@@ -11,6 +11,7 @@
 // expect: stdout "copier-after"
 // expect: stdout "watch mirror=5"
 // expect: exit 0
+use std.reactive.{signal, effect}
 src = signal(0)
 mirror = signal(0)
 effect(fn() {

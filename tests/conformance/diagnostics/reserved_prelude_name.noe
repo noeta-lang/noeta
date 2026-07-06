@@ -1,0 +1,9 @@
+// Binding a reserved prelude name is a static E0046 (prelude-redesign P3). The always-global
+// prelude is deliberately tiny — `Ok`/`Err`/`some`/`none`/`panic`/`assert` — and those names cannot
+// be bound by any form (binding, `mut`, param, `fn`, type, `for`/match binder): the tree-walker
+// pre-declares them as immutable globals while the VM would resolve a shadow as a fresh local, so
+// allowing a binding meant the backends diverged. Rejected before either backend runs.
+// expect: error E0046 at 8:1
+// expect: exit 1
+Ok = 5
+echo Ok

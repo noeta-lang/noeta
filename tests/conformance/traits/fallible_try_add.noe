@@ -18,10 +18,10 @@ class Money {
 
     impl TryAdd {
         fn try_add(other: Money): Result<Money, MoneyError> {
-            if currency != other.currency {
+            if self.currency != other.currency {
                 return Err(MoneyError.CurrencyMismatch);
             }
-            return Ok(Money { amount: amount + other.amount, currency: currency });
+            return Ok(Money { amount: self.amount + other.amount, currency: self.currency });
         }
     }
 }

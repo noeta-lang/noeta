@@ -12,7 +12,7 @@
 class Inner {
     tag: string
     fn new(tag: string): Inner { return Inner { tag: tag }; }
-    destruct { echo "drop inner ${tag}"; }
+    destruct { echo "drop inner ${self.tag}"; }
 }
 
 struct Box { inner: Inner }

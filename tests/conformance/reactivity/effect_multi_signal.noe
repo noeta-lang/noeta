@@ -7,6 +7,7 @@
 // expect: stdout "sum=26"
 // expect: stdout "sum=36"
 // expect: exit 0
+use std.reactive.{signal, effect}
 a = signal(1)
 b = signal(2)
 c = signal(3)

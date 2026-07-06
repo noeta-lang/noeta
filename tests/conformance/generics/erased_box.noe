@@ -13,7 +13,7 @@ class Box<T> {
     }
 
     fn get(): T {
-        return value;
+        return self.value;
     }
 }
 

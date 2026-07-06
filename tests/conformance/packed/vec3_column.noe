@@ -27,4 +27,4 @@ echo vec.scale_all(ps, 2.0f32)
 // A produced column list is a real `List<V3>` — indexable and countable.
 totals = vec.add_all(ps, qs)
 echo totals[0]
-echo totals.count()
+echo totals.len()

@@ -270,6 +270,18 @@ impl Printer<'_> {
                 format!("{}.{}({}){}", atom(receiver), name, atoms(args), marker)
             }
             Rvalue::Field { receiver, name, .. } => format!("{}.{}", atom(receiver), name),
+            Rvalue::MethodHandle {
+                ty,
+                method,
+                associated,
+                ..
+            } => format!(
+                "handle {ty}.{method}{}",
+                if *associated { " (assoc)" } else { "" }
+            ),
+            Rvalue::BoundHandle { recv, method, .. } => {
+                format!("bind {}.{method}", atom(recv))
+            }
             Rvalue::SetField {
                 receiver,
                 name,

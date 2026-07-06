@@ -31,14 +31,18 @@ total = 1 +
         2 +
         3
 
-// leading-`|>` continuation
+// leading-`.` continuation (a method chain across lines)
 scaled = [1, 2, 3]
-    |> map(fn(x) => x * 2)
-    |> sum()
+    .map(fn(x) => x * 2)
+    .sum()
 
 p = pack()
 
+// leading-`|>` continuation
+verdict = p.x
+    |> sign
+
 echo total
 echo scaled
-echo sign(p.x)
-echo len([p.x, p.y, total])
+echo verdict
+echo [p.x, p.y, total].len()

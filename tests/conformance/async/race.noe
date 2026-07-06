@@ -8,6 +8,7 @@
 // expect: stdout "y end"
 // expect: stdout "winner=1"
 // expect: exit 0
+use std.task.{sleep, race}
 async fn work(name: string, ms: int): int {
     echo name ~ " start"
     sleep(ms).await

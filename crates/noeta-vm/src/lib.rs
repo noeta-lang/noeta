@@ -2437,6 +2437,15 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, Value::native_fn(*func));
                         pc += 1;
                     }
+                    Op::BindMethod { dst, recv, method } => {
+                        // A bound method handle (`value.method`, EX.2b): capture one retained
+                        // reference to the receiver.
+                        let recv_val = regs[fbase + *recv as usize];
+                        retain(recv_val);
+                        let handle = Value::bound_method(recv_val, module.name(*method));
+                        set_reg(regs, fbase, *dst, handle);
+                        pc += 1;
+                    }
                     Op::MakeList {
                         dst,
                         items,
@@ -3126,447 +3135,21 @@ impl<'m> Vm<'m> {
                                 continue 'reload;
                             }
                         }
-                        // `x.compare(y)` — the `Ordering` of two primitives (the value a `Comparable`
-                        // impl returns). One argument, on any non-object receiver.
-                        if method == "compare" {
-                            if args.len() != 1 {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!(
-                                        "method `compare` takes 1 argument but {} were supplied",
-                                        args.len()
-                                    ),
-                                ));
-                            }
-                            let other = regs[fbase + args[0] as usize];
-                            match compare_primitive(v, other) {
-                                Some(ordering) => {
-                                    let value =
-                                        make_ordering(noeta_ast::ordering_variant(ordering));
-                                    set_reg(regs, fbase, *dst, value);
-                                    pc += 1;
-                                }
-                                None => {
-                                    return Err(self.error(
-                                        DiagnosticCode::TypeMismatch,
-                                        *span,
-                                        format!(
-                                            "cannot compare {} and {}",
-                                            v.type_name(),
-                                            other.type_name()
-                                        ),
-                                    ));
-                                }
-                            }
-                            continue;
-                        }
-                        // Ring 1 string methods (`upper`/`split`/`replace`/...) — dispatched through
-                        // the shared `noeta-stdlib` surface so the tree-walker and the VM cannot drift.
-                        // `Unknown` falls through to the collection methods below. `as_string` clones
-                        // out of the heap, so the projected args own their strings for the call.
-                        if hk == Some(HeapKind::Str)
-                            && let Some(recv_str) = v.as_string()
-                        {
-                            let arg_values = ArgBuf::collect(args, regs, fbase);
-                            let arg_strings: Vec<Option<String>> = arg_values
-                                .as_slice()
-                                .iter()
-                                .map(|a| a.as_string())
-                                .collect();
-                            let projected: Vec<noeta_stdlib::Arg> = arg_values
-                                .as_slice()
-                                .iter()
-                                .zip(&arg_strings)
-                                .map(|(a, s)| {
-                                    if let Some(s) = s {
-                                        noeta_stdlib::Arg::Str(s)
-                                    } else if let Some(i) = a.as_int() {
-                                        noeta_stdlib::Arg::Int(i)
-                                    } else if let Some(f) = a.as_float() {
-                                        noeta_stdlib::Arg::Float(f)
-                                    } else if let Some(b) = a.as_bool() {
-                                        noeta_stdlib::Arg::Bool(b)
-                                    } else {
-                                        noeta_stdlib::Arg::Other
-                                    }
-                                })
-                                .collect();
-                            match noeta_stdlib::string_method(&recv_str, method, &projected) {
-                                noeta_stdlib::Dispatch::Done(output) => {
-                                    let value = stdlib_output_to_value(output);
-                                    set_reg(regs, fbase, *dst, value);
-                                    pc += 1;
-                                    continue;
-                                }
-                                noeta_stdlib::Dispatch::Err(error) => {
-                                    return Err(self.error(
-                                        stdlib_error_code(error.kind),
-                                        *span,
-                                        error.message,
-                                    ));
-                                }
-                                noeta_stdlib::Dispatch::Unknown => {}
-                            }
-                        }
-                        // Bit-manipulation methods on `int` (P-BITS Tier B4) — the popcount-class
-                        // intrinsics, delegating to the shared `int_method` so the backends agree. The
-                        // checker already arity/type-checked the call; `rotate_*` take one `int` amount.
-                        if matches!(hk, None | Some(HeapKind::Int))
-                            && let Some(recv_int) = v.as_int()
-                            && let Some(int_method) = noeta_stdlib::IntMethod::from_name(method)
-                        {
-                            let arg = match args.first() {
-                                Some(r) => {
-                                    let a = regs[fbase + *r as usize];
-                                    match a.as_int() {
-                                        Some(n) => n,
-                                        None => {
-                                            return Err(self.error(
-                                            DiagnosticCode::TypeMismatch,
-                                            *span,
-                                            format!(
-                                                "`int.{method}` expects an integer argument, found {}",
-                                                a.type_name()
-                                            ),
-                                        ));
-                                        }
-                                    }
-                                }
-                                None => 0,
-                            };
-                            let value =
-                                Value::int(noeta_stdlib::int_method(recv_int, int_method, arg));
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // Cross-domain numeric conversions (S0): `int→float/f32`, `float/f32→int`,
-                        // `float↔f32`. The `IntMethod` branch above handled `int→int` and continued; an
-                        // integer receiver reaches here only for a float destination (`to_float`/`to_f32`),
-                        // a `float`/`f32` receiver for any. Shared `num_convert` keeps the backends in step.
-                        if matches!(hk, None | Some(HeapKind::Int))
-                            && let Some(src) = v
-                                .as_f32()
-                                .map(noeta_stdlib::NumScalar::F32)
-                                .or_else(|| v.as_float().map(noeta_stdlib::NumScalar::F64))
-                                .or_else(|| v.as_int().map(noeta_stdlib::NumScalar::Int))
-                            && let Some(dest) = noeta_stdlib::NumConvert::from_name(method)
-                        {
-                            let value = match noeta_stdlib::num_convert(src, dest) {
-                                noeta_stdlib::NumScalar::Int(i) => Value::int(i),
-                                noeta_stdlib::NumScalar::F64(f) => Value::float(f),
-                                noeta_stdlib::NumScalar::F32(f) => Value::f32(f),
-                            };
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // Ring 1 list methods (reverse/contains/join) — the shared `ListMethod` enum
-                        // makes the helper's `match` exhaustive, so the tree-walker cannot offer a
-                        // method this backend lacks.
-                        if matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
-                            && let Some(list_method) = noeta_stdlib::ListMethod::from_name(method)
-                        {
-                            let arg_values = ArgBuf::collect(args, regs, fbase);
-                            let value = self.call_list_method(
-                                v,
-                                list_method,
-                                method,
-                                arg_values.as_slice(),
-                                *span,
-                            )?;
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // Ring 1 set methods (contains/union/intersection).
-                        if hk == Some(HeapKind::Set)
-                            && let Some(set_method) = noeta_stdlib::SetMethod::from_name(method)
-                        {
-                            let arg_values = ArgBuf::collect(args, regs, fbase);
-                            let value = self.call_set_method(
-                                v,
-                                set_method,
-                                method,
-                                arg_values.as_slice(),
-                                *span,
-                            )?;
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // File-handle methods (read_line/read/write/close) — the shared
-                        // `FileHandleMethod` enum keeps the two backends in lockstep.
-                        if hk == Some(HeapKind::FileHandle)
-                            && let Some(handle_method) =
-                                noeta_stdlib::FileHandleMethod::from_name(method)
-                        {
-                            let arg_values = ArgBuf::collect(args, regs, fbase);
-                            let value = self.call_file_handle_method(
-                                v,
-                                handle_method,
-                                method,
-                                arg_values.as_slice(),
-                                *span,
-                            )?;
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // Channel endpoint methods (isolates I.1): `tx.send(v)`/`tx.close()` on a sender,
-                        // `rx.recv()` on a receiver. `send`/`recv` yield leaf futures (enqueue/dequeue when
-                        // polled); `close` is synchronous. Endpoint validity was checked statically.
-                        if hk == Some(HeapKind::Sender)
-                            && let Some(id) = v.sender_id()
-                        {
-                            match method {
-                                "send" => {
-                                    let msg = regs[fbase + args[0] as usize];
-                                    // The future retains its own reference to the message; the arg
-                                    // register's reference is released by its normal end-of-life.
-                                    let future = Value::make_channel_send(id, msg);
-                                    set_reg(regs, fbase, *dst, future);
-                                    pc += 1;
-                                    continue;
-                                }
-                                "close" => {
-                                    match &mut self.channels[id.index()] {
-                                        Channel::Local { closed, .. } => *closed = true,
-                                        Channel::Shared(core) => core.close(),
-                                    }
-                                    self.channel_progress += 1;
-                                    set_reg(regs, fbase, *dst, Value::unit());
-                                    pc += 1;
-                                    continue;
-                                }
-                                _ => {}
-                            }
-                        }
-                        if hk == Some(HeapKind::Receiver)
-                            && let Some(id) = v.receiver_id()
-                            && method == "recv"
-                        {
-                            let future = Value::make_channel_recv(id);
-                            set_reg(regs, fbase, *dst, future);
-                            pc += 1;
-                            continue;
-                        }
-                        // Reactive handle methods (reactivity S1/S2/S3): `signal.get()`/`.set(v)`/
-                        // `.update(fn)`, `computed.get()`, and `effect.dispose()`. Each method is guarded
-                        // by the node's `kind` (a `signal` is not disposable, a `computed` is read-only,
-                        // an `effect` is not readable); an invalid pair falls through to the generic
-                        // no-method runtime error below, exactly as any other unknown method on a
-                        // built-in type. `get` on a `computed` recomputes a dirty body via
-                        // `read_reactive`; on a `signal` it is a plain read (the callback never fires).
-                        if hk == Some(HeapKind::Reactive)
-                            && let Some((kind, node)) = v.reactive_parts()
-                        {
-                            match (kind, method) {
-                                (NodeKind::Signal | NodeKind::Computed, "get") => {
-                                    let result = self.read_reactive(node, *span)?;
-                                    set_reg(regs, fbase, *dst, result);
-                                    pc += 1;
-                                    continue;
-                                }
-                                (NodeKind::Signal, "set") => {
-                                    let value = regs[fbase + args[0] as usize];
-                                    // The graph retains its own reference to the new content and
-                                    // releases the old; the arg register's reference is released by
-                                    // its normal end-of-life. Then flush so subscribed effects rerun —
-                                    // but coalesce: a set inside a running effect body only enqueues,
-                                    // the ongoing flush picks it up (no nested flush). (reactivity S4)
-                                    self.reactive.set(node, GcVal::retained(value));
-                                    if !self.reactive.is_flushing() {
-                                        self.drive_flush(*span)?;
-                                    }
-                                    set_reg(regs, fbase, *dst, Value::unit());
-                                    pc += 1;
-                                    continue;
-                                }
-                                (NodeKind::Signal, "update") => {
-                                    // Read-modify-write: read the current value (owned), call the
-                                    // updater with it (which consumes that reference), store the
-                                    // result, then flush (coalescing inside a running flush, like set).
-                                    let f = regs[fbase + args[0] as usize];
-                                    let current = self.read_reactive(node, *span)?;
-                                    let updated = self.call_value(f, vec![current], *span)?;
-                                    self.reactive.set(node, GcVal::owned(updated));
-                                    if !self.reactive.is_flushing() {
-                                        self.drive_flush(*span)?;
-                                    }
-                                    set_reg(regs, fbase, *dst, Value::unit());
-                                    pc += 1;
-                                    continue;
-                                }
-                                (NodeKind::Effect, "dispose") => {
-                                    // Unsubscribe and free the node; its stored body/content drop.
-                                    self.reactive.dispose(node);
-                                    set_reg(regs, fbase, *dst, Value::unit());
-                                    pc += 1;
-                                    continue;
-                                }
-                                _ => {}
-                            }
-                        }
-                        // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file
-                        // handle above.
-                        if hk == Some(HeapKind::Iter)
-                            && let Some(iter_method) = noeta_stdlib::IterMethod::from_name(method)
-                        {
-                            let arg_values = ArgBuf::collect(args, regs, fbase);
-                            let value = self.call_iter_method(
-                                v,
-                                iter_method,
-                                method,
-                                arg_values.as_slice(),
-                                *span,
-                            )?;
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // Ring 1 map methods (keys/values/has).
-                        if hk == Some(HeapKind::Map)
-                            && let Some(map_method) = noeta_stdlib::MapMethod::from_name(method)
-                        {
-                            let arg_values = ArgBuf::collect(args, regs, fbase);
-                            let value = self.call_map_method(
-                                v,
-                                map_method,
-                                method,
-                                arg_values.as_slice(),
-                                *span,
-                            )?;
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // `list.to_bytes()` — serialize a `List<@packed>` to its flat buffer (P-PACK 4.4);
-                        // a boxed list has no canonical form, so it's a type error (surfaced, not silent).
-                        if method == "to_bytes"
-                            && matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
-                        {
-                            if !args.is_empty() {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    "method `to_bytes` takes no arguments".to_string(),
-                                ));
-                            }
-                            let value = match v.packed_bytes() {
-                                Some(buf) => Value::bytes(buf),
-                                None => {
-                                    return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    "`to_bytes` expects a packed list (a `List` of `@packed` structs)"
-                                        .to_string(),
-                                ));
-                                }
-                            };
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // `iter()` on a built-in collection (Track I.1a) → a lazy iterator. A list shares
-                        // its backing (the iterator retains one reference); a set/map first becomes a list
-                        // of its elements / values (the iteration order `for` uses).
-                        if method == "iter"
-                            && matches!(
-                                hk,
-                                Some(
-                                    HeapKind::List
-                                        | HeapKind::PackedList
-                                        | HeapKind::Set
-                                        | HeapKind::Map
-                                )
-                            )
-                        {
-                            if !args.is_empty() {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    "method `iter` takes no arguments".to_string(),
-                                ));
-                            }
-                            let value = if matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
-                            {
-                                Value::iter(v)
-                            } else {
-                                let items = if hk == Some(HeapKind::Set) {
-                                    v.set_items()
-                                } else {
-                                    v.map_values()
-                                }
-                                .expect("set/map receiver");
-                                for item in &items {
-                                    item.inc_ref();
-                                }
-                                let list = Value::list(items);
-                                let iter = Value::iter(list);
-                                // `Value::iter` retained the list; drop this local reference so the
-                                // iterator is its sole owner.
-                                list.release();
-                                iter
-                            };
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // Built-in zero-argument methods on lists/maps/strings.
-                        let result = if !args.is_empty() {
-                            None
-                        } else if method == "count" {
-                            v.list_len()
-                                .or_else(|| v.set_len())
-                                .or_else(|| v.map_len())
-                                .or_else(|| v.as_string().map(|s| s.chars().count()))
-                                .or_else(|| v.bytes_len())
-                                .map(|n| Value::int(n as i64))
-                        } else if method == "enumerate"
-                            && matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
-                        {
-                            // A list of `(index, value)` **tuples** (object-model slice 4b), matching the
-                            // tree-walker's `Value::Tuple` pairs. A packed list is materialized to a
-                            // temporary boxed list first (then released).
-                            let boxed = v.realize_list();
-                            let items = boxed.list_items().expect("list receiver");
-                            let pairs = items
-                                .iter()
-                                .enumerate()
-                                .map(|(i, &element)| {
-                                    retain(element);
-                                    Value::tuple(vec![Value::int(i as i64), element])
-                                })
-                                .collect();
-                            boxed.release();
-                            Some(Value::list(pairs))
-                        } else {
-                            None
-                        };
-                        match result {
-                            Some(value) => {
-                                set_reg(regs, fbase, *dst, value);
-                                pc += 1;
-                            }
-                            None if !args.is_empty()
-                                && (method == "count" || method == "enumerate") =>
-                            {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!("method `{method}` takes no arguments"),
-                                ));
-                            }
-                            None => {
-                                return Err(self.error(
-                                    DiagnosticCode::UnknownName,
-                                    *span,
-                                    format!("no method `{method}` on {}", v.type_name()),
-                                ));
-                            }
-                        }
+                        // Everything below the object/enum dispatch is a built-in method on a
+                        // non-object receiver — value-in/value-out, factored into
+                        // `call_builtin_method` (prelude-redesign MH.2) so an unbound method handle
+                        // (`list.len` as a value) dispatches through the SAME branches by
+                        // construction. Arguments are borrowed from the registers (which keep
+                        // ownership; `ArgBuf` stages ≤8 inline — no method-call path allocates that
+                        // did not before the extraction), and the receiver's one-shot `hk`
+                        // classification is passed through so the helper's rungs keep main's
+                        // integer-compare receiver tests (no re-deref per rung).
+                        let arg_values = ArgBuf::collect(args, regs, fbase);
+                        let (dst, span) = (*dst, *span);
+                        let value =
+                            self.call_builtin_method(v, hk, method, arg_values.as_slice(), span)?;
+                        set_reg(regs, fbase, dst, value);
+                        pc += 1;
                     }
                     Op::Index {
                         dst,
@@ -5240,19 +4823,549 @@ impl<'m> Vm<'m> {
                     }
                     result
                 }
-                None => {
-                    let type_name = callee.type_name();
-                    for a in args {
-                        release(a);
+                // A selectively-imported native-module function (`use std.math.sqrt`) called by its
+                // bare name — dispatched through the same `call_native_module` as `math.sqrt(...)`.
+                None => match callee.module_fn_parts() {
+                    Some((module, func)) => {
+                        let result = self.call_native_module(&module, &func, &args, span);
+                        for a in &args {
+                            release(*a);
+                        }
+                        result
                     }
-                    Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!("{type_name} is not callable"),
-                    ))
-                }
+                    // An unbound method handle (`Type.method`) applied to its arguments — the first is
+                    // the receiver (prelude-redesign MH). Runs the resolved method on a fresh frame
+                    // stack, consuming the owned arguments into the callee window.
+                    None => match callee.method_handle_parts() {
+                        Some((ty, method, associated)) => {
+                            self.run_method_handle(&ty, &method, associated, args, span)
+                        }
+                        // A bound handle: prepend the captured receiver (retained — the instance
+                        // dispatch consumes owned arguments) and run as an instance handle.
+                        None => match callee.bound_method_parts() {
+                            Some((recv, method)) => {
+                                retain(recv);
+                                let mut owned = Vec::with_capacity(args.len() + 1);
+                                owned.push(recv);
+                                owned.extend(args);
+                                self.run_method_handle("", &method, false, owned, span)
+                            }
+                            None => {
+                                let type_name = callee.type_name();
+                                for a in args {
+                                    release(a);
+                                }
+                                Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    span,
+                                    format!("{type_name} is not callable"),
+                                ))
+                            }
+                        },
+                    },
+                },
             },
         }
+    }
+
+    /// Dispatch a **built-in** method on a non-object receiver — every method-call path that is
+    /// value-in/value-out: `compare`, string/int/numeric-conversion methods, the Ring 1
+    /// list/set/map/iterator/file-handle methods, channel endpoints, reactive handles, `to_bytes`,
+    /// `iter()`, the eager `map`/`filter`/`sum`, and `count`/`len`/`enumerate` — ending in the
+    /// canonical takes-no-arguments / no-method errors. Factored out of the `Op::CallMethod` arm
+    /// (prelude-redesign MH.2) so the opcode and an unbound method handle (`list.len` passed as a
+    /// value) dispatch through the SAME branches by construction. The op-field-dependent fast paths
+    /// (`reuse` in-place updates) and the frame-pushing object/enum dispatches stay in the opcode —
+    /// receivers here never resolve through the user method table.
+    ///
+    /// The receiver and arguments are **borrowed** (the caller keeps its references, exactly as the
+    /// opcode's registers did); the result is a freshly-owned value. Branch ORDER is semantic
+    /// (string before int, `IntMethod` before `NumConvert`, …) — do not reorder.
+    ///
+    /// `#[inline]` so the `Op::CallMethod` arm — the hot call site — folds this back into the
+    /// dispatch loop exactly as the pre-extraction inline branches were (A/B-benched: the bare
+    /// out-of-line call cost ~+15-25ns per built-in method call); the cold handle path may call it
+    /// out-of-line. `hk` is the receiver's one-shot [`HeapKind`] classification (the caller already
+    /// derefs it once), so every rung below is an integer compare — main's classify-once dispatch,
+    /// preserved through the extraction.
+    #[inline]
+    fn call_builtin_method(
+        &mut self,
+        v: Value,
+        hk: Option<HeapKind>,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        // `x.compare(y)` — the `Ordering` of two primitives (the value a `Comparable`
+        // impl returns). One argument, on any non-object receiver.
+        if method == "compare" {
+            if args.len() != 1 {
+                return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!(
+                        "method `compare` takes 1 argument but {} were supplied",
+                        args.len()
+                    ),
+                ));
+            }
+            let other = args[0];
+            return match compare_primitive(v, other) {
+                Some(ordering) => Ok(make_ordering(noeta_ast::ordering_variant(ordering))),
+                None => Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("cannot compare {} and {}", v.type_name(), other.type_name()),
+                )),
+            };
+        }
+        // Ring 1 string methods (`upper`/`split`/`replace`/...) — dispatched through
+        // the shared `noeta-stdlib` surface so the tree-walker and the VM cannot drift.
+        // `Unknown` falls through to the collection methods below. `as_string` clones
+        // out of the heap, so the projected args own their strings for the call.
+        if hk == Some(HeapKind::Str)
+            && let Some(recv_str) = v.as_string()
+        {
+            let arg_strings: Vec<Option<String>> = args.iter().map(|a| a.as_string()).collect();
+            let projected: Vec<noeta_stdlib::Arg> = args
+                .iter()
+                .zip(&arg_strings)
+                .map(|(a, s)| {
+                    if let Some(s) = s {
+                        noeta_stdlib::Arg::Str(s)
+                    } else if let Some(i) = a.as_int() {
+                        noeta_stdlib::Arg::Int(i)
+                    } else if let Some(f) = a.as_float() {
+                        noeta_stdlib::Arg::Float(f)
+                    } else if let Some(b) = a.as_bool() {
+                        noeta_stdlib::Arg::Bool(b)
+                    } else {
+                        noeta_stdlib::Arg::Other
+                    }
+                })
+                .collect();
+            match noeta_stdlib::string_method(&recv_str, method, &projected) {
+                noeta_stdlib::Dispatch::Done(output) => {
+                    return Ok(stdlib_output_to_value(output));
+                }
+                noeta_stdlib::Dispatch::Err(error) => {
+                    return Err(self.error(stdlib_error_code(error.kind), span, error.message));
+                }
+                noeta_stdlib::Dispatch::Unknown => {}
+            }
+        }
+        // Bit-manipulation methods on `int` (P-BITS Tier B4) — the popcount-class
+        // intrinsics, delegating to the shared `int_method` so the backends agree. The
+        // checker already arity/type-checked the call; `rotate_*` take one `int` amount.
+        if matches!(hk, None | Some(HeapKind::Int))
+            && let Some(recv_int) = v.as_int()
+            && let Some(int_method) = noeta_stdlib::IntMethod::from_name(method)
+        {
+            let arg = match args.first() {
+                Some(a) => match a.as_int() {
+                    Some(n) => n,
+                    None => {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            span,
+                            format!(
+                                "`int.{method}` expects an integer argument, found {}",
+                                a.type_name()
+                            ),
+                        ));
+                    }
+                },
+                None => 0,
+            };
+            return Ok(Value::int(noeta_stdlib::int_method(recv_int, int_method, arg)));
+        }
+        // Cross-domain numeric conversions (S0): `int→float/f32`, `float/f32→int`,
+        // `float↔f32`. The `IntMethod` branch above handled `int→int` and returned; an
+        // integer receiver reaches here only for a float destination (`to_float`/`to_f32`),
+        // a `float`/`f32` receiver for any. Shared `num_convert` keeps the backends in step.
+        if matches!(hk, None | Some(HeapKind::Int))
+            && let Some(src) = v
+                .as_f32()
+                .map(noeta_stdlib::NumScalar::F32)
+                .or_else(|| v.as_float().map(noeta_stdlib::NumScalar::F64))
+                .or_else(|| v.as_int().map(noeta_stdlib::NumScalar::Int))
+            && let Some(dest) = noeta_stdlib::NumConvert::from_name(method)
+        {
+            return Ok(match noeta_stdlib::num_convert(src, dest) {
+                noeta_stdlib::NumScalar::Int(i) => Value::int(i),
+                noeta_stdlib::NumScalar::F64(f) => Value::float(f),
+                noeta_stdlib::NumScalar::F32(f) => Value::f32(f),
+            });
+        }
+        // Ring 1 list methods (reverse/contains/join) — the shared `ListMethod` enum
+        // makes the helper's `match` exhaustive, so the tree-walker cannot offer a
+        // method this backend lacks.
+        if matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
+            && let Some(list_method) = noeta_stdlib::ListMethod::from_name(method)
+        {
+            return self.call_list_method(v, list_method, method, args, span);
+        }
+        // Ring 1 set methods (contains/union/intersection).
+        if hk == Some(HeapKind::Set)
+            && let Some(set_method) = noeta_stdlib::SetMethod::from_name(method)
+        {
+            return self.call_set_method(v, set_method, method, args, span);
+        }
+        // File-handle methods (read_line/read/write/close) — the shared
+        // `FileHandleMethod` enum keeps the two backends in lockstep.
+        if hk == Some(HeapKind::FileHandle)
+            && let Some(handle_method) = noeta_stdlib::FileHandleMethod::from_name(method)
+        {
+            return self.call_file_handle_method(v, handle_method, method, args, span);
+        }
+        // Channel endpoint methods (isolates I.1): `tx.send(v)`/`tx.close()` on a sender,
+        // `rx.recv()` on a receiver. `send`/`recv` yield leaf futures (enqueue/dequeue when
+        // polled); `close` is synchronous. Endpoint validity was checked statically.
+        if hk == Some(HeapKind::Sender)
+            && let Some(id) = v.sender_id()
+        {
+            match method {
+                "send" => {
+                    // The future retains its own reference to the message; the caller's
+                    // reference is released by its normal end-of-life.
+                    return Ok(Value::make_channel_send(id, args[0]));
+                }
+                "close" => {
+                    match &mut self.channels[id.index()] {
+                        Channel::Local { closed, .. } => *closed = true,
+                        Channel::Shared(core) => core.close(),
+                    }
+                    self.channel_progress += 1;
+                    return Ok(Value::unit());
+                }
+                _ => {}
+            }
+        }
+        if hk == Some(HeapKind::Receiver)
+            && let Some(id) = v.receiver_id()
+            && method == "recv"
+        {
+            return Ok(Value::make_channel_recv(id));
+        }
+        // Reactive handle methods (reactivity S1/S2/S3): `signal.get()`/`.set(v)`/
+        // `.update(fn)`, `computed.get()`, and `effect.dispose()`. Each method is guarded
+        // by the node's `kind` (a `signal` is not disposable, a `computed` is read-only,
+        // an `effect` is not readable); an invalid pair falls through to the generic
+        // no-method runtime error below, exactly as any other unknown method on a
+        // built-in type. `get` on a `computed` recomputes a dirty body via
+        // `read_reactive`; on a `signal` it is a plain read (the callback never fires).
+        if hk == Some(HeapKind::Reactive)
+            && let Some((kind, node)) = v.reactive_parts()
+        {
+            match (kind, method) {
+                (NodeKind::Signal | NodeKind::Computed, "get") => {
+                    return self.read_reactive(node, span);
+                }
+                (NodeKind::Signal, "set") => {
+                    // The graph retains its own reference to the new content and
+                    // releases the old; the caller's reference is released by its normal
+                    // end-of-life. Then flush so subscribed effects rerun — but coalesce:
+                    // a set inside a running effect body only enqueues, the ongoing flush
+                    // picks it up (no nested flush). (reactivity S4)
+                    self.reactive.set(node, GcVal::retained(args[0]));
+                    if !self.reactive.is_flushing() {
+                        self.drive_flush(span)?;
+                    }
+                    return Ok(Value::unit());
+                }
+                (NodeKind::Signal, "update") => {
+                    // Read-modify-write: read the current value (owned), call the
+                    // updater with it (which consumes that reference), store the
+                    // result, then flush (coalescing inside a running flush, like set).
+                    let f = args[0];
+                    let current = self.read_reactive(node, span)?;
+                    let updated = self.call_value(f, vec![current], span)?;
+                    self.reactive.set(node, GcVal::owned(updated));
+                    if !self.reactive.is_flushing() {
+                        self.drive_flush(span)?;
+                    }
+                    return Ok(Value::unit());
+                }
+                (NodeKind::Effect, "dispose") => {
+                    // Unsubscribe and free the node; its stored body/content drop.
+                    self.reactive.dispose(node);
+                    return Ok(Value::unit());
+                }
+                _ => {}
+            }
+        }
+        // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file
+        // handle above.
+        if hk == Some(HeapKind::Iter)
+            && let Some(iter_method) = noeta_stdlib::IterMethod::from_name(method)
+        {
+            return self.call_iter_method(v, iter_method, method, args, span);
+        }
+        // Ring 1 map methods (keys/values/has).
+        if hk == Some(HeapKind::Map)
+            && let Some(map_method) = noeta_stdlib::MapMethod::from_name(method)
+        {
+            return self.call_map_method(v, map_method, method, args, span);
+        }
+        // `list.to_bytes()` — serialize a `List<@packed>` to its flat buffer (P-PACK 4.4);
+        // a boxed list has no canonical form, so it's a type error (surfaced, not silent).
+        if method == "to_bytes" && matches!(hk, Some(HeapKind::List | HeapKind::PackedList)) {
+            if !args.is_empty() {
+                return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    "method `to_bytes` takes no arguments".to_string(),
+                ));
+            }
+            return match v.packed_bytes() {
+                Some(buf) => Ok(Value::bytes(buf)),
+                None => Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    "`to_bytes` expects a packed list (a `List` of `@packed` structs)".to_string(),
+                )),
+            };
+        }
+        // `iter()` on a built-in collection (Track I.1a) → a lazy iterator. A list shares
+        // its backing (the iterator retains one reference); a set/map first becomes a list
+        // of its elements / values (the iteration order `for` uses).
+        if method == "iter"
+            && matches!(
+                hk,
+                Some(HeapKind::List | HeapKind::PackedList | HeapKind::Set | HeapKind::Map)
+            )
+        {
+            if !args.is_empty() {
+                return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    "method `iter` takes no arguments".to_string(),
+                ));
+            }
+            let value = if matches!(hk, Some(HeapKind::List | HeapKind::PackedList)) {
+                Value::iter(v)
+            } else {
+                let items = if hk == Some(HeapKind::Set) {
+                    v.set_items()
+                } else {
+                    v.map_values()
+                }
+                .expect("set/map receiver");
+                for item in &items {
+                    item.inc_ref();
+                }
+                let list = Value::list(items);
+                let iter = Value::iter(list);
+                // `Value::iter` retained the list; drop this local reference so the
+                // iterator is its sole owner.
+                list.release();
+                iter
+            };
+            return Ok(value);
+        }
+        // Eager collection methods reusing the prelude builtin impls (prelude-redesign
+        // P1): `xs.map(f)` / `xs.filter(f)` / `xs.sum()` on a list, routed through
+        // `call_builtin` with the receiver as the first argument so the method and
+        // (legacy) free-function forms share one impl. A user object's own method wins
+        // (dispatched earlier); a list receiver is never an object.
+        if matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
+            && let Some(builtin) = match method {
+                "map" if args.len() == 1 => Some(Builtin::Map),
+                "filter" if args.len() == 1 => Some(Builtin::Filter),
+                "sum" if args.is_empty() => Some(Builtin::Sum),
+                _ => None,
+            }
+        {
+            let mut arg_vals = Vec::with_capacity(args.len() + 1);
+            arg_vals.push(v);
+            arg_vals.extend_from_slice(args);
+            return self.call_builtin(builtin, &arg_vals, span);
+        }
+        // Built-in zero-argument methods on lists/maps/strings. `len()` is the collection
+        // length (P1.3 — `count` is iterator-only, a consuming terminal).
+        let result = if !args.is_empty() {
+            None
+        } else if method == "len" {
+            v.list_len()
+                .or_else(|| v.set_len())
+                .or_else(|| v.map_len())
+                .or_else(|| v.as_string().map(|s| s.chars().count()))
+                .or_else(|| v.bytes_len())
+                .map(|n| Value::int(n as i64))
+        } else if method == "enumerate" && matches!(hk, Some(HeapKind::List | HeapKind::PackedList)) {
+            // A list of `(index, value)` **tuples** (object-model slice 4b), matching the
+            // tree-walker's `Value::Tuple` pairs. A packed list is materialized to a
+            // temporary boxed list first (then released).
+            let boxed = v.realize_list();
+            let items = boxed.list_items().expect("list receiver");
+            let pairs = items
+                .iter()
+                .enumerate()
+                .map(|(i, &element)| {
+                    retain(element);
+                    Value::tuple(vec![Value::int(i as i64), element])
+                })
+                .collect();
+            boxed.release();
+            Some(Value::list(pairs))
+        } else {
+            None
+        };
+        match result {
+            Some(value) => Ok(value),
+            None if !args.is_empty() && (method == "len" || method == "enumerate") =>
+            {
+                Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("method `{method}` takes no arguments"),
+                ))
+            }
+            None => Err(self.error(
+                DiagnosticCode::UnknownName,
+                span,
+                format!("no method `{method}` on {}", v.type_name()),
+            )),
+        }
+    }
+
+    /// Run an unbound method handle (`Type.method`) applied to `args` on a fresh frame stack,
+    /// consuming the owned arguments into the callee window (prelude-redesign MH). For an **instance**
+    /// handle the first argument is the receiver (register 0 = `self`), the rest are the method's
+    /// parameters — identical to a closure call whose prototype is resolved from the method table
+    /// rather than a first-class closure. Associated handles are not yet produced (MH.1 is
+    /// instance-only); they return a clean error rather than mis-dispatching.
+    fn run_method_handle(
+        &mut self,
+        ty: &str,
+        method: &str,
+        associated: bool,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, Abort> {
+        // An ASSOCIATED handle (`ctor = Stack.new`, prelude-redesign EX.2) calls the function
+        // directly — no receiver; the prototype's register 0 (`self`) stays unit, exactly as the
+        // opcode's associated dispatch leaves it.
+        if associated {
+            let Some(&proto) = self.methods.get(&(ty.to_string(), method.to_string())) else {
+                for a in args {
+                    release(a);
+                }
+                return Err(self.error(
+                    DiagnosticCode::UnknownName,
+                    span,
+                    format!("type `{ty}` has no associated function `{method}`"),
+                ));
+            };
+            let chunk = &self.module.protos[proto as usize];
+            // Register 0 is the (unit) receiver slot, so declared arity is one more than the args.
+            let total = chunk.num_params as usize - 1;
+            let required = total - chunk.defaults.len();
+            if args.len() < required || args.len() > total {
+                let supplied = args.len();
+                for a in args {
+                    release(a);
+                }
+                return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    arity_message("associated function", required, total, supplied),
+                ));
+            }
+            let filled = args.len() + 1;
+            let num_registers = chunk.num_registers as usize;
+            let defaults = chunk.defaults.clone();
+            let mut regs = vec![Value::unit(); num_registers];
+            for (i, v) in args.into_iter().enumerate() {
+                regs[i + 1] = v;
+            }
+            for (reg, dproto) in &defaults {
+                if *reg as usize >= filled {
+                    let value = self.run_thunk(*dproto, &[])?;
+                    regs[*reg as usize] = value;
+                }
+            }
+            return self.run(
+                vec![Frame {
+                    proto,
+                    base: 0,
+                    pc: 0,
+                    ret_dst: 0,
+                    ret_transform: RetTransform::None,
+                    upvalues: Vec::new(),
+                }],
+                regs,
+            );
+        }
+        // The receiver's runtime type names the method table entry, so a subtype dispatches to its
+        // own method; fall back to the handle's declared type if the receiver has no shape.
+        let type_name = match args.first() {
+            Some(recv) => recv
+                .shape()
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| ty.to_string()),
+            None => {
+                return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("method handle `{ty}.{method}` needs a receiver argument"),
+                ));
+            }
+        };
+        let Some(&proto) = self.methods.get(&(type_name.clone(), method.to_string())) else {
+            // Not a user method — a **built-in** receiver (`list.len`, `string.upper`, MH.2):
+            // dispatch through the same `call_builtin_method` the `Op::CallMethod` opcode uses, so a
+            // handle call and a direct call agree by construction (this mirrors the tree-walker,
+            // whose handle arm reuses its ordinary `call_method`). The helper borrows; the owned
+            // arguments are released after (the result is a fresh value, so this is safe even when
+            // it aliases an argument's content).
+            let recv = args[0];
+            let result = self.call_builtin_method(recv, recv.heap_kind(), method, &args[1..], span);
+            for a in args {
+                release(a);
+            }
+            return result;
+        };
+        let chunk = &self.module.protos[proto as usize];
+        let num_params = chunk.num_params as usize; // includes register 0 = self (the receiver)
+        let num_registers = chunk.num_registers as usize;
+        let required = num_params - chunk.defaults.len();
+        if args.len() < required || args.len() > num_params {
+            let supplied = args.len();
+            for a in args {
+                release(a);
+            }
+            return Err(self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                arity_message("method", required, num_params, supplied),
+            ));
+        }
+        let filled = args.len();
+        let defaults = chunk.defaults.clone();
+        let mut regs = vec![Value::unit(); num_registers];
+        for (i, v) in args.into_iter().enumerate() {
+            regs[i] = v;
+        }
+        // A method never captures upvalues; fill any omitted trailing defaults from module scope.
+        for (reg, dproto) in &defaults {
+            if *reg as usize >= filled {
+                let value = self.run_thunk(*dproto, &[])?;
+                regs[*reg as usize] = value;
+            }
+        }
+        self.run(
+            vec![Frame {
+                proto,
+                base: 0,
+                pc: 0,
+                ret_dst: 0,
+                ret_transform: RetTransform::None,
+                upvalues: Vec::new(),
+            }],
+            regs,
+        )
     }
 
     /// Read a reactive node, driving a `computed`'s recompute through [`call_value`](Self::call_value)
@@ -5447,11 +5560,59 @@ impl<'m> Vm<'m> {
                     set_reg(regs, caller_base, dst, result);
                     Ok(false)
                 }
-                None => Err(self.error(
-                    DiagnosticCode::TypeMismatch,
-                    span,
-                    format!("{} is not callable", callee_val.type_name()),
-                )),
+                // A selectively-imported native-module function called by its bare name.
+                None => match callee_val.module_fn_parts() {
+                    Some((module, func)) => {
+                        let arg_vals: Vec<Value> = arg_regs
+                            .iter()
+                            .map(|&r| regs[caller_base + r as usize])
+                            .collect();
+                        let result = self.call_native_module(&module, &func, &arg_vals, span)?;
+                        set_reg(regs, caller_base, dst, result);
+                        Ok(false)
+                    }
+                    // An unbound method handle (`Type.method`) stored and called directly. Run it
+                    // synchronously (its method body re-enters the VM) and land the result — the
+                    // arguments are retained since `run_method_handle` consumes owned references.
+                    None => match callee_val.method_handle_parts() {
+                        Some((ty, method, associated)) => {
+                            let arg_vals: Vec<Value> = arg_regs
+                                .iter()
+                                .map(|&r| {
+                                    let v = regs[caller_base + r as usize];
+                                    retain(v);
+                                    v
+                                })
+                                .collect();
+                            let result =
+                                self.run_method_handle(&ty, &method, associated, arg_vals, span)?;
+                            set_reg(regs, caller_base, dst, result);
+                            Ok(false)
+                        }
+                        // A bound handle: captured receiver first, then the call's arguments.
+                        None => match callee_val.bound_method_parts() {
+                            Some((recv, method)) => {
+                                retain(recv);
+                                let mut owned = Vec::with_capacity(arg_regs.len() + 1);
+                                owned.push(recv);
+                                for &r in arg_regs {
+                                    let v = regs[caller_base + r as usize];
+                                    retain(v);
+                                    owned.push(v);
+                                }
+                                let result =
+                                    self.run_method_handle("", &method, false, owned, span)?;
+                                set_reg(regs, caller_base, dst, result);
+                                Ok(false)
+                            }
+                            None => Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                span,
+                                format!("{} is not callable", callee_val.type_name()),
+                            )),
+                        },
+                    },
+                },
             },
         }
     }
@@ -5575,6 +5736,14 @@ impl<'m> Vm<'m> {
         span: Span,
     ) -> Result<Value, Abort> {
         match builtin {
+            // `next_id()` as a first-class value (`use std.id.{next_id}`, P2c) — direct calls
+            // compile to the dedicated `Op::NextId`; an indirect call reads the same counter.
+            Builtin::NextId => {
+                self.check_arity(builtin, args, 0, span)?;
+                let id = self.next_id;
+                self.next_id += 1;
+                Ok(Value::int(id as i64))
+            }
             Builtin::Len => {
                 self.check_arity(builtin, args, 1, span)?;
                 let v = args[0];
@@ -6556,7 +6725,7 @@ mod tests {
         // captured `Res`'s `destruct` (its last reference died with the cycle). So `drop 7` prints at
         // program-exit collection, after `make()`'s own `7`.
         let r = run(
-            "class Res {\n  id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${id}\"; }\n}\nfn make(): int {\n  r = Res.new(7);\n  fn rec(n: int): int { if n <= 0 { return r.id; } return rec(n - 1); }\n  return rec(2);\n}\necho make();\n",
+            "class Res {\n  id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${self.id}\"; }\n}\nfn make(): int {\n  r = Res.new(7);\n  fn rec(n: int): int { if n <= 0 { return r.id; } return rec(n - 1); }\n  return rec(2);\n}\necho make();\n",
         );
         assert_eq!(r.stdout, "7\ndrop 7\n");
         assert_eq!(r.exit_code, 0);
@@ -6603,7 +6772,7 @@ mod tests {
         // A reassigned destructor-bearing object exercises the VM's `release_value` last-reference
         // free — the path that must defer a *buffered* object rather than free it shallowly (the bug
         // that segfaulted before `free_shallow` became the universal deferral point).
-        let destructed = "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { x = id + 1; }\n}\nmut r = Res.new(0);\nfor i in 0..3 { r = Res.new(i); }\necho r.id;\n";
+        let destructed = "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { x = self.id + 1; }\n}\nmut r = Res.new(0);\nfor i in 0..3 { r = Res.new(i); }\necho r.id;\n";
         for src in [cyclic, acyclic, destructed] {
             let before = noeta_value::live_count();
             let r = run_with_collector(src, noeta_value::CollectorMode::TrialDeletion);
@@ -6631,7 +6800,7 @@ mod tests {
         // A monotonically-growing accumulator of **heap** elements (records — ints would be immediate
         // and never counted). Peak ≈ n live objects at the end: the genuinely-live structure prompt
         // reclamation cannot shrink, but whose transient cost reuse/COW keeps O(n) not O(n²).
-        let accumulate = "class Pair { a: int b: int }\nmut acc = [];\nfor i in 0..4000 { acc ~= [Pair { a: i, b: i }]; }\necho acc.count();\n";
+        let accumulate = "class Pair { a: int b: int }\nmut acc = [];\nfor i in 0..4000 { acc ~= [Pair { a: i, b: i }]; }\necho acc.len();\n";
         let accumulate_peak = peak_residency(accumulate);
 
         // (Deep-nested teardown is benched separately on the optimized bench profile — its recursive
@@ -6694,7 +6863,7 @@ mod tests {
         // `WrapOk` frame transform); an unknown name / arity mismatch builds `Result.Err`. Exercises
         // the new type-handle value, the `Op::Invoke` dispatch, and the refcount handoff on return.
         let r = run(
-            "class Box {\n  v: int\n  fn new(v: int): Box { return Box { v: v }; }\n  fn doubled(): int { return v * 2; }\n}\nhit = match invoke(Box.new(21), \"doubled\", []) { Ok(v) => \"${v}\", Err(e) => \"err ${e}\" };\necho hit;\nmade = match invoke(Box, \"new\", [7]) { Ok(b) => match invoke(b, \"doubled\", []) { Ok(d) => \"${d}\", Err(_) => \"x\" }, Err(_) => \"x\" };\necho made;\nmiss = match invoke(Box.new(1), \"nope\", []) { Ok(_) => \"ok\", Err(_) => \"miss\" };\necho miss;\n",
+            "class Box {\n  v: int\n  fn new(v: int): Box { return Box { v: v }; }\n  fn doubled(): int { return self.v * 2; }\n}\nhit = match invoke(Box.new(21), \"doubled\", []) { Ok(v) => \"${v}\", Err(e) => \"err ${e}\" };\necho hit;\nmade = match invoke(Box, \"new\", [7]) { Ok(b) => match invoke(b, \"doubled\", []) { Ok(d) => \"${d}\", Err(_) => \"x\" }, Err(_) => \"x\" };\necho made;\nmiss = match invoke(Box.new(1), \"nope\", []) { Ok(_) => \"ok\", Err(_) => \"miss\" };\necho miss;\n",
         );
         assert_eq!(r.stdout, "42\n14\nmiss\n");
         assert_eq!(r.exit_code, 0);
@@ -6769,7 +6938,7 @@ mod tests {
         // the pre-update value (the runtime refcount > 1 forces the copy). Heap fields exercise the
         // slot retain/release accounting; run under miri to validate refcounts (no UAF/double free).
         let r = run(
-            "class Point {\n  x: int\n  tag: string\n  fn show(): string { return \"${x} ${tag}\"; }\n}\nmut acc = Point { x: -1, tag: \"k\" };\nfor i in 0..4 {\n  acc = Point { ...acc, x: i };\n}\necho acc.show();\nmut p = Point { x: 1, tag: \"a\" };\nsnap = p;\np = Point { ...p, x: 9 };\necho p.show();\necho snap.show();\n",
+            "class Point {\n  x: int\n  tag: string\n  fn show(): string { return \"${self.x} ${self.tag}\"; }\n}\nmut acc = Point { x: -1, tag: \"k\" };\nfor i in 0..4 {\n  acc = Point { ...acc, x: i };\n}\necho acc.show();\nmut p = Point { x: 1, tag: \"a\" };\nsnap = p;\np = Point { ...p, x: 9 };\necho p.show();\necho snap.show();\n",
         );
         assert_eq!(r.stdout, "3 k\n9 a\n1 a\n");
         assert_eq!(r.exit_code, 0);
@@ -6784,7 +6953,7 @@ mod tests {
         // at the pre-update value. String values exercise the slot retain/release accounting; run under
         // miri to validate refcounts (no UAF / double free).
         let r = run(
-            "fn build(): string {\n  mut m = {};\n  for i in 0..3 { m[\"k${i}\"] = \"v${i}\"; }\n  m[\"k0\"] = \"x\";\n  m = m.remove(\"k1\");\n  return \"${m.values()} ${m.count()}\";\n}\necho build();\nmut acc = { \"a\": \"1\" };\nsnap = acc;\nacc[\"a\"] = \"9\";\nacc[\"b\"] = \"2\";\necho acc.values();\necho snap.values();\n",
+            "fn build(): string {\n  mut m = {};\n  for i in 0..3 { m[\"k${i}\"] = \"v${i}\"; }\n  m[\"k0\"] = \"x\";\n  m = m.remove(\"k1\");\n  return \"${m.values()} ${m.len()}\";\n}\necho build();\nmut acc = { \"a\": \"1\" };\nsnap = acc;\nacc[\"a\"] = \"9\";\nacc[\"b\"] = \"2\";\necho acc.values();\necho snap.values();\n",
         );
         assert_eq!(r.stdout, "[\"x\", \"v2\"] 2\n[\"9\", \"2\"]\n[\"1\"]\n");
         assert_eq!(r.exit_code, 0);
@@ -6812,7 +6981,7 @@ mod tests {
         // fallback — an aliased accumulator (`snap = t`) keeps its value. String elements exercise the
         // element retain/release accounting; run under miri (no UAF / double free).
         let r = run(
-            "fn build(): string {\n  mut s = #{};\n  for i in 0..3 { s = s.add(\"v${i}\"); }\n  s = s.add(\"v0\");\n  s = s.remove(\"v1\");\n  return \"${s.count()}\";\n}\necho build();\nmut t = #{\"a\", \"b\"};\nsnap = t;\nt = t.add(\"c\");\nt = t.remove(\"a\");\necho t;\necho snap;\n",
+            "fn build(): string {\n  mut s = #{};\n  for i in 0..3 { s = s.add(\"v${i}\"); }\n  s = s.add(\"v0\");\n  s = s.remove(\"v1\");\n  return \"${s.len()}\";\n}\necho build();\nmut t = #{\"a\", \"b\"};\nsnap = t;\nt = t.add(\"c\");\nt = t.remove(\"a\");\necho t;\necho snap;\n",
         );
         assert_eq!(r.stdout, "2\n{\"b\", \"c\"}\n{\"a\", \"b\"}\n");
         assert_eq!(r.exit_code, 0);
@@ -6856,7 +7025,7 @@ mod tests {
         // leak oracle to confirm residency 0.
         let before = noeta_value::live_count();
         let r = run(
-            "class Node {\n  mut next: ?Node\n  id: int\n  fn new(id: int): Node { return Node { next: none, id: id }; }\n  destruct { echo \"drop ${id}\"; }\n}\na = Node.new(1);\nb = Node.new(2);\na.next = some(b);\nb.next = some(a);\necho \"linked\";\n",
+            "class Node {\n  mut next: ?Node\n  id: int\n  fn new(id: int): Node { return Node { next: none, id: id }; }\n  destruct { echo \"drop ${self.id}\"; }\n}\na = Node.new(1);\nb = Node.new(2);\na.next = some(b);\nb.next = some(a);\necho \"linked\";\n",
         );
         assert_eq!(r.stdout, "linked\ndrop 2\ndrop 1\n");
         assert_eq!(r.exit_code, 0);
@@ -6876,7 +7045,7 @@ mod tests {
         // step), while an aliased reassignment (`snap = q`) copies to preserve `snap`. Run under miri to
         // validate the all-slot overwrite's retain/release accounting (no UAF / double free).
         let r = run(
-            "class P {\n  n: int\n  tag: string\n  fn show(): string { return \"${n} ${tag}\"; }\n}\nfn build(): string {\n  mut p = P { n: 0, tag: \"a\" };\n  for i in 0..3 { p = P { n: i, tag: \"t${i}\" }; }\n  return p.show();\n}\necho build();\nmut q = P { n: 1, tag: \"x\" };\nsnap = q;\nq = P { n: 9, tag: \"y\" };\necho q.show();\necho snap.show();\n",
+            "class P {\n  n: int\n  tag: string\n  fn show(): string { return \"${self.n} ${self.tag}\"; }\n}\nfn build(): string {\n  mut p = P { n: 0, tag: \"a\" };\n  for i in 0..3 { p = P { n: i, tag: \"t${i}\" }; }\n  return p.show();\n}\necho build();\nmut q = P { n: 1, tag: \"x\" };\nsnap = q;\nq = P { n: 9, tag: \"y\" };\necho q.show();\necho snap.show();\n",
         );
         assert_eq!(r.stdout, "2 t2\n9 y\n1 x\n");
         assert_eq!(r.exit_code, 0);
@@ -6891,7 +7060,7 @@ mod tests {
         // field carried across each in-place update. Run under miri to validate the `Drop` does not
         // double-free the receiver and the carried heap field's refcount stays balanced.
         let r = run(
-            "class Point {\n  x: int\n  label: string\n  fn show(): string { return \"${x} ${label}\"; }\n}\nfn run(n: int): string {\n  mut acc = Point { x: 0, label: \"p\" };\n  for i in 0..n {\n    acc = Point { ...acc, x: acc.x + 2 };\n  }\n  return acc.show();\n}\necho run(5);\n",
+            "class Point {\n  x: int\n  label: string\n  fn show(): string { return \"${self.x} ${self.label}\"; }\n}\nfn run(n: int): string {\n  mut acc = Point { x: 0, label: \"p\" };\n  for i in 0..n {\n    acc = Point { ...acc, x: acc.x + 2 };\n  }\n  return acc.show();\n}\necho run(5);\n",
         );
         assert_eq!(r.stdout, "10 p\n");
         assert_eq!(r.exit_code, 0);
@@ -6905,7 +7074,7 @@ mod tests {
         // displaced field is released exactly once (no UAF / double-free) and the carried field `n`
         // stays balanced.
         let r = run(
-            "class Res {\n  id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${id}\"; }\n}\nclass Box {\n  r: Res\n  n: int\n}\nfn run(): void {\n  mut acc = Box { r: Res.new(0), n: 7 };\n  acc = Box { ...acc, r: Res.new(1) };\n  echo \"n=${acc.n}\";\n}\nrun();\n",
+            "class Res {\n  id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${self.id}\"; }\n}\nclass Box {\n  r: Res\n  n: int\n}\nfn run(): void {\n  mut acc = Box { r: Res.new(0), n: 7 };\n  acc = Box { ...acc, r: Res.new(1) };\n  echo \"n=${acc.n}\";\n}\nrun();\n",
         );
         assert_eq!(r.stdout, "drop 0\nn=7\ndrop 1\n");
         assert_eq!(r.exit_code, 0);
@@ -7039,7 +7208,7 @@ mod tests {
     #[test]
     fn destructors_run_at_program_end_in_reverse_declaration_order() {
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${name}\"; }\n}\na = R.new(\"a\");\nb = R.new(\"b\");\necho \"body\";\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${self.name}\"; }\n}\na = R.new(\"a\");\nb = R.new(\"b\");\necho \"body\";\n",
         );
         // Globals destroyed in reverse declaration order: b before a.
         assert_eq!(r.stdout, "body\nclose b\nclose a\n");
@@ -7053,7 +7222,7 @@ mod tests {
         // The bare `compile` path marks every drop conservatively relevant, so the local's
         // `Op::Drop` routes through `release_value` and fires the destructor.
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn announce(): void { echo \"here ${name}\"; }\n  destruct { echo \"close ${name}\"; }\n}\nfn scope(): void {\n  r = R.new(\"x\");\n  r.announce();\n  echo \"after\";\n}\necho \"start\";\nscope();\necho \"end\";\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn announce(): void { echo \"here ${self.name}\"; }\n  destruct { echo \"close ${self.name}\"; }\n}\nfn scope(): void {\n  r = R.new(\"x\");\n  r.announce();\n  echo \"after\";\n}\necho \"start\";\nscope();\necho \"end\";\n",
         );
         // `r`'s last use is `r.announce()`; the destructor fires right after it returns, before
         // "after" — and definitely before program end ("end").
@@ -7064,7 +7233,7 @@ mod tests {
     #[test]
     fn reassigning_a_binding_destroys_the_displaced_value() {
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${name}\"; }\n}\nmut x = R.new(\"first\");\nx = R.new(\"second\");\necho \"mid\";\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${self.name}\"; }\n}\nmut x = R.new(\"first\");\nx = R.new(\"second\");\necho \"mid\";\n",
         );
         // "first" is destroyed at the reassignment; "second" at program end.
         assert_eq!(r.stdout, "close first\nmid\nclose second\n");
@@ -7077,7 +7246,7 @@ mod tests {
         // (`set_reg`'s plain release would not fire the destructor), and its surviving value via the
         // function-body scope-exit drop. "first" closes between the two reads; "second" before return.
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn use_it(): void { echo \"use ${name}\"; }\n  destruct { echo \"close ${name}\"; }\n}\nfn go(): void {\n  mut r = R.new(\"first\");\n  r.use_it();\n  r = R.new(\"second\");\n  r.use_it();\n}\necho \"start\";\ngo();\necho \"end\";\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn use_it(): void { echo \"use ${self.name}\"; }\n  destruct { echo \"close ${self.name}\"; }\n}\nfn go(): void {\n  mut r = R.new(\"first\");\n  r.use_it();\n  r = R.new(\"second\");\n  r.use_it();\n}\necho \"start\";\ngo();\necho \"end\";\n",
         );
         assert_eq!(
             r.stdout,
@@ -7092,7 +7261,7 @@ mod tests {
         // unwinding (the `on_error` drops the compiler attaches to `Op::TryUnwrap`). `r` is live past
         // the `?`, so `close r` fires on the error path, before the caller prints the propagated Err.
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${name}\"; }\n}\nfn check(c: bool): Result<int, string> {\n  if c { return Ok(1); }\n  return Err(\"bad\");\n}\nfn go(c: bool): Result<int, string> {\n  r = R.new(\"r\");\n  x = check(c)?;\n  return Ok(x);\n}\necho \"start\";\necho go(false);\necho \"end\";\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${self.name}\"; }\n}\nfn check(c: bool): Result<int, string> {\n  if c { return Ok(1); }\n  return Err(\"bad\");\n}\nfn go(c: bool): Result<int, string> {\n  r = R.new(\"r\");\n  x = check(c)?;\n  return Ok(x);\n}\necho \"start\";\necho go(false);\necho \"end\";\n",
         );
         assert_eq!(r.stdout, "start\nclose r\nErr(bad)\nend\n");
         assert_eq!(r.exit_code, 0);
@@ -7105,7 +7274,7 @@ mod tests {
         // destroyed — `b` before `a` — before the program exits 1. They are never read, so they live
         // undropped to the panic; the panic-aware `coalesce` pinning keeps them in distinct registers.
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${name}\"; }\n}\nfn go(): void {\n  a = R.new(\"a\");\n  b = R.new(\"b\");\n  echo \"made\";\n  panic(\"boom\");\n}\necho \"start\";\ngo();\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${self.name}\"; }\n}\nfn go(): void {\n  a = R.new(\"a\");\n  b = R.new(\"b\");\n  echo \"made\";\n  panic(\"boom\");\n}\necho \"start\";\ngo();\n",
         );
         assert_eq!(r.stdout, "start\nmade\nclose b\nclose a\n");
         assert_eq!(r.exit_code, 1);
@@ -7119,7 +7288,7 @@ mod tests {
         // struct holds the sole reference — the construction-temp release makes refcount 1 here), and
         // `o` is a dead-store dropped at scope exit: `outer`, then `a`, then `b` (declared order).
         let r = run(
-            "class Leaf {\n  tag: string\n  fn new(tag: string): Leaf { return Leaf { tag: tag }; }\n  destruct { echo \"drop ${tag}\"; }\n}\nclass Outer {\n  label: string\n  a: Leaf\n  b: Leaf\n  fn new(): Outer { return Outer { label: \"o\", a: Leaf.new(\"a\"), b: Leaf.new(\"b\") }; }\n  destruct { echo \"drop outer ${label}\"; }\n}\nfn go(): void {\n  o = Outer.new();\n  echo \"built\";\n}\necho \"start\";\ngo();\necho \"end\";\n",
+            "class Leaf {\n  tag: string\n  fn new(tag: string): Leaf { return Leaf { tag: tag }; }\n  destruct { echo \"drop ${self.tag}\"; }\n}\nclass Outer {\n  label: string\n  a: Leaf\n  b: Leaf\n  fn new(): Outer { return Outer { label: \"o\", a: Leaf.new(\"a\"), b: Leaf.new(\"b\") }; }\n  destruct { echo \"drop outer ${self.label}\"; }\n}\nfn go(): void {\n  o = Outer.new();\n  echo \"built\";\n}\necho \"start\";\ngo();\necho \"end\";\n",
         );
         assert_eq!(
             r.stdout,
@@ -7134,7 +7303,7 @@ mod tests {
         // `destruct`; its contained `Leaf`s do, and fire a, b, c (index order) when the list dies. The
         // construction-temp releases make the list the sole owner, so each element is at refcount 1.
         let r = run(
-            "class Leaf {\n  tag: string\n  fn new(tag: string): Leaf { return Leaf { tag: tag }; }\n  destruct { echo \"drop ${tag}\"; }\n}\nfn go(): void {\n  items = [Leaf.new(\"a\"), Leaf.new(\"b\"), Leaf.new(\"c\")];\n  echo \"built\";\n}\necho \"start\";\ngo();\necho \"end\";\n",
+            "class Leaf {\n  tag: string\n  fn new(tag: string): Leaf { return Leaf { tag: tag }; }\n  destruct { echo \"drop ${self.tag}\"; }\n}\nfn go(): void {\n  items = [Leaf.new(\"a\"), Leaf.new(\"b\"), Leaf.new(\"c\")];\n  echo \"built\";\n}\necho \"start\";\ngo();\necho \"end\";\n",
         );
         assert_eq!(r.stdout, "start\nbuilt\ndrop a\ndrop b\ndrop c\nend\n");
         assert_eq!(r.exit_code, 0);
@@ -7148,7 +7317,7 @@ mod tests {
         // statement). The compiler emits a destructor-aware `Op::Drop` of the receiver / discarded
         // register where there was none before.
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn use_it(): void { echo \"use ${name}\"; }\n  destruct { echo \"close ${name}\"; }\n}\necho \"start\";\nR.new(\"a\").use_it();\nR.new(\"b\");\necho \"end\";\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn use_it(): void { echo \"use ${self.name}\"; }\n  destruct { echo \"close ${self.name}\"; }\n}\necho \"start\";\nR.new(\"a\").use_it();\nR.new(\"b\");\necho \"end\";\n",
         );
         assert_eq!(r.stdout, "start\nuse a\nclose a\nclose b\nend\n");
         assert_eq!(r.exit_code, 0);
@@ -7190,7 +7359,7 @@ mod tests {
     #[test]
     fn class_constructor_method_and_field_access() {
         let r = run(
-            "class Box {\n  v: int\n  fn new(v: int): Box { return Box { v: v }; }\n  fn doubled(): int { return v * 2; }\n}\nb = Box.new(21);\necho b.doubled();\necho b.v;\n",
+            "class Box {\n  v: int\n  fn new(v: int): Box { return Box { v: v }; }\n  fn doubled(): int { return self.v * 2; }\n}\nb = Box.new(21);\necho b.doubled();\necho b.v;\n",
         );
         assert_eq!(r.stdout, "42\n21\n");
         assert_eq!(r.exit_code, 0);
@@ -7199,7 +7368,7 @@ mod tests {
     #[test]
     fn method_takes_arguments_alongside_fields() {
         let r = run(
-            "class Counter {\n  base: int\n  fn new(base: int): Counter { return Counter { base: base }; }\n  fn plus(n: int): int { return base + n; }\n}\nc = Counter.new(10);\necho c.plus(5);\n",
+            "class Counter {\n  base: int\n  fn new(base: int): Counter { return Counter { base: base }; }\n  fn plus(n: int): int { return self.base + n; }\n}\nc = Counter.new(10);\necho c.plus(5);\n",
         );
         assert_eq!(r.stdout, "15\n");
     }
@@ -7216,7 +7385,7 @@ mod tests {
     fn operator_trait_overloads_plus() {
         // `a + b` on a class implementing `Add` dispatches to its `add` method (M1.8).
         let r = run(
-            "class Money {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): Money { return Money { amount: a, currency: c }; }\n  impl Add {\n    fn add(other: Money): Money { return Money { amount: amount + other.amount, currency: currency }; }\n  }\n}\na = Money.new(5, \"USD\");\nb = Money.new(3, \"USD\");\nt = a + b;\necho t.amount;\necho t.currency;\n",
+            "class Money {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): Money { return Money { amount: a, currency: c }; }\n  impl Add {\n    fn add(other: Money): Money { return Money { amount: self.amount + other.amount, currency: self.currency }; }\n  }\n}\na = Money.new(5, \"USD\");\nb = Money.new(3, \"USD\");\nt = a + b;\necho t.amount;\necho t.currency;\n",
         );
         assert_eq!(r.stdout, "8\nUSD\n");
         assert_eq!(r.exit_code, 0);
@@ -7234,7 +7403,7 @@ mod tests {
         // `impl Equatable` routes `==`/`!=` to `eq`; `eq` here ignores `tag`, and `!=` negates the
         // returned bool through the frame's return transform.
         let r = run(
-            "class M {\n  amount: int\n  tag: int\n  fn new(a: int, t: int): M { return M { amount: a, tag: t }; }\n  impl Equatable {\n    fn eq(other: M): bool { return amount == other.amount; }\n  }\n}\na = M.new(5, 1);\nb = M.new(5, 2);\necho a == b;\necho a != b;\necho a == M.new(9, 1);\n",
+            "class M {\n  amount: int\n  tag: int\n  fn new(a: int, t: int): M { return M { amount: a, tag: t }; }\n  impl Equatable {\n    fn eq(other: M): bool { return self.amount == other.amount; }\n  }\n}\na = M.new(5, 1);\nb = M.new(5, 2);\necho a == b;\necho a != b;\necho a == M.new(9, 1);\n",
         );
         assert_eq!(r.stdout, "true\nfalse\nfalse\n");
         assert_eq!(r.exit_code, 0);
@@ -7245,7 +7414,7 @@ mod tests {
         // `impl Comparable` routes `< <= > >=` to `compare`; the returned `Ordering` is mapped to
         // each operator's bool via the frame's return transform.
         let r = run(
-            "class M {\n  amount: int\n  fn new(a: int): M { return M { amount: a }; }\n  impl Comparable {\n    fn compare(other: M): Ordering { return amount.compare(other.amount); }\n  }\n}\na = M.new(5);\nb = M.new(8);\necho a < b;\necho a > b;\necho a <= b;\necho a >= b;\n",
+            "class M {\n  amount: int\n  fn new(a: int): M { return M { amount: a }; }\n  impl Comparable {\n    fn compare(other: M): Ordering { return self.amount.compare(other.amount); }\n  }\n}\na = M.new(5);\nb = M.new(8);\necho a < b;\necho a > b;\necho a <= b;\necho a >= b;\n",
         );
         assert_eq!(r.stdout, "true\nfalse\ntrue\nfalse\n");
         assert_eq!(r.exit_code, 0);
@@ -7304,7 +7473,7 @@ mod tests {
     fn index_dispatches_to_index_trait() {
         // `inv[i]` routes to the class's `Index::get`, pushing a call frame `[recv, index]`.
         let r = run(
-            "class Inv {\n  items: list\n  fn new(items: list): Inv { return Inv { items: items }; }\n  impl Index {\n    fn get(i: int): int { return items[i]; }\n  }\n}\necho Inv.new([7, 8, 9])[2];\n",
+            "class Inv {\n  items: list\n  fn new(items: list): Inv { return Inv { items: items }; }\n  impl Index {\n    fn get(i: int): int { return self.items[i]; }\n  }\n}\necho Inv.new([7, 8, 9])[2];\n",
         );
         assert_eq!(r.stdout, "9\n");
         assert_eq!(r.exit_code, 0);
@@ -7359,7 +7528,7 @@ mod tests {
     fn len_dispatches_to_length_trait() {
         // `len(o)` routes to the class's `Length::len`, pushing a receiver-only call frame.
         let r = run(
-            "class Stack {\n  items: list\n  fn new(items: list): Stack { return Stack { items: items }; }\n  impl Length {\n    fn len(): int { return len(items); }\n  }\n}\necho len(Stack.new([1, 2, 3]));\n",
+            "class Stack {\n  items: list\n  fn new(items: list): Stack { return Stack { items: items }; }\n  impl Length {\n    fn len(): int { return self.items.len(); }\n  }\n}\necho Stack.new([1, 2, 3]).len();\n",
         );
         assert_eq!(r.stdout, "3\n");
         assert_eq!(r.exit_code, 0);
@@ -7369,7 +7538,7 @@ mod tests {
     fn echo_dispatches_to_display_trait() {
         // `echo o` and `"{o}"` route to the class's `Display::to_string` (the `Stringify` op).
         let r = run(
-            "class P {\n  n: int\n  fn new(n: int): P { return P { n: n }; }\n  impl Display {\n    fn to_string(): string { return \"P#${n}\"; }\n  }\n}\np = P.new(7);\necho p;\necho \"it is ${p}\";\n",
+            "class P {\n  n: int\n  fn new(n: int): P { return P { n: n }; }\n  impl Display {\n    fn to_string(): string { return \"P#${self.n}\"; }\n  }\n}\np = P.new(7);\necho p;\necho \"it is ${p}\";\n",
         );
         assert_eq!(r.stdout, "P#7\nit is P#7\n");
         assert_eq!(r.exit_code, 0);
@@ -7425,7 +7594,7 @@ mod tests {
     fn for_dispatches_to_iterable_trait() {
         // `for x in o` routes to the class's `Iterable::iter`, iterating its returned list.
         let r = run(
-            "class Bag {\n  items: list\n  fn new(items: list): Bag { return Bag { items: items }; }\n  impl Iterable {\n    fn iter(): list { return items; }\n  }\n}\nmut total = 0;\nfor x in Bag.new([1, 2, 3]) { total = total + x; }\necho total;\n",
+            "class Bag {\n  items: list\n  fn new(items: list): Bag { return Bag { items: items }; }\n  impl Iterable {\n    fn iter(): list { return self.items; }\n  }\n}\nmut total = 0;\nfor x in Bag.new([1, 2, 3]) { total = total + x; }\necho total;\n",
         );
         assert_eq!(r.stdout, "6\n");
         assert_eq!(r.exit_code, 0);
@@ -7533,7 +7702,7 @@ mod tests {
 
     #[test]
     fn next_id_is_a_deterministic_counter() {
-        let r = run("echo next_id();\necho next_id();\necho next_id();\n");
+        let r = run("use std.id.{next_id}\necho next_id();\necho next_id();\necho next_id();\n");
         assert_eq!(r.stdout, "1\n2\n3\n");
     }
 
@@ -7542,7 +7711,7 @@ mod tests {
         // The `fn(it) => it.price * it.qty` closure captures nothing enclosing, so it compiles
         // even though it is defined inside a method (true upvalue capture stays unsupported).
         let r = run(
-            "struct Item { price: float qty: int }\nclass Cart {\n  items: List<Item>\n  fn new(items: List<Item>): Cart { return Cart { items: items }; }\n  fn total(): float { return items |> map(fn(it) => it.price * it.qty) |> sum(); }\n}\nc = Cart.new([Item { price: 2.5, qty: 4 }, Item { price: 1.0, qty: 3 }]);\necho c.total();\n",
+            "struct Item { price: float qty: int }\nclass Cart {\n  items: List<Item>\n  fn new(items: List<Item>): Cart { return Cart { items: items }; }\n  fn total(): float { return self.items.map(fn(it) => it.price * it.qty).sum(); }\n}\nc = Cart.new([Item { price: 2.5, qty: 4 }, Item { price: 1.0, qty: 3 }]);\necho c.total();\n",
         );
         assert_eq!(r.stdout, "13.0\n");
         assert_eq!(r.exit_code, 0);
@@ -7564,7 +7733,7 @@ mod tests {
 
     #[test]
     fn maps_display_in_sorted_key_order() {
-        let r = run("echo {\"b\": 2, \"a\": 1};\necho {\"a\": 1, \"b\": 2}.count();\n");
+        let r = run("echo {\"b\": 2, \"a\": 1};\necho {\"a\": 1, \"b\": 2}.len();\n");
         assert_eq!(r.stdout, "{\"a\": 1, \"b\": 2}\n2\n");
         assert_eq!(r.exit_code, 0);
     }
@@ -7572,7 +7741,7 @@ mod tests {
     #[test]
     fn len_over_list_map_and_string() {
         let r = run(
-            "echo len([1, 2, 3]);\necho len({\"a\": 1});\necho len(\"héllo\");\necho len([]);\n",
+            "echo [1, 2, 3].len();\necho {\"a\": 1}.len();\necho \"héllo\".len();\necho [].len();\n",
         );
         assert_eq!(r.stdout, "3\n1\n5\n0\n");
     }
@@ -7580,7 +7749,7 @@ mod tests {
     #[test]
     fn filter_map_sum_pipeline() {
         let r = run(
-            "echo [1, 2, 3, 4] |> filter(fn(n) => n % 2 == 0) |> map(fn(n) => n * 10) |> sum();\n",
+            "echo [1, 2, 3, 4].filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).sum();\n",
         );
         assert_eq!(r.stdout, "60\n");
         assert_eq!(r.exit_code, 0);
@@ -7588,9 +7757,9 @@ mod tests {
 
     #[test]
     fn sum_promotes_to_float_when_any_element_is_float() {
-        assert_eq!(run("echo sum([1, 2, 3]);\n").stdout, "6\n");
-        assert_eq!(run("echo sum([1, 2.5, 3]);\n").stdout, "6.5\n");
-        assert_eq!(run("echo sum([]);\n").stdout, "0\n");
+        assert_eq!(run("echo [1, 2, 3].sum();\n").stdout, "6\n");
+        assert_eq!(run("echo [1, 2.5, 3].sum();\n").stdout, "6.5\n");
+        assert_eq!(run("echo [].sum();\n").stdout, "0\n");
     }
 
     #[test]
@@ -7633,12 +7802,14 @@ mod tests {
     }
 
     #[test]
-    fn len_of_an_int_is_a_type_error() {
-        let r = run("echo len(42);\n");
+    fn len_of_an_int_is_an_unknown_method() {
+        // `len` is a collection method (P1.2), so on an int it is an unknown method (E0005) — the
+        // same error every other unknown method raises (the old free `len(42)` was a TypeMismatch).
+        let r = run("echo (42).len();\n");
         assert_eq!(r.exit_code, 1);
         assert_eq!(
             r.diagnostics[0].code,
-            noeta_diagnostics::DiagnosticCode::TypeMismatch
+            noeta_diagnostics::DiagnosticCode::UnknownName
         );
     }
 
@@ -7646,7 +7817,7 @@ mod tests {
     fn map_closure_error_propagates_and_frees() {
         // The closure divides by zero on the second element: the error must surface and the
         // partially-built result list must be freed (miri verifies no leak).
-        let r = run("echo [1, 0, 2] |> map(fn(n) => 10 / n);\n");
+        let r = run("echo [1, 0, 2].map(fn(n) => 10 / n);\n");
         assert_eq!(r.exit_code, 1);
         assert_eq!(
             r.diagnostics[0].code,
@@ -7657,7 +7828,7 @@ mod tests {
     #[test]
     fn nested_list_of_lists_round_trips() {
         // Exercises recursive collection freeing through the register/global machinery.
-        let r = run("xs = [[1, 2], [3, 4]];\necho xs;\necho len(xs);\n");
+        let r = run("xs = [[1, 2], [3, 4]];\necho xs;\necho xs.len();\n");
         assert_eq!(r.stdout, "[[1, 2], [3, 4]]\n2\n");
     }
 
@@ -7732,7 +7903,7 @@ mod tests {
         let source = Source::new(
             SourceId::FIRST,
             "t.noe",
-            "enum Status { Pending; Paid; }\nclass Order {\n  id: int\n  mut status: Status\n  fn new(id: int): Order { return Order { id: id, status: Status.Pending }; }\n  fn tag(): int { return id; }\n}\no = Order.new(7);\necho o.tag();\n",
+            "enum Status { Pending; Paid; }\nclass Order {\n  id: int\n  mut status: Status\n  fn new(id: int): Order { return Order { id: id, status: Status.Pending }; }\n  fn tag(): int { return self.id; }\n}\no = Order.new(7);\necho o.tag();\n",
         );
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
@@ -7793,7 +7964,7 @@ mod tests {
         let source = Source::new(
             SourceId::FIRST,
             "t.noe",
-            "fn build(): Map<string, int> {\n  mut m = {};\n  for i in 0..3 { m[\"k${i}\"] = i; }\n  return m;\n}\necho build().count();\n",
+            "fn build(): Map<string, int> {\n  mut m = {};\n  for i in 0..3 { m[\"k${i}\"] = i; }\n  return m;\n}\necho build().len();\n",
         );
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
@@ -7862,7 +8033,7 @@ mod tests {
         let source = Source::new(
             SourceId::FIRST,
             "t.noe",
-            "echo [1, 2, 3, 4] |> filter(fn(n) => n % 2 == 0) |> map(fn(n) => n * 10) |> sum();\n",
+            "echo [1, 2, 3, 4].filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).sum();\n",
         );
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);

@@ -6,10 +6,11 @@
 // expect: stdout "4"
 // expect: stdout "end"
 // expect: exit 0
+use std.task.{sleep}
 class Res {
     pub tag: string
     fn new(t: string): Res { return Res { tag: t } }
-    destruct { echo "drop ${tag}" }
+    destruct { echo "drop ${self.tag}" }
 }
 async fn inner(): int {
     r = Res.new("inner")

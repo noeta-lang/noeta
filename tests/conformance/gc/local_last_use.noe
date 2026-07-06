@@ -18,11 +18,11 @@ class Resource {
     }
 
     fn use_it(): void {
-        echo "using ${name}";
+        echo "using ${self.name}";
     }
 
     destruct {
-        echo "closing ${name}";
+        echo "closing ${self.name}";
     }
 }
 

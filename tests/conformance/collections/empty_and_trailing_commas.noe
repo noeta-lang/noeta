@@ -7,8 +7,8 @@
 // expect: stdout "done"
 // expect: exit 0
 echo [];
-echo len([]);
+echo [].len();
 echo [1, 2, 3,];
-echo {"a": 1, "b": 2,}.count();
+echo {"a": 1, "b": 2,}.len();
 for x in [] { echo "never"; }
 echo "done";

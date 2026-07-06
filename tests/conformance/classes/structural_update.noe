@@ -14,7 +14,7 @@ class Money {
     }
 
     fn show(): string {
-        return "${amount} ${currency}";
+        return "${self.amount} ${self.currency}";
     }
 }
 

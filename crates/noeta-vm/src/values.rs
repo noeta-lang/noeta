@@ -471,5 +471,11 @@ pub(crate) fn materialize(c: &Const) -> Value {
         Const::F32(f) => Value::f32(*f),
         Const::Str(s) => Value::string(s),
         Const::NativeModule(name) => Value::native_module(name),
+        Const::ModuleFn { module, func } => Value::module_fn(module, func),
+        Const::MethodHandle {
+            ty,
+            method,
+            associated,
+        } => Value::method_handle(ty, method, *associated),
     }
 }

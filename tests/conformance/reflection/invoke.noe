@@ -15,7 +15,7 @@ class Shape {
     w: int
     h: int
     fn new(w: int, h: int): Shape { return Shape { w: w, h: h }; }
-    fn area(): int { return w * h; }
+    fn area(): int { return self.w * self.h; }
 }
 
 // Instance method by name on a value.

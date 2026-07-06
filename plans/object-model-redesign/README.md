@@ -14,12 +14,14 @@ the `mut`-field (E0033) / `mut`-receiver (E0006) checks. This unblocks self-muta
 methods (`self.words[i] = v`), the missing piece for building a `BitSet` in-language
 (`tests/conformance/classes/bitset.lang` — the bit-tier dogfood).
 
-**Also (2026-07): live in-method field access, both backends.** Decided (with user) that a bare name
-inside a method is a **local** — self-reference is the explicit `self.f = v`. The tree-walker no
-longer snapshots fields into the method scope: a bare field read resolves live off `self`
-(`eval_ir_atom`) and a bare write declares a local, matching the VM. This closed two divergences the
-snapshot caused (a bare write hit an immutable snapshot → E0006 on the walker; and `self.n = v` then
-a bare read returned the stale snapshot value). Pinned by `classes/method_field_access.lang`.
+**Also (2026-07): live in-method field access, both backends.** ~~A bare field read resolved live
+off `self` while a bare write declared a local~~ — **SUPERSEDED by prelude-redesign EX.1 (2026-07-06,
+decided with user): member access is fully EXPLICIT.** A bare name inside a method (or destructor)
+is never a field — reads AND writes; `self.field` is the one way to touch the instance. A bare name
+that matches a declared field is a targeted static E0005 ("member access is explicit — the field is
+`self.x`"). The original read/write asymmetry was an intended-but-surprising halfway point (the user
+had wanted both explicit all along); it also made associated-vs-instance underivable. Pinned by
+`classes/method_field_access.noe` + `diagnostics/bare_field_read.noe`.
 
 **And (2026-07): precise `self.field` typing.** The checker never bound `self` for `struct`/`class`
 methods (only enums did), so an explicit `self.f` synthesized its receiver as `dyn` and erased the

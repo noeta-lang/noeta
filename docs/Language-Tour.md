@@ -151,10 +151,15 @@ echo twice(inc, 10)         // 12
 The pipe `|>` threads a value as the first argument of the next call, which reads left-to-right:
 
 ```noeta
+fn double(n: int): int { return n * 2 }
+
+echo 5 |> double |> double          // 20
+
+// Collection work chains directly as methods:
 echo [1, 2, 3, 4]
-    |> filter(fn(n) => n % 2 == 0)
-    |> map(fn(n) => n * 10)
-    |> sum()                        // 60
+    .filter(fn(n) => n % 2 == 0)
+    .map(fn(n) => n * 10)
+    .sum()                          // 60
 ```
 
 → [Functions & Closures](Functions-and-Closures).
@@ -174,7 +179,7 @@ struct Point { x: int  y: int }        // value type
 class Counter {
     pub mut n: int
     fn new(): Counter { return Counter { n: 0 } }   // associated function (no self)
-    fn bump(): void { self.n = n + 1 }              // method; `n` reads the field
+    fn bump(): void { self.n = self.n + 1 }         // method; fields read through self
 }
 
 p = Point { x: 1, y: 2 }
@@ -247,7 +252,7 @@ Lists, maps, and sets — all value-semantic (copy-on-write):
 ```noeta
 xs = [1, 2, 3]
 echo xs[0]                     // 1
-echo len(xs)                   // 3
+echo xs.len()                  // 3
 echo xs.reverse()              // [3, 2, 1]
 echo [...xs, 4]                // [1, 2, 3, 4]  (spread)
 
@@ -294,7 +299,7 @@ The `?` operator propagates a failure, early-returning it from the current funct
 
 ```noeta ignore
 fn validate(items: List<Item>): Result<void, OrderError> {
-    if items.count() == 0 { return Err(OrderError.Empty) }
+    if items.len() == 0 { return Err(OrderError.Empty) }
     return Ok()
 }
 
@@ -380,6 +385,7 @@ echo json.stringify([1, 2, 3])   // [1,2,3]
 `async fn`, `.await`, and a structured `concurrent { }` scope; `spawn` for concurrent tasks, `isolate` for true-parallel ones, and typed channels for message passing:
 
 ```noeta
+use std.task.{sleep, all}
 async fn work(name: string, ms: int): int {
     echo "${name} start"
     sleep(ms).await
@@ -412,11 +418,11 @@ enum OrderError {
 }
 
 fn total(items: List<Item>): float {
-    return items |> map(fn(it) => it.price * it.qty) |> sum()
+    return items.map(fn(it) => it.price * it.qty).sum()
 }
 
 fn validate(items: List<Item>): Result<void, OrderError> {
-    if items.count() == 0 { return Err(OrderError.Empty) }
+    if items.len() == 0 { return Err(OrderError.Empty) }
     for (i, item) in items.enumerate() {
         if item.price < 0 { return Err(OrderError.NegativePrice(index: i)) }
     }

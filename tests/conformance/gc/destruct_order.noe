@@ -19,7 +19,7 @@ class Resource {
     }
 
     destruct {
-        echo "closing ${name}";
+        echo "closing ${self.name}";
     }
 }
 

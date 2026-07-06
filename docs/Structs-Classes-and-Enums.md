@@ -105,22 +105,22 @@ b = Money { amount: 300, ...a }    // amount: 300, currency: "USD"
 
 ## Methods and `self`
 
-Methods live in the type body. Inside a method, a **bare field name reads the field** off the receiver — no `self.` needed:
+Methods live in the type body. Member access is **explicit**: a field is read and written through `self.field` — a bare name inside a method is always a local (or an unknown name), never a field:
 
 ```noeta
 class Counter {
     pub mut n: int
     fn new(): Counter { return Counter { n: 10 } }   // associated function (no self)
-    fn read(): int { return n }                       // bare `n` reads the field
+    fn read(): int { return self.n }                  // fields read through self
     fn set_then_read(): int {
         self.n = 5                                     // self.f = v writes the field
-        return n                                       // 5
+        return self.n                                  // 5
     }
 }
 ```
 
 > [!IMPORTANT]
-> A bare **read** (`n`) loads the field, but a bare **write** (`n = 5`) creates a *local* that shadows the field — it does not touch the receiver. To mutate a field, always use the explicit `self.f = v`. Index-assign through a field works too: `self.cells[i] = v` desugars to `self.cells = self.cells.set(i, v)`.
+> A bare name (`n`) never touches the receiver: `n = 5` declares a local, and reading `n` without a local in scope is a compile-time unknown-name error with a hint (`use self.n`). Index-assign through a field works too: `self.cells[i] = v` desugars to `self.cells = self.cells.set(i, v)`.
 
 **Associated functions** take no receiver (constructors are the usual case) and are called on the bare type name; **methods** dispatch on a value:
 
@@ -136,7 +136,7 @@ A `class` may declare `destruct { … }`, which runs when the instance is droppe
 ```noeta
 class File {
     path: string
-    destruct { echo "closing ${path}" }
+    destruct { echo "closing ${self.path}" }
 }
 ```
 

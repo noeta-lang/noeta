@@ -1,0 +1,31 @@
+// BOUND method handles (prelude-redesign EX.2b): `value.method` in value position captures the
+// receiver at bind time. For a `class` the capture is the shared instance (a reference), so
+// mutations through the handle are visible on the original — pinned below. Built-in receivers
+// (`xs.len`, `s.upper`) bind the same way. A same-named FIELD still wins member access; only a
+// method name in value position becomes a handle.
+// expect: stdout "2"
+// expect: stdout "3"
+// expect: stdout "HELLO"
+// expect: stdout "true"
+// expect: exit 0
+class Counter {
+    pub mut n: int
+    fn new(): Counter { return Counter { n: 0 } }
+    fn bump(): void { self.n = self.n + 1 }
+}
+
+c = Counter.new()
+f = c.bump
+f()
+f()
+echo c.n
+
+xs = [1, 2, 3]
+g = xs.len
+echo g()
+
+up = "hello".upper
+echo up()
+
+has = "hello".contains
+echo has("ell")

@@ -131,6 +131,12 @@ pub struct Checked {
     /// carried here for the same reason as the other site maps: lowering bakes it onto `Rvalue::List`
     /// so `type_of` recovers a list's element type after a `dyn` launder, identically on both backends.
     pub construction_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    /// Unbound method-handle sites (`Type.method` in value position) → the resolved
+    /// `(ty, method, associated)`, carried here for the same reason as the other site maps: lowering
+    /// emits an `Rvalue::MethodHandle` at these spans on both backends.
+    pub handle_sites: std::collections::HashMap<Span, (String, String, bool)>,
+    /// Bound-handle sites (`value.method`, EX.2b), carried like the other site maps.
+    pub bound_handle_sites: std::collections::HashSet<Span>,
     /// Per-binding destructor-relevance (Phase 3.2b), threaded into the compiler so the drop pass
     /// annotates each `DropVar` — carried here for the same reason as `type_of_sites` (compute the
     /// checker's result once, reuse it without a second run).
@@ -235,6 +241,8 @@ fn from_check_output(out: noeta_check::Checked) -> Checked {
         width_sites: out.width_sites,
         f32_literal_sites: out.f32_literal_sites,
         construction_sites: out.construction_sites,
+        handle_sites: out.handle_sites,
+        bound_handle_sites: out.bound_handle_sites,
         destructor_relevance: out.destructor_relevance,
     }
 }
@@ -264,6 +272,8 @@ pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
         checked.width_sites.clone(),
         checked.f32_literal_sites.clone(),
         checked.construction_sites.clone(),
+        checked.handle_sites.clone(),
+        checked.bound_handle_sites.clone(),
         &checked.destructor_relevance,
         false,
     ))
@@ -357,8 +367,8 @@ pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> LinkedProgram {
 #[salsa::tracked(returns(ref))]
 pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
     match &linked(db, ws).0 {
-        // The shared helper maps every `CheckOutput` field (including main's `f32_literal_sites`)
-        // and leaves `expr_types` empty — the compile path pays nothing for the IDE index.
+        // The shared helper maps every checker output field — both the LSP track's
+        // `expr_types`/`f32_literal_sites` and the prelude-redesign handle-site maps.
         Ok(program) => from_check_output(noeta_check::check_all(program)),
         Err(diags) => Checked {
             diagnostics: diags.clone(),
@@ -372,6 +382,8 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             width_sites: std::collections::HashMap::new(),
             f32_literal_sites: std::collections::HashSet::new(),
             construction_sites: std::collections::HashMap::new(),
+            handle_sites: std::collections::HashMap::new(),
+            bound_handle_sites: std::collections::HashSet::new(),
             destructor_relevance: noeta_check::DestructorRelevance::default(),
         },
     }
@@ -397,6 +409,8 @@ pub fn linked_checked_ide(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             width_sites: std::collections::HashMap::new(),
             f32_literal_sites: std::collections::HashSet::new(),
             construction_sites: std::collections::HashMap::new(),
+            handle_sites: std::collections::HashMap::new(),
+            bound_handle_sites: std::collections::HashSet::new(),
             destructor_relevance: noeta_check::DestructorRelevance::default(),
         },
     }
@@ -427,6 +441,8 @@ pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> Bytecode {
                 checked.width_sites.clone(),
                 checked.f32_literal_sites.clone(),
                 checked.construction_sites.clone(),
+                checked.handle_sites.clone(),
+                checked.bound_handle_sites.clone(),
                 &checked.destructor_relevance,
                 false,
             ))

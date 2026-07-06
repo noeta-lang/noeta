@@ -131,6 +131,12 @@ pub struct Checked {
     /// lowering wraps the op's result in `Rvalue::MaskWidth` to wrap the erased i64 into the width. A
     /// pure function of the program, like the other site maps — the masking is invisible to `RunResult`.
     pub width_sites: HashMap<Span, (bool, u8)>,
+    /// Unbound method-handle sites (`Type.method` in value position) → the resolved
+    /// `(ty, method, associated)`. Lowering emits an [`Rvalue::MethodHandle`] at these spans.
+    pub handle_sites: HashMap<Span, (String, String, bool)>,
+    /// Bound-handle sites (`value.method` in value position, EX.2b) → lowered to
+    /// [`Rvalue::BoundHandle`] (the receiver captured into the handle).
+    pub bound_handle_sites: HashSet<Span>,
     /// Bare float-literal spans adapted into an `f32` context (P-NUM-SYM) — the type-directed hint
     /// that makes lowering emit a narrow `Const::F32` instead of the default `Const::Float`. A pure
     /// function of the program (both backends narrow identically), like the other site maps.
@@ -179,6 +185,8 @@ fn check_all_impl(program: &Program, record_expr_types: bool) -> Checked {
         index_field_sites: checker.sites.index_field_sites,
         for_stream_sites: checker.sites.for_stream_sites,
         width_sites: checker.sites.width_sites,
+        handle_sites: checker.sites.handle_sites,
+        bound_handle_sites: checker.sites.bound_handle_sites,
         f32_literal_sites: checker.sites.f32_literal_sites,
         destructor_relevance: checker.relevance,
     }
@@ -401,6 +409,24 @@ fn lookup(env: &Env, name: &str) -> Option<Type> {
         .find_map(|frame| frame.get(name).map(|b| b.ty.clone()))
 }
 
+/// A representative `Type` for a built-in type *name* used as a method-handle receiver
+/// (`list.len`, `string.upper`), with unknown element/value types as `dyn`. `None` for a name that
+/// is not a handle-able built-in type. Built-in types carry only instance methods (no associated
+/// fns), so a handle on one is always an instance handle.
+fn builtin_receiver_type(name: &str) -> Option<Type> {
+    Some(match name {
+        "list" | "List" => Type::List(Box::new(Type::Dyn)),
+        "set" | "Set" => Type::Set(Box::new(Type::Dyn)),
+        "map" | "Map" => Type::Map(Box::new(Type::String), Box::new(Type::Dyn)),
+        "string" => Type::String,
+        "bytes" => Type::Bytes,
+        "int" => Type::Int,
+        "float" => Type::Float,
+        "f32" => Type::F32,
+        _ => return None,
+    })
+}
+
 /// Whether `name`'s nearest in-scope binding was declared `mut` (false if unbound).
 fn lookup_mutable(env: &Env, name: &str) -> bool {
     env.iter()
@@ -491,6 +517,13 @@ struct SiteMaps {
     /// `IntN` → the result's `(signed, bits)`. Lowering reads this (via [`Checked::width_sites`]) to
     /// wrap the op's result in `Rvalue::MaskWidth`. Empty for programs with no fixed-width arithmetic.
     width_sites: HashMap<Span, (bool, u8)>,
+    /// Unbound method-handle sites: a `Type.method` member expression in value position → the
+    /// resolved `(ty, method, associated)`. Lowering reads this (via [`Checked::handle_sites`]) to
+    /// emit an [`Rvalue::MethodHandle`] instead of a field load. A pure function of the program.
+    handle_sites: HashMap<Span, (String, String, bool)>,
+    /// **Bound**-handle sites (`value.method` in value position, EX.2b): spans whose `Member`
+    /// lowers to an [`Rvalue::BoundHandle`] (receiver captured) instead of a field load.
+    bound_handle_sites: HashSet<Span>,
     /// Bare float-literal spans adapted into an `f32` context (P-NUM-SYM) — lowering reads this (via
     /// [`Checked::f32_literal_sites`]) to emit a narrow `Const::F32` for the literal.
     f32_literal_sites: HashSet<Span>,
@@ -536,6 +569,11 @@ struct Checker {
     /// `impl`-block methods so a method call on a user object resolves to a real type, with the
     /// owning class's generic parameters erased to `dyn` (they accept any argument).
     methods: HashMap<(String, String), FnSig>,
+    /// Whether each `(type, method)` is an **instance** method (its body references `self`) or an
+    /// associated function (never touches `self`) — DERIVED at collection time (prelude-redesign
+    /// EX.2; well-defined because member access is explicit, EX.1). Drives the wrong-way-call check
+    /// (E0047) and the associated-vs-instance shape of a `Type.method` handle.
+    method_instance: HashMap<(String, String), bool>,
     /// Which built-in traits each user type satisfies: type name → set of trait names it `@derive`s
     /// or `impl`s. The basis (with the built-in-type table in [`Self::satisfies`]) for enforcing a
     /// generic call's trait bounds (S4.2).
@@ -547,6 +585,10 @@ struct Checker {
     /// Names bound to a Ring 2 stdlib module by a `use std.{…}` import (`json`, `fs`, …). A call
     /// `m.f(args)` on such a name resolves through [`stdlib::module_return`].
     modules: HashSet<String>,
+    /// Names brought into scope bare by a selective member import (`use std.math.sqrt` → `sqrt`),
+    /// each mapped to its `(module, func)`. A bare call `sqrt(args)` types through
+    /// [`stdlib::module_return`] exactly like the qualified `math.sqrt(args)`.
+    imported_fns: HashMap<String, (String, String)>,
     /// Every name a type annotation may legally resolve to: declared records/classes/enums plus
     /// names brought in by a `use` (whether merged in by the linker or left as an opaque stub).
     /// Built-in names and in-scope generic parameters are *not* stored here — they are checked
@@ -677,6 +719,30 @@ impl Checker {
     ) -> &mut Diagnostic {
         self.diags.push(Diagnostic::error(code, span, message));
         self.diags.last_mut().expect("just pushed a diagnostic")
+    }
+
+    /// Reject a declaration that binds a **reserved prelude name** (E0046, prelude-redesign P3).
+    /// The always-global prelude is deliberately tiny — `Ok`/`Err`/`some`/`none`/`panic`/`assert` —
+    /// and those names cannot be bound by ANY form (binding, `mut`, param, `fn`, type, `for`/match
+    /// binder): the tree-walker pre-declares them as immutable globals while the VM would resolve a
+    /// shadow as a fresh local, so allowing a binding meant the backends diverged. Rejecting it
+    /// statically closes that divergence by construction. Methods and enum variants are exempt —
+    /// they are always receiver-/type-qualified, so a bare prelude name never resolves to them.
+    fn check_reserved_name(&mut self, name: &str, span: Span) {
+        const RESERVED_PRELUDE: &[&str] = &["Ok", "Err", "some", "none", "panic", "assert"];
+        if RESERVED_PRELUDE.contains(&name) {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::ReservedName,
+                    span,
+                    format!("cannot bind `{name}`: it is a reserved prelude name"),
+                )
+                .with_help(
+                    "rename the binding — the prelude's `Ok`/`Err`/`some`/`none`/`panic`/`assert` \
+                     cannot be shadowed",
+                ),
+            );
+        }
     }
 
     /// Register built-in prelude types the checker must know regardless of the program. Run before
@@ -985,6 +1051,52 @@ impl Checker {
                         r.name.clone(),
                         r.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
+                    // Record each struct method's signature + instance classification, exactly as
+                    // for a class (this closed a long-standing gap: struct associated calls —
+                    // `B.new(1)` — previously typed as a hole because struct methods were never
+                    // registered; prelude-redesign EX.2 needs the classification for all kinds).
+                    let tps: HashSet<String> =
+                        r.type_params.iter().map(|p| p.name.clone()).collect();
+                    let struct_generics: Vec<(String, Vec<String>)> = r
+                        .type_params
+                        .iter()
+                        .map(|p| (p.name.clone(), p.bounds.clone()))
+                        .collect();
+                    let methods = r
+                        .methods
+                        .iter()
+                        .chain(r.impls.iter().flat_map(|b| b.methods.iter()));
+                    for m in methods {
+                        self.method_instance.insert(
+                            (r.name.clone(), m.name.clone()),
+                            m.body.iter().any(|s| s.mentions("self")),
+                        );
+                        let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
+                        let raw_ret = async_return(
+                            m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
+                            m.is_async,
+                        );
+                        let params = raw_params
+                            .iter()
+                            .cloned()
+                            .map(|t| erase_type_params(t, &tps))
+                            .collect();
+                        let ret = erase_type_params(raw_ret.clone(), &tps);
+                        let generic = (!struct_generics.is_empty()).then(|| GenericInfo {
+                            params: struct_generics.clone(),
+                            raw_params,
+                            raw_ret,
+                        });
+                        self.methods.insert(
+                            (r.name.clone(), m.name.clone()),
+                            FnSig {
+                                params,
+                                ret,
+                                required: required_params(&m.params),
+                                generic,
+                            },
+                        );
+                    }
                 }
                 Stmt::Class(c) => {
                     let fields = c
@@ -1068,6 +1180,10 @@ impl Checker {
                         .iter()
                         .chain(c.impls.iter().flat_map(|b| b.methods.iter()));
                     for m in methods {
+                        self.method_instance.insert(
+                            (c.name.clone(), m.name.clone()),
+                            m.body.iter().any(|s| s.mentions("self")),
+                        );
                         let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
                         let raw_ret = async_return(
                             m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
@@ -1146,6 +1262,10 @@ impl Checker {
                         .map(|p| (p.name.clone(), p.bounds.clone()))
                         .collect();
                     for m in &e.methods {
+                        self.method_instance.insert(
+                            (e.name.clone(), m.name.clone()),
+                            m.body.iter().any(|s| s.mentions("self")),
+                        );
                         let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
                         let raw_ret = async_return(
                             m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
@@ -1217,9 +1337,30 @@ impl Checker {
                 // opaque stub) is a legal referent for an annotation — registered as a known type.
                 Stmt::Use { path, names, .. } => {
                     let is_std = path.len() == 1 && path[0] == "std";
+                    // A selective member import `use std.<mod>.<fn>` — a two-segment `std` path whose
+                    // second segment is a known module. Each name binds as a bare function alias.
+                    let selective = (path.len() == 2 && path[0] == "std")
+                        .then(|| path[1].clone())
+                        .filter(|m| stdlib::is_std_module(m));
                     for name in names {
                         if is_std && stdlib::is_std_module(&name.name) {
                             self.modules.insert(name.name.clone());
+                        } else if let Some(module) = &selective {
+                            if noeta_stdlib::registry::is_module_function(module, &name.name) {
+                                self.imported_fns.insert(
+                                    name.name.clone(),
+                                    (module.clone(), name.name.clone()),
+                                );
+                            } else {
+                                self.error(
+                                    DiagnosticCode::UnknownName,
+                                    name.span,
+                                    format!(
+                                        "module `{module}` has no function `{}`",
+                                        name.name
+                                    ),
+                                );
+                            }
                         } else {
                             self.types.insert(name.name.clone());
                         }
@@ -1389,6 +1530,7 @@ impl Checker {
                 value,
                 ..
             } => {
+                self.check_reserved_name(name, *name_span);
                 // An annotated binding (`x: T = …`) is checked against `T` and bound at `T`; the
                 // annotation is the boundary the value must satisfy and the way to fix an otherwise
                 // un-inferable value. Un-annotated bindings stay inference-only (open expectation).
@@ -1480,6 +1622,7 @@ impl Checker {
                     }
                 };
                 for ((name, name_span), t) in targets.iter().zip(elem_types) {
+                    self.check_reserved_name(name, *name_span);
                     if self.type_relevant(&t) {
                         self.relevance.locals.insert(*name_span);
                     }
@@ -1631,10 +1774,22 @@ impl Checker {
                     );
                 }
             }
-            Stmt::Fn(decl) => self.check_fn(decl, env, &[], TargetKind::Function),
-            Stmt::Struct(r) => self.check_struct(r, env),
-            Stmt::Class(c) => self.check_class(c, env),
-            Stmt::Enum(e) => self.check_enum(e, env),
+            Stmt::Fn(decl) => {
+                self.check_reserved_name(&decl.name, decl.name_span);
+                self.check_fn(decl, env, &[], TargetKind::Function)
+            }
+            Stmt::Struct(r) => {
+                self.check_reserved_name(&r.name, r.name_span);
+                self.check_struct(r, env)
+            }
+            Stmt::Class(c) => {
+                self.check_reserved_name(&c.name, c.name_span);
+                self.check_class(c, env)
+            }
+            Stmt::Enum(e) => {
+                self.check_reserved_name(&e.name, e.name_span);
+                self.check_enum(e, env)
+            }
             Stmt::Impl(decl) => self.check_standalone_impl(decl),
             Stmt::Namespace { .. } | Stmt::Use { .. } => {}
             // A dev-tier block reaching the checker is an *inactive* residual (object-model
@@ -1747,6 +1902,7 @@ impl Checker {
             bind(env, name, ty.clone());
         }
         for p in &decl.params {
+            self.check_reserved_name(&p.name, p.name_span);
             bind(env, &p.name, param_type(p));
         }
         for stmt in &decl.body {
@@ -2095,13 +2251,11 @@ impl Checker {
 
     fn check_struct(&mut self, r: &StructDecl, env: &mut Env) {
         let saved = self.enter_type_params(&r.type_params);
-        let mut fields: Vec<(String, Type)> = r
-            .fields
-            .iter()
-            .map(|f| (f.name.clone(), field_type(&f.ty)))
-            .collect();
-        // Bind `self` too, so an explicit `self.field` types as precisely as a bare `field` read.
-        fields.push(("self".to_string(), self_type(&r.name, &r.type_params)));
+        // Only `self` is bound in a method body (prelude-redesign EX.1 — member access is
+        // explicit): `self.field` types through `synth_member`; a bare field name is an unknown
+        // name with a targeted hint (see the `Expr::Ident` fallback in `synth`).
+        let fields: Vec<(String, Type)> =
+            vec![("self".to_string(), self_type(&r.name, &r.type_params))];
         for f in &r.fields {
             self.check_type_opt(&f.ty);
             self.check_attrs(&f.attrs, TargetKind::Field);
@@ -2134,13 +2288,11 @@ impl Checker {
 
     fn check_class(&mut self, c: &ClassDecl, env: &mut Env) {
         let saved = self.enter_type_params(&c.type_params);
-        let mut fields: Vec<(String, Type)> = c
-            .fields
-            .iter()
-            .map(|f| (f.name.clone(), field_type(&f.ty)))
-            .collect();
-        // Bind `self` too, so an explicit `self.field` types as precisely as a bare `field` read.
-        fields.push(("self".to_string(), self_type(&c.name, &c.type_params)));
+        // Only `self` is bound in a method body (prelude-redesign EX.1 — member access is
+        // explicit): `self.field` types through `synth_member`; a bare field name is an unknown
+        // name with a targeted hint (see the `Expr::Ident` fallback in `synth`).
+        let fields: Vec<(String, Type)> =
+            vec![("self".to_string(), self_type(&c.name, &c.type_params))];
         for f in &c.fields {
             self.check_type_opt(&f.ty);
             self.check_attrs(&f.attrs, TargetKind::Field);
@@ -2621,6 +2773,7 @@ impl Checker {
                 self.validate_param_defaults(params, env);
                 env.push(HashMap::new());
                 for (i, p) in params.iter().enumerate() {
+                    self.check_reserved_name(&p.name, p.name_span);
                     let pty = p.ty.as_ref().map(Type::from_ref).unwrap_or_else(|| {
                         expected_params.get(i).cloned().unwrap_or(Type::Unknown)
                     });
@@ -2785,14 +2938,46 @@ impl Checker {
                 }
                 Type::String
             }
-            Expr::Ident { name, .. } => lookup(env, name)
+            Expr::Ident { name, span } => match lookup(env, name)
                 .or_else(|| {
                     self.functions.get(name).map(|sig| Type::Fn {
                         params: Vec::new(),
                         ret: Box::new(sig.ret.clone()),
                     })
                 })
-                .unwrap_or(Type::Unknown),
+                // A selectively-imported module function referenced as a value (`let f = sqrt`).
+                .or_else(|| {
+                    self.imported_fns.contains_key(name).then(|| Type::Fn {
+                        params: Vec::new(),
+                        ret: Box::new(Type::Dyn),
+                    })
+                }) {
+                Some(t) => t,
+                None => {
+                    // A bare name inside a type's own body that names one of its FIELDS is a
+                    // targeted static error (prelude-redesign EX.1): member access is explicit, so
+                    // the field is only reachable as `self.name`. Any other unknown ident stays
+                    // tolerated here (deferred to the runtime E0005, as before).
+                    if let Some(ct) = self.current_type.clone()
+                        && self
+                            .records
+                            .get(&ct)
+                            .is_some_and(|fs| fs.iter().any(|(f, _)| f == name))
+                    {
+                        self.diags.push(
+                            Diagnostic::error(
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                format!("cannot find `{name}` in this scope"),
+                            )
+                            .with_help(format!(
+                                "member access is explicit — the field is `self.{name}`"
+                            )),
+                        );
+                    }
+                    Type::Unknown
+                }
+            },
             Expr::Unary { op, operand, span } => {
                 // A negated fixed-width literal (`-128i8`, `-1i32`): check against the *signed*
                 // negative range here, so the inner literal's positive-range check does not fire a
@@ -2865,6 +3050,7 @@ impl Checker {
                 self.validate_param_defaults(params, env);
                 env.push(HashMap::new());
                 for p in params {
+                    self.check_reserved_name(&p.name, p.name_span);
                     bind(env, &p.name, param_type(p));
                 }
                 // With an explicit return annotation, check the body against it (and adopt it as the
@@ -3836,18 +4022,23 @@ impl Checker {
                     self.check_args(&params, required, args, arg_exprs, span, name);
                     return ret;
                 }
-                // Prelude functions are polymorphic/variadic — their result is typed, but their
-                // arguments are not arity-checked here.
-                let result = stdlib::prelude_return(name, args).unwrap_or(Type::Unknown);
-                // A `map(list, fn)` whose result element type is a packed struct: record the call so
-                // the VM builds a flat result instead of N boxed objects (P-PACK 2.6 category B). Keyed
-                // by the whole-call span — the span the lowered `Rvalue::Call`/`Op::Call` carries.
-                if name == "map"
-                    && let Type::List(elem) = &result
+                // A selectively-imported module function (`use std.math.sqrt`) called bare — typed
+                // exactly like the qualified `math.sqrt(args)` (same params/return tables). A local
+                // binding of the same name shadows it (checked first, in the arms above via `env`).
+                if let Some((module, func)) = self.imported_fns.get(name).cloned()
+                    && lookup(env, name).is_none()
                 {
-                    self.note_map_packed(elem, call_span);
+                    if let Some(params) = stdlib::module_params(&module, &func) {
+                        let n = params.len();
+                        self.check_args(&params, n, args, arg_exprs, span, &func);
+                    }
+                    return stdlib::module_return(&module, &func, args).unwrap_or(Type::Unknown);
                 }
-                result
+                // Prelude functions are polymorphic/variadic — their result is typed, but their
+                // arguments are not arity-checked here. (The packed-result note the free `map`
+                // recorded here moved to the list-method `map` arm in `synth_call`'s Member case —
+                // the free form left the prelude, P1.2.)
+                stdlib::prelude_return(name, args).unwrap_or(Type::Unknown)
             }
             Expr::Member { receiver, name, .. } => {
                 // `Enum.try_from(s)` → `?Enum` / `Enum.from(s)` → `Enum` — the built-in string→case
@@ -3893,6 +4084,28 @@ impl Checker {
                     && self.types.contains(tn)
                     && let Some(sig) = self.methods.get(&(tn.clone(), name.to_string())).cloned()
                 {
+                    // An INSTANCE method (its body references `self`) cannot be called
+                    // associated-style — there is no receiver to become `self` (E0047,
+                    // prelude-redesign EX.2). The classification is derived from the body.
+                    if self
+                        .method_instance
+                        .get(&(tn.clone(), name.to_string()))
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        self.diags.push(
+                            Diagnostic::error(
+                                DiagnosticCode::InvalidReceiver,
+                                span,
+                                format!("`{name}` is an instance method of `{tn}`"),
+                            )
+                            .with_help(format!(
+                                "call it on a value (`x.{name}(...)`), or pass `{tn}.{name}` \
+                                 as a handle"
+                            )),
+                        );
+                        return sig.ret.clone();
+                    }
                     // A static call: the type arguments are not known from a bare type name, so the
                     // method's own arguments instantiate any parameters (`Box.new(1)` infers `int`).
                     return self.call_user_method(name, &sig, args, arg_exprs, span, &[]);
@@ -3907,6 +4120,25 @@ impl Checker {
                 if let Type::Named(n, recv_args) = &recv
                     && let Some(sig) = self.methods.get(&(n.clone(), name.to_string())).cloned()
                 {
+                    // An ASSOCIATED function (never touches `self`) is not callable on a value —
+                    // the receiver would be silently discarded (E0047, prelude-redesign EX.2).
+                    if !self
+                        .method_instance
+                        .get(&(n.clone(), name.to_string()))
+                        .copied()
+                        .unwrap_or(true)
+                    {
+                        self.diags.push(
+                            Diagnostic::error(
+                                DiagnosticCode::InvalidReceiver,
+                                span,
+                                format!("`{name}` is an associated function of `{n}`"),
+                            )
+                            .with_help(format!("call it on the type: `{n}.{name}(...)`")),
+                        );
+                        return sig.ret.clone();
+                    }
+                    return self.call_user_method(name, &sig, args, arg_exprs, span, recv_args);
                     return self.call_user_method(name, &sig, args, arg_exprs, span, recv_args);
                 }
                 self.check_method_args(&recv, name, args, arg_exprs, span);
@@ -3951,6 +4183,19 @@ impl Checker {
                         _ => Type::Dyn,
                     };
                     return Type::Named(stdlib::ITERATOR.to_string(), vec![r]);
+                }
+                // `xs.map(f)` on a list → `List<R>`, `R` the closure's return type — the eager list
+                // method form (prelude-redesign P1), refined here for the same reason as iterator
+                // `map`. Matches the free `map(xs, f)` this replaces.
+                if name == "map" && matches!(recv, Type::List(_)) {
+                    let r = match args.first() {
+                        Some(Type::Fn { ret, .. }) => (**ret).clone(),
+                        _ => Type::Dyn,
+                    };
+                    // Record the packed-result note the free `map` gets (keyed by the call span), so a
+                    // packed-struct element still lowers to a flat result.
+                    self.note_map_packed(&r, call_span);
+                    return Type::List(Box::new(r));
                 }
                 let ret = self.method_call_return(&recv, name);
                 // A method call on a concrete primitive with no such built-in method is an error,
@@ -4549,6 +4794,57 @@ impl Checker {
         {
             return self.enum_construction_type(tn, name, &[], member_span);
         }
+        // `Type.method` in value position (not the callee of a call) is an unbound **method handle**:
+        // a callable taking the receiver as its first argument (prelude-redesign MH). Guarded to a
+        // bare type name not shadowed by a local, naming a method of a user type. Typed
+        // `Fn(ReceiverType, ...method_params) -> ret`; the resolution is recorded so lowering emits an
+        // `Rvalue::MethodHandle`. (Built-in-type receivers — `list.len` — land in a later slice.)
+        if let Expr::Ident { name: tn, .. } = receiver
+            && lookup(env, tn).is_none()
+            && let Some(sig) = self.methods.get(&(tn.clone(), name.to_string()))
+        {
+            // The handle's shape follows the derived classification (EX.2): an INSTANCE method's
+            // handle takes the receiver as its first argument (`Fn(T, ...params) -> ret`); an
+            // ASSOCIATED function's handle is the function itself (`Fn(params) -> ret`) — e.g.
+            // `ctor = Stack.new`.
+            let instance = self
+                .method_instance
+                .get(&(tn.clone(), name.to_string()))
+                .copied()
+                .unwrap_or(true);
+            let mut params = Vec::with_capacity(sig.params.len() + 1);
+            if instance {
+                params.push(Type::Named(tn.clone(), Vec::new()));
+            }
+            params.extend(sig.params.iter().cloned());
+            let ret = sig.ret.clone();
+            self.sites
+                .handle_sites
+                .insert(member_span, (tn.clone(), name.to_string(), !instance));
+            return Type::Fn {
+                params,
+                ret: Box::new(ret),
+            };
+        }
+        // The same for a **built-in** type receiver (`list.len`, `string.upper`): a bare built-in
+        // type name (not shadowed) whose `name` is one of its built-in methods → an instance handle
+        // `Fn(ReceiverType, ...method_params) -> ret` (prelude-redesign MH.2). Built-in types have no
+        // associated fns, so a built-in handle is always instance.
+        if let Expr::Ident { name: tn, .. } = receiver
+            && lookup(env, tn).is_none()
+            && let Some(recv_ty) = builtin_receiver_type(tn)
+            && let Some(ret) = stdlib::method_return(&recv_ty, name)
+        {
+            let mut params = vec![recv_ty.clone()];
+            params.extend(stdlib::method_params(&recv_ty, name).unwrap_or_default());
+            self.sites
+                .handle_sites
+                .insert(member_span, (tn.clone(), name.to_string(), false));
+            return Type::Fn {
+                params,
+                ret: Box::new(ret),
+            };
+        }
         let recv = self.synth(receiver, env);
         if let Type::Named(n, recv_args) = &recv
             && let Some(ty) = self
@@ -4580,8 +4876,59 @@ impl Checker {
                 .cloned()
                 .zip(recv_args.iter().cloned())
                 .collect();
-            let pset: HashSet<String> = params.into_iter().collect();
+            // Inside the generic type's OWN body (`self.value` in a method of `Box<T>`), `T` is in
+            // scope and must stay `T` — erasing it to `dyn` would break `fn get(): T { return
+            // self.value }` (prelude-redesign EX.1: this path now serves what the retired bare
+            // field read did). Only parameters NOT in scope erase.
+            let pset: HashSet<String> = params
+                .into_iter()
+                .filter(|p| !self.type_params.contains_key(p))
+                .collect();
             return erase_type_params(apply_subst(&ty, &subst), &pset);
+        }
+        // `value.method` in value position — a **bound** method handle (EX.2b): the receiver is
+        // captured at bind time; the handle is `Fn(params) -> ret` (no receiver parameter). Checked
+        // AFTER the field path, so a same-named field keeps winning member access. Covers user
+        // types (instance methods only — binding an associated fn through a value is the E0047
+        // wrong-way shape) and built-in receivers (`xs.len`, `s.upper`).
+        if let Type::Named(n, _) = &recv
+            && let Some(sig) = self.methods.get(&(n.clone(), name.to_string()))
+        {
+            let instance = self
+                .method_instance
+                .get(&(n.clone(), name.to_string()))
+                .copied()
+                .unwrap_or(true);
+            // Binding an ASSOCIATED function through a value is the wrong-way shape (E0047) —
+            // there is no receiver to capture; bind it off the type instead.
+            if !instance {
+                self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::InvalidReceiver,
+                        member_span,
+                        format!("`{name}` is an associated function of `{n}`"),
+                    )
+                    .with_help(format!("bind it off the type: `{n}.{name}`")),
+                );
+            } else {
+                self.sites.bound_handle_sites.insert(member_span);
+            }
+            let params = sig.params.clone();
+            let ret = sig.ret.clone();
+            return Type::Fn {
+                params,
+                ret: Box::new(ret),
+            };
+        }
+        if !matches!(recv, Type::Unknown | Type::Dyn)
+            && let Some(ret) = stdlib::method_return(&recv, name)
+        {
+            let params = stdlib::method_params(&recv, name).unwrap_or_default();
+            self.sites.bound_handle_sites.insert(member_span);
+            return Type::Fn {
+                params,
+                ret: Box::new(ret),
+            };
         }
         // A field/member access on a `dyn` (or hole) receiver stays deferred.
         if recv.defers_to_runtime() {
@@ -4711,7 +5058,10 @@ impl Checker {
             _ => Type::Unknown,
         };
         match pattern {
-            ForPattern::Single { name, .. } => bind(env, name, elem),
+            ForPattern::Single { name, name_span } => {
+                self.check_reserved_name(name, *name_span);
+                bind(env, name, elem)
+            }
             // `for (a, b, …) in …` destructures each iterated **tuple** element positionally
             // (object-model slice 4b — `.enumerate()` yields `(int, T)` tuples). Each name binds to
             // its element type when the element is a known tuple, else `dyn`.
@@ -4735,7 +5085,15 @@ impl Checker {
             | Pattern::Bool { .. }
             // `is T` binds no name here — `synth_match` narrows the scrutinee identifier instead.
             | Pattern::IsType { .. } => {}
-            Pattern::Binding { name, .. } => bind(env, name, ty.clone()),
+            Pattern::Binding { name, span } => {
+                // A bare `none` in pattern position is the Option-none CONSTRUCTOR pattern (it is
+                // represented as a binding but matched by name), not a fresh binding — exempt it
+                // from the reserved-name rule so `match o { some(v) => …, none => … }` stays legal.
+                if name != "none" {
+                    self.check_reserved_name(name, *span);
+                }
+                bind(env, name, ty.clone())
+            }
             Pattern::Variant {
                 variant, bindings, ..
             } => {

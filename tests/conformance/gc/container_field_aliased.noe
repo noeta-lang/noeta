@@ -17,14 +17,14 @@
 class Leaf {
     pub tag: string
     fn new(tag: string): Leaf { return Leaf { tag: tag }; }
-    destruct { echo "drop leaf ${tag}"; }
+    destruct { echo "drop leaf ${self.tag}"; }
 }
 
 class Box {
     pub label: string
     inner: Leaf
     fn new(label: string, inner: Leaf): Box { return Box { label: label, inner: inner }; }
-    destruct { echo "drop box ${label}"; }
+    destruct { echo "drop box ${self.label}"; }
 }
 
 fn go(): void {

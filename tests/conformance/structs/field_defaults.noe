@@ -40,10 +40,10 @@ struct Cfg {
     tags: List<int> = [1, 2]
 }
 cfg = Cfg { name: "svc" };
-echo "${cfg.retries} ${cfg.tags.count()}";
+echo "${cfg.retries} ${cfg.tags.len()}";
 
 // A spread supplies every field, so a defaulted field takes the base's value, not its default;
 // a named override still wins.
 base_cfg = Cfg { name: "svc", retries: 9 };
 derived = Cfg { ...base_cfg };
-echo "${derived.retries} ${derived.tags.count()}";
+echo "${derived.retries} ${derived.tags.len()}";

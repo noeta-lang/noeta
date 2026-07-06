@@ -33,7 +33,7 @@ class BitSet {
     }
 
     fn count(): int {
-        return self.words |> map(fn(w) => w.count_ones()) |> sum();
+        return self.words.map(fn(w) => w.count_ones()).sum();
     }
 }
 

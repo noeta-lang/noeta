@@ -12,6 +12,7 @@
 namespace App.Orders;
 
 use App.Models.User;
+use std.id.{next_id};
 
 struct Item { price: float qty: int }
 
@@ -37,20 +38,20 @@ class Order {
     }
 
     fn total(): float {
-        return items |> map(fn(it) => it.price * it.qty) |> sum();
+        return self.items.map(fn(it) => it.price * it.qty).sum();
     }
 
     fn label(): string {
-        return match status {
-            Status.Pending  => "Order #${id} awaiting payment",
-            Status.Paid     => "Order #${id} paid: ${customer.name}",
-            Status.Refunded => "Order #${id} refunded",
+        return match self.status {
+            Status.Pending  => "Order #${self.id} awaiting payment",
+            Status.Paid     => "Order #${self.id} paid: ${self.customer.name}",
+            Status.Refunded => "Order #${self.id} refunded",
         };
     }
 }
 
 fn validate(items: List<Item>): Result<void, OrderError> {
-    if items.count() == 0 {
+    if items.len() == 0 {
         return Err(OrderError.Empty);
     }
     for (i, item) in items.enumerate() {

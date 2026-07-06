@@ -6,6 +6,7 @@
 // expect: stdout "checked 3"
 // expect: stdout "11"
 // expect: exit 0
+use std.task.{sleep}
 async fn check(x: int): bool {
     sleep(1).await
     echo "checked ${x}"

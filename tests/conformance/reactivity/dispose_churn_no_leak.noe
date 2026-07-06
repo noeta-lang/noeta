@@ -8,6 +8,7 @@
 // expect: stdout "watch n=1"
 // expect: stdout "done"
 // expect: exit 0
+use std.reactive.{signal, effect}
 n = signal(0)
 effect(fn() {
     echo "watch n=${n.get()}"

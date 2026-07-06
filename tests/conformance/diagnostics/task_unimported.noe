@@ -1,0 +1,8 @@
+// Using `sleep` without `use std.task` is an unknown name (E0005) — the concurrency combinators
+// left the always-global prelude (prelude-redesign P2b).
+// expect: error E0005 at 6:9
+// expect: exit 1
+async fn f(): void {
+    x = sleep(10)
+}
+f().await

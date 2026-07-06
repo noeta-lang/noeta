@@ -12,7 +12,7 @@ class Counter {
     }
 
     fn bump(by: int = 1): int {
-        return start + by;
+        return self.start + by;
     }
 }
 d = Counter.from(10);

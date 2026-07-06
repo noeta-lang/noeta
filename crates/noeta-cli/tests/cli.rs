@@ -144,7 +144,8 @@ fn run_real_isolates_actually_run_in_parallel() {
     // keeps the test robust on a loaded machine while still failing if the isolates serialized.
     let file = temp_program(
         "isolate_parallel",
-        "async fn work(ms: int): int { sleep(ms).await; return ms }\n\
+        "use std.task.{sleep}\n\
+         async fn work(ms: int): int { sleep(ms).await; return ms }\n\
          async fn run(): int {\n\
          mut total = 0\n\
          concurrent { a = isolate work(300); b = isolate work(300); total = a.await + b.await }\n\
@@ -367,7 +368,8 @@ fn run_sleeps_in_real_time_on_the_real_executor() {
     // instantly). Two tasks in a `concurrent` block interleave — `b`'s shorter sleep finishes first —
     // producing the *same* byte-for-byte output as the sandbox differential, but taking ~150ms of
     // real time. We assert both: the interleaved output and a real-time lower bound.
-    let src = "async fn work(name: string, ms: int): int {\n\
+    let src = "use std.task.{sleep}\n\
+               async fn work(name: string, ms: int): int {\n\
                \x20   echo name ~ \" start\"\n\
                \x20   sleep(ms).await\n\
                \x20   echo name ~ \" end\"\n\

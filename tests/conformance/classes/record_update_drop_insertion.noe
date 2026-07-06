@@ -10,7 +10,7 @@ class Bag {
     pub label: string
 
     fn show(): string {
-        return "${total} ${label}";
+        return "${self.total} ${self.label}";
     }
 }
 

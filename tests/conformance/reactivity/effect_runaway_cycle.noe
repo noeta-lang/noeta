@@ -3,8 +3,9 @@
 // it. The scheduler bounds each flush (MAX_FLUSH_STEPS) and surfaces this as a runtime error rather than
 // hanging (or, without the coalescing fix, overflowing the stack). Both backends bound at the same step
 // count, so the abort is deterministic and differential-identical.
-// expect: error E0045 at 9:1
+// expect: error E0045 at 10:1
 // expect: exit 1
+use std.reactive.{signal, effect}
 count = signal(0)
 effect(fn() {
     count.set(count.get() + 1)

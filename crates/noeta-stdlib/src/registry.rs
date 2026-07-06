@@ -246,6 +246,49 @@ pub fn find_function(module: &str, func: &str) -> Option<&'static ExtFn> {
         .find(|f| f.name == func)
 }
 
+/// The **virtual** std modules (prelude-redesign P2): importable module names whose functions are
+/// interpreter/VM *builtins* rather than registry natives — they need the executor or the reactive
+/// graph, which the registry seam (`ModuleDispatch` = value-in/value-out + `Host`) deliberately
+/// cannot reach. They gate name resolution only: a selective import (`use std.reactive.{signal}`)
+/// binds the named builtin as a first-class value, and a qualified call (`reactive.signal(0)`)
+/// intercepts in each backend's `call_native_module` *ahead of* registry dispatch — the same
+/// pattern `fs.*_async` uses.
+/// (`task` is named `task` rather than `async` because `async` is a keyword — `use std.async.…`
+/// would not parse; decided with the user at P2b.)
+pub const VIRTUAL_MODULES: &[(&str, &[&str])] = &[
+    ("reactive", &["signal", "computed", "effect"]),
+    ("task", &["sleep", "all", "race", "map_bounded"]),
+    ("id", &["next_id"]),
+];
+
+/// Whether `name` is a virtual std module (importable, but not registry-backed).
+pub fn is_virtual_module(name: &str) -> bool {
+    VIRTUAL_MODULES.iter().any(|(m, _)| *m == name)
+}
+
+/// Whether `<module>.<func>` names a virtual-module builtin (`("reactive", "signal")` → true).
+pub fn virtual_module_function(module: &str, func: &str) -> bool {
+    VIRTUAL_MODULES
+        .iter()
+        .any(|(m, fns)| *m == module && fns.contains(&func))
+}
+
+/// Whether `<module>.<func>` names a callable std-module function — the single predicate the
+/// checker and both backends share to decide what a selective member import (`use std.<mod>.<fn>`)
+/// binds, so all three agree by construction. Covers every registered function, the virtual-module
+/// builtins, plus the handful of non-registry ones that still dispatch through a per-backend
+/// fallback (the `vec` bulk `*_all` kernels and `fs.list`, both pending `vec`/`fs` refinements —
+/// see `noeta-check::stdlib`).
+pub fn is_module_function(module: &str, func: &str) -> bool {
+    find_function(module, func).is_some()
+        || virtual_module_function(module, func)
+        || matches!(
+            (module, func),
+            ("vec", "add_all" | "sub_all" | "scale_all" | "dot_all" | "length_all")
+                | ("fs", "list")
+        )
+}
+
 /// Dispatch a registered module function. Returns the canonical "no such function" error if the
 /// module is unknown (the backends only ever dispatch a name they bound, so that is unreachable
 /// in practice).

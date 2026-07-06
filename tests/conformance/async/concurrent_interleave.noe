@@ -9,6 +9,7 @@
 // expect: stdout "sum=3"
 // expect: stdout "done"
 // expect: exit 0
+use std.task.{sleep}
 async fn work(name: string, ms: int): int {
     echo name ~ " start"
     sleep(ms).await

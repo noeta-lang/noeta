@@ -7,6 +7,7 @@
 // expect: stdout "a end"
 // expect: stdout "all done"
 // expect: exit 0
+use std.task.{sleep}
 async fn work(name: string, ms: int): void {
     echo name ~ " start"
     sleep(ms).await

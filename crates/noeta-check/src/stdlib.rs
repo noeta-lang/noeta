@@ -48,7 +48,7 @@ pub(super) const EFFECT: &str = "Effect";
 /// (B4) — comes from the native-extension registry now; only the `vec` bulk `*_all` kernels keep a
 /// small per-backend fallback in `module_params`/`module_return`.
 pub(super) fn is_std_module(name: &str) -> bool {
-    registry::find_module(name).is_some()
+    registry::find_module(name).is_some() || registry::is_virtual_module(name)
 }
 
 /// Map the registry's neutral [`registry::SigType`] onto a checker [`Type`].
@@ -218,7 +218,7 @@ fn iterator_method(name: &str, elem: &Type) -> Option<Type> {
 
 fn bytes_method(name: &str) -> Option<Type> {
     Some(match name {
-        "count" => Type::Int, // the buffer length in bytes
+        "len" => Type::Int, // the buffer length in bytes
         _ => return None,
     })
 }
@@ -279,7 +279,7 @@ fn string_method(name: &str) -> Option<Type> {
         "upper" | "lower" | "trim" | "replace" | "repeat" => Type::String,
         "contains" | "starts_with" | "ends_with" => Type::Bool,
         "split" => list(Type::String),
-        "count" => Type::Int,
+        "len" => Type::Int,
         _ => return None,
     })
 }
@@ -291,7 +291,18 @@ fn list_method(name: &str, elem: &Type) -> Option<Type> {
         "join" => Type::String,
         "first" | "last" => opt(elem.clone()),
         "to_set" => set(elem.clone()),
-        "count" => Type::Int,
+        // `len` is the collection length (P1.3 — `count` is iterator-only: a consuming terminal).
+        "len" => Type::Int,
+        // Eager collection methods reusing the free-function impls (prelude-redesign P1). `filter(f)`
+        // keeps the element type; `sum()` is numeric by element (`int`/`float`/hole); `map(f)` → a
+        // `List<R>` where `R` is the closure's return, refined at the call site (like iterator `map`).
+        "filter" => list(elem.clone()),
+        "sum" => match elem {
+            Type::Int => Type::Int,
+            Type::Float => Type::Float,
+            _ => Type::Unknown,
+        },
+        "map" => list(Type::Dyn),
         // `to_bytes` serializes a `List<@packed>` to its raw flat buffer (P-PACK 4.4).
         "to_bytes" => Type::Bytes,
         // `enumerate` yields a list of `(index, item)` tuples (object-model slice 4b).
@@ -306,7 +317,7 @@ fn set_method(name: &str, elem: &Type) -> Option<Type> {
     Some(match name {
         "contains" => Type::Bool,
         "union" | "intersection" | "add" | "remove" => set(elem.clone()),
-        "count" => Type::Int,
+        "len" => Type::Int,
         "iter" => iterable_iter(elem.clone()),
         _ => return None,
     })
@@ -317,7 +328,7 @@ fn map_method(name: &str, val: &Type) -> Option<Type> {
         "keys" => list(Type::String), // runtime map keys are always strings
         "values" => list(val.clone()),
         "has" => Type::Bool,
-        "count" => Type::Int,
+        "len" => Type::Int,
         // `get_or(key, default)` — the value at `key`, or `default`. Both are `V`.
         "get_or" => val.clone(),
         // `set`/`remove` return a new map of the same type (keys are always strings).
@@ -348,7 +359,7 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         Type::List(elem) => list_params(name, elem),
         Type::Set(elem) => set_params(name, elem),
         Type::Map(_, val) => map_params(name, val),
-        Type::Bytes if name == "count" => Some(vec![]),
+        Type::Bytes if name == "len" => Some(vec![]),
         Type::Named(n, _) if n == FILE_HANDLE => file_handle_params(name),
         Type::Named(n, args) if n == ITERATOR => {
             iterator_params(name, args.first().unwrap_or(&Type::Dyn))
@@ -426,7 +437,7 @@ fn int_params(name: &str) -> Option<Vec<Type>> {
 
 fn string_params(name: &str) -> Option<Vec<Type>> {
     Some(match name {
-        "upper" | "lower" | "trim" | "count" => vec![],
+        "upper" | "lower" | "trim" | "len" => vec![],
         "contains" | "starts_with" | "ends_with" | "split" => vec![Type::String],
         "replace" => vec![Type::String, Type::String],
         "repeat" => vec![Type::Int],
@@ -436,21 +447,32 @@ fn string_params(name: &str) -> Option<Vec<Type>> {
 
 fn list_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "reverse" | "sorted" | "count" | "first" | "last" | "to_set" | "enumerate" | "to_bytes"
-        | "iter" => {
+        "reverse" | "sorted" | "len" | "sum" | "first" | "last" | "to_set"
+        | "enumerate" | "to_bytes" | "iter" => {
             vec![]
         }
         "contains" => vec![elem.clone()],
         "join" => vec![Type::String],
         "slice" => vec![Type::Int, Type::Int],
         "set" => vec![Type::Int, elem.clone()], // `set(index, value)`
+        // `map(f)` / `filter(f)` take one closure over the element type. `filter` demands a `bool`
+        // predicate; `map` accepts any return (its result element type is the closure's return,
+        // refined at the call site). Matching the eager free-function forms they replace.
+        "filter" => vec![Type::Fn {
+            params: vec![elem.clone()],
+            ret: Box::new(Type::Bool),
+        }],
+        "map" => vec![Type::Fn {
+            params: vec![elem.clone()],
+            ret: Box::new(Type::Dyn),
+        }],
         _ => return None,
     })
 }
 
 fn set_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "count" | "iter" => vec![],
+        "len" | "iter" => vec![],
         "contains" | "add" | "remove" => vec![elem.clone()],
         "union" | "intersection" => vec![set(elem.clone())],
         _ => return None,
@@ -459,7 +481,7 @@ fn set_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
 
 fn map_params(name: &str, val: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "keys" | "values" | "count" | "iter" => vec![],
+        "keys" | "values" | "len" | "iter" => vec![],
         "has" | "remove" => vec![Type::String], // runtime map keys are strings
         "set" => vec![Type::String, val.clone()], // `set(key, value)`
         "get_or" => vec![Type::String, val.clone()], // `get_or(key, default)`
@@ -502,24 +524,8 @@ pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
 /// `None` if `name` is not a prelude function.
 pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
     Some(match name {
-        "len" | "next_id" => Type::Int,
-        // Numeric: `int` if the list is concretely `List<int>`, `float` if `List<float>`, else a
-        // numeric hole (the element type is not yet known — gradual, not the `dyn` escape).
-        "sum" => match args.first() {
-            Some(Type::List(e)) if **e == Type::Int => Type::Int,
-            Some(Type::List(e)) if **e == Type::Float => Type::Float,
-            _ => Type::Unknown,
-        },
-        // `map(list, f) -> List<ret(f)>`; the element type is the closure's synthesized return.
-        "map" => match args.get(1) {
-            Some(Type::Fn { ret, .. }) => list((**ret).clone()),
-            _ => list(Type::Unknown),
-        },
-        // `filter(list, _) -> List<T>` (the same list).
-        "filter" => match args.first() {
-            Some(t @ Type::List(_)) => t.clone(),
-            _ => list(Type::Unknown),
-        },
+        // `len`/`map`/`filter`/`sum` left the prelude (P1.2, collection methods now — see
+        // `list_method`); `next_id` left it (P2c) for `use std.id`.
         // The polymorphic constructors carry the argument type in the known position; the other
         // type parameter is unconstrained (a hole) at the call site.
         "Ok" => Type::Result(
@@ -535,42 +541,9 @@ pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
         "panic" => Type::Unknown,
         // `assert(cond)` / `assert(cond, msg)` — checked for effect, yields nothing.
         "assert" => Type::Unit,
-        // `sleep(ms)` — a leaf timer future (Track A.2). Returns `Future<void>`, so `sleep(ms).await`
-        // yields `void`; awaiting it suspends until the executor clock reaches the deadline.
-        "sleep" => Type::Named(FUTURE.to_string(), vec![Type::Unit]),
-        // `signal(v: T) -> Signal<T>` (reactivity S1) — the value type rides as the single type arg
-        // so `.get()` recovers `T` and `.set()` requires `T`.
-        "signal" => Type::Named(
-            SIGNAL.to_string(),
-            vec![args.first().cloned().unwrap_or(Type::Unknown)],
-        ),
-        // `computed(fn() -> T) -> Computed<T>` (reactivity S3) — the closure's return type rides as the
-        // single type arg so `.get()` recovers `T`.
-        "computed" => Type::Named(
-            COMPUTED.to_string(),
-            vec![match args.first() {
-                Some(Type::Fn { ret, .. }) => (**ret).clone(),
-                _ => Type::Unknown,
-            }],
-        ),
-        // `effect(fn() -> void) -> Effect` (reactivity S2) — runs `fn` now and reruns it when a signal
-        // it read changes.
-        "effect" => Type::Named(EFFECT.to_string(), vec![]),
-        // `all(List<Future<T>>) -> List<T>` — await every future, results in order (Track A.9).
-        "all" => list(future_elem(args.first())),
-        // `race(List<Future<T>>) -> T` — the first result; the losers are cancelled (Track A.9).
-        "race" => future_elem(args.first()),
-        // `map_bounded(List<A>, int, Fn(A) -> Future<B>) -> List<B>` (Track A.9). The element type is
-        // the closure's return future's `B`.
-        "map_bounded" => match args.get(2) {
-            Some(Type::Fn { ret, .. }) => match ret.as_ref() {
-                Type::Named(n, targs) if n == FUTURE => {
-                    list(targs.first().cloned().unwrap_or(Type::Unknown))
-                }
-                _ => list(Type::Unknown),
-            },
-            _ => list(Type::Unknown),
-        },
+        // `signal`/`computed`/`effect` left the prelude (P2a) for `use std.reactive`, and
+        // `sleep`/`all`/`race`/`map_bounded` (P2b) for `use std.task` — both typed in
+        // `module_return` under their virtual modules.
         _ => return None,
     })
 }
@@ -588,6 +561,57 @@ pub(super) fn index_return(receiver: &Type) -> Option<Type> {
 
 /// The return type of a Ring 2 module call `module.name(args)`, or `None` if unknown.
 pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<Type> {
+    // The virtual `reactive` module (prelude-redesign P2a): its functions are backend builtins, so
+    // their types live here rather than in the registry. `signal(v: T) -> Signal<T>` (the value
+    // type rides as the single type arg so `.get()` recovers `T` and `.set()` requires `T`);
+    // `computed(fn() -> T) -> Computed<T>`; `effect(fn() -> void) -> Effect`.
+    if module == "reactive" {
+        return match name {
+            "signal" => Some(Type::Named(
+                SIGNAL.to_string(),
+                vec![args.first().cloned().unwrap_or(Type::Unknown)],
+            )),
+            "computed" => Some(Type::Named(
+                COMPUTED.to_string(),
+                vec![match args.first() {
+                    Some(Type::Fn { ret, .. }) => (**ret).clone(),
+                    _ => Type::Unknown,
+                }],
+            )),
+            "effect" => Some(Type::Named(EFFECT.to_string(), vec![])),
+            _ => None,
+        };
+    }
+    // The virtual `id` module (prelude-redesign P2c): `next_id() -> int`, the deterministic
+    // seeded counter (UUIDs are a planned follow-on through the deterministic Host seam).
+    if module == "id" {
+        return match name {
+            "next_id" => Some(Type::Int),
+            _ => None,
+        };
+    }
+    // The virtual `task` module (prelude-redesign P2b): the concurrency combinators.
+    // `sleep(ms) -> Future<void>` (Track A.2) — awaiting it suspends until the executor clock
+    // reaches the deadline; `all(List<Future<T>>) -> List<T>` (results in order);
+    // `race(List<Future<T>>) -> T` (first result, losers cancelled);
+    // `map_bounded(List<A>, int, Fn(A) -> Future<B>) -> List<B>` (≤n in flight). (Track A.9.)
+    if module == "task" {
+        return match name {
+            "sleep" => Some(Type::Named(FUTURE.to_string(), vec![Type::Unit])),
+            "all" => Some(list(future_elem(args.first()))),
+            "race" => Some(future_elem(args.first())),
+            "map_bounded" => Some(match args.get(2) {
+                Some(Type::Fn { ret, .. }) => match ret.as_ref() {
+                    Type::Named(n, targs) if n == FUTURE => {
+                        list(targs.first().cloned().unwrap_or(Type::Unknown))
+                    }
+                    _ => list(Type::Unknown),
+                },
+                _ => list(Type::Unknown),
+            }),
+            _ => None,
+        };
+    }
     // Migrated modules: the result type comes from the registry's `RetTy`. `SameAsArg(i)` carries the
     // i-th argument's type (`vec.add(v, w): typeof v`); `NumericPreserving` is the `math.abs`/min/max
     // kind-preserving rule; `Concrete` maps directly.
