@@ -238,6 +238,9 @@ fn compile_real(
         // Real execution runs isolates on OS threads (I.4b): lower `isolate f(args)` to `SpawnIsolate`.
         // The differential/salsa paths pass false (byte-identical cooperative sandbox).
         true,
+        // `noeta run` is a production compile — no debug info (the debugger's `noeta dap` compiles
+        // the same program with debug = true).
+        false,
     )
     .map_err(|u| {
         format!(

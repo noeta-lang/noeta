@@ -266,6 +266,8 @@ pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
         checked.construction_sites.clone(),
         &checked.destructor_relevance,
         false,
+        // No debug info on the salsa/IDE bytecode path (the debugger uses its own direct compile).
+        false,
     ))
 }
 
@@ -428,6 +430,8 @@ pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> Bytecode {
                 checked.f32_literal_sites.clone(),
                 checked.construction_sites.clone(),
                 &checked.destructor_relevance,
+                false,
+                // No debug info on the salsa/IDE bytecode path.
                 false,
             ))
         }

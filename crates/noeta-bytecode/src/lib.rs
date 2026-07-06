@@ -1013,6 +1013,29 @@ pub struct Chunk {
     /// a function with no defaults; the entries are the trailing parameters, so the lowest legal
     /// argument count is `num_params - defaults.len()` (less the receiver for a method).
     pub defaults: Vec<(u16, u32)>,
+    /// This prototype's human-readable name (`"main"`, a free function's name, `"Type.method"`, or
+    /// `"Type::destruct"`), for a debugger's stack trace. `None` for anonymous closures/thunks and
+    /// for every prototype in a non-debug compile — debug info is emitted only when the compiler runs
+    /// in debug mode (`compile_with_sites(..., debug = true)`), so a production `Module` carries none.
+    pub debug_name: Option<String>,
+    /// The source span of this prototype's defining construct (the `fn`/method, or the whole program
+    /// for `main`), for mapping a stack frame to its declaration. `None` outside a debug compile.
+    pub def_span: Option<Span>,
+    /// The frame's **source** locals: which register holds each named variable, with its declaring
+    /// span — the debugger's `reg → name` map for the Variables view. Only the source bindings appear
+    /// (ANF temporaries are nameless and omitted). Emitted only in a debug compile, where named-local
+    /// registers are pinned through coalescing (see `frame_locals`) so this stays a clean 1:1 map;
+    /// [`crate`]'s coalescing pass rewrites each `reg` alongside the code. Empty otherwise.
+    pub debug_locals: Vec<LocalDebug>,
+}
+
+/// One source variable's debug record: its name, the register it lives in for this frame, and the
+/// span where it was declared. See [`Chunk::debug_locals`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalDebug {
+    pub name: String,
+    pub reg: u16,
+    pub def_span: Span,
 }
 
 impl Chunk {
@@ -1027,6 +1050,9 @@ impl Chunk {
             num_registers: 0,
             defaults: Vec::new(),
             frame_locals: Vec::new(),
+            debug_name: None,
+            def_span: None,
+            debug_locals: Vec::new(),
         }
     }
 

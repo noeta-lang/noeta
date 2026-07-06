@@ -51,8 +51,8 @@ use std::collections::{HashMap, HashSet};
 use noeta_ast::{BinaryOp, Program, TypeRef};
 use noeta_builtins::PRELUDE_NAMES;
 use noeta_bytecode::{
-    BoolSide, Builtin, CaptureFrom, Chunk, Const, GlobalId, MethodEntry, Module, NameId,
-    NarrowTarget, Op, Reg, ReuseCheck, StrPart,
+    BoolSide, Builtin, CaptureFrom, Chunk, Const, GlobalId, LocalDebug, MethodEntry, Module,
+    NameId, NarrowTarget, Op, Reg, ReuseCheck, StrPart,
 };
 use noeta_ir::{
     Atom, Block, Const as IrConst, Decl, ForPattern, Func, InterpPart, Pattern, Rvalue, Stmt, Temp,
@@ -111,6 +111,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         checked.construction_sites,
         &checked.destructor_relevance,
         false,
+        false,
     )
 }
 
@@ -144,6 +145,10 @@ pub fn compile_with_sites(
     construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
     relevance: &noeta_check::DestructorRelevance,
     real_isolates: bool,
+    // Emit per-prototype debug info (reg→name locals, function names, defining spans) and pin named
+    // locals through coalescing so the map stays 1:1. Only `noeta dap` passes true; the CLI, salsa,
+    // and the differential pass false (no debug info, unconstrained coalescing — goldens unchanged).
+    debug: bool,
 ) -> Result<Module, Unsupported> {
     compile_inner(
         program,
@@ -159,6 +164,7 @@ pub fn compile_with_sites(
         Some(passes_relevance(relevance)),
         relevance.reachable_types.iter().cloned().collect(),
         real_isolates,
+        debug,
     )
 }
 
@@ -183,6 +189,9 @@ fn compile_inner(
     // Whether `isolate f(args)` lowers to `Rvalue::SpawnIsolate` (real OS-thread path, I.4b). Only the
     // CLI's real (VM) execution passes true; the differential/salsa keep false (byte-identical sandbox).
     real_isolates: bool,
+    // Whether to emit per-prototype debug info + pin named locals through coalescing (see the public
+    // `compile_with_sites` doc). Threaded onto `ModuleCompiler` and read at `into_chunk`/`declare_local`.
+    debug: bool,
 ) -> Result<Module, Unsupported> {
     // Lower the surface program to the shared Core IR, then compile *that* to bytecode. The same
     // lowering the IR interpreter consumes, so both backends execute one program (Phase 2). The
@@ -234,6 +243,7 @@ fn compile_inner(
         name_ids: HashMap::new(),
         global_names: Vec::new(),
         global_slots: HashMap::new(),
+        debug,
     };
     // Type registration reads the surface declarations (shapes, derives, the method/destructor
     // proto table) the IR carries verbatim; bodies are lowered from the IR.
@@ -247,7 +257,7 @@ fn compile_inner(
             fc.stmt(stmt)?;
         }
         fc.code.push(Op::Halt);
-        fc.into_chunk(0, Vec::new())
+        fc.into_chunk(0, Vec::new(), Some("main".to_string()), Some(ir.span))
     };
     module.protos[0] = main;
     // Intern each packed `map(...)` result layout (P-PACK 2.6 category B) and pair it with the call
@@ -364,6 +374,12 @@ struct ModuleCompiler {
     global_names: Vec<String>,
     /// Dedup index for [`Self::global_names`]: global name → its slot id.
     global_slots: HashMap<String, u32>,
+    /// Whether this is a **debug** compile (`noeta dap`): emit per-prototype debug info — the
+    /// `reg → name` locals map, function names, and defining spans — and pin every named local
+    /// through register coalescing so that map stays 1:1 (see [`FnCompiler::into_chunk`]). A
+    /// production/differential compile leaves this `false`, so no debug info is produced and
+    /// coalescing is unconstrained (goldens/benchmarks are untouched).
+    debug: bool,
 }
 
 impl ModuleCompiler {
@@ -591,6 +607,7 @@ impl ModuleCompiler {
                         }),
                         Vec::new(),
                         Vec::new(),
+                        Some(format!("{name}.{method}")),
                     )?;
                     self.protos[proto as usize] = chunk;
                 }
@@ -614,6 +631,7 @@ impl ModuleCompiler {
                         }),
                         Vec::new(),
                         Vec::new(),
+                        Some(format!("{name}.{method}")),
                     )?;
                     self.protos[proto as usize] = chunk;
                 }
@@ -637,6 +655,7 @@ impl ModuleCompiler {
                     }),
                     Vec::new(),
                     Vec::new(),
+                    Some(format!("{name}.{method}")),
                 )?;
                 self.protos[proto as usize] = chunk;
             }
@@ -655,6 +674,7 @@ impl ModuleCompiler {
                     }),
                     Vec::new(),
                     Vec::new(),
+                    Some(format!("{name}::destruct")),
                 )?;
                 self.protos[proto as usize] = chunk;
             }
@@ -681,13 +701,16 @@ impl ModuleCompiler {
         Ok(())
     }
 
-    /// Compile one IR [`Func`] (function/closure/method/`destruct` body) into a [`Chunk`].
+    /// Compile one IR [`Func`] (function/closure/method/`destruct` body) into a [`Chunk`]. `debug_name`
+    /// is the name a debugger shows for this prototype (`None` for an anonymous closure); it and the
+    /// func's span are recorded on the chunk only in a debug compile.
     fn compile_func(
         &mut self,
         func: &Func,
         method: Option<MethodCtx>,
         upvalues: Vec<(String, bool)>,
         enclosing_locals: Vec<HashSet<String>>,
+        debug_name: Option<String>,
     ) -> Result<Chunk, Unsupported> {
         self.compile_chunk(
             &func.params,
@@ -697,6 +720,8 @@ impl ModuleCompiler {
             method,
             upvalues,
             enclosing_locals,
+            debug_name,
+            Some(func.span),
         )
     }
 
@@ -718,8 +743,11 @@ impl ModuleCompiler {
         method: Option<MethodCtx>,
         upvalues: Vec<(String, bool)>,
         enclosing_locals: Vec<HashSet<String>>,
+        debug_name: Option<String>,
+        def_span: Option<Span>,
     ) -> Result<Chunk, Unsupported> {
         let is_method = method.is_some();
+        let debug = self.debug;
         let globals = self.global_names();
         let analysis = freevars::analyze(params, defaults, body, &enclosing_locals, &globals);
 
@@ -778,6 +806,16 @@ impl ModuleCompiler {
                     celled,
                 },
             );
+            // In a debug compile, a parameter is a named local a debugger should see. The IR drops
+            // per-parameter spans, so it is attributed to the function's own defining span. Its
+            // register (`0..num_params`) is pinned through coalescing by `into_chunk`'s `frame_locals`.
+            if let Some(span) = def_span.filter(|_| debug) {
+                fc.debug_locals.push(LocalDebug {
+                    name: param.clone(),
+                    reg,
+                    def_span: span,
+                });
+            }
         }
         for stmt in &body.stmts {
             fc.stmt(stmt)?;
@@ -790,17 +828,19 @@ impl ModuleCompiler {
         }
         fc.code.push(Op::Halt);
         let num_params = params.len() as u16 + if is_method { 1 } else { 0 };
-        Ok(fc.into_chunk(num_params, default_pairs))
+        Ok(fc.into_chunk(num_params, default_pairs, debug_name, def_span))
     }
 
-    /// Compile an IR [`Func`] into a fresh prototype and return its index.
+    /// Compile an IR [`Func`] into a fresh prototype and return its index. `debug_name` is the name a
+    /// debugger shows for it — the binding's name for a named `fn`, `None` for an anonymous closure.
     fn add_function(
         &mut self,
         func: &Func,
         upvalues: Vec<(String, bool)>,
         enclosing_locals: Vec<HashSet<String>>,
+        debug_name: Option<String>,
     ) -> Result<u32, Unsupported> {
-        let chunk = self.compile_func(func, None, upvalues, enclosing_locals)?;
+        let chunk = self.compile_func(func, None, upvalues, enclosing_locals, debug_name)?;
         let idx = self.protos.len() as u32;
         self.protos.push(chunk);
         Ok(idx)
@@ -822,6 +862,9 @@ impl ModuleCompiler {
             None,
             upvalues,
             enclosing_locals,
+            // A defaulted-parameter / field-default thunk is an anonymous value evaluator.
+            None,
+            None,
         )?;
         let idx = self.protos.len() as u32;
         self.protos.push(chunk);
@@ -952,6 +995,10 @@ struct FnCompiler<'m> {
     /// The registers of this function's body locals in **declaration order** — the source of the
     /// `Chunk.frame_locals` panic-teardown list (params, prepended at `into_chunk`, come first).
     frame_locals: Vec<Reg>,
+    /// The debugger's `reg → name` records (one per source binding), collected by [`Self::declare_local`]
+    /// when the compile is in debug mode. Moved onto the `Chunk` (and register-remapped by coalescing)
+    /// at [`Self::into_chunk`]. Always empty in a non-debug compile.
+    debug_locals: Vec<LocalDebug>,
 }
 
 /// Pending forward jumps from `break`/`continue` inside one loop, patched at the loop's end.
@@ -1040,6 +1087,7 @@ impl<'m> FnCompiler<'m> {
             local_layer: HashSet::new(),
             loops: Vec::new(),
             frame_locals: Vec::new(),
+            debug_locals: Vec::new(),
         }
     }
 
@@ -1072,13 +1120,21 @@ impl<'m> FnCompiler<'m> {
         chain
     }
 
-    fn into_chunk(self, num_params: u16, defaults: Vec<(u16, u32)>) -> Chunk {
+    fn into_chunk(
+        self,
+        num_params: u16,
+        defaults: Vec<(u16, u32)>,
+        debug_name: Option<String>,
+        def_span: Option<Span>,
+    ) -> Chunk {
         // The panic-teardown list, in construction order: parameters (registers `0..num_params`, live
-        // from entry) then body locals in declaration order. Only programs that **define a
-        // destructor** can observe panic teardown, so the list (and the pinning it triggers below) is
-        // populated only then — the common no-destructor case keeps an empty list and full coalescing,
-        // so benchmarks/goldens are untouched.
-        let frame_locals: Vec<u16> = if self.module.destructors.is_empty() {
+        // from entry) then body locals in declaration order. Two things want it populated: a program
+        // that **defines a destructor** (so panic teardown is observable), and a **debug** compile (so
+        // every named local's register is pinned through coalescing, keeping `debug_locals` a clean
+        // 1:1 `reg → name`). Otherwise the common case keeps an empty list and full coalescing, so
+        // benchmarks/goldens are untouched.
+        let debug = self.module.debug;
+        let frame_locals: Vec<u16> = if self.module.destructors.is_empty() && !debug {
             Vec::new()
         } else {
             let mut locals: Vec<u16> = (0..num_params).collect();
@@ -1089,6 +1145,11 @@ impl<'m> FnCompiler<'m> {
             }
             locals
         };
+        let (debug_name, def_span, debug_locals) = if debug {
+            (debug_name, def_span, self.debug_locals)
+        } else {
+            (None, None, Vec::new())
+        };
         let mut chunk = Chunk {
             code: self.code,
             consts: self.consts,
@@ -1097,6 +1158,9 @@ impl<'m> FnCompiler<'m> {
             num_registers: self.next_reg,
             defaults,
             frame_locals,
+            debug_name,
+            def_span,
+            debug_locals,
         };
         // Coalescing reuses a dead local's slot for a later one; but a destructor-bearing local that
         // dies only at an *unreachable* drop (a dead store before a `panic`, whose scope-exit drop the
@@ -1377,7 +1441,9 @@ impl<'m> FnCompiler<'m> {
     /// so a self-recursive `fn` can capture its own (still-unset) cell.
     fn declare_fn(&mut self, name: &str, func: &Func) -> Result<(), Unsupported> {
         if self.at_global_depth() {
-            let proto = self.module.add_function(func, Vec::new(), Vec::new())?;
+            let proto =
+                self.module
+                    .add_function(func, Vec::new(), Vec::new(), Some(name.to_string()))?;
             let t = self.alloc_reg();
             self.code.push(Op::MakeClosure {
                 dst: t,
@@ -1414,7 +1480,9 @@ impl<'m> FnCompiler<'m> {
         }
         let (upvalues, captures) = self.resolve_captures(func)?;
         let enclosing = self.child_enclosing();
-        let proto = self.module.add_function(func, upvalues, enclosing)?;
+        let proto = self
+            .module
+            .add_function(func, upvalues, enclosing, Some(name.to_string()))?;
         let t = self.alloc_reg();
         self.code.push(Op::MakeClosure {
             dst: t,
@@ -1425,7 +1493,7 @@ impl<'m> FnCompiler<'m> {
             self.code.push(Op::CellSet { cell: reg, src: t });
         } else {
             // `t` holds a just-built closure read nowhere else — the local adopts it (consuming move).
-            self.declare_local(name, t, true, false);
+            self.declare_local(name, t, true, false, func.span);
         }
         Ok(())
     }
@@ -1817,7 +1885,7 @@ impl<'m> FnCompiler<'m> {
                 let global = self.module.intern_global(name);
                 self.code.push(Op::StoreGlobal { global, src });
             } else {
-                self.declare_local(name, src, owned, true);
+                self.declare_local(name, src, owned, true, name_span);
             }
             return Ok(());
         }
@@ -1903,7 +1971,7 @@ impl<'m> FnCompiler<'m> {
             let global = self.module.intern_global(name);
             self.code.push(Op::StoreGlobal { global, src });
         } else {
-            self.declare_local(name, src, owned, false);
+            self.declare_local(name, src, owned, false, name_span);
         }
         Ok(())
     }
@@ -1919,7 +1987,7 @@ impl<'m> FnCompiler<'m> {
     /// as its home — a *consuming move* with no copying `Op::Move` (the value is already there). A
     /// borrowed source (a directly-held local or `self`, whose slot another live binding owns) is
     /// copied into a fresh slot so a later reassignment of either binding cannot disturb the other.
-    fn declare_local(&mut self, name: &str, src: Reg, owned: bool, mutable: bool) {
+    fn declare_local(&mut self, name: &str, src: Reg, owned: bool, mutable: bool, def_span: Span) {
         let celled = self.celled.contains(name);
         let reg = match self.scopes.last().unwrap().get(name) {
             // A re-`mut` shadow writes into the existing slot — no adoption.
@@ -1941,6 +2009,16 @@ impl<'m> FnCompiler<'m> {
         // time it appears; the VM fires each register once anyway (a second is a no-op on `unit`).
         if !self.frame_locals.contains(&reg) {
             self.frame_locals.push(reg);
+        }
+        // In a debug compile, keep the source name → register mapping for the debugger's Variables
+        // view. A re-`mut` shadow reuses the slot but re-declares the name; record the latest span so
+        // the reported location tracks the live declaration. (Register-remapped later by coalescing.)
+        if self.module.debug {
+            self.debug_locals.push(LocalDebug {
+                name: name.to_string(),
+                reg,
+                def_span,
+            });
         }
         self.scopes.last_mut().unwrap().insert(
             name.to_string(),
@@ -2502,7 +2580,8 @@ impl<'m> FnCompiler<'m> {
                 // the captured cells into the new closure.
                 let (upvalues, captures) = self.resolve_captures(func)?;
                 let enclosing = self.child_enclosing();
-                let proto = self.module.add_function(func, upvalues, enclosing)?;
+                // An anonymous closure literal — no debugger name.
+                let proto = self.module.add_function(func, upvalues, enclosing, None)?;
                 self.code.push(Op::MakeClosure {
                     dst,
                     proto,
@@ -3783,12 +3862,146 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::compile;
+    use super::{compile, compile_with_sites};
     use noeta_ast::AttrValue;
     use noeta_ast::reflect::AttributeRecord;
+    use noeta_bytecode::Module;
     use noeta_lexer::lex;
     use noeta_parser::parse;
     use noeta_span::{Source, SourceId};
+
+    /// Compile `src` in **debug** mode (as `noeta dap` does), threading the checker's site maps into
+    /// `compile_with_sites` with `debug = true` so the per-prototype debug info is emitted.
+    fn compile_dbg(src: &str) -> Module {
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "test program must parse cleanly: {:?}",
+            parsed.diagnostics
+        );
+        let checked = noeta_check::check_all(&parsed.program);
+        assert!(
+            checked.diagnostics.is_empty(),
+            "test program must type-check cleanly: {:?}",
+            checked.diagnostics
+        );
+        compile_with_sites(
+            &parsed.program,
+            checked.type_of_sites.clone(),
+            checked.packed_list_sites.clone(),
+            checked.map_packed_sites.clone(),
+            checked.index_field_sites.clone(),
+            checked.ext_call_sites.clone(),
+            checked.for_stream_sites.clone(),
+            checked.width_sites.clone(),
+            checked.f32_literal_sites.clone(),
+            checked.construction_sites.clone(),
+            &checked.destructor_relevance,
+            false,
+            true,
+        )
+        .expect("compiles")
+    }
+
+    #[test]
+    fn main_carries_its_name_and_defining_span() {
+        let m = compile_dbg("echo \"hi\";\n");
+        let main = m.main();
+        assert_eq!(main.debug_name.as_deref(), Some("main"));
+        assert!(main.def_span.is_some());
+    }
+
+    #[test]
+    fn a_functions_locals_and_params_are_recorded_by_register() {
+        // `x`/`y` are locals (declare_local); `p` is a parameter — all should appear, each with a
+        // register. Top-level `mut` binds a *global*, so the names live inside a function.
+        let m = compile_dbg("fn f(p: int): int {\n  mut x = p;\n  mut y = 2;\n  x + y\n}\nf(1);\n");
+        let f = m
+            .protos
+            .iter()
+            .find(|c| c.debug_name.as_deref() == Some("f"))
+            .expect("a proto named f");
+        let names: std::collections::HashSet<&str> =
+            f.debug_locals.iter().map(|l| l.name.as_str()).collect();
+        assert!(names.contains("p"), "missing param p: {names:?}");
+        assert!(names.contains("x"), "missing local x: {names:?}");
+        assert!(names.contains("y"), "missing local y: {names:?}");
+        // Every recorded register is a valid slot in the frame.
+        for local in &f.debug_locals {
+            assert!(
+                local.reg < f.num_registers,
+                "reg {} out of range",
+                local.reg
+            );
+        }
+    }
+
+    #[test]
+    fn named_locals_stay_one_to_one_under_coalescing() {
+        // `a` dies once `r` copies it, before `b` is defined — disjoint live ranges that coalescing
+        // would merge onto one register. In a debug compile named locals are pinned, so each keeps a
+        // distinct slot: the 1:1 `reg → name` the Variables view depends on. (Without pinning `a` and
+        // `b` would share a register and the distinct-count check below would fail.)
+        let m = compile_dbg(
+            "fn f(): int {\n  mut a = 1;\n  mut r = a;\n  mut b = 2;\n  r = r + b;\n  r\n}\nf();\n",
+        );
+        let f = m
+            .protos
+            .iter()
+            .find(|c| c.debug_name.as_deref() == Some("f"))
+            .expect("a proto named f");
+        let regs: Vec<u16> = f.debug_locals.iter().map(|l| l.reg).collect();
+        let distinct: std::collections::HashSet<u16> = regs.iter().copied().collect();
+        assert_eq!(
+            regs.len(),
+            distinct.len(),
+            "reg->name is not 1:1: {:?}",
+            f.debug_locals
+        );
+    }
+
+    #[test]
+    fn a_method_proto_is_named_type_dot_method() {
+        let m = compile_dbg(
+            "struct Point { x: int\n  fn mag(): int { self.x }\n}\nmut p = Point { x: 3 };\np.mag();\n",
+        );
+        assert!(
+            m.protos
+                .iter()
+                .any(|c| c.debug_name.as_deref() == Some("Point.mag")),
+            "expected a proto named Point.mag; names: {:?}",
+            m.protos
+                .iter()
+                .map(|c| c.debug_name.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_non_debug_compile_carries_no_debug_info() {
+        let source = Source::new(
+            SourceId::FIRST,
+            "test.noe",
+            "fn f() {\n  mut x = 1;\n  echo x;\n}\nf();\n",
+        );
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        assert!(parsed.diagnostics.is_empty());
+        let m = compile(&parsed.program).expect("compiles");
+        for chunk in &m.protos {
+            assert!(
+                chunk.debug_name.is_none(),
+                "unexpected debug_name off-debug"
+            );
+            assert!(chunk.def_span.is_none(), "unexpected def_span off-debug");
+            assert!(
+                chunk.debug_locals.is_empty(),
+                "unexpected debug_locals off-debug"
+            );
+        }
+    }
 
     /// Compile `src` and return its attribute manifest (the VM-side view of the shared artifact).
     fn manifest(src: &str) -> Vec<AttributeRecord> {

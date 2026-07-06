@@ -120,6 +120,9 @@ fn compile_checked(
         &checked.destructor_relevance,
         // Real execution lowers `isolate f(args)` to real OS-thread spawns, as `noeta run` does.
         true,
+        // Debug compile: emit the debug-info side-tables (reg->name locals, proto names + spans) and
+        // pin named locals through coalescing. This is the one difference from `noeta run`'s compile.
+        true,
     )
     .map_err(|u| {
         format!(

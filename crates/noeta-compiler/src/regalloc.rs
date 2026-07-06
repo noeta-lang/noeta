@@ -217,6 +217,13 @@ pub fn coalesce(chunk: &mut Chunk) {
             true
         }
     });
+    // Remap the debugger's `reg → name` records through the same colouring (also metadata). In a
+    // debug compile every named local's register is in `frame_locals`, hence pinned to its own
+    // colour above, so the map stays a clean 1:1 — no two names collapse onto one register. In a
+    // non-debug compile `debug_locals` is empty and this is a no-op.
+    for local in &mut chunk.debug_locals {
+        local.reg = colors[local.reg as usize] as u16;
+    }
     chunk.num_registers = new_count as u16;
 }
 
@@ -1079,6 +1086,9 @@ mod tests {
             num_registers,
             defaults: Vec::new(),
             frame_locals: Vec::new(),
+            debug_name: None,
+            def_span: None,
+            debug_locals: Vec::new(),
         }
     }
 
