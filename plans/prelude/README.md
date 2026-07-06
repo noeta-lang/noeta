@@ -1,6 +1,14 @@
 # Prelude-redesign arc — shrink the always-global prelude, fix the builtin-shadowing divergence
 
-**Status: CORE ARC COMPLETE (P0–P4 + MH.1/MH.2 + P1.3); the EX closing track remains.**
+**Status: ARC COMPLETE — every slice, including the EX closing track.** EX.1 `f0ea860` (member
+access fully explicit: `self.field` only, bare names never fields, targeted E0005 hint; 72 corpus
+files migrated by a span-driven tool; generic `self.value` T-erasure fixed), EX.2a `ab4bb33`
+(associated-vs-instance DERIVED from the body via new `Stmt::mentions` — zero runtime cost; E0047
+wrong-way calls both directions; associated handles `ctor = Stack.new`; struct methods finally
+registered in the checker method table), EX.2b `55815e3` + `7e2e0bd` (BOUND handles `f = c.bump` —
+receiver captured, reference-semantics pinned, GC-traversed child, ships over Wire; binding an
+associated fn through a value = static E0047). The handle surface is complete: unbound instance,
+unbound associated, bound, built-in.
 Branch `worktree-prelude-redesign` (worktree off main). Commits: P0 `88494b7` (selective import),
 P1.1 `f5e5663` (eager methods + len), MH.1 `2181ad0` (user-type handles), MH.2 `890b3c4` (dispatch
 refactor, perf-gated) + `28e0cdd` (built-in handles), P1.2 `337b277` (free fns removed), P2a
