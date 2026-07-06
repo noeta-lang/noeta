@@ -1067,8 +1067,8 @@ fn prelude_functions_are_typed() {
     assert_eq!(codes("fn f(): string { return [1].len(); }\n"), ["E0007"]);
     assert!(codes("fn f(): int { return [1, 2].sum(); }\n").is_empty()); // sum(List<int>) -> int
     // The remaining prelude free functions stay typed.
-    assert!(codes("fn f(): int { return next_id(); }\n").is_empty()); // next_id -> int
-    assert_eq!(codes("fn f(): string { return next_id(); }\n"), ["E0007"]);
+    assert!(codes("use std.id.{next_id}\nfn f(): int { return next_id(); }\n").is_empty()); // next_id -> int
+    assert_eq!(codes("use std.id.{next_id}\nfn f(): string { return next_id(); }\n"), ["E0007"]);
 }
 
 #[test]

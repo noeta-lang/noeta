@@ -62,6 +62,10 @@ pub enum CaptureFrom {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtin {
     Len,
+    /// `next_id()` — the deterministic seeded counter (`use std.id`, prelude-redesign P2c). Direct
+    /// calls compile to the dedicated `Op::NextId`; this variant exists so the imported name can be
+    /// bound as a first-class value (`Op::LoadNativeFn`) and dispatched indirectly.
+    NextId,
     Map,
     Filter,
     Sum,
@@ -97,6 +101,7 @@ impl Builtin {
     /// The surface name, for diagnostics ("`map` expects a list, ...").
     pub fn name(self) -> &'static str {
         match self {
+            Builtin::NextId => "next_id",
             Builtin::Len => "len",
             Builtin::Map => "map",
             Builtin::Filter => "filter",
@@ -115,6 +120,7 @@ impl Builtin {
     /// The builtin a prelude name refers to, if it is one this slice implements.
     pub fn from_name(name: &str) -> Option<Builtin> {
         match name {
+            "next_id" => Some(Builtin::NextId),
             "len" => Some(Builtin::Len),
             "map" => Some(Builtin::Map),
             "filter" => Some(Builtin::Filter),

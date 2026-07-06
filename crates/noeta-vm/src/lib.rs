@@ -5642,6 +5642,14 @@ impl<'m> Vm<'m> {
         span: Span,
     ) -> Result<Value, Abort> {
         match builtin {
+            // `next_id()` as a first-class value (`use std.id.{next_id}`, P2c) — direct calls
+            // compile to the dedicated `Op::NextId`; an indirect call reads the same counter.
+            Builtin::NextId => {
+                self.check_arity(builtin, args, 0, span)?;
+                let id = self.next_id;
+                self.next_id += 1;
+                Ok(Value::int(id as i64))
+            }
             Builtin::Len => {
                 self.check_arity(builtin, args, 1, span)?;
                 let v = args[0];
@@ -7561,7 +7569,7 @@ mod tests {
 
     #[test]
     fn next_id_is_a_deterministic_counter() {
-        let r = run("echo next_id();\necho next_id();\necho next_id();\n");
+        let r = run("use std.id.{next_id}\necho next_id();\necho next_id();\necho next_id();\n");
         assert_eq!(r.stdout, "1\n2\n3\n");
     }
 

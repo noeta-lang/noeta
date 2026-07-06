@@ -522,9 +522,8 @@ pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
 /// `None` if `name` is not a prelude function.
 pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
     Some(match name {
-        // `len`/`map`/`filter`/`sum` left the prelude (prelude-redesign P1.2): they are collection
-        // METHODS now — see `list_method`/`method_params`; `list.len`-style handles cover value use.
-        "next_id" => Type::Int,
+        // `len`/`map`/`filter`/`sum` left the prelude (P1.2, collection methods now — see
+        // `list_method`); `next_id` left it (P2c) for `use std.id`.
         // The polymorphic constructors carry the argument type in the known position; the other
         // type parameter is unconstrained (a hole) at the call site.
         "Ok" => Type::Result(
@@ -578,6 +577,14 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
                 }],
             )),
             "effect" => Some(Type::Named(EFFECT.to_string(), vec![])),
+            _ => None,
+        };
+    }
+    // The virtual `id` module (prelude-redesign P2c): `next_id() -> int`, the deterministic
+    // seeded counter (UUIDs are a planned follow-on through the deterministic Host seam).
+    if module == "id" {
+        return match name {
+            "next_id" => Some(Type::Int),
             _ => None,
         };
     }

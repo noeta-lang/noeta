@@ -42,7 +42,6 @@ impl Default for IdGen {
 /// by the LSP to mark prelude identifiers. Grows as value-returning builtins land.
 pub const PRELUDE_NAMES: &[&str] = &[
     "echo",
-    "next_id",
     // `len`/`map`/`filter`/`sum` left the prelude (prelude-redesign P1.2): they are collection
     // METHODS now (`xs.len()`, `xs.map(f)`), passable as values via method handles (`list.len`).
     "Ok",

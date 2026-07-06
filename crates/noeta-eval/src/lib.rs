@@ -421,7 +421,7 @@ impl Builtin {
     /// The prelude functions registered in every program's global scope. `none` is a
     /// prelude *value* (not a function), so it is bound separately in [`Interpreter::new`].
     const PRELUDE: &'static [Builtin] = &[
-        Builtin::NextId,
+        // `NextId` left the prelude (P2c) for `use std.id` — like the P2a/P2b names below.
         // `Len`/`Map`/`Filter`/`Sum` left the prelude (prelude-redesign P1.2): the collection
         // METHOD forms route to the same impls; `list.len`-style handles cover value use.
         Builtin::MakeOk,
@@ -5471,7 +5471,7 @@ mod tests {
         assert_eq!(out.value.as_deref(), Some("15"));
         // `next_id()` continuity persists across entries.
         assert_eq!(
-            session.eval(&program_of("next_id();")).value.as_deref(),
+            session.eval(&program_of("use std.id.{next_id}; next_id();")).value.as_deref(),
             Some("1")
         );
         assert_eq!(
@@ -5793,7 +5793,7 @@ mod tests {
 
     #[test]
     fn next_id_is_deterministic() {
-        assert_eq!(run("echo next_id(); echo next_id();").stdout, "1\n2\n");
+        assert_eq!(run("use std.id.{next_id}; echo next_id(); echo next_id();").stdout, "1\n2\n");
     }
 
     #[test]

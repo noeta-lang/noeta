@@ -258,6 +258,7 @@ pub fn find_function(module: &str, func: &str) -> Option<&'static ExtFn> {
 pub const VIRTUAL_MODULES: &[(&str, &[&str])] = &[
     ("reactive", &["signal", "computed", "effect"]),
     ("task", &["sleep", "all", "race", "map_bounded"]),
+    ("id", &["next_id"]),
 ];
 
 /// Whether `name` is a virtual std module (importable, but not registry-backed).
