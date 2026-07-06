@@ -1,8 +1,8 @@
 {
   "name": "noeta",
   "displayName": "Noeta",
-  "description": "Language support for the Noeta programming language (.noe): syntax highlighting plus the noeta lsp language server (diagnostics, hover, go-to-definition, outline, completion).",
-  "version": "0.2.0",
+  "description": "Language support for the Noeta programming language (.noe): syntax highlighting, the noeta lsp language server (diagnostics, hover, go-to-definition, outline, completion), and the noeta dap debugger (breakpoints, stepping, variables).",
+  "version": "0.3.0",
   "publisher": "noeta",
   "license": "MIT",
   "repository": {
@@ -21,7 +21,9 @@
   ],
   "main": "./src/extension.js",
   "activationEvents": [
-    "onLanguage:noeta"
+    "onLanguage:noeta",
+    "onDebugResolve:noeta",
+    "onDebugDynamicConfigurations:noeta"
   ],
   "contributes": {
     "languages": [
@@ -44,6 +46,61 @@
         "path": "./syntaxes/noeta.tmLanguage.json"
       }
     ],
+    "breakpoints": [
+      {
+        "language": "noeta"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "noeta",
+        "label": "Noeta",
+        "languages": [
+          "noeta"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Absolute path to the .noe file to run.",
+                "default": "${file}"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Pause before the first instruction runs.",
+                "default": false
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "noeta",
+            "request": "launch",
+            "name": "Debug Noeta file",
+            "program": "${file}",
+            "stopOnEntry": false
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Noeta: Debug current file",
+            "description": "Run the active .noe file under the Noeta debugger.",
+            "body": {
+              "type": "noeta",
+              "request": "launch",
+              "name": "Debug Noeta file",
+              "program": "^\"\\${file}\"",
+              "stopOnEntry": false
+            }
+          }
+        ]
+      }
+    ],
     "commands": [
       {
         "command": "noeta.restartServer",
@@ -56,7 +113,7 @@
         "noeta.server.path": {
           "type": "string",
           "default": "noeta",
-          "markdownDescription": "Path to the `noeta` executable. The extension launches it as `noeta lsp`. Defaults to `noeta` on your `PATH`; set an absolute path to use a local build (e.g. `target/release/noeta`)."
+          "markdownDescription": "Path to the `noeta` executable. The extension launches it as `noeta lsp` (language server) and `noeta dap` (debugger). Defaults to `noeta` on your `PATH`; set an absolute path to use a local build (e.g. `target/release/noeta`)."
         },
         "noeta.trace.server": {
           "type": "string",
