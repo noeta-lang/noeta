@@ -24,10 +24,36 @@ use crate::protocol::event;
 
 /// A resume command sent from the adapter to a paused run.
 pub enum Resume {
-    /// Leave the pause and keep running.
+    /// Leave the pause and keep running until the next breakpoint (or the end).
     Continue,
+    /// Leave the pause and run until the next stop the [`StepMode`] describes.
+    Step(StepMode),
     /// Abandon the run (the client disconnected).
     Terminate,
+}
+
+/// A source-line step, as the DAP `next` / `stepIn` / `stepOut` requests ask for it. Stepping is
+/// line-granular (not instruction-granular): a step runs until the *source line* changes in a way the
+/// mode allows, so one press advances one visible line rather than one bytecode op.
+#[derive(Clone, Copy)]
+pub enum StepMode {
+    /// `next`: run to the next line in the current frame, running any call the line makes to
+    /// completion without stopping inside it (a deeper frame is skipped over).
+    Over,
+    /// `stepIn`: run to the next line at *any* depth — descend into a call the current line makes.
+    Into,
+    /// `stepOut`: run until the current frame returns, stopping in the caller.
+    Out,
+}
+
+/// The step in progress, captured (from the pause it was launched at) when the adapter sends a
+/// [`Resume::Step`]. `origin_depth` is the call-stack depth there, `origin_line` its innermost frame's
+/// `(source, line)`; [`DapDebugger::before_op`] compares each instruction against these to decide when
+/// the step has landed.
+struct StepState {
+    mode: StepMode,
+    origin_depth: usize,
+    origin_line: Option<(u32, u32)>,
 }
 
 /// The paused stack, captured by the run worker at a pause and read by the adapter thread to answer
@@ -137,6 +163,9 @@ pub struct DapDebugger {
     events: Sender<Value>,
     /// Resume commands from the adapter; recv blocks the run thread while paused.
     resume: Receiver<Resume>,
+    /// The step in progress, if the last resume was a step. `Some` between a `Resume::Step` and the
+    /// instruction it lands on; `None` while running freely.
+    step: Option<StepState>,
 }
 
 impl DapDebugger {
@@ -158,6 +187,7 @@ impl DapDebugger {
             paused,
             events,
             resume,
+            step: None,
         }
     }
 
@@ -165,7 +195,11 @@ impl DapDebugger {
     /// terminates the run. The snapshot is published *before* the event so a `stackTrace` the client
     /// sends on seeing `stopped` always finds it; it is cleared on resume so a late request after
     /// `continue` reads an empty stack rather than stale frames.
+    ///
+    /// Any pause consumes the in-flight step (arriving here means it landed, or a breakpoint pre-empted
+    /// it); a fresh [`Resume::Step`] then arms a new one, relative to *this* location.
     fn pause(&mut self, reason: &str, view: &DebugView) -> DebugAction {
+        self.step = None;
         *self.paused.lock().unwrap() = Some(capture(view, &self.sources));
         let _ = self.events.send(event(
             "stopped",
@@ -176,16 +210,51 @@ impl DapDebugger {
             }),
         ));
         let action = match self.resume.recv() {
-            // A spurious continue after a termination request still terminates.
-            Ok(Resume::Continue) if !self.terminate.load(Ordering::Relaxed) => {
+            // Ignore any step/continue that raced a termination request.
+            _ if self.terminate.load(Ordering::Relaxed) => DebugAction::Terminate,
+            Ok(Resume::Continue) => DebugAction::Continue,
+            // Arm the step relative to this pause point, then resume; `before_op` lands it.
+            Ok(Resume::Step(mode)) => {
+                self.step = Some(StepState {
+                    mode,
+                    origin_depth: view.depth(),
+                    origin_line: top_line(view, &self.sources),
+                });
                 DebugAction::Continue
             }
-            Ok(Resume::Continue) => DebugAction::Terminate,
             // Terminate, or the adapter dropped the channel (session gone).
             Ok(Resume::Terminate) | Err(_) => DebugAction::Terminate,
         };
         *self.paused.lock().unwrap() = None;
         action
+    }
+
+    /// Whether the in-flight step (if any) has landed at this instruction — see [`StepMode`].
+    ///
+    /// Stepping is line-granular, so a step only ever lands on an instruction that *maps to a source
+    /// line*: the many spanless ops (stores, moves, a call's return slot) are stepped through
+    /// transparently, which also prevents landing on the resume instruction after a call (it has no
+    /// span, so it would otherwise read as line 0).
+    fn step_landed(&self, view: &DebugView) -> bool {
+        let Some(step) = &self.step else {
+            return false;
+        };
+        let Some(line) = top_line(view, &self.sources) else {
+            return false;
+        };
+        let line = Some(line);
+        let depth = view.depth();
+        match step.mode {
+            // Landed once we are shallower than where we started (the frame returned).
+            StepMode::Out => depth < step.origin_depth,
+            // A new line in the starting frame, or a return past it — but never inside a deeper call.
+            StepMode::Over => {
+                depth < step.origin_depth
+                    || (depth == step.origin_depth && line != step.origin_line)
+            }
+            // The first instruction at any different (depth, line) — so entering a call lands too.
+            StepMode::Into => depth != step.origin_depth || line != step.origin_line,
+        }
     }
 }
 
@@ -198,11 +267,25 @@ impl Debugger for DapDebugger {
             self.entered = true;
             return self.pause("entry", view);
         }
+        // A breakpoint pre-empts an in-flight step (standard behaviour: land on the breakpoint).
         if self.stops.contains(&(proto, pc)) {
             return self.pause("breakpoint", view);
         }
+        if self.step_landed(view) {
+            return self.pause("step", view);
+        }
         DebugAction::Continue
     }
+}
+
+/// The innermost (currently executing) frame's `(source, line)`, or `None` for a spanless op. The
+/// identity a step is measured against.
+fn top_line(view: &DebugView, sources: &SourceMap) -> Option<(u32, u32)> {
+    let span = view.frame(view.depth() - 1).op_span()?;
+    Some((
+        span.source.0,
+        sources.source(span.source).line_col(span.start).line,
+    ))
 }
 
 /// Snapshot the live [`DebugView`] into an owned [`PausedState`]. Walks the frame stack innermost

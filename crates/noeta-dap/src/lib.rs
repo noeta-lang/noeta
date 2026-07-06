@@ -33,7 +33,7 @@ use std::thread::{self, JoinHandle};
 
 use serde_json::{Value, json};
 
-use debugger::{DapDebugger, FrameInfo, Paused, Resume, resolve_breakpoints};
+use debugger::{DapDebugger, FrameInfo, Paused, Resume, StepMode, resolve_breakpoints};
 use protocol::{Writer, command_of, error_response, event, read_message, response};
 
 /// The debuggee is a single logical thread of execution; the DAP UI still needs a thread id to hang
@@ -138,6 +138,27 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
                     let _ = resume.send(Resume::Continue);
                 }
                 let _ = tx.send(response(&request, json!({ "allThreadsContinued": true })));
+            }
+            // The three source-line steps. Each unblocks the paused worker with a step mode; the worker
+            // runs until the step lands and emits a `stopped` (reason `"step"`). Only meaningful while
+            // paused — a stray step with no paused worker is a no-op send into a dropped channel.
+            "next" => {
+                if let Some(resume) = &resume_tx {
+                    let _ = resume.send(Resume::Step(StepMode::Over));
+                }
+                let _ = tx.send(response(&request, json!({})));
+            }
+            "stepIn" => {
+                if let Some(resume) = &resume_tx {
+                    let _ = resume.send(Resume::Step(StepMode::Into));
+                }
+                let _ = tx.send(response(&request, json!({})));
+            }
+            "stepOut" => {
+                if let Some(resume) = &resume_tx {
+                    let _ = resume.send(Resume::Step(StepMode::Out));
+                }
+                let _ = tx.send(response(&request, json!({})));
             }
             // The three introspection requests a client sends while paused. Each reads the shared
             // captured stack (empty if the program isn't paused) — the worker is blocked inside its
@@ -688,6 +709,30 @@ mod tests {
             self.recv_until(|m| m["type"] == "event" && m["event"] == "stopped")
         }
 
+        /// Issue a step (`next`/`stepIn`/`stepOut`), wait for it to land, and return the resulting
+        /// stack as `[(name, line)]` innermost-first.
+        fn step(&mut self, command: &str) -> Vec<(String, i64)> {
+            self.send(command, json!({ "threadId": MAIN_THREAD_ID }));
+            let stopped = self.wait_stopped();
+            assert_eq!(
+                stopped["body"]["reason"], "step",
+                "step should stop with reason `step`"
+            );
+            self.send("stackTrace", json!({ "threadId": MAIN_THREAD_ID }));
+            let frames = self.response("stackTrace");
+            frames["body"]["stackFrames"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| {
+                    (
+                        f["name"].as_str().unwrap().to_string(),
+                        f["line"].as_i64().unwrap(),
+                    )
+                })
+                .collect()
+        }
+
         /// End the session: disconnect, then join the adapter thread so nothing outlives the test.
         fn disconnect_and_join(mut self) {
             self.send("disconnect", json!({}));
@@ -766,6 +811,92 @@ mod tests {
         assert_eq!(named("n")["type"], "int");
         assert_eq!(named("doubled")["value"], "40");
         assert_eq!(named("result")["value"], "41");
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    #[test]
+    fn stepping_moves_by_source_line_over_into_and_out() {
+        // `add` is called from `main` at line 6; stepping walks lines, not bytecode ops.
+        let path = fixture(
+            "step",
+            "fn add(a: int, b: int): int {\n    \
+             mut s = a + b\n    \
+             return s\n}\n\
+             mut x = 1\n\
+             mut y = add(x, 2)\n\
+             mut z = y + 10\n\
+             echo z\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 6 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+
+        // `stepIn` on the call line descends into `add` (a new, deeper frame at its first line).
+        assert_eq!(
+            session.step("stepIn"),
+            vec![("add".into(), 2), ("main".into(), 6)],
+            "stepIn should enter `add`"
+        );
+        // `stepOut` runs `add` to completion and lands back in `main` past the call (line 7).
+        assert_eq!(
+            session.step("stepOut"),
+            vec![("main".into(), 7)],
+            "stepOut should return to the caller"
+        );
+        // `next` advances one line within `main`.
+        assert_eq!(
+            session.step("next"),
+            vec![("main".into(), 8)],
+            "next should advance one line"
+        );
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    #[test]
+    fn step_over_a_call_does_not_descend_into_it() {
+        // `next` on the call line runs `add` to completion without stopping inside it.
+        let path = fixture(
+            "stepover",
+            "fn add(a: int, b: int): int {\n    \
+             return a + b\n}\n\
+             mut x = 1\n\
+             mut y = add(x, 2)\n\
+             echo y\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 5 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+
+        // Step over the `add(x, 2)` call: it must land on line 6 in `main`, never inside `add`.
+        assert_eq!(session.step("next"), vec![("main".into(), 6)]);
 
         session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
         session.disconnect_and_join();
