@@ -52,7 +52,7 @@ immutable-rebind rule (E0006) and the inferred-static philosophy.
 | `len` | free fn | **`.len()`** method on collections (rename existing collection `.count()`→`.len()`; iterators keep `.count()`) — D2 SETTLED |
 | `map`, `filter`, `sum` | free fn (+ lazy iter method) | **eager list methods** `xs.map(f)`/`.filter(f)`/`.sum()` — D1 SETTLED |
 | `signal`, `computed`, `effect` | prelude | **`use std.reactive.{…}`** |
-| `sleep`, `all`, `race`, `map_bounded` | prelude | **`use std.async.{…}`** |
+| `sleep`, `all`, `race`, `map_bounded` | prelude | **`use std.task.{…}`** (planned as `std.async`; renamed at P2b — `async` is a keyword) |
 | `next_id` | prelude | **`use std.id.{next_id}`** |
 
 **Import model — SELECTIVE BARE IMPORT, generalized to ALL std modules.** The parser already
@@ -72,7 +72,7 @@ depth. Names under `std.` are modules; names under `std.<module>.` are members.
 `self.reactive` / `self.executor`, which the stdlib registry seam deliberately cannot reach
 (`ModuleDispatch` only gets `&mut dyn Host`), so they keep their existing inline `Builtin` execution;
 we only stop binding their names into scope unless the module is imported. (This mirrors why
-`fs.*_async` already bypasses the registry.) So `std.reactive`/`std.async`/`std.id` are
+`fs.*_async` already bypasses the registry.) So `std.reactive`/`std.task`/`std.id` are
 **non-registry importable modules** whose member names alias existing `Builtin`s.
 
 ## Micro-decisions (SETTLED with user)
@@ -105,7 +105,7 @@ dependencies: enabling feature → move names out → reserve the remainder.
 - **P2a — `std.reactive`.** Register `reactive` as an importable module exporting
   `signal`/`computed`/`effect`. Migrate corpus (add `use std.reactive.{…}`). Remove the three from
   the always-on prelude. Gate their resolution behind import in all three stages.
-- **P2b — `std.async`.** Same for `sleep`/`all`/`race`/`map_bounded`.
+- **P2b — `std.task`.** Same for `sleep`/`all`/`race`/`map_bounded`. (Planned as `std.async`; renamed — `async` is a keyword, `use std.async.…` does not parse.)
 - **P2c — `std.id`.** Same for `next_id`.
 - **P3 — Reject-shadowing (closes the divergence).** Prelude is now `Ok`/`Err`/`some`/`panic`/
   `assert` (5). Add **E0046** in `noeta-check`: a binding whose name collides with a remaining

@@ -1,6 +1,6 @@
 # Unbound method handles — `Type.method` (prelude-redesign, slice MH)
 
-**Status: PLANNED.** Pulled into the arc (decided with user) so `map/filter/sum/len` moving to methods
+**Status: COMPLETE — and extended beyond this plan.** MH.1/MH.2 shipped as planned; the EX.2 closing track then added ASSOCIATED handles (`ctor = Stack.new`) and BOUND handles (`f = c.bump`, receiver captured), retiring the instance-only interim and the bound-handle deferral below. Pulled into the arc (decided with user) so `map/filter/sum/len` moving to methods
 does not lose the ability to pass those operations as values. Sits between P1.1 (methods added) and
 the P1.2 corpus migration — `builtin_as_value.noe` migrates to method handles instead of closures.
 
