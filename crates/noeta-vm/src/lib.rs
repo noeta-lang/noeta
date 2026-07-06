@@ -38,7 +38,8 @@ use std::sync::Arc;
 use noeta_ast::{BinaryOp, Program};
 use noeta_backend::{Backend, RunResult};
 use noeta_bytecode::{
-    BoolSide, Builtin, CaptureFrom, Const, Module, NarrowTarget, Op, Reg, ReuseCheck, StrPart,
+    BoolSide, Builtin, CaptureFrom, Chunk, Const, Module, NarrowTarget, Op, Reg, ReuseCheck,
+    StrPart,
 };
 use noeta_compiler::{Unsupported, compile};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
@@ -66,8 +67,10 @@ mod scheduler;
 /// JIT'd frame; a production/differential run leaves it `None` and pays one predicted branch per op.
 pub trait Debugger: Send {
     /// Called with the instruction about to execute (`proto` is its prototype index, `pc` its offset
-    /// in that prototype's code). May block until the user resumes.
-    fn before_op(&mut self, proto: u32, pc: usize) -> DebugAction;
+    /// in that prototype's code) and a [`DebugView`] of the paused stack — the live frames and their
+    /// register windows — so a pause can build a stack trace and read locals. May block until the
+    /// user resumes.
+    fn before_op(&mut self, proto: u32, pc: usize, view: &DebugView) -> DebugAction;
 }
 
 /// What the VM does after consulting the [`Debugger`] for an instruction.
@@ -77,6 +80,79 @@ pub enum DebugAction {
     Continue,
     /// Abandon the run (clean teardown, as an abort) — e.g. the client disconnected while paused.
     Terminate,
+}
+
+/// A read-only view of the paused VM handed to [`Debugger::before_op`]: the live frame stack and each
+/// frame's register window. It exists so a debugger can render a stack trace and inspect locals
+/// *without* the VM's private `Frame`/`Module`/`Chunk` types leaking across the crate boundary — the
+/// accessors hand back only public types (`&str`, [`Span`], [`Value`]). The innermost (currently
+/// executing) frame is index `depth() - 1`; index `0` is the bottom (`main`).
+#[derive(Debug)]
+pub struct DebugView<'a> {
+    module: &'a Module,
+    frames: &'a [Frame],
+    regs: &'a [Value],
+}
+
+impl<'a> DebugView<'a> {
+    /// Number of live frames on the call stack.
+    pub fn depth(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// The frame at call-stack index `i` (`0` = bottom `main`, `depth()-1` = innermost).
+    ///
+    /// The reported [`DebugFrame::op_span`] is the frame's *current source line*. For the innermost
+    /// frame that is the instruction about to run (`pc`, synced by the debugger consult). For a caller
+    /// frame, `pc` is the **resume** point — the instruction *after* the call (a call saves `pc + 1`)
+    /// — so we back up one to the call op itself, which carries the call-site span the user expects to
+    /// see for a frame that is waiting on a callee.
+    pub fn frame(&self, i: usize) -> DebugFrame<'a> {
+        let frame = &self.frames[i];
+        let chunk = &self.module.protos[frame.proto as usize];
+        let window = &self.regs[frame.base..frame.base + chunk.num_registers as usize];
+        let is_innermost = i + 1 == self.frames.len();
+        let pc = if is_innermost {
+            frame.pc
+        } else {
+            frame.pc.saturating_sub(1)
+        };
+        DebugFrame { chunk, pc, window }
+    }
+}
+
+/// One frame of a [`DebugView`]: its prototype's debug info (name, per-register local names) joined to
+/// the frame's live register window, so a debugger can read each named local's current value.
+#[derive(Debug)]
+pub struct DebugFrame<'a> {
+    chunk: &'a Chunk,
+    pc: usize,
+    window: &'a [Value],
+}
+
+impl<'a> DebugFrame<'a> {
+    /// The function's debug name (`"main"`, `"Point.mag"`, …). `None` if the program was compiled
+    /// without debug info (a non-debug build), where the frame carries no name.
+    pub fn name(&self) -> Option<&'a str> {
+        self.chunk.debug_name.as_deref()
+    }
+
+    /// The source span whose line is this frame's current line: the instruction about to execute for
+    /// the innermost frame, or the call op for a caller frame (see [`DebugView::frame`]). `None` for a
+    /// spanless op (rare) or a debug-info-less build.
+    pub fn op_span(&self) -> Option<Span> {
+        self.chunk.code.get(self.pc).and_then(Op::span)
+    }
+
+    /// Each named local in declaration order: its name, the span of its binding, and its current
+    /// register value. Pinned through coalescing (debug compiles), so each named local keeps a
+    /// dedicated register for the whole frame — the value read here is exactly that local's.
+    pub fn locals(&self) -> impl Iterator<Item = (&'a str, Span, Value)> + '_ {
+        self.chunk
+            .debug_locals
+            .iter()
+            .map(move |ld| (ld.name.as_str(), ld.def_span, self.window[ld.reg as usize]))
+    }
 }
 
 /// The bytecode-VM backend.
@@ -304,6 +380,7 @@ impl Backend for VmBackend {
 /// One activation record: a prototype index, its register file, the program counter, the caller
 /// register the return value flows into (irrelevant for the bottom/top-level frame), and an
 /// optional transform applied to the return value as it lands in the caller.
+#[derive(Debug)]
 struct Frame {
     proto: u32,
     /// This frame's register file occupies `regs[base .. base + proto.num_registers]` in the
@@ -2295,7 +2372,12 @@ impl<'m> Vm<'m> {
                 // disconnect while paused) unwinds cleanly, releasing the stack like any abort.
                 if let Some(debugger) = self.debugger.as_deref_mut() {
                     frames[top].pc = pc;
-                    if debugger.before_op(proto as u32, pc) == DebugAction::Terminate {
+                    let view = DebugView {
+                        module,
+                        frames: &frames[..],
+                        regs: &regs[..],
+                    };
+                    if debugger.before_op(proto as u32, pc, &view) == DebugAction::Terminate {
                         return Err(Abort);
                     }
                 }

@@ -1317,6 +1317,22 @@ impl<'m> FnCompiler<'m> {
             // (Phase 4) if it is the final reference; an irrelevant one stays a plain release.
             Stmt::DropVar { name, relevant, .. } => {
                 if let Resolved::Local(reg) = self.resolve(name) {
+                    // Debug compiles keep **plain** named locals alive to frame teardown instead of
+                    // freeing them at last use, so a debugger paused past a variable's final read
+                    // still sees its value rather than the `unit` the last-use `Op::Drop` would leave
+                    // (the register is pinned through coalescing, so nothing reuses the slot, and the
+                    // frame's normal window teardown releases the surviving value exactly once — the
+                    // interpreter path always releases the full window). This trades a little
+                    // promptness for an inspectable stack; it is behaviour-invisible because a
+                    // non-destructor value's reclamation is unobservable. A **destructor-bearing**
+                    // (`relevant`) local is *not* skipped: its `destruct` must fire at last use (spec
+                    // §2), and the window teardown uses a plain, non-destructor-aware release — so
+                    // dropping it here is both spec-correct and required to run the destructor at all.
+                    // Non-debug compiles are unaffected (the `Op::Drop` is emitted as before), so the
+                    // production bytecode and the differential oracle stay byte-identical.
+                    if self.module.debug && !*relevant {
+                        return Ok(());
+                    }
                     self.code.push(Op::Drop {
                         reg,
                         relevant: *relevant,
@@ -3873,6 +3889,12 @@ mod tests {
     /// Compile `src` in **debug** mode (as `noeta dap` does), threading the checker's site maps into
     /// `compile_with_sites` with `debug = true` so the per-prototype debug info is emitted.
     fn compile_dbg(src: &str) -> Module {
+        compile_flag(src, true)
+    }
+
+    /// Compile `src` through the full check→compile pipeline with an explicit `debug` flag, so a test
+    /// can compare the two compiles of the *same* program (debug vs production).
+    fn compile_flag(src: &str, debug: bool) -> Module {
         let source = Source::new(SourceId::FIRST, "test.noe", src);
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
@@ -3900,9 +3922,32 @@ mod tests {
             checked.construction_sites.clone(),
             &checked.destructor_relevance,
             false,
-            true,
+            debug,
         )
         .expect("compiles")
+    }
+
+    #[test]
+    fn debug_skips_plain_local_last_use_drops() {
+        // `a` is read for the last time at `mut b = a + 1`; the drop pass places an `Op::Drop` there.
+        // A **production** compile keeps that drop (prompt reclamation, unchanged). A **debug** compile
+        // skips it so a debugger paused at `b` can still read `a` — the whole point of D2. All values
+        // here are non-destructor immediates, so this is pure promptness, invisible to behaviour.
+        let src = "fn f(): int {\n  mut a = 10;\n  mut b = a + 1;\n  b\n}\nf();\n";
+        let drops = |m: &Module| {
+            m.protos
+                .iter()
+                .flat_map(|c| c.code.iter())
+                .filter(|op| matches!(op, noeta_bytecode::Op::Drop { .. }))
+                .count()
+        };
+        let prod = drops(&compile_flag(src, false));
+        let dbg = drops(&compile_flag(src, true));
+        assert!(prod > 0, "production drops `a` at its last use");
+        assert!(
+            dbg < prod,
+            "debug keeps plain locals live (skips their last-use drops): prod={prod} debug={dbg}"
+        );
     }
 
     #[test]

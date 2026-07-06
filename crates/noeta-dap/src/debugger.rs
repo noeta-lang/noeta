@@ -10,13 +10,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
 
 use noeta_bytecode::Module;
 use noeta_span::SourceMap;
-use noeta_vm::{DebugAction, Debugger};
+use noeta_vm::{DebugAction, DebugView, Debugger};
 use serde_json::{Value, json};
 
 use crate::MAIN_THREAD_ID;
@@ -28,6 +28,40 @@ pub enum Resume {
     Continue,
     /// Abandon the run (the client disconnected).
     Terminate,
+}
+
+/// The paused stack, captured by the run worker at a pause and read by the adapter thread to answer
+/// `stackTrace` / `scopes` / `variables`. `None` whenever the program is running (before the first
+/// pause, or after a resume). A `Mutex` because the two threads touch it at disjoint times — the
+/// worker writes it just before blocking and clears it on resume, the adapter reads it only while the
+/// worker is blocked — so contention is nil; the lock is purely for safe hand-off.
+pub type Paused = Arc<Mutex<Option<PausedState>>>;
+
+/// A snapshot of the call stack at a pause: fully owned (no borrow of VM internals), so the adapter
+/// thread can serialize it long after `before_op` returned. Innermost (currently executing) frame is
+/// first, matching the order DAP wants stack frames in.
+pub struct PausedState {
+    pub frames: Vec<FrameInfo>,
+}
+
+/// One captured stack frame: where it is paused (name + source position) and its in-scope locals.
+pub struct FrameInfo {
+    /// The function's debug name (`"main"`, `"Point.mag"`, …).
+    pub name: String,
+    /// The source file the frame is executing in, if the paused instruction carried a span.
+    pub path: Option<String>,
+    /// 1-based line/column of the instruction about to execute.
+    pub line: u32,
+    pub column: u32,
+    /// The named locals visible at the pause, in declaration order.
+    pub locals: Vec<VarInfo>,
+}
+
+/// One local variable's captured name, rendered value, and type.
+pub struct VarInfo {
+    pub name: String,
+    pub value: String,
+    pub ty: String,
 }
 
 /// Resolve editor breakpoint requests (`path → 1-based lines`) against the compiled program into the
@@ -94,6 +128,11 @@ pub struct DapDebugger {
     entered: bool,
     /// Set by the adapter to abandon the run even while it is executing (not paused) — checked each op.
     terminate: Arc<AtomicBool>,
+    /// The source map, to resolve each frame's instruction span to a file + line while capturing a
+    /// pause. Held (a per-run clone) so `capture` needs nothing from the adapter thread.
+    sources: SourceMap,
+    /// Where a pause publishes the captured stack for the adapter thread to read; cleared on resume.
+    paused: Paused,
     /// Outgoing events (a `stopped` when it pauses), funnelled to the writer thread.
     events: Sender<Value>,
     /// Resume commands from the adapter; recv blocks the run thread while paused.
@@ -105,6 +144,8 @@ impl DapDebugger {
         stops: HashSet<(u32, usize)>,
         stop_on_entry: bool,
         terminate: Arc<AtomicBool>,
+        sources: SourceMap,
+        paused: Paused,
         events: Sender<Value>,
         resume: Receiver<Resume>,
     ) -> DapDebugger {
@@ -113,13 +154,19 @@ impl DapDebugger {
             stop_on_entry,
             entered: false,
             terminate,
+            sources,
+            paused,
             events,
             resume,
         }
     }
 
-    /// Emit a `stopped` event and block until the adapter resumes or terminates the run.
-    fn pause(&mut self, reason: &str) -> DebugAction {
+    /// Capture the paused stack, emit a `stopped` event, and block until the adapter resumes or
+    /// terminates the run. The snapshot is published *before* the event so a `stackTrace` the client
+    /// sends on seeing `stopped` always finds it; it is cleared on resume so a late request after
+    /// `continue` reads an empty stack rather than stale frames.
+    fn pause(&mut self, reason: &str, view: &DebugView) -> DebugAction {
+        *self.paused.lock().unwrap() = Some(capture(view, &self.sources));
         let _ = self.events.send(event(
             "stopped",
             json!({
@@ -128,7 +175,7 @@ impl DapDebugger {
                 "allThreadsStopped": true,
             }),
         ));
-        match self.resume.recv() {
+        let action = match self.resume.recv() {
             // A spurious continue after a termination request still terminates.
             Ok(Resume::Continue) if !self.terminate.load(Ordering::Relaxed) => {
                 DebugAction::Continue
@@ -136,22 +183,69 @@ impl DapDebugger {
             Ok(Resume::Continue) => DebugAction::Terminate,
             // Terminate, or the adapter dropped the channel (session gone).
             Ok(Resume::Terminate) | Err(_) => DebugAction::Terminate,
-        }
+        };
+        *self.paused.lock().unwrap() = None;
+        action
     }
 }
 
 impl Debugger for DapDebugger {
-    fn before_op(&mut self, proto: u32, pc: usize) -> DebugAction {
+    fn before_op(&mut self, proto: u32, pc: usize, view: &DebugView) -> DebugAction {
         if self.terminate.load(Ordering::Relaxed) {
             return DebugAction::Terminate;
         }
         if self.stop_on_entry && !self.entered {
             self.entered = true;
-            return self.pause("entry");
+            return self.pause("entry", view);
         }
         if self.stops.contains(&(proto, pc)) {
-            return self.pause("breakpoint");
+            return self.pause("breakpoint", view);
         }
         DebugAction::Continue
     }
+}
+
+/// Snapshot the live [`DebugView`] into an owned [`PausedState`]. Walks the frame stack innermost
+/// first (the order DAP renders it); for each frame records its name, source position, and the locals
+/// that are *in scope at the pause* — those whose binding begins before the instruction about to run.
+/// A local declared later in the function has a pinned-but-unassigned register, so filtering by
+/// declaration span keeps the yet-to-exist names out of the view.
+fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
+    let mut frames = Vec::with_capacity(view.depth());
+    for i in (0..view.depth()).rev() {
+        let frame = view.frame(i);
+        let op_span = frame.op_span();
+        let (path, line, column) = match op_span {
+            Some(span) => {
+                let source = sources.source(span.source);
+                let lc = source.line_col(span.start);
+                (Some(source.name().to_string()), lc.line, lc.col)
+            }
+            None => (None, 0, 0),
+        };
+        let locals = frame
+            .locals()
+            .filter(|(_, def_span, _)| match op_span {
+                // In scope iff its binding begins strictly before the paused instruction. Strict, so a
+                // local being introduced by the very instruction we're stopped before isn't shown as
+                // bound yet.
+                Some(here) => def_span.start < here.start,
+                // No paused span to compare against: show every named local rather than hide them all.
+                None => true,
+            })
+            .map(|(name, _, value)| VarInfo {
+                name: name.to_string(),
+                value: value.display(),
+                ty: value.type_name().to_string(),
+            })
+            .collect();
+        frames.push(FrameInfo {
+            name: frame.name().unwrap_or("<anonymous>").to_string(),
+            path,
+            line,
+            column,
+            locals,
+        });
+    }
+    PausedState { frames }
 }

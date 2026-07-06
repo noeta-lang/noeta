@@ -26,14 +26,14 @@ mod session;
 use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use serde_json::{Value, json};
 
-use debugger::{DapDebugger, Resume, resolve_breakpoints};
+use debugger::{DapDebugger, FrameInfo, Paused, Resume, resolve_breakpoints};
 use protocol::{Writer, command_of, error_response, event, read_message, response};
 
 /// The debuggee is a single logical thread of execution; the DAP UI still needs a thread id to hang
@@ -68,6 +68,9 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
     // running one. Both target the current run's debugger.
     let mut resume_tx: Option<Sender<Resume>> = None;
     let mut terminate: Option<Arc<AtomicBool>> = None;
+    // The current run's captured pause, shared with its worker: `Some` only while the program is
+    // paused, so `stackTrace`/`scopes`/`variables` read the live stop and nothing otherwise.
+    let mut paused: Option<Paused> = None;
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
 
     while let Ok(Some(request)) = read_message(&mut reader) {
@@ -109,13 +112,16 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
                     Some(path) => {
                         let (r_tx, r_rx) = mpsc::channel::<Resume>();
                         let term = Arc::new(AtomicBool::new(false));
+                        let paused_state: Paused = Arc::new(Mutex::new(None));
                         resume_tx = Some(r_tx);
                         terminate = Some(Arc::clone(&term));
+                        paused = Some(Arc::clone(&paused_state));
                         workers.push(spawn_run(
                             path,
                             breakpoints.clone(),
                             stop_on_entry,
                             term,
+                            paused_state,
                             r_rx,
                             tx.clone(),
                         ));
@@ -132,6 +138,18 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
                     let _ = resume.send(Resume::Continue);
                 }
                 let _ = tx.send(response(&request, json!({ "allThreadsContinued": true })));
+            }
+            // The three introspection requests a client sends while paused. Each reads the shared
+            // captured stack (empty if the program isn't paused) — the worker is blocked inside its
+            // debugger, so this thread has the snapshot to itself.
+            "stackTrace" => {
+                let _ = tx.send(response(&request, stack_trace_body(&paused)));
+            }
+            "scopes" => {
+                let _ = tx.send(response(&request, scopes_body(&request)));
+            }
+            "variables" => {
+                let _ = tx.send(response(&request, variables_body(&request, &paused)));
             }
             "disconnect" => {
                 signal_terminate(&terminate, &resume_tx);
@@ -168,6 +186,7 @@ fn spawn_run(
     breakpoints: HashMap<String, Vec<u32>>,
     stop_on_entry: bool,
     terminate: Arc<AtomicBool>,
+    paused: Paused,
     resume: mpsc::Receiver<Resume>,
     out: Sender<Value>,
 ) -> JoinHandle<()> {
@@ -183,6 +202,8 @@ fn spawn_run(
                     stops,
                     stop_on_entry,
                     terminate,
+                    compiled.sources.clone(),
+                    paused,
                     out.clone(),
                     resume,
                 ));
@@ -282,6 +303,107 @@ fn exited_event(exit_code: i32) -> Value {
 
 fn terminated_event() -> Value {
     event("terminated", json!({}))
+}
+
+/// Run `f` against the current pause snapshot. `None` when no run is active or it isn't paused (the
+/// shared slot is empty), which is exactly when the client shouldn't have asked — the introspection
+/// handlers then fall back to an empty result rather than an error.
+fn with_paused<T>(
+    paused: &Option<Paused>,
+    f: impl FnOnce(&debugger::PausedState) -> T,
+) -> Option<T> {
+    let guard = paused.as_ref()?.lock().unwrap();
+    guard.as_ref().map(f)
+}
+
+/// The `stackTrace` response body: the captured frames innermost-first, each with an `id` the client
+/// echoes back in `scopes`. Empty when the program isn't paused.
+fn stack_trace_body(paused: &Option<Paused>) -> Value {
+    let frames = with_paused(paused, |state| {
+        state
+            .frames
+            .iter()
+            .enumerate()
+            .map(|(id, frame)| stack_frame(id, frame))
+            .collect::<Vec<_>>()
+    })
+    .unwrap_or_default();
+    json!({ "totalFrames": frames.len(), "stackFrames": frames })
+}
+
+/// One DAP `StackFrame`: its id (index in the snapshot), name, source position, and — when the frame
+/// carried a span — the file it is executing in.
+fn stack_frame(id: usize, frame: &FrameInfo) -> Value {
+    let mut value = json!({
+        "id": id,
+        "name": frame.name,
+        "line": frame.line,
+        "column": frame.column,
+    });
+    if let Some(path) = &frame.path {
+        value["source"] = json!({ "name": basename(path), "path": path });
+    }
+    value
+}
+
+/// The `scopes` response body: one `Locals` scope for the requested frame. Its `variablesReference`
+/// is `frameId + 1` — non-zero (0 means "no children" in DAP) and decodable back to the frame in
+/// `variables`.
+fn scopes_body(request: &Value) -> Value {
+    let frame_id = request
+        .get("arguments")
+        .and_then(|a| a.get("frameId"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    json!({
+        "scopes": [ {
+            "name": "Locals",
+            "variablesReference": frame_id + 1,
+            "expensive": false,
+        } ]
+    })
+}
+
+/// The `variables` response body: the locals of the frame the `variablesReference` came from
+/// (`ref - 1`). Empty when not paused or the reference is stale. Values are leaves for now, so each
+/// carries `variablesReference: 0` (not expandable) — structured drill-down is a later slice.
+fn variables_body(request: &Value, paused: &Option<Paused>) -> Value {
+    let var_ref = request
+        .get("arguments")
+        .and_then(|a| a.get("variablesReference"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let variables = var_ref
+        .checked_sub(1)
+        .and_then(|frame_id| {
+            with_paused(paused, |state| {
+                state.frames.get(frame_id as usize).map(|frame| {
+                    frame
+                        .locals
+                        .iter()
+                        .map(|v| {
+                            json!({
+                                "name": v.name,
+                                "value": v.value,
+                                "type": v.ty,
+                                "variablesReference": 0,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .flatten()
+        })
+        .unwrap_or_default();
+    json!({ "variables": variables })
+}
+
+/// The final path component, for a `Source.name` alongside the full `path`.
+fn basename(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
 }
 
 #[cfg(test)]
@@ -509,5 +631,143 @@ mod tests {
         let messages = drive(&[request(1, "frobnicate", json!({}))]);
         let resp = response_to(&messages, "frobnicate").expect("a response");
         assert_eq!(resp["success"], false);
+    }
+
+    /// An interactive client over real OS pipes. Unlike `drive` (which pre-buffers every request and
+    /// only inspects output after the loop ends), a `Session` can *wait* for the adapter to reach a
+    /// state before sending the next request — essential for the paused introspection requests, since
+    /// `stackTrace` only has a stack to return once the worker has actually paused.
+    struct Session {
+        to_adapter: io::PipeWriter,
+        from_adapter: BufReader<io::PipeReader>,
+        adapter: Option<JoinHandle<()>>,
+        seq: i64,
+    }
+
+    impl Session {
+        fn start() -> Session {
+            let (adapter_reads, client_writes) = io::pipe().unwrap();
+            let (client_reads, adapter_writes) = io::pipe().unwrap();
+            let adapter =
+                thread::spawn(move || serve(BufReader::new(adapter_reads), adapter_writes));
+            Session {
+                to_adapter: client_writes,
+                from_adapter: BufReader::new(client_reads),
+                adapter: Some(adapter),
+                seq: 0,
+            }
+        }
+
+        /// Send a request (auto-assigning a monotonic seq) and flush it to the adapter.
+        fn send(&mut self, command: &str, arguments: Value) {
+            self.seq += 1;
+            let bytes = frame(request(self.seq, command, arguments));
+            self.to_adapter.write_all(&bytes).unwrap();
+            self.to_adapter.flush().unwrap();
+        }
+
+        /// Read messages until one satisfies `pred`, returning it (earlier messages are discarded).
+        fn recv_until(&mut self, pred: impl Fn(&Value) -> bool) -> Value {
+            loop {
+                let message = read_message(&mut self.from_adapter)
+                    .unwrap()
+                    .expect("adapter closed the stream unexpectedly");
+                if pred(&message) {
+                    return message;
+                }
+            }
+        }
+
+        /// Read up to the response for `command`.
+        fn response(&mut self, command: &str) -> Value {
+            self.recv_until(|m| m["type"] == "response" && m["command"] == command)
+        }
+
+        /// Block until the adapter reports a `stopped` event (the program paused).
+        fn wait_stopped(&mut self) -> Value {
+            self.recv_until(|m| m["type"] == "event" && m["event"] == "stopped")
+        }
+
+        /// End the session: disconnect, then join the adapter thread so nothing outlives the test.
+        fn disconnect_and_join(mut self) {
+            self.send("disconnect", json!({}));
+            let _ = self.response("disconnect");
+            self.adapter.take().unwrap().join().unwrap();
+        }
+    }
+
+    #[test]
+    fn paused_at_a_breakpoint_reports_the_stack_scopes_and_locals() {
+        // Break on `echo result` (line 4), inside `compute`, called from top-level `main`. A builtin
+        // call is a spanned op, so the line resolves to a stop; by then all three locals are assigned.
+        let path = fixture(
+            "inspect",
+            "fn compute(n: int): int {\n    \
+             mut doubled = n + n\n    \
+             mut result = doubled + 1\n    \
+             echo result\n    \
+             return result\n}\n\
+             echo \"start\"\n\
+             mut answer = compute(20)\n\
+             echo \"end\"\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 4 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+
+        // Sync point: only once the worker has paused does the stack exist to inspect.
+        let stopped = session.wait_stopped();
+        assert_eq!(stopped["body"]["reason"], "breakpoint");
+
+        // stackTrace: innermost frame first — `compute` called from `main`, at the breakpoint line.
+        session.send("stackTrace", json!({ "threadId": MAIN_THREAD_ID }));
+        let frames = session.response("stackTrace");
+        let frames = frames["body"]["stackFrames"].as_array().unwrap();
+        assert_eq!(frames.len(), 2, "compute + main: {frames:#?}");
+        assert_eq!(frames[0]["name"], "compute");
+        assert_eq!(frames[0]["line"], 4);
+        assert_eq!(frames[0]["source"]["path"], program.as_str());
+        assert_eq!(frames[1]["name"], "main");
+        // The caller frame shows its *call site* (line 8, `mut answer = compute(20)`), not the resume
+        // instruction after it.
+        assert_eq!(frames[1]["line"], 8);
+
+        // scopes(compute) → a Locals scope with an expandable (non-zero) reference.
+        let compute_id = frames[0]["id"].clone();
+        session.send("scopes", json!({ "frameId": compute_id }));
+        let scopes = session.response("scopes");
+        let scope = &scopes["body"]["scopes"][0];
+        assert_eq!(scope["name"], "Locals");
+        let var_ref = scope["variablesReference"].as_i64().unwrap();
+        assert!(var_ref > 0, "locals must be expandable");
+
+        // variables: `compute`'s locals, all in scope at `return result` — n=20, doubled=40, result=41.
+        session.send("variables", json!({ "variablesReference": var_ref }));
+        let variables = session.response("variables");
+        let vars = variables["body"]["variables"].as_array().unwrap();
+        let named = |name: &str| {
+            vars.iter()
+                .find(|v| v["name"] == name)
+                .unwrap_or_else(|| panic!("no local {name:?} in {vars:#?}"))
+                .clone()
+        };
+        assert_eq!(named("n")["value"], "20");
+        assert_eq!(named("n")["type"], "int");
+        assert_eq!(named("doubled")["value"], "40");
+        assert_eq!(named("result")["value"], "41");
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
     }
 }
