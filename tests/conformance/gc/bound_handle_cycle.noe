@@ -1,0 +1,18 @@
+// A bound handle stored INTO the object it captures forms a reference cycle (object → handle →
+// object). The handle's captured receiver is a traversed child, so the backup trace collector
+// reclaims the pair at teardown — residency 0 (the leak oracle runs this corpus on both backends).
+// expect: stdout "7"
+// expect: stdout "done"
+// expect: exit 0
+class Node {
+    pub mut cb: dyn
+    pub tag: int
+    fn new(): Node { return Node { cb: 0, tag: 7 } }
+    fn ping(): int { return self.tag }
+}
+
+n = Node.new()
+n.cb = n.ping
+f = n.ping
+echo f()
+echo "done"

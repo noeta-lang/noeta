@@ -313,6 +313,26 @@ pub(crate) enum Payload {
     /// A first-class prelude builtin (`len`/`map`/`filter`/`sum`) used as a value. A leaf (the
     /// `Builtin` id is plain data); `noeta-vm` dispatches it at an indirect call site.
     NativeFn(Builtin),
+    /// A selectively-imported native-module function (`use std.math.sqrt` → bare `sqrt`) used as a
+    /// value or called directly. A leaf (two owned `String`s, no child values); dispatched through
+    /// the same `call_native_module` path as a `<module>.<func>` member call, so the two backends
+    /// agree by construction.
+    ModuleFn { module: String, func: String },
+    /// An unbound method handle (`Type.method` as a value). When called it dispatches by name — as
+    /// an instance method on its first argument (`associated == false`), or as an associated call
+    /// `ty.method(args)` (`associated == true`). A leaf (owned `String`s + a bool). Both backends
+    /// dispatch through the shared method machinery, so they agree by construction.
+    MethodHandle {
+        ty: String,
+        method: String,
+        associated: bool,
+    },
+    /// A **bound** method handle (`value.method` as a value, prelude-redesign EX.2b): the receiver
+    /// is captured at bind time (one owned reference — for a `class` the shared instance, so later
+    /// mutations are visible through the handle; for a value type a value-semantic copy). Calling it
+    /// dispatches `method` on the captured receiver. NOT a leaf: `recv` is a child value (traversed
+    /// by the cycle collector, released with the handle).
+    BoundMethod { recv: Value, method: String },
     /// An `fs.open` file handle (M2.5): a mutable cursor over a content snapshot (read) or a
     /// pending write buffer. The whole state machine lives in `noeta_stdlib::FileHandle` so it is
     /// byte-identical to the tree-walker's. Holds no child `Value`s (only owned `String`s), so it
@@ -675,6 +695,8 @@ pub(crate) fn free(value: Value) {
         Payload::Future(step) => release_child(*step),
         // A channel-send future owns the message it is queuing until it is enqueued or dropped.
         Payload::ChannelSend(_, value) => release_child(*value),
+        // A bound method handle owns its captured receiver.
+        Payload::BoundMethod { recv, .. } => release_child(*recv),
         // A packed list (P-PACK 2.4) owns only primitive words — no child references — so freeing it
         // just drops the buffer (and its shared `Rc<PackedSchema>`), like any other leaf.
         Payload::Str(_)
@@ -682,6 +704,8 @@ pub(crate) fn free(value: Value) {
         | Payload::Int(_)
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
+        | Payload::ModuleFn { .. }
+        | Payload::MethodHandle { .. }
         | Payload::PackedList { .. }
         | Payload::Timer(_)
         | Payload::Handle(..)
@@ -856,6 +880,8 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         Payload::Future(step) => push(*step),
         // A channel-send future owns one reference to the message it is queuing.
         Payload::ChannelSend(_, value) => push(*value),
+        // A bound method handle owns one reference to its captured receiver.
+        Payload::BoundMethod { recv, .. } => push(*recv),
         // A packed list holds only primitive words (no child references) — a GC leaf; a timer holds
         // only its integer deadline.
         Payload::Str(_)
@@ -863,6 +889,8 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::Int(_)
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
+        | Payload::ModuleFn { .. }
+        | Payload::MethodHandle { .. }
         | Payload::PackedList { .. }
         | Payload::Timer(_)
         | Payload::Handle(..)

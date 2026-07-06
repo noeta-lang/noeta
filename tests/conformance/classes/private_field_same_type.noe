@@ -10,7 +10,7 @@ class Point {
     y: int
     fn new(x: int, y: int): Point { return Point { x: x, y: y }; }
     impl Equatable {
-        fn eq(other: Point): bool { return x == other.x && y == other.y; }
+        fn eq(other: Point): bool { return self.x == other.x && self.y == other.y; }
     }
 }
 

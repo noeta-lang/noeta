@@ -38,8 +38,8 @@ for p in ps {
 }
 echo total                     // 255 + 1 + 7
 
-echo map(ps, fn(p) => p.r)     // demote-to-boxed producer
-echo filter(ps, fn(p) => p.opaque).count()
+echo ps.map(fn(p) => p.r)     // demote-to-boxed producer
+echo ps.filter(fn(p) => p.opaque).len()
 echo ps.slice(1, 3)            // packed_select over columns
 echo ps.reverse()              // packed_select over columns
 echo ps.set(1, P { r: 9, g: 9, b: 9, opaque: false })
@@ -51,7 +51,7 @@ echo ps ~ [P { r: 4, g: 5, b: 6, opaque: false }]   // column concat (O(n) rebui
 xs = [V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }, V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }]
 ys = from_bytes::<V3>(xs.to_bytes())
 echo ys == xs
-echo ys.count()
+echo ys.len()
 echo ys[1].y
 
 // A nested `@packed` field inside a column struct: the nested `V3` stays a contiguous per-element

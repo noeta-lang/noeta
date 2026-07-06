@@ -24,10 +24,10 @@ class Desc {
 
     impl Comparable {
         fn compare(other: Desc): Ordering {
-            if amount > other.amount {
+            if self.amount > other.amount {
                 return Ordering.Less;
             }
-            if amount < other.amount {
+            if self.amount < other.amount {
                 return Ordering.Greater;
             }
             return Ordering.Equal;

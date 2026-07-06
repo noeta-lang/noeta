@@ -13,7 +13,7 @@ class Money {
 
     impl Add {
         fn add(other: Money): Money {
-            return Money { amount: amount + other.amount, currency: currency };
+            return Money { amount: self.amount + other.amount, currency: self.currency };
         }
     }
 }

@@ -62,6 +62,10 @@ pub enum CaptureFrom {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtin {
     Len,
+    /// `next_id()` — the deterministic seeded counter (`use std.id`, prelude-redesign P2c). Direct
+    /// calls compile to the dedicated `Op::NextId`; this variant exists so the imported name can be
+    /// bound as a first-class value (`Op::LoadNativeFn`) and dispatched indirectly.
+    NextId,
     Map,
     Filter,
     Sum,
@@ -97,6 +101,7 @@ impl Builtin {
     /// The surface name, for diagnostics ("`map` expects a list, ...").
     pub fn name(self) -> &'static str {
         match self {
+            Builtin::NextId => "next_id",
             Builtin::Len => "len",
             Builtin::Map => "map",
             Builtin::Filter => "filter",
@@ -115,6 +120,7 @@ impl Builtin {
     /// The builtin a prelude name refers to, if it is one this slice implements.
     pub fn from_name(name: &str) -> Option<Builtin> {
         match name {
+            "next_id" => Some(Builtin::NextId),
             "len" => Some(Builtin::Len),
             "map" => Some(Builtin::Map),
             "filter" => Some(Builtin::Filter),
@@ -145,6 +151,17 @@ pub enum Const {
     /// A Ring 2 native module, by surface name (`use std.{json}` lowers to loading this then
     /// storing it into the named global).
     NativeModule(String),
+    /// A selectively-imported native-module function (`use std.math.sqrt`): the `(module, func)`
+    /// pair, loaded then stored into the bare-name global. Called (or passed as a value) through the
+    /// same `call_native_module` path as a `<module>.<func>` member call.
+    ModuleFn { module: String, func: String },
+    /// An unbound method handle (`Type.method` as a value): the `(ty, method, associated)` triple.
+    /// Called by dispatching on its first argument (instance) or as an associated call (associated).
+    MethodHandle {
+        ty: String,
+        method: String,
+        associated: bool,
+    },
 }
 
 /// One segment of a fused string interpolation ([`Op::BuildString`], P-VMT-STR). A `Literal` is a
@@ -329,6 +346,13 @@ pub enum Op {
     LoadNativeFn {
         dst: Reg,
         func: Builtin,
+    },
+    /// `dst = <recv>.method` — build a **bound** method handle (prelude-redesign EX.2b): captures
+    /// one retained reference to the receiver; calling the handle dispatches `method` on it.
+    BindMethod {
+        dst: Reg,
+        recv: Reg,
+        method: NameId,
     },
     /// `dst = [items...]` — build a heap list, retaining each element into it.
     MakeList {
@@ -1367,6 +1391,12 @@ fn const_repr(c: &Const) -> String {
         Const::F32(f) => format!("{f:?}f32"),
         Const::Str(s) => format!("{s:?}"),
         Const::NativeModule(name) => format!("module {name}"),
+        Const::ModuleFn { module, func } => format!("fn {module}.{func}"),
+        Const::MethodHandle {
+            ty,
+            method,
+            associated,
+        } => format!("handle {ty}.{method}{}", if *associated { " (assoc)" } else { "" }),
     }
 }
 
@@ -1402,6 +1432,9 @@ fn op_repr(
             captures.len()
         ),
         Op::LoadNativeFn { dst, func } => format!("LoadNativeFn r{dst} <- {}", func.name()),
+        Op::BindMethod { dst, recv, method } => {
+            format!("BindMethod  r{dst} <- r{recv}.{}", n(method))
+        }
         Op::MakeCell { dst, src } => format!("MakeCell    r{dst} <- cell(r{src})"),
         Op::CellGet { dst, cell } => format!("CellGet     r{dst} <- *r{cell}"),
         Op::CellSet { cell, src } => format!("CellSet     *r{cell} <- r{src}"),

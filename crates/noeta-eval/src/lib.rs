@@ -92,6 +92,8 @@ impl Backend for TreeWalkBackend {
                 for_stream_sites: &checked.for_stream_sites,
                 width_sites: &checked.width_sites,
                 construction_sites: &checked.construction_sites,
+                handle_sites: &checked.handle_sites,
+                bound_handle_sites: &checked.bound_handle_sites,
                 f32_literal_sites: &checked.f32_literal_sites,
             },
         )
@@ -401,26 +403,37 @@ impl Builtin {
         }
     }
 
+    /// The builtin behind a **virtual-module** function name (`use std.reactive.{signal}` →
+    /// `Builtin::Signal`, prelude-redesign P2) — the names `registry::VIRTUAL_MODULES` exports.
+    /// The bytecode compiler resolves the same names through its own `Builtin::from_name`.
+    fn from_virtual_name(name: &str) -> Option<Builtin> {
+        match name {
+            "signal" => Some(Builtin::Signal),
+            "computed" => Some(Builtin::Computed),
+            "effect" => Some(Builtin::Effect),
+            "sleep" => Some(Builtin::Sleep),
+            "all" => Some(Builtin::All),
+            "race" => Some(Builtin::Race),
+            "map_bounded" => Some(Builtin::MapBounded),
+            "next_id" => Some(Builtin::NextId),
+            _ => None,
+        }
+    }
+
     /// The prelude functions registered in every program's global scope. `none` is a
     /// prelude *value* (not a function), so it is bound separately in [`Interpreter::new`].
     const PRELUDE: &'static [Builtin] = &[
-        Builtin::NextId,
-        Builtin::Len,
-        Builtin::Map,
-        Builtin::Filter,
-        Builtin::Sum,
+        // `NextId` left the prelude (P2c) for `use std.id` — like the P2a/P2b names below.
+        // `Len`/`Map`/`Filter`/`Sum` left the prelude (prelude-redesign P1.2): the collection
+        // METHOD forms route to the same impls; `list.len`-style handles cover value use.
         Builtin::MakeOk,
         Builtin::MakeErr,
         Builtin::MakeSome,
         Builtin::Panic,
         Builtin::Assert,
-        Builtin::Sleep,
-        Builtin::All,
-        Builtin::Race,
-        Builtin::MapBounded,
-        Builtin::Signal,
-        Builtin::Computed,
-        Builtin::Effect,
+        // `Signal`/`Computed`/`Effect` left the prelude (P2a) for `use std.reactive`, and
+        // `Sleep`/`All`/`Race`/`MapBounded` (P2b) for `use std.task` — all bound by
+        // `declare_use` as first-class builtin values when imported.
     ];
 }
 
@@ -1262,12 +1275,7 @@ impl Interpreter {
         for obj in &survivors {
             if let Some(body) = obj.def.destructor.clone() {
                 let scope = Scope::child(&self.scope);
-                {
-                    let slots = obj.slots.borrow();
-                    for (spec, field) in obj.def.fields.iter().zip(slots.iter()) {
-                        scope.declare(spec.name.clone(), field.clone(), false);
-                    }
-                }
+                // Only `self` is in scope (EX.1 — member access is explicit: `self.field`).
                 scope.declare("self".to_string(), Value::Object(obj.clone()), false);
                 let saved = std::mem::replace(&mut self.scope, scope);
                 let _ = self.exec_ir_fn_body(&body);
@@ -1325,6 +1333,8 @@ impl Interpreter {
             // closure/future/iterator's cells). Container-before-contained, deferring to the true last
             // reference of each capture.
             Value::Function(c) => self.destroy_closure(c),
+            // A bound handle owns its captured receiver — destroy it with the handle.
+            Value::BoundMethod(recv, _) => self.destroy_value(*recv),
             Value::Future(inner) => self.destroy_boxed(inner),
             Value::Iter(state) => self.destroy_iter(state),
             // Scalars/types/handles bear no destructor; their `Rc`/value drops here, reclaiming memory.
@@ -1404,14 +1414,7 @@ impl Interpreter {
         //    part of any expression's value, so they are swallowed at this boundary.
         if let Some(body) = obj.def.destructor.clone() {
             let scope = Scope::child(&self.scope);
-            {
-                // Bind the fields into the destructor scope, then release the borrow before running
-                // the body (which may re-enter and read/mutate the same instance via `self`).
-                let slots = obj.slots.borrow();
-                for (spec, field) in obj.def.fields.iter().zip(slots.iter()) {
-                    scope.declare(spec.name.clone(), field.clone(), false);
-                }
-            }
+            // Only `self` is in scope (EX.1 — member access is explicit: `self.field`).
             scope.declare("self".to_string(), Value::Object(obj.clone()), false);
             let saved = std::mem::replace(&mut self.scope, scope);
             let _ = self.exec_ir_fn_body(&body);
@@ -1534,12 +1537,35 @@ impl Interpreter {
     /// M0 each imported name resolves to an *opaque stub type* so references and all-fields
     /// literals (`User { name: ... }`) work even though the type's real shape is unknown.
     fn declare_use(&mut self, path: &[String], names: &[noeta_ast::UseName]) {
-        // `use std.{json, ...}` binds each recognized name to its Ring 2 native module; other
-        // imports (and unrecognized `std` names) fall back to the opaque-stub binding.
+        // `use std.{json, ...}` binds each recognized name to its Ring 2 native module; a selective
+        // member import (`use std.math.sqrt`) binds each member to a `(module, func)` module-function
+        // value; other imports (and unrecognized `std` names) fall back to the opaque-stub binding.
         let is_std = path == ["std"];
+        let selective_module = (path.len() == 2 && path[0] == "std")
+            .then(|| path[1].as_str())
+            .filter(|m| {
+                noeta_stdlib::registry::find_module(m).is_some()
+                    || noeta_stdlib::registry::is_virtual_module(m)
+            });
         for imported in names {
-            let value = if is_std && noeta_stdlib::registry::find_module(&imported.name).is_some() {
+            let value = if is_std
+                && (noeta_stdlib::registry::find_module(&imported.name).is_some()
+                    || noeta_stdlib::registry::is_virtual_module(&imported.name))
+            {
                 Value::NativeModule(imported.name.clone())
+            } else if let Some(module) = selective_module
+                && noeta_stdlib::registry::virtual_module_function(module, &imported.name)
+            {
+                // A virtual-module member (`use std.reactive.{signal}`, P2a): the function IS a
+                // builtin, so bind the first-class builtin value — the old prelude binding, gated.
+                Value::Builtin(
+                    Builtin::from_virtual_name(&imported.name)
+                        .expect("every virtual-module function is a named builtin"),
+                )
+            } else if let Some(module) = selective_module
+                && noeta_stdlib::registry::is_module_function(module, &imported.name)
+            {
+                Value::ModuleFn(module.to_string(), imported.name.clone())
             } else {
                 Value::Type(Rc::new(TypeDef {
                     name: imported.name.clone(),
@@ -2292,13 +2318,33 @@ impl Interpreter {
                 )),
             };
         }
+        // Eager collection methods that reuse the prelude builtin impls (prelude-redesign P1):
+        // `xs.map(f)` / `xs.filter(f)` / `xs.sum()` on a list. Routed through `call_builtin` with the
+        // receiver as the first argument, so the method form and the (legacy) free-function form
+        // `map(xs, f)` share exactly one implementation. A user object's own `map`/`filter`/`sum`
+        // method wins — it is dispatched earlier, before this built-in fallback.
+        if let Value::List(_) = &receiver
+            && let Some(builtin) = match name {
+                "map" if args.len() == 1 => Some(Builtin::Map),
+                "filter" if args.len() == 1 => Some(Builtin::Filter),
+                "sum" if args.is_empty() => Some(Builtin::Sum),
+                _ => None,
+            }
+        {
+            let mut builtin_args = Vec::with_capacity(args.len() + 1);
+            builtin_args.push(receiver);
+            builtin_args.extend(args);
+            return self.call_builtin(builtin, builtin_args, span);
+        }
         let arity_ok = args.is_empty();
+        // `len()` is the length of a collection (P1.3 — `count` is iterator-only, a consuming
+        // terminal; a collection `count` is an unknown method like any other).
         let result = match (name, &receiver) {
-            ("count", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
-            ("count", Value::Set(items, _)) if arity_ok => Some(Value::Int(items.len() as i64)),
-            ("count", Value::Map(entries, _)) if arity_ok => Some(Value::Int(entries.len() as i64)),
-            ("count", Value::Str(s)) if arity_ok => Some(Value::Int(s.chars().count() as i64)),
-            ("count", Value::Bytes(b)) if arity_ok => Some(Value::Int(b.len() as i64)),
+            ("len", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
+            ("len", Value::Set(items, _)) if arity_ok => Some(Value::Int(items.len() as i64)),
+            ("len", Value::Map(entries, _)) if arity_ok => Some(Value::Int(entries.len() as i64)),
+            ("len", Value::Str(s)) if arity_ok => Some(Value::Int(s.chars().count() as i64)),
+            ("len", Value::Bytes(b)) if arity_ok => Some(Value::Int(b.len() as i64)),
             // `.enumerate()` yields a list of `(index, value)` **tuples** (object-model slice 4b —
             // tuples are the positional-pair type), destructured by a `for (i, x) in …` pattern.
             ("enumerate", Value::List(items)) if arity_ok => {
@@ -2319,12 +2365,13 @@ impl Interpreter {
             // always `UnknownName` regardless of arity. (Without this guard, `xs.map(f)` — `map` is a
             // free function, not a method — reported `TypeMismatch` here while the VM reported
             // `UnknownName`; the guard makes both backends agree.)
-            None if !arity_ok && (name == "count" || name == "enumerate") => Err(self
-                .runtime_error(
+            None if !arity_ok && (name == "len" || name == "enumerate") => {
+                Err(self.runtime_error(
                     DiagnosticCode::TypeMismatch,
                     span,
                     format!("method `{name}` takes no arguments"),
-                )),
+                ))
+            }
             None => Err(self.runtime_error(
                 DiagnosticCode::UnknownName,
                 span,
@@ -2637,6 +2684,22 @@ impl Interpreter {
         {
             let id = self.executor.spawn_io(&mut *self.host, req);
             return Ok(Value::AsyncIo(id));
+        }
+        // A virtual module's functions (`reactive.signal(...)`, prelude-redesign P2) are builtins —
+        // they need the executor/reactive graph the registry seam cannot reach — so a qualified call
+        // intercepts here, ahead of registry dispatch, exactly like `fs.*_async`. Mirrors the VM.
+        if noeta_stdlib::registry::is_virtual_module(module) {
+            let Some(builtin) = noeta_stdlib::registry::virtual_module_function(module, func)
+                .then(|| Builtin::from_virtual_name(func))
+                .flatten()
+            else {
+                return Err(self.runtime_error(
+                    DiagnosticCode::UnknownName,
+                    span,
+                    format!("module `{module}` has no function `{func}`"),
+                ));
+            };
+            return self.call_builtin(builtin, args.to_vec(), span);
         }
         // A function registered in the native-extension registry dispatches through the shared
         // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host
@@ -3266,6 +3329,39 @@ impl Interpreter {
     fn call(&mut self, callee: Value, args: Vec<Value>, span: Span) -> Eval<Value> {
         match callee {
             Value::Builtin(builtin) => self.call_builtin(builtin, args, span),
+            // A selectively-imported module function (`use std.math.sqrt`) called by its bare name —
+            // dispatched exactly like the `math.sqrt(...)` member call.
+            Value::ModuleFn(module, func) => {
+                self.call_native_module(&module, &func, &args, span)
+            }
+            // An unbound method handle (`Type.method` as a value). An associated handle dispatches
+            // on the named type (`ty.method(args)`); an instance handle takes its first argument as
+            // the receiver (`recv.method(rest)`). Both route through the ordinary (total) method call.
+            Value::MethodHandle(ty, method, associated) => {
+                if associated {
+                    match self.scope.lookup(&ty) {
+                        Some(type_value) => self.call_method(type_value, &method, args, span),
+                        None => Err(self.runtime_error(
+                            DiagnosticCode::UnknownName,
+                            span,
+                            format!("cannot find type `{ty}` for method handle `{ty}.{method}`"),
+                        )),
+                    }
+                } else {
+                    let mut args = args;
+                    if args.is_empty() {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::TypeMismatch,
+                            span,
+                            format!("method handle `{ty}.{method}` needs a receiver argument"),
+                        ));
+                    }
+                    let recv = args.remove(0);
+                    self.call_method(recv, &method, args, span)
+                }
+            }
+            // A bound handle (`f = x.method`, EX.2b): dispatch the method on the captured receiver.
+            Value::BoundMethod(recv, method) => self.call_method(*recv, &method, args, span),
             Value::Function(closure) => self.call_closure(&closure, args, span),
             other => Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
@@ -4508,7 +4604,11 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
             .as_ref()
             .map(|r| (**r).clone())
             .unwrap_or_else(|| TypeRepr::Map(dyn_(), dyn_())),
-        Value::Function(_) | Value::Builtin(_) => TypeRepr::Fn(Vec::new(), dyn_()),
+        Value::Function(_)
+        | Value::Builtin(_)
+        | Value::ModuleFn(..)
+        | Value::MethodHandle(..)
+        | Value::BoundMethod(..) => TypeRepr::Fn(Vec::new(), dyn_()),
         // A generic enum instance carrying a reflected type tag (R2b.2) reports its precise type;
         // otherwise the head-only classification (`Option`/`Result` by name, else the enum name with
         // empty args). Mirrors `vm_type_repr`'s node-tag consultation.
@@ -4702,7 +4802,14 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
         TypeRef::Tuple { .. } => matches!(value, Value::Tuple(_)),
         // A function type is erased to a head-constructor "is callable" test (params/return dropped),
         // matching the VM's `NarrowTarget::Fn` (type_name `"function"`).
-        TypeRef::Fn { .. } => matches!(value, Value::Function(_) | Value::Builtin(_)),
+        TypeRef::Fn { .. } => matches!(
+            value,
+            Value::Function(_)
+                | Value::Builtin(_)
+                | Value::ModuleFn(..)
+                | Value::MethodHandle(..)
+                | Value::BoundMethod(..)
+        ),
         TypeRef::Named { name, args, .. } => {
             let head_ok = match name.as_str() {
                 "int" => matches!(value, Value::Int(_)),
@@ -4989,7 +5096,11 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
             )
         }
         Value::Enum(e) => NativeValue::Str(e.variant.clone()),
-        Value::Function(_) | Value::Builtin(_) => NativeValue::Str("<fn>".to_string()),
+        Value::Function(_)
+        | Value::Builtin(_)
+        | Value::ModuleFn(..)
+        | Value::MethodHandle(..)
+        | Value::BoundMethod(..) => NativeValue::Str("<fn>".to_string()),
         Value::NativeModule(module) => NativeValue::Str(format!("<module {module}>")),
         Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
         // An iterator has no JSON analog — its opaque display form, like the VM.
@@ -5271,7 +5382,7 @@ mod tests {
         // `a + b` on a class implementing `Add` dispatches to its `add` method (M1.8); the VM
         // reproduces this identically (see noeta-vm), guarded by the differential oracle.
         let out = run(
-            "class Money {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): Money { return Money { amount: a, currency: c }; }\n  impl Add {\n    fn add(other: Money): Money { return Money { amount: amount + other.amount, currency: currency }; }\n  }\n}\na = Money.new(5, \"USD\");\nb = Money.new(3, \"USD\");\nt = a + b;\necho t.amount;\necho t.currency;\n",
+            "class Money {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): Money { return Money { amount: a, currency: c }; }\n  impl Add {\n    fn add(other: Money): Money { return Money { amount: self.amount + other.amount, currency: self.currency }; }\n  }\n}\na = Money.new(5, \"USD\");\nb = Money.new(3, \"USD\");\nt = a + b;\necho t.amount;\necho t.currency;\n",
         );
         assert_eq!(out.stdout, "8\nUSD\n");
         assert_eq!(out.exit_code, 0);
@@ -5282,7 +5393,7 @@ mod tests {
         // `impl Equatable` routes `==`/`!=` to `eq` (here ignoring `tag`); `!=` negates. The VM
         // reproduces this identically (see noeta-vm), guarded by the differential oracle.
         let out = run(
-            "class M {\n  amount: int\n  tag: int\n  fn new(a: int, t: int): M { return M { amount: a, tag: t }; }\n  impl Equatable {\n    fn eq(other: M): bool { return amount == other.amount; }\n  }\n}\na = M.new(5, 1);\nb = M.new(5, 2);\necho a == b;\necho a != b;\necho a == M.new(9, 1);\n",
+            "class M {\n  amount: int\n  tag: int\n  fn new(a: int, t: int): M { return M { amount: a, tag: t }; }\n  impl Equatable {\n    fn eq(other: M): bool { return self.amount == other.amount; }\n  }\n}\na = M.new(5, 1);\nb = M.new(5, 2);\necho a == b;\necho a != b;\necho a == M.new(9, 1);\n",
         );
         assert_eq!(out.stdout, "true\nfalse\nfalse\n");
         assert_eq!(out.exit_code, 0);
@@ -5293,7 +5404,7 @@ mod tests {
         // `impl Comparable` routes `< <= > >=` to `compare` (delegating to the built-in primitive
         // `.compare()`); the returned `Ordering` is mapped to each operator's bool.
         let out = run(
-            "class M {\n  amount: int\n  fn new(a: int): M { return M { amount: a }; }\n  impl Comparable {\n    fn compare(other: M): Ordering { return amount.compare(other.amount); }\n  }\n}\na = M.new(5);\nb = M.new(8);\necho a < b;\necho a > b;\necho a <= b;\necho a >= b;\n",
+            "class M {\n  amount: int\n  fn new(a: int): M { return M { amount: a }; }\n  impl Comparable {\n    fn compare(other: M): Ordering { return self.amount.compare(other.amount); }\n  }\n}\na = M.new(5);\nb = M.new(8);\necho a < b;\necho a > b;\necho a <= b;\necho a >= b;\n",
         );
         assert_eq!(out.stdout, "true\nfalse\ntrue\nfalse\n");
         assert_eq!(out.exit_code, 0);
@@ -5355,7 +5466,7 @@ mod tests {
         assert_eq!(out.value.as_deref(), Some("15"));
         // `next_id()` continuity persists across entries.
         assert_eq!(
-            session.eval(&program_of("next_id();")).value.as_deref(),
+            session.eval(&program_of("use std.id.{next_id}; next_id();")).value.as_deref(),
             Some("1")
         );
         assert_eq!(
@@ -5382,7 +5493,7 @@ mod tests {
         // last-use semantics `lang run` has, which the superseded AST-walk session never produced.
         let mut session = Session::new();
         session.eval(&program_of(
-            "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${id}\"; } }",
+            "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${self.id}\"; } }",
         ));
         let out = session.eval(&program_of(
             "fn use_it(): void { mut r = Res.new(1); echo \"using\"; }\nuse_it();",
@@ -5394,7 +5505,7 @@ mod tests {
     fn session_meta_commands_drop_type_bindings_reset() {
         let mut session = Session::new();
         session.eval(&program_of(
-            "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${id}\"; } }",
+            "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${self.id}\"; } }",
         ));
         session.eval(&program_of("mut r = Res.new(7);"));
         session.eval(&program_of("x = 42;"));
@@ -5441,7 +5552,7 @@ mod tests {
         // `:drop` of the same object would see refcount > 1 and skip its destructor.
         let mut session = Session::new();
         session.eval(&program_of(
-            "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${id}\"; } }",
+            "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${self.id}\"; } }",
         ));
         session.eval(&program_of("mut a = Res.new(1);"));
         // Type it (and, separately, echo it) — both go through the sentinel.
@@ -5522,14 +5633,15 @@ mod tests {
     #[test]
     fn list_and_map_literals_and_len() {
         assert_eq!(run("echo [1, 2, 3];").stdout, "[1, 2, 3]\n");
-        assert_eq!(run("echo len([1, 2, 3]);").stdout, "3\n");
-        assert_eq!(run("echo {\"a\": 1, \"b\": 2}.count();").stdout, "2\n");
+        assert_eq!(run("echo [1, 2, 3].len();").stdout, "3\n");
+        assert_eq!(run("echo {\"a\": 1, \"b\": 2}.len();").stdout, "2\n");
     }
 
     #[test]
     fn map_filter_sum_pipeline() {
+        // Method-chain form since P1.2 — the free `map`/`filter`/`sum` left the prelude.
         let src =
-            "echo [1, 2, 3, 4] |> filter(fn(n) => n % 2 == 0) |> map(fn(n) => n * 10) |> sum();";
+            "echo [1, 2, 3, 4].filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).sum();";
         assert_eq!(run(src).stdout, "60\n");
     }
 
@@ -5676,7 +5788,7 @@ mod tests {
 
     #[test]
     fn next_id_is_deterministic() {
-        assert_eq!(run("echo next_id(); echo next_id();").stdout, "1\n2\n");
+        assert_eq!(run("use std.id.{next_id}; echo next_id(); echo next_id();").stdout, "1\n2\n");
     }
 
     #[test]
@@ -5705,13 +5817,13 @@ mod tests {
 
     #[test]
     fn class_constructor_and_instance_method() {
-        let src = "class Box { v: int fn new(v: int): Box { return Box { v: v }; } fn doubled(): int { return v * 2; } } b = Box.new(21); echo b.doubled(); echo b.v;";
+        let src = "class Box { v: int fn new(v: int): Box { return Box { v: v }; } fn doubled(): int { return self.v * 2; } } b = Box.new(21); echo b.doubled(); echo b.v;";
         assert_eq!(run(src).stdout, "42\n21\n");
     }
 
     #[test]
     fn method_takes_arguments_alongside_fields() {
-        let src = "class Counter { base: int fn new(base: int): Counter { return Counter { base: base }; } fn plus(n: int): int { return base + n; } } c = Counter.new(10); echo c.plus(5);";
+        let src = "class Counter { base: int fn new(base: int): Counter { return Counter { base: base }; } fn plus(n: int): int { return self.base + n; } } c = Counter.new(10); echo c.plus(5);";
         assert_eq!(run(src).stdout, "15\n");
     }
 
@@ -5732,13 +5844,13 @@ mod tests {
     fn destructors_run_in_reverse_declaration_order_at_program_end() {
         // A `destruct` block runs when the last reference to an instance drops; top-level
         // bindings are destroyed at program end in reverse declaration order.
-        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close ${name}\"; } } a = R.new(\"a\"); b = R.new(\"b\"); echo \"body\";";
+        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close ${self.name}\"; } } a = R.new(\"a\"); b = R.new(\"b\"); echo \"body\";";
         assert_eq!(run(src).stdout, "body\nclose b\nclose a\n");
     }
 
     #[test]
     fn reassignment_destroys_the_displaced_instance() {
-        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close ${name}\"; } } mut x = R.new(\"first\"); x = R.new(\"second\"); echo \"mid\";";
+        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close ${self.name}\"; } } mut x = R.new(\"first\"); x = R.new(\"second\"); echo \"mid\";";
         assert_eq!(run(src).stdout, "close first\nmid\nclose second\n");
     }
 

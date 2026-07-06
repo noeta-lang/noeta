@@ -9,6 +9,7 @@
 // expect: stdout "c end"
 // expect: stdout "all=2,1,3"
 // expect: exit 0
+use std.task.{sleep, all}
 async fn work(name: string, ms: int): int {
     echo name ~ " start"
     sleep(ms).await

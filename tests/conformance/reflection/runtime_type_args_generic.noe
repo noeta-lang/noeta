@@ -35,7 +35,7 @@ fn label(t: Type): string {
 
 // Label the single type argument (every case here is a one-parameter generic), or empty for none.
 fn arglabel(args: List<Type>): string {
-    return if args.count() == 0 then "" else label(args[0]);
+    return if args.len() == 0 then "" else label(args[0]);
 }
 
 fn launder(v: dyn): dyn { return v; }

@@ -45,26 +45,17 @@ impl Default for IdGen {
 /// statement forms and never reach identifier resolution, so listing them is dead weight and
 /// misleadingly implies they are shadowable prelude bindings (they are not).
 pub const PRELUDE_NAMES: &[&str] = &[
-    "next_id",
-    "len",
-    "map",
-    "filter",
-    "sum",
+    "echo",
+    // `len`/`map`/`filter`/`sum` left the prelude (prelude-redesign P1.2): they are collection
+    // METHODS now (`xs.len()`, `xs.map(f)`), passable as values via method handles (`list.len`).
     "Ok",
     "Err",
     "some",
     "none",
     "panic",
     "assert",
-    "sleep",
-    "all",
-    "race",
-    "map_bounded",
-    // Reactivity S1/S2/S3: `signal(v)` creates a reactive cell; `computed(fn)` a lazy memoized
-    // derivation; `effect(fn)` a side effect that reruns when a signal it reads changes.
-    "signal",
-    "computed",
-    "effect",
+    // `signal`/`computed`/`effect` left the prelude (P2a) for `use std.reactive`, and
+    // `sleep`/`all`/`race`/`map_bounded` (P2b) for `use std.task` (`registry::VIRTUAL_MODULES`).
 ];
 
 #[cfg(test)]

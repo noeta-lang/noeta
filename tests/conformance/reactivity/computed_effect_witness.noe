@@ -11,6 +11,7 @@
 // expect: stdout "sq"
 // expect: stdout "watch=16"
 // expect: exit 0
+use std.reactive.{signal, computed, effect}
 n = signal(1)
 squared = computed(fn() { echo "sq"; return n.get() * n.get() })
 effect(fn() {

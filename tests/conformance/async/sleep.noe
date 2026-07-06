@@ -6,6 +6,7 @@
 // expect: stdout "after"
 // expect: stdout "done"
 // expect: exit 0
+use std.task.{sleep}
 async fn nap(): void {
     echo "before"
     sleep(10).await

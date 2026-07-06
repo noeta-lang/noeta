@@ -13,7 +13,7 @@
 class Leaf {
     tag: string
     fn new(tag: string): Leaf { return Leaf { tag: tag }; }
-    destruct { echo "drop leaf ${tag}"; }
+    destruct { echo "drop leaf ${self.tag}"; }
 }
 
 fn go(): void {

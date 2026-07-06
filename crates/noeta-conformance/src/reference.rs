@@ -41,6 +41,8 @@ pub fn reference_run(
     width_sites: HashMap<Span, (bool, u8)>,
     f32_literal_sites: HashSet<Span>,
     construction_sites: HashMap<Span, TypeRepr>,
+    handle_sites: HashMap<Span, (String, String, bool)>,
+    bound_handle_sites: HashSet<Span>,
     relevance: &noeta_check::DestructorRelevance,
 ) -> RunResult {
     // Lower with the checker's site maps: packed-list literals stream into a flat buffer (P-PACK 2.5)
@@ -55,6 +57,8 @@ pub fn reference_run(
             for_stream_sites: &for_stream_sites,
             width_sites: &width_sites,
             construction_sites: &construction_sites,
+            handle_sites: &handle_sites,
+            bound_handle_sites: &bound_handle_sites,
             f32_literal_sites: &f32_literal_sites,
         },
     )

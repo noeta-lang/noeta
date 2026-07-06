@@ -1,0 +1,21 @@
+// Eager collection methods (prelude-redesign P1): `map`/`filter`/`sum` are list methods (the eager
+// forms, returning a `List`/value directly, distinct from the lazy `xs.iter().map(...)` adapters),
+// and `len()` is the length of any collection (the preferred name for what `count()` did). Each
+// reuses the existing free-function/`count` implementation, so both backends agree by construction.
+// expect: stdout "[2, 4, 6]"
+// expect: stdout "[2, 4]"
+// expect: stdout "6"
+// expect: stdout "3"
+// expect: stdout "3"
+// expect: stdout "2"
+// expect: stdout "5"
+// expect: exit 0
+xs = [1, 2, 3]
+
+echo xs.map(fn(v) => v * 2)
+echo xs.filter(fn(v) => v % 2 == 0) ~ [4]
+echo xs.sum()
+echo xs.len()
+echo {"a": 1, "b": 2, "c": 3}.len()
+echo [1, 2].to_set().len()
+echo "hello".len()

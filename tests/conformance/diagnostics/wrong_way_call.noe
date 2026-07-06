@@ -1,0 +1,11 @@
+// Wrong-way method calls are static E0047 (prelude-redesign EX.2): an instance method (references
+// `self`) cannot be called associated-style — there is no receiver to become `self`. (The inverse —
+// an associated function called on a value — is the same code; one arm pinned here.)
+// expect: error E0047 at 11:6
+// expect: exit 1
+class Stack {
+    items: list
+    fn new(items: list): Stack { return Stack { items: items } }
+    fn size(): int { return self.items.len() }
+}
+echo Stack.size()

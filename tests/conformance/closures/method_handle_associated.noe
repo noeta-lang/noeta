@@ -1,0 +1,20 @@
+// An ASSOCIATED handle (prelude-redesign EX.2): `Type.method` where the method never references
+// `self` is the function itself — `Fn(params) -> ret`, no receiver. The associated-vs-instance
+// split is DERIVED from the body (references `self` ⟺ instance), with zero runtime cost.
+// expect: stdout "3"
+// expect: stdout "[2, 1]"
+// expect: exit 0
+class Stack {
+    items: list
+    fn new(items: list): Stack { return Stack { items: items } }
+    fn size(): int { return self.items.len() }
+}
+
+// The constructor as a value.
+ctor = Stack.new
+s = ctor([1, 2, 3])
+echo s.size()
+
+// Handed to `map`: each element list becomes a Stack via the associated handle, then an
+// instance handle reads it back.
+echo [[9, 9], [7]].map(Stack.new).map(Stack.size)

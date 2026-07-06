@@ -81,6 +81,12 @@ pub enum HeapKind {
     Enum,
     NativeModule,
     NativeFn,
+    /// A selectively-imported module function (`use std.math.sqrt`, prelude-redesign P0).
+    ModuleFn,
+    /// An unbound method handle (`Type.method` as a value, prelude-redesign MH).
+    MethodHandle,
+    /// A bound method handle (`value.method`, receiver captured, prelude-redesign EX.2b).
+    BoundMethod,
     FileHandle,
     Iter,
     Future,
@@ -1337,6 +1343,74 @@ impl Value {
         }
     }
 
+    /// A selectively-imported native-module function value (refcount 1), e.g. `sqrt` from
+    /// `use std.math.sqrt` — the `(module, func)` pair to hand to `call_native_module`.
+    pub fn module_fn(module: &str, func: &str) -> Value {
+        heap::alloc(Payload::ModuleFn {
+            module: module.to_string(),
+            func: func.to_string(),
+        })
+    }
+
+    /// The `(module, func)` pair, if this is a selectively-imported native-module function value.
+    pub fn module_fn_parts(self) -> Option<(String, String)> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::ModuleFn { module, func } => Some((module.clone(), func.clone())),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// An unbound method handle value (refcount 1) — `Type.method` as a value.
+    pub fn method_handle(ty: &str, method: &str, associated: bool) -> Value {
+        heap::alloc(Payload::MethodHandle {
+            ty: ty.to_string(),
+            method: method.to_string(),
+            associated,
+        })
+    }
+
+    /// A **bound** method handle (refcount 1): `value.method` with the receiver captured
+    /// (prelude-redesign EX.2b). Takes ownership of one reference to `recv`.
+    pub fn bound_method(recv: Value, method: &str) -> Value {
+        heap::alloc(Payload::BoundMethod {
+            recv,
+            method: method.to_string(),
+        })
+    }
+
+    /// The `(receiver, method)` pair, if this is a bound method handle. The receiver is returned
+    /// borrowed (no refcount change).
+    pub fn bound_method_parts(self) -> Option<(Value, String)> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::BoundMethod { recv, method } => Some((*recv, method.clone())),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// The `(ty, method, associated)` triple, if this is an unbound method handle value.
+    pub fn method_handle_parts(self) -> Option<(String, String, bool)> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::MethodHandle {
+                    ty,
+                    method,
+                    associated,
+                } => Some((ty.clone(), method.clone(), *associated)),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     /// A heap map (refcount 1), keyed by owned strings, presenting in sorted-key order. As with
     /// [`Value::list`], the map takes ownership of one reference to each value. The caller passes a
     /// `BTreeMap` (a convenient sorted builder); it is stored internally as a `HashMap` for O(1)
@@ -2076,7 +2150,11 @@ impl Value {
                 Payload::Bytes(b) => format!("<{} bytes>", b.len()),
                 Payload::Int(i) => i.to_string(),
                 // Mirrors the M0 tree-walker's `Value::Function(_) => "<fn>"` (and `Builtin`).
-                Payload::Closure { .. } | Payload::NativeFn(_) => "<fn>".to_string(),
+                Payload::Closure { .. }
+                | Payload::NativeFn(_)
+                | Payload::ModuleFn { .. }
+                | Payload::MethodHandle { .. }
+                | Payload::BoundMethod { .. } => "<fn>".to_string(),
                 // A cell is internal capture storage and never reaches a display site (the
                 // compiler derefs it first); render transparently as its contents if it ever does.
                 Payload::Cell(inner) => inner.display(),
@@ -2229,9 +2307,11 @@ impl Value {
                         .map(|(name, v)| (name.clone(), v.to_native_deep()))
                         .collect(),
                 ),
-                Payload::Closure { .. } | Payload::NativeFn(_) => {
-                    NativeValue::Str("<fn>".to_string())
-                }
+                Payload::Closure { .. }
+                | Payload::NativeFn(_)
+                | Payload::ModuleFn { .. }
+                | Payload::MethodHandle { .. }
+                | Payload::BoundMethod { .. } => NativeValue::Str("<fn>".to_string()),
                 Payload::Cell(inner) => inner.to_native_deep(),
                 Payload::Enum { shape, .. } => {
                     NativeValue::Str(shape.variant.as_deref().unwrap_or(&shape.name).to_string())
@@ -2298,6 +2378,9 @@ impl Value {
             Payload::PackedList { .. } => HeapKind::PackedList,
             Payload::Object { .. } => HeapKind::Object,
             Payload::Enum { .. } => HeapKind::Enum,
+            Payload::ModuleFn { .. } => HeapKind::ModuleFn,
+            Payload::MethodHandle { .. } => HeapKind::MethodHandle,
+            Payload::BoundMethod { .. } => HeapKind::BoundMethod,
             Payload::NativeModule(_) => HeapKind::NativeModule,
             Payload::NativeFn(_) => HeapKind::NativeFn,
             Payload::FileHandle(_) => HeapKind::FileHandle,
@@ -2329,7 +2412,12 @@ impl Value {
             // Boxed ints were already caught by `as_int` above, so a pointer here is a
             // closure, list, map, or string. M0 names both user functions and builtins
             // "function".
-            if self.as_closure().is_some() || self.as_native_fn().is_some() {
+            if self.as_closure().is_some()
+                || self.as_native_fn().is_some()
+                || self.module_fn_parts().is_some()
+                || self.method_handle_parts().is_some()
+                || self.bound_method_parts().is_some()
+            {
                 "function"
             } else if self.is_list() {
                 "list"

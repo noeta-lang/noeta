@@ -94,6 +94,8 @@ fn eval_runner(program: noeta_ast::Program) -> impl FnOnce() -> noeta_backend::R
             for_stream_sites: &checked.for_stream_sites,
             width_sites: &checked.width_sites,
             construction_sites: &checked.construction_sites,
+            handle_sites: &checked.handle_sites,
+            bound_handle_sites: &checked.bound_handle_sites,
             f32_literal_sites: &checked.f32_literal_sites,
         },
     )
@@ -128,10 +130,10 @@ fn producer_vec3_src(n: usize, packed: bool, op: &str) -> String {
          data = [{elems}]\n\
          result = {op}\n\
          mut sum = 0.0\n\
-         for i in 0..result.count() {{\n    \
+         for i in 0..result.len() {{\n    \
             sum = sum + result[i].x\n\
          }}\n\
-         echo data.count()\n\
+         echo data.len()\n\
          echo sum\n"
     )
 }
@@ -146,15 +148,16 @@ fn packed_producers_keep_the_list_flat() {
     const N: usize = 2_000;
     let cases = [
         ("reverse", "data.reverse()"),
-        ("slice", "data.slice(0, data.count())"),
-        ("filter", "filter(data, fn(v) => v.x > 0.0)"),
+        ("slice", "data.slice(0, data.len())"),
+        ("filter", "data.filter(fn(v) => v.x > 0.0)"),
         ("set", "data.set(0, Vec3 { x: 9.0, y: 9.0, z: 9.0 })"),
         // `map` to a packed struct keeps the result flat too (P-PACK 2.6 category B): each mapped
         // element is packed straight into the buffer, so only one input + one output element are live
-        // at a time and the held result is a flat buffer.
+        // at a time and the held result is a flat buffer. (Method form since P1.2 — the free
+        // `map`/`filter` left the prelude; the methods route to the same builtin impls.)
         (
             "map",
-            "map(data, fn(v) => Vec3 { x: v.x + 1.0, y: v.y, z: v.z })",
+            "data.map(fn(v) => Vec3 { x: v.x + 1.0, y: v.y, z: v.z })",
         ),
         // `concat` (`~`) also stays flat (see `packed_set_concat.noe` + the `packed_concat` /
         // `packed_extend_in_place` miri tests); it is omitted here because its result-size growth and
@@ -200,7 +203,7 @@ fn vec3_typed_src(n: usize, f32_fields: bool) -> String {
          data = [{elems}]\n\
          mut sum = 0.0{}\n\
          for i in 0..{n} {{\n    sum = sum + data[i].x\n}}\n\
-         echo data.count()\n",
+         echo data.len()\n",
         if f32_fields { "f32" } else { "" }
     )
 }
@@ -218,7 +221,7 @@ fn flags8_src(n: usize, bool_fields: bool) -> String {
     format!(
         "@packed struct F8 {{ {} }}\n\
          data = [{elems}]\n\
-         echo data.count()\n",
+         echo data.len()\n",
         decl.join("; ")
     )
 }

@@ -7,9 +7,9 @@
 // expect: stdout "1:b"
 // expect: exit 0
 echo [1, 2, 3];
-echo len([1, 2, 3]);
-echo {"a": 1, "b": 2}.count();
-echo [1, 2, 3, 4] |> filter(fn(n) => n % 2 == 0) |> map(fn(n) => n * 10) |> sum();
+echo [1, 2, 3].len();
+echo {"a": 1, "b": 2}.len();
+echo [1, 2, 3, 4].filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).sum();
 for (i, x) in ["a", "b"].enumerate() {
     echo i ~ ":" ~ x;
 }

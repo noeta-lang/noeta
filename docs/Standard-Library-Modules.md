@@ -3,8 +3,12 @@
 The `std` namespace holds modules you import explicitly with `use std.{name}`. Unused modules tree-shake away. An unknown function on a module is E0005; misuse maps onto a diagnostic code as noted per module.
 
 ```noeta
-use std.{math, json, fs}
+use std.{math, json, fs}       // whole modules → qualified calls: math.sqrt(x)
+use std.math.sqrt              // selective import → bare call: sqrt(x)
+use std.math.{abs, max}        // selective, several members
 ```
+
+A **selective import** (`use std.<module>.<member>`) binds the member under its bare name — braces are only a grouping delimiter for several names, never required for one. A selectively-imported function is a first-class value (`f = sqrt`). Both forms work for every module below.
 
 The always-available Ring 1 surface (strings, collections, options) needs no import — see [Standard Library](Standard-Library).
 
@@ -51,7 +55,7 @@ A logical monotonic clock — no wall-clock, so programs stay deterministic.
 | `monotonic` | `monotonic() -> int` | Reads then advances one tick; first call → `0`. |
 | `sleep` | `sleep(ms: int) -> void` | Advances the logical clock by `ms` without blocking. |
 
-(The async `sleep(ms).await` used in [Concurrency](Concurrency) is the prelude future form.)
+(The async `sleep(ms).await` used in [Concurrency](Concurrency) is the `use std.task` future form.)
 
 ## `env` and `args`
 
@@ -122,6 +126,18 @@ p = json.parse::<Point>("{\"x\":1,\"y\":2}")         // a real Point (methods ca
 ```
 
 The typed form supports nested structs, `List<T>`, `Map`, and optional fields (an absent field becomes `none`). A shape/type mismatch is E0007; a missing required field is E0009. Numeric widening follows `int <: f32 <: float` (a JSON integer satisfies `float`, a fractional number does not satisfy `int`).
+
+## `reactive`
+
+Server-side reactivity ([Reactivity](Reactivity)): `signal(v: T) -> Signal<T>` (a mutable cell), `computed(fn() -> T) -> Computed<T>` (a lazy memoized derivation), `effect(fn) -> Effect` (a side effect that reruns when a signal it read changes). These are interpreter builtins behind an import gate — `use std.reactive.{signal, computed, effect}` (or the qualified `reactive.signal(0)`).
+
+## `task`
+
+The concurrency combinators ([Concurrency](Concurrency)): `sleep(ms) -> Future<void>`, `all(List<Future<T>>) -> List<T>`, `race(List<Future<T>>) -> T` (losers cancelled), `map_bounded(items, n, f) -> List<B>` (≤ n in flight). Named `task` — `async` is a keyword and cannot appear in a `use` path.
+
+## `id`
+
+`next_id() -> int` — the deterministic seeded counter (1, 2, 3, …), reproducible by design so tests never flake on identity. (UUIDs are a planned addition through the deterministic host seam.)
 
 ## `vec` & `quat`
 

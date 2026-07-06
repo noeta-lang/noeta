@@ -1,0 +1,23 @@
+// Unbound method handles on BUILT-IN type receivers (prelude-redesign MH.2): `list.len`,
+// `string.upper`, … are first-class callables taking the receiver as their first argument. The VM
+// dispatches a handle call through the same factored `call_builtin_method` the direct-call opcode
+// uses (and the tree-walker through its ordinary `call_method`), so a handle call and a direct call
+// agree by construction.
+// expect: stdout "[3, 2]"
+// expect: stdout "3"
+// expect: stdout "[6, 9]"
+// expect: stdout "["ADA", "GRACE"]"
+// expect: stdout "true"
+// expect: exit 0
+xss = [[1, 2, 3], [4, 5]]
+// A built-in handle handed to `map` — each element (a list) becomes the receiver.
+echo xss.map(list.len)
+// Bound to a name, then called with an explicit receiver.
+f = list.len
+echo f([7, 8, 9])
+// A handle to an eager collection method: each inner list sums itself.
+echo [[1, 2, 3], [4, 5]].map(list.sum)
+// String receivers, zero-arg and with a trailing argument.
+echo ["ada", "grace"].map(string.upper)
+g = string.contains
+echo g("hello", "ell")

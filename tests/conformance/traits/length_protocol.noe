@@ -1,5 +1,6 @@
-// Implementing the `Length` trait lights up `len(o)`: the built-in `len` dispatches to the
-// object's `len` method. Runs identically under both backends (the differential oracle).
+// The `Length` trait is a capability BOUND (prelude-redesign P1.2 — the free `len(o)` builtin it
+// used to light up is retired): `impl Length` promises a `len(): int` method, and a generic
+// `<T: Length>` licenses `x.len()` on the parameter. Direct `.len()` calls need no trait.
 // expect: stdout "3"
 // expect: stdout "0"
 // expect: exit 0
@@ -12,10 +13,14 @@ class Stack {
 
     impl Length {
         fn len(): int {
-            return len(items);
+            return self.items.len();
         }
     }
 }
 
-echo len(Stack.new([10, 20, 30]));
-echo len(Stack.new([]));
+fn measure<T: Length>(x: T): int {
+    return x.len();
+}
+
+echo measure(Stack.new([10, 20, 30]));
+echo Stack.new([]).len();

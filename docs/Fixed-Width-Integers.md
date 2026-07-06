@@ -99,7 +99,7 @@ The `@packed` directive marks a **struct** as a *packed value type*: a `List` of
 mut acc = [V { x: 0, y: 0 }, V { x: 1, y: 1 }, V { x: 2, y: 2 }]
 acc = acc.set(1, V { x: 9, y: 9 })     // in-place flat-slot overwrite when uniquely owned
 echo acc                                // [V {x: 0, y: 0}, V {x: 9, y: 9}, V {x: 2, y: 2}]
-echo acc.count()                        // 3
+echo acc.len()                          // 3
 ```
 
 Rules:
@@ -132,10 +132,10 @@ xs = [V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }, V3 { x: 4.0f32, y: 5.0f32, z: 6.0f
 blob = xs.to_bytes()                    // -> bytes
 ys = from_bytes::<V3>(blob)             // -> List<V3>
 echo ys == xs                           // true
-echo blob.count()                       // 24  (2 elements × 3 × 4-byte f32)
+echo blob.len()                         // 24  (2 elements × 3 × 4-byte f32)
 ```
 
-`bytes` is an opaque binary buffer: `b.count()` gives its length, it compares by content, and `type_of(b)` is `Type.Bytes`.
+`bytes` is an opaque binary buffer: `b.len()` gives its length, it compares by content, and `type_of(b)` is `Type.Bytes`.
 
 ## Bulk vector kernels
 

@@ -11,6 +11,7 @@
 // expect: stdout "compute"
 // expect: stdout "total=30"
 // expect: exit 0
+use std.reactive.{signal, computed}
 a = signal(1)
 b = signal(2)
 total = computed(fn() { echo "compute"; return a.get() + b.get() })

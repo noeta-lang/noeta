@@ -5,6 +5,7 @@
 // expect: stdout "2"
 // expect: stdout "10"
 // expect: exit 0
+use std.task.{sleep}
 async fn after(ms: int, v: int): int {
     sleep(ms).await
     return v

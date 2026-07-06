@@ -1,0 +1,22 @@
+// `sleep`/`all`/`race`/`map_bounded` are `use std.task` imports, not prelude names (prelude-redesign
+// P2b — the module is `task`, not `async`, because `async` is a keyword and would not parse in a
+// `use` path). Selective import binds the bare names; the whole-module form gives qualified calls.
+// expect: stdout "[1, 2]"
+// expect: stdout "done"
+// expect: exit 0
+use std.task.{sleep, all}
+use std.{task}
+
+async fn tick(n: int): int {
+    sleep(n).await
+    return n
+}
+
+async fn run(): void {
+    results = all([tick(1), tick(2)])
+    echo results
+    task.sleep(1).await
+    echo "done"
+}
+
+run().await

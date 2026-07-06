@@ -39,6 +39,7 @@ echo naturals().take(5).collect()   // [0, 1, 2, 3, 4]
 - **`expr.await`** — postfix; suspends until the future resolves, then unwraps it. Awaiting a non-future is E0040. Top-level `await` is allowed.
 
 ```noeta
+use std.task.{sleep}
 async fn nap(name: string, ms: int): int {
     echo "${name} start"
     sleep(ms).await
@@ -57,6 +58,7 @@ A `concurrent { … }` scope runs tasks concurrently and joins them at the closi
 - **`isolate f(args)`** runs in a fresh isolate (own heap, true parallelism); its arguments and result must be `Send` (see below).
 
 ```noeta
+use std.task.{sleep, all}
 async fn work(name: string, ms: int): int {
     sleep(ms).await
     return ms

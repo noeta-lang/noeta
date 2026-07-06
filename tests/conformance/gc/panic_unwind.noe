@@ -13,7 +13,7 @@
 class R {
     name: string
     fn new(name: string): R { return R { name: name }; }
-    destruct { echo "close ${name}"; }
+    destruct { echo "close ${self.name}"; }
 }
 
 fn go(): void {

@@ -14,5 +14,5 @@ fs.write_bytes("data.bin", xs.to_bytes())
 ys = from_bytes::<V3>(fs.read_bytes("data.bin"))
 
 echo ys == xs
-echo ys.count()
+echo ys.len()
 echo ys[0].x

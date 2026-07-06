@@ -14,7 +14,7 @@ class Bag {
 
     impl Iterable {
         fn iter(): list {
-            return items;
+            return self.items;
         }
     }
 }

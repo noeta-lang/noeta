@@ -34,8 +34,8 @@ A line **continues** onto the next (no statement break inserted) when the break 
 total = 1 +          // trailing operator → continues
         2 + 3
 scaled = [1, 2, 3]
-    |> map(fn(x) => x * 2)   // leading |> → continues
-    |> sum()
+    .map(fn(x) => x * 2)     // leading . → continues
+    .sum()
 echo total               // 6
 ```
 

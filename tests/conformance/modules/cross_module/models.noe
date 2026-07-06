@@ -11,6 +11,6 @@ pub class User {
     }
 
     fn greeting(): string {
-        return "Hi, ${name}";
+        return "Hi, ${self.name}";
     }
 }

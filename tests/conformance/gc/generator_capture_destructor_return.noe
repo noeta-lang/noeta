@@ -11,7 +11,7 @@
 class Res {
     pub tag: string
     fn new(t: string): Res { return Res { tag: t } }
-    destruct { echo "drop ${tag}" }
+    destruct { echo "drop ${self.tag}" }
 }
 fn counter(): Iterator<int> {
     r = Res.new("gen")

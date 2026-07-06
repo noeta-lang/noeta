@@ -1,0 +1,22 @@
+// Selective member import (`use std.<mod>.<fn>`) brings a module function into scope under its bare
+// name, callable without the `module.` qualifier. The braced group form imports several at once, and
+// a single name needs no braces. Dispatched through the same `call_native_module` path as the
+// qualified call, so both backends agree by construction (prelude-redesign P0).
+// expect: stdout "4.0"
+// expect: stdout "5"
+// expect: stdout "9"
+// expect: stdout "3"
+// expect: stdout "5.0"
+// expect: exit 0
+use std.math.sqrt
+use std.math.{abs, max}
+use std.{math}
+
+echo sqrt(16.0)
+echo abs(-5)
+echo max(3, 9)
+// The qualified form still works alongside a selective import of the same module.
+echo math.floor(3.7)
+// A selectively-imported function is a first-class value — bind it, then call through the binding.
+f = sqrt
+echo f(25.0)

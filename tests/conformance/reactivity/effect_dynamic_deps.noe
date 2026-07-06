@@ -9,6 +9,7 @@
 // expect: stdout "b=21"
 // expect: stdout "b=22"
 // expect: exit 0
+use std.reactive.{signal, effect}
 a = signal(10)
 b = signal(20)
 cond = signal(true)

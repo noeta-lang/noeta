@@ -7,4 +7,4 @@ mut total: int = 0;
 for x in xs {
     total = total + x;
 }
-echo len(xs);
+echo xs.len();

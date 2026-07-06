@@ -186,6 +186,16 @@ pub enum DiagnosticCode {
     /// looping forever. This is a runtime error (the program is well-formed; the *update graph* has a
     /// self-reinforcing cycle), analogous to a non-terminating loop being surfaced instead of hung on.
     ReactiveCycle,
+    /// A declaration binds a reserved prelude name (`Ok`/`Err`/`some`/`none`/`panic`/`assert`) —
+    /// prelude-redesign P3. Reserving the (small) remaining prelude closes the backend divergence a
+    /// shadowing binding used to cause (the tree-walker pre-declares prelude names as immutable
+    /// globals; the VM resolved a shadow as a fresh local).
+    ReservedName,
+    /// A method called through the wrong receiver kind (prelude-redesign EX.2): an instance method
+    /// (its body references `self`) called associated-style (`Type.m(...)`), or an associated
+    /// function (never touches `self`) called on a value (`x.new(...)`). The distinction is DERIVED
+    /// from the body — zero runtime cost — and enforced statically.
+    InvalidReceiver,
 }
 
 impl DiagnosticCode {
@@ -237,6 +247,8 @@ impl DiagnosticCode {
         DiagnosticCode::NonIntegerBitwise,
         DiagnosticCode::FixedWidthOutOfRange,
         DiagnosticCode::ReactiveCycle,
+        DiagnosticCode::ReservedName,
+        DiagnosticCode::InvalidReceiver,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -288,6 +300,8 @@ impl DiagnosticCode {
             DiagnosticCode::NonIntegerBitwise => "E0043",
             DiagnosticCode::FixedWidthOutOfRange => "E0044",
             DiagnosticCode::ReactiveCycle => "E0045",
+            DiagnosticCode::ReservedName => "E0046",
+            DiagnosticCode::InvalidReceiver => "E0047",
         }
     }
 

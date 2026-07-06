@@ -3,6 +3,7 @@
 The standard library ships **fine-grained reactivity** — `signal`, `computed`, and `effect` — the same model SolidJS popularized, running server-side. State lives in signals; derivations and side effects declare what they read, and the runtime reruns exactly what a change affects, in a deterministic, glitch-free order. These are ordinary stdlib values (no new keywords), the load-bearing primitive behind the reactive-single-binary story (architecture §9.4); the transport layer that pushes changes to a browser is a later milestone (see [What's next](#whats-next)).
 
 ```noeta
+use std.reactive.{signal, computed, effect}
 count = signal(0)
 doubled = computed(fn() => count.get() * 2)
 effect(fn() { echo "count is ${count.get()}, doubled is ${doubled.get()}" })
@@ -19,6 +20,7 @@ count.set(5)          // reruns the effect once: "count is 5, doubled is 10"
 - `.update(fn(T) => T)` — read-modify-write convenience.
 
 ```noeta
+use std.reactive.{signal}
 n = signal(1)
 echo n.get()                    // 1
 n.set(10)
@@ -34,6 +36,7 @@ Setting to a value equal to the current one still fires dependents — a change 
 `computed(fn() => T)` creates a `Computed<T>`: a derivation that recomputes **only when a dependency changed**, and returns its memo otherwise. It is **lazy** — the body does not run until the first `.get()` — and **read-only** (there is no `.set()`).
 
 ```noeta
+use std.reactive.{signal, computed}
 first = signal("Ada")
 last  = signal("Lovelace")
 full  = computed(fn() => "${first.get()} ${last.get()}")
@@ -51,6 +54,7 @@ A `computed` may read other computeds; a chain recomputes transitively, each lev
 `effect(fn() => void)` runs its body **immediately**, tracks the signals and computeds it read, and **reruns** whenever one of them changes. It returns an `Effect` handle whose only method is `.dispose()`.
 
 ```noeta
+use std.reactive.{signal, effect}
 temp = signal(20)
 watcher = effect(fn() { echo "temperature is ${temp.get()}" })
 // prints "temperature is 20" right away
@@ -67,6 +71,7 @@ An `Effect` has no readable value — `.get()` on one is `E0005`.
 A `.get()` inside a running `computed`/`effect` body subscribes that body to what it read; a `.get()` in ordinary code (outside any body) is a plain read that subscribes nothing. Dependencies are recaptured on **every** run, so a body that reads different signals on different runs tracks exactly the ones it read last:
 
 ```noeta
+use std.reactive.{signal, effect}
 useLeft = signal(true)
 left  = signal(1)
 right = signal(2)
@@ -82,6 +87,7 @@ useLeft.set(false) // reruns, now reading `right`; `left` is unsubscribed
 When one signal feeds several derivations that feed a common consumer (a diamond), a single `set` reruns the consumer **once**, seeing a consistent set of inputs — never a half-updated mix. This falls out of the lazy-pull model: a dirty computed is always forced fresh on read.
 
 ```noeta
+use std.reactive.{signal, computed, effect}
 base  = signal(2)
 plus  = computed(fn() => base.get() + 10)
 times = computed(fn() => base.get() * 10)
@@ -101,6 +107,7 @@ A `set`/`update` performed **inside** a running effect does not start a nested u
 An effect that changes a signal it depends on would rerun forever. Rather than hang, the scheduler bounds each flush and raises **`E0045` ReactiveCycle** once it exceeds the step limit:
 
 ```noeta error
+use std.reactive.{signal, effect}
 n = signal(0)
 effect(fn() { n.set(n.get() + 1) })   // reads n and writes n — never settles
 // → E0045: reactive update did not converge

@@ -15,5 +15,5 @@ ys = from_bytes::<V3>(blob)
 
 echo ys
 echo ys == xs
-echo ys.count()
+echo ys.len()
 echo ys[1].y

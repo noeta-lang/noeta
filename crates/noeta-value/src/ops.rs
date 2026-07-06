@@ -431,6 +431,19 @@ fn values_equal(left: Value, right: Value) -> bool {
     if let (Some(a), Some(b)) = (left.as_native_fn(), right.as_native_fn()) {
         return a == b;
     }
+    // Selectively-imported native-module functions compare by their `(module, func)` pair.
+    if let (Some(a), Some(b)) = (left.module_fn_parts(), right.module_fn_parts()) {
+        return a == b;
+    }
+    // Method handles compare by their `(ty, method, associated)` triple.
+    if let (Some(a), Some(b)) = (left.method_handle_parts(), right.method_handle_parts()) {
+        return a == b;
+    }
+    // Bound handles compare by method name + receiver value equality.
+    if let (Some((ra, ma)), Some((rb, mb))) = (left.bound_method_parts(), right.bound_method_parts())
+    {
+        return ma == mb && values_equal(ra, rb);
+    }
     false
 }
 

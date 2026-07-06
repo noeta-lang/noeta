@@ -179,6 +179,8 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
         checked.width_sites.clone(),
         checked.f32_literal_sites.clone(),
         checked.construction_sites.clone(),
+        checked.handle_sites.clone(),
+        checked.bound_handle_sites.clone(),
         &checked.destructor_relevance,
     );
     match &noeta_db::bytecode(&db, src).0 {
@@ -237,6 +239,8 @@ fn compare_backends_workspace(
         checked.width_sites.clone(),
         checked.f32_literal_sites.clone(),
         checked.construction_sites.clone(),
+        checked.handle_sites.clone(),
+        checked.bound_handle_sites.clone(),
         &checked.destructor_relevance,
     );
     match &noeta_db::linked_bytecode(&db, ws).0 {

@@ -1,0 +1,15 @@
+// The arc's raison d'être (prelude-redesign): `sum = 5` used to DIVERGE between the backends — the
+// tree-walker pre-declared every prelude name as an immutable global (so this was E0006) while the
+// VM let the local shadow the builtin and ran fine. The fix was to shrink the prelude: `sum`, `map`,
+// `filter`, `len`, `signal`, `sleep`, `next_id`, … are methods or `use std.*` imports now, so these
+// are ordinary bindings — legal, and identical on both backends by the differential.
+// expect: stdout "7"
+// expect: stdout "12"
+// expect: exit 0
+sum = 5
+map = 2
+echo sum + map
+filter = 3
+len = 4
+signal = 5
+echo filter + len + signal

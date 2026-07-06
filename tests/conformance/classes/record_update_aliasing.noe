@@ -12,7 +12,7 @@ class Money {
     pub currency: string
 
     fn show(): string {
-        return "${amount} ${currency}";
+        return "${self.amount} ${self.currency}";
     }
 }
 

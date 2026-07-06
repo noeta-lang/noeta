@@ -9,7 +9,7 @@
 fn describe(x: int | string): string {
     return match x {
         is int => "int ${x}",
-        is string => "len ${len(x)}",
+        is string => "len ${x.len()}",
     };
 }
 

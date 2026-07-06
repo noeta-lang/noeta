@@ -6,7 +6,7 @@
 class Box<T> {
     value: T
     fn new(v: T): Box<T> { return Box { value: v }; }
-    fn get(): T { return value; }
+    fn get(): T { return self.value; }
 }
 fn need_int(n: int): int { return n; }
 b = Box.new("hi");

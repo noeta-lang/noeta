@@ -5,6 +5,7 @@
 // expect: stdout "1"
 // expect: stdout "2"
 // expect: exit 0
+use std.task.{sleep}
 async fn ticks(n: int): void {
     mut i = 0
     while i < n {

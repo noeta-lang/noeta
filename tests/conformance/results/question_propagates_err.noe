@@ -3,7 +3,7 @@
 // expect: stdout "Err(empty)"
 // expect: exit 0
 fn validate(items: List<dyn>): Result<void, string> {
-    if items.count() == 0 {
+    if items.len() == 0 {
         return Err("empty");
     }
     return Ok();

@@ -5,10 +5,11 @@
 // expect: stdout "2"
 // expect: stdout "end"
 // expect: exit 0
+use std.task.{sleep, race}
 class Res {
     pub tag: string
     fn new(t: string): Res { return Res { tag: t } }
-    destruct { echo "drop ${tag}" }
+    destruct { echo "drop ${self.tag}" }
 }
 async fn slow(): int {
     r = Res.new("slow")

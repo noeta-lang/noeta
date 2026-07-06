@@ -16,7 +16,7 @@ class Money {
 
     impl Comparable {
         fn compare(other: Money): Ordering {
-            return amount.compare(other.amount);
+            return self.amount.compare(other.amount);
         }
     }
 }

@@ -13,7 +13,7 @@
 class Leaf {
     tag: string
     fn new(tag: string): Leaf { return Leaf { tag: tag }; }
-    destruct { echo "drop leaf ${tag}"; }
+    destruct { echo "drop leaf ${self.tag}"; }
 }
 
 class Pair {
@@ -23,7 +23,7 @@ class Pair {
     fn new(label: string): Pair {
         return Pair { label: label, first: Leaf.new("first"), second: Leaf.new("second") };
     }
-    destruct { echo "drop pair ${label}"; }
+    destruct { echo "drop pair ${self.label}"; }
 }
 
 fn go(): void {

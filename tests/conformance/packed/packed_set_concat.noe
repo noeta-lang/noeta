@@ -19,7 +19,7 @@ echo acc
 // In-place reuse concat `acc = acc ~ xs` (uniquely owned → flat buffer extend).
 acc = acc ~ [V { x: 5, y: 5 }]
 echo acc
-echo acc.count()
+echo acc.len()
 
 // Aliased concat: both operands stay live, so the result is a flat copy and the inputs are unchanged.
 a = [V { x: 1, y: 1 }]

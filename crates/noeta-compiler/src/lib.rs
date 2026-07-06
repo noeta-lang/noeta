@@ -87,7 +87,25 @@ fn unsupported<T>(reason: impl Into<String>) -> Result<T, Unsupported> {
 /// Whether `use <path>.{name}` imports a Ring 2 native module (`use std.{json}`) rather than a
 /// sibling-module declaration. Such names are bound as global values, not opaque types.
 fn is_native_module(path: &[String], name: &str) -> bool {
-    path == ["std"] && noeta_stdlib::registry::find_module(name).is_some()
+    path == ["std"]
+        && (noeta_stdlib::registry::find_module(name).is_some()
+            || noeta_stdlib::registry::is_virtual_module(name))
+}
+
+/// For a selective member import `use std.<mod>.<name>` — `path == ["std", <mod>]` where `<mod>` is a
+/// native module — the module name. Each imported `<name>` then binds as a bare global holding a
+/// [`Const::ModuleFn`], called (or passed) through the same `call_native_module` path as
+/// `<mod>.<name>(...)`. `None` for a plain module import (`use std.{math}`) or a non-std path.
+fn selective_import_module(path: &[String]) -> Option<&str> {
+    if path.len() == 2
+        && path[0] == "std"
+        && (noeta_stdlib::registry::find_module(&path[1]).is_some()
+            || noeta_stdlib::registry::is_virtual_module(&path[1]))
+    {
+        Some(&path[1])
+    } else {
+        None
+    }
 }
 
 /// Compile a whole program to a [`Module`], or report the first unsupported construct.
@@ -109,6 +127,8 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         checked.width_sites,
         checked.f32_literal_sites,
         checked.construction_sites,
+        checked.handle_sites,
+        checked.bound_handle_sites,
         &checked.destructor_relevance,
         false,
         false,
@@ -143,6 +163,8 @@ pub fn compile_with_sites(
     width_sites: HashMap<Span, (bool, u8)>,
     f32_literal_sites: HashSet<Span>,
     construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    handle_sites: HashMap<Span, (String, String, bool)>,
+    bound_handle_sites: HashSet<Span>,
     relevance: &noeta_check::DestructorRelevance,
     real_isolates: bool,
     // Emit per-prototype debug info (reg→name locals, function names, defining spans) and pin named
@@ -161,6 +183,8 @@ pub fn compile_with_sites(
         width_sites,
         f32_literal_sites,
         construction_sites,
+        handle_sites,
+        bound_handle_sites,
         Some(passes_relevance(relevance)),
         relevance.reachable_types.iter().cloned().collect(),
         real_isolates,
@@ -182,6 +206,8 @@ fn compile_inner(
     width_sites: HashMap<Span, (bool, u8)>,
     f32_literal_sites: HashSet<Span>,
     construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    handle_sites: HashMap<Span, (String, String, bool)>,
+    bound_handle_sites: HashSet<Span>,
     relevance: Option<noeta_ir_passes::Relevance>,
     // Per-type destruct-reachability (Phase 4.3), exported straight to the `Module` for the VM's
     // container-before-contained field-walk gate; not consumed by the compiler itself.
@@ -211,6 +237,8 @@ fn compile_inner(
             for_stream_sites: &for_stream_sites,
             width_sites: &width_sites,
             construction_sites: &construction_sites,
+            handle_sites: &handle_sites,
+            bound_handle_sites: &bound_handle_sites,
             f32_literal_sites: &f32_literal_sites,
         },
         real_isolates,
@@ -431,8 +459,11 @@ impl ModuleCompiler {
                     self.module_fns.insert(decl.name.clone());
                 }
                 noeta_ast::Stmt::Use { path, names, .. } => {
+                    // A plain module import (`use std.{math}`) binds the module name; a selective
+                    // member import (`use std.math.sqrt`) binds each member as a bare global.
+                    let selective = selective_import_module(path).is_some();
                     for imported in names {
-                        if is_native_module(path, &imported.name) {
+                        if is_native_module(path, &imported.name) || selective {
                             self.module_globals.insert(imported.name.clone(), false);
                         }
                     }
@@ -569,10 +600,12 @@ impl ModuleCompiler {
                         .insert(decl.name.clone(), TypeInfo::Enum { variants, fns });
                 }
                 noeta_ast::Stmt::Use { path, names, .. } => {
+                    // A `use std.{json}` native module — or a selective member import
+                    // (`use std.math.sqrt`) — resolves as a global value bound at the `use` site,
+                    // not an opaque type, so neither is registered here.
+                    let selective = selective_import_module(path).is_some();
                     for imported in names {
-                        // A `use std.{json}` native module resolves as a global value (bound at
-                        // the `use` site), not an opaque type, so it is not registered here.
-                        if is_native_module(path, &imported.name) {
+                        if is_native_module(path, &imported.name) || selective {
                             continue;
                         }
                         self.types.insert(imported.name.clone(), TypeInfo::Opaque);
@@ -1044,7 +1077,6 @@ enum Resolved {
     /// The method receiver (`self`) — register 0 in a method body.
     SelfRecv,
     /// A field of the method receiver, loaded via `LoadField` from register 0.
-    Field,
     /// An upvalue captured from an enclosing function (read via its index). Reassignment goes
     /// through `binding`, which checks the upvalue's mutability separately.
     Upvalue(u16),
@@ -1219,13 +1251,12 @@ impl<'m> FnCompiler<'m> {
         // Inside a method, `self` and the class's fields resolve against the receiver. Locals
         // (parameters) are checked first, so a parameter shadows a same-named field — matching
         // the tree-walker, which binds fields, then `self`, then parameters (last wins).
-        if let Some(ctx) = &self.method {
+        if let Some(_ctx) = &self.method {
             if name == "self" {
                 return Resolved::SelfRecv;
             }
-            if ctx.fields.contains(name) {
-                return Resolved::Field;
-            }
+            // A bare name inside a method NEVER resolves to a field (prelude-redesign EX.1 —
+            // member access is explicit): `self.field` reads it; a bare name is a local/global.
         }
         // A name captured from an enclosing function resolves to an upvalue cell. Checked before
         // globals/prelude: the tree-walker captures the nearest lexical binding, so a same-named
@@ -1436,10 +1467,41 @@ impl<'m> FnCompiler<'m> {
             Decl::Fn { name, func, .. } => self.declare_fn(name, func),
             Decl::Class(_) | Decl::Enum(_) | Decl::Struct(_) => Ok(()),
             Decl::Use { path, names, .. } => {
+                let selective = selective_import_module(path);
                 for imported in names {
                     if is_native_module(path, &imported.name) {
                         let value = self.alloc_reg();
                         let k = self.add_const(Const::NativeModule(imported.name.clone()));
+                        self.code.push(Op::LoadConst { dst: value, k });
+                        let global = self.module.intern_global(&imported.name);
+                        self.code.push(Op::StoreGlobal { global, src: value });
+                    } else if let Some(module) = selective
+                        && noeta_stdlib::registry::virtual_module_function(module, &imported.name)
+                    {
+                        // A virtual-module member (`use std.reactive.{signal}`, P2a): the function
+                        // IS a builtin (it needs the executor/reactive graph), so bind the
+                        // first-class builtin value — calling it dispatches exactly as the old
+                        // prelude binding did.
+                        let builtin = Builtin::from_name(&imported.name)
+                            .expect("every virtual-module function is a named builtin");
+                        let value = self.alloc_reg();
+                        self.code.push(Op::LoadNativeFn {
+                            dst: value,
+                            func: builtin,
+                        });
+                        let global = self.module.intern_global(&imported.name);
+                        self.code.push(Op::StoreGlobal { global, src: value });
+                    } else if let Some(module) = selective
+                        && noeta_stdlib::registry::is_module_function(module, &imported.name)
+                    {
+                        // `use std.math.sqrt` — bind `sqrt` to a `(math, sqrt)` module-function value.
+                        // An unknown member is left unbound (the checker reports it); a bare call then
+                        // raises E0005 like any missing name.
+                        let value = self.alloc_reg();
+                        let k = self.add_const(Const::ModuleFn {
+                            module: module.to_string(),
+                            func: imported.name.clone(),
+                        });
                         self.code.push(Op::LoadConst { dst: value, k });
                         let global = self.module.intern_global(&imported.name);
                         self.code.push(Op::StoreGlobal { global, src: value });
@@ -2170,19 +2232,6 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::UpvalueGet { dst, index });
                 Ok(dst)
             }
-            Resolved::Field => {
-                let dst = self.alloc_reg();
-                let cache = self.module.next_cache_slot();
-                let field = self.module.intern_name(name);
-                self.code.push(Op::LoadField {
-                    dst,
-                    obj: 0,
-                    field,
-                    span,
-                    cache,
-                });
-                Ok(dst)
-            }
             Resolved::Global => {
                 let dst = self.alloc_reg();
                 let global = self.module.intern_global(name);
@@ -2393,6 +2442,35 @@ impl<'m> FnCompiler<'m> {
                 span,
                 ..
             } => self.lower_field(receiver, name, dst, *span),
+            // A bound method handle (`value.method` as a value, EX.2b): evaluate the receiver and
+            // capture it into the handle (`Op::BindMethod` retains it).
+            Rvalue::BoundHandle { recv, method, .. } => {
+                let recv_reg = self.atom_reg(recv)?;
+                let method = self.module.intern_name(method);
+                self.code.push(Op::BindMethod {
+                    dst,
+                    recv: recv_reg,
+                    method,
+                });
+                self.drop_temp_receiver(recv, recv_reg);
+                Ok(())
+            }
+            // An unbound method handle (`Type.method` as a value) is a static constant: load the
+            // `(ty, method, associated)` triple. The VM materializes a `Payload::MethodHandle`.
+            Rvalue::MethodHandle {
+                ty,
+                method,
+                associated,
+                ..
+            } => {
+                let k = self.add_const(Const::MethodHandle {
+                    ty: ty.clone(),
+                    method: method.clone(),
+                    associated: *associated,
+                });
+                self.code.push(Op::LoadConst { dst, k });
+                Ok(())
+            }
             Rvalue::SetField {
                 receiver,
                 name,
@@ -3920,6 +3998,8 @@ mod tests {
             checked.width_sites.clone(),
             checked.f32_literal_sites.clone(),
             checked.construction_sites.clone(),
+            checked.handle_sites.clone(),
+            checked.bound_handle_sites.clone(),
             &checked.destructor_relevance,
             false,
             debug,
