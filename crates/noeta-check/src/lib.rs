@@ -4139,7 +4139,6 @@ impl Checker {
                         return sig.ret.clone();
                     }
                     return self.call_user_method(name, &sig, args, arg_exprs, span, recv_args);
-                    return self.call_user_method(name, &sig, args, arg_exprs, span, recv_args);
                 }
                 self.check_method_args(&recv, name, args, arg_exprs, span);
                 // A bit intrinsic on a fixed-width receiver (Tier W5) must act within the width, not
