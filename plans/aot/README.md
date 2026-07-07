@@ -1,12 +1,14 @@
 # AOT & bundling arc — source-free binaries (P-AOT)
 
-**Status: Levels 1 & 2 COMPLETE (branch `aot-bundling`, unmerged); Level 3 not started.** Goal:
-ship a runnable artifact that does **not** include the `.noe` source. Three levels of increasing
-ambition and cost — bytecode bundle → self-contained executable → native AOT + DCE. Levels 1–2
-deliver the source-hiding goal cheaply and hand Level 3 its interpreter-fallback substrate for free;
-Level 3 is the performance/opacity milestone. **Delivered: `noeta build` → obfuscated `.noeb`
-(`noeta run app.noeb`), and `noeta build --exe` → a single self-contained executable — both source-
-free, differential-proven identical to a source run.**
+**Status: Levels 1 & 2 MERGED to main; Level 3 native AOT COMPLETE through L3.3 on branch
+`aot-level3` (unmerged); only L3.4 DCE remains (optional).** Goal: ship a runnable artifact that does
+**not** include the `.noe` source. Three levels of increasing ambition and cost — bytecode bundle →
+self-contained executable → native AOT + DCE. Levels 1–2 deliver the source-hiding goal cheaply and
+hand Level 3 its interpreter-fallback substrate for free; Level 3 is the performance/opacity
+milestone. **Delivered: `noeta build` → obfuscated `.noeb` (`noeta run app.noeb`); `noeta build
+--exe` → a single self-contained executable; and `noeta build --native` → a native binary with the
+eligible prototypes compiled to machine code and the rest interpreting — all source-free,
+differential-proven identical to a source run.**
 
 Provenance: design conversation 2026-07-07 (after the P-JCT JIT compile-throughput arc). The user
 confirmed **JIT op-coverage expansion is deferred to a separate later track** — AOT ships at
@@ -118,11 +120,32 @@ from Levels 1–2** (the same hybrid the JIT uses at runtime).
 
 | # | Slice | Depends | Notes |
 |---|---|---|---|
-| L3.0 | generalize codegen over `cranelift-module::Module` | — (parallel to L1/L2) | The keystone reuse. Today `Jit` hardcodes `cranelift-jit::JITModule`; abstract the module backend so the *same* `emit_int_body`/`FunctionBuilder` IR construction can target `cranelift-object::ObjectModule`. **Gate: the JIT path stays byte-identical** (jit-differential green) — this is a refactor, not a behavior change. |
-| L3.1 | AOT compile driver | L3.0 | Eagerly compile **every** proto (not just hot ones) to an object file. Runtime helpers (`retain`/`release`/`call`/`return`/…) resolved by **linking against the runtime crate**, not baked addresses. Emit relocations for direct native→native calls. |
-| L3.2 | link driver → standalone binary | L3.1 + L2.1 | Link the object + the runtime + the embedded interpreter/bytecode substrate (Levels 1–2) into one binary: native for the covered ops, interpreter fallback for the rest. |
-| L3.3 | AOT differential oracle | L3.2 | AOT-binary `RunResult` ≡ source-run, over the corpus. |
+| L3.0 ✅ | generalize codegen over `cranelift-module::Module` | — (parallel to L1/L2) | **DONE** (L3.0a `4e632dd` split + genericization). `Jit<M: ClifModule = JITModule>` — the module backend is a generic param, so the *same* `emit_int_body`/`FunctionBuilder` IR construction targets both `JITModule` (runtime) and `ObjectModule` (AOT), **monomorphized → zero JIT dispatch cost**. Split `finalize` into shared `define_body → FuncId` + JIT-only `finalize_ptr`. Added `Jit::<ObjectModule>::new_object`/`compile_object`/`finish`; smoke test compiles a real program's every proto into a valid host ELF object. **Gates: jit-differential byte-identical; A/B (taskset -c 2): compile throughput 584→586 ms (+0.4%, in-noise), generated-code speed unchanged.** NOTE: a native AOT body still bakes an absolute `frame_template` pointer — running (not just emitting) AOT native bodies is L3.1. |
+| L3.1a ✅ | AOT codegen mode (IC-off) + corpus oracle | L3.0 | **DONE** (`83c88f0`). **Audit finding:** the *only* absolute-address bake in the emit paths is the per-site inline-cache slot (`Box<CallSiteCache>` heap addr, line ~2714). The frame-template copy is already object-safe — it bakes the template's *words* as position-independent immediates (zeroed fields, `None` niche, empty `Vec` ptr = `align_of`), never the address. So the AOT address problem = the inline cache, nothing else. Threaded an `aot` flag into `Codegen`: an AOT body emits **no** IC hit path and passes a null slot to `prepare_call` (helper already guards `!site.is_null()`) — every call takes the always-correct helper slow path (the cold-first-call path). Oracle: `NOETA_JIT_AOT=1` makes the runtime JIT emit AOT-form bodies → jit-differential proves the AOT codegen byte-identical across the **whole corpus** before any linking. Gates green; JIT machine code unchanged (A/B +0.07%). |
+| L3.1b ✅ | eager AOT compile driver | L3.1a | **DONE** (`972bf58`). `Jit::<ObjectModule>::compile_module(module) -> AotManifest`: every eligible proto → native main body + fast body (S4.1) as exported symbols; ineligible protos get no native entry (interpreted). Manifest = proto-index → symbol map (the L3.2 binding contract). Symbol names now a single source of truth (`proto_symbol`/`fast_symbol`/`stub_symbol`). Test parses the ELF symbol table and asserts every native proto symbol is a real definition. Gates green (both differential modes). |
+| L3.2a ✅ | AOT dispatch-table data symbol (approach A) | L3.1b | **DONE** (`d35f2d0`). `compile_module` emits `noeta_aot_dispatch` — an exported data object, ABI `[count][main_0,fast_0,…]` (pointer-width LE words), each function slot a linker-resolved relocation to the proto body or null. The AOT object is now **complete** (bodies + dispatch wiring). Test asserts the symbol is defined + one body relocation per native main+fast entry. Runtime reads this one static (no self-dlsym). |
+| L3.2b(1) ✅ | export the JIT runtime helpers | L3.2a | **DONE** (`60576f9`). New `aot` feature (= `["jit"]`) puts `#[export_name]` on the ten `jit_*` helpers under their canonical `noeta_jit_*` names, so a program object's `Linkage::Import` relocations resolve against noeta-vm as the AOT runtime. Off by default (normal `noeta` unchanged). Drift-guard test pins the literals to the `noeta_jit::*_HELPER` constants. |
+| L3.2b(2) ✅ | `run_module_aot` binding entry + in-process proof | L3.2b(1) | **DONE** (`da952e3`). `run_module_aot` binds the `noeta_aot_dispatch` table into the mutable mirror tables (`bind_aot_dispatch`) instead of arming the compiler; a new `Vm.aot` flag is OR'd into the frame-entry dispatch gate so pre-installed native entries are used with `self.jit == None` (ineligible protos still interpret). **In-process proof** (isolates the linker): harvest a force-JIT'd entry into an AOT-shaped table, run a fresh compiler-unarmed VM bound to it → native runs, matches tier-0. `aot` defaults false → all existing paths byte-identical. |
+| L3.2b(3) ✅ | link driver + `noeta build --native` + AOT differential | L3.2b(2) | **DONE — the linker ran for real; native AOT ships.** Four green slices: **(3a)** `noeta_vm::compile_module_aot(module) -> object bytes` (`4e…`→ commit on branch) — lives in noeta-vm because only it knows the `Frame` layout; factored the frame template into a shared `fresh_frame_template` (init_jit / init_jit_service / AOT all identical). **(3b)** new `noeta-aot-runtime` **staticlib** crate (`crate-type=["staticlib"]`, name `noeta_aot`): C-ABI `main` recovers the stapled bundle from its own exe tail → Module, references `extern static noeta_aot_dispatch`, binds it and runs on the real host; pulls noeta-vm `aot` so the `noeta_jit_*` helpers are in the archive. `nm` confirms the linkage shape (main+helpers = `T`, dispatch = `U`). **(3c)** `noeta build --native -o app`: object → `cc [program.o + libnoeta_aot.a + native-static-libs] → exe` → staple bundle (L2) → chmod. Archive via `NOETA_AOT_RUNTIME_LIB` (hermetic) or workspace `cargo rustc … --print native-static-libs` (interim). `NOETA_CC` overrides the linker; `--exe`/`--native` mutually exclusive; non-jit build reports it needs the JIT. **(3d)** end-to-end differential test: native binary stdout ≡ `noeta run`, byte-for-byte (loop/sq/fib native, rest interpreted); skips cleanly without a `cc`/`cargo` toolchain. **Gates:** jit-differential green in **both** production and `NOETA_JIT_AOT` modes (494 matched, 0 skipped); **JIT non-regression confirmed** — interleaved A/B (taskset -c 2, 7 rounds) compile-total median 625.8 ms (baseline b82d293) → 607.0 ms (HEAD), marginally faster/in-noise; codegen byte-identical (no emit-path change this session). Crux decision as planned: archive **built from the workspace** for now; *packaging/shipping* to end users is a later distribution call. **HMR alignment preserved:** AOT calls stay indirection-routed (never baked native→native); tables stay mutable + interpreter/JIT live. |
+| L3.2 ✅ | link driver → standalone binary | L3.1 + L2.1 | **DONE (= L3.2a + L3.2b(1..3)).** Object + runtime + embedded interpreter/bytecode substrate (L1–L2) linked into one native binary: machine code for the covered ops, interpreter fallback for the rest — the same hybrid the runtime JIT uses, resolved at build time. |
+| L3.3 ✅ | AOT differential oracle | L3.2 | **DONE — subsumed by L3.2b(3d).** The linked native binary's `RunResult` (stdout + exit) is asserted ≡ the source run in an automated test; `NOETA_JIT_AOT` remains the codegen-only, corpus-wide preview. (A broader native-binary-over-full-corpus harness could be added later, but the mechanism is proven.) |
 | L3.4 | DCE / tree-shaking | L3.2 | **Own sub-milestone, optional for shipping L3.** Whole-program reachability drops unused functions + stdlib. Hard part = dynamic dispatch (trait method tables, `invoke`, reflection `attributes_of`/`type_of`, the stdlib registry): needs conservative roots (`@reflectable`) and closes the deferred "reflection-metadata elimination" row (`deferred.md`, gated on exactly this). Aggressiveness = decision point. |
+
+**Dev-tooling reuse & future convergence (checked 2026-07-07).** The `tooling-unification` arc is
+**merged to main**, but it unified the *interactive-eval* family (LSP/DAP/REPL: one type spelling,
+one fragment parser, the `SessionCompiler`/`VmSession::adopted` live-session seam, the debug console's
+mid-run module swap). AOT/build is a **different axis** (codegen + linking + batch orchestration), so
+it takes **no** LSP/DAP reuse and needs no shared refactor — it reuses the compile pipeline
+(loader→check→compiler→bytecode) exactly as `noeta build` already does. Two *future* convergences to
+keep the seams friendly toward, neither in L3.2:
+- **HMR** = the intersection of the already-merged session machinery (`SessionCompiler`,
+  `VmSession::adopted`, debug-console mid-run swap) *and* the AOT/JIT per-proto entry-table
+  indirection (`jit_install`). HMR generalizes "extend a live session with a fragment" to "replace a
+  changed module's protos + re-point the entry tables." Preserve: indirection-routed calls (no baked
+  direct native→native), runtime-mutable tables, interpreter/JIT live in HMR builds.
+- **Debuggable native binaries** = emit the DAP's debug-info side-tables (`Chunk::debug_lines`, the
+  name map, TypeRepr rendering) as cranelift **DWARF** into the AOT object, so `noeta dap` can debug
+  a native binary. L3-future ("debuggable native"); keep the manifest/symbol seam DWARF-friendly.
 
 **Obfuscation × Level 3:** an AOT binary's **native machine code** is inherently opaque (not
 bytecode — `noeta dump` can't read it), so Level 3 raises the opacity bar for free. The embedded

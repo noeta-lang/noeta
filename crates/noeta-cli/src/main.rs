@@ -113,6 +113,12 @@ enum Command {
         /// separate `.noeb` or interpreter alongside it.
         #[arg(long)]
         exe: bool,
+        /// Emit a **native** executable (P-AOT L3): every eligible prototype is compiled ahead of
+        /// time to machine code and linked into the binary (the rest interpret), then the bundle is
+        /// stapled on as with `--exe`. Requires a C toolchain (`cc`); the AOT runtime archive is
+        /// located via `NOETA_AOT_RUNTIME_LIB`, else built from the workspace (interim).
+        #[arg(long)]
+        native: bool,
         /// Activate a dev-tier for this build, e.g. `--tier debug`. Repeatable.
         #[arg(long)]
         tier: Vec<String>,
@@ -201,9 +207,10 @@ fn main() -> ExitCode {
             file,
             out,
             exe,
+            native,
             tier,
             profile,
-        } => cmd_build(&file, out.as_deref(), exe, &tier, &profile),
+        } => cmd_build(&file, out.as_deref(), exe, native, &tier, &profile),
         Command::Dump {
             file,
             tier,
@@ -633,9 +640,14 @@ fn cmd_build(
     file: &std::path::Path,
     out: Option<&std::path::Path>,
     exe: bool,
+    native: bool,
     tiers: &[String],
     profile: &Option<String>,
 ) -> ExitCode {
+    if exe && native {
+        eprintln!("lang: --exe and --native are mutually exclusive");
+        return ExitCode::from(2);
+    }
     let mut active: Vec<String> = match profile {
         Some(name) => match manifest::resolve_active_tiers(file, name) {
             Ok(tiers) => tiers,
@@ -672,7 +684,9 @@ fn cmd_build(
                         return ExitCode::from(1);
                     }
                 };
-                if exe {
+                if native {
+                    emit_native(file, out, &module)
+                } else if exe {
                     emit_exe(file, out, &module)
                 } else {
                     emit_bundle(file, out, &module)
@@ -780,6 +794,255 @@ fn emit_exe(
         image.len()
     );
     ExitCode::SUCCESS
+}
+
+/// Emit `module` as a **native** executable (P-AOT L3.2b(3)) — the final level. Steps:
+///   1. AOT-compile every eligible prototype to a relocatable object (`compile_module_aot`), which
+///      also defines the `noeta_aot_dispatch` table.
+///   2. Link that object against the AOT runtime staticlib (`libnoeta_aot.a`) with a C toolchain
+///      (`cc`) into a native binary: the runtime provides `main` + the `noeta_jit_*` helpers, the
+///      object provides the native bodies + the dispatch table, and the linker resolves it all.
+///   3. Staple the program's bundle onto that binary (the L2 mechanism), so at startup the runtime
+///      recovers the module and binds the linked-in native bodies through the dispatch table.
+///
+/// The eligible prototypes run as machine code; ineligible ones interpret the same bytecode from the
+/// stapled bundle — the identical hybrid the runtime JIT uses, just resolved at build time.
+#[cfg(feature = "jit")]
+fn emit_native(
+    file: &std::path::Path,
+    out: Option<&std::path::Path>,
+    module: &noeta_bytecode::Module,
+) -> ExitCode {
+    let default_out = if cfg!(windows) {
+        file.with_extension("exe")
+    } else {
+        file.with_extension("")
+    };
+    let out_path = out.map(std::path::Path::to_path_buf).unwrap_or(default_out);
+    if out_path == file {
+        eprintln!(
+            "lang: refusing to overwrite the source file {}; pass -o <path>",
+            file.display()
+        );
+        return ExitCode::from(2);
+    }
+
+    // 1. AOT object.
+    let object = match noeta_vm::compile_module_aot(module) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!("lang: AOT compile failed: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    // A per-invocation scratch dir for the object + the pre-staple linked binary.
+    let work = std::env::temp_dir().join(format!("noeta-aot-{}", std::process::id()));
+    if let Err(err) = std::fs::create_dir_all(&work) {
+        eprintln!("lang: cannot create a build directory: {err}");
+        return ExitCode::from(2);
+    }
+    let cleanup = |code: ExitCode| -> ExitCode {
+        let _ = std::fs::remove_dir_all(&work);
+        code
+    };
+    let obj_path = work.join("program.o");
+    if let Err(err) = std::fs::write(&obj_path, &object) {
+        eprintln!("lang: cannot write the AOT object: {err}");
+        return cleanup(ExitCode::from(2));
+    }
+
+    // 2. Locate the runtime archive + the system libs it must link with, then `cc`-link.
+    let (archive, libs) = match resolve_aot_runtime() {
+        Ok(pair) => pair,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return cleanup(ExitCode::from(1));
+        }
+    };
+    let linked = work.join("linked");
+    if let Err(err) = link_native(&obj_path, &archive, &libs, &linked) {
+        eprintln!("lang: link failed: {err}");
+        return cleanup(ExitCode::from(1));
+    }
+
+    // 3. Staple the bundle onto the linked binary (L2), so the runtime recovers the module.
+    let runtime = match std::fs::read(&linked) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!("lang: cannot read the linked binary: {err}");
+            return cleanup(ExitCode::from(2));
+        }
+    };
+    let blob = noeta_bundle::write(module);
+    let image = noeta_bundle::staple(&runtime, &blob);
+    if let Err(err) = std::fs::write(&out_path, &image) {
+        eprintln!("lang: cannot write {}: {err}", out_path.display());
+        return cleanup(ExitCode::from(2));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(err) =
+            std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o755))
+        {
+            eprintln!("lang: cannot mark {} executable: {err}", out_path.display());
+            return cleanup(ExitCode::from(2));
+        }
+    }
+    eprintln!(
+        "wrote {} ({} bytes, native AOT)",
+        out_path.display(),
+        image.len()
+    );
+    cleanup(ExitCode::SUCCESS)
+}
+
+/// Native AOT (`noeta build --native`) needs the JIT codegen; an interpreter-only build
+/// (`--no-default-features`) has no AOT compiler, so it reports that rather than emitting a binary.
+#[cfg(not(feature = "jit"))]
+fn emit_native(
+    _file: &std::path::Path,
+    _out: Option<&std::path::Path>,
+    _module: &noeta_bytecode::Module,
+) -> ExitCode {
+    eprintln!("lang: native AOT (`--native`) requires the JIT-enabled build (default features)");
+    ExitCode::from(2)
+}
+
+/// Locate the AOT runtime staticlib (`libnoeta_aot.a`) and the native system libraries it must be
+/// linked against.
+/// Priority: an explicit `NOETA_AOT_RUNTIME_LIB` (paired with `NOETA_AOT_LINK_LIBS`,
+/// space-separated) — the packaged/hermetic path — else build it from the workspace with `cargo
+/// rustc … --print native-static-libs` (interim: needs cargo + the source tree), which both produces
+/// the archive and prints the exact link line. Packaging the archive for a shipped toolchain (so
+/// `--native` works outside the workspace) is a later distribution decision.
+#[cfg(feature = "jit")]
+fn resolve_aot_runtime() -> Result<(std::path::PathBuf, Vec<String>), String> {
+    if let Ok(path) = std::env::var("NOETA_AOT_RUNTIME_LIB") {
+        let libs = std::env::var("NOETA_AOT_LINK_LIBS")
+            .ok()
+            .map(|s| s.split_whitespace().map(str::to_string).collect())
+            .unwrap_or_else(default_native_libs);
+        return Ok((std::path::PathBuf::from(path), libs));
+    }
+
+    // Interim workspace build: one `cargo rustc` compiles the staticlib and prints its
+    // native-static-libs note. Combined stdout+stderr is captured so we can parse the note.
+    let output = std::process::Command::new("cargo")
+        .args([
+            "rustc",
+            "-p",
+            "noeta-aot-runtime",
+            "--release",
+            "--",
+            "--print",
+            "native-static-libs",
+        ])
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("cannot run cargo to build the AOT runtime: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "building the AOT runtime failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let notes = String::from_utf8_lossy(&output.stderr);
+    let libs = notes
+        .lines()
+        .find_map(|l| l.split_once("native-static-libs:"))
+        .map(|(_, libs)| {
+            libs.split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(default_native_libs);
+    let archive = workspace_target_dir()?
+        .join("release")
+        .join("libnoeta_aot.a");
+    if !archive.exists() {
+        return Err(format!(
+            "the AOT runtime archive was not found at {} after building",
+            archive.display()
+        ));
+    }
+    Ok((archive, libs))
+}
+
+/// A conservative default native-link set for a Rust staticlib on Linux, used when the exact
+/// `native-static-libs` note is unavailable (an explicit archive with no `NOETA_AOT_LINK_LIBS`).
+#[cfg(feature = "jit")]
+fn default_native_libs() -> Vec<String> {
+    [
+        "-lgcc_s",
+        "-lutil",
+        "-lrt",
+        "-lpthread",
+        "-lm",
+        "-ldl",
+        "-lc",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// The workspace's Cargo target directory: `CARGO_TARGET_DIR` if set, else `<workspace root>/target`
+/// found by walking up from the current directory for the `Cargo.toml` that declares `[workspace]`.
+#[cfg(feature = "jit")]
+fn workspace_target_dir() -> Result<std::path::PathBuf, String> {
+    if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
+        return Ok(std::path::PathBuf::from(dir));
+    }
+    let mut dir = std::env::current_dir().map_err(|e| e.to_string())?;
+    loop {
+        let manifest = dir.join("Cargo.toml");
+        if manifest.exists()
+            && std::fs::read_to_string(&manifest)
+                .map(|s| s.contains("[workspace]"))
+                .unwrap_or(false)
+        {
+            return Ok(dir.join("target"));
+        }
+        if !dir.pop() {
+            return Err(
+                "cannot find the workspace root; run `noeta build --native` from inside the \
+                 workspace, or set NOETA_AOT_RUNTIME_LIB to a prebuilt archive"
+                    .to_string(),
+            );
+        }
+    }
+}
+
+/// Link the AOT `object` against the runtime `archive` (+ its native `libs`) into `out` with a C
+/// toolchain. Everything — the program's native bodies, the runtime, and Rust std — lives in the one
+/// archive, so a single archive mention resolves the object↔runtime mutual references (the object
+/// defines `noeta_aot_dispatch`, the archive defines `main` + the `noeta_jit_*` helpers). `cc` adds
+/// the C runtime that calls `main`. The linker (`cc`) is overridable via `NOETA_CC`.
+#[cfg(feature = "jit")]
+fn link_native(
+    object: &std::path::Path,
+    archive: &std::path::Path,
+    libs: &[String],
+    out: &std::path::Path,
+) -> Result<(), String> {
+    let cc = std::env::var("NOETA_CC").unwrap_or_else(|_| "cc".to_string());
+    let mut cmd = std::process::Command::new(&cc);
+    cmd.arg(object).arg(archive).args(libs).arg("-o").arg(out);
+    let output = cmd
+        .output()
+        .map_err(|e| format!("cannot run the linker `{cc}` (override with NOETA_CC): {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`{cc}` exited with {}:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
 }
 
 /// Gate a tier runner on `--profile`: if a profile was given and does not make `tier` live, print a

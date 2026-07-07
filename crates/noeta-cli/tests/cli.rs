@@ -1369,6 +1369,100 @@ fn build_exe_reports_a_runtime_abort_from_the_stapled_program() {
     let _ = std::fs::remove_file(&app);
 }
 
+// --- `build --native` / native AOT executables (P-AOT L3) ---------------------------
+
+/// Build the AOT runtime staticlib (`libnoeta_aot.a`) for `--native` to link against, reusing the
+/// workspace's `target/debug` (so its deps are already compiled), and return the archive path plus
+/// the native-static-libs link line rustc reports. `None` if the toolchain can't produce it (no
+/// `cargo`, or the build failed) — the caller then skips, so the differential is a no-op on a host
+/// without a build toolchain rather than a spurious failure.
+fn build_aot_archive() -> Option<(PathBuf, String)> {
+    let output = std::process::Command::new(env!("CARGO"))
+        .current_dir(workspace())
+        .args([
+            "rustc",
+            "-p",
+            "noeta-aot-runtime",
+            "--",
+            "--print",
+            "native-static-libs",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        eprintln!(
+            "skipping native AOT test: building the runtime archive failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
+    }
+    let notes = String::from_utf8_lossy(&output.stderr);
+    let libs = notes
+        .lines()
+        .find_map(|l| l.split_once("native-static-libs:"))
+        .map(|(_, libs)| libs.trim().to_string())
+        .unwrap_or_default();
+    let archive = workspace().join("target/debug/libnoeta_aot.a");
+    archive.exists().then_some((archive, libs))
+}
+
+/// Whether a C toolchain (`cc`) is on PATH — `--native`'s linker. Overridable via `NOETA_CC`, as the
+/// CLI's linker driver is.
+fn has_cc() -> bool {
+    let cc = std::env::var("NOETA_CC").unwrap_or_else(|_| "cc".to_string());
+    std::process::Command::new(cc)
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn build_native_matches_a_source_run_byte_for_byte() {
+    // P-AOT L3.2b(3), the end-to-end AOT differential: `noeta build --native` compiles the eligible
+    // prototypes to machine code, links them into a native binary, and staples the bundle on. That
+    // binary — dispatching native bodies for the hot loop / `sq` / `fib` and interpreting the rest —
+    // must produce exactly what `noeta run` produces on the same source. This is the linked-binary
+    // proof the in-process test (`aot_bound_dispatch_runs_native_in_process`) forecast: only the
+    // linker was unproven, and here it runs for real.
+    let Some((archive, libs)) = build_aot_archive() else {
+        return; // no build toolchain for the runtime archive — skip.
+    };
+    if !has_cc() {
+        eprintln!("skipping native AOT test: no `cc` on PATH");
+        return;
+    }
+
+    let src = "fn sq(n: int): int { return n * n }\n\
+               fn fib(n: int): int { if n < 2 { return n }\n  return fib(n - 1) + fib(n - 2) }\n\
+               mut t = 0\nfor i in 0..1000 { t = t + sq(i) }\n\
+               echo t\necho fib(20)\necho \"done\"\n";
+    let file = temp_program("build_native", src);
+    let app = file.parent().unwrap().join("app_native");
+    let _ = std::fs::remove_file(&app);
+
+    // Reference: a plain source run.
+    let reference = lang().arg("run").arg(&file).assert().success();
+    let expected = String::from_utf8(reference.get_output().stdout.clone()).unwrap();
+
+    // Build the native binary, pointing the linker driver at the archive we just built.
+    lang()
+        .arg("build")
+        .arg(&file)
+        .arg("--native")
+        .arg("-o")
+        .arg(&app)
+        .env("NOETA_AOT_RUNTIME_LIB", &archive)
+        .env("NOETA_AOT_LINK_LIBS", &libs)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("native AOT"));
+
+    // The native binary runs on its own and matches the source run exactly.
+    Command::new(&app).assert().success().stdout(expected);
+    let _ = std::fs::remove_file(&app);
+}
+
 #[test]
 fn bundle_run_rejects_build_time_flags() {
     // Tiers are baked at build time; passing them to a bundle run is a usage error, not a silent

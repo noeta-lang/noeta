@@ -1,0 +1,36 @@
+[package]
+name = "noeta-aot-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# P-AOT L3.2b(3): the runtime an ahead-of-time-compiled program links against. Built as a **static
+# library** (a single relocatable archive) so `noeta build --native` can `cc`-link a program's AOT
+# object against it into a self-contained native executable. It provides the C-ABI `main` entry, the
+# exported `noeta_jit_*` helper symbols the native bodies call (via noeta-vm's `aot` feature), and the
+# bundle/host machinery to load and run the embedded program.
+[lib]
+name = "noeta_aot"
+crate-type = ["staticlib"]
+
+[dependencies]
+# `aot` turns on the JIT and exports the `noeta_jit_*` runtime helpers under their canonical C names,
+# so the linked-in native bodies resolve their helper calls against this archive.
+noeta-vm = { workspace = true, features = ["aot"] }
+noeta-bundle = { workspace = true }
+noeta-bytecode = { workspace = true }
+noeta-runtime = { workspace = true }
+noeta-stdlib = { workspace = true }
+noeta-span = { workspace = true }
+noeta-diagnostics = { workspace = true }
+
+# This crate is the one place the whole AOT scheme's `unsafe` lives: a C-ABI `main`, the reference to
+# the linker-defined `noeta_aot_dispatch` data symbol, and the `run_module_aot` binding call. Relax
+# `unsafe_code` from the workspace `forbid` to `deny` so those three sites can opt in explicitly.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
