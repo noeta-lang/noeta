@@ -1,7 +1,11 @@
 # std.http — an HTTP client over the Network host capability
 
-**Status: DESIGN (awaiting sign-off on the four decisions below).** Branch `http` (off local
-main `1c89bd1`, post crypto merge).
+**Status: ARC COMPLETE (2026-07-07).** H0 `1940efb`, H1 `a29c77f`, H2 `d0169c1`, H3 `c681e8c`,
+H4 `35f181d`, H5 `0b4f20d`, H6 docs+memory. Branch `http` (off local main `1c89bd1`). All four
+design decisions shipped as recommended (sync+async, `Response` extern type, pure sandbox
+responder, reqwest+rustls). Gates each slice: 73 suites + full conformance (differential + leak +
+doc-samples) + fmt + clippy. Real-network paths covered by `#[ignore]` tests (sync + async).
+Follow-ons in `plans/deferred.md` §HTTP.
 
 The last major host capability. `std.crypto` proved the extern-type + registry seams carry a new
 module with zero backend edits; this arc adds the seventh `Host` capability (**Network**), its

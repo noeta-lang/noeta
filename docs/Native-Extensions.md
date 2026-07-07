@@ -28,7 +28,7 @@ trait Extension {
 }
 ```
 
-`params` and `ret` use `SigType`, a small signature vocabulary (noeta-stdlib cannot see the checker's `Type`); `noeta-check` maps each `SigType` to a real `Type`, so the registry is the single source of truth that *both* the checker and both backends read.
+`params` and `ret` use `SigType`, a small signature vocabulary (noeta-stdlib cannot see the checker's `Type`); `noeta-check` maps each `SigType` to a real `Type`, so the registry is the single source of truth that *both* the checker and both backends read. A parameter wrapped in `SigType::Optional(&…)` is **trailing-optional** (`http.get(url, headers?)`): the checker derives the required-argument count from the first `Optional`, and the dispatch reads the slot with `args.get(i)`, supplying its own default when the call omits it — so optional params cost no backend change and no default-value machinery.
 
 ## First-class types: `ExtType` and `ExternValue`
 
@@ -42,7 +42,7 @@ An extension implements an **async** function without ever seeing the executor: 
 
 ## The `Host` capability
 
-All host-coupled effects — filesystem, clock, PRNG, `env`/`args` — go through one `Host` trait. Two implementations exist: `SandboxHost` (deterministic in-memory VFS, logical clock, seeded RNG — what the differential always runs) and `RealHost` (real disk, real env, per-isolate tokio — what `noeta run` uses, never differential-tested). This is the same "simulate deterministically, deploy real" split as the async executor and isolate scheduler.
+All host-coupled effects — filesystem, clock, PRNG, `env`/`args`, entropy, ids, and the network — go through one `Host` trait (seven capability traits, blanket-impl'd). Two implementations exist: `SandboxHost` (deterministic in-memory VFS, logical clock, seeded RNG, and a **pure network responder** — what the differential always runs) and `RealHost` (real disk, real env, per-isolate tokio, and a real reqwest client — what `noeta run` uses, never differential-tested). This is the same "simulate deterministically, deploy real" split as the async executor and isolate scheduler. The network capability (http arc) is the seventh: its async path is where `RealHost` overrides `net_spawn` to hand the executor a genuine `RealBody::Async` reqwest future, while the sandbox resolves at spawn.
 
 ## Case study: `json.parse::<T>`
 
@@ -53,6 +53,7 @@ The motivating consumer is a native function that builds a value of a type named
 - **Shipped (Phases A + B):** the registry and neutral marshalling seam; `math`/`random`/`time`/`env`/`args`/`fs`/`vec`/`quat`/`json` all migrated onto it; the old `NativeModule` enum deleted; `json.parse::<T>` working end to end.
 - **Shipped (extern-types arc):** `ExtType`/`ExternValue` first-class types (`Uuid`, and `FileHandle` migrated off its hand-threaded hosting); extern map/set keys (`Map<Uuid, T>`); the `ExternIo` async seam (`fs.*_async` migrated off its per-backend intercepts, async metadata twins added with zero backend edits).
 - **Shipped (crypto arc):** `std.crypto` (digests, HMAC, bcrypt, `random_bytes`) and the incremental `Hasher` — the third extern type, landed with zero backend edits, proving the mutable + host-free corner; `SigType::Union` (`string|bytes` signature positions, mapped onto declared unions).
+- **Shipped (http arc):** the seventh `Host` capability (**Network**) — a pure sandbox responder + a real reqwest/rustls client; `std.http` (sync + async verbs, incl. QUERY) returning a `Response` extern type; the async path drives `RealBody::Async` with a real future; and **general optional-param support** (`SigType::Optional`) for registry functions and extern-type methods.
 - **Deferred:** columnar kernels via extensions (blocked on a raw-buffer ABI capability), Host-coupled finalizers (GC free cannot reach the Host — buffered types keep explicit `close()`), and the package/dependency manager that would let `vec`/`quat` physically leave core and third parties register their own crates. Extracting a stable `noeta-native` ABI crate is planned for the package-manager milestone.
 
 ## See also

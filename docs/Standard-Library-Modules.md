@@ -212,6 +212,60 @@ the host's entropy capability — exactly reproducible in the deterministic sand
 entropy under `noeta run`. The digest functions are pure: the same input gives the same digest
 everywhere (the conformance suite pins the published NIST/RFC vectors).
 
+## `http`
+
+An HTTP client. Each verb performs a request and returns a `Response`; the `*_async` twins return
+a `Future<Response>` for concurrent work.
+
+| Function | Signature | Notes |
+|---|---|---|
+| `get` / `head` / `delete` | `get(url: string, headers?: Map<string, string>) -> Response` | Bodyless verbs. |
+| `post` / `put` | `post(url: string, body: string\|bytes, headers?: Map<string, string>) -> Response` | Body-carrying. |
+| `query` | `query(url: string, body: string\|bytes, headers?: Map<string, string>) -> Response` | The HTTP QUERY method — a safe, idempotent request that carries a body (for complex reads a URL can't express). |
+| `request` | `request(method: string, url: string, headers?: Map<string, string>) -> Response` | Any other (bodyless) verb. |
+| `*_async` | `get_async(url, headers?) -> Future<Response>`, … | Async twin of every verb above; `.await` yields the `Response`. |
+
+Every verb takes an **optional** trailing `headers: Map<string, string>`. `Response` methods:
+`status() -> int`, `ok() -> bool` (2xx), `body() -> string`, `body_bytes() -> bytes`, and
+`header(name) -> string?` (case-insensitive).
+
+```noeta ignore
+use std.{http, json}
+
+resp = http.get("https://api.example.com/users/1", {"authorization": "Bearer " ~ token})
+if resp.ok() {
+    user = json.parse::<User>(resp.body())
+    echo user.name
+} else {
+    echo "request failed: " ~ resp.status()
+}
+
+// POST a JSON body; QUERY for a body-carrying read.
+http.post("https://api.example.com/users", json.stringify(payload), {"content-type": "application/json"})
+found = http.query("https://api.example.com/search", json.stringify(filter))
+```
+
+Concurrent fan-out uses the async twins inside a `concurrent` block (see [Concurrency](Concurrency)):
+
+```noeta ignore
+use std.{http}
+async fn fetch(url: string): int {
+    return http.get_async(url).await.status()
+}
+concurrent {
+    hs = [spawn fetch("https://a.example"), spawn fetch("https://b.example")]
+    codes = all(hs)
+    echo codes.join(",")
+}
+```
+
+**Sandbox vs. real.** Under `noeta run` (and the REPL) requests hit the real network. Under the
+deterministic sandbox (the conformance differential, tests) a built-in responder answers every
+request purely from its shape — `…/status/{n}` returns status `n`, `…/echo` returns a JSON echo of
+the request, `…/headers` echoes the request headers — so tests are reproducible without a live
+server. A program that needs real data runs on the real host. (Examples above are `ignore`d in the
+doc-test gate precisely because they would otherwise reach the network.)
+
 ## `vec` & `quat`
 
 Scalar 3D vector and quaternion math over any struct with the right shape — a `Vec3` is any struct with three `f32` fields, a `Quat` any struct with four. Result-shape operations return the *same* struct type as the input.
