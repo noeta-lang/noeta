@@ -21,6 +21,32 @@ pub struct ReflectionInfo {
 }
 
 impl ReflectionInfo {
+    /// Merge another program fragment's reflection into this one, **latest-wins** for any redeclared
+    /// name. A REPL session builds one fragment per entry and accumulates them here, so a type or
+    /// attribute declared in an earlier entry stays queryable (`attributes_of` / `type_of` /
+    /// `roles_of` across entries) while a type *redefined* in a later entry supersedes its old records
+    /// — matching how method dispatch resolves to the newest declaration. Records for names the
+    /// incoming fragment does not touch are left in place; the fragment's own records are appended in
+    /// source order after purging any they redeclare.
+    pub fn accumulate(&mut self, fragment: ReflectionInfo) {
+        // The declaration names this fragment (re)defines — a type it declares, or any attribute /
+        // role target it carries. Their old records are superseded wholesale before the new ones land.
+        let redeclared: std::collections::HashSet<&str> = fragment
+            .types
+            .iter()
+            .map(|t| t.name.as_str())
+            .chain(fragment.manifest.iter().map(|a| a.target.as_str()))
+            .chain(fragment.roles.iter().map(|r| r.target.as_str()))
+            .collect();
+        self.types.retain(|t| !redeclared.contains(t.name.as_str()));
+        self.manifest.retain(|a| !redeclared.contains(a.target.as_str()));
+        self.roles.retain(|r| !redeclared.contains(r.target.as_str()));
+        drop(redeclared);
+        self.types.extend(fragment.types);
+        self.manifest.extend(fragment.manifest);
+        self.roles.extend(fragment.roles);
+    }
+
     /// The data attributes attached to `target`, in source order — the manifest query tooling and
     /// `attributes_of` use to discover, e.g., every type tagged `#[Entity]`.
     pub fn attributes_for<'a>(

@@ -157,6 +157,27 @@ fn a_mid_session_panic_traces_identically_and_the_session_survives() {
 }
 
 #[test]
+fn cross_entry_reflection_agrees() {
+    // Reflection accumulates across entries on **both** backends: an attribute declared in one entry
+    // and attached in another is found by a query in a third. Without accumulation the query entry's
+    // reflection would hold only its own declarations, so `attributes_of::<Column>()` would be empty —
+    // this both proves the accumulation and keeps the two REPLs in lockstep.
+    assert_sessions_agree(&[
+        Step::Eval("@attribute\nstruct Column { name: string }"),
+        Step::Eval("struct User {\n  #[Column(\"uid\")]\n  id: int\n}"),
+        Step::Eval(
+            "for c in attributes_of::<Column>() {\n  echo c.target;\n  echo c.value.name;\n}",
+        ),
+        // A type redefined in a later entry supersedes its old reflection (latest-wins): re-declaring
+        // User with a different attribute replaces, not duplicates.
+        Step::Eval("struct User {\n  #[Column(\"renamed\")]\n  id: int\n}"),
+        Step::Eval(
+            "for c in attributes_of::<Column>() {\n  echo c.target;\n  echo c.value.name;\n}",
+        ),
+    ]);
+}
+
+#[test]
 fn cross_entry_object_identity_and_method_dispatch_agree() {
     assert_sessions_agree(&[
         Step::Eval(

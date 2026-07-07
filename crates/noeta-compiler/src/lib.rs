@@ -334,6 +334,12 @@ fn compile_inner(
 /// successfully-parsed entry always compiles.
 pub struct SessionCompiler {
     mc: ModuleCompiler,
+    /// Reflection accumulated across entries (REPL-on-VM follow-on): each entry's
+    /// [`noeta_ast::reflect::build`] is merged in latest-wins, so `attributes_of` / `type_of` /
+    /// `roles_of` on a type declared in an *earlier* entry resolve — where a per-entry rebuild would
+    /// only see the current entry's declarations. The tree-walker `Session` accumulates identically,
+    /// so the session differential stays green.
+    reflection: noeta_ast::reflect::ReflectionInfo,
 }
 
 impl std::fmt::Debug for SessionCompiler {
@@ -377,7 +383,10 @@ impl SessionCompiler {
             global_slots: HashMap::new(),
             debug: false,
         };
-        SessionCompiler { mc }
+        SessionCompiler {
+            mc,
+            reflection: noeta_ast::reflect::ReflectionInfo::default(),
+        }
     }
 
     /// Compile one REPL entry, **appending** its declarations to the persistent tables and its
@@ -419,10 +428,14 @@ impl SessionCompiler {
         // (correct; it only forgoes the plain-free fast path for a genuinely destructor-free type).
         let destruct_reachable: Vec<String> = self.mc.types.keys().cloned().collect();
 
+        // Accumulate this entry's reflection into the persistent set (latest-wins), so a query on a
+        // type declared in an earlier entry resolves — the tree-walker `Session` accumulates the same
+        // way, keeping the session differential green.
+        self.reflection
+            .accumulate(noeta_ast::reflect::build(entry));
+
         // Snapshot the persistent tables into a runnable module. Cloned (not moved) so the tables stay
         // alive for the next entry; O(total bytecode) per entry, negligible at an interactive prompt.
-        // Reflection is rebuilt per entry (matching the tree-walker `Session`, which rebuilds it per
-        // batch) — cross-entry reflection is a documented follow-on, not a regression.
         Ok(Module {
             protos: self.mc.protos.clone(),
             shapes: self.mc.shapes.clone(),
@@ -436,7 +449,7 @@ impl SessionCompiler {
             tojson_derives: self.mc.tojson_derives.clone(),
             destruct_reachable,
             cache_slots: self.mc.cache_slots,
-            reflection: noeta_ast::reflect::build(entry),
+            reflection: self.reflection.clone(),
             type_reprs: self.mc.type_reprs.clone(),
             names: self.mc.names.clone(),
             global_names: self.mc.global_names.clone(),

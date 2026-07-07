@@ -221,11 +221,15 @@ impl Session {
         let ir = noeta_ir::lower(&lowerable)
             .expect("Core-IR lowering is total over the parsed language (the REPL only feeds parsed programs)");
         // Mirror the bytecode pipeline: precise-RC drops (no checker in the REPL, so drops are
-        // conservatively destructor-relevant) then reuse tokens. Reflection is rebuilt from this
-        // batch so within-entry `attributes_of`/`roles_of`/type queries resolve.
+        // conservatively destructor-relevant) then reuse tokens. This entry's reflection is
+        // **accumulated** into the persistent set (latest-wins), so `attributes_of`/`roles_of`/type
+        // queries resolve for types declared in *earlier* entries too — the VM's `SessionCompiler`
+        // accumulates identically, so the session differential stays green.
         let ir = noeta_ir_passes::insert_drops(&ir, None);
         let ir = noeta_ir_passes::thread_reuse(&ir);
-        self.interp.reflection = noeta_ast::reflect::build(&lowerable);
+        self.interp
+            .reflection
+            .accumulate(noeta_ast::reflect::build(&lowerable));
         let flow = self.interp.run_ir_batch(&ir);
         // **Remove** (not clone) the sentinel so an evaluated trailing value never lingers in scope.
         // Keeping it bound would hold a reference to the value across entries, which would both leak
