@@ -1786,114 +1786,135 @@ impl<'m> Vm<'m> {
 
 /// Run `main` and tear the VM down (globals, cycle collection, channel drain), returning the program's
 /// [`RunResult`]. Split from [`Vm::load`] so a worker isolate can load the module without running
-/// `main` (isolates I.4b). The teardown is unchanged from the original single-function entry.
+/// `main` (isolates I.4b). Two phases — [`Vm::run_top`] then [`Vm::teardown`] — so a persistent
+/// session (REPL-on-VM) can run one entry's `main` against the shared globals *without* the teardown a
+/// later entry's bindings still depend on; the single-shot path just runs them back to back.
 fn run_and_teardown(vm: &mut Vm, mode: noeta_value::CollectorMode) -> RunResult {
-    let module = vm.module;
-    let regs = vec![Value::unit(); module.main().num_registers as usize];
-    let top = Frame {
-        proto: 0,
-        base: 0,
-        pc: 0,
-        ret_dst: 0,
-        ret_transform: RetTransform::None,
-        upvalues: Vec::new(),
-    };
-    // The top-level frame's `Return`/`Halt` yields the program's (discarded) value; release
-    // it. On abort `run` has already released every frame register.
-    if let Ok(v) = vm.run(vec![top], regs) {
-        release(v);
-    }
-    // An abort (e.g. a detected deadlock, E0010) can leave open `concurrent` scopes whose tasks
-    // were never joined — each scope still owns its tasks' futures (and any parked results).
-    // Release them exactly as `ScopeEnd` would, so an aborted program's teardown stays
-    // refcount-exact (the anomaly oracle checks) and destructors on captured locals still run.
-    for scope in std::mem::take(&mut vm.scopes) {
-        for task in scope {
-            vm.release_value(task.future);
-            if let Some(result) = task.result {
-                vm.release_value(result);
-            }
-        }
-    }
-    // Release the JIT inline caches' closure pins (S4.2) before any collector accounting: a
-    // pinned closure the program itself dropped must read as garbage now, not as an anomaly.
-    // Native code can no longer run (the run above is over), so the caches are dead.
-    #[cfg(feature = "jit")]
-    for v in std::mem::take(&mut vm.jit_cache_pins) {
-        release(v);
-    }
-    // Reap reference cycles the program may have tied through `mut` fields / cells / closures that
-    // refcounting alone cannot reclaim (e.g. a self-recursive nested `fn`). The two collectors run at
-    // different points: the **trace** marks from the live globals *before* teardown (the frame stack
-    // is unwound, so the globals are the whole root set) and sweeps everything unreachable; the
-    // **trial-deletion** path instead reaps its buffered candidates *after* teardown, once every frame
-    // and global release has had a chance to buffer the cycle's roots.
-    if mode == noeta_value::CollectorMode::Trace {
-        let mut roots: Vec<Value> = vm
-            .globals
-            .iter()
-            .copied()
-            .filter(|v| !v.is_unbound())
-            .collect();
-        // The reactive graph (reactivity S1) holds a `+1` reference to every signal's content and
-        // every computed/effect body, but a value reachable *only* through the graph is invisible to
-        // this mark-from-roots sweep. Feed those held values in as roots so the collector does not
-        // reclaim a still-referenced value out from under the graph (which `reactive.clear()` below
-        // would then double-free). The reactive analogue of scanning the channel buffers.
-        vm.reactive.for_each_value(|gv| roots.push(gv.get()));
-        let garbage = collect_trace(&roots);
-        vm.reclaim_cycle_garbage(garbage);
-    }
-    // Release any messages still buffered in channels at program end (isolates I.1) — undrained
-    // `send`s. Draining here keeps residency at zero; `release_value` runs any message destructor. A
-    // `Shared` channel (I.4c) holds `Wire` copies, not heap `Value`s, so dropping it frees cleanly.
-    for chan in std::mem::take(&mut vm.channels) {
-        if let Channel::Local { buffer, .. } = chan {
-            for msg in buffer {
-                vm.release_value(msg);
-            }
-        }
-    }
-    // Release every value held by the reactive graph (reactivity S1): signals never disposed by the
-    // program still own their content until here. Dropping the nodes fires each `GcVal`'s `Drop`, so
-    // residency returns to zero — the leak oracle's proof that the graph's refcounting is exact.
-    vm.reactive.clear();
-    // Destroy the globals at program end in reverse declaration order, running each
-    // destructor on its last reference — the deterministic destruction the spec requires.
-    for slot in vm.global_order.clone().into_iter().rev() {
-        let v = std::mem::replace(&mut vm.globals[slot as usize], Value::unbound());
-        if !v.is_unbound() {
-            vm.release_value(v);
-        }
-    }
-    // Backup collection (object-model slice 2c): a reference `class` cycle rooted in the globals
-    // (`a.next = b; b.next = a`) survives the teardown above — each member still holds the other, so
-    // refcounting never reaches zero. With the globals now gone there are **no roots left**, so every
-    // still-live object is unreachable garbage; trace-collect from an empty root set to reclaim it,
-    // running each member's `destruct` exactly once. (The pre-teardown trace above only catches
-    // cycles already unreachable mid-run.)
-    if mode == noeta_value::CollectorMode::Trace {
-        let garbage = collect_trace(&[]);
-        vm.reclaim_cycle_garbage(garbage);
-    }
-    if mode == noeta_value::CollectorMode::TrialDeletion {
-        let garbage = noeta_gc::collect_trial_deletion();
-        vm.reclaim_cycle_garbage(garbage);
-    }
+    vm.run_top();
+    vm.teardown(mode)
+}
 
-    // Join any isolate worker threads not already harvested (a structured scope harvests + joins its
-    // isolates at `}`, so this is normally empty — defensive against an early exit).
-    for slot in std::mem::take(&mut vm.isolates) {
-        if let Some(h) = slot.handle {
-            let _ = h.join();
+impl<'m> Vm<'m> {
+    /// Run the module's entry chunk (proto 0 = `main`) to completion and release the frame-local state
+    /// it leaves behind — the returned top value, any open `concurrent` scopes, and the JIT
+    /// inline-cache closure pins. **Does not** touch the globals, channels, reactive graph, or run any
+    /// collector: those are [`Vm::teardown`]'s job, deferred so a session can run many entries between
+    /// one load and one teardown (REPL-on-VM R0).
+    fn run_top(&mut self) {
+        let regs = vec![Value::unit(); self.module.main().num_registers as usize];
+        let top = Frame {
+            proto: 0,
+            base: 0,
+            pc: 0,
+            ret_dst: 0,
+            ret_transform: RetTransform::None,
+            upvalues: Vec::new(),
+        };
+        // The top-level frame's `Return`/`Halt` yields the program's (discarded) value; release
+        // it. On abort `run` has already released every frame register.
+        if let Ok(v) = self.run(vec![top], regs) {
+            release(v);
+        }
+        // An abort (e.g. a detected deadlock, E0010) can leave open `concurrent` scopes whose tasks
+        // were never joined — each scope still owns its tasks' futures (and any parked results).
+        // Release them exactly as `ScopeEnd` would, so an aborted program's teardown stays
+        // refcount-exact (the anomaly oracle checks) and destructors on captured locals still run.
+        for scope in std::mem::take(&mut self.scopes) {
+            for task in scope {
+                self.release_value(task.future);
+                if let Some(result) = task.result {
+                    self.release_value(result);
+                }
+            }
+        }
+        // Release the JIT inline caches' closure pins (S4.2) before any collector accounting: a
+        // pinned closure the program itself dropped must read as garbage now, not as an anomaly.
+        // Native code can no longer run (the run above is over), so the caches are dead.
+        #[cfg(feature = "jit")]
+        for v in std::mem::take(&mut self.jit_cache_pins) {
+            release(v);
         }
     }
 
-    let exit_code = if vm.diagnostics.is_empty() { 0 } else { 1 };
-    RunResult {
-        stdout: std::mem::take(&mut vm.stdout),
-        exit_code,
-        diagnostics: std::mem::take(&mut vm.diagnostics),
+    /// Tear the VM down after its entry chunk(s) ran and drain the [`RunResult`]: reap reference
+    /// cycles, drain channel buffers, clear the reactive graph, destroy the globals in reverse binding
+    /// order (running each destructor), reap any remaining cycle garbage, and join outstanding isolate
+    /// workers. Split from [`Vm::run_top`] so a session runs this **once** at the end rather than after
+    /// every entry (REPL-on-VM R0); leak residency must reach zero here.
+    fn teardown(&mut self, mode: noeta_value::CollectorMode) -> RunResult {
+        // Reap reference cycles the program may have tied through `mut` fields / cells / closures that
+        // refcounting alone cannot reclaim (e.g. a self-recursive nested `fn`). The two collectors run at
+        // different points: the **trace** marks from the live globals *before* teardown (the frame stack
+        // is unwound, so the globals are the whole root set) and sweeps everything unreachable; the
+        // **trial-deletion** path instead reaps its buffered candidates *after* teardown, once every frame
+        // and global release has had a chance to buffer the cycle's roots.
+        if mode == noeta_value::CollectorMode::Trace {
+            let mut roots: Vec<Value> = self
+                .globals
+                .iter()
+                .copied()
+                .filter(|v| !v.is_unbound())
+                .collect();
+            // The reactive graph (reactivity S1) holds a `+1` reference to every signal's content and
+            // every computed/effect body, but a value reachable *only* through the graph is invisible to
+            // this mark-from-roots sweep. Feed those held values in as roots so the collector does not
+            // reclaim a still-referenced value out from under the graph (which `reactive.clear()` below
+            // would then double-free). The reactive analogue of scanning the channel buffers.
+            self.reactive.for_each_value(|gv| roots.push(gv.get()));
+            let garbage = collect_trace(&roots);
+            self.reclaim_cycle_garbage(garbage);
+        }
+        // Release any messages still buffered in channels at program end (isolates I.1) — undrained
+        // `send`s. Draining here keeps residency at zero; `release_value` runs any message destructor. A
+        // `Shared` channel (I.4c) holds `Wire` copies, not heap `Value`s, so dropping it frees cleanly.
+        for chan in std::mem::take(&mut self.channels) {
+            if let Channel::Local { buffer, .. } = chan {
+                for msg in buffer {
+                    self.release_value(msg);
+                }
+            }
+        }
+        // Release every value held by the reactive graph (reactivity S1): signals never disposed by the
+        // program still own their content until here. Dropping the nodes fires each `GcVal`'s `Drop`, so
+        // residency returns to zero — the leak oracle's proof that the graph's refcounting is exact.
+        self.reactive.clear();
+        // Destroy the globals at program end in reverse declaration order, running each
+        // destructor on its last reference — the deterministic destruction the spec requires.
+        for slot in self.global_order.clone().into_iter().rev() {
+            let v = std::mem::replace(&mut self.globals[slot as usize], Value::unbound());
+            if !v.is_unbound() {
+                self.release_value(v);
+            }
+        }
+        // Backup collection (object-model slice 2c): a reference `class` cycle rooted in the globals
+        // (`a.next = b; b.next = a`) survives the teardown above — each member still holds the other, so
+        // refcounting never reaches zero. With the globals now gone there are **no roots left**, so every
+        // still-live object is unreachable garbage; trace-collect from an empty root set to reclaim it,
+        // running each member's `destruct` exactly once. (The pre-teardown trace above only catches
+        // cycles already unreachable mid-run.)
+        if mode == noeta_value::CollectorMode::Trace {
+            let garbage = collect_trace(&[]);
+            self.reclaim_cycle_garbage(garbage);
+        }
+        if mode == noeta_value::CollectorMode::TrialDeletion {
+            let garbage = noeta_gc::collect_trial_deletion();
+            self.reclaim_cycle_garbage(garbage);
+        }
+
+        // Join any isolate worker threads not already harvested (a structured scope harvests + joins its
+        // isolates at `}`, so this is normally empty — defensive against an early exit).
+        for slot in std::mem::take(&mut self.isolates) {
+            if let Some(h) = slot.handle {
+                let _ = h.join();
+            }
+        }
+
+        let exit_code = if self.diagnostics.is_empty() { 0 } else { 1 };
+        RunResult {
+            stdout: std::mem::take(&mut self.stdout),
+            exit_code,
+            diagnostics: std::mem::take(&mut self.diagnostics),
+        }
     }
 }
 
@@ -6609,6 +6630,53 @@ mod tests {
         let parsed = parse(&source, &lexed.tokens);
         let module = compile(&parsed.program).expect("program should compile");
         VmBackend::new().run_module_traced(&module)
+    }
+
+    /// R0 (REPL-on-VM): [`Vm::run_top`] runs the entry chunk against globals that **persist between
+    /// calls**, and a single [`Vm::teardown`] afterwards brings heap residency back to zero. This is
+    /// the mechanism the session rides on — a first entry's global bindings survive into the next, and
+    /// cleanup is deferred to one final teardown rather than run after every entry.
+    #[test]
+    fn run_top_persists_globals_across_entries_then_one_teardown_zeroes_residency() {
+        let src = "mut xs = [1, 2, 3];\necho xs.len();\n";
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).expect("compiles");
+
+        let before = noeta_value::live_count();
+        let mode = noeta_value::CollectorMode::Trace;
+        noeta_value::set_collector_mode(mode);
+        let mut vm = Vm::load(
+            &module,
+            Box::new(noeta_stdlib::SandboxHost::new()),
+            Box::new(noeta_stdlib::SandboxExecutor::new()),
+        );
+
+        // Entry 1 binds the global `xs` (a heap list) and leaves it live between entries.
+        vm.run_top();
+        assert!(
+            vm.globals.iter().any(|v| !v.is_unbound()),
+            "a global bound by the first entry survives into the next"
+        );
+        assert!(
+            noeta_value::live_count() > before,
+            "the bound list is resident between entries (no per-entry teardown ran)"
+        );
+
+        // Entry 2 re-runs the entry chunk against the *same* globals (rebinding `xs`, which releases
+        // the first list and builds a new one) — no teardown in between.
+        vm.run_top();
+
+        // One teardown drains both entries' output and returns residency to the pre-run baseline.
+        let result = vm.teardown(mode);
+        assert_eq!(result.stdout, "3\n3\n");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            noeta_value::live_count(),
+            before,
+            "a single teardown after many entries brings residency to zero"
+        );
     }
 
     #[test]
