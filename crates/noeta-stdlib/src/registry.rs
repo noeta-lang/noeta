@@ -544,6 +544,22 @@ fn want_arity(func: &str, args: &[NativeValue], expected: usize) -> Result<(), S
     }
 }
 
+/// Accept `min..=max` arguments (http arc H4) — for a dispatch with trailing-optional params. The
+/// checker already gates the arity, so this is the defensive twin of [`want_arity`]; on violation
+/// it reports the maximum as the "expected" count.
+fn want_arity_range(
+    func: &str,
+    args: &[NativeValue],
+    min: usize,
+    max: usize,
+) -> Result<(), StdError> {
+    if (min..=max).contains(&args.len()) {
+        Ok(())
+    } else {
+        Err(arity_error(func, max, args.len()))
+    }
+}
+
 fn want_int(func: &str, args: &[NativeValue], index: usize) -> Result<i64, StdError> {
     match args.get(index) {
         Some(NativeValue::Scalar(Scalar::Int(n))) => Ok(*n),
@@ -1011,90 +1027,125 @@ fn crypto_dispatch(
 /// The `Response` signature type, named once.
 const RESPONSE_SIG: SigType = SigType::Named(crate::net::RESPONSE_TYPE_NAME);
 
-/// The sync `http` surface. Bodyless verbs take just a url; `post`/`put` take a `string|bytes`
-/// body; `request(method, url)` covers any other (bodyless) verb. All return a `Response`. Headers
-/// / timeouts / body-carrying custom verbs are the H4 options pass. Each performs the request
-/// synchronously through the Host (deterministic in the sandbox, real under `noeta run`).
+/// A request-headers argument type — `Map<string, string>`, named once.
+const HEADERS: SigType = SigType::Map(&SigType::String, &SigType::String);
+/// The optional trailing `headers` parameter every verb accepts (http arc H5).
+const OPT_HEADERS: SigType = SigType::Optional(&HEADERS);
+
+/// The `http` surface. Bodyless verbs take a url; `post`/`put`/`query` take a `string|bytes` body;
+/// `request(method, url)` covers any other (bodyless) verb. **Every** verb accepts an optional
+/// trailing `headers: Map<string, string>` (H5, via the registry's optional-param support). All
+/// return a `Response`; the `*_async` twins return `Future<Response>` (H3) and drive a real
+/// reqwest future on the real host. `query` is the RFC-draft HTTP QUERY method — safe, idempotent,
+/// body-carrying. Each performs the request through the Host (deterministic sandbox, real under
+/// `noeta run`). Timeouts are a deferred follow-on.
 const HTTP_FNS: &[ExtFn] = &[
     ExtFn {
         name: "get",
-        params: &[Str],
+        params: &[Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_SIG),
     },
     ExtFn {
         name: "head",
-        params: &[Str],
+        params: &[Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_SIG),
     },
     ExtFn {
         name: "delete",
-        params: &[Str],
+        params: &[Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_SIG),
     },
     ExtFn {
         name: "post",
-        params: &[Str, STR_OR_BYTES],
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(RESPONSE_SIG),
     },
     ExtFn {
         name: "put",
-        params: &[Str, STR_OR_BYTES],
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    ExtFn {
+        name: "query",
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(RESPONSE_SIG),
     },
     ExtFn {
         name: "request",
-        params: &[Str, Str],
+        params: &[Str, Str, OPT_HEADERS],
         ret: Concrete(RESPONSE_SIG),
     },
-    // Async twins (H3): each returns `Future<Response>` and, on the real host, drives a genuine
-    // reqwest future concurrently (RealBody::Async); the sandbox resolves deterministically at
-    // spawn. `.await` unwraps the `Response`.
     ExtFn {
         name: "get_async",
-        params: &[Str],
+        params: &[Str, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_SIG)),
     },
     ExtFn {
         name: "head_async",
-        params: &[Str],
+        params: &[Str, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_SIG)),
     },
     ExtFn {
         name: "delete_async",
-        params: &[Str],
+        params: &[Str, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_SIG)),
     },
     ExtFn {
         name: "post_async",
-        params: &[Str, STR_OR_BYTES],
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_SIG)),
     },
     ExtFn {
         name: "put_async",
-        params: &[Str, STR_OR_BYTES],
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
+        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+    },
+    ExtFn {
+        name: "query_async",
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_SIG)),
     },
     ExtFn {
         name: "request_async",
-        params: &[Str, Str],
+        params: &[Str, Str, OPT_HEADERS],
         ret: Concrete(SigType::Future(&RESPONSE_SIG)),
     },
 ];
 
-/// Perform an HTTP request through the Host and wrap the response as the `Response` extern value.
-fn http_perform(
-    host: &mut dyn Host,
+/// Read the optional `headers: Map<string, string>` argument at `index`, or an empty list if the
+/// call omitted it (http arc H5). The `http` module is `deep_marshal`, so the map arrives as a
+/// [`NativeValue::Map`]; the checker has already typed the values as strings.
+fn want_headers(
+    func: &str,
+    args: &[NativeValue],
+    index: usize,
+) -> Result<Vec<(String, String)>, StdError> {
+    match args.get(index) {
+        None => Ok(Vec::new()),
+        Some(NativeValue::Map(entries)) => entries
+            .iter()
+            .map(|(k, v)| match v {
+                NativeValue::Str(value) => Ok((k.clone(), value.clone())),
+                _ => Err(type_error(func, "map of string to string")),
+            })
+            .collect(),
+        Some(_) => Err(type_error(func, "map of string to string")),
+    }
+}
+
+/// Assemble the request the sync and async paths share.
+fn http_request(
     method: &str,
     url: &str,
     body: Vec<u8>,
-) -> Result<NativeOut, StdError> {
-    let response = host.net_fetch(crate::NetRequest {
+    headers: Vec<(String, String)>,
+) -> crate::NetRequest {
+    crate::NetRequest {
         method: method.to_string(),
         url: url.to_string(),
-        headers: Vec::new(),
+        headers,
         body,
-    })?;
-    Ok(NativeOut::Extern(crate::ExternBox::new(response)))
+    }
 }
 
 fn http_dispatch(
@@ -1102,60 +1153,46 @@ fn http_dispatch(
     host: &mut dyn Host,
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError> {
-    match func {
+    // Build the request from the call, per verb shape. Bodyless verbs put headers at index 1;
+    // body-carrying verbs and `request` put them at index 2. The method is uppercased so
+    // `request("get", …)` and any custom verb (QUERY) normalize.
+    let verb = func.trim_end_matches("_async");
+    let request = match verb {
         "get" | "head" | "delete" => {
-            want_arity(func, args, 1)?;
-            let method = func.to_ascii_uppercase();
-            http_perform(host, &method, want_str(func, args, 0)?, Vec::new())
+            want_arity_range(func, args, 1, 2)?;
+            http_request(
+                &verb.to_ascii_uppercase(),
+                want_str(func, args, 0)?,
+                Vec::new(),
+                want_headers(func, args, 1)?,
+            )
         }
-        "post" | "put" => {
-            want_arity(func, args, 2)?;
-            let method = func.to_ascii_uppercase();
+        "post" | "put" | "query" => {
+            want_arity_range(func, args, 2, 3)?;
             let url = want_str(func, args, 0)?.to_string();
             let body = want_data(func, args, 1)?.to_vec();
-            http_perform(host, &method, &url, body)
+            http_request(
+                &verb.to_ascii_uppercase(),
+                &url,
+                body,
+                want_headers(func, args, 2)?,
+            )
         }
-        // Any other (bodyless) verb; the method is uppercased so `request("get", …)` works.
         "request" => {
-            want_arity(func, args, 2)?;
+            want_arity_range(func, args, 2, 3)?;
             let method = want_str(func, args, 0)?.to_ascii_uppercase();
             let url = want_str(func, args, 1)?.to_string();
-            http_perform(host, &method, &url, Vec::new())
+            http_request(&method, &url, Vec::new(), want_headers(func, args, 2)?)
         }
-        // Async twins: build the request, hand the host its async descriptor, ticket it.
-        "get_async" | "head_async" | "delete_async" => {
-            want_arity(func, args, 1)?;
-            let method = func.trim_end_matches("_async").to_ascii_uppercase();
-            let request = crate::NetRequest {
-                method,
-                url: want_str(func, args, 0)?.to_string(),
-                headers: Vec::new(),
-                body: Vec::new(),
-            };
-            Ok(NativeOut::Spawn(SpawnBox(host.net_spawn(request))))
-        }
-        "post_async" | "put_async" => {
-            want_arity(func, args, 2)?;
-            let method = func.trim_end_matches("_async").to_ascii_uppercase();
-            let request = crate::NetRequest {
-                method,
-                url: want_str(func, args, 0)?.to_string(),
-                headers: Vec::new(),
-                body: want_data(func, args, 1)?.to_vec(),
-            };
-            Ok(NativeOut::Spawn(SpawnBox(host.net_spawn(request))))
-        }
-        "request_async" => {
-            want_arity(func, args, 2)?;
-            let request = crate::NetRequest {
-                method: want_str(func, args, 0)?.to_ascii_uppercase(),
-                url: want_str(func, args, 1)?.to_string(),
-                headers: Vec::new(),
-                body: Vec::new(),
-            };
-            Ok(NativeOut::Spawn(SpawnBox(host.net_spawn(request))))
-        }
-        _ => Err(no_function_error("http", func)),
+        _ => return Err(no_function_error("http", func)),
+    };
+    // Sync verbs fetch through the Host now; `*_async` hand the host its async descriptor to
+    // ticket on the executor (H3).
+    if func.ends_with("_async") {
+        Ok(NativeOut::Spawn(SpawnBox(host.net_spawn(request))))
+    } else {
+        let response = host.net_fetch(request)?;
+        Ok(NativeOut::Extern(crate::ExternBox::new(response)))
     }
 }
 
@@ -2141,7 +2178,9 @@ const STD_MODULES: &[ExtModule] = &[
         name: "http",
         functions: HTTP_FNS,
         dispatch: http_dispatch,
-        deep_marshal: false,
+        // The optional `headers` argument is a `Map` — needs the deep marshalling that surfaces
+        // it as `NativeValue::Map` (http arc H5). url/body strings project fine either way.
+        deep_marshal: true,
     },
     ExtModule {
         name: "env",

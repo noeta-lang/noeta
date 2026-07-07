@@ -1,0 +1,30 @@
+// std.http request options (http arc H5): every verb takes an optional trailing
+// `headers: Map<string, string>` (via the registry's new optional-param support), and the QUERY
+// method (RFC-draft: safe, idempotent, body-carrying) joins the surface. The sandbox `/headers`
+// route echoes the request headers (sorted), so headers-sent is differential-pinnable; `/echo`
+// shows the method, pinning QUERY.
+// expect: stdout "{"x-a":"1","x-b":"2"}"
+// expect: stdout "{"body":"q=1","method":"QUERY","path":"/echo"}"
+// expect: stdout "{"authorization":"Bearer t"}"
+// expect: stdout "{"body":"","method":"PATCH","path":"/echo"}"
+// expect: stdout "{"k":"v"}"
+// expect: exit 0
+use std.{http}
+
+// Headers on a bodyless verb (arg index 1), echoed sorted by the /headers route.
+echo http.get("https://svc.test/headers", {"x-b": "2", "x-a": "1"}).body()
+
+// QUERY — body-carrying; /echo shows the uppercased method.
+echo http.query("https://svc.test/echo", "q=1").body()
+
+// Headers on a body verb (arg index 2).
+echo http.post("https://svc.test/headers", "b", {"authorization": "Bearer t"}).body()
+
+// request with a custom verb + headers (headers ignored by the /echo route).
+echo http.request("PATCH", "https://svc.test/echo", {"x": "y"}).body()
+
+// Optional headers work on the async twins too.
+async fn run(): void {
+    echo http.get_async("https://svc.test/headers", {"k": "v"}).await.body()
+}
+run().await
