@@ -267,10 +267,19 @@ impl SessionChecker {
     }
 
     /// Type-check one entry against the accumulated session and commit its declarations and
-    /// bindings. Returns **this entry's** diagnostics (empty ⇒ the entry is well-typed against
+    /// bindings. Returns **this entry's** diagnostics (no errors ⇒ the entry is well-typed against
     /// everything the session knows). The checker's per-entry lexical scratch is reset first, so
     /// one entry's context can never leak into the next.
+    ///
+    /// **Transactional:** an entry that ERRORS commits nothing — the prompt skips running such an
+    /// entry, so the checker must not remember its declarations or bindings either (later entries
+    /// would otherwise check against functions/types/bindings the runtime never bound). The whole
+    /// session state is cloned before the entry and restored on error — prompt-scale registries,
+    /// so the clone is cheap insurance, never a hot path. Warning-only entries commit (the prompt
+    /// runs them).
     pub fn check_entry(&mut self, entry: &Program) -> Vec<Diagnostic> {
+        let backup_checker = self.checker.clone();
+        let backup_env = self.env.clone();
         self.reset_scratch();
         let diag_mark = self.checker.diags.len();
         self.checker.collect(entry);
@@ -280,7 +289,15 @@ impl SessionChecker {
         self.checker.compute_relevance(entry);
         self.checker.check_semantic_roles(entry);
         self.checker.check_program_in(entry, &mut self.env);
-        self.checker.diags.split_off(diag_mark)
+        let diagnostics = self.checker.diags.split_off(diag_mark);
+        if diagnostics
+            .iter()
+            .any(|d| d.severity == noeta_diagnostics::Severity::Error)
+        {
+            self.checker = backup_checker;
+            self.env = backup_env;
+        }
+        diagnostics
     }
 
     /// A snapshot of the accumulated compile-input bundle — every entry's site maps so far
@@ -599,7 +616,7 @@ fn assign(env: &mut Env, name: &str, ty: Type) {
 /// concern — codegen hints, not type facts). Every one is a *pure function of the program* and
 /// invisible to `RunResult`, so both backends derive the same hints by construction; they are lifted
 /// out into the public [`Checked`] result verbatim.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct SiteMaps {
     /// Each `type_of(value)` site (keyed by the `Expr::TypeOf` span) whose operand has a **concrete**
     /// static type, mapped to the precise [`TypeRepr`] the backends bake as a constant (`type_of`
@@ -657,7 +674,9 @@ struct SiteMaps {
     f32_literal_sites: HashSet<Span>,
 }
 
-#[derive(Default)]
+// `Clone` so a [`SessionChecker`] entry is transactional (clone-before, restore-on-error) —
+// prompt-scale state, so the per-entry clone is cheap insurance, never a hot path.
+#[derive(Clone, Default)]
 struct Checker {
     /// User-declared enums: name → variants (each with its **accurate** payload types, like a
     /// struct's fields in [`Self::records`]).

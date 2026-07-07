@@ -2019,3 +2019,15 @@ fn destruct_reachability_refixpoints_over_the_accumulated_registry() {
             .contains("Holder")
     );
 }
+
+#[test]
+fn an_erroring_entry_is_transactional_and_commits_nothing() {
+    let mut session = super::SessionChecker::new();
+    // The entry binds `fixed2` immutably AND then errors — the whole entry rolls back.
+    assert_eq!(
+        entry_codes(&mut session, 0, "fixed2 = 2\nmut boom: int = \"s\"\n"),
+        vec!["E0007"]
+    );
+    // `fixed2` was never committed: binding it fresh (not E0006-reassigning) is clean.
+    assert!(entry_codes(&mut session, 1, "fixed2 = 3\nfixed2 = 4\n") == vec!["E0006"]);
+}

@@ -1385,3 +1385,43 @@ fn bundle_run_rejects_build_time_flags() {
         .code(2)
         .stderr(predicate::str::contains("apply at build time"));
 }
+
+#[test]
+fn repl_check_skips_an_ill_typed_entry_and_keeps_the_session_usable() {
+    // Under --check (session-checker C2): entry 2 retypes a mut binding → E0007 printed, entry
+    // SKIPPED (x keeps its value); entry 3 still runs against the intact session.
+    lang()
+        .arg("repl")
+        .arg("--check")
+        .write_stdin("mut x = 5\nx = \"s\"\necho x + 1;\n")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("E0007"))
+        .stdout(predicate::str::contains("6"));
+}
+
+#[test]
+fn repl_check_applies_static_rules_the_unchecked_repl_defers() {
+    // A required-signature violation (E0022) is static-only: the unchecked REPL would run it.
+    lang()
+        .arg("repl")
+        .arg("--check")
+        .write_stdin("fn f(n) { return n }\necho 1 + 1;\n")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("E0022"))
+        .stdout(predicate::str::contains("2"));
+}
+
+#[test]
+fn repl_check_toggles_at_the_prompt() {
+    // Off by default: the retype runs (checkerless REPL semantics). After `:check on`, the same
+    // shape is rejected.
+    lang()
+        .arg("repl")
+        .write_stdin("mut a = 1\na = \"s\"\necho a ~ \"!\";\n:check on\nmut b = 2\nb = \"t\"\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("s!"))
+        .stderr(predicate::str::contains("E0007"));
+}

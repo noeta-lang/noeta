@@ -134,7 +134,13 @@ enum Command {
         profile: Option<String>,
     },
     /// Start an interactive REPL.
-    Repl,
+    Repl {
+        /// Type-check each entry before running it (session-checker C2): an entry with a type
+        /// error prints its `E0xxx` diagnostics and is skipped; clean entries run as usual.
+        /// Also toggleable at the prompt with `:check on` / `:check off`.
+        #[arg(long)]
+        check: bool,
+    },
     /// Run the Noeta language server over stdio (LSP). Started by an editor client (e.g. the
     /// VS Code extension); speaks JSON-RPC on stdin/stdout. Provides live diagnostics, hover
     /// types, and navigation over the compiler's incremental query graph.
@@ -184,7 +190,7 @@ fn main() -> ExitCode {
             tier,
             profile,
         } => cmd_dump(&file, &tier, &profile),
-        Command::Repl => cmd_repl(),
+        Command::Repl { check } => cmd_repl(check),
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),
     }
@@ -1466,9 +1472,14 @@ fn real_repl_env() -> noeta_vm::HostFactory {
     })
 }
 
-fn cmd_repl() -> ExitCode {
+fn cmd_repl(check: bool) -> ExitCode {
     let stdin = io::stdin();
     let mut session = VmSession::new(real_repl_env());
+    // The optional per-entry type checker (session-checker C2): `Some` = every entry is checked
+    // against the accumulated session before it runs; an erroring entry prints diagnostics and is
+    // skipped (and commits nothing — `check_entry` is transactional). Toggleable at the prompt.
+    let mut checker: Option<noeta_check::SessionChecker> =
+        check.then(noeta_check::SessionChecker::new);
     let mut buffer = String::new();
     // Each evaluated entry is parsed with a **distinct** `SourceId` (its index here) and kept, so a
     // stack trace into a function defined in an *earlier* entry renders against that entry's real text
@@ -1480,6 +1491,9 @@ fn cmd_repl() -> ExitCode {
     let _ = io::stderr().flush();
 
     eprintln!("type :help for commands");
+    if checker.is_some() {
+        eprintln!("(type checking on — entries are checked before running)");
+    }
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         // Skip blank lines when nothing is pending.
@@ -1491,7 +1505,7 @@ fn cmd_repl() -> ExitCode {
         // A `:`-prefixed line (when nothing is pending) is a REPL meta-command — tooling that lives
         // outside the language grammar (`:type`, `:drop`, `:bindings`, `:reset`, `:help`, `:quit`).
         if buffer.is_empty() && line.trim_start().starts_with(':') {
-            if repl_meta(&mut session, line.trim(), &sources) == MetaOutcome::Quit {
+            if repl_meta(&mut session, &mut checker, line.trim(), &sources) == MetaOutcome::Quit {
                 break;
             }
             eprint!("» ");
@@ -1503,7 +1517,7 @@ fn cmd_repl() -> ExitCode {
         }
         buffer.push_str(&line);
 
-        match repl_step(&mut session, &buffer, &mut sources) {
+        match repl_step(&mut session, &mut checker, &buffer, &mut sources) {
             ReplStep::Consumed => {
                 buffer.clear();
                 eprint!("» ");
@@ -1529,7 +1543,12 @@ enum MetaOutcome {
 /// top-level bindings alive across entries — extended lifetime, unlike compiled code's last-use
 /// destruction — so `:drop` is how a destructor is observed or an object reclaimed interactively,
 /// and `:type` reports a value's runtime type in a session that runs no checker.
-fn repl_meta(session: &mut VmSession, line: &str, sources: &[Source]) -> MetaOutcome {
+fn repl_meta(
+    session: &mut VmSession,
+    checker: &mut Option<noeta_check::SessionChecker>,
+    line: &str,
+    sources: &[Source],
+) -> MetaOutcome {
     let body = line.strip_prefix(':').unwrap_or(line);
     let mut parts = body.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("");
@@ -1539,8 +1558,33 @@ fn repl_meta(session: &mut VmSession, line: &str, sources: &[Source]) -> MetaOut
         "help" | "h" | "?" => print_repl_help(),
         "reset" => {
             session.reset();
+            // The checker's session must reset with the runtime's — its registries describe
+            // bindings/types that no longer exist.
+            if checker.is_some() {
+                *checker = Some(noeta_check::SessionChecker::new());
+            }
             eprintln!("(session reset)");
         }
+        // Toggle per-entry type checking (session-checker C2). Turning it on mid-session starts
+        // from an EMPTY typing environment: earlier (unchecked) bindings are simply unknown to it,
+        // which the checker's unknown-ident tolerance treats as runtime-deferred — degraded
+        // precision, never false errors.
+        "check" => match arg {
+            "on" => {
+                if checker.is_none() {
+                    *checker = Some(noeta_check::SessionChecker::new());
+                }
+                eprintln!("(type checking on — entries are checked before running)");
+            }
+            "off" => {
+                *checker = None;
+                eprintln!("(type checking off)");
+            }
+            _ => eprintln!(
+                "type checking is {} — usage: :check on|off",
+                if checker.is_some() { "on" } else { "off" }
+            ),
+        },
         "bindings" | "b" => {
             let names = session.binding_names();
             if names.is_empty() {
@@ -1609,8 +1653,32 @@ fn print_repl_help() {
     eprintln!("  :drop <name>   run a binding's destructor now and unbind it (alias :free)");
     eprintln!("  :bindings      list the live bindings");
     eprintln!("  :reset         clear all bindings and start fresh");
+    eprintln!("  :check on|off  type-check entries before running them (skip on error)");
     eprintln!("  :help          show this help");
     eprintln!("  :quit          exit the REPL (or Ctrl-D)");
+}
+
+/// The `--check` gate (session-checker C2): type-check one parsed entry against the accumulated
+/// session. Returns whether the entry should RUN — `true` with no checker, or when the entry has
+/// no error-severity diagnostics (warnings print and the entry still runs). Errors render against
+/// the entry's own source and the entry is skipped; `check_entry`'s transactionality means a
+/// skipped entry left no trace in the checker either.
+fn check_entry_gate(
+    checker: &mut Option<noeta_check::SessionChecker>,
+    program: &noeta_ast::Program,
+    source: &Source,
+) -> bool {
+    let Some(checker) = checker.as_mut() else {
+        return true;
+    };
+    let diagnostics = checker.check_entry(program);
+    if diagnostics.is_empty() {
+        return true;
+    }
+    emit_diagnostics(source, diagnostics.iter());
+    !diagnostics
+        .iter()
+        .any(|d| d.severity == noeta_diagnostics::Severity::Error)
 }
 
 /// Try to evaluate the accumulated REPL buffer. Statements ending in `;`/`}` evaluate as-is;
@@ -1618,7 +1686,18 @@ fn print_repl_help() {
 /// printed. If the only parse problem is hitting end-of-input, the entry is treated as
 /// incomplete and more input is requested (multiline). Any other error is reported, and the
 /// buffer is reset so one bad entry cannot wedge the session.
-fn repl_step(session: &mut VmSession, buffer: &str, sources: &mut Vec<Source>) -> ReplStep {
+///
+/// With a `checker` present (`--check` / `:check on`, session-checker C2), a parsed entry is
+/// type-checked against the accumulated session first: an entry with errors prints its `E0xxx`
+/// diagnostics (rendered against the entry's own source) and is **skipped** — and `check_entry`'s
+/// transactionality means it commits nothing, so the checker stays aligned with what actually ran.
+/// Warning-only entries print the warnings and run.
+fn repl_step(
+    session: &mut VmSession,
+    checker: &mut Option<noeta_check::SessionChecker>,
+    buffer: &str,
+    sources: &mut Vec<Source>,
+) -> ReplStep {
     // The next evaluated entry's `SourceId` is its index in the persistent `sources` vector.
     let id = SourceId(sources.len() as u32);
     let source = Source::new(id, format!("<repl:{}>", sources.len()), buffer.to_string());
@@ -1632,6 +1711,9 @@ fn repl_step(session: &mut VmSession, buffer: &str, sources: &mut Vec<Source>) -
         .collect();
 
     if diags.is_empty() {
+        if !check_entry_gate(checker, &parsed.program, &source) {
+            return ReplStep::Consumed;
+        }
         sources.push(source);
         let out = session.eval(&parsed.program);
         emit_session(sources, out);
@@ -1648,6 +1730,9 @@ fn repl_step(session: &mut VmSession, buffer: &str, sources: &mut Vec<Source>) -
     let plexed = lex(&psource);
     let pparsed = parse(&psource, &plexed.tokens);
     if plexed.diagnostics.is_empty() && pparsed.diagnostics.is_empty() {
+        if !check_entry_gate(checker, &pparsed.program, &psource) {
+            return ReplStep::Consumed;
+        }
         sources.push(psource);
         let out = session.eval(&pparsed.program);
         emit_session(sources, out);
