@@ -1209,7 +1209,12 @@ fn cmd_repl() -> ExitCode {
     let stdin = io::stdin();
     let mut session = VmSession::new(sandbox_repl_env());
     let mut buffer = String::new();
-    let mut entry_no: u32 = 0;
+    // Each evaluated entry is parsed with a **distinct** `SourceId` (its index here) and kept, so a
+    // stack trace into a function defined in an *earlier* entry renders against that entry's real text
+    // and line — rather than degrading to name-only, as it did when every entry reused
+    // `SourceId::FIRST` (REPL-on-VM follow-on). Only entries that actually run are kept; a syntax-error
+    // entry compiles nothing, so no future trace can reference it.
+    let mut sources: Vec<Source> = Vec::new();
     eprint!("lang repl — type a statement, Ctrl-D to exit\n» ");
     let _ = io::stderr().flush();
 
@@ -1225,7 +1230,7 @@ fn cmd_repl() -> ExitCode {
         // A `:`-prefixed line (when nothing is pending) is a REPL meta-command — tooling that lives
         // outside the language grammar (`:type`, `:drop`, `:bindings`, `:reset`, `:help`, `:quit`).
         if buffer.is_empty() && line.trim_start().starts_with(':') {
-            if repl_meta(&mut session, line.trim()) == MetaOutcome::Quit {
+            if repl_meta(&mut session, line.trim(), &sources) == MetaOutcome::Quit {
                 break;
             }
             eprint!("» ");
@@ -1237,7 +1242,7 @@ fn cmd_repl() -> ExitCode {
         }
         buffer.push_str(&line);
 
-        match repl_step(&mut session, &buffer, &mut entry_no) {
+        match repl_step(&mut session, &buffer, &mut sources) {
             ReplStep::Consumed => {
                 buffer.clear();
                 eprint!("» ");
@@ -1263,7 +1268,7 @@ enum MetaOutcome {
 /// top-level bindings alive across entries — extended lifetime, unlike compiled code's last-use
 /// destruction — so `:drop` is how a destructor is observed or an object reclaimed interactively,
 /// and `:type` reports a value's runtime type in a session that runs no checker.
-fn repl_meta(session: &mut VmSession, line: &str) -> MetaOutcome {
+fn repl_meta(session: &mut VmSession, line: &str, sources: &[Source]) -> MetaOutcome {
     let body = line.strip_prefix(':').unwrap_or(line);
     let mut parts = body.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("");
@@ -1302,7 +1307,7 @@ fn repl_meta(session: &mut VmSession, line: &str) -> MetaOutcome {
             if arg.is_empty() {
                 eprintln!("usage: :type <expr>");
             } else {
-                repl_type(session, arg);
+                repl_type(session, arg, sources);
             }
         }
         other => eprintln!("unknown command `:{other}` — try :help"),
@@ -1310,9 +1315,13 @@ fn repl_meta(session: &mut VmSession, line: &str) -> MetaOutcome {
     MetaOutcome::Continue
 }
 
-/// `:type <expr>` — parse `expr`, evaluate it in the session, and print its runtime type.
-fn repl_type(session: &mut VmSession, expr: &str) {
-    let source = Source::new(SourceId::FIRST, "<repl-type>", format!("{expr};"));
+/// `:type <expr>` — parse `expr`, evaluate it in the session, and print its runtime type. Evaluating
+/// the expression may abort (`:type boom()`); the trace then resolves against every entry's source, so
+/// a `:type` id (the next index) is added to the render map without being *persisted* — a `:type`
+/// query defines nothing, so no later trace can reference it.
+fn repl_type(session: &mut VmSession, expr: &str, sources: &[Source]) {
+    let id = SourceId(sources.len() as u32);
+    let source = Source::new(id, "<repl-type>", format!("{expr};"));
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     let diags: Vec<Diagnostic> = lexed
@@ -1328,8 +1337,13 @@ fn repl_type(session: &mut VmSession, expr: &str) {
     let out = session.type_of(&parsed.program);
     print!("{}", out.stdout);
     let _ = io::stdout().flush();
+    // Render diagnostics / any abort trace against all entries plus this `:type` source.
+    let mut map_sources = sources.to_vec();
+    map_sources.push(source);
+    let map = SourceMap::new(map_sources);
     if !out.diagnostics.is_empty() {
-        emit_diagnostics(&source, out.diagnostics.iter());
+        emit_diagnostics_mapped(&map, out.diagnostics.iter());
+        emit_trace(&out.trace, &map);
     } else if let Some(ty) = out.value {
         println!("{ty}");
         let _ = io::stdout().flush();
@@ -1351,12 +1365,10 @@ fn print_repl_help() {
 /// printed. If the only parse problem is hitting end-of-input, the entry is treated as
 /// incomplete and more input is requested (multiline). Any other error is reported, and the
 /// buffer is reset so one bad entry cannot wedge the session.
-fn repl_step(session: &mut VmSession, buffer: &str, entry_no: &mut u32) -> ReplStep {
-    let source = Source::new(
-        SourceId::FIRST,
-        format!("<repl:{entry_no}>"),
-        buffer.to_string(),
-    );
+fn repl_step(session: &mut VmSession, buffer: &str, sources: &mut Vec<Source>) -> ReplStep {
+    // The next evaluated entry's `SourceId` is its index in the persistent `sources` vector.
+    let id = SourceId(sources.len() as u32);
+    let source = Source::new(id, format!("<repl:{}>", sources.len()), buffer.to_string());
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     let diags: Vec<Diagnostic> = lexed
@@ -1367,19 +1379,21 @@ fn repl_step(session: &mut VmSession, buffer: &str, entry_no: &mut u32) -> ReplS
         .collect();
 
     if diags.is_empty() {
-        *entry_no += 1;
-        emit_session(&source, session.eval(&parsed.program));
+        sources.push(source);
+        let out = session.eval(&parsed.program);
+        emit_session(sources, out);
         return ReplStep::Consumed;
     }
 
-    // A bare expression needs a terminating `;`; retry with one appended.
-    let patched = format!("{buffer};");
-    let psource = Source::new(SourceId::FIRST, format!("<repl:{entry_no}>"), patched);
+    // A bare expression needs a terminating `;`; retry with one appended (same id — only one of the
+    // two sources is ever kept, whichever compiled).
+    let psource = Source::new(id, format!("<repl:{}>", sources.len()), format!("{buffer};"));
     let plexed = lex(&psource);
     let pparsed = parse(&psource, &plexed.tokens);
     if plexed.diagnostics.is_empty() && pparsed.diagnostics.is_empty() {
-        *entry_no += 1;
-        emit_session(&psource, session.eval(&pparsed.program));
+        sources.push(psource);
+        let out = session.eval(&pparsed.program);
+        emit_session(sources, out);
         return ReplStep::Consumed;
     }
 
@@ -1401,8 +1415,8 @@ fn repl_step(session: &mut VmSession, buffer: &str, entry_no: &mut u32) -> ReplS
         return ReplStep::Incomplete;
     }
 
-    // A genuine syntax error: report it against the original buffer and reset.
-    *entry_no += 1;
+    // A genuine syntax error: report it against the original buffer and reset. The entry compiled
+    // nothing, so its source is *not* kept — its id is reused by the next entry.
     emit_diagnostics(&source, diags.iter());
     ReplStep::Consumed
 }
@@ -1423,21 +1437,28 @@ fn unclosed_delimiters(tokens: &[noeta_lexer::Token]) -> bool {
     depth > 0
 }
 
-/// Print a session evaluation's stdout, the value of a trailing bare expression (if any),
-/// then any diagnostics.
-fn emit_session(source: &Source, out: SessionOutput) {
+/// Print a session evaluation's stdout, the value of a trailing bare expression (if any), then any
+/// diagnostics and abort trace. `sources` holds every evaluated entry keyed by `SourceId`, so a
+/// diagnostic or trace frame from a function defined in an earlier entry renders against that entry's
+/// real file and line.
+fn emit_session(sources: &[Source], out: SessionOutput) {
     print!("{}", out.stdout);
     if let Some(value) = out.value {
         println!("{value}");
     }
     let _ = io::stdout().flush();
-    emit_diagnostics(source, out.diagnostics.iter());
-    // A panicking entry's stack trace, after its diagnostic — the same rendering and "only when
-    // there is a call chain" rule as `noeta run`. Frames from functions defined in earlier entries
-    // render name-only (their spans point into that entry's text, which is gone).
-    if out.trace.len() >= 2 {
-        let sources = SourceMap::new(vec![source.clone()]);
-        eprint!("{}", noeta_vm::render_trace(&out.trace, &sources));
+    let map = SourceMap::new(sources.to_vec());
+    emit_diagnostics_mapped(&map, out.diagnostics.iter());
+    emit_trace(&out.trace, &map);
+}
+
+/// Render a session entry's abort trace to stderr, resolving each frame against `map` — the same
+/// rendering and "only when there is a real call chain (≥2 frames)" rule `noeta run` uses (a single
+/// frame just repeats the diagnostic's own location). With per-entry sources in `map`, a frame from a
+/// function defined in an earlier entry now shows that entry's real file and line.
+fn emit_trace(trace: &[noeta_vm::TraceFrame], map: &SourceMap) {
+    if trace.len() >= 2 {
+        eprint!("{}", noeta_vm::render_trace(trace, map));
     }
 }
 

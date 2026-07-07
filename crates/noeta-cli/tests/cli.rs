@@ -1098,9 +1098,11 @@ fn a_repl_panic_prints_a_stack_trace_and_the_session_continues() {
         .stderr(predicate::str::contains(
             "stack trace (most recent call first):",
         ))
-        // Frames from earlier entries render name-only (their entry's text is gone) — but they render.
-        .stderr(predicate::str::contains("at boom"))
-        .stderr(predicate::str::contains("at mid"))
+        // Each entry is parsed with its own SourceId and kept, so a frame from a function defined in an
+        // *earlier* entry resolves to that entry's real file and line — not the name-only degradation
+        // the single-SourceId REPL produced. `boom` is entry 0 (panics on its line 2), `mid` entry 1.
+        .stderr(predicate::str::contains("at boom (<repl:0>:2)"))
+        .stderr(predicate::str::contains("at mid (<repl:1>:2)"))
         // The session survives the panic and evaluates the next entry.
         .stdout(predicate::str::contains("still alive"));
 }
