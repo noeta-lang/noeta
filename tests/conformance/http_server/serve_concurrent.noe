@@ -1,0 +1,30 @@
+// http.serve concurrent dispatch (http-server S3b): an async handler suspends at its `await`, so all
+// five scripted connections are accepted and in flight — each prints "handling" — *before* any
+// completes and prints "done". A serial server would print handling/done paired per request; here
+// every handler starts before the first sleep elapses, then they all resume together. Both backends
+// run the identical cooperative schedule, so the interleaving is deterministic and differential-pinned.
+// expect: stdout "handling GET /"
+// expect: stdout "handling GET /health"
+// expect: stdout "handling POST /echo"
+// expect: stdout "handling GET /users/42"
+// expect: stdout "handling DELETE /users/42"
+// expect: stdout "done GET /"
+// expect: stdout "done GET /health"
+// expect: stdout "done POST /echo"
+// expect: stdout "done GET /users/42"
+// expect: stdout "done DELETE /users/42"
+// expect: stdout "served"
+// expect: exit 0
+use std.{http}
+use std.task.{sleep}
+
+async fn handle(req: Request): Response {
+    line = "${req.method()} ${req.path()}"
+    echo "handling ${line}"
+    sleep(5).await
+    echo "done ${line}"
+    return http.response(200, "ok")
+}
+
+http.serve(8080, handle)
+echo "served"

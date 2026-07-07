@@ -24,13 +24,17 @@
 pub mod executor;
 pub use executor::RealExecutor;
 
+use noeta_stdlib::net::accept_outcome;
 use noeta_stdlib::{
     Clock, Entropy, Env, ErrorKind, ExternBox, ExternIo, FileReader, FileSystem, Ids, NativeOut,
     NetRequest, NetResponse, Network, ReadSource, RealBody, Rng, StdError,
 };
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::fs::File;
-use tokio::io::BufReader;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Runtime;
 
 /// The real host: real process `env`/`args` and real-disk file IO over a per-isolate
@@ -61,6 +65,31 @@ pub struct RealHost {
     /// The real HTTP client for the `Network` capability (http arc H1). Cheap to clone (an inner
     /// `Arc`), holds the connection pool; built once per host. Requests are driven on `runtime`.
     http: reqwest::Client,
+    /// Inbound listeners (http-server S1), keyed by the id `net_listen` hands out. Each holds a
+    /// bound socket; the tokio listener is created lazily on the executor's runtime at first accept
+    /// (so all server socket IO stays on the runtime that drives the accept future, never this
+    /// host's runtime — a `TcpStream` is bound to the runtime it was accepted on).
+    servers: HashMap<u64, Arc<ServerState>>,
+    /// Monotonic id source for `servers`.
+    next_listener: u64,
+    /// Open inbound connections awaiting a reply, keyed by conn id. Shared (`Arc`) into every accept
+    /// descriptor (which inserts an accepted stream) and reply descriptor (which removes and writes
+    /// it), both running on the executor's runtime.
+    conns: Arc<Mutex<HashMap<u64, TcpStream>>>,
+    /// Monotonic, thread-safe id source for `conns` (accept futures run concurrently on the
+    /// executor).
+    next_conn: Arc<AtomicU64>,
+}
+
+/// One inbound listener's shared state. The socket is bound at `net_listen` (runtime-free, via
+/// `std::net`); the tokio listener is built once on first accept — on the executor's runtime — and
+/// reused for every subsequent accept.
+#[derive(Debug)]
+struct ServerState {
+    /// The bound, non-blocking std socket, taken when the tokio listener is first built.
+    pending_std: std::sync::Mutex<Option<std::net::TcpListener>>,
+    /// The tokio listener, created lazily on the executor runtime, then shared across accepts.
+    tokio: std::sync::Mutex<Option<Arc<TcpListener>>>,
 }
 
 impl RealHost {
@@ -80,6 +109,10 @@ impl RealHost {
             readers: HashMap::new(),
             next_reader_id: 0,
             http: reqwest::Client::new(),
+            servers: HashMap::new(),
+            next_listener: 0,
+            conns: Arc::new(Mutex::new(HashMap::new())),
+            next_conn: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -316,6 +349,281 @@ impl Network for RealHost {
             client: self.http.clone(),
         })
     }
+
+    /// Bind a real listener (http-server S1). Uses `std::net` so the bind is runtime-free — the
+    /// tokio listener is attached lazily on the executor runtime at first accept. The socket is set
+    /// non-blocking (required by `TcpListener::from_std`), and `SO_REUSEADDR` is the std default.
+    fn net_listen(&mut self, addr: &str) -> Result<u64, StdError> {
+        let listener = std::net::TcpListener::bind(addr)
+            .map_err(|e| io_error(format!("cannot bind `{addr}`: {e}")))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| io_error(format!("cannot configure `{addr}`: {e}")))?;
+        let id = self.next_listener;
+        self.next_listener += 1;
+        self.servers.insert(
+            id,
+            Arc::new(ServerState {
+                pending_std: std::sync::Mutex::new(Some(listener)),
+                tokio: std::sync::Mutex::new(None),
+            }),
+        );
+        Ok(id)
+    }
+
+    /// A genuine async accept: `TcpListener::accept().await` on the executor's runtime, so a slow
+    /// handler yields cooperatively while the next connection is awaited (overriding the default
+    /// serial descriptor).
+    fn net_accept(&self, listener: u64) -> Box<dyn ExternIo> {
+        Box::new(RealAcceptIo {
+            state: self.servers.get(&listener).cloned(),
+            conns: self.conns.clone(),
+            next_conn: self.next_conn.clone(),
+        })
+    }
+
+    /// A genuine async reply: write the response to the held stream and close it, on the executor's
+    /// runtime (the runtime that accepted the connection).
+    fn net_reply(&self, conn: u64, response: NetResponse) -> Box<dyn ExternIo> {
+        Box::new(RealReplyIo {
+            conns: self.conns.clone(),
+            conn,
+            response: Some(response),
+        })
+    }
+
+    /// The real host always overrides [`Network::net_accept`] with the async descriptor, so the
+    /// synchronous fallback is unreachable (like `fs_read_more` on the sandbox).
+    fn net_accept_next(&mut self, _listener: u64) -> Result<Option<(u64, NetRequest)>, StdError> {
+        unreachable!("RealHost serves via the async net_accept descriptor, never the sync fallback")
+    }
+
+    /// The real host always overrides [`Network::net_reply`] with the async descriptor.
+    fn net_reply_now(&mut self, _conn: u64, _response: NetResponse) -> Result<(), StdError> {
+        unreachable!("RealHost replies via the async net_reply descriptor, never the sync fallback")
+    }
+}
+
+/// The real host's async accept descriptor (http-server S1): its body attaches the tokio listener
+/// on first use, accepts one connection on the executor's runtime, reads the request off it, and
+/// parks the stream in the shared `conns` map keyed by a fresh conn id for the reply to pick up.
+#[derive(Debug)]
+struct RealAcceptIo {
+    /// The listener's shared state — `None` if the id was never bound (a defensive miss → Io error).
+    state: Option<Arc<ServerState>>,
+    conns: Arc<Mutex<HashMap<u64, TcpStream>>>,
+    next_conn: Arc<AtomicU64>,
+}
+
+impl ExternIo for RealAcceptIo {
+    fn run_sync(&mut self, _host: &mut dyn noeta_stdlib::Host) -> Result<NativeOut, StdError> {
+        // Never hit: the real executor calls `run_real`, and only the real host builds this
+        // descriptor. If some executor lacked a real-body path, accept still needs a live runtime,
+        // so surface an error rather than silently degrade.
+        Err(io_error(
+            "async accept requires the real executor's runtime".to_string(),
+        ))
+    }
+
+    fn run_real(&mut self) -> Option<RealBody> {
+        let state = self.state.clone();
+        let conns = self.conns.clone();
+        let next_conn = self.next_conn.clone();
+        Some(RealBody::Async(Box::pin(async move {
+            let state =
+                state.ok_or_else(|| io_error("accept on an unbound listener".to_string()))?;
+            // Attach the tokio listener once, on this (the executor's) runtime, then reuse it.
+            let listener = {
+                let mut slot = state.tokio.lock().unwrap();
+                if slot.is_none() {
+                    let std = state
+                        .pending_std
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .ok_or_else(|| io_error("listener already attached".to_string()))?;
+                    let tl = TcpListener::from_std(std)
+                        .map_err(|e| io_error(format!("cannot attach listener: {e}")))?;
+                    *slot = Some(Arc::new(tl));
+                }
+                slot.as_ref().unwrap().clone()
+            };
+            let (mut stream, _peer) = listener
+                .accept()
+                .await
+                .map_err(|e| io_error(format!("accept failed: {e}")))?;
+            let request = read_request(&mut stream).await?;
+            let conn = next_conn.fetch_add(1, Ordering::Relaxed);
+            conns.lock().unwrap().insert(conn, stream);
+            Ok(accept_outcome(Some((conn, request))))
+        })))
+    }
+}
+
+/// The real host's async reply descriptor: pull the held stream for `conn`, write the response, and
+/// close — on the executor's runtime.
+#[derive(Debug)]
+struct RealReplyIo {
+    conns: Arc<Mutex<HashMap<u64, TcpStream>>>,
+    conn: u64,
+    response: Option<NetResponse>,
+}
+
+impl ExternIo for RealReplyIo {
+    fn run_sync(&mut self, _host: &mut dyn noeta_stdlib::Host) -> Result<NativeOut, StdError> {
+        Err(io_error(
+            "async reply requires the real executor's runtime".to_string(),
+        ))
+    }
+
+    fn run_real(&mut self) -> Option<RealBody> {
+        let conns = self.conns.clone();
+        let conn = self.conn;
+        let response = self.response.take();
+        Some(RealBody::Async(Box::pin(async move {
+            let mut stream = conns
+                .lock()
+                .unwrap()
+                .remove(&conn)
+                .ok_or_else(|| io_error(format!("reply on a closed connection {conn}")))?;
+            let response =
+                response.ok_or_else(|| io_error("reply descriptor run twice".to_string()))?;
+            write_response(&mut stream, &response).await?;
+            // Best-effort graceful close; the client has the full framed response by now.
+            let _ = stream.shutdown().await;
+            Ok(NativeOut::Unit)
+        })))
+    }
+}
+
+/// Read one HTTP/1.1 request off `stream`: the request line, headers to the blank line, and a body
+/// of exactly `Content-Length` bytes (0 if absent). A minimal, dependency-free parser — enough for
+/// the JSON/form APIs this server targets; chunked transfer-encoding and pipelining are follow-ons.
+async fn read_request(stream: &mut TcpStream) -> Result<NetRequest, StdError> {
+    // Read until the header terminator `\r\n\r\n`, keeping any body bytes that arrive in the same
+    // read for after the headers.
+    let mut buf: Vec<u8> = Vec::with_capacity(1024);
+    let header_end = loop {
+        if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+            break pos + 4;
+        }
+        let mut chunk = [0u8; 1024];
+        let n = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|e| io_error(format!("reading request failed: {e}")))?;
+        if n == 0 {
+            return Err(io_error(
+                "client closed before a complete request".to_string(),
+            ));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    };
+
+    let head = String::from_utf8_lossy(&buf[..header_end]);
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next().unwrap_or_default();
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("GET").to_string();
+    let target = parts.next().unwrap_or("/").to_string();
+
+    let mut headers = Vec::new();
+    let mut content_length = 0usize;
+    for line in lines {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            let name = name.trim().to_string();
+            let value = value.trim().to_string();
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.parse().unwrap_or(0);
+            }
+            headers.push((name, value));
+        }
+    }
+
+    // Body: bytes already buffered past the headers, plus any remaining up to Content-Length.
+    let mut body = buf[header_end..].to_vec();
+    while body.len() < content_length {
+        let mut chunk = [0u8; 4096];
+        let n = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|e| io_error(format!("reading body failed: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+    body.truncate(content_length);
+
+    Ok(NetRequest {
+        method,
+        url: target,
+        headers,
+        body,
+    })
+}
+
+/// Serialize `response` as an HTTP/1.1 response and write it to `stream`. Always frames the body
+/// with `Content-Length` and requests connection close (one request per connection in v1).
+async fn write_response(stream: &mut TcpStream, response: &NetResponse) -> Result<(), StdError> {
+    let reason = reason_phrase(response.status);
+    let mut head = format!("HTTP/1.1 {} {reason}\r\n", response.status);
+    let mut has_length = false;
+    for (name, value) in &response.headers {
+        if name.eq_ignore_ascii_case("content-length") {
+            has_length = true;
+        }
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    if !has_length {
+        head.push_str(&format!("content-length: {}\r\n", response.body.len()));
+    }
+    head.push_str("connection: close\r\n\r\n");
+    stream
+        .write_all(head.as_bytes())
+        .await
+        .map_err(|e| io_error(format!("writing response head failed: {e}")))?;
+    stream
+        .write_all(&response.body)
+        .await
+        .map_err(|e| io_error(format!("writing response body failed: {e}")))?;
+    stream
+        .flush()
+        .await
+        .map_err(|e| io_error(format!("flushing response failed: {e}")))
+}
+
+/// A compact reason phrase for the common statuses; anything else is `"Status"` (the phrase is
+/// advisory in HTTP/1.1 — clients key off the numeric code).
+fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        201 => "Created",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        500 => "Internal Server Error",
+        _ => "Status",
+    }
+}
+
+/// The first index of `needle` in `haystack`, or `None` — a tiny substring search for the header
+/// terminator (no dependency, and the search window is a single small request head).
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 impl Rng for RealHost {
@@ -515,6 +823,69 @@ mod tests {
         assert!(host.fs_remove(&path).unwrap());
         // Opening a now-missing file lazily is the same IO error as the old eager read.
         assert_eq!(host.fs_open_read(&path).unwrap_err().kind, ErrorKind::Io);
+    }
+
+    #[test]
+    #[ignore = "binds a real loopback socket; run explicitly"]
+    fn real_host_serves_one_request_over_loopback() {
+        use std::io::{Read, Write};
+
+        let mut host = RealHost::new().unwrap();
+        let id = host.net_listen("127.0.0.1:0").unwrap();
+        // The socket is bound at net_listen; read the OS-assigned port to connect to.
+        let addr = host.servers[&id]
+            .pending_std
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .local_addr()
+            .unwrap();
+
+        // A runtime to drive the accept/reply futures on (stands in for RealExecutor's runtime).
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        // Client on its own OS thread: send a framed POST, read the whole response back.
+        let client = std::thread::spawn(move || {
+            let mut sock = std::net::TcpStream::connect(addr).unwrap();
+            sock.write_all(b"POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello")
+                .unwrap();
+            let mut resp = String::new();
+            sock.read_to_string(&mut resp).unwrap();
+            resp
+        });
+
+        // Server: accept one connection (parses the request off the wire)…
+        let mut accept = host.net_accept(id);
+        let outcome = match accept.run_real() {
+            Some(RealBody::Async(fut)) => rt.block_on(fut).unwrap(),
+            _ => panic!("real accept must have an async body"),
+        };
+        assert!(
+            matches!(outcome, NativeOut::Some(_)),
+            "a connection arrived"
+        );
+
+        // …then reply on the first connection (conn id 0).
+        let mut reply = host.net_reply(
+            0,
+            NetResponse {
+                status: 200,
+                headers: vec![],
+                body: b"pong".to_vec(),
+            },
+        );
+        match reply.run_real() {
+            Some(RealBody::Async(fut)) => rt.block_on(fut).unwrap(),
+            _ => panic!("real reply must have an async body"),
+        };
+
+        let response = client.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"), "got: {response}");
+        assert!(response.trim_end().ends_with("pong"), "got: {response}");
     }
 
     #[test]

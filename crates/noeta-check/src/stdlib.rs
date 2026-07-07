@@ -635,6 +635,14 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
             _ => None,
         };
     }
+    // `http.serve(port, handler)` (http-server S3): a builtin (the handler is a closure the registry
+    // seam cannot carry), so it is typed here rather than via an `ExtFn`. It runs the accept loop and
+    // yields nothing. Like the `task`/`reactive` builtins, its arguments are not strictly validated
+    // against a declared signature (`module_params` returns `None` for it — the handler's own body is
+    // still checked); strict `handler: (Request) -> Response` validation is a follow-on.
+    if module == "http" && name == "serve" {
+        return Some(Type::Unit);
+    }
     // Migrated modules: the result type comes from the registry's `RetTy`. `SameAsArg(i)` carries the
     // i-th argument's type (`vec.add(v, w): typeof v`); `NumericPreserving` is the `math.abs`/min/max
     // kind-preserving rule; `Concrete` maps directly.

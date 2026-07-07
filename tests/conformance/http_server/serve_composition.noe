@@ -1,0 +1,57 @@
+// Composability proof (http-server S5): a router and a middleware built as ordinary in-language code
+// over the `http.serve` primitive — no framework shipped, no runtime hook. A middleware is a
+// handler-transformer (a function from a handler to a handler); a router IS a handler that
+// dispatches to sub-handlers; the app is their composition, collapsing to the one handler `serve`
+// runs. This is why a framework needs nothing from core: the contract is a first-class composable
+// value. Handlers are closures typed `(Request) -> Response`. Driven by the sandbox request script;
+// differential-pinned in both backends.
+// expect: stdout "log: GET /"
+// expect: stdout "-> home"
+// expect: stdout "log: GET /health"
+// expect: stdout "-> health"
+// expect: stdout "log: POST /echo"
+// expect: stdout "-> 404"
+// expect: stdout "log: GET /users/42"
+// expect: stdout "-> 404"
+// expect: stdout "log: DELETE /users/42"
+// expect: stdout "-> 404"
+// expect: stdout "served"
+// expect: exit 0
+use std.{http}
+
+// Sub-handlers, each an ordinary `(Request) -> Response`.
+home = fn(req: Request): Response {
+    echo "-> home"
+    return http.response(200, "home")
+}
+
+health = fn(req: Request): Response {
+    echo "-> health"
+    return http.response(200, "ok")
+}
+
+// A router is itself a handler: it dispatches on the request and delegates to a sub-handler.
+route = fn(req: Request): Response {
+    p = req.path()
+    if p == "/" {
+        return home(req)
+    }
+    if p == "/health" {
+        return health(req)
+    }
+    echo "-> 404"
+    return http.response(404, "not found")
+}
+
+// A middleware wraps a handler, returning a new handler (the onion model). It closes over `next`.
+logging = fn(next: (Request) -> Response): (Request) -> Response {
+    return fn(req: Request): Response {
+        echo "log: ${req.method()} ${req.path()}"
+        return next(req)
+    }
+}
+
+// Compose: logging around the router → one `(Request) -> Response` value the server runs.
+app = logging(route)
+http.serve(8080, app)
+echo "served"

@@ -1,0 +1,26 @@
+// http.serve (http-server S3): the serve construct binds a listener and drives the sandbox's fixed
+// request script through the handler, then terminates (the script exhausts → the listener closes).
+// The handler routes on method/path, reads the body, and builds a Response; each `echo` is observed
+// by the differential, and both backends run the identical accept→handle→reply loop.
+// expect: stdout "GET /"
+// expect: stdout "GET /health"
+// expect: stdout "POST /echo hello"
+// expect: stdout "GET /users/42"
+// expect: stdout "DELETE /users/42"
+// expect: stdout "served"
+// expect: exit 0
+use std.{http}
+
+fn handle(req: Request): Response {
+    method = req.method()
+    path = req.path()
+    if method == "POST" {
+        echo "${method} ${path} ${req.body()}"
+    } else {
+        echo "${method} ${path}"
+    }
+    return http.response(200, "ok")
+}
+
+http.serve(8080, handle)
+echo "served"
