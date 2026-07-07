@@ -1,6 +1,8 @@
 # Parallel-seams arc (P-PAR) — making the runtime's parallelism seams pay
 
-**Status: in progress (branch `perf-parallel-seams`, off local main `6d069ca`).** Motivated by the
+**Status: ✅ ARC COMPLETE (S0–S4, branch `perf-parallel-seams`; main merged in through `cb8de9b`).
+Headline: fan-out 1.84×/3× less memory, cross-thread ping-pong 20.6×, compile-heavy CLI 23×, and
+the S1b shape interner is a general interpreter win (fib −10..15%).** Motivated by the
 2026-07-07 parallelism assessment: the value/VM/GC path is deliberately single-threaded per isolate
 (thread-local heap, non-atomic RC — the P-VMT wins depend on it), and the language-level parallelism
 seam (shared-nothing OS-thread isolates + channels) already exists. This arc does **not** add
@@ -35,10 +37,10 @@ atomic RC on the value path, parallel dispatch, concurrent GC, parallel compile 
 | # | Tag | Slice | Impact | Effort | Independent? |
 |---|---|---|---|---|---|
 | S0 | P-PAR-BENCH | ✅ **DONE** (`d8c9200`) — [Baseline benchmarks](s0-benchmarks.md): fan-out copies ~50 MB+serial-marshal/worker; ping-pong 160 µs/round; JIT pauses 3.5–145 ms/compile (99% of wall) | enables the rest | S | yes |
-| S1 | P-PAR-ARC | ⚠️ **swap DONE (`ab505bc`), gate FAILED — user decision pending** — [`Rc<Shape>`/`Rc<PackedSchema>` → `Arc`](s1-arc-shape.md): field_assign +10–12%, broad +1–4%; accept vs shapes-by-index | prereq (gate: no hot-path regression) | M | yes |
-| S2 | P-PAR-SHARE | [Wire `SharedRegion` into the real spawn path](s2-shared-region-spawn.md): promote once, borrow N times | high (fan-out workloads) | M–L | needs S1 decision |
+| S1 | P-PAR-ARC | ✅ **DONE via S1b interned `&'static` shapes (`b1b64dc`)** — the Arc swap (`ab505bc`) failed its gate (+11% field_assign); the approved interner **beats the Rc baseline everywhere** (dispatch_fib −15.4%, fib −10..13%, field_assign −3..8%). [Doc](s1-arc-shape.md) | prereq → net win | M | yes |
+| S2 | P-PAR-SHARE | ✅ **DONE** (`5253098`) — [SharedRegion borrow-share](s2-shared-region-spawn.md): promote once, borrow N times; n8 fan-out wall **1.84×**, RSS **3.1× lower & ~flat in N**; COW gates hardened (`is_uniquely_owned`) | high (fan-out workloads) | M–L | needs S1 |
 | S3 | P-PAR-WAKE | ✅ **DONE** (`d0da088`) — [Park/wakeup eventcount](s3-scheduler-wakeup.md): ping-pong **319 → 15.5 ms (20.6×)**, ~1 ms above the coop floor | medium (pipeline latency, idle CPU) | S | yes |
-| S4 | P-PAR-JITBG | [Off-thread JIT compilation](s4-offthread-jit.md) — S0c says **go** (worst pause 194 ms; compile dominates wall); user sign-off pending, incl. an `opt_level` A/B first | unknown until measured | M (if go) | yes |
+| S4 | P-PAR-JITBG | ✅ **DONE** (`ba5f0cc`) — [Off-thread compile service](s4-offthread-jit.md): compile-heavy CLI wall **1096 → 47 ms (23×)**, mutator pauses (were ≤194 ms) → 0; `NOETA_JIT_OPT` dev knob from the A/B | large | M | yes |
 
 ## Sequencing (value × independence, ascending risk — the sweep's spine)
 
