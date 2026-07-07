@@ -156,14 +156,15 @@ enum Command {
         #[arg(long, default_value_t = 8080)]
         port: u16,
     },
-    /// Format `.noe` source into the canonical style (F0: a minimal subset; more each slice). By
-    /// default rewrites each file in place; style is read from the nearest `noeta.toml` `[fmt]`
-    /// table (or built-in defaults). Files that do not parse, or that use a construct the formatter
-    /// does not handle yet, are left untouched and reported.
+    /// Format `.noe` source into the canonical style. By default rewrites each file in place
+    /// (atomically); a directory argument formats every `.noe` beneath it. Style is read from the
+    /// nearest `noeta.toml` `[fmt]` table (or built-in defaults). Files that do not parse are left
+    /// untouched and reported; a formatted file is guaranteed to preserve the program's meaning.
     Fmt {
-        /// Files to format in place. Omit when using `--stdin`.
+        /// Files or directories to format in place. Omit when using `--stdin`.
         files: Vec<PathBuf>,
-        /// Do not write; exit non-zero if any file is not already canonically formatted (for CI).
+        /// Do not write. List each file that is not already canonically formatted and exit non-zero
+        /// if any exist (for CI).
         #[arg(long)]
         check: bool,
         /// Read source from stdin and write the formatted result to stdout (editor "format on save").
@@ -235,23 +236,36 @@ fn cmd_dap() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `noeta fmt` — format `.noe` source into the canonical style. F0 CLI stub: single files (no
-/// directory recursion yet — that is F6), `--check`, and `--stdin`. Files that do not parse or use
-/// a not-yet-supported construct are left untouched and reported; the safety gate inside
-/// `noeta_fmt::format_source` guarantees a written file never changes meaning.
-fn cmd_fmt(files: &[PathBuf], check: bool, stdin: bool) -> ExitCode {
+/// `noeta fmt` — format `.noe` source into the canonical style. Rewrites the given files (or every
+/// `.noe` under the given directories) in place by default; `--check` writes nothing and lists any
+/// file that is not already formatted (exit 1, for CI); `--stdin` reads stdin and writes the result
+/// to stdout. Style comes from the nearest `noeta.toml` `[fmt]` table. Files that do not parse are
+/// left untouched and reported; the safety gate inside `noeta_fmt::format_source` guarantees a
+/// written file never changes meaning. In-place writes are atomic (temp file + rename) and skipped
+/// when the content is already canonical.
+fn cmd_fmt(paths: &[PathBuf], check: bool, stdin: bool) -> ExitCode {
     if stdin {
         return cmd_fmt_stdin();
     }
-    if files.is_empty() {
+    if paths.is_empty() {
         eprintln!("noeta fmt: no files given (use `--stdin` to format standard input)");
         return ExitCode::FAILURE;
     }
 
-    let mut failed = false; // a parse/unsupported/io error on any file
+    // Expand any directory argument into the `.noe` files beneath it.
+    let mut files = Vec::new();
+    for path in paths {
+        if path.is_dir() {
+            collect_noe_files(path, &mut files);
+        } else {
+            files.push(path.clone());
+        }
+    }
+
+    let mut failed = false; // a parse or IO error on any file
     let mut would_change = false; // `--check`: some file is not already formatted
 
-    for file in files {
+    for file in &files {
         let dir = file.parent().unwrap_or_else(|| std::path::Path::new("."));
         let config = match manifest::resolve_fmt_config(dir) {
             Ok(config) => config,
@@ -276,12 +290,10 @@ fn cmd_fmt(files: &[PathBuf], check: bool, stdin: bool) -> ExitCode {
                 }
                 if check {
                     would_change = true;
-                    println!("would reformat {}", file.display());
-                } else if let Err(err) = std::fs::write(file, &formatted) {
+                    println!("{}", file.display());
+                } else if let Err(err) = atomic_write(file, &formatted) {
                     eprintln!("noeta fmt: cannot write `{}`: {err}", file.display());
                     failed = true;
-                } else {
-                    println!("reformatted {}", file.display());
                 }
             }
             Err(err) => {
@@ -296,6 +308,38 @@ fn cmd_fmt(files: &[PathBuf], check: bool, stdin: bool) -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Recursively collect every `.noe` file under `dir` (skipping dot-directories like `.git`).
+fn collect_noe_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        eprintln!("noeta fmt: cannot read directory `{}`", dir.display());
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let hidden = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.'));
+            if !hidden {
+                collect_noe_files(&path, out);
+            }
+        } else if path.extension().is_some_and(|e| e == "noe") {
+            out.push(path);
+        }
+    }
+}
+
+/// Write `contents` to `path` atomically: write a sibling temp file, then rename over the target, so
+/// a crash mid-write never leaves a truncated source file.
+fn atomic_write(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("out");
+    let tmp = dir.join(format!(".{name}.fmt-tmp"));
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// Format stdin → stdout with the config discovered from the current directory.

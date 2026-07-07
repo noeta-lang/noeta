@@ -293,8 +293,12 @@ gates re-run every slice.
   layouts. *Deferred refinements (noted): width-wrapping of long binary chains, method chains, and
   `A | B | C` unions (currently source-directed/flat even under `wrap`); trailing commas where the
   grammar allows.*
-- **F6 — CLI completion.** `--check` (unified diff), `--stdin`, dir recursion, atomic in-place write,
-  parse-failure + safety-failure handling, exit codes. End-to-end `verify` on real files.
+- **F6 — CLI completion. ✅ DONE.** `noeta fmt` now takes files **or directories** (recurses for
+  `.noe`, skipping dot-dirs), writes in place **atomically** (sibling temp + rename), stays silent on
+  success (gofmt-style), and `--check` lists each unformatted file and exits non-zero (CI). Per-file
+  `noeta.toml` `[fmt]` discovery; parse failures reported and left untouched. 4 `assert_cmd`
+  integration tests (stdin, --check, in-place, decline-unparseable) + manual end-to-end verify.
+  *(A `--diff` output is a possible follow-on; `--check` currently lists like `gofmt -l`.)*
 - **F7 — LSP `textDocument/formatting`.** Register the provider in `noeta-lsp` over the same engine
   (range-formatting optional). *Editor "format on save" without shelling out.*
 
