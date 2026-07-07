@@ -88,25 +88,25 @@ fn eval_runner(program: noeta_ast::Program) -> impl FnOnce() -> noeta_backend::R
     let ir = noeta_ir::lower_with_sites(
         &program,
         noeta_ir::LoweringSites {
-            packed_list_sites: &checked.packed_list_sites,
-            index_field_sites: &checked.index_field_sites,
-            ext_call_sites: &checked.ext_call_sites,
-            for_stream_sites: &checked.for_stream_sites,
-            width_sites: &checked.width_sites,
-            construction_sites: &checked.construction_sites,
-            handle_sites: &checked.handle_sites,
-            bound_handle_sites: &checked.bound_handle_sites,
-            f32_literal_sites: &checked.f32_literal_sites,
+            packed_list_sites: &checked.sites.packed_list_sites,
+            index_field_sites: &checked.sites.index_field_sites,
+            ext_call_sites: &checked.sites.ext_call_sites,
+            for_stream_sites: &checked.sites.for_stream_sites,
+            width_sites: &checked.sites.width_sites,
+            construction_sites: &checked.sites.construction_sites,
+            handle_sites: &checked.sites.handle_sites,
+            bound_handle_sites: &checked.sites.bound_handle_sites,
+            f32_literal_sites: &checked.sites.f32_literal_sites,
         },
     )
     .expect("Core-IR lowering is total over the parsed language");
     let relevance = noeta_ir_passes::Relevance {
-        locals: checked.destructor_relevance.locals.clone(),
-        params: checked.destructor_relevance.params.clone(),
+        locals: checked.sites.destructor_relevance.locals.clone(),
+        params: checked.sites.destructor_relevance.params.clone(),
     };
     let ir = noeta_ir_passes::insert_drops(&ir, Some(&relevance));
     let ir = noeta_ir_passes::thread_reuse(&ir);
-    let sites = checked.type_of_sites;
+    let sites = checked.sites.type_of_sites;
     move || TreeWalkBackend::new().run_ir(&program, &ir, sites)
 }
 

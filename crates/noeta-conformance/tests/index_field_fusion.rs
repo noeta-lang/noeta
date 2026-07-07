@@ -29,15 +29,15 @@ fn lowered_ir(src: &str) -> String {
     let ir = noeta_ir::lower_with_sites(
         &parsed.program,
         noeta_ir::LoweringSites {
-            packed_list_sites: &checked.packed_list_sites,
-            index_field_sites: &checked.index_field_sites,
-            ext_call_sites: &checked.ext_call_sites,
-            for_stream_sites: &checked.for_stream_sites,
-            width_sites: &checked.width_sites,
-            construction_sites: &checked.construction_sites,
-            handle_sites: &checked.handle_sites,
-            bound_handle_sites: &checked.bound_handle_sites,
-            f32_literal_sites: &checked.f32_literal_sites,
+            packed_list_sites: &checked.sites.packed_list_sites,
+            index_field_sites: &checked.sites.index_field_sites,
+            ext_call_sites: &checked.sites.ext_call_sites,
+            for_stream_sites: &checked.sites.for_stream_sites,
+            width_sites: &checked.sites.width_sites,
+            construction_sites: &checked.sites.construction_sites,
+            handle_sites: &checked.sites.handle_sites,
+            bound_handle_sites: &checked.sites.bound_handle_sites,
+            f32_literal_sites: &checked.sites.f32_literal_sites,
         },
     )
     .expect("lowering is total over the parsed language");

@@ -36,18 +36,7 @@ fn both_traces(src: &str) -> (Vec<TraceFrame>, Vec<TraceFrame>, Source) {
 
     let module = noeta_compiler::compile_with_sites(
         &parsed.program,
-        checked.type_of_sites.clone(),
-        checked.packed_list_sites.clone(),
-        checked.map_packed_sites.clone(),
-        checked.index_field_sites.clone(),
-        checked.ext_call_sites.clone(),
-        checked.for_stream_sites.clone(),
-        checked.width_sites.clone(),
-        checked.f32_literal_sites.clone(),
-        checked.construction_sites.clone(),
-        checked.handle_sites.clone(),
-        checked.bound_handle_sites.clone(),
-        &checked.destructor_relevance,
+        checked.sites.clone(),
         false,
         false, // a PRODUCTION compile — traces must not need the debug tier
     )
@@ -55,20 +44,8 @@ fn both_traces(src: &str) -> (Vec<TraceFrame>, Vec<TraceFrame>, Source) {
     let (vm_result, vm_trace) = VmBackend::new().run_module_traced(&module);
     assert_ne!(vm_result.exit_code, 0, "the program should abort");
 
-    let (eval_result, eval_trace) = noeta_conformance::reference::reference_run_traced(
-        &parsed.program,
-        checked.type_of_sites.clone(),
-        checked.packed_list_sites.clone(),
-        checked.index_field_sites.clone(),
-        checked.ext_call_sites.clone(),
-        checked.for_stream_sites.clone(),
-        checked.width_sites.clone(),
-        checked.f32_literal_sites.clone(),
-        checked.construction_sites.clone(),
-        checked.handle_sites.clone(),
-        checked.bound_handle_sites.clone(),
-        &checked.destructor_relevance,
-    );
+    let (eval_result, eval_trace) =
+        noeta_conformance::reference::reference_run_traced(&parsed.program, checked.sites);
     assert_ne!(eval_result.exit_code, 0, "the program should abort");
 
     (vm_trace, eval_trace, source)

@@ -116,23 +116,7 @@ fn selective_import_module(path: &[String]) -> Option<&str> {
 /// the tree-walker, whose type declarations are all evaluated before the driver code runs.
 pub fn compile(program: &Program) -> Result<Module, Unsupported> {
     let checked = noeta_check::check_all(program);
-    compile_with_sites(
-        program,
-        checked.type_of_sites,
-        checked.packed_list_sites,
-        checked.map_packed_sites,
-        checked.index_field_sites,
-        checked.ext_call_sites,
-        checked.for_stream_sites,
-        checked.width_sites,
-        checked.f32_literal_sites,
-        checked.construction_sites,
-        checked.handle_sites,
-        checked.bound_handle_sites,
-        &checked.destructor_relevance,
-        false,
-        false,
-    )
+    compile_with_sites(program, checked.sites, false, false)
 }
 
 /// Convert the checker's destructor-relevance into the drop pass's form (identical sets; the two
@@ -144,70 +128,45 @@ fn passes_relevance(r: &noeta_check::DestructorRelevance) -> noeta_ir_passes::Re
     }
 }
 
-/// Compile a program using a **precomputed** `type_of` site map instead of re-deriving it.
+/// Compile a program using a **precomputed** checker [`Sites`] bundle instead of re-deriving it.
 ///
-/// [`compile`] re-runs the checker (via `resolve_type_of_sites`) to obtain the map, which on a
-/// path that already type-checked the program — the CLI, the `noeta-db` `bytecode` query, the
-/// differential harness — means a redundant checker run. An orchestrator that already holds a
-/// [`noeta_check::Checked`] threads its `type_of_sites` here so the checker runs only once. The
-/// map is a pure function of the program, so this is behavior-identical to [`compile`].
-#[allow(clippy::too_many_arguments)]
+/// [`compile`] re-runs the checker to obtain the bundle, which on a path that already type-checked
+/// the program — the CLI, the `noeta-db` `bytecode` query, the differential harness — means a
+/// redundant checker run. An orchestrator that already holds a [`noeta_check::Checked`] threads
+/// `checked.sites` here so the checker runs only once. The bundle is a pure function of the
+/// program, so this is behavior-identical to [`compile`].
+///
+/// [`Sites`]: noeta_check::Sites
 pub fn compile_with_sites(
     program: &Program,
-    type_of_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
-    packed_list_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
-    map_packed_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
-    index_field_sites: HashSet<Span>,
-    ext_call_sites: HashMap<Span, noeta_stdlib::TypeRecipe>,
-    for_stream_sites: HashSet<Span>,
-    width_sites: HashMap<Span, (bool, u8)>,
-    f32_literal_sites: HashSet<Span>,
-    construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
-    handle_sites: HashMap<Span, (String, String, bool)>,
-    bound_handle_sites: HashSet<Span>,
-    relevance: &noeta_check::DestructorRelevance,
+    sites: noeta_check::Sites,
     real_isolates: bool,
     // Emit per-prototype debug info (reg→name locals, function names, defining spans) and pin named
     // locals through coalescing so the map stays 1:1. Only `noeta dap` passes true; the CLI, salsa,
     // and the differential pass false (no debug info, unconstrained coalescing — goldens unchanged).
     debug: bool,
 ) -> Result<Module, Unsupported> {
+    let relevance = Some(passes_relevance(&sites.destructor_relevance));
+    let destruct_reachable = sites
+        .destructor_relevance
+        .reachable_types
+        .iter()
+        .cloned()
+        .collect();
     compile_inner(
         program,
-        type_of_sites,
-        packed_list_sites,
-        map_packed_sites,
-        index_field_sites,
-        ext_call_sites,
-        for_stream_sites,
-        width_sites,
-        f32_literal_sites,
-        construction_sites,
-        handle_sites,
-        bound_handle_sites,
-        Some(passes_relevance(relevance)),
-        relevance.reachable_types.iter().cloned().collect(),
+        sites,
+        relevance,
+        destruct_reachable,
         real_isolates,
         debug,
     )
 }
 
-// Threads the checker's several lowering-site maps plus relevance through to the IR lowering; each
-// is a distinct precomputed input, so they are passed positionally rather than bundled.
-#[allow(clippy::too_many_arguments)]
+// Threads the checker's site bundle plus the pre-converted relevance through to the IR lowering.
 fn compile_inner(
     program: &Program,
-    type_of_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
-    packed_list_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
-    map_packed_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
-    index_field_sites: HashSet<Span>,
-    ext_call_sites: HashMap<Span, noeta_stdlib::TypeRecipe>,
-    for_stream_sites: HashSet<Span>,
-    width_sites: HashMap<Span, (bool, u8)>,
-    f32_literal_sites: HashSet<Span>,
-    construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
-    handle_sites: HashMap<Span, (String, String, bool)>,
-    bound_handle_sites: HashSet<Span>,
+    sites: noeta_check::Sites,
     relevance: Option<noeta_ir_passes::Relevance>,
     // Per-type destruct-reachability (Phase 4.3), exported straight to the `Module` for the VM's
     // container-before-contained field-walk gate; not consumed by the compiler itself.
@@ -219,6 +178,20 @@ fn compile_inner(
     // `compile_with_sites` doc). Threaded onto `ModuleCompiler` and read at `into_chunk`/`declare_local`.
     debug: bool,
 ) -> Result<Module, Unsupported> {
+    let noeta_check::Sites {
+        type_of_sites,
+        construction_sites,
+        packed_list_sites,
+        ext_call_sites,
+        map_packed_sites,
+        index_field_sites,
+        for_stream_sites,
+        width_sites,
+        handle_sites,
+        bound_handle_sites,
+        f32_literal_sites,
+        destructor_relevance: _,
+    } = sites;
     // Lower the surface program to the shared Core IR, then compile *that* to bytecode. The same
     // lowering the IR interpreter consumes, so both backends execute one program (Phase 2). The
     // precise-RC drop-insertion pass (Phase 3) annotates the IR with `DropVar`s at last-use death
@@ -4186,24 +4159,7 @@ mod tests {
             "test program must type-check cleanly: {:?}",
             checked.diagnostics
         );
-        compile_with_sites(
-            &parsed.program,
-            checked.type_of_sites.clone(),
-            checked.packed_list_sites.clone(),
-            checked.map_packed_sites.clone(),
-            checked.index_field_sites.clone(),
-            checked.ext_call_sites.clone(),
-            checked.for_stream_sites.clone(),
-            checked.width_sites.clone(),
-            checked.f32_literal_sites.clone(),
-            checked.construction_sites.clone(),
-            checked.handle_sites.clone(),
-            checked.bound_handle_sites.clone(),
-            &checked.destructor_relevance,
-            false,
-            debug,
-        )
-        .expect("compiles")
+        compile_with_sites(&parsed.program, checked.sites, false, debug).expect("compiles")
     }
 
     #[test]

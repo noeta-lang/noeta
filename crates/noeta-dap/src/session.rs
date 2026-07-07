@@ -133,33 +133,20 @@ pub fn run_compiled(compiled: &Compiled, debugger: Option<Box<dyn Debugger>>) ->
     }
 }
 
-/// Compile an already-checked program to a bytecode [`Module`] **with debug info**. Mirrors the CLI's
-/// `compile_real` (unpacking `checked`'s site maps into `compile_with_sites`, the checker output
-/// contract the compiler consumes without depending on `noeta-check`) but passes `debug = true`.
-/// Adding a site map changes that signature, so both call sites fail to compile together — the
-/// duplication cannot silently drift.
+/// Compile an already-checked program to a bytecode [`Module`] **with debug info**. The same
+/// `compile_with_sites` call the CLI's `compile_real` makes (the checker's [`noeta_check::Sites`]
+/// bundle threaded through), but with `debug = true`: emit the debug-info side-tables (reg→name
+/// locals, proto names + spans) and pin named locals through coalescing — the one difference from
+/// `noeta run`'s compile.
 fn compile_checked(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
 ) -> Result<Module, String> {
     noeta_compiler::compile_with_sites(
         program,
-        checked.type_of_sites.clone(),
-        checked.packed_list_sites.clone(),
-        checked.map_packed_sites.clone(),
-        checked.index_field_sites.clone(),
-        checked.ext_call_sites.clone(),
-        checked.for_stream_sites.clone(),
-        checked.width_sites.clone(),
-        checked.f32_literal_sites.clone(),
-        checked.construction_sites.clone(),
-        checked.handle_sites.clone(),
-        checked.bound_handle_sites.clone(),
-        &checked.destructor_relevance,
+        checked.sites.clone(),
         // Real execution lowers `isolate f(args)` to real OS-thread spawns, as `noeta run` does.
         true,
-        // Debug compile: emit the debug-info side-tables (reg->name locals, proto names + spans) and
-        // pin named locals through coalescing. This is the one difference from `noeta run`'s compile.
         true,
     )
     .map_err(|u| {

@@ -94,53 +94,20 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         // errors is rejected before it runs, exactly as the bytecode pipeline gates it. Running
         // it here (not only on the VM path) is what lets a negative type-error case assert via
         // `// expect: error E00xx`, and keeps the tree-walker and VM observably identical.
-        // One `check_all` yields both the gate diagnostics and the `type_of` site map the eval
-        // backend needs, so the checker runs once per case instead of again inside the backend.
-        let mut type_of_sites = std::collections::HashMap::new();
-        let mut packed_list_sites = std::collections::HashMap::new();
-        let mut index_field_sites = std::collections::HashSet::new();
-        let mut ext_call_sites = std::collections::HashMap::new();
-        let mut for_stream_sites = std::collections::HashSet::new();
-        let mut width_sites = std::collections::HashMap::new();
-        let mut f32_literal_sites = std::collections::HashSet::new();
-        let mut construction_sites = std::collections::HashMap::new();
-        let mut handle_sites = std::collections::HashMap::new();
-        let mut bound_handle_sites = std::collections::HashSet::new();
-        let mut destructor_relevance = noeta_check::DestructorRelevance::default();
+        // One `check_all` yields both the gate diagnostics and the site bundle the eval backend
+        // needs, so the checker runs once per case instead of again inside the backend.
+        let mut sites = noeta_check::Sites::default();
         if stage == Stage::Eval && diagnostics.is_empty() {
             let checked = noeta_check::check_all(&parsed.program);
             diagnostics.extend(checked.diagnostics);
-            type_of_sites = checked.type_of_sites;
-            packed_list_sites = checked.packed_list_sites;
-            index_field_sites = checked.index_field_sites;
-            ext_call_sites = checked.ext_call_sites;
-            for_stream_sites = checked.for_stream_sites;
-            width_sites = checked.width_sites;
-            f32_literal_sites = checked.f32_literal_sites;
-            construction_sites = checked.construction_sites;
-            handle_sites = checked.handle_sites;
-            bound_handle_sites = checked.bound_handle_sites;
-            destructor_relevance = checked.destructor_relevance;
+            sites = checked.sites;
         }
 
         // Only evaluate a program that checked cleanly and only when asked to. The reference is the
         // Core-IR interpreter (the migration's Phase-4 reference semantics), so conformance pins the
         // same last-use destruction the VM produces.
         if stage == Stage::Eval && diagnostics.is_empty() {
-            let result = reference::reference_run(
-                &parsed.program,
-                type_of_sites,
-                packed_list_sites,
-                index_field_sites,
-                ext_call_sites,
-                for_stream_sites,
-                width_sites,
-                f32_literal_sites,
-                construction_sites,
-                handle_sites,
-                bound_handle_sites,
-                &destructor_relevance,
-            );
+            let result = reference::reference_run(&parsed.program, sites);
             stdout = result.stdout;
             diagnostics.extend(result.diagnostics);
             exit_code = result.exit_code;
@@ -305,20 +272,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
             errors: errors_of_mapped(&linked.sources, &checked.diagnostics),
         };
     }
-    let result = reference::reference_run(
-        &linked.program,
-        checked.type_of_sites,
-        checked.packed_list_sites,
-        checked.index_field_sites,
-        checked.ext_call_sites,
-        checked.for_stream_sites,
-        checked.width_sites,
-        checked.f32_literal_sites,
-        checked.construction_sites,
-        checked.handle_sites,
-        checked.bound_handle_sites,
-        &checked.destructor_relevance,
-    );
+    let result = reference::reference_run(&linked.program, checked.sites);
     Outcome {
         errors: errors_of_mapped(&linked.sources, &result.diagnostics),
         stdout: result.stdout,

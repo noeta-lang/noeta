@@ -18,66 +18,30 @@
 //! property test) cover its former role; see `plans/memory-management/phase-7-finalize.md` for the
 //! decision and rationale.
 
-use std::collections::{HashMap, HashSet};
-
 use noeta_ast::Program;
-use noeta_ast::reflect::{PackedLayout, TypeRepr};
 use noeta_backend::RunResult;
 use noeta_eval::TreeWalkBackend;
-use noeta_span::Span;
 
-/// Run `program` through the Core-IR interpreter on the given `type_of` sites, lowering it and
-/// inserting the precise-RC drops (with destructor relevance) exactly as the bytecode pipeline
+/// Run `program` through the Core-IR interpreter on the checker's [`Sites`] bundle, lowering it
+/// and inserting the precise-RC drops (with destructor relevance) exactly as the bytecode pipeline
 /// does — so the reference and the VM consume identical IR. The lowering is total over the parsed
 /// language, so every parse+check-clean program reaches the IR path (no AST-walk fallback — Phase 7).
-#[allow(clippy::too_many_arguments)]
-pub fn reference_run(
-    program: &Program,
-    sites: HashMap<Span, TypeRepr>,
-    packed_list_sites: HashMap<Span, PackedLayout>,
-    index_field_sites: HashSet<Span>,
-    ext_call_sites: HashMap<Span, noeta_stdlib::TypeRecipe>,
-    for_stream_sites: HashSet<Span>,
-    width_sites: HashMap<Span, (bool, u8)>,
-    f32_literal_sites: HashSet<Span>,
-    construction_sites: HashMap<Span, TypeRepr>,
-    handle_sites: HashMap<Span, (String, String, bool)>,
-    bound_handle_sites: HashSet<Span>,
-    relevance: &noeta_check::DestructorRelevance,
-) -> RunResult {
-    reference_run_traced(
-        program,
-        sites,
-        packed_list_sites,
-        index_field_sites,
-        ext_call_sites,
-        for_stream_sites,
-        width_sites,
-        f32_literal_sites,
-        construction_sites,
-        handle_sites,
-        bound_handle_sites,
-        relevance,
-    )
-    .0
+///
+/// One bundle field is **deliberately ignored**: [`Sites::map_packed_sites`]. The flat `map`-result
+/// layout is a VM representation choice invisible to `RunResult`, so the reference stays boxed there
+/// (the field's own doc says so). Every other field is consumed identically to the VM pipeline.
+///
+/// [`Sites`]: noeta_check::Sites
+/// [`Sites::map_packed_sites`]: noeta_check::Sites::map_packed_sites
+pub fn reference_run(program: &Program, sites: noeta_check::Sites) -> RunResult {
+    reference_run_traced(program, sites).0
 }
 
 /// As [`reference_run`], plus the abort traceback (empty for a clean run) — the oracle side of the
 /// backend trace-parity check.
-#[allow(clippy::too_many_arguments)]
 pub fn reference_run_traced(
     program: &Program,
-    sites: HashMap<Span, TypeRepr>,
-    packed_list_sites: HashMap<Span, PackedLayout>,
-    index_field_sites: HashSet<Span>,
-    ext_call_sites: HashMap<Span, noeta_stdlib::TypeRecipe>,
-    for_stream_sites: HashSet<Span>,
-    width_sites: HashMap<Span, (bool, u8)>,
-    f32_literal_sites: HashSet<Span>,
-    construction_sites: HashMap<Span, TypeRepr>,
-    handle_sites: HashMap<Span, (String, String, bool)>,
-    bound_handle_sites: HashSet<Span>,
-    relevance: &noeta_check::DestructorRelevance,
+    sites: noeta_check::Sites,
 ) -> (RunResult, Vec<noeta_backend::TraceFrame>) {
     // Lower with the checker's site maps: packed-list literals stream into a flat buffer (P-PACK 2.5)
     // and `list[i].field` reads fuse to `Rvalue::IndexField` (P-PACK 2.5+). Both ride on the IR, so
@@ -85,26 +49,26 @@ pub fn reference_run_traced(
     let ir = noeta_ir::lower_with_sites(
         program,
         noeta_ir::LoweringSites {
-            packed_list_sites: &packed_list_sites,
-            index_field_sites: &index_field_sites,
-            ext_call_sites: &ext_call_sites,
-            for_stream_sites: &for_stream_sites,
-            width_sites: &width_sites,
-            construction_sites: &construction_sites,
-            handle_sites: &handle_sites,
-            bound_handle_sites: &bound_handle_sites,
-            f32_literal_sites: &f32_literal_sites,
+            packed_list_sites: &sites.packed_list_sites,
+            index_field_sites: &sites.index_field_sites,
+            ext_call_sites: &sites.ext_call_sites,
+            for_stream_sites: &sites.for_stream_sites,
+            width_sites: &sites.width_sites,
+            construction_sites: &sites.construction_sites,
+            handle_sites: &sites.handle_sites,
+            bound_handle_sites: &sites.bound_handle_sites,
+            f32_literal_sites: &sites.f32_literal_sites,
         },
     )
     .expect(
         "Core-IR lowering is total over the parsed language \
          (gate: ir_lowering_is_total_over_the_corpus)",
     );
-    let ir = noeta_ir_passes::insert_drops(&ir, Some(&to_relevance(relevance)));
+    let ir = noeta_ir_passes::insert_drops(&ir, Some(&to_relevance(&sites.destructor_relevance)));
     // Thread reuse tokens identically to the bytecode pipeline so the reference and the VM consume
     // the same annotated IR (Phase 5).
     let ir = noeta_ir_passes::thread_reuse(&ir);
-    TreeWalkBackend::new().run_ir_traced(program, &ir, sites)
+    TreeWalkBackend::new().run_ir_traced(program, &ir, sites.type_of_sites)
 }
 
 /// The drop pass's relevance form, copied from the checker's (identical sets). Mirrors the

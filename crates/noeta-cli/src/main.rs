@@ -229,18 +229,7 @@ fn compile_real(
 ) -> Result<noeta_bytecode::Module, String> {
     noeta_compiler::compile_with_sites(
         program,
-        checked.type_of_sites.clone(),
-        checked.packed_list_sites.clone(),
-        checked.map_packed_sites.clone(),
-        checked.index_field_sites.clone(),
-        checked.ext_call_sites.clone(),
-        checked.for_stream_sites.clone(),
-        checked.width_sites.clone(),
-        checked.f32_literal_sites.clone(),
-        checked.construction_sites.clone(),
-        checked.handle_sites.clone(),
-        checked.bound_handle_sites.clone(),
-        &checked.destructor_relevance,
+        checked.sites.clone(),
         // Real execution runs isolates on OS threads (I.4b): lower `isolate f(args)` to `SpawnIsolate`.
         // The differential/salsa paths pass false (byte-identical cooperative sandbox).
         true,

@@ -161,28 +161,11 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
         return;
     }
 
-    // Thread the checker's `type_of` site map + destructor relevance (already memoized by the gate
-    // above) into the reference, which runs the same drop-annotated Core IR the VM compiles — so
-    // the differential cross-checks two independent executors of one IR.
+    // Thread the checker's site bundle (already memoized by the gate above) into the reference,
+    // which runs the same drop-annotated Core IR the VM compiles — so the differential
+    // cross-checks two independent executors of one IR.
     let checked = noeta_db::checked(&db, src);
-    let sites = checked.type_of_sites.clone();
-    let packed = checked.packed_list_sites.clone();
-    let index_fields = checked.index_field_sites.clone();
-    let ext = checked.ext_call_sites.clone();
-    let tree = reference_run(
-        &parsed.0.program,
-        sites,
-        packed,
-        index_fields,
-        ext,
-        checked.for_stream_sites.clone(),
-        checked.width_sites.clone(),
-        checked.f32_literal_sites.clone(),
-        checked.construction_sites.clone(),
-        checked.handle_sites.clone(),
-        checked.bound_handle_sites.clone(),
-        &checked.destructor_relevance,
-    );
+    let tree = reference_run(&parsed.0.program, checked.sites.clone());
     match &noeta_db::bytecode(&db, src).0 {
         Err(_) => report.skipped += 1,
         Ok(module) => {
@@ -225,24 +208,7 @@ fn compare_backends_workspace(
         return;
     }
     let checked = noeta_db::linked_checked(&db, ws);
-    let sites = checked.type_of_sites.clone();
-    let packed = checked.packed_list_sites.clone();
-    let index_fields = checked.index_field_sites.clone();
-    let ext = checked.ext_call_sites.clone();
-    let tree = reference_run(
-        program,
-        sites,
-        packed,
-        index_fields,
-        ext,
-        checked.for_stream_sites.clone(),
-        checked.width_sites.clone(),
-        checked.f32_literal_sites.clone(),
-        checked.construction_sites.clone(),
-        checked.handle_sites.clone(),
-        checked.bound_handle_sites.clone(),
-        &checked.destructor_relevance,
-    );
+    let tree = reference_run(program, checked.sites.clone());
     match &noeta_db::linked_bytecode(&db, ws).0 {
         Err(_) => report.skipped += 1,
         Ok(module) => {
