@@ -85,6 +85,7 @@ File IO. Under `noeta run` this is real disk; the conformance sandbox uses an in
 | `list` | `list() -> List<string>` / `list(dir: string) -> List<string>` |
 | `open` | `open(path: string, mode: string) -> FileHandle` |
 | `read_async` / `write_async` / `append_async` | the `Future`-returning variants (see [Concurrency](Concurrency)) |
+| `exists_async` / `remove_async` / `list_async` | async metadata twins — same semantics as their sync forms, awaited |
 
 ### File handles
 

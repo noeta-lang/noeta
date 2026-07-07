@@ -1,6 +1,8 @@
 # The extern-type seam — registrable native value types (and `Uuid`, its first client)
 
-**Status: DESIGN — awaiting confirmation.** Branch `uuid-host-seam` (continues the id-entropy arc).
+**Status: ARC COMPLETE (2026-07-07).** X1 `727b603`, X2 `f22349e`, X3 `1568b92`, X4 `af0ab27`+`7a17ae2`, X5 `cff9cb3`, X6 `9cd4c42`, X7 docs+memory. Gates: X1/X4 benches no-regression (X4 get/100k ~8-11% FASTER), X3 zero-edit fs corpus, X5 zero-edit async corpus + real-executor CLI tests, X6 zero backend edits. Follow-ons in `plans/deferred.md` §Extern types.
+
+Original design (as approved): Branch `uuid-host-seam` (continues the id-entropy arc).
 The `Extension` trait's "and, later, types" promissory note comes due: the registry grows a
 `types()` seam so a Rust crate can contribute a first-class value type the way it already
 contributes modules. `Uuid` is the first client (pure, ordered, key-capable); **FileHandle
@@ -340,11 +342,11 @@ CLI test.
   equality/ordering/display/narrowing rungs in both backends; checker admit + table-driven
   methods; the shared method-dispatch path. Gate: full bench suite, no regression (equality
   chain appended-last + Payload untouched-size proof).
-- **X2 — Uuid.** `uuid` crate dep; `id.rs` rewritten over `uuid::Builder` (hand-rolled bytes
+- **X2 — Uuid. ✅ DONE (`f22349e`)** (also fixed: eval's hand-written `Value: PartialEq` extern hole — `some(u) == some(u)` was silently false on one backend). `uuid` crate dep; `id.rs` rewritten over `uuid::Builder` (hand-rolled bytes
   deleted; exact-value pins prove identity); `ID_FNS` ret → `Named("Uuid")`; `id.parse`;
   methods `version`/`to_string`/`timestamp_ms`; narrowing + dyn conformance; real-host CLI
   test unchanged (observes canonical strings).
-- **X3 — FileHandle migration.** `impl ExternValue for FileHandle` + `ExtType`; delete the
+- **X3 — FileHandle migration. ✅ DONE (`1568b92`)** (bonus: every heap object's payload shrank 88→56 bytes — the inline FileHandle variant was the largest). `impl ExternValue for FileHandle` + `ExtType`; delete the
   hand-threaded hosting (payload/value variants, method twins, `FileHandleMethod`,
   `NativeOut::FileHandle`, checker tables — list above). Gate: existing fs/handle conformance
   corpus green through the swap (behavior pinned by oracle, zero expectation edits).
@@ -358,13 +360,13 @@ CLI test.
   `Map<Uuid,T>`/`Set<Uuid>` conformance; `Map<FileHandle,_>` static-rejection test. NOTE
   (pre-existing, NOT this slice): the checker still accepts `Map<int,_>` and int-keyed literals
   statically while runtimes reject at runtime — recorded for the deferred sweep.
-- **X5 — the async seam + fs migration.** `ExternIo` + `RealBody` + `NativeOut::Spawn`;
+- **X5 — the async seam + fs migration. ✅ DONE (`cff9cb3`).** `ExternIo` + `RealBody` + `NativeOut::Spawn`;
   `Executor::spawn_ext`/`poll_ext` (deleting `IoRequest`/`IoOutcome`/`from_fs_async` — fs
   becomes an `FsIo: ExternIo` with today's two bodies verbatim); `fs_dispatch` `*_async` arms
   with `Future(T)` rets; DELETE both backends' by-name intercepts. Gate: existing async
   conformance corpus green with zero expectation edits; real-host CLI async test still shows
   genuine concurrency.
-- **X6 — new async file functions.** The async twins of the remaining sync fs surface
+- **X6 — new async file functions. ✅ DONE (`9cd4c42`)** (metadata twins deliberately use the None-fallback — real semantics by construction + the degradation path exercised). The async twins of the remaining sync fs surface
   (`exists_async`/`list_async`/`remove_async` per `FS_FNS`) — new `FsIo` variants + signature
   rows ONLY (no backend edits — the proof the seam is open). Sandbox + real-host conformance.
 - **X7 — docs + memory.** Wiki `id` section (+ a `Uuid` type section), fs async additions,
