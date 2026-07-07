@@ -40,7 +40,8 @@ pauses before the first instruction.
 | **Call stack** | Every frame with its function name and source position — including frames from functions defined in other modules. |
 | **Variables** | Each frame's named locals (and `self` in a method frame) with their current value and type — the same surface type spelling (`List<int>`, `Point`) the LSP hover and REPL `:type` show. Only locals *in scope at the pause* appear; a name declared further down the function isn't shown as bound yet. |
 | **Hover** | Hovering an expression in the source while paused evaluates it **read-only** — names, `.field` chains, `[index]`, operators, literals. Anything that would run code is refused (see below). |
-| **Watch & debug console** | Full expression evaluation — the console is effectively **a REPL over the paused program** (see next section). |
+| **Watch & debug console** | Full expression evaluation — the console is effectively **a REPL over the paused program** (see next section). Repeated watch evaluations are memoized, so stepping with a full watch panel costs nothing extra. |
+| **Edit variables** | Change a local's value from the Variables panel while paused; the replacement is any console expression (other locals visible), and the resumed program runs with the new value. `self` is not editable. |
 | **Panic tracebacks** | An abort replays its diagnostic and call-chain traceback as console output, same rendering as `noeta run`. |
 
 ## The debug console is a REPL over the paused program
@@ -80,17 +81,30 @@ program state — rebinding a global callback, say — stays alive and callable 
 …and when the program later calls `cb(7)` itself, it runs your console-built closure. The runtime
 keeps every fragment's code resolvable for the rest of the run, so nothing dangles.
 
+**4. Console bindings persist.** A top-level `mut total = …` (or a bare `label = …` introducing a
+new name) at the console binds a **session global**, exactly like a REPL binding — visible in every
+later console entry for the rest of the run:
+
+```text
+> mut total = xs.len() * 10
+> total + 2
+32
+```
+
+One rule: a console `mut` whose name collides with a **frame local** is refused ("pick another
+name") — the language forbids shadowing, and silently diverging from what the Variables panel shows
+would be worse. A `mut` nested *inside* the fragment (in a loop or closure body) stays
+fragment-local, as it would in any function.
+
 Console entries are **checkerless**, like the REPL: an ill-typed fragment surfaces as a console
 error message (the runtime's, e.g. an arity or unknown-name error), never as a crash, and a failed
 entry leaves no trace in the debugged program's own diagnostics.
 
-### What the console does *not* do (yet)
+### One nuance about frame locals
 
-- **`mut` bindings don't persist across console entries.** A fragment's `mut x = …` is local to
-  that entry. (Program *globals* can be reassigned, as `cb` above shows.)
-- **Assigning to a frame local doesn't write the frame.** Locals pass into a fragment by value;
-  `i = 5` at the console changes the fragment's copy, not the paused register. Editing a live local
-  (`setVariable`) is a planned follow-on.
+Frame locals pass into a fragment **by value**: `i = 5` typed at the console changes the fragment's
+copy, not the paused register. To actually change a live local, edit it in the **Variables panel**
+(`setVariable`) — that writes the frame register, and the resumed program sees the new value.
 
 ## Hover stays side-effect-free
 
@@ -124,7 +138,8 @@ console — those are allowed to run code.
 ## Current limitations
 
 - No conditional / hit-count / logpoint breakpoints, and no data or exception breakpoints.
-- No `setVariable` (editing a paused frame's locals) — planned.
+- Console entries are checkerless — type errors surface as runtime messages, not `E0xxx`
+  diagnostics at the prompt (an incremental session checker is planned).
 - Column-precise breakpoints are not supported; breakpoints are line-granular.
 - Debugging real OS-thread `isolate`s is out of scope for now: debug the main isolate; worker
   isolates run to completion undebugged.
