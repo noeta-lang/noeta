@@ -42,6 +42,9 @@ noeta-check = { path = "crates/noeta-check" }
 # M1 modules (Thrust C)
 noeta-loader = { path = "crates/noeta-loader" }
 noeta-stdlib = { path = "crates/noeta-stdlib" }
+# Native-extension ABI (P-NATIVE): the contract + dep-free primitives, split out of noeta-stdlib so
+# the batteries (crypto/uuid/json) don't ride the ABI. noeta-stdlib re-exports it (core/std-style).
+noeta-native = { path = "crates/noeta-native" }
 # M2 runtime (host-coupled IO: real disk async + real env/args)
 noeta-runtime = { path = "crates/noeta-runtime" }
 # M2 reactivity core (signal/computed/effect graph — value-generic, backend-driven)

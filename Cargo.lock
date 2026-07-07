@@ -1767,6 +1767,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-native"
+version = "0.0.0"
+dependencies = [
+ "compact_str",
+ "equivalent",
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "noeta-object"
 version = "0.0.0"
 
