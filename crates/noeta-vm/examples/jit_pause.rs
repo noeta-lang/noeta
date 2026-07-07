@@ -85,6 +85,10 @@ fn main() {
         stats.compile_ns_max / 1_000
     );
     println!("compile avg     {:>10} µs", avg_us);
+    // CAVEAT (P-JCT): with off-thread compilation (P-PAR S4) compile time OVERLAPS the mutator
+    // and the stats entry point drains the queue at exit, so `wall − compile` is NOT "runtime"
+    // — a compile-bound run reports ~0 here. For generated-code quality, compare `wall` at call
+    // counts large enough that runtime dominates.
     println!(
         "runtime (wall − compile) {:>7.1} ms",
         (wall.as_nanos() as f64 - stats.compile_ns_total as f64) / 1e6

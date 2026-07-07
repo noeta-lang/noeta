@@ -1,6 +1,9 @@
 # JIT compile-throughput investigation (P-JCT)
 
-**Status: IN PROGRESS.** Spun off from P-PAR S4 (`plans/perf/parallel-seams/s4-offthread-jit.md`):
+**Status: ✅ ARC COMPLETE (C0–C4, branch `jit-compile-throughput`). Headline (pinned interleaved
+A/B vs `28f33b2`): compile 3.1× faster (mixed fixture 1722 → 562 ms, worst pause 151 → 51 ms),
+clif IR −60%, machine code −50% — and the generated code is *faster* too (small hot fns 1.35×,
+mixed 1.09×, fib(30) end-to-end 1.18×, jit_promo wall 1.05×).** Spun off from P-PAR S4 (`plans/perf/parallel-seams/s4-offthread-jit.md`):
 even at `NOETA_JIT_OPT=none` the engine averages **~27 ms per compile** for functions a few lines
 long — Cranelift's own ballpark for small functions is tens–hundreds of **µs**, so we are paying
 2–3 orders of magnitude somewhere in *our* embedding, not in the optimizer (the opt-level A/B
@@ -28,8 +31,31 @@ this arc attacks the cost itself — cheaper compiles mean hot code goes native 
 | C0 | Instrument: per-phase ns (IR build / define / finalize), clif inst + code-byte counts, surfaced in `jit_pause`; `NOETA_JIT_CLIF` IR dump | ✅ DONE |
 | C1 | Verifier A/B → policy (off in release; on under `debug_assertions`; `NOETA_JIT_VERIFY=1|0` overrides) — **−23% compile time** | ✅ DONE |
 | C2 | Finalize batching | ✅ CLOSED, measured dead: `finalize_definitions` = 0.6 ms of a 1740 ms compile total (~10 µs/body) — nothing to batch |
-| C3 | IR-volume reduction (the real story — see findings): claims propagation, iconst dedup, shared bail blocks, dead `band` | pending |
-| C4 | Pinned interleaved A/B re-run of the S4 benches + full gates | pending |
+| C3 | IR-volume reduction: entry-block `ConstPool`, shared bail block per pc, guard-strengthened claims (results + operands + `CondBranch` Bool), dead `band` dropped | ✅ DONE |
+| C4 | Pinned interleaved A/B vs `28f33b2` (runtime quality + wall) + full gates | ✅ DONE |
+
+## C3 shipped (three stacked changes, each measured on the mixed fixture, verifier off)
+
+| stage | clif insts | compile total |
+|---|--:|--:|
+| C1 exit (verifier off only) | 838,977 | 1332 ms |
+| + `ConstPool` (once per body, entry block) + dead `band` + shared bail per pc | 530,792 | 928 ms |
+| + result claims: asym `(Int,Imm)→Int` / `(Float,Imm)→Float` | 363,112 | 642 ms |
+| + operand strengthening (guards claim the guarded side downstream; heap map clears both operands at every supported Binary; `CondBranch` claims Bool) | **334,832** | **562 ms** |
+
+**Vs the shipped S4 config (verifier on): compile 1722 → 562 ms = 3.1×; insts −60%; machine
+code 5.1 → 2.5 MB.** The 1-stmt body went 338 → 223 insts and the generic float dispatch on
+provably-int adds is gone (claims now flow through the asymmetric guarded path in both
+directions). Soundness rails: emitter/analysis lock-step (`def_raw` at every strengthened
+guard), the typed⇒!heap invariant preserved by strengthening heap at a superset of the kind
+sites, `slot_hazard_map` unaffected (hazards raised at def sites persist — a guard can't
+un-track a stale slot). All suites + jit-differential green.
+
+**New finding (recorded, not yet acted on): the egraph is superlinear in body size.** At
+`opt_level=none` compile time is linear in insts (~0.75 µs/inst at every size); at `speed` the
+per-inst cost grows with body size (1.27 → 1.89 µs/inst from 40 to 160 stmts). Very large
+bodies would benefit from a size-tiered opt level, but Cranelift fixes `opt_level` per ISA/module
+— it would need a second engine on the compile thread. Deferred unless real programs hit it.
 
 ## C0 findings — the cost is IR volume, not Cranelift
 
@@ -75,12 +101,25 @@ paying for a pure debug check. jit-differential re-run green with `NOETA_JIT_VER
 - Gates per slice: conformance, differential, jit-differential, workspace tests, clippy, fmt.
 - Commit per green slice; never push.
 
-## Numbers
+## C4 — pinned interleaved A/B vs `28f33b2` (taskset -c 2, median of 5–7, same day)
 
-(recorded as slices land)
+| Measurement | base `28f33b2` | new | ratio |
+|---|--:|--:|--:|
+| jit_pause mixed: compile total / worst pause | 1722 ms / 151 ms | **562 ms / 51 ms** | **3.1×** |
+| clif insts / code bytes (mixed, 61 bodies) | 839 k / 5.08 MB | 335 k / 2.54 MB | −60% / −50% |
+| generated-code wall, 30×5-stmt fns × 2 M calls | 6163 ms | **4570 ms** | **1.35×** |
+| generated-code wall, mixed × 100 k calls | 18110 ms | 16543 ms | 1.09× |
+| fib(30) end-to-end (`noeta run`, compile lands mid-flight) | 23.9 ms | 20.2 ms | 1.18× |
+| jit_promo.noe end-to-end (`noeta run`) | 36.9 ms | 35.0 ms | 1.05× |
 
-| Measurement | before | after |
-|---|--:|--:|
-| jit_pause mixed: compile total / max | 1695.6 ms / 165 ms (S4 baseline, opt=speed) | |
-| jit_promo.noe end-to-end wall | 46.9 ms (off-thread) | |
-| fib(30) end-to-end (compile lands mid-flight) | 31.2 ms | |
+The code-quality wins come from the strengthened claims (generic dispatches and repeat guards
+gone from hot loops); the end-to-end wins from compiles landing ~3× sooner (S4's off-thread
+service drains its backlog faster, so tier-1 entry happens earlier).
+
+**Measurement trap (recorded in the example too): `jit_pause`'s `wall − compile` is NOT runtime
+under off-thread compilation** — compile overlaps the mutator and the stats entry drains the
+queue at exit, so a compile-bound run reports ~0. Compare `wall` at runtime-dominated call
+counts for code quality.
+
+Final gates: 501 conformance, differential + jit-differential (tier 1 agrees, leaks nothing),
+`cargo test --workspace` all suites, clippy + fmt — green.
