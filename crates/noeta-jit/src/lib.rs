@@ -698,6 +698,7 @@ impl Jit {
             // frame_ptr = regs + base * 8 (Value is 8 bytes). All register access is off this.
             let base_bytes = b.ins().imul_imm(base, 8);
             let frame_ptr = b.ins().iadd(regs, base_bytes);
+            let pool = ConstPool::seed(&mut b);
             let note_bound_ref = self.module.declare_func_in_func(self.note_bound_id, b.func);
             let retain_ref = self.module.declare_func_in_func(self.retain_id, b.func);
             let release_ref = self.module.declare_func_in_func(self.release_id, b.func);
@@ -773,6 +774,8 @@ impl Jit {
                 vm,
                 regs,
                 frame_ptr,
+                pool,
+                bail_blocks: vec![None; n],
                 base,
                 globals,
                 frames,
@@ -879,8 +882,7 @@ impl Jit {
                         let bail0 = cg.b.create_block();
                         cg.b.ins().brif(any, bail0, &[], init0, &[]);
                         cg.b.switch_to_block(bail0);
-                        let zero = cg.b.ins().iconst(types::I64, 0);
-                        cg.b.ins().return_(&[zero]);
+                        cg.b.ins().return_(&[cg.pool.zero]);
                     }
                     None => {
                         cg.b.ins().jump(init0, &[]);
@@ -913,9 +915,7 @@ impl Jit {
                         let bail0 = cg.b.create_block();
                         cg.b.ins().brif(any, bail0, &[], init0, &[]);
                         cg.b.switch_to_block(bail0);
-                        let unit =
-                            cg.b.ins()
-                                .iconst(types::I64, Value::NANBOX.unit_bits as i64);
+                        let unit = cg.pool.unit;
                         for (pi, &a) in arg_vals.iter().enumerate() {
                             cg.b.ins().store(
                                 MemFlagsData::trusted(),
@@ -933,17 +933,14 @@ impl Jit {
                                 reg_offset(r),
                             );
                         }
-                        let zero = cg.b.ins().iconst(types::I64, 0);
-                        cg.b.ins().return_(&[zero, zero]);
+                        cg.b.ins().return_(&[cg.pool.zero, cg.pool.zero]);
                     }
                     None => {
                         cg.b.ins().jump(init0, &[]);
                     }
                 }
                 cg.b.switch_to_block(init0);
-                let unit =
-                    cg.b.ins()
-                        .iconst(types::I64, Value::NANBOX.unit_bits as i64);
+                let unit = cg.pool.unit;
                 for r in 0..nreg {
                     let v = arg_vals.get(r).copied().unwrap_or(unit);
                     cg.b.def_var(cg.vars[r], v);
@@ -957,8 +954,7 @@ impl Jit {
             for (pc, op) in chunk.code.iter().enumerate() {
                 cg.b.switch_to_block(op_blocks[pc]);
                 if !reachable[pc] {
-                    let here = cg.b.ins().iconst(types::I64, pc as i64);
-                    cg.ret_bail(here);
+                    cg.ret_bail_isolated(pc);
                     continue;
                 }
                 emit_op(&mut cg, &chunk.consts, op, pc, &op_blocks);
@@ -1497,6 +1493,22 @@ fn heap_at_fixpoint(chunk: &noeta_bytecode::Chunk, n: usize, nreg: usize) -> Opt
         for pc in 0..n {
             // out = transfer(in[pc], effects[pc]).
             let mut out = inset[pc * nreg..pc * nreg + nreg].to_vec();
+            // P-JCT C3 guard strengthening: a supported `Binary`'s native continuation proved
+            // **both** operands immediate — every emitted path (typed, asymmetric-guarded,
+            // generic dispatch) bails unless both operands are small ints or both floats — and a
+            // `CondBranch`'s continuation proved its scrutinee a bool (a non-bool bails for
+            // E0007). Tier-0 divergence is caught by the mid-frame entry verification, exactly
+            // the contract that lets the entry row seed all-immediate. A slot left stale-heap by
+            // an *earlier* def stays tracked: [`slot_hazard_map`] raises hazards at def sites
+            // and never lowers them (only a call's full sync clears).
+            match &chunk.code[pc] {
+                Op::Binary { op, a, b, .. } if supported_binary(*op) => {
+                    out[*a as usize] = false;
+                    out[*b as usize] = false;
+                }
+                Op::CondBranch { reg, .. } => out[*reg as usize] = false,
+                _ => {}
+            }
             match effects[pc] {
                 RegEffect::Inert => {}
                 RegEffect::Clear(r) => out[r as usize] = false,
@@ -1632,6 +1644,22 @@ pub(crate) fn kind_in_map(chunk: &noeta_bytecode::Chunk) -> Vec<Kind> {
                 | Op::Unary { dst, .. }
                 | Op::Stringify { dst, .. } => out[*dst as usize] = Kind::Imm,
                 Op::Binary { op, dst, a, b, .. } => {
+                    let (ka, kb) = (out[*a as usize], out[*b as usize]);
+                    // P-JCT C3 guard strengthening: the asymmetric emitter path (T1b) *guards*
+                    // its statically-unknown side, so on every native continuation that operand
+                    // held the typed side's kind — claim it downstream (the emitter's matching
+                    // `def_raw` keeps the raw variable current; mid-frame entries re-verify).
+                    // The generic (Imm, Imm) path proves "immediate", not a single kind — the
+                    // heap transfer strengthens there, this map cannot.
+                    if supported_binary(*op) {
+                        match (ka, kb) {
+                            (Kind::Int, Kind::Imm) => out[*b as usize] = Kind::Int,
+                            (Kind::Imm, Kind::Int) => out[*a as usize] = Kind::Int,
+                            (Kind::Float, Kind::Imm) => out[*b as usize] = Kind::Float,
+                            (Kind::Imm, Kind::Float) => out[*a as usize] = Kind::Float,
+                            _ => {}
+                        }
+                    }
                     out[*dst as usize] = match op {
                         BinaryOp::Eq
                         | BinaryOp::Ne
@@ -1643,14 +1671,24 @@ pub(crate) fn kind_in_map(chunk: &noeta_bytecode::Chunk) -> Vec<Kind> {
                         | BinaryOp::Sub
                         | BinaryOp::Mul
                         | BinaryOp::Div
-                        | BinaryOp::Rem => match (out[*a as usize], out[*b as usize]) {
+                        | BinaryOp::Rem => match (ka, kb) {
                             (Kind::Int, Kind::Int) => Kind::Int,
                             (Kind::Float, Kind::Float) => Kind::Float,
+                            // P-JCT C3: the asymmetric path bails before storing anything that
+                            // isn't a fitting int/float — the same contract that makes the
+                            // (Int, Int) claim sound. Without this, `a*3 + x%2`'s outer `+`
+                            // compiled the full generic two-sided dispatch.
+                            (Kind::Int, Kind::Imm) | (Kind::Imm, Kind::Int) => Kind::Int,
+                            (Kind::Float, Kind::Imm) | (Kind::Imm, Kind::Float) => Kind::Float,
                             _ => Kind::Imm,
                         },
                         _ => Kind::Imm, // `~`, `&&`/`||`, identity — bail ops here; tier 0 decides
                     };
                 }
+                // P-JCT C3: a `CondBranch`'s continuation (either successor) proved the
+                // scrutinee a bool — a non-bool bails for E0007 before branching. The emitter
+                // defines the raw 0/1 form before the branch, on both claimed and generic paths.
+                Op::CondBranch { reg, .. } => out[*reg as usize] = Kind::Bool,
                 // Inert for registers (the reg_effect whitelist guarantees nothing else appears).
                 _ => {}
             }
@@ -1744,6 +1782,58 @@ pub(crate) fn fast_ok(chunk: &noeta_bytecode::Chunk) -> bool {
             .all(|op| reg_effect(op, &chunk.consts).is_some())
 }
 
+/// P-JCT C3: the fixed NaN-box/outcome constants every body needs, materialized **once in the
+/// entry block** (which dominates every reachable block) instead of re-emitted at each use —
+/// duplicate `iconst`s were roughly a third of the IR handed to Cranelift, and compile time is
+/// proportional to what we hand it, not to what survives GVN. Unreachable-pc blocks (no
+/// predecessors, so not dominated by entry) must not read the pool — they emit their two
+/// constants locally ([`Codegen::ret_bail_isolated`]).
+#[derive(Clone, Copy)]
+struct ConstPool {
+    zero: ClValue,
+    unit: ClValue,
+    /// `qnan` — the [`Codegen::is_float`] mask/want.
+    qnan: ClValue,
+    /// `sign | qnan` — the [`Codegen::is_pointer`] mask/want.
+    ptr_tag: ClValue,
+    /// `sign | qnan | int_tag` — the [`Codegen::is_small_int`] mask.
+    int_mask: ClValue,
+    /// `qnan | int_tag` — the [`Codegen::is_small_int`] want and the small-int retag word.
+    int_tag: ClValue,
+    /// The low-48-bit payload mask.
+    ptr_mask: ClValue,
+    true_bits: ClValue,
+    false_bits: ClValue,
+    /// `Value::float(f64::NAN).bits()` — the canonical quiet NaN a float op's NaN result becomes.
+    nan_canon: ClValue,
+    unbound: ClValue,
+    outcome_returned: ClValue,
+    outcome_continue: ClValue,
+}
+
+impl ConstPool {
+    /// Emit the pool into the current (entry) block.
+    fn seed(b: &mut FunctionBuilder) -> ConstPool {
+        let l = Value::NANBOX;
+        let mut k = |v: i64| b.ins().iconst(types::I64, v);
+        ConstPool {
+            zero: k(0),
+            unit: k(l.unit_bits as i64),
+            qnan: k(l.qnan as i64),
+            ptr_tag: k((l.sign_bit | l.qnan) as i64),
+            int_mask: k((l.sign_bit | l.qnan | l.int_tag) as i64),
+            int_tag: k((l.qnan | l.int_tag) as i64),
+            ptr_mask: k(l.ptr_mask as i64),
+            true_bits: k(l.true_bits as i64),
+            false_bits: k(l.false_bits as i64),
+            nan_canon: k(Value::float(f64::NAN).bits() as i64),
+            unbound: k(l.unbound_bits as i64),
+            outcome_returned: k(OUTCOME_RETURNED),
+            outcome_continue: k(OUTCOME_CONTINUE),
+        }
+    }
+}
+
 /// A thin wrapper over the Cranelift builder carrying the frame base pointer, the globals base
 /// pointer, and the `note_global_bound` helper reference — the context every op-emitter needs. Keeps
 /// [`emit_op`] free of builder plumbing. Register/global access uses *trusted* memory flags (aligned
@@ -1758,6 +1848,15 @@ struct Codegen<'a, 'b> {
     /// path is only taken when no `reserve_window` reallocation can occur.
     regs: ClValue,
     frame_ptr: ClValue,
+    /// The entry-block constant pool (P-JCT C3) — see [`ConstPool`].
+    pool: ConstPool,
+    /// P-JCT C3: one shared bail block per pc, created and filled (frame sync + bail return) on
+    /// the first [`guard`] at that pc; later guards of the same op reuse it. An op like
+    /// `a = a * 3 + 1` carries several guards (operand tags, overflow fits), and each bail body
+    /// is a full [`Codegen::sync_frame`] — per-guard bail blocks were a large slice of the IR
+    /// volume. Sound because the spill *set* is pc-keyed (identical for every guard of the pc)
+    /// and the spilled *values* resolve per-predecessor through the SSA builder's block params.
+    bail_blocks: Vec<Option<Block>>,
     /// The frame's base offset (ABI param 2), passed to the call helper.
     base: ClValue,
     globals: ClValue,
@@ -1974,7 +2073,6 @@ impl Codegen<'_, '_> {
     /// interpreter at `pc`. Known-constant registers need no guard: their single dominating
     /// `LoadConst` def wrote the slot.
     fn guard_entry_claims(&mut self, pc: usize) {
-        let l = Value::NANBOX;
         let mut any: Option<ClValue> = None;
         for r in 0..self.nreg as u16 {
             if self.heap_in[pc * self.nreg + r as usize] || self.const_bits[r as usize].is_some() {
@@ -1984,28 +2082,22 @@ impl Codegen<'_, '_> {
             let viol = match self.kind_claim(pc, r) {
                 Kind::Int => {
                     // Violated unless the small-int tag matches.
-                    let mask = self
-                        .b
+                    let masked = self.b.ins().band(v, self.pool.int_mask);
+                    self.b
                         .ins()
-                        .iconst(types::I64, (l.sign_bit | l.qnan | l.int_tag) as i64);
-                    let want = self.b.ins().iconst(types::I64, (l.qnan | l.int_tag) as i64);
-                    let masked = self.b.ins().band(v, mask);
-                    self.b.ins().icmp(IntCC::NotEqual, masked, want)
+                        .icmp(IntCC::NotEqual, masked, self.pool.int_tag)
                 }
                 Kind::Bool => {
                     // Violated unless the word is exactly `true` or `false`.
-                    let tb = self.b.ins().iconst(types::I64, l.true_bits as i64);
-                    let fb = self.b.ins().iconst(types::I64, l.false_bits as i64);
-                    let is_t = self.b.ins().icmp(IntCC::Equal, v, tb);
-                    let is_f = self.b.ins().icmp(IntCC::Equal, v, fb);
+                    let is_t = self.b.ins().icmp(IntCC::Equal, v, self.pool.true_bits);
+                    let is_f = self.b.ins().icmp(IntCC::Equal, v, self.pool.false_bits);
                     let is_bool = self.b.ins().bor(is_t, is_f);
                     self.b.ins().bxor_imm(is_bool, 1)
                 }
                 Kind::Float => {
                     // Violated if the word is qnan-tagged (every non-f64 value is).
-                    let qnan = self.b.ins().iconst(types::I64, l.qnan as i64);
-                    let masked = self.b.ins().band(v, qnan);
-                    self.b.ins().icmp(IntCC::Equal, masked, qnan)
+                    let masked = self.b.ins().band(v, self.pool.qnan);
+                    self.b.ins().icmp(IntCC::Equal, masked, self.pool.qnan)
                 }
                 Kind::Imm | Kind::Bot => self.is_pointer(v),
             };
@@ -2077,7 +2169,6 @@ impl Codegen<'_, '_> {
     /// typed claim and a typed claim requires typed defs on every incoming path). Runs after
     /// [`Codegen::load_ssa_vars`], so the boxed variables hold the slot values.
     fn init_raw_vars(&mut self, pc: usize) {
-        let l = Value::NANBOX;
         for r in 0..self.nreg as u16 {
             if !self.is_var(r) {
                 continue;
@@ -2089,11 +2180,10 @@ impl Codegen<'_, '_> {
                 }
                 Kind::Bool => {
                     let v = self.b.use_var(self.vars[r as usize]);
-                    let tb = self.b.ins().iconst(types::I64, l.true_bits as i64);
-                    let is_t = self.b.ins().icmp(IntCC::Equal, v, tb);
+                    let is_t = self.b.ins().icmp(IntCC::Equal, v, self.pool.true_bits);
                     self.b.ins().uextend(types::I64, is_t)
                 }
-                _ => self.b.ins().iconst(types::I64, 0),
+                _ => self.pool.zero,
             };
             self.b.def_var(self.raw_vars[r as usize], raw);
         }
@@ -2120,10 +2210,7 @@ impl Codegen<'_, '_> {
     /// exactly tier-0's never-written local, or a dead immediate whose slot may not keep garbage
     /// bits (teardown's release loop and the unwind path read every slot).
     fn normalize_frame(&mut self, pc: usize) {
-        let unit = self
-            .b
-            .ins()
-            .iconst(types::I64, Value::NANBOX.unit_bits as i64);
+        let unit = self.pool.unit;
         for r in 0..self.nreg as u16 {
             let i = pc * self.nreg + r as usize;
             if self.is_var(r)
@@ -2146,10 +2233,22 @@ impl Codegen<'_, '_> {
     /// `OUTCOME_RETURNED`, so bails pad with zero.
     fn ret_bail(&mut self, outcome: ClValue) {
         if self.fast {
-            let zero = self.b.ins().iconst(types::I64, 0);
-            self.b.ins().return_(&[outcome, zero]);
+            self.b.ins().return_(&[outcome, self.pool.zero]);
         } else {
             self.b.ins().return_(&[outcome]);
+        }
+    }
+
+    /// [`Codegen::ret_bail`] for a block with **no predecessors** (an unreachable pc's block):
+    /// such a block is not dominated by the entry block, so it must not read the constant pool —
+    /// both words are emitted locally.
+    fn ret_bail_isolated(&mut self, pc: usize) {
+        let here = self.b.ins().iconst(types::I64, pc as i64);
+        if self.fast {
+            let zero = self.b.ins().iconst(types::I64, 0);
+            self.b.ins().return_(&[here, zero]);
+        } else {
+            self.b.ins().return_(&[here]);
         }
     }
 
@@ -2217,42 +2316,28 @@ impl Codegen<'_, '_> {
 
     /// `(v & (sign|qnan)) == (sign|qnan)` — is `v` a heap pointer?
     fn is_pointer(&mut self, v: ClValue) -> ClValue {
-        let l = Value::NANBOX;
-        let mask = self
-            .b
-            .ins()
-            .iconst(types::I64, (l.sign_bit | l.qnan) as i64);
-        let masked = self.b.ins().band(v, mask);
-        self.b.ins().icmp(IntCC::Equal, masked, mask)
+        let masked = self.b.ins().band(v, self.pool.ptr_tag);
+        self.b.ins().icmp(IntCC::Equal, masked, self.pool.ptr_tag)
     }
 
     /// `(v & (sign|qnan|int_tag)) == (qnan|int_tag)` — is `v` an immediate small int?
     fn is_small_int(&mut self, v: ClValue) -> ClValue {
-        let l = Value::NANBOX;
-        let mask = self
-            .b
-            .ins()
-            .iconst(types::I64, (l.sign_bit | l.qnan | l.int_tag) as i64);
-        let want = self.b.ins().iconst(types::I64, (l.qnan | l.int_tag) as i64);
-        let masked = self.b.ins().band(v, mask);
-        self.b.ins().icmp(IntCC::Equal, masked, want)
+        let masked = self.b.ins().band(v, self.pool.int_mask);
+        self.b.ins().icmp(IntCC::Equal, masked, self.pool.int_tag)
     }
 
-    /// Unbox a small-int word to its i64: sign-extend the low 48-bit payload (`(p << 16) >> 16`).
+    /// Unbox a small-int word to its i64: sign-extend the low 48-bit payload (`(v << 16) >> 16` —
+    /// the shift pair discards the tag bits itself, no payload mask needed).
     fn unbox_int(&mut self, v: ClValue) -> ClValue {
-        let l = Value::NANBOX;
-        let pm = self.b.ins().iconst(types::I64, l.ptr_mask as i64);
-        let p = self.b.ins().band(v, pm);
-        let shl = self.b.ins().ishl_imm(p, 16);
+        let shl = self.b.ins().ishl_imm(v, 16);
         self.b.ins().sshr_imm(shl, 16)
     }
 
     /// `(v & qnan) != qnan` — is `v` an f64 float? (Every tagged value — int/bool/unit/f32/pointer —
     /// has all the qnan bits set; a float is exactly the words that don't.)
     fn is_float(&mut self, v: ClValue) -> ClValue {
-        let qnan = self.b.ins().iconst(types::I64, Value::NANBOX.qnan as i64);
-        let masked = self.b.ins().band(v, qnan);
-        self.b.ins().icmp(IntCC::NotEqual, masked, qnan)
+        let masked = self.b.ins().band(v, self.pool.qnan);
+        self.b.ins().icmp(IntCC::NotEqual, masked, self.pool.qnan)
     }
 
     /// Reinterpret a float word's bits as the f64 it stores (the value is known to be a float — a
@@ -2263,11 +2348,7 @@ impl Codegen<'_, '_> {
 
     /// `v == unbound` — is `v` the VM's unbound-global sentinel?
     fn is_unbound(&mut self, v: ClValue) -> ClValue {
-        let u = self
-            .b
-            .ins()
-            .iconst(types::I64, Value::NANBOX.unbound_bits as i64);
-        self.b.ins().icmp(IntCC::Equal, v, u)
+        self.b.ins().icmp(IntCC::Equal, v, self.pool.unbound)
     }
 
     /// Load global slot `g` (a full NaN-boxed word) from the globals array.
@@ -2369,9 +2450,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             // analysis); otherwise a heap value is released — the destructor-aware path when the drop is
             // IR-relevant, else the plain release.
             let v = cg.read_reg(*reg);
-            let unit =
-                cg.b.ins()
-                    .iconst(types::I64, Value::NANBOX.unit_bits as i64);
+            let unit = cg.pool.unit;
             cg.store_reg_raw(*reg, unit);
             if !cg.transfer[pc] && cg.may_be_heap(*reg) {
                 cg.release_dropped_if_heap(v, *relevant);
@@ -2398,10 +2477,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             // Taken iff the value is exactly `true`; a non-bool is simply not taken (the interpreter's
             // `as_bool() == Some(true)`), so no guard/bail is needed.
             let v = cg.read_reg(*reg);
-            let t =
-                cg.b.ins()
-                    .iconst(types::I64, Value::NANBOX.true_bits as i64);
-            let is_true = cg.b.ins().icmp(IntCC::Equal, v, t);
+            let is_true = cg.b.ins().icmp(IntCC::Equal, v, cg.pool.true_bits);
             cg.b.ins().brif(
                 is_true,
                 op_blocks[*target as usize],
@@ -2423,10 +2499,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
                 return;
             }
             let v = cg.read_reg(*reg);
-            let fb =
-                cg.b.ins()
-                    .iconst(types::I64, Value::NANBOX.false_bits as i64);
-            let is_false = cg.b.ins().icmp(IntCC::Equal, v, fb);
+            let is_false = cg.b.ins().icmp(IntCC::Equal, v, cg.pool.false_bits);
             cg.b.ins().brif(
                 is_false,
                 op_blocks[*target as usize],
@@ -2452,9 +2525,15 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             // false → jump target; true → fall through; anything else → bail so the interpreter
             // raises E0007 ("`if` condition must be a bool").
             let v = cg.read_reg(*reg);
-            let l = Value::NANBOX;
-            let fb = cg.b.ins().iconst(types::I64, l.false_bits as i64);
-            let tb = cg.b.ins().iconst(types::I64, l.true_bits as i64);
+            let fb = cg.pool.false_bits;
+            let tb = cg.pool.true_bits;
+            // Both continuations proved the scrutinee a bool, and the kind map claims it Bool
+            // downstream (P-JCT C3 guard strengthening) — define its raw 0/1 form here, where it
+            // dominates both successors (`true` reaches the fallthrough only, so the bit is
+            // exact on every path that reads it).
+            let is_t = cg.b.ins().icmp(IntCC::Equal, v, tb);
+            let raw = cg.b.ins().uextend(types::I64, is_t);
+            cg.def_raw(*reg, raw);
             let is_false = cg.b.ins().icmp(IntCC::Equal, v, fb);
             let chk_true = cg.b.create_block();
             cg.b.ins()
@@ -2662,8 +2741,7 @@ fn emit_call(
         .jump(fast_blk, &[fp_untagged.into(), callee_base.into()]);
 
     cg.b.switch_to_block(untagged);
-    let zero = cg.b.ins().iconst(types::I64, 0);
-    let is_zero = cg.b.ins().icmp(IntCC::Equal, fnptr, zero);
+    let is_zero = cg.b.ins().icmp(IntCC::Equal, fnptr, cg.pool.zero);
     let fallback = cg.b.create_block();
     let direct = cg.b.create_block();
     cg.b.ins().brif(is_zero, fallback, &[], direct, &[]);
@@ -2684,7 +2762,7 @@ fn emit_call(
     cg.b.switch_to_block(direct);
     let regs = cg.regs;
     let globals = cg.globals;
-    let entry0 = cg.b.ins().iconst(types::I64, 0);
+    let entry0 = cg.pool.zero;
     let iinst = cg.b.ins().call_indirect(
         cg.callee_sig,
         fnptr,
@@ -2698,7 +2776,7 @@ fn emit_call(
     // `CONTINUE` — so branch straight to the next op, skipping that per-call helper call. Only a
     // non-RETURNED outcome (a bail pc that must fix the callee frame's pc, or a nested CALLED/ABORTED)
     // takes the cold `after_call` path.
-    let returned = cg.b.ins().iconst(types::I64, OUTCOME_RETURNED);
+    let returned = cg.pool.outcome_returned;
     let is_returned = cg.b.ins().icmp(IntCC::Equal, callee_outcome, returned);
     let cold_blk = cg.b.create_block();
     cg.b.ins()
@@ -2708,7 +2786,7 @@ fn emit_call(
         cg.b.ins()
             .call(cg.after_call_ref, &[vm, frames, callee_outcome]);
     let after = cg.b.inst_results(ainst)[0];
-    let cont = cg.b.ins().iconst(types::I64, OUTCOME_CONTINUE);
+    let cont = cg.pool.outcome_continue;
     let is_cont = cg.b.ins().icmp(IntCC::Equal, after, cont);
     cg.b.ins().brif(is_cont, continue_blk, &[], return_blk, &[]);
     cg.b.switch_to_block(continue_blk);
@@ -2745,7 +2823,7 @@ fn emit_call(
     let finst = cg.b.ins().call_indirect(fsig, fp, &fast_args);
     let f_outcome = cg.b.inst_results(finst)[0];
     let f_value = cg.b.inst_results(finst)[1];
-    let f_returned = cg.b.ins().iconst(types::I64, OUTCOME_RETURNED);
+    let f_returned = cg.pool.outcome_returned;
     let f_is_ret = cg.b.ins().icmp(IntCC::Equal, f_outcome, f_returned);
     let f_hot = cg.b.create_block();
     let f_cold = cg.b.create_block();
@@ -2758,7 +2836,7 @@ fn emit_call(
     cg.b.switch_to_block(f_cold);
     let f_ainst = cg.b.ins().call(cg.after_call_ref, &[vm, frames, f_outcome]);
     let f_after = cg.b.inst_results(f_ainst)[0];
-    let f_cont = cg.b.ins().iconst(types::I64, OUTCOME_CONTINUE);
+    let f_cont = cg.pool.outcome_continue;
     let f_is_cont = cg.b.ins().icmp(IntCC::Equal, f_after, f_cont);
     let f_ret_blk = cg.b.create_block();
     cg.b.ins()
@@ -2783,7 +2861,7 @@ fn emit_leaf_op(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
         cg.b.ins()
             .call(cg.leaf_op_ref, &[vm, regs_vec, base, proto, pcv]);
     let outcome = cg.b.inst_results(inst)[0];
-    let cont = cg.b.ins().iconst(types::I64, OUTCOME_CONTINUE);
+    let cont = cg.pool.outcome_continue;
     let is_cont = cg.b.ins().icmp(IntCC::Equal, outcome, cont);
     let continue_blk = cg.b.create_block();
     let return_blk = cg.b.create_block();
@@ -2886,7 +2964,7 @@ fn emit_return_fast(cg: &mut Codegen, src: Reg, pc: usize) {
     let base = cg.base;
     cg.b.ins()
         .store(MemFlagsData::trusted(), base, cg.regs_vec, cg.vec_len_off);
-    let outcome = cg.b.ins().iconst(types::I64, OUTCOME_RETURNED);
+    let outcome = cg.pool.outcome_returned;
     cg.b.ins().return_(&[outcome, raw]);
 }
 
@@ -2942,10 +3020,7 @@ fn emit_store_global(cg: &mut Codegen, g: u32, src: Reg, pc: usize, op_blocks: &
     // its reference transfers) and write the slot; a first bind also records it in `global_order`.
     cg.b.switch_to_block(cont);
     let v = cg.read_reg(src);
-    let unit =
-        cg.b.ins()
-            .iconst(types::I64, Value::NANBOX.unit_bits as i64);
-    cg.store_reg_raw(src, unit);
+    cg.store_reg_raw(src, cg.pool.unit);
     cg.store_global(g, v);
     let is_unb = cg.is_unbound(old);
     let bind_blk = cg.b.create_block();
@@ -2977,10 +3052,7 @@ fn emit_take_global(cg: &mut Codegen, dst: Reg, g: u32, pc: usize, op_blocks: &[
     let here = cg.pc_const(pc);
     cg.ret_bail(here);
     cg.b.switch_to_block(cont);
-    let unit =
-        cg.b.ins()
-            .iconst(types::I64, Value::NANBOX.unit_bits as i64);
-    cg.store_global(g, unit);
+    cg.store_global(g, cg.pool.unit);
     cg.store_reg(dst, old);
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
 }
@@ -3022,20 +3094,27 @@ fn emit_binary(
     // (A statically-known mismatch — `Int` × `Float`, `Int` × `Bool` — keeps the generic
     // dispatch, which bails to the interpreter exactly as before.)
     if (ka == Kind::Int && kb == Kind::Imm) || (ka == Kind::Imm && kb == Kind::Int) {
+        // The guard proves the unknown side `Int` on every native continuation, and the kind
+        // map claims it downstream (P-JCT C3 guard strengthening) — so its raw variable must be
+        // made current here, exactly like a typed def's.
         let (x, y) = if ka == Kind::Int {
             let x = cg.read_raw_int(a);
             let vb = cg.read_reg(b);
             let ok = cg.is_small_int(vb);
             let cont = cg.b.create_block();
             guard(cg, ok, cont, pc);
-            (x, cg.unbox_int(vb))
+            let y = cg.unbox_int(vb);
+            cg.def_raw(b, y);
+            (x, y)
         } else {
             let va = cg.read_reg(a);
             let ok = cg.is_small_int(va);
             let cont = cg.b.create_block();
             guard(cg, ok, cont, pc);
             let y = cg.read_raw_int(b);
-            (cg.unbox_int(va), y)
+            let x = cg.unbox_int(va);
+            cg.def_raw(a, x);
+            (x, y)
         };
         emit_int_binary_raw(cg, op, dst, x, y, pc, op_blocks);
         return;
@@ -3107,8 +3186,7 @@ fn emit_int_binary_raw(
         BinaryOp::Div | BinaryOp::Rem => {
             // Bail on a zero divisor (the interpreter raises E0008). Signed overflow (MIN / -1) cannot
             // arise: `x` is unboxed from a 48-bit immediate, so it is never i64::MIN.
-            let zero = cg.b.ins().iconst(types::I64, 0);
-            let nonzero = cg.b.ins().icmp(IntCC::NotEqual, y, zero);
+            let nonzero = cg.b.ins().icmp(IntCC::NotEqual, y, cg.pool.zero);
             let ok = cg.b.create_block();
             guard(cg, nonzero, ok, pc);
             let r = if op == BinaryOp::Div {
@@ -3133,10 +3211,9 @@ fn emit_int_binary_raw(
             // `CondBranch` then branches on the raw bit with no re-comparison.
             let raw = cg.b.ins().uextend(types::I64, cmp);
             cg.def_raw(dst, raw);
-            let l = Value::NANBOX;
-            let tb = cg.b.ins().iconst(types::I64, l.true_bits as i64);
-            let fb = cg.b.ins().iconst(types::I64, l.false_bits as i64);
-            let boxed = cg.b.ins().select(cmp, tb, fb);
+            let boxed =
+                cg.b.ins()
+                    .select(cmp, cg.pool.true_bits, cg.pool.false_bits);
             cg.store_reg(dst, boxed);
             cg.b.ins().jump(op_blocks[pc + 1], &[]);
         }
@@ -3150,10 +3227,8 @@ fn emit_int_binary_raw(
 /// the raw i64 (it just passed the fit check), so an `Int`-claimed downstream read skips the
 /// unboxing entirely.
 fn box_int_and_store(cg: &mut Codegen, dst: Reg, r: ClValue, pc: usize, op_blocks: &[Block]) {
-    let l = Value::NANBOX;
-    let pm = cg.b.ins().iconst(types::I64, l.ptr_mask as i64);
-    let lo = cg.b.ins().band(r, pm);
-    let shl = cg.b.ins().ishl_imm(lo, 16);
+    let lo = cg.b.ins().band(r, cg.pool.ptr_mask);
+    let shl = cg.b.ins().ishl_imm(r, 16);
     let ext = cg.b.ins().sshr_imm(shl, 16);
     let fits = cg.b.ins().icmp(IntCC::Equal, ext, r);
 
@@ -3161,8 +3236,7 @@ fn box_int_and_store(cg: &mut Codegen, dst: Reg, r: ClValue, pc: usize, op_block
     let store = cg.b.create_block();
     guard(cg, fits, store, pc);
     cg.def_raw(dst, r);
-    let tag = cg.b.ins().iconst(types::I64, (l.qnan | l.int_tag) as i64);
-    let boxed = cg.b.ins().bor(lo, tag);
+    let boxed = cg.b.ins().bor(lo, cg.pool.int_tag);
     cg.store_reg(dst, boxed);
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
 }
@@ -3220,10 +3294,9 @@ fn emit_float_binary(
             // transfer marks every comparison result `Bool` regardless of which path produced it.
             let raw = cg.b.ins().uextend(types::I64, cmp);
             cg.def_raw(dst, raw);
-            let l = Value::NANBOX;
-            let tb = cg.b.ins().iconst(types::I64, l.true_bits as i64);
-            let fb = cg.b.ins().iconst(types::I64, l.false_bits as i64);
-            let boxed = cg.b.ins().select(cmp, tb, fb);
+            let boxed =
+                cg.b.ins()
+                    .select(cmp, cg.pool.true_bits, cg.pool.false_bits);
             cg.store_reg(dst, boxed);
             cg.b.ins().jump(op_blocks[pc + 1], &[]);
         }
@@ -3237,27 +3310,34 @@ fn emit_float_binary(
 fn box_float_and_store(cg: &mut Codegen, dst: Reg, r: ClValue, pc: usize, op_blocks: &[Block]) {
     let raw = cg.b.ins().bitcast(types::I64, MemFlagsData::new(), r);
     let is_nan = cg.b.ins().fcmp(FloatCC::Unordered, r, r);
-    let canon =
-        cg.b.ins()
-            .iconst(types::I64, Value::float(f64::NAN).bits() as i64);
-    let boxed = cg.b.ins().select(is_nan, canon, raw);
+    let boxed = cg.b.ins().select(is_nan, cg.pool.nan_canon, raw);
     cg.store_reg(dst, boxed);
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
 }
 
-/// Emit a fast-path guard: `brif cond -> cont else bail(pc)`, fill the bail block (which spills
-/// the SSA-resident live registers, then hands control back to the interpreter at `pc`), and
-/// leave the builder positioned in `cont` so the caller keeps emitting the fast path. `cont` is a
-/// caller-created block; `cond` is the keep-going condition (true = stay in native code). No
-/// sealing here — blocks are sealed once at the end (`seal_all_blocks`), which also resolves the
-/// SSA variables' block parameters (P-JSSA).
+/// Emit a fast-path guard: `brif cond -> cont else bail(pc)` and leave the builder positioned in
+/// `cont` so the caller keeps emitting the fast path. `cont` is a caller-created block; `cond` is
+/// the keep-going condition (true = stay in native code). The bail block — which spills the
+/// SSA-resident live registers, then hands control back to the interpreter at `pc` — is **shared
+/// per pc** ([`Codegen::bail_blocks`]): created and filled by the pc's first guard, reused by the
+/// rest. No sealing here — blocks are sealed once at the end (`seal_all_blocks`), which also
+/// resolves the SSA variables' block parameters (P-JSSA), including the per-predecessor values
+/// the shared bail's spills observe.
 fn guard(cg: &mut Codegen, cond: ClValue, cont: Block, pc: usize) {
-    let bail = cg.b.create_block();
-    cg.b.ins().brif(cond, cont, &[], bail, &[]);
-    cg.b.switch_to_block(bail);
-    cg.sync_frame(pc);
-    let here = cg.pc_const(pc);
-    cg.ret_bail(here);
+    match cg.bail_blocks[pc] {
+        Some(bail) => {
+            cg.b.ins().brif(cond, cont, &[], bail, &[]);
+        }
+        None => {
+            let bail = cg.b.create_block();
+            cg.bail_blocks[pc] = Some(bail);
+            cg.b.ins().brif(cond, cont, &[], bail, &[]);
+            cg.b.switch_to_block(bail);
+            cg.sync_frame(pc);
+            let here = cg.pc_const(pc);
+            cg.ret_bail(here);
+        }
+    }
     cg.b.switch_to_block(cont);
 }
 
