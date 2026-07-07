@@ -32,7 +32,6 @@
 //! recursion over the shared `globals`/`stdout`/`diagnostics`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -621,44 +620,9 @@ struct Vm<'m> {
     abort_trace: Vec<TraceFrame>,
 }
 
-/// One frame of an abort traceback: the function's name (`None` for an anonymous closure/thunk) and
-/// the source location it was at — the failing instruction for the innermost frame, the call site
-/// for each caller (resolved through the always-present line table). `span` is `None` where no
-/// location is known: a caller that re-entered the VM through a native call, or a frame paused in
-/// its spanless prologue.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TraceFrame {
-    pub name: Option<String>,
-    pub span: Option<Span>,
-}
-
-/// Render an abort traceback for human consumption, resolving each frame's span against `sources` —
-/// the same rendering the CLI prints after a panic diagnostic and the debug adapter forwards as
-/// error output. Innermost frame first. Deep stacks (runaway recursion) are capped, with the elided
-/// count noted.
-pub fn render_trace(trace: &[TraceFrame], sources: &noeta_span::SourceMap) -> String {
-    /// The most frames a rendered traceback shows — enough for any legitimate stack, while a
-    /// stack-overflow abort with thousands of identical frames stays readable.
-    const MAX_FRAMES: usize = 64;
-    let mut out = String::from("stack trace (most recent call first):\n");
-    for frame in trace.iter().take(MAX_FRAMES) {
-        let name = frame.name.as_deref().unwrap_or("<anonymous>");
-        match frame.span {
-            Some(span) => {
-                let source = sources.source(span.source);
-                let line = source.line_col(span.start).line;
-                let _ = writeln!(out, "  at {name} ({}:{line})", source.name());
-            }
-            None => {
-                let _ = writeln!(out, "  at {name}");
-            }
-        }
-    }
-    if trace.len() > MAX_FRAMES {
-        let _ = writeln!(out, "  … and {} more frames", trace.len() - MAX_FRAMES);
-    }
-    out
-}
+/// The traceback vocabulary is shared with the tree-walker oracle through the backend contract
+/// crate, so both backends produce the same `TraceFrame` shape (and can eventually be compared).
+pub use noeta_backend::{TraceFrame, render_trace};
 
 /// Tier-1 promotion threshold: a prototype interprets until it has been entered this many times,
 /// then the JIT compiles it (P-JIT). The `--jit-differential` oracle bypasses this via `force_jit`.

@@ -32,7 +32,9 @@ mod ir_corpus;
 #[cfg(feature = "jit")]
 mod jit_differential;
 mod leaks;
-mod reference;
+// Public so the trace-parity integration test drives the oracle's traced entry through the same
+// IR pipeline the differential uses.
+pub mod reference;
 mod report;
 
 pub use differential::{DiffReport, Mismatch, run_differential};

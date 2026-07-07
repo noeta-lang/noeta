@@ -45,6 +45,40 @@ pub fn reference_run(
     bound_handle_sites: HashSet<Span>,
     relevance: &noeta_check::DestructorRelevance,
 ) -> RunResult {
+    reference_run_traced(
+        program,
+        sites,
+        packed_list_sites,
+        index_field_sites,
+        ext_call_sites,
+        for_stream_sites,
+        width_sites,
+        f32_literal_sites,
+        construction_sites,
+        handle_sites,
+        bound_handle_sites,
+        relevance,
+    )
+    .0
+}
+
+/// As [`reference_run`], plus the abort traceback (empty for a clean run) — the oracle side of the
+/// backend trace-parity check.
+#[allow(clippy::too_many_arguments)]
+pub fn reference_run_traced(
+    program: &Program,
+    sites: HashMap<Span, TypeRepr>,
+    packed_list_sites: HashMap<Span, PackedLayout>,
+    index_field_sites: HashSet<Span>,
+    ext_call_sites: HashMap<Span, noeta_stdlib::TypeRecipe>,
+    for_stream_sites: HashSet<Span>,
+    width_sites: HashMap<Span, (bool, u8)>,
+    f32_literal_sites: HashSet<Span>,
+    construction_sites: HashMap<Span, TypeRepr>,
+    handle_sites: HashMap<Span, (String, String, bool)>,
+    bound_handle_sites: HashSet<Span>,
+    relevance: &noeta_check::DestructorRelevance,
+) -> (RunResult, Vec<noeta_backend::TraceFrame>) {
     // Lower with the checker's site maps: packed-list literals stream into a flat buffer (P-PACK 2.5)
     // and `list[i].field` reads fuse to `Rvalue::IndexField` (P-PACK 2.5+). Both ride on the IR, so
     // `run_ir` needs no map (the VM compiles the same).
@@ -70,7 +104,7 @@ pub fn reference_run(
     // Thread reuse tokens identically to the bytecode pipeline so the reference and the VM consume
     // the same annotated IR (Phase 5).
     let ir = noeta_ir_passes::thread_reuse(&ir);
-    TreeWalkBackend::new().run_ir(program, &ir, sites)
+    TreeWalkBackend::new().run_ir_traced(program, &ir, sites)
 }
 
 /// The drop pass's relevance form, copied from the checker's (identical sets). Mirrors the
