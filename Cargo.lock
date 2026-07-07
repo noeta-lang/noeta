@@ -1825,6 +1825,7 @@ dependencies = [
  "equivalent",
  "hmac",
  "md-5",
+ "noeta-native",
  "serde_json",
  "sha1",
  "sha2",
