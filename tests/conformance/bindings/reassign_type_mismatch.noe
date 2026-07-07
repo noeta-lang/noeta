@@ -1,0 +1,9 @@
+// A `mut` binding has a fixed type: a reassignment must match it (stable typing). `x` is inferred
+// `int`, so assigning a `string` is a static mismatch — the type a binding is shown with is a
+// promise, not something a later write silently changes. Use a declared union (`mut x: int|string`)
+// or `dyn` for a genuinely multi-type binding. The reassigned value is on line 8, column 5.
+// expect: error E0007 at 8:5
+// expect: exit 1
+mut x = 1;
+x = "hello";
+echo x;

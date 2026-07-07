@@ -210,6 +210,25 @@ impl Type {
         matches!(self, Type::Unknown)
     }
 
+    /// Whether this type contains an inference hole ([`Type::Unknown`]) anywhere — at the top level
+    /// or nested inside a container / union / tuple / function type. Used to tell a still-**unresolved**
+    /// inferred type (`mut acc = []` → `List<Unknown>`, whose element a later write completes) apart
+    /// from a fully-resolved one — a reassignment refines the former but must respect the latter.
+    pub fn contains_unknown(&self) -> bool {
+        match self {
+            Type::Unknown => true,
+            Type::List(t) | Type::Set(t) | Type::Option(t) => t.contains_unknown(),
+            Type::Map(k, v) | Type::Result(k, v) => k.contains_unknown() || v.contains_unknown(),
+            Type::Named(_, args) | Type::Union(args) | Type::Tuple(args) => {
+                args.iter().any(Type::contains_unknown)
+            }
+            Type::Fn { params, ret } => {
+                params.iter().any(Type::contains_unknown) || ret.contains_unknown()
+            }
+            _ => false,
+        }
+    }
+
     /// Whether an operation on a value of this type is **not statically checked** but deferred to
     /// the runtime — either because the type is an inference hole (`Unknown`) or because it is the
     /// dynamic escape (`Dyn`). Operator/member/index/`?` checks accept such a type without a

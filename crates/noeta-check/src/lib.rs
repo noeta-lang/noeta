@@ -1584,13 +1584,66 @@ impl Checker {
                                      whose later writes determine the type",
                             );
                         }
-                        // `mut x = …` is a fresh declaration (innermost frame, even if it shadows);
-                        // a bare `x = …` reassigns an existing binding in its declaring scope so a
-                        // refinement persists past a nested scope, else introduces a fresh binding.
+                        // `mut x = …` is a fresh declaration (innermost frame, even if it shadows).
                         if *mut_decl {
                             bind_mut(env, name, vty);
-                        } else {
+                        } else if matches!(value, Expr::FieldSet { .. } | Expr::Coalesce { .. }) {
+                            // Two desugars of compound assignment carry an *intended* type change and
+                            // so bypass the plain-variable reassignment checks below:
+                            //  - `x.f = v` → `x = FieldSet{…}`: a receiver rebind whose mutability is
+                            //    class-aware (a value `struct` rebinds and needs `mut x`, E0006; a
+                            //    reference `class` mutates in place) and whose type is checked, both
+                            //    inside `synth_field_set` — so the checks below would double-report on
+                            //    a struct and false-positive on a class.
+                            //  - `x ??= y` → `x = x ?? y`: the coalesce **unwraps** an optional, so it
+                            //    deliberately narrows the binding (`Option<int>` → `int`). This is the
+                            //    one place a bare reassignment legitimately changes a *resolved* type.
+                            // Update the binding's type as before; each desugar's own checks ran.
                             assign(env, name, vty);
+                        } else {
+                            // A bare `x = …` reassigns an existing binding, or introduces a fresh
+                            // immutable one. Reassignment is now enforced **statically** — the
+                            // tree-walker deferred both of these to the runtime:
+                            match lookup(env, name) {
+                                Some(existing) => {
+                                    if !lookup_mutable(env, name) {
+                                        // (1) Mutability: an immutable binding cannot be reassigned.
+                                        self.error(
+                                            DiagnosticCode::ImmutableAssignment,
+                                            *name_span,
+                                            format!("cannot assign to `{name}`, which is immutable"),
+                                        )
+                                        .help(format!(
+                                            "declare it `mut {name} = …` to allow reassignment"
+                                        ));
+                                    } else if existing.contains_unknown() {
+                                        // (2) A still-unresolved inferred type (`mut acc = []`) — this
+                                        // write completes / refines it (the accumulator pattern).
+                                        assign(env, name, vty);
+                                    } else if !self.assignable(&vty, &existing) {
+                                        // (3) Type stability: a resolved `mut` binding keeps its type;
+                                        // a value that is not assignable to it — a different type, or a
+                                        // widening of a resolved type — is rejected. Use a declared
+                                        // union or `dyn` for a genuinely multi-type binding.
+                                        self.error(
+                                            DiagnosticCode::TypeMismatch,
+                                            value.span(),
+                                            format!(
+                                                "cannot assign `{vty}` to `{name}`, which has type `{existing}`"
+                                            ),
+                                        )
+                                        .help(format!(
+                                            "a reassignment must match the binding's type — declare \
+                                             `mut {name}: {existing} | {vty}` for a union, or \
+                                             `mut {name}: dyn` to opt out of a fixed type"
+                                        ));
+                                    }
+                                    // else: assignable (subtype / same / union member) — the binding
+                                    // keeps its established type, so its shown type stays stable.
+                                }
+                                // Not in scope — a fresh immutable binding in the innermost frame.
+                                None => bind(env, name, vty),
+                            }
                         }
                     }
                 }
@@ -2953,13 +3006,14 @@ impl Checker {
     }
 
     /// Whether an argument of type `arg` may be passed where `param` is expected — the kind-aware
-    /// counterpart of the free [`arg_compatible`], adding the two call-site leniencies (a `dyn`/hole
-    /// on either side defers; a numeric argument widens to a numeric parameter).
+    /// counterpart of the free [`arg_compatible`]. A `dyn`/hole on either side defers to the runtime;
+    /// otherwise the argument must be assignable to the parameter under the strict subtype lattice.
+    /// There is **no** numeric-widening leniency: an `int` is not accepted where a `float` is expected
+    /// (write `f(2.0)`, not `f(2)`), matching every other typed boundary — a binding, a return, a list
+    /// element — where `int → float` is already rejected, and so an inlay-hinted parameter type is a
+    /// promise the caller must meet.
     fn arg_assignable(&self, arg: &Type, param: &Type) -> bool {
-        self.assignable(arg, param)
-            || arg.defers_to_runtime()
-            || param.defers_to_runtime()
-            || (arg.is_numeric() && param.is_numeric())
+        self.assignable(arg, param) || arg.defers_to_runtime() || param.defers_to_runtime()
     }
 
     fn subsume(&mut self, actual: &Type, expected: &Type, span: Span) {

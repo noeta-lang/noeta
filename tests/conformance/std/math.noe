@@ -14,12 +14,12 @@
 // expect: exit 0
 use std.{math};
 echo math.sqrt(16.0);
-echo math.pow(2, 10);
+echo math.pow(2.0, 10.0);
 echo math.abs(-7);
 echo math.floor(2.9);
 echo math.ceil(2.1);
 echo math.round(2.5);
 echo math.min(3, 8);
 echo math.max(3, 8);
-echo math.max(3, 3.5);
+echo math.max(3.0, 3.5);
 echo math.pi() > 3.14 && math.pi() < 3.15;

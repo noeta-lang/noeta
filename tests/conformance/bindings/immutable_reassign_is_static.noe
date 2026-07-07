@@ -1,0 +1,11 @@
+// Reassigning an immutable binding is a **compile-time** error (E0006), not a runtime one — so it is
+// caught even on a branch that never executes. Here the write is inside `if false { … }`, which the
+// program never reaches, yet the reassignment is still rejected statically. The write is on line 9,
+// column 3.
+// expect: error E0006 at 9:3
+// expect: exit 1
+x = 1;
+if false {
+  x = 2;
+}
+echo x;

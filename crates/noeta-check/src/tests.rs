@@ -1205,9 +1205,11 @@ fn argument_arity_is_checked() {
 fn argument_types_are_checked() {
     assert_eq!(codes("echo [1, 2].join(5);\n"), ["E0007"]); // join wants a string
     assert!(codes("echo [1, 2].join(\", \");\n").is_empty());
-    // Numeric widening: an int argument is accepted for a float parameter.
+    // Strict numeric fit: an int argument is NOT accepted where a float is expected — write `4.0`,
+    // not `4` (matching a binding / return / element, and Rust's no-implicit-widening rule).
     let m = "use std.{math};\n";
-    assert!(codes(&format!("{m}echo math.sqrt(4);\n")).is_empty());
+    assert_eq!(codes(&format!("{m}echo math.sqrt(4);\n")), ["E0007"]);
+    assert!(codes(&format!("{m}echo math.sqrt(4.0);\n")).is_empty());
     assert_eq!(codes(&format!("{m}echo math.sqrt(\"x\");\n")), ["E0007"]);
 }
 
@@ -1319,10 +1321,16 @@ fn compound_assignment_accumulator_infers_like_plain_concat() {
 }
 
 #[test]
-fn nested_reassignment_updates_the_outer_binding() {
-    // A reassignment inside an `if` updates the outer binding's type, not a block-local shadow.
-    let src = "mut x = 1;\nif true { x = \"now a string\"; }\ns: string = x;\n";
-    assert!(codes(src).is_empty());
+fn a_resolved_mut_binding_rejects_an_incompatible_reassignment() {
+    // Stable typing: a reassignment must match the binding's established type — even nested in an
+    // `if`, and even for an *inferred* type. `x` is `int`, so assigning a `string` is E0007 (use a
+    // declared union or `dyn` for a genuinely multi-type binding). This reverses the old flow-typed
+    // `mut`, where a reassignment silently retyped the binding.
+    let bad = "mut x = 1;\nif true { x = \"now a string\"; }\n";
+    assert_eq!(codes(bad), ["E0007"]);
+    // A *compatible* reassignment (same type) in a nested scope is fine and stays in scope.
+    let ok = "mut x = 1;\nif true { x = 2; }\ns: int = x;\n";
+    assert!(codes(ok).is_empty());
 }
 
 // ----- list spread `[...xs, x]` (L2, desugars to `~`) -----
