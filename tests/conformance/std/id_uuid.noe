@@ -1,0 +1,18 @@
+// UUIDs through the deterministic Host seam (id-entropy U3). On the sandbox, `id.uuid()` (v4)
+// draws from the entropy stream — independent of `random`, so these exact values hold even if a
+// program seeds or draws the user PRNG — and `id.uuid_v7()` builds on the fixed 2026-01-01 epoch
+// plus the logical clock, so `time.sleep` advances the v7 timestamp deterministically.
+// expect: stdout "4396d60d-bd85-47af-a98f-f1a0396ff552"
+// expect: stdout "fe0612e3-95ab-4d91-a275-7f60ebe1e246"
+// expect: stdout "019b76da-a800-7b88-8388-6454811320c9"
+// expect: stdout "019b76da-a805-771d-b930-7f8e50c9e6c1"
+// expect: exit 0
+use std.{id, time, random}
+
+echo id.uuid()
+random.seed(42)
+echo id.uuid()
+
+echo id.uuid_v7()
+time.sleep(5)
+echo id.uuid_v7()

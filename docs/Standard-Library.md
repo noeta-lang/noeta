@@ -78,16 +78,18 @@ echo { host, scheme } // shorthand: { "host": host, "scheme": scheme }
 
 | Method | Signature | Example → result |
 |---|---|---|
-| `keys` | `keys() -> List<string>` | `{"b":2,"a":1}.keys()` → `["a", "b"]` |
+| `keys` | `keys() -> List<K>` | `{"b":2,"a":1}.keys()` → `["a", "b"]` |
 | `values` | `values() -> List<V>` | `{"b":2,"a":1}.values()` → `[1, 2]` |
-| `has` | `has(key: string) -> bool` | `{"a":1}.has("a")` → `true` |
-| `get_or` | `get_or(key: string, default: V) -> V` | `{"a":1}.get_or("z", 0)` → `0` — one probe where `if m.has(k) then m[k] else d` costs two |
-| `set` | `set(key: string, v: V) -> Map<string, V>` | new map with the entry added/updated |
-| `remove` | `remove(key: string) -> Map<string, V>` | new map without the key |
+| `has` | `has(key: K) -> bool` | `{"a":1}.has("a")` → `true` |
+| `get_or` | `get_or(key: K, default: V) -> V` | `{"a":1}.get_or("z", 0)` → `0` — one probe where `if m.has(k) then m[k] else d` costs two |
+| `set` | `set(key: K, v: V) -> Map<K, V>` | new map with the entry added/updated |
+| `remove` | `remove(key: K) -> Map<K, V>` | new map without the key |
 | `len` | `len() -> int` | number of entries |
 | `iter` | `iter() -> Iterator<V>` | iterates the values |
 
-Iterating a map (`for v in m`) yields values; equality is structural (order-independent).
+Iterating a map (`for v in m`) yields values in key order; equality is structural (order-independent).
+
+A map's key type `K` is `string`, or a **key-capable** native type — immutable, totally ordered, stably hashed. `Uuid` is one: `Map<Uuid, Order>` works end to end (index, `set`/`remove`, `keys()` returns the `Uuid`s), and `Set<Uuid>` orders by the id's bytes, so v7 ids sort by creation time. A mutable native type (`FileHandle`) is rejected statically. `int` keys are not supported (yet).
 
 ## Set
 

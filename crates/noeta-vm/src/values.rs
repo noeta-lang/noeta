@@ -34,6 +34,10 @@ pub(crate) fn marshal_native_arg(value: Value) -> noeta_stdlib::NativeValue {
         NativeValue::Str(s)
     } else if let Some(b) = value.bytes_data() {
         NativeValue::Bytes(b)
+    } else if value.is_extern() {
+        // An extern-type argument crosses by value (`clone_box`); extern producers are host/IO
+        // shaped, never a hot path. Mirrors the tree-walker's projection.
+        NativeValue::Extern(value.with_extern(|e| noeta_stdlib::ExternBox(e.clone_box())))
     } else if value.is_object() {
         // An object with all-scalar fields (e.g. a `Vec3`) projects to its field scalars in slot
         // order; anything with a non-scalar field is opaque (a dispatch that wanted an object will
@@ -125,16 +129,22 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
                 .map(|(k, v)| (k, materialize_native(v)))
                 .collect(),
         ),
-        NativeOut::FileHandle(handle) => Value::file_handle(handle),
+        // An extern-type value: host the box in the VM's single extern payload (extern-types X1).
+        NativeOut::Extern(e) => Value::extern_value(e),
         // Object results carry no shape, so they are built by `materialize_ext` (which has the
         // function's `RetTy` + arguments) and never reach here.
         NativeOut::Object(_) => {
             unreachable!("object results are materialized by `materialize_ext`")
         }
+        // Option results from ordinary dispatch (`id.parse`, extern-type methods like
+        // `timestamp_ms` — extern-types X2).
+        NativeOut::None => make_none(),
+        NativeOut::Some(inner) => make_some(materialize_native(*inner)),
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
-        // path (`materialize_recipe`, which has the VM's shape table), not here.
-        NativeOut::Struct { .. } | NativeOut::None | NativeOut::Some(_) => {
-            unreachable!("recipe results are materialized by the typed-call path")
+        // path (`materialize_recipe`, which has the VM's shape table), not here; async work is
+        // ticketed at the dispatch return (extern-types X5), never materialized.
+        NativeOut::Struct { .. } | NativeOut::Spawn(_) => {
+            unreachable!("recipe/spawn results never reach materialize_native")
         }
     }
 }
@@ -454,9 +464,10 @@ pub(crate) fn materialize_recipe(out: noeta_stdlib::NativeOut) -> Value {
                 .collect();
             Value::object(shape, values)
         }
-        // `Object` (shape-from-argument) and `FileHandle` are never produced by a recipe decode.
-        NativeOut::Object(_) | NativeOut::FileHandle(_) => {
-            unreachable!("json.parse recipe decode never yields an Object/FileHandle result")
+        // `Object` (shape-from-argument) and extern values are never produced by a recipe
+        // decode (a `TypeRecipe` names only JSON shapes).
+        NativeOut::Object(_) | NativeOut::Extern(_) | NativeOut::Spawn(_) => {
+            unreachable!("json.parse recipe decode never yields an Object/Extern/Spawn result")
         }
     }
 }

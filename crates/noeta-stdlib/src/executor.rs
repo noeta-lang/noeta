@@ -17,43 +17,132 @@
 use crate::{Host, StdError};
 use std::collections::{BTreeSet, HashMap};
 
-/// An asynchronous host-IO request (Track A.4c/A.10) — the neutral description an `fs.*_async` leaf
-/// hands the executor. Adding a new async IO leaf is adding a variant here plus its sandbox/real
-/// handling; the backends stay data-driven (they build the result value from the [`IoOutcome`]).
+/// Async work a registry dispatch returns instead of a value (extern-types X5):
+/// `NativeOut::Spawn(Box<dyn ExternIo>)`. The backend tickets the descriptor on its executor and
+/// hands back a future — extensions provide values and WORK; core owns time, scheduling, and
+/// determinism. Plain `Send` data + two bodies, the split the old closed `IoRequest` enum had.
+pub trait ExternIo: Send + std::fmt::Debug {
+    /// The deterministic body: run synchronously against the Host. The sandbox executor runs
+    /// this **at spawn** (ready on the first poll — in-oracle, differential-identical), and the
+    /// real executor falls back to it at spawn when [`ExternIo::run_real`] declines — so an
+    /// extension's async function is deterministic under the differential no matter what its
+    /// real body does.
+    fn run_sync(&mut self, host: &mut dyn Host) -> Result<crate::NativeOut, StdError>;
+
+    /// Hand out the real executor's concurrency body, if the descriptor has one. Default:
+    /// `None` — no real body, the real executor degrades to `run_sync` at spawn (correct,
+    /// serial). Override with [`RealBody::Blocking`] (the runtime's blocking pool — file IO,
+    /// blocking clients) or [`RealBody::Async`] (a genuinely async future) for true
+    /// concurrency. One-shot by contract (`&mut self` so the impl moves its data out); never
+    /// consulted by the sandbox executor, so it can never affect the differential.
+    fn run_real(&mut self) -> Option<RealBody> {
+        None
+    }
+}
+
+/// What the real executor runs for an [`ExternIo`] descriptor — see [`ExternIo::run_real`].
+pub enum RealBody {
+    /// Run this blocking closure on the runtime's blocking pool (true concurrency).
+    Blocking(Box<dyn FnOnce() -> Result<crate::NativeOut, StdError> + Send>),
+    /// Drive this future on the runtime (true concurrency, for genuinely async clients).
+    Async(std::pin::Pin<Box<dyn Future<Output = Result<crate::NativeOut, StdError>> + Send>>),
+}
+
+impl std::fmt::Debug for RealBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            RealBody::Blocking(_) => "RealBody::Blocking",
+            RealBody::Async(_) => "RealBody::Async",
+        })
+    }
+}
+
+/// The `fs.*_async` work descriptors (Track A.4c/A.10, migrated onto the open seam in
+/// extern-types X5): plain data, built by `fs_dispatch`. The sandbox body streams through the
+/// Host (the VFS); the real body is a blocking closure over `std::fs` on the runtime's blocking
+/// pool — exactly what `tokio::fs` is underneath, so real concurrency and error text are
+/// unchanged from the deleted `run_io_real`.
 #[derive(Debug, Clone)]
-pub enum IoRequest {
+pub enum FsIo {
     /// `fs.read_async(path)` → the file's text.
     Read(String),
     /// `fs.write_async(path, content)` → unit.
     Write(String, String),
     /// `fs.append_async(path, content)` → unit.
     Append(String, String),
+    /// `fs.exists_async(path)` → bool (extern-types X6).
+    Exists(String),
+    /// `fs.remove_async(path)` → whether anything was removed (extern-types X6).
+    Remove(String),
+    /// `fs.list_async()` / `fs.list_async(dir)` → the listing (extern-types X6).
+    List(Option<String>),
 }
 
-impl IoRequest {
-    /// Build the request for an `fs.*_async` call from its already-marshalled string arguments, or
-    /// `None` if `func` is not an async fs op (or an argument is missing / not a string). The
-    /// func→variant mapping lives here, next to the `FS_FNS` signature table, so it is written once
-    /// rather than mirrored in each backend: a backend only marshals its own value representation to
-    /// `&[Option<String>]` and calls this. (A checked program always supplies string arguments; the
-    /// `None` fall-through lets the registry's normal dispatch report a genuinely unknown function.)
-    pub fn from_fs_async(func: &str, args: &[Option<String>]) -> Option<IoRequest> {
-        let arg = |i: usize| args.get(i).cloned().flatten();
-        Some(match func {
-            "read_async" => IoRequest::Read(arg(0)?),
-            "write_async" => IoRequest::Write(arg(0)?, arg(1)?),
-            "append_async" => IoRequest::Append(arg(0)?, arg(1)?),
-            _ => return None,
-        })
+impl ExternIo for FsIo {
+    fn run_sync(&mut self, host: &mut dyn Host) -> Result<crate::NativeOut, StdError> {
+        match self {
+            FsIo::Read(path) => host.fs_read(path).map(crate::NativeOut::Str),
+            FsIo::Write(path, content) => host
+                .fs_write(path, content)
+                .map(|()| crate::NativeOut::Unit),
+            FsIo::Append(path, content) => host
+                .fs_append(path, content)
+                .map(|()| crate::NativeOut::Unit),
+            FsIo::Exists(path) => Ok(crate::NativeOut::Scalar(crate::Scalar::Bool(
+                host.fs_exists(path),
+            ))),
+            FsIo::Remove(path) => host
+                .fs_remove(path)
+                .map(|removed| crate::NativeOut::Scalar(crate::Scalar::Bool(removed))),
+            FsIo::List(dir) => match dir {
+                None => host.fs_list(),
+                Some(dir) => host.fs_list_dir(dir),
+            }
+            .map(|paths| {
+                crate::NativeOut::List(paths.into_iter().map(crate::NativeOut::Str).collect())
+            }),
+        }
     }
-}
 
-/// The result of a completed [`IoRequest`] — the neutral value the backend materializes (text → a
-/// `string`, unit → the unit value). Extensible (e.g. `Bytes` for a future `read_bytes_async`).
-#[derive(Debug, Clone)]
-pub enum IoOutcome {
-    Text(String),
-    Unit,
+    fn run_real(&mut self) -> Option<RealBody> {
+        // The metadata twins (X6) deliberately have NO real body: the real executor's None
+        // fallback runs `run_sync` against the RealHost at spawn — exact sync semantics by
+        // construction (these are cheap point ops), and the degradation path every extension
+        // gets for free stays exercised. Content IO below keeps its concurrent bodies.
+        if matches!(self, FsIo::Exists(_) | FsIo::Remove(_) | FsIo::List(_)) {
+            return None;
+        }
+        let io_error = |message: String| StdError {
+            kind: crate::ErrorKind::Io,
+            message,
+        };
+        // One-shot: move the descriptor's data into the closure (self is spent after this).
+        let taken = std::mem::replace(self, FsIo::Read(String::new()));
+        Some(RealBody::Blocking(Box::new(move || match taken {
+            FsIo::Read(path) => std::fs::read_to_string(&path)
+                .map(crate::NativeOut::Str)
+                .map_err(|e| io_error(format!("cannot read `{path}`: {e}"))),
+            FsIo::Write(path, content) => std::fs::write(&path, content)
+                .map(|()| crate::NativeOut::Unit)
+                .map_err(|e| io_error(format!("cannot write `{path}`: {e}"))),
+            FsIo::Append(path, content) => {
+                use std::io::Write;
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .map_err(|e| io_error(format!("cannot open `{path}` for append: {e}")))
+                    .and_then(|mut file| {
+                        file.write_all(content.as_bytes())
+                            .map_err(|e| io_error(format!("cannot append to `{path}`: {e}")))
+                    })
+                    .map(|()| crate::NativeOut::Unit)
+            }
+            FsIo::Exists(_) | FsIo::Remove(_) | FsIo::List(_) => {
+                unreachable!("metadata twins returned None above")
+            }
+        })))
+    }
 }
 
 /// The async scheduler's clock + timer seam, injected into each backend exactly like [`crate::Host`].
@@ -83,26 +172,17 @@ pub trait Executor {
     /// time to the deadline; the real executor *sleeps* real time until it, or drives a pending read.
     fn advance(&mut self) -> Option<u64>;
 
-    /// Begin an async host-IO request (Track A.4c/A.10: `fs.read_async`/`write_async`/`append_async`),
-    /// returning a ticket id to poll it with via [`Self::poll_io`]. The sandbox executor performs the
-    /// IO **synchronously** through `host` and caches the outcome, so it is ready on the first poll
-    /// (deterministic, in-oracle); the real executor spawns it on its tokio runtime and harvests it in
-    /// [`Self::advance`] (real concurrency, out-of-oracle). `host` is consulted only by the sandbox.
-    fn spawn_io(&mut self, host: &mut dyn Host, req: IoRequest) -> u64;
+    /// Begin an async work descriptor (extern-types X5 — `fs.*_async` and any extension's
+    /// async function), returning a ticket id to poll via [`Self::poll_ext`]. The sandbox
+    /// executor runs `run_sync` through `host` **at spawn** and caches the outcome, so it is
+    /// ready on the first poll (deterministic, in-oracle); the real executor runs the
+    /// descriptor's real body on its tokio runtime (real concurrency, out-of-oracle) and
+    /// consults `host` only for a [`RealBody::Sync`] fallback.
+    fn spawn_ext(&mut self, host: &mut dyn Host, io: Box<dyn ExternIo>) -> u64;
 
-    /// Poll an IO request begun by [`Self::spawn_io`]: `Some(outcome)` once it has completed (the
+    /// Poll a descriptor begun by [`Self::spawn_ext`]: `Some(outcome)` once completed (the
     /// ticket is then spent), `None` while pending. A ticket is polled at most once to `Some`.
-    fn poll_io(&mut self, id: u64) -> Option<Result<IoOutcome, StdError>>;
-}
-
-/// Run an [`IoRequest`] synchronously against a [`Host`] — the sandbox's IO path, and the body the
-/// real executor's spawned task runs too (shared so both perform identical operations).
-pub fn run_io_sync(host: &mut dyn Host, req: &IoRequest) -> Result<IoOutcome, StdError> {
-    match req {
-        IoRequest::Read(path) => host.fs_read(path).map(IoOutcome::Text),
-        IoRequest::Write(path, content) => host.fs_write(path, content).map(|()| IoOutcome::Unit),
-        IoRequest::Append(path, content) => host.fs_append(path, content).map(|()| IoOutcome::Unit),
-    }
+    fn poll_ext(&mut self, id: u64) -> Option<Result<crate::NativeOut, StdError>>;
 }
 
 /// The deterministic sandbox executor: a logical clock (milliseconds, starting at zero) and the set
@@ -114,10 +194,10 @@ pub struct SandboxExecutor {
     /// Deadlines (absolute logical times) of timers that have been polled while pending. Ordered, so
     /// [`Self::advance`] deterministically picks the earliest.
     timers: BTreeSet<u64>,
-    /// Outcomes of `fs.*_async` requests, keyed by ticket id. The sandbox performs each request
-    /// synchronously at `spawn_io` (deterministic), so the outcome is cached here and returned ready
-    /// on the first `poll_io`. Kept tiny — a ticket is removed once polled.
-    io: HashMap<u64, Result<IoOutcome, StdError>>,
+    /// Outcomes of async work descriptors, keyed by ticket id. The sandbox runs each descriptor's
+    /// `run_sync` at `spawn_ext` (deterministic), so the outcome is cached here and returned
+    /// ready on the first `poll_ext`. Kept tiny — a ticket is removed once polled.
+    io: HashMap<u64, Result<crate::NativeOut, StdError>>,
     /// Monotonic ticket source for `io`.
     next_io_id: u64,
 }
@@ -150,16 +230,16 @@ impl Executor for SandboxExecutor {
         Some(self.now)
     }
 
-    fn spawn_io(&mut self, host: &mut dyn Host, req: IoRequest) -> u64 {
-        // Deterministic: perform the IO now against the sandbox VFS and cache it, ready on first poll.
+    fn spawn_ext(&mut self, host: &mut dyn Host, mut io: Box<dyn ExternIo>) -> u64 {
+        // Deterministic: run the sync body now against the Host and cache it, ready on first poll.
         let id = self.next_io_id;
         self.next_io_id += 1;
-        self.io.insert(id, run_io_sync(host, &req));
+        self.io.insert(id, io.run_sync(host));
         id
     }
 
-    fn poll_io(&mut self, id: u64) -> Option<Result<IoOutcome, StdError>> {
-        // Always ready — the IO completed at `spawn_io`.
+    fn poll_ext(&mut self, id: u64) -> Option<Result<crate::NativeOut, StdError>> {
+        // Always ready — the work completed at `spawn_ext`.
         self.io.remove(&id)
     }
 }

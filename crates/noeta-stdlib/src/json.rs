@@ -210,6 +210,9 @@ pub fn stringify(value: &NativeValue) -> String {
                 .collect();
             format!("{{{}}}", parts.join(","))
         }
+        // An extern-type value serializes as its display form, quoted — a `Uuid` is its
+        // canonical string in JSON, the same form `echo` prints.
+        NativeValue::Extern(e) => json_string(&e.display_string()),
         // The shallow-marshal-only variants never reach the serializer: `json` is always deeply
         // marshalled (the only producer of a `stringify` argument).
         NativeValue::Bytes(_) | NativeValue::Object { .. } | NativeValue::Opaque(_) => {

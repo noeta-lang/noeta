@@ -55,7 +55,7 @@ A logical monotonic clock — no wall-clock, so programs stay deterministic.
 | `monotonic` | `monotonic() -> int` | Reads then advances one tick; first call → `0`. |
 | `sleep` | `sleep(ms: int) -> void` | Advances the logical clock by `ms` without blocking. |
 
-(The async `sleep(ms).await` used in [Concurrency](Concurrency) is the `use std.task` future form.)
+(The async `sleep(ms).await` used in [Concurrency](Concurrency) is the `use std.task` future form. Wall time exists only where it belongs: `id.uuid_v7()` reads it through the host seam — real under `noeta run`, fixed-epoch deterministic in tests.)
 
 ## `env` and `args`
 
@@ -85,6 +85,7 @@ File IO. Under `noeta run` this is real disk; the conformance sandbox uses an in
 | `list` | `list() -> List<string>` / `list(dir: string) -> List<string>` |
 | `open` | `open(path: string, mode: string) -> FileHandle` |
 | `read_async` / `write_async` / `append_async` | the `Future`-returning variants (see [Concurrency](Concurrency)) |
+| `exists_async` / `remove_async` / `list_async` | async metadata twins — same semantics as their sync forms, awaited |
 
 ### File handles
 
@@ -137,7 +138,29 @@ The concurrency combinators ([Concurrency](Concurrency)): `sleep(ms) -> Future<v
 
 ## `id`
 
-`next_id() -> int` — the deterministic seeded counter (1, 2, 3, …), reproducible by design so tests never flake on identity. (UUIDs are a planned addition through the deterministic host seam.)
+Identity generation — sequential ids and UUIDs.
+
+| Function | Signature | Notes |
+|---|---|---|
+| `next_id` | `next_id() -> int` | A deterministic counter: 1, 2, 3, …. |
+| `uuid` | `uuid() -> Uuid` | A UUID (version 4, random) — the default choice. |
+| `uuid_v7` | `uuid_v7() -> Uuid` | A time-ordered UUID (version 7, unix-ms + random) — for ids that should sort by creation time. |
+| `parse` | `parse(s: string) -> Uuid?` | Any RFC form; `none` on malformed input. |
+
+`Uuid` is a first-class value type: it compares by value, orders by its bytes (so v7 ids sort by creation time), and displays in the canonical hyphenated lowercase form. Instance methods: `to_string() -> string`, `version() -> int`, and `timestamp_ms() -> int?` — `some(ms)` exactly when the version carries a timestamp (v7), `none` otherwise.
+
+```noeta
+use std.{id}
+echo id.next_id()            // 1
+key = id.uuid()              // e.g. 4396d60d-bd85-47af-a98f-f1a0396ff552
+ordered = id.uuid_v7()       // sorts by creation time
+echo key.version()           // 4
+echo ordered.version()       // 7
+echo key is Uuid             // true
+echo id.parse(key.to_string()) == some(key)   // true — canonical round-trip
+```
+
+UUIDs flow through the host seam: in the deterministic sandbox (tests, the differential oracle) they are exactly reproducible — drawn from an entropy stream **independent of `random`** (generating an id never perturbs a seeded sequence, and `random.seed` never rewinds ids), with v7 timestamps built on a fixed epoch plus the logical clock (so `time.sleep` advances them). Under `noeta run`, `uuid()` uses real OS entropy and `uuid_v7()` real wall time.
 
 ## `vec` & `quat`
 

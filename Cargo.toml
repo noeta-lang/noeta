@@ -53,6 +53,14 @@ noeta-lsp = { path = "crates/noeta-lsp" }
 logos = "0.16"
 salsa = "0.27"
 tokio = { version = "1", features = ["rt", "fs", "io-util", "time"] }
+# OS entropy for RealHost's `Entropy` capability (id-entropy U1): UUID v4/v7 random bits must be
+# real entropy on the real host (the sandbox uses its own seeded SplitMix64 stream instead).
+getrandom = "0.3"
+# RFC 9562 UUID type + builders for the first-class `Uuid` (extern-types X2). Deliberately
+# default-features = false: the self-generating constructors (`new_v4`/`new_v7`, behind the
+# `v4`/`v7` features) stay OUT so the Host seam remains the only entropy/time source —
+# `Builder::from_random_bytes`/`from_unix_timestamp_millis` take caller-provided bits.
+uuid = { version = "1", default-features = false }
 chumsky = { version = "1.0.0-alpha.8", features = ["pratt"] }
 ariadne = "0.6"
 clap = { version = "4", features = ["derive"] }
@@ -77,6 +85,13 @@ itoa = "1"
 # content lives inline in the payload — a short-lived string costs one allocation (the Obj),
 # not two. Heap spill keeps capacity, so in-place append stays amortized O(n).
 compact_str = "0.9"
+# Extern map keys (extern-types X4): `MapKey` lives ONCE in noeta-stdlib so both backends share
+# the ordering/display contract by construction. `equivalent` is the shared heterogeneous-lookup
+# trait (hashbrown re-exports it), letting the VM probe a `HashMap<MapKey, _>` by bare `&str`
+# with no key allocation — the P-SSO hot path unchanged. hashbrown = std's own table, taken
+# directly for that `Equivalent`-based lookup API.
+equivalent = "1"
+hashbrown = { version = "0.17", default-features = false, features = ["equivalent", "inline-more", "default-hasher"] }
 
 [workspace.lints.rust]
 # Quarantine unsafe: forbidden workspace-wide in M0. The first crates that may

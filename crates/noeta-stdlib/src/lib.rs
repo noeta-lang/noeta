@@ -22,24 +22,29 @@
 
 pub mod env;
 pub mod executor;
+pub mod extern_value;
 pub mod fs;
 pub mod handle;
 pub mod host;
+pub mod id;
 pub mod iter;
 pub mod json;
+pub mod map_key;
 pub mod math;
 pub mod quat;
 pub mod random;
 pub mod registry;
 pub mod vec3;
 
-pub use executor::{Executor, IoOutcome, IoRequest, SandboxExecutor, run_io_sync};
-pub use handle::{FileHandle, FileHandleMethod, FileMode, Flush, ReadSource};
-pub use host::{Clock, Env, FileReader, FileSystem, Host, Rng, SandboxHost};
+pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
+pub use extern_value::{ExternBox, ExternValue};
+pub use handle::{FileHandle, FileMode, Flush, ReadSource};
+pub use host::{Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Rng, SandboxHost};
 pub use iter::IterMethod;
+pub use map_key::{ExternKeyRef, MapKey};
 pub use registry::{
-    ExtFn, ExtModule, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType, StdExtension,
-    TypeRecipe,
+    ExtFn, ExtModule, ExtType, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType,
+    StdExtension, TypeDispatch, TypeRecipe,
 };
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the
@@ -273,6 +278,15 @@ pub fn no_function_error(module: &str, func: &str) -> StdError {
     StdError {
         kind: ErrorKind::UnknownName,
         message: format!("module `{module}` has no function `{func}`"),
+    }
+}
+
+/// Build the canonical "no such method on an extern type" error (→ `E0005`), the type-shaped
+/// sibling of [`no_function_error`] (extern-types X2).
+pub fn no_method_error(type_name: &str, method: &str) -> StdError {
+    StdError {
+        kind: ErrorKind::UnknownName,
+        message: format!("type `{type_name}` has no method `{method}`"),
     }
 }
 

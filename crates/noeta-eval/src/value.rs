@@ -18,7 +18,6 @@ use std::fmt;
 use std::rc::Rc;
 
 use noeta_ast::reflect::TypeRepr;
-use noeta_stdlib::FileHandle;
 
 use crate::{Builtin, Closure, EnumDef, EnumValue, ObjectValue, TypeDef};
 
@@ -57,7 +56,10 @@ pub enum Value {
     /// R1), set at literal construction so `type_of` recovers it after a `dyn` launder; `None` for a
     /// derived/mutated map. Invisible to value semantics — equality compares only the entries — the
     /// tree-walker twin of the VM's node tag.
-    Map(Rc<BTreeMap<String, Value>>, Option<Rc<TypeRepr>>),
+    Map(
+        Rc<BTreeMap<noeta_stdlib::MapKey, Value>>,
+        Option<Rc<TypeRepr>>,
+    ),
     /// A user-defined function or closure.
     Function(Rc<Closure>),
     /// A built-in (native) function from the prelude.
@@ -86,10 +88,12 @@ pub enum Value {
     /// A **bound** method handle (`value.method`, EX.2b): the receiver captured at bind time.
     /// Calling it dispatches the method on the captured receiver. VM twin: `Payload::BoundMethod`.
     BoundMethod(Box<Value>, String),
-    /// An `fs.open` file handle (M2.5): a mutable cursor. `Rc<RefCell<…>>` gives the shared,
-    /// interior-mutable state the VM gets from its heap object; the `FileHandle` itself is the
-    /// same shared type both backends advance, so behavior is identical by construction.
-    FileHandle(Rc<RefCell<FileHandle>>),
+    /// A registered extern-type value (extern-types X1) — the ONE hosting variant every
+    /// registry-contributed type shares; the tree-walker twin of the VM's `Payload::Extern`.
+    /// `Rc<RefCell<…>>` gives the shared, interior-mutable cell a mutating method needs
+    /// (reference semantics, the FileHandle discipline generalized); a pure type never borrows
+    /// mutably.
+    Extern(Rc<RefCell<noeta_stdlib::ExternBox>>),
     /// A lazy iterator (Track I.1a): a reference-semantic cursor over a list value — the tree-walker
     /// twin of the VM's `Payload::Iter`. `Rc<RefCell<…>>` gives the shared interior-mutable cursor so
     /// every alias advances the same iterator, exactly like a file handle.
@@ -628,14 +632,14 @@ impl Value {
     /// map-producing path uses. A literal that carries a reflected `Map(K, V)` type stamps it via
     /// [`Value::map_value_tagged`]; every other map (derived, mutated) stays untagged and reflects
     /// head-only.
-    pub(crate) fn map_value(entries: Rc<BTreeMap<String, Value>>) -> Value {
+    pub(crate) fn map_value(entries: Rc<BTreeMap<noeta_stdlib::MapKey, Value>>) -> Value {
         Value::Map(entries, None)
     }
 
     /// As [`Value::map_value`], but carrying the reflected `Map(K, V)` type (R1) — used only at map
     /// literal construction.
     pub(crate) fn map_value_tagged(
-        entries: Rc<BTreeMap<String, Value>>,
+        entries: Rc<BTreeMap<noeta_stdlib::MapKey, Value>>,
         reflect: Option<Rc<TypeRepr>>,
     ) -> Value {
         Value::Map(entries, reflect)
@@ -717,14 +721,16 @@ impl Value {
             Value::Map(entries, _) => {
                 let parts: Vec<String> = entries
                     .iter()
-                    .map(|(k, v)| format!("{k:?}: {}", v.repr()))
+                    .map(|(k, v)| format!("{}: {}", k.render(), v.repr()))
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
             Value::Function(_) => "<fn>".to_string(),
             // A selectively-imported module function renders as a function (matching the VM's
             // `Payload::ModuleFn` → `<fn>`), not with the module's `<module …>` form.
-            Value::ModuleFn(..) | Value::MethodHandle(..) | Value::BoundMethod(..) => "<fn>".to_string(),
+            Value::ModuleFn(..) | Value::MethodHandle(..) | Value::BoundMethod(..) => {
+                "<fn>".to_string()
+            }
             Value::Builtin(b) => format!("<builtin {}>", b.name()),
             Value::EnumType(def) => format!("<enum {}>", def.name()),
             Value::Enum(value) => value.display(),
@@ -732,7 +738,8 @@ impl Value {
             Value::Object(object) => object.display(),
             Value::NativeModule(module) => format!("<module {module}>"),
             // `<file "path" (mode)>`, rendered by the shared handle so the VM matches exactly.
-            Value::FileHandle(handle) => handle.borrow().display(),
+            // An extern-type value renders through its contract, identically on both backends.
+            Value::Extern(e) => e.borrow().display_string(),
             Value::Iter(_) => "<iterator>".to_string(),
             Value::Future(_)
             | Value::Timer(_)
@@ -780,7 +787,8 @@ impl Value {
             Value::Type(_) => "type",
             Value::Object(_) => "object",
             Value::NativeModule(_) => "module",
-            Value::FileHandle(_) => "file handle",
+            // The registered extern type's own name (`Uuid`), from the value contract.
+            Value::Extern(e) => e.borrow().type_name(),
             Value::Iter(_) => "iterator",
             Value::Future(_)
             | Value::Timer(_)
@@ -817,7 +825,11 @@ impl fmt::Debug for Value {
             Value::Function(_) => write!(f, "Function(<fn>)"),
             Value::ModuleFn(module, func) => write!(f, "ModuleFn({module}.{func})"),
             Value::MethodHandle(ty, method, associated) => {
-                write!(f, "MethodHandle({ty}.{method}{})", if *associated { " assoc" } else { "" })
+                write!(
+                    f,
+                    "MethodHandle({ty}.{method}{})",
+                    if *associated { " assoc" } else { "" }
+                )
             }
             Value::BoundMethod(recv, method) => write!(f, "BoundMethod({recv:?}.{method})"),
             Value::Builtin(b) => write!(f, "Builtin({})", b.name()),
@@ -826,7 +838,7 @@ impl fmt::Debug for Value {
             Value::Type(def) => write!(f, "Type({})", def.name()),
             Value::Object(object) => write!(f, "Object({})", object.display()),
             Value::NativeModule(module) => write!(f, "NativeModule({module})"),
-            Value::FileHandle(handle) => write!(f, "FileHandle({})", handle.borrow().display()),
+            Value::Extern(e) => write!(f, "Extern({})", e.borrow().display_string()),
             Value::Iter(state) => write!(f, "Iter({:?})", state.borrow()),
             Value::Future(thunk) => write!(f, "Future({thunk:?})"),
             Value::Timer(deadline) => write!(f, "Timer({deadline})"),
@@ -869,8 +881,10 @@ impl PartialEq for Value {
             }
             // A bound handle compares by method name + receiver equality.
             (Value::BoundMethod(ra, ma), Value::BoundMethod(rb, mb)) => ma == mb && ra == rb,
-            // File handles compare by their full shared state, matching the VM by construction.
-            (Value::FileHandle(a), Value::FileHandle(b)) => *a.borrow() == *b.borrow(),
+            // Extern-type values compare through their contract (extern-types X2). This impl is
+            // the one enum/list/tuple/set *payload* comparisons route through, so a missing arm
+            // here is the classic silent-wrong-`false` hole (`some(u) == some(u)` was false).
+            (Value::Extern(a), Value::Extern(b)) => a.borrow().eq_value(&**b.borrow()),
             // Functions and types are not structurally comparable.
             _ => false,
         }
@@ -902,7 +916,7 @@ mod tests {
         Value::map_value(Rc::new(
             pairs
                 .iter()
-                .map(|(k, v)| (k.to_string(), v.clone()))
+                .map(|(k, v)| (noeta_stdlib::MapKey::from(*k), v.clone()))
                 .collect(),
         ))
     }

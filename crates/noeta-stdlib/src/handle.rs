@@ -345,30 +345,41 @@ fn not_writable_error(path: &str) -> StdError {
         message: format!("file handle for `{path}` is not open for writing"),
     }
 }
+/// The `FileHandle` extern-value contract (extern-types X3): the hand-threaded hosting variants
+/// are gone — both backends hold a handle through the one extern seam. Equality stays the full
+/// shared-state comparison (the derived `PartialEq`: path, mode, cursor, buffer, closed);
+/// unordered and NOT key-capable (a handle mutates — its hash/order could go stale under a key).
+impl crate::ExternValue for FileHandle {
+    fn type_name(&self) -> &'static str {
+        "FileHandle"
+    }
 
-/// The file-handle methods, enumerated so a `match` over them is exhaustive in both backends —
-/// adding one will not compile until both handle it (the same static guard as `SetMethod`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FileHandleMethod {
-    /// `read_line()` → `some(line)` advancing the cursor, `none` at EOF.
-    ReadLine,
-    /// `read(n)` → `some(chunk)` of up to `n` characters, `none` at EOF.
-    Read,
-    /// `write(chunk)` → appends to the buffer (write/append handles).
-    Write,
-    /// `close()` → flushes a write/append handle's buffer to the host.
-    Close,
-}
+    fn eq_value(&self, other: &dyn crate::ExternValue) -> bool {
+        other.as_any().downcast_ref::<FileHandle>() == Some(self)
+    }
 
-impl FileHandleMethod {
-    pub fn from_name(name: &str) -> Option<FileHandleMethod> {
-        match name {
-            "read_line" => Some(FileHandleMethod::ReadLine),
-            "read" => Some(FileHandleMethod::Read),
-            "write" => Some(FileHandleMethod::Write),
-            "close" => Some(FileHandleMethod::Close),
-            _ => None,
-        }
+    fn cmp_value(&self, _other: &dyn crate::ExternValue) -> Option<std::cmp::Ordering> {
+        None
+    }
+
+    fn hash_value(&self) -> u64 {
+        0 // not key-capable; never consulted
+    }
+
+    fn display(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
+        out.write_str(&self.display())
+    }
+
+    fn clone_box(&self) -> Box<dyn crate::ExternValue> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 

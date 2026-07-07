@@ -23,12 +23,22 @@ Registration is declarative:
 ```
 trait Extension {
     name;
-    modules() -> &[ExtModule];   // each with ExtFn { name, params, ret, dispatch }
-    types()   -> &[ExtType];
+    modules() -> &[ExtModule];   // each with ExtFn { name, params, ret } + one dispatch
+    types()   -> &[ExtType];     // first-class value types (see below)
 }
 ```
 
 `params` and `ret` use `SigType`, a small signature vocabulary (noeta-stdlib cannot see the checker's `Type`); `noeta-check` maps each `SigType` to a real `Type`, so the registry is the single source of truth that *both* the checker and both backends read.
+
+## First-class types: `ExtType` and `ExternValue`
+
+An extension contributes a **value type** the way it contributes a module. An `ExtType` declares a reserved name (declaring a same-name user type is E0049), an instance-method signature table, one shared method dispatch, and a `key_capable` flag. The value behavior lives on one trait, `ExternValue` — equality, ordering, hashing, display, clone — and each backend hosts every extern type through a **single** variant (`Payload::Extern` in the VM, `Value::Extern` in the tree-walker), so a new native type touches no backend code at all.
+
+The method dispatch has ONE signature covering the whole {pure, mutable} × {host-free, effectful} matrix: the receiver arrives `&mut` (a pure method just doesn't mutate) and the `Host` is always passed (a pure method just doesn't touch it). Two core types prove the corners: `Uuid` (pure, byte-ordered, key-capable — it can key a `Map`/member a `Set`) and `FileHandle` (mutable cursor, fs-effectful methods, not key-capable). Effects reach the world only through the `Host`; construction of effectful values stays in module functions (`fs.open`).
+
+## Async functions: the `ExternIo` seam
+
+An extension implements an **async** function without ever seeing the executor: its dispatch returns *work* (`NativeOut::Spawn(descriptor)`) instead of a value, and the backend tickets the descriptor on its executor and hands back a `Future`. The descriptor has two bodies — `run_sync(host)`, which the deterministic sandbox executor always runs **at spawn** (so an extension's async function is differential-deterministic no matter what its real body does), and an optional real body (a blocking closure for the runtime's blocking pool, or a native future) for true concurrency under `noeta run`. No real body means the real executor degrades to the sync body at spawn — correct, just serial. The `fs.*_async` family is the dogfood: its descriptors live in the same registry crate, and adding `exists_async`/`remove_async`/`list_async` touched no backend code.
 
 ## The `Host` capability
 
@@ -41,7 +51,8 @@ The motivating consumer is a native function that builds a value of a type named
 ## Status
 
 - **Shipped (Phases A + B):** the registry and neutral marshalling seam; `math`/`random`/`time`/`env`/`args`/`fs`/`vec`/`quat`/`json` all migrated onto it; the old `NativeModule` enum deleted; `json.parse::<T>` working end to end.
-- **Deferred:** `ExtType` (native first-class *types*, like an `Image`), columnar kernels via extensions (blocked on a raw-buffer ABI capability), and the package/dependency manager that would let `vec`/`quat` physically leave core and third parties register their own crates. Extracting a stable `noeta-native` ABI crate is planned for the package-manager milestone.
+- **Shipped (extern-types arc):** `ExtType`/`ExternValue` first-class types (`Uuid`, and `FileHandle` migrated off its hand-threaded hosting); extern map/set keys (`Map<Uuid, T>`); the `ExternIo` async seam (`fs.*_async` migrated off its per-backend intercepts, async metadata twins added with zero backend edits).
+- **Deferred:** columnar kernels via extensions (blocked on a raw-buffer ABI capability), Host-coupled finalizers (GC free cannot reach the Host — buffered types keep explicit `close()`), and the package/dependency manager that would let `vec`/`quat` physically leave core and third parties register their own crates. Extracting a stable `noeta-native` ABI crate is planned for the package-manager milestone.
 
 ## See also
 

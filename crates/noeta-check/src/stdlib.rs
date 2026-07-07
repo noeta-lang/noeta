@@ -12,10 +12,6 @@
 use noeta_stdlib::registry;
 use noeta_types::Type;
 
-/// Reserved built-in type name for the value `fs.open` returns (the runtime `FileHandle`). A
-/// receiver of this `Named` type dispatches the file-handle methods.
-pub(super) const FILE_HANDLE: &str = "FileHandle";
-
 /// Reserved built-in type name for the value `iter()` returns (Track I.1a). `Iterator<T>` carries its
 /// element type as its single argument; a receiver of this `Named` type dispatches `next`/`collect`.
 pub(super) const ITERATOR: &str = "Iterator";
@@ -43,6 +39,13 @@ pub(super) const COMPUTED: &str = "Computed";
 /// Reserved built-in type name for a reactive side effect (reactivity S2). `effect(fn)` yields an
 /// `Effect` (no type argument — it produces no value); `.dispose()` unsubscribes it.
 pub(super) const EFFECT: &str = "Effect";
+
+/// Every checker-native reserved type name (extern-types X1): the `Named` types whose method
+/// tables live in THIS file because their values are backend builtins coupled to the executor or
+/// reactive graph. Together with the registry's extern types (`registry::find_type`) these form
+/// the E0049 reservation set — a user declaration of any of them is rejected.
+pub(super) const NATIVE_TYPE_NAMES: &[&str] =
+    &[ITERATOR, FUTURE, SENDER, RECEIVER, SIGNAL, COMPUTED, EFFECT];
 
 /// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. Every module — `json` included
 /// (B4) — comes from the native-extension registry now; only the `vec` bulk `*_all` kernels keep a
@@ -112,9 +115,8 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         Type::String => string_method(name),
         Type::List(elem) => list_method(name, elem),
         Type::Set(elem) => set_method(name, elem),
-        Type::Map(_, val) => map_method(name, val),
+        Type::Map(key, val) => map_method(name, key, val),
         Type::Bytes => bytes_method(name),
-        Type::Named(n, _) if n == FILE_HANDLE => file_handle_method(name),
         Type::Named(n, args) if n == ITERATOR => {
             iterator_method(name, args.first().unwrap_or(&Type::Dyn))
         }
@@ -131,6 +133,16 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
             computed_method(name, args.first().unwrap_or(&Type::Dyn))
         }
         Type::Named(n, _) if n == EFFECT => effect_method(name),
+        // A registered extern type's methods come from its `ExtType` signature table
+        // (extern-types X1) — the registry is the single source, so a new native type never
+        // edits this file.
+        Type::Named(n, _) if registry::find_type(n).is_some() => {
+            let sig = registry::find_type_method(n, name)?;
+            Some(match sig.ret {
+                registry::RetTy::Concrete(s) => sig_to_type(&s),
+                _ => Type::Dyn,
+            })
+        }
         _ => None,
     }
 }
@@ -323,26 +335,20 @@ fn set_method(name: &str, elem: &Type) -> Option<Type> {
     })
 }
 
-fn map_method(name: &str, val: &Type) -> Option<Type> {
+fn map_method(name: &str, key: &Type, val: &Type) -> Option<Type> {
     Some(match name {
-        "keys" => list(Type::String), // runtime map keys are always strings
+        // The receiver's own key type `K` (extern-types X4): `string`, or a key-capable extern
+        // type (`Uuid`). A bare `map` receiver defaults its key to `string`.
+        "keys" => list(key.clone()),
         "values" => list(val.clone()),
         "has" => Type::Bool,
         "len" => Type::Int,
         // `get_or(key, default)` — the value at `key`, or `default`. Both are `V`.
         "get_or" => val.clone(),
-        // `set`/`remove` return a new map of the same type (keys are always strings).
-        "set" | "remove" => Type::Map(Box::new(Type::String), Box::new(val.clone())),
+        // `set`/`remove` return a new map of the same `Map<K, V>` type.
+        "set" | "remove" => Type::Map(Box::new(key.clone()), Box::new(val.clone())),
         // `iter()` yields the map's **values** (the iteration order `for` uses).
         "iter" => iterable_iter(val.clone()),
-        _ => return None,
-    })
-}
-
-fn file_handle_method(name: &str) -> Option<Type> {
-    Some(match name {
-        "read_line" | "read" => opt(Type::String),
-        "write" | "close" => Type::Unit,
         _ => return None,
     })
 }
@@ -358,9 +364,8 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         Type::String => string_params(name),
         Type::List(elem) => list_params(name, elem),
         Type::Set(elem) => set_params(name, elem),
-        Type::Map(_, val) => map_params(name, val),
+        Type::Map(key, val) => map_params(name, key, val),
         Type::Bytes if name == "len" => Some(vec![]),
-        Type::Named(n, _) if n == FILE_HANDLE => file_handle_params(name),
         Type::Named(n, args) if n == ITERATOR => {
             iterator_params(name, args.first().unwrap_or(&Type::Dyn))
         }
@@ -400,6 +405,12 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
             "dispose" => vec![],
             _ => return None,
         }),
+        // A registered extern type's method parameters come from its `ExtType` signature table
+        // (extern-types X1), like `method_return`.
+        Type::Named(n, _) if registry::find_type(n).is_some() => {
+            let sig = registry::find_type_method(n, name)?;
+            Some(sig.params.iter().map(sig_to_type).collect())
+        }
         _ => None,
     }
 }
@@ -447,8 +458,8 @@ fn string_params(name: &str) -> Option<Vec<Type>> {
 
 fn list_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "reverse" | "sorted" | "len" | "sum" | "first" | "last" | "to_set"
-        | "enumerate" | "to_bytes" | "iter" => {
+        "reverse" | "sorted" | "len" | "sum" | "first" | "last" | "to_set" | "enumerate"
+        | "to_bytes" | "iter" => {
             vec![]
         }
         "contains" => vec![elem.clone()],
@@ -479,21 +490,13 @@ fn set_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     })
 }
 
-fn map_params(name: &str, val: &Type) -> Option<Vec<Type>> {
+fn map_params(name: &str, key: &Type, val: &Type) -> Option<Vec<Type>> {
     Some(match name {
         "keys" | "values" | "len" | "iter" => vec![],
-        "has" | "remove" => vec![Type::String], // runtime map keys are strings
-        "set" => vec![Type::String, val.clone()], // `set(key, value)`
-        "get_or" => vec![Type::String, val.clone()], // `get_or(key, default)`
-        _ => return None,
-    })
-}
-
-fn file_handle_params(name: &str) -> Option<Vec<Type>> {
-    Some(match name {
-        "read_line" | "close" => vec![],
-        "read" => vec![Type::Int],
-        "write" => vec![Type::String],
+        // Key positions take the receiver's own key type `K` (extern-types X4).
+        "has" | "remove" => vec![key.clone()],
+        "set" => vec![key.clone(), val.clone()], // `set(key, value)`
+        "get_or" => vec![key.clone(), val.clone()], // `get_or(key, default)`
         _ => return None,
     })
 }
@@ -502,9 +505,10 @@ fn file_handle_params(name: &str) -> Option<Vec<Type>> {
 /// parameters (`math.abs`/`min`/`max`, and any numeric position) are typed `dyn` so an `int` or
 /// `float` argument is accepted without a spurious mismatch.
 pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
-    // `fs.list` takes an optional dir argument (0 or 1) — not arity-checked. (It is registered with
-    // a fixed signature for dispatch, so this skip must precede the registry lookup.)
-    if module == "fs" && name == "list" {
+    // `fs.list` (and its async twin, extern-types X6) takes an optional dir argument (0 or 1) —
+    // not arity-checked. (Both are registered with a fixed signature for dispatch, so this skip
+    // must precede the registry lookup.)
+    if module == "fs" && (name == "list" || name == "list_async") {
         return None;
     }
     // Migrated modules: parameter types come from the native-extension registry.
@@ -582,14 +586,8 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
             _ => None,
         };
     }
-    // The virtual `id` module (prelude-redesign P2c): `next_id() -> int`, the deterministic
-    // seeded counter (UUIDs are a planned follow-on through the deterministic Host seam).
-    if module == "id" {
-        return match name {
-            "next_id" => Some(Type::Int),
-            _ => None,
-        };
-    }
+    // (`id` was virtual here until the id-entropy arc de-virtualized it — `next_id`/`uuid`/
+    // `uuid_v7` now type through the registry fallback below like any migrated module.)
     // The virtual `task` module (prelude-redesign P2b): the concurrency combinators.
     // `sleep(ms) -> Future<void>` (Track A.2) — awaiting it suspends until the executor clock
     // reaches the deadline; `all(List<Future<T>>) -> List<T>` (results in order);
