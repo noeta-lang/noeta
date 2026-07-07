@@ -85,8 +85,35 @@ fn main() {
         stats.compile_ns_max / 1_000
     );
     println!("compile avg     {:>10} µs", avg_us);
+    // CAVEAT (P-JCT): with off-thread compilation (P-PAR S4) compile time OVERLAPS the mutator
+    // and the stats entry point drains the queue at exit, so `wall − compile` is NOT "runtime"
+    // — a compile-bound run reports ~0 here. For generated-code quality, compare `wall` at call
+    // counts large enough that runtime dominates.
     println!(
         "runtime (wall − compile) {:>7.1} ms",
         (wall.as_nanos() as f64 - stats.compile_ns_total as f64) / 1e6
     );
+    // P-JCT C0: where compile total goes. `build` (IR construction) is the remainder.
+    let b = stats.breakdown;
+    let build_ns = stats
+        .compile_ns_total
+        .saturating_sub(b.define_ns + b.finalize_ns);
+    println!(
+        "  build IR      {:>10.1} ms   define {:>8.1} ms   finalize {:>8.1} ms",
+        build_ns as f64 / 1e6,
+        b.define_ns as f64 / 1e6,
+        b.finalize_ns as f64 / 1e6
+    );
+    println!(
+        "  bodies        {:>10}    clif insts {}   code bytes {}",
+        b.bodies, b.clif_insts, b.code_bytes
+    );
+    if b.define_ns > 0 {
+        println!(
+            "  define throughput {:>6.2} MB/s  ({:.1} µs/body, {:.0} insts/body)",
+            b.code_bytes as f64 / (b.define_ns as f64 / 1e9) / 1e6,
+            b.define_ns as f64 / b.bodies.max(1) as f64 / 1e3,
+            b.clif_insts as f64 / b.bodies.max(1) as f64
+        );
+    }
 }
