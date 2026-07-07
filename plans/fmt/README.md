@@ -1,11 +1,19 @@
 # `noeta fmt` — a canonical source formatter
 
-**Status: PLANNED (branch `fmt`, worktree `.claude/worktrees/fmt`).** Research + scope complete;
-slices F0–F7 defined below — **width-driven wrapping is in v1** (F5), as an opt-in `[fmt]` knob
-(`wrap`, **default off**) so the existing corpus needs no reflow. `fmt` is one of the two subcommands
-`docs/The-CLI.md` still lists as *intentionally absent* (the other is `check`); `build` has since
-shipped, so this closes half of that note. (The parallel `noeta mcp` arc wraps this engine — it does
-not reimplement formatting — so `noeta-fmt` must stay a reusable library, which it is.)
+**Status: ARC COMPLETE (F0–F7), branch `fmt`, worktree `.claude/worktrees/fmt` (local, unpushed).**
+The `noeta fmt` canonical formatter ships: a lean, reusable `noeta-fmt` crate (lex+trivia → parse →
+AST → `Doc` → text) behind a **safety gate** (re-parse + AST-equal-modulo-spans, else abort
+untouched), with **comment reattachment**, opt-in **width-driven wrapping** (`[fmt] wrap`, default
+off, so the existing corpus needs no reflow), and configurable **match-arm alignment**. Front-ends:
+`noeta fmt` (files/dirs, `--check`, `--stdin`, atomic writes) and the LSP `textDocument/formatting`
+provider. Property-tested over the ~530-file `.noe` corpus: **safe + idempotent + comment-complete
+under both `wrap` policies**. `fmt` was one of the two subcommands `docs/The-CLI.md` listed as
+*intentionally absent* (the other is `check`). The parallel `noeta mcp` arc wraps this engine rather
+than reimplementing it — `noeta-fmt` is a reusable library, as required.
+
+*Remaining polish, all optional / deferred (see slice notes + Non-goals): width-wrapping of long
+binary/method chains and `A|B|C` unions; trailing commas where the grammar allows; `noeta fmt
+--diff`; LSP range formatting; `// fmt: off`, import sorting, broader config.*
 
 ## The one idea that shapes everything: canonical reformat, not whitespace touch-up
 
@@ -299,8 +307,14 @@ gates re-run every slice.
   `noeta.toml` `[fmt]` discovery; parse failures reported and left untouched. 4 `assert_cmd`
   integration tests (stdin, --check, in-place, decline-unparseable) + manual end-to-end verify.
   *(A `--diff` output is a possible follow-on; `--check` currently lists like `gofmt -l`.)*
-- **F7 — LSP `textDocument/formatting`.** Register the provider in `noeta-lsp` over the same engine
-  (range-formatting optional). *Editor "format on save" without shelling out.*
+- **F7 — LSP `textDocument/formatting`. ✅ DONE.** `noeta-lsp` advertises
+  `document_formatting_provider` and implements `formatting` over the same `noeta_fmt` engine
+  (`DocumentStore::format_document` → a single full-document `TextEdit`; no-op when already canonical;
+  no edits on unparseable source). Config parsing was **centralized into `noeta-fmt`**
+  (`FmtConfig::from_toml` / `FmtConfig::discover`) so the editor and CLI honor the same `[fmt]` table
+  and can never drift; the CLI's `manifest.rs` now delegates to it. 3 store tests; the VS Code /
+  VSCodium client picks up "Format Document" / format-on-save automatically from the capability.
+  *(Range formatting is an optional follow-on.)*
 
 ## Non-goals / deferred (recorded in `plans/deferred.md`)
 

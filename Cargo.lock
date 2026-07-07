@@ -1743,6 +1743,7 @@ dependencies = [
  "noeta-lexer",
  "noeta-parser",
  "noeta-span",
+ "toml",
 ]
 
 [[package]]
@@ -1821,6 +1822,7 @@ dependencies = [
  "noeta-check",
  "noeta-db",
  "noeta-diagnostics",
+ "noeta-fmt",
  "noeta-lexer",
  "noeta-parser",
  "noeta-span",

@@ -42,19 +42,22 @@
 //!
 //! # Status
 //!
-//! **F0–F5** done: crate skeleton, [`FmtConfig`] seam, the [`format_source`] entry point with the
-//! safety gate, the **full printer** ([`print`], on the [`doc`] algebra) — total over every parseable
-//! program (precedence-minimal parentheses, restricted-head handling, list-spread re-sugaring,
-//! per-member `;`, config-driven match-arm alignment), **comment reattachment** (leading / trailing /
-//! dangling), and **width-driven wrapping** ([`FmtConfig::wrap`]: default off keeps author breaks and
-//! is byte-stable; on, delimited sequences and pipeline chains break at [`FmtConfig::line_width`]).
-//! Remaining: the CLI polish (F6) and the LSP provider (F7).
+//! **Arc complete (F0–F7).** Crate skeleton, [`FmtConfig`] seam + `noeta.toml` `[fmt]` parsing
+//! ([`FmtConfig::from_toml`] / [`FmtConfig::discover`], shared by the CLI and LSP), the
+//! [`format_source`] entry point with the safety gate, the **full printer** ([`print`], on the
+//! [`doc`] algebra) — total over every parseable program (precedence-minimal parentheses,
+//! restricted-head handling, list-spread re-sugaring, per-member `;`, config-driven match-arm
+//! alignment), **comment reattachment** (leading / trailing / dangling), and **width-driven wrapping**
+//! ([`FmtConfig::wrap`]: default off keeps author breaks and is byte-stable; on, delimited sequences
+//! and pipeline chains break at [`FmtConfig::line_width`]). Front-ends: `noeta fmt` (files/dirs,
+//! `--check`, `--stdin`) and the LSP `textDocument/formatting` provider.
 
 use noeta_diagnostics::Diagnostic;
 use noeta_span::{Source, SourceId};
 
 // The Wadler pretty-printing algebra (F2): source-directed hardlines (`wrap = false`) and
 // width-driven groups (`wrap = true`) both lower onto it.
+mod config;
 mod doc;
 mod print;
 mod safety;

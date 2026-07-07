@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use noeta_check::BUILTIN_TIERS;
-use noeta_fmt::{ArrowStyle, FmtConfig};
+use noeta_fmt::FmtConfig;
 
 /// The manifest file name, discovered at or above the entry file's directory.
 pub const MANIFEST_NAME: &str = "noeta.toml";
@@ -91,40 +91,9 @@ pub fn resolve_fmt_config(start_dir: &Path) -> Result<FmtConfig, String> {
     };
     let text = std::fs::read_to_string(&path)
         .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
-    parse_fmt_config(&text).map_err(|err| format!("invalid `{}`: {err}", path.display()))
-}
-
-/// Overlay a `noeta.toml`'s `[fmt]` table (if any) onto [`FmtConfig::default`]. Unknown keys inside
-/// `[fmt]` are ignored (as elsewhere in the manifest — room for later knobs); known keys are
-/// type-checked and `match_arm_arrows` is validated against its allowed values.
-fn parse_fmt_config(text: &str) -> Result<FmtConfig, String> {
-    let table: toml::Table = text.parse().map_err(|err| format!("{err}"))?;
-    let mut config = FmtConfig::default();
-
-    let Some(fmt_value) = table.get("fmt") else {
-        return Ok(config);
-    };
-    let fmt = fmt_value.as_table().ok_or("`fmt` must be a table")?;
-
-    if let Some(v) = fmt.get("wrap") {
-        config.wrap = v.as_bool().ok_or("`fmt.wrap` must be a boolean")?;
-    }
-    if let Some(v) = fmt.get("line_width") {
-        let n = v
-            .as_integer()
-            .filter(|n| *n > 0)
-            .ok_or("`fmt.line_width` must be a positive integer")?;
-        config.line_width = n as usize;
-    }
-    if let Some(v) = fmt.get("match_arm_arrows") {
-        config.match_arm_arrows = match v.as_str() {
-            Some("compact") => ArrowStyle::Compact,
-            Some("align") => ArrowStyle::Align,
-            _ => return Err("`fmt.match_arm_arrows` must be \"compact\" or \"align\"".to_string()),
-        };
-    }
-
-    Ok(config)
+    // The `[fmt]` grammar lives in `noeta-fmt` (shared with the LSP formatter); the CLI adds the
+    // manifest path to any error.
+    FmtConfig::from_toml(&text).map_err(|err| format!("invalid `{}`: {err}", path.display()))
 }
 
 impl Manifest {
@@ -327,31 +296,5 @@ mod tests {
         let m = Manifest::parse("[profiles.a]\nextends = \"b\"\n[profiles.b]\nextends = \"a\"\n")
             .unwrap();
         assert!(m.active_tiers("a").unwrap_err().contains("cycle"));
-    }
-
-    #[test]
-    fn fmt_config_defaults_when_absent() {
-        // No `[fmt]` table (only profiles) → defaults.
-        assert_eq!(
-            parse_fmt_config("[profiles.dev.tiers]\ntest = \"std\"\n").unwrap(),
-            FmtConfig::default()
-        );
-    }
-
-    #[test]
-    fn fmt_config_overlays_known_keys() {
-        let c =
-            parse_fmt_config("[fmt]\nwrap = true\nline_width = 80\nmatch_arm_arrows = \"align\"\n")
-                .unwrap();
-        assert!(c.wrap);
-        assert_eq!(c.line_width, 80);
-        assert_eq!(c.match_arm_arrows, ArrowStyle::Align);
-    }
-
-    #[test]
-    fn fmt_config_rejects_bad_values() {
-        assert!(parse_fmt_config("[fmt]\nwrap = 1\n").is_err());
-        assert!(parse_fmt_config("[fmt]\nline_width = 0\n").is_err());
-        assert!(parse_fmt_config("[fmt]\nmatch_arm_arrows = \"aligned\"\n").is_err());
     }
 }

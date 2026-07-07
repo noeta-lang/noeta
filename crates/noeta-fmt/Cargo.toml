@@ -12,6 +12,7 @@ noeta-diagnostics = { workspace = true }
 noeta-lexer = { workspace = true }
 noeta-parser = { workspace = true }
 noeta-ast = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 noeta-lexer = { workspace = true }
