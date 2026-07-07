@@ -58,7 +58,7 @@ noeta-dap = { path = "crates/noeta-dap" }
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
 logos = "0.16"
 salsa = "0.27"
-tokio = { version = "1", features = ["rt", "fs", "io-util", "time"] }
+tokio = { version = "1", features = ["rt", "fs", "io-util", "time", "net"] }
 # Real HTTP client for RealHost's `Network` capability (http arc), CLI-only (never in the hot
 # interpreter core, never differential-tested). Async-first so it drives the `RealBody::Async`
 # executor path with a genuine future; `rustls-tls` keeps it portable (no system OpenSSL). The

@@ -155,6 +155,19 @@ enum Command {
     /// Debug Adapter Protocol on stdin/stdout. Runs a program under the production VM (JIT unarmed
     /// for full introspection) with breakpoints, stepping, and variable inspection.
     Dap,
+    /// Serve a program's HTTP handler. The file defines a top-level `fn fetch(req: Request):
+    /// Response` (sync or async) and `use std.{http}`; `noeta serve` runs the file's top-level
+    /// setup, then binds a listener and drives the handler — the ergonomic entry point over an
+    /// explicit `http.serve(...)` call. Runs until interrupted (Ctrl-C). Single worker,
+    /// cooperatively concurrent (a slow async handler yields while others progress); multi-core
+    /// worker isolates are a follow-on.
+    Serve {
+        /// Path to a `.noe` file exporting a `fetch` handler.
+        file: PathBuf,
+        /// The TCP port to bind (default 8080); the listener binds all interfaces (`0.0.0.0`).
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
 }
 
 fn main() -> ExitCode {
@@ -199,6 +212,7 @@ fn main() -> ExitCode {
         Command::Repl { no_check, load } => cmd_repl(!no_check, load),
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),
+        Command::Serve { file, port } => cmd_serve(&file, port),
     }
 }
 
@@ -446,6 +460,69 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
             ExitCode::from(1)
         }
     }
+}
+
+/// `noeta serve <FILE> [--port N]` — the ergonomic HTTP-server entry point (http-server S4). The
+/// file exports a top-level `fn fetch(req: Request): Response` (sync or async) and `use std.{http}`;
+/// this runs the file's top-level setup, then synthesizes and runs `http.serve(<port>, fetch)`,
+/// which binds `0.0.0.0:<port>` and drives the handler over the real host until interrupted
+/// (Ctrl-C). Single worker, cooperatively concurrent — a slow async handler yields while others
+/// progress. (Multi-core worker isolates are a follow-on; see `plans/http-server`.) Layering the
+/// serve call on top of the loaded program means the mechanism is the exact same `http.serve` a
+/// program can call directly — the command only supplies the entry convention and the port.
+fn cmd_serve(file: &std::path::Path, port: u16) -> ExitCode {
+    use noeta_ast::{Expr, Stmt};
+    use noeta_span::Span;
+
+    let mut linked = match noeta_loader::load(file) {
+        Err(err) => {
+            eprintln!("lang: cannot read {}: {err}", file.display());
+            return ExitCode::from(2);
+        }
+        Ok(Err(load_diagnostics)) => {
+            let mut stderr = io::stderr();
+            for ld in &load_diagnostics {
+                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+            }
+            return ExitCode::from(1);
+        }
+        Ok(Ok(linked)) => linked,
+    };
+
+    // Synthesize `http.serve(<port>, fetch)` as a trailing top-level statement. The program supplies
+    // `fetch` and `use std.{http}` (any handler builds responses with `http.response`, so `http` is
+    // already imported); a missing `fetch`/`http` surfaces as an ordinary check error. A synthetic
+    // span (offset 0) is fine — this node is compiler-generated, never the subject of a diagnostic
+    // the user needs to locate.
+    let sp = Span::empty_at(0);
+    let ident = |name: &str| Expr::Ident {
+        name: name.to_string(),
+        span: sp,
+    };
+    let serve = Expr::Member {
+        receiver: Box::new(ident("http")),
+        name: "serve".to_string(),
+        name_span: sp,
+        span: sp,
+    };
+    let call = Expr::Call {
+        callee: Box::new(serve),
+        args: vec![
+            Expr::Int {
+                value: i64::from(port),
+                span: sp,
+            },
+            ident("fetch"),
+        ],
+        span: sp,
+    };
+    linked.program.stmts.push(Stmt::Expr {
+        expr: call,
+        span: sp,
+    });
+
+    eprintln!("noeta serve: listening on http://0.0.0.0:{port} (Ctrl-C to stop)");
+    exit_code(run_program(&linked.program, &linked.sources))
 }
 
 /// Run a `.noeb` bundle (P-AOT L1.2): decode the module from the versioned container and execute it

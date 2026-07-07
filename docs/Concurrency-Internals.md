@@ -52,6 +52,25 @@ The real scheduler crosses threads by **faithful copy, not borrow**: no `Value`/
 > [!NOTE]
 > **Deferred: zero-copy borrow-share.** A `SharedRegion` + a `shared` header bit (where `retain`/`release` are no-ops, so a shared-immutable graph is read cross-thread with no atomic ops, freed wholesale at the scope join) is fully built and miri-proven but wired into *neither* backend yet — it needs `Rc<Shape> → Arc<Shape>` first (runtime values carry a non-atomic `Rc<Shape>`, unsound to borrow across threads until shapes are thread-safe). So single-isolate programs never touch it and the corpus is byte-identical. Note also: the CLI's real-parallel path routes through the **VM only** — the reference interpreter's `Rc`-based value is `!Send`, so it stays the differential reference plus sandbox.
 
+## Serving HTTP: inversion of control
+
+Every capability above is **program-initiated** — the program asks, the world answers. `http.serve`
+inverts that: the world initiates (a connection) and the program's handler responds. This reuses the
+async substrate wholesale. Accepting a connection is an **async leaf** (like `sleep` / `fs.read_async`)
+— a descriptor the executor drives (`TcpListener::accept().await` on the real host); the serve loop
+polls that accept future *alongside* the in-flight handler futures each round, spawning a handler task
+per connection into a **server-owned reaping set** and replying as each completes. So it is exactly
+the cooperative Tier-1 model: a slow async handler yields at its `await`s while the next connection is
+accepted and other handlers advance (the Node/Deno event-loop shape, on our executor). Both backends
+run the identical poll order, so the interleaving is deterministic and the differential agrees.
+
+Determinism is the **inverse of the client's pure responder**: under the sandbox the accept leaf
+yields a fixed, documented **request script** and then reports the listener closed, so a served
+program drives a known sequence through the handler and *terminates* in-oracle — no socket. The real
+host binds a `TcpListener` and blocks. Multi-core serving (a follow-on) stays isolate-native: an
+acceptor isolate hands each accepted **fd (an int)** to worker isolates over a `Channel<int>` —
+intra-process fds are shared across threads, so no `SO_REUSEPORT`/`socket2` is needed.
+
 ## See also
 
 - [Concurrency](Concurrency) — the surface these mechanisms power.

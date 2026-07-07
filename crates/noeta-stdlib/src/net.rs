@@ -9,9 +9,47 @@
 //! response path and pin exact bytes. Under the sandbox every request — whatever its URL — is
 //! answered here; a program that wants real data runs under `noeta run` (the real host).
 
-pub use noeta_native::net::{NetFetchIo, NetRequest, NetResponse, RESPONSE_TYPE_NAME};
+pub use noeta_native::net::{
+    NetFetchIo, NetRequest, NetResponse, REQUEST_TYPE_NAME, RESPONSE_TYPE_NAME, Request,
+    accept_outcome, query_value, request_header, request_path,
+};
 
 use serde_json::json;
+
+/// The sandbox's fixed **inbound** request script (http-server S1) — the deterministic driver a
+/// served program's handler runs against under `--differential`, the inbound mirror of the pure
+/// `sandbox_respond`. A finite, documented sequence, so conformance can pin a handler's behavior
+/// and the served program terminates in-oracle (a real accept loop never would). Every
+/// `http.serve` under the sandbox is driven by this exact sequence, whatever port it names:
+///
+///   1. `GET /`                                — root, no body, no headers
+///   2. `GET /health`                          — a second path to route on
+///   3. `POST /echo`  body `hello`  header `content-type: text/plain`  — a body + a header
+///   4. `GET /users/42?active=true`            — a path segment + a query string
+///   5. `DELETE /users/42`                     — a non-GET/POST verb
+pub fn sandbox_request_script() -> Vec<NetRequest> {
+    let req = |method: &str, path: &str, body: &str, headers: Vec<(&str, &str)>| NetRequest {
+        method: method.to_string(),
+        url: path.to_string(),
+        headers: headers
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        body: body.as_bytes().to_vec(),
+    };
+    vec![
+        req("GET", "/", "", vec![]),
+        req("GET", "/health", "", vec![]),
+        req(
+            "POST",
+            "/echo",
+            "hello",
+            vec![("content-type", "text/plain")],
+        ),
+        req("GET", "/users/42?active=true", "", vec![]),
+        req("DELETE", "/users/42", "", vec![]),
+    ]
+}
 
 /// A response with a single `content-type` header (the responder's shorthand).
 fn typed(status: u16, content_type: &str, body: impl Into<Vec<u8>>) -> NetResponse {

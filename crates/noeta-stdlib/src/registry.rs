@@ -61,6 +61,12 @@ const STD_TYPES: &[ExtType] = &[
         dispatch: response_method_dispatch,
         key_capable: false, // a response is not a map key
     },
+    ExtType {
+        name: crate::net::REQUEST_TYPE_NAME,
+        methods: REQUEST_METHODS,
+        dispatch: request_method_dispatch,
+        key_capable: false, // an inbound request is not a map key
+    },
 ];
 
 /// The `FileHandle` instance methods (extern-types X3) — the signatures the checker's
@@ -762,6 +768,8 @@ const RESPONSE_SIG: SigType = SigType::Named(crate::net::RESPONSE_TYPE_NAME);
 const HEADERS: SigType = SigType::Map(&SigType::String, &SigType::String);
 /// The optional trailing `headers` parameter every verb accepts (http arc H5).
 const OPT_HEADERS: SigType = SigType::Optional(&HEADERS);
+/// The optional `body` parameter of the `http.response` builder (http-server S2).
+const OPT_BODY: SigType = SigType::Optional(&STR_OR_BYTES);
 
 /// The `http` surface. Bodyless verbs take a url; `post`/`put`/`query` take a `string|bytes` body;
 /// `request(method, url)` covers any other (bodyless) verb. **Every** verb accepts an optional
@@ -804,6 +812,13 @@ const HTTP_FNS: &[ExtFn] = &[
     ExtFn {
         name: "request",
         params: &[Str, Str, OPT_HEADERS],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    // The server-side response builder (http-server S2): the handler constructs its reply. Status
+    // is required; body (string|bytes, default empty) and a headers map are optional.
+    ExtFn {
+        name: "response",
+        params: &[Int, OPT_BODY, OPT_HEADERS],
         ret: Concrete(RESPONSE_SIG),
     },
     ExtFn {
@@ -884,6 +899,26 @@ fn http_dispatch(
     host: &mut dyn Host,
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError> {
+    // The server-side response builder (http-server S2) — constructs a value, no request/fetch.
+    if func == "response" {
+        want_arity_range(func, args, 1, 3)?;
+        let status = want_int(func, args, 0)?;
+        if !(100..=599).contains(&status) {
+            return Err(type_error(func, "an HTTP status code in 100..=599"));
+        }
+        let body = match args.get(1) {
+            None => Vec::new(),
+            Some(_) => want_data(func, args, 1)?.to_vec(),
+        };
+        let headers = want_headers(func, args, 2)?;
+        return Ok(NativeOut::Extern(crate::ExternBox::new(
+            crate::NetResponse {
+                status: status as u16,
+                headers,
+                body,
+            },
+        )));
+    }
     // Build the request from the call, per verb shape. Bodyless verbs put headers at index 1;
     // body-carrying verbs and `request` put them at index 2. The method is uppercased so
     // `request("get", …)` and any custom verb (QUERY) normalize.
@@ -954,6 +989,11 @@ const RESPONSE_METHODS: &[ExtFn] = &[
         params: &[Str],
         ret: Concrete(SigType::Option(&Str)),
     },
+    ExtFn {
+        name: "with_header",
+        params: &[Str, Str],
+        ret: Concrete(RESPONSE_SIG),
+    },
 ];
 
 fn response_method_dispatch(
@@ -995,8 +1035,107 @@ fn response_method_dispatch(
                 None => NativeOut::None,
             })
         }
+        "with_header" => {
+            want_arity(method, args, 2)?;
+            let name = want_str(method, args, 0)?.to_string();
+            let value = want_str(method, args, 1)?.to_string();
+            // Copy-modify: a `Response` is immutable, so middleware builds a new one with the header
+            // added (replacing any existing same-named header, case-insensitively).
+            let mut next = resp.clone();
+            next.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(&name));
+            next.headers.push((name, value));
+            Ok(NativeOut::Extern(crate::ExternBox::new(next)))
+        }
         _ => Err(crate::no_method_error(
             crate::net::RESPONSE_TYPE_NAME,
+            method,
+        )),
+    }
+}
+
+/// The `Request` instance methods (http-server S2): all pure reads over the wrapped inbound request.
+const REQUEST_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "method",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "path",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "query",
+        params: &[Str],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        name: "header",
+        params: &[Str],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        name: "body",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "body_bytes",
+        params: &[],
+        ret: Concrete(SigType::Bytes),
+    },
+];
+
+fn request_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(request) = recv.as_any().downcast_ref::<crate::net::Request>() else {
+        return Err(type_error(method, crate::net::REQUEST_TYPE_NAME));
+    };
+    let req = &request.inner;
+    match method {
+        "method" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Str(req.method.clone()))
+        }
+        "path" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Str(
+                crate::net::request_path(&req.url).to_string(),
+            ))
+        }
+        "query" => {
+            want_arity(method, args, 1)?;
+            let name = want_str(method, args, 0)?;
+            Ok(match crate::net::query_value(&req.url, name) {
+                Some(value) => NativeOut::Some(Box::new(NativeOut::Str(value))),
+                None => NativeOut::None,
+            })
+        }
+        "header" => {
+            want_arity(method, args, 1)?;
+            let name = want_str(method, args, 0)?;
+            Ok(match crate::net::request_header(req, name) {
+                Some(value) => NativeOut::Some(Box::new(NativeOut::Str(value.to_string()))),
+                None => NativeOut::None,
+            })
+        }
+        "body" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Str(
+                String::from_utf8_lossy(&req.body).into_owned(),
+            ))
+        }
+        "body_bytes" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Bytes(req.body.clone()))
+        }
+        _ => Err(crate::no_method_error(
+            crate::net::REQUEST_TYPE_NAME,
             method,
         )),
     }
@@ -1976,6 +2115,99 @@ mod tests {
             0
         );
         assert_eq!(SigType::required_count(&[]), 0);
+    }
+
+    #[test]
+    fn request_accessors_read_the_inbound_request() {
+        let mut req = crate::net::Request {
+            conn: 0,
+            inner: crate::NetRequest {
+                method: "POST".to_string(),
+                url: "/users/42?active=true".to_string(),
+                headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+                body: b"{}".to_vec(),
+            },
+        };
+        let call = |req: &mut crate::net::Request, method: &str, args: &[NativeValue]| {
+            let ty = find_type(crate::net::REQUEST_TYPE_NAME).unwrap();
+            (ty.dispatch)(req, method, &mut SandboxHost::new(), args)
+        };
+        assert_eq!(
+            call(&mut req, "method", &[]),
+            Ok(NativeOut::Str("POST".to_string()))
+        );
+        assert_eq!(
+            call(&mut req, "path", &[]),
+            Ok(NativeOut::Str("/users/42".to_string()))
+        );
+        // A present query param, then a missing one.
+        assert_eq!(
+            call(&mut req, "query", &[NativeValue::Str("active".to_string())]),
+            Ok(NativeOut::Some(Box::new(NativeOut::Str(
+                "true".to_string()
+            ))))
+        );
+        assert_eq!(
+            call(
+                &mut req,
+                "query",
+                &[NativeValue::Str("missing".to_string())]
+            ),
+            Ok(NativeOut::None)
+        );
+        // Header lookup is case-insensitive.
+        assert_eq!(
+            call(
+                &mut req,
+                "header",
+                &[NativeValue::Str("content-type".to_string())]
+            ),
+            Ok(NativeOut::Some(Box::new(NativeOut::Str(
+                "application/json".to_string()
+            ))))
+        );
+        assert_eq!(
+            call(&mut req, "body", &[]),
+            Ok(NativeOut::Str("{}".to_string()))
+        );
+    }
+
+    #[test]
+    fn response_builder_and_copy_modify() {
+        let mut h = host();
+        // Status + body + headers.
+        let built = dispatch(
+            "http",
+            "response",
+            &mut h,
+            &[
+                NativeValue::Scalar(Scalar::Int(201)),
+                NativeValue::Str("ok".to_string()),
+                NativeValue::Map(vec![("x-a".to_string(), NativeValue::Str("1".to_string()))]),
+            ],
+        )
+        .unwrap();
+        let NativeOut::Extern(boxed) = &built else {
+            panic!("response builds an extern value");
+        };
+        let resp = boxed
+            .as_any()
+            .downcast_ref::<crate::NetResponse>()
+            .expect("a Response");
+        assert_eq!(resp.status, 201);
+        assert_eq!(resp.body, b"ok");
+        assert_eq!(resp.header_value("x-a"), Some("1"));
+
+        // An out-of-range status is rejected.
+        assert!(
+            dispatch(
+                "http",
+                "response",
+                &mut h,
+                &[NativeValue::Scalar(Scalar::Int(700))],
+            )
+            .is_err()
+        );
     }
 
     #[test]
