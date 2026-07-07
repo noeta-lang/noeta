@@ -55,6 +55,11 @@ noeta-dap = { path = "crates/noeta-dap" }
 logos = "0.16"
 salsa = "0.27"
 tokio = { version = "1", features = ["rt", "fs", "io-util", "time"] }
+# Real HTTP client for RealHost's `Network` capability (http arc), CLI-only (never in the hot
+# interpreter core, never differential-tested). Async-first so it drives the `RealBody::Async`
+# executor path with a genuine future; `rustls-tls` keeps it portable (no system OpenSSL). The
+# deterministic sandbox has its own pure responder and pulls none of this in.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 # OS entropy for RealHost's `Entropy` capability (id-entropy U1): UUID v4/v7 random bits must be
 # real entropy on the real host (the sandbox uses its own seeded SplitMix64 stream instead).
 getrandom = "0.3"
