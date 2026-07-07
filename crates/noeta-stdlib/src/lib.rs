@@ -44,7 +44,7 @@ pub use handle::{FileHandle, FileMode, Flush, ReadSource};
 pub use host::{Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Rng, SandboxHost};
 pub use iter::IterMethod;
 pub use map_key::{ExternKeyRef, MapKey};
-pub use net::{NetRequest, NetResponse};
+pub use net::{NetFetchIo, NetRequest, NetResponse};
 pub use registry::{
     ExtFn, ExtModule, ExtType, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType,
     StdExtension, TypeDispatch, TypeRecipe,

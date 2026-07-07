@@ -150,6 +150,27 @@ pub fn sandbox_respond(request: &NetRequest) -> NetResponse {
     }
 }
 
+/// The default async network descriptor (http arc H3): it performs the request synchronously
+/// through the Host **at spawn** and has no real body. The sandbox uses this (deterministic,
+/// resolved at spawn — the differential never observes a real body); the real host overrides
+/// [`crate::host::Network::net_spawn`] with a concurrent reqwest-backed descriptor. This is the
+/// same "serial degradation for free" the fs metadata twins rely on.
+#[derive(Debug)]
+pub struct NetFetchIo {
+    /// The request to perform when the descriptor is driven.
+    pub request: NetRequest,
+}
+
+impl crate::ExternIo for NetFetchIo {
+    fn run_sync(
+        &mut self,
+        host: &mut dyn crate::Host,
+    ) -> Result<crate::NativeOut, crate::StdError> {
+        let response = host.net_fetch(self.request.clone())?;
+        Ok(crate::NativeOut::Extern(crate::ExternBox::new(response)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

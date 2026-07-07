@@ -1,0 +1,28 @@
+// std.http async twins (http arc H3): `http.*_async` return `Future<Response>`. On the real host
+// each drives a genuine reqwest future on the executor's runtime (RealBody::Async); under the
+// sandbox they resolve deterministically at spawn via the same responder, so the differential
+// pins them. No backend code changed — the descriptor is handed out by the Network capability's
+// `net_spawn`. (Awaiting a batch of these concurrently with `all(...)` is a separate pre-existing
+// async-combinator gap, tracked in plans/deferred.md — sequential `.await` is what works today.)
+// expect: stdout "200"
+// expect: stdout "{"body":"","method":"GET","path":"/echo"}"
+// expect: stdout "true"
+// expect: stdout "201"
+// expect: stdout "{"body":"yo","method":"POST","path":"/echo"}"
+// expect: stdout "{"body":"","method":"PATCH","path":"/echo"}"
+// expect: exit 0
+use std.{http}
+
+async fn run(): void {
+    r = http.get_async("https://svc.test/echo").await
+    echo r.status()
+    echo r.body()
+    echo r is Response
+
+    // A second async request, awaited in turn — the async path handles distinct requests.
+    echo http.get_async("https://svc.test/status/201").await.status()
+
+    echo http.post_async("https://svc.test/echo", "yo").await.body()
+    echo http.request_async("PATCH", "https://svc.test/echo").await.body()
+}
+run().await

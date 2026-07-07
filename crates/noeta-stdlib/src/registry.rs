@@ -1028,6 +1028,39 @@ const HTTP_FNS: &[ExtFn] = &[
         params: &[Str, Str],
         ret: Concrete(RESPONSE_SIG),
     },
+    // Async twins (H3): each returns `Future<Response>` and, on the real host, drives a genuine
+    // reqwest future concurrently (RealBody::Async); the sandbox resolves deterministically at
+    // spawn. `.await` unwraps the `Response`.
+    ExtFn {
+        name: "get_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+    },
+    ExtFn {
+        name: "head_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+    },
+    ExtFn {
+        name: "delete_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+    },
+    ExtFn {
+        name: "post_async",
+        params: &[Str, STR_OR_BYTES],
+        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+    },
+    ExtFn {
+        name: "put_async",
+        params: &[Str, STR_OR_BYTES],
+        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+    },
+    ExtFn {
+        name: "request_async",
+        params: &[Str, Str],
+        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+    },
 ];
 
 /// Perform an HTTP request through the Host and wrap the response as the `Response` extern value.
@@ -1070,6 +1103,39 @@ fn http_dispatch(
             let method = want_str(func, args, 0)?.to_ascii_uppercase();
             let url = want_str(func, args, 1)?.to_string();
             http_perform(host, &method, &url, Vec::new())
+        }
+        // Async twins: build the request, hand the host its async descriptor, ticket it.
+        "get_async" | "head_async" | "delete_async" => {
+            want_arity(func, args, 1)?;
+            let method = func.trim_end_matches("_async").to_ascii_uppercase();
+            let request = crate::NetRequest {
+                method,
+                url: want_str(func, args, 0)?.to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            };
+            Ok(NativeOut::Spawn(SpawnBox(host.net_spawn(request))))
+        }
+        "post_async" | "put_async" => {
+            want_arity(func, args, 2)?;
+            let method = func.trim_end_matches("_async").to_ascii_uppercase();
+            let request = crate::NetRequest {
+                method,
+                url: want_str(func, args, 0)?.to_string(),
+                headers: Vec::new(),
+                body: want_data(func, args, 1)?.to_vec(),
+            };
+            Ok(NativeOut::Spawn(SpawnBox(host.net_spawn(request))))
+        }
+        "request_async" => {
+            want_arity(func, args, 2)?;
+            let request = crate::NetRequest {
+                method: want_str(func, args, 0)?.to_ascii_uppercase(),
+                url: want_str(func, args, 1)?.to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+            };
+            Ok(NativeOut::Spawn(SpawnBox(host.net_spawn(request))))
         }
         _ => Err(no_function_error("http", func)),
     }

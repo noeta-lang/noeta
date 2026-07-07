@@ -25,8 +25,8 @@ pub mod executor;
 pub use executor::RealExecutor;
 
 use noeta_stdlib::{
-    Clock, Entropy, Env, ErrorKind, FileReader, FileSystem, Ids, NetRequest, NetResponse, Network,
-    ReadSource, Rng, StdError,
+    Clock, Entropy, Env, ErrorKind, ExternBox, ExternIo, FileReader, FileSystem, Ids, NativeOut,
+    NetRequest, NetResponse, Network, ReadSource, RealBody, Rng, StdError,
 };
 use std::collections::HashMap;
 use tokio::fs::File;
@@ -224,47 +224,96 @@ impl FileSystem for RealHost {
     }
 }
 
+/// Perform an HTTP request with reqwest, collecting the whole [`NetResponse`]. Shared by the sync
+/// path ([`RealHost::net_fetch`] via `block_on`) and the async path ([`HttpIo`] spawned on the
+/// executor's runtime), so both build the request and read the response identically.
+async fn reqwest_fetch(
+    client: &reqwest::Client,
+    request: NetRequest,
+) -> Result<NetResponse, StdError> {
+    let method = reqwest::Method::from_bytes(request.method.as_bytes())
+        .map_err(|_| io_error(format!("invalid HTTP method `{}`", request.method)))?;
+    let mut builder = client.request(method, &request.url);
+    for (name, value) in &request.headers {
+        builder = builder.header(name, value);
+    }
+    if !request.body.is_empty() {
+        builder = builder.body(request.body);
+    }
+    let url = request.url;
+    let response = builder
+        .send()
+        .await
+        .map_err(|e| io_error(format!("request to `{url}` failed: {e}")))?;
+    let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| {
+            io_error(format!(
+                "reading the response body from `{url}` failed: {e}"
+            ))
+        })?
+        .to_vec();
+    Ok(NetResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+/// The real host's async network descriptor (http arc H3): its real body is a genuine reqwest
+/// future driven on the executor's runtime, so `http.*_async` requests fan out concurrently.
+#[derive(Debug)]
+struct HttpIo {
+    request: NetRequest,
+    /// Cloned from `RealHost::http` — a reqwest `Client` is a cheap `Arc` handle, used across the
+    /// executor's runtime here (reqwest is runtime-agnostic; connections bind lazily to whichever
+    /// runtime drives the future).
+    client: reqwest::Client,
+}
+
+impl ExternIo for HttpIo {
+    fn run_sync(&mut self, _host: &mut dyn noeta_stdlib::Host) -> Result<NativeOut, StdError> {
+        // Only reached if some executor lacks a real body path; the real executor uses `run_real`
+        // and the sandbox uses the default `NetFetchIo`. Perform it on a throwaway runtime.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| io_error(format!("cannot start a runtime for the request: {e}")))?;
+        let response = rt.block_on(reqwest_fetch(&self.client, self.request.clone()))?;
+        Ok(NativeOut::Extern(ExternBox::new(response)))
+    }
+
+    fn run_real(&mut self) -> Option<RealBody> {
+        let client = self.client.clone();
+        let request = self.request.clone();
+        Some(RealBody::Async(Box::pin(async move {
+            let response = reqwest_fetch(&client, request).await?;
+            Ok(NativeOut::Extern(ExternBox::new(response)))
+        })))
+    }
+}
+
 impl Network for RealHost {
     /// Perform the request over the real network, blocking on the host's runtime (the sync
     /// `http.*` surface). A transport failure is an `ErrorKind::Io` error; an HTTP error *status*
-    /// comes back as an ordinary [`NetResponse`]. The async `http.*_async` surface (H3) drives its
-    /// own future on the executor instead — this is the blocking path.
+    /// comes back as an ordinary [`NetResponse`].
     fn net_fetch(&mut self, request: NetRequest) -> Result<NetResponse, StdError> {
-        let method = reqwest::Method::from_bytes(request.method.as_bytes())
-            .map_err(|_| io_error(format!("invalid HTTP method `{}`", request.method)))?;
-        let url = request.url.clone();
-        let mut builder = self.http.request(method, &request.url);
-        for (name, value) in &request.headers {
-            builder = builder.header(name, value);
-        }
-        if !request.body.is_empty() {
-            builder = builder.body(request.body.clone());
-        }
-        self.runtime.block_on(async move {
-            let response = builder
-                .send()
-                .await
-                .map_err(|e| io_error(format!("request to `{url}` failed: {e}")))?;
-            let status = response.status().as_u16();
-            let headers = response
-                .headers()
-                .iter()
-                .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-                .collect();
-            let body = response
-                .bytes()
-                .await
-                .map_err(|e| {
-                    io_error(format!(
-                        "reading the response body from `{url}` failed: {e}"
-                    ))
-                })?
-                .to_vec();
-            Ok(NetResponse {
-                status,
-                headers,
-                body,
-            })
+        self.runtime.block_on(reqwest_fetch(&self.http, request))
+    }
+
+    /// The async `http.*_async` surface: hand out a reqwest-backed descriptor whose real body runs
+    /// concurrently on the executor's runtime (overriding the default serial-at-spawn descriptor).
+    fn net_spawn(&self, request: NetRequest) -> Box<dyn ExternIo> {
+        Box::new(HttpIo {
+            request,
+            client: self.http.clone(),
         })
     }
 }

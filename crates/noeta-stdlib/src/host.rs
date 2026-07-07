@@ -103,6 +103,16 @@ pub trait Ids {
 /// error *status* is an ordinary response, not an error.
 pub trait Network {
     fn net_fetch(&mut self, request: crate::NetRequest) -> Result<crate::NetResponse, StdError>;
+
+    /// Build the async work descriptor for `request` (http arc H3, the `http.*_async` surface).
+    /// The dispatch tickets the returned descriptor on the executor. The default is a
+    /// [`crate::net::NetFetchIo`] with no real body — it resolves through [`Self::net_fetch`] at
+    /// spawn (deterministic in the sandbox; serial-but-correct on any host). `RealHost` overrides
+    /// it to hand out a genuine reqwest future via [`crate::RealBody::Async`], for true
+    /// concurrent fan-out. Kept off [`Self::net_fetch`] so the sandbox never touches a real body.
+    fn net_spawn(&self, request: crate::NetRequest) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::net::NetFetchIo { request })
+    }
 }
 
 /// **Host introspection** capability (M2.2). `env_keys` is sorted. The sandbox presents a fixed

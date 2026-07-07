@@ -49,8 +49,11 @@ impl RealExecutor {
     /// Build a real executor with its own `current_thread` runtime (time driver enabled). Fails only
     /// if the OS refuses to create the runtime.
     pub fn new() -> std::io::Result<RealExecutor> {
+        // `enable_all` (was time-only): a `RealBody::Async` may be a reqwest/hyper future needing
+        // the IO driver (http arc H3); timers still need the time driver. Blocking bodies and the
+        // timer sleeps are unaffected.
         let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
+            .enable_all()
             .build()?;
         Ok(RealExecutor {
             start: Instant::now(),
