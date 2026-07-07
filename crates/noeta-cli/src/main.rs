@@ -1420,6 +1420,13 @@ fn emit_session(source: &Source, out: SessionOutput) {
     }
     let _ = io::stdout().flush();
     emit_diagnostics(source, out.diagnostics.iter());
+    // A panicking entry's stack trace, after its diagnostic — the same rendering and "only when
+    // there is a call chain" rule as `noeta run`. Frames from functions defined in earlier entries
+    // render name-only (their spans point into that entry's text, which is gone).
+    if out.trace.len() >= 2 {
+        let sources = SourceMap::new(vec![source.clone()]);
+        eprint!("{}", noeta_vm::render_trace(&out.trace, &sources));
+    }
 }
 
 fn exit_code(code: i32) -> ExitCode {

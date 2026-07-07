@@ -175,6 +175,10 @@ impl Session {
     pub fn eval(&mut self, program: &Program) -> SessionOutput {
         self.interp.stdout.clear();
         self.interp.diagnostics.clear();
+        // Per-entry trace state: the interpreter persists across entries, and the trace's
+        // first-abort-wins rule would otherwise let entry 1's panic mask entry 2's.
+        self.interp.abort_trace.clear();
+        self.interp.call_sites.clear();
 
         let value = self
             .run_batch(program)
@@ -264,6 +268,7 @@ impl Session {
             stdout: std::mem::take(&mut self.interp.stdout),
             diagnostics: std::mem::take(&mut self.interp.diagnostics),
             value,
+            trace: std::mem::take(&mut self.interp.abort_trace),
         }
     }
 }
@@ -328,6 +333,10 @@ pub struct SessionOutput {
     pub stdout: String,
     pub diagnostics: Vec<Diagnostic>,
     pub value: Option<String>,
+    /// The abort traceback if this entry panicked (empty otherwise) — innermost frame first. A frame
+    /// from a function defined in an *earlier* entry carries a span into that entry's (gone) text;
+    /// the renderer degrades it to name-only.
+    pub trace: Vec<noeta_backend::TraceFrame>,
 }
 
 // --- Functions and scopes ---

@@ -1258,10 +1258,20 @@ pub type IsolateFactory =
     Arc<dyn Fn() -> (Box<dyn noeta_stdlib::Host>, Box<dyn noeta_stdlib::Executor>) + Send + Sync>;
 
 /// A spawned worker isolate (isolates I.4b): the channel its result (a marshalled [`isolate::Wire`], or
-/// an abort message) arrives on, and the thread's join handle (taken to join at teardown).
+/// a failure) arrives on, and the thread's join handle (taken to join at teardown).
 struct IsolateSlot {
-    result: std::sync::mpsc::Receiver<Result<isolate::Wire, String>>,
+    result: std::sync::mpsc::Receiver<Result<isolate::Wire, IsolateFailure>>,
     handle: Option<std::thread::JoinHandle<()>>,
+}
+
+/// A worker isolate's failure, shipped back across the thread boundary: the abort's message and the
+/// worker's own stack trace (empty for a non-abort failure, e.g. an unshippable result). Plain data
+/// (`String`s + `Span`s), so it crosses threads like the [`isolate::Wire`] values do. The parent
+/// installs the trace before re-raising at the `.await`, so the rendered traceback tells the whole
+/// story — the worker's frames innermost, the awaiting parent's frames beneath them.
+struct IsolateFailure {
+    message: String,
+    trace: Vec<TraceFrame>,
 }
 
 /// An owned reference to a VM [`Value`], with RAII refcounting — the element type the reactive graph
@@ -1900,7 +1910,7 @@ fn run_isolate_worker(
     wire_args: Vec<isolate::Wire>,
     wire_globals: Vec<(u32, isolate::Wire)>,
     span: Span,
-) -> Result<isolate::Wire, String> {
+) -> Result<isolate::Wire, IsolateFailure> {
     noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
     let (host, executor) = factory();
     let mut wvm = Vm::load(module, host, executor);
@@ -1931,16 +1941,26 @@ fn run_isolate_worker(
     release(callee);
     let message = match outcome {
         Ok(result) => {
-            let marshalled = isolate::marshal(result, &wvm.shapes, &wvm.channels)
-                .map_err(|e| format!("isolate result is not shippable: {e}"));
+            let marshalled = isolate::marshal(result, &wvm.shapes, &wvm.channels).map_err(|e| {
+                // The body completed; only the result failed to ship — there is no abort stack.
+                IsolateFailure {
+                    message: format!("isolate result is not shippable: {e}"),
+                    trace: Vec::new(),
+                }
+            });
             wvm.release_value(result);
             marshalled
         }
-        Err(_abort) => Err(wvm
-            .diagnostics
-            .last()
-            .map(|d| d.message.clone())
-            .unwrap_or_else(|| "isolate aborted".to_string())),
+        // Ship the worker's own abort traceback home with the message (plain data — it crosses the
+        // boundary like any `Wire`), so the parent's rendered trace includes the worker's frames.
+        Err(_abort) => Err(IsolateFailure {
+            message: wvm
+                .diagnostics
+                .last()
+                .map(|d| d.message.clone())
+                .unwrap_or_else(|| "isolate aborted".to_string()),
+            trace: std::mem::take(&mut wvm.abort_trace),
+        }),
     };
     // Tear the worker down so its thread-local heap returns to zero residency: release the JIT
     // inline caches' closure pins (S4.2), destroy globals in reverse declaration order, then

@@ -492,9 +492,7 @@ impl Interpreter {
                 (
                     name.clone(),
                     // Methods trace as `Type.method`, matching the VM's chunk naming.
-                    Rc::new(
-                        self.make_ir_closure(func, Some(format!("{}.{name}", decl.name))),
-                    ),
+                    Rc::new(self.make_ir_closure(func, Some(format!("{}.{name}", decl.name)))),
                 )
             })
             .collect();
@@ -538,9 +536,7 @@ impl Interpreter {
                 (
                     name.clone(),
                     // Methods trace as `Type.method`, matching the VM's chunk naming.
-                    Rc::new(
-                        self.make_ir_closure(func, Some(format!("{}.{name}", decl.name))),
-                    ),
+                    Rc::new(self.make_ir_closure(func, Some(format!("{}.{name}", decl.name)))),
                 )
             })
             .collect();
@@ -572,9 +568,7 @@ impl Interpreter {
                 (
                     name.clone(),
                     // Methods trace as `Type.method`, matching the VM's chunk naming.
-                    Rc::new(
-                        self.make_ir_closure(func, Some(format!("{}.{name}", decl.name))),
-                    ),
+                    Rc::new(self.make_ir_closure(func, Some(format!("{}.{name}", decl.name)))),
                 )
             })
             .collect();

@@ -1061,3 +1061,44 @@ fn a_top_level_panic_prints_no_stack_trace() {
         .stderr(predicate::str::contains("panic: top"))
         .stderr(predicate::str::contains("stack trace").not());
 }
+
+#[test]
+fn a_panicking_isolate_ships_its_stack_trace_home() {
+    // The worker's own frames (explode ← the async body) cross the thread boundary and render
+    // innermost, above the awaiting parent.
+    let file = temp_program(
+        "trace_isolate",
+        "fn explode(n: int): int {\n    panic(\"worker exploded\")\n}\nasync fn work(n: int): int {\n    return explode(n)\n}\nconcurrent {\n    h = isolate work(5)\n    echo h.await\n}\n",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "isolate panicked: panic: worker exploded",
+        ))
+        .stderr(predicate::str::contains(
+            "stack trace (most recent call first):",
+        ))
+        .stderr(predicate::str::contains("at explode (").and(predicate::str::contains(":2)")));
+}
+
+#[test]
+fn a_repl_panic_prints_a_stack_trace_and_the_session_continues() {
+    lang()
+        .arg("repl")
+        .write_stdin(
+            "fn boom(): int {\n    panic(\"repl boom\")\n}\nfn mid(): int {\n    return boom()\n}\nmid()\necho \"still alive\"\n",
+        )
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "stack trace (most recent call first):",
+        ))
+        // Frames from earlier entries render name-only (their entry's text is gone) — but they render.
+        .stderr(predicate::str::contains("at boom"))
+        .stderr(predicate::str::contains("at mid"))
+        // The session survives the panic and evaluates the next entry.
+        .stdout(predicate::str::contains("still alive"));
+}

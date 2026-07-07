@@ -34,12 +34,19 @@ impl<'m> Vm<'m> {
                     &mut self.channels,
                 )))
             }
-            Ok(Err(message)) => {
+            Ok(Err(failure)) => {
                 self.finish_isolate(id);
+                // Install the worker's shipped traceback (if any) before raising, so the abort that
+                // unwinds the parent renders the whole story: the worker's frames innermost, then the
+                // parent's own frames (appended by `Vm::run`'s unwind as later segments). First abort
+                // wins, as everywhere.
+                if self.abort_trace.is_empty() {
+                    self.abort_trace = failure.trace;
+                }
                 Err(self.error(
                     DiagnosticCode::Panic,
                     span,
-                    format!("isolate panicked: {message}"),
+                    format!("isolate panicked: {}", failure.message),
                 ))
             }
             Err(TryRecvError::Empty) => Ok(Poll::Pending),

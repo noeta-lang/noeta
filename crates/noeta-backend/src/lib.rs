@@ -58,11 +58,17 @@ pub fn render_trace(trace: &[TraceFrame], sources: &noeta_span::SourceMap) -> St
     let mut out = String::from("stack trace (most recent call first):\n");
     for frame in trace.iter().take(MAX_FRAMES) {
         let name = frame.name.as_deref().unwrap_or("<anonymous>");
-        match frame.span {
-            Some(span) => {
-                let source = sources.source(span.source);
-                let line = source.line_col(span.start).line;
-                let _ = writeln!(out, "  at {name} ({}:{line})", source.name());
+        // A span that does not fit its resolved source renders name-only rather than panicking the
+        // renderer — the REPL reuses one `SourceId` across entries, so a frame from a function
+        // defined in an *earlier* entry carries a span into text the current entry no longer has.
+        let located = frame.span.and_then(|span| {
+            let source = sources.source(span.source);
+            (span.start as usize <= source.text().len())
+                .then(|| (source.name(), source.line_col(span.start).line))
+        });
+        match located {
+            Some((file, line)) => {
+                let _ = writeln!(out, "  at {name} ({file}:{line})");
             }
             None => {
                 let _ = writeln!(out, "  at {name}");
