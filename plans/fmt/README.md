@@ -1,9 +1,11 @@
 # `noeta fmt` — a canonical source formatter
 
 **Status: PLANNED (branch `fmt`, worktree `.claude/worktrees/fmt`).** Research + scope complete;
-slices F0–F6 defined below, F7 (width-driven wrapping) deferred as an explicit follow-on. `fmt` is
-one of the two subcommands `docs/The-CLI.md` still lists as *intentionally absent* (the other is
-`check`); `build` has since shipped, so this closes half of that note.
+slices F0–F7 defined below — **width-driven wrapping is in v1** (F5), as an opt-in `[fmt]` knob
+(`wrap`, **default off**) so the existing corpus needs no reflow. `fmt` is one of the two subcommands
+`docs/The-CLI.md` still lists as *intentionally absent* (the other is `check`); `build` has since
+shipped, so this closes half of that note. (The parallel `noeta mcp` arc wraps this engine — it does
+not reimplement formatting — so `noeta-fmt` must stay a reusable library, which it is.)
 
 ## The one idea that shapes everything: canonical reformat, not whitespace touch-up
 
@@ -96,7 +98,7 @@ New crate **`noeta-fmt`** (sound: keeps formatting out of the compile DAG and th
 ```
 noeta-lexer ─┐
 noeta-parser ─┼─→ noeta-fmt ─→ noeta-cli (`noeta fmt`)
-noeta-ast  ──┘        └──────→ noeta-lsp (`textDocument/formatting`, F6/follow-on)
+noeta-ast  ──┘        └──────→ noeta-lsp (`textDocument/formatting`, F7)
 ```
 
 Pipeline for one file:
@@ -110,31 +112,41 @@ source ──lex_with_trivia──▶ (tokens, comments)
        ──SAFETY GATE──────▶ re-lex+parse the output, assert AST-equal-modulo-spans, else abort
 ```
 
-### The printer: a Wadler/Prettier `Doc` algebra (F2), driven conservatively first
+### The printer: a Wadler/Prettier `Doc` algebra (F2), two group-break policies
 
 We do **not** emit strings directly. We lower the AST to a small **`Doc` pretty-printing algebra**
 (`text`, `line`/`softline`/`hardline`, `nest`, `group`, `concat`) with a best-fit renderer — the
 Wadler-Leijen design that Prettier and every serious formatter uses. This is the "build it right"
-lever: it is *slightly* more than a conservative v1 strictly needs, but it makes width-driven wrapping
-(F7) an incremental change of *which breaks are soft* rather than a rewrite of the printer.
+lever: the *same* `Doc` tree serves both break policies, so wrapping is a choice of *how groups
+decide to break*, never a second printer.
 
-- **v1 (F3):** groups break based on *whether the source already had a line break there* (respect
-  author intent at statement/block granularity) — so v1 normalizes indentation, spacing, blank-line
-  runs, `;`, and alignment, but does **not** re-flow a long line the author wrote on one line, nor
-  join lines the author split. Predictable, low-surprise, reviewable diffs.
-- **F7 (deferred):** flip the relevant `group`s to width-driven (break at column limit), enabling
-  argument-list / method-chain / long-union wrapping. Pure printer-policy change, no structural churn.
+The `wrap` config knob selects the group-break policy for the whole document:
+
+- **`wrap = false` (default) — source-directed.** A `group` breaks iff the source already had a line
+  break inside it (respect author intent at statement/block granularity). Normalizes indentation,
+  spacing, blank-line runs, continuation indent, and (per config) match-arm arrows, but does **not**
+  re-flow a long line the author wrote on one line, nor join lines the author split. This is why the
+  existing corpus needs **no reflow** — a file that is already spaced/indented sanely comes out
+  essentially unchanged. Predictable, low-surprise, reviewable diffs.
+- **`wrap = true` — width-driven.** A `group` breaks iff it does not fit in `line_width` columns (the
+  classic Wadler best-fit), ignoring the author's original breaks entirely: long argument lists,
+  method / pipeline chains, and long `A | B | C` unions wrap; short broken things join. Fully
+  canonical layout. Same `Doc`, same renderer — only the fits-test policy differs.
+
+Both policies are deterministic, so safety + idempotency hold under either. `wrap` is a single
+whole-document setting in v1 (not per-construct); finer control is a later follow-on.
 
 ### Continuation indentation (pipelines & chains) — a first-class F3 requirement
 
 A statement that spills onto multiple lines must indent its continuation correctly; this is exactly
-what the `Doc` `nest` combinator is for, and it must be right even in conservative v1. The language
-keeps `|>` as its own left-associative `Expr::Pipeline` node (`noeta-ast/src/lib.rs:687`; loosest
-precedence), so `a |> f |> g |> h` is a nested chain. A pipeline chain (and likewise a `.`-method
-chain or a long `&&`/`||`/`??` chain) lowers to a single `group(nest(4, [head, line, "|> " seg,
-line, "|> " seg, ...]))`. In conservative v1 the group **breaks iff the author already broke it**;
-when broken, every `|>` segment sits on its own line indented one level under the statement start —
-never left at the statement's own column, never mis-stepped:
+what the `Doc` `nest` combinator is for, and it must be right under **both** break policies. The
+language keeps `|>` as its own left-associative `Expr::Pipeline` node (`noeta-ast/src/lib.rs:687`;
+loosest precedence), so `a |> f |> g |> h` is a nested chain. A pipeline chain (and likewise a
+`.`-method chain or a long `&&`/`||`/`??` chain) lowers to a single `group(nest(4, [head, line,
+"|> " seg, line, "|> " seg, ...]))`. The group **breaks** when the author already broke it
+(`wrap=false`) or when it overflows `line_width` (`wrap=true`); either way the `nest(4)` guarantees
+every `|>` segment sits on its own line indented one level under the statement start — never left at
+the statement's own column, never mis-stepped:
 
 ```
 // input (author broke the chain)               // output (canon: 4-sp continuation)
@@ -156,15 +168,25 @@ optional `[fmt]` table from that same file — **no new config file, no new disc
 
 ```toml
 [fmt]
+wrap             = false       # false (default) = keep author line breaks | true = width-driven wrapping
+line_width       = 100         # column budget used only when wrap = true
 match_arm_arrows = "compact"   # "compact" (default) | "align"
 ```
 
 Design intent: introduce the config *seam* now (a `FmtConfig` with defaults, threaded into the
-printer) so options are designed-in rather than bolted-on, but ship exactly **one** knob for v1 —
-match-arm `=>` alignment, the one the language owner explicitly wants to leave to the reader's taste.
-Default is `compact` (edit-stable, low-diff, doesn't force alignment on anyone); `align` is opt-in for
-teams that prefer the readability of column-aligned arrows. `noeta fmt --stdin` with no discoverable
-manifest uses defaults. Idempotency/safety hold under either setting (each is deterministic).
+printer) so options are designed-in rather than bolted-on, and ship exactly the knobs v1 needs:
+
+- **`wrap`** (default `false`) — off by default *specifically so the existing corpus needs no
+  reflow*: the formatter respects the line breaks already in the code and only normalizes
+  indent/spacing/blank-lines/continuation. A team that wants fully-canonical width-driven layout opts
+  in with `wrap = true` (+ `line_width`). Both are deterministic → idempotent + safe.
+- **`match_arm_arrows`** (default `compact`) — the one purely-aesthetic call the language owner wants
+  left to taste: `compact` (single space, edit-stable, forces alignment on no one) or `align`
+  (column-aligned `=>` for teams that prefer that readability).
+
+`noeta fmt --stdin` with no discoverable manifest uses these defaults (so piping a snippet from an
+editor with no project gives stable, corpus-compatible output). Idempotency/safety hold under every
+combination.
 
 ### Correctness guarantees (gates on every slice from F3)
 
@@ -189,7 +211,8 @@ indent** is overwhelmingly the house style) and the language's own normalization
 | Aspect | Canon |
 |---|---|
 | Indent | 4 spaces, never tabs |
-| Line width | 100 cols (soft; only bites once F7 wrapping is on) |
+| Line width | `line_width` (default 100 cols); bites only when `wrap = true` |
+| Wrapping | **configurable** via `[fmt] wrap` — `false` (default; keep author line breaks) or `true` (width-driven reflow of arg lists / chains / unions). See *The printer* + *Configuration* |
 | Braces | opening brace on the same line as its `struct`/`class`/`enum`/`fn`/`match`/block header (K&R), as the corpus already does |
 | Statements | one per line |
 | Trailing `;` | **preserved as written** — the language made line-end `;` optional; the formatter neither adds nor strips them, it keeps each statement's author choice. Presence is tracked as per-statement trivia (see below) |
@@ -197,11 +220,11 @@ indent** is overwhelmingly the house style) and the language's own normalization
 | `match` arms | **configurable** via `[fmt] match_arm_arrows` — `"compact"` (single space around `=>`, gofmt-style; **default**) or `"align"` (column-align `=>` across an arm group). See *Configuration* |
 | Continuation | a statement broken across lines (pipelines `\|>`, method chains, long binary/`??` chains) indents its continuation **one level (4 sp)** under the statement start; nested breaks add a level each. See *Continuation indentation* |
 | Spacing | one space around binary ops, after `,`/`:`, none inside `(`/`[`, none before `,`/`;` |
-| Trailing commas | added on the last element of any element list the formatter breaks onto its own line (F7); left as-is when inline (v1) |
+| Trailing commas | when `wrap = true`, added on the last element of any list broken onto its own line; left as-is when inline or when `wrap = false` |
 | String interpolation | untouched inside `${...}` beyond re-formatting the expression |
 | `@doc { }` text tiers | body preserved verbatim (it is free-form prose, not code) |
 
-## CLI surface (F5)
+## CLI surface (F6)
 
 Matches gofmt/rustfmt muscle memory:
 
@@ -232,47 +255,48 @@ gates re-run every slice.
   Plus the print-time semicolon-presence lookup helper.
 - **F2 — `Doc` algebra.** Wadler/Leijen `text|line|softline|hardline|nest|group|concat` + best-fit
   renderer + unit tests (fits/breaks, nesting, groups).
-- **F3 — AST→Doc printer (no comments).** Full coverage of the surface: `Stmt` (~13 variants), `Expr`
-  (~35 variants), `TypeRef`, `Pattern`, `MatchArm`, all decls (`struct`/`class`/`enum`/`impl`/`fn`),
-  attributes/`@tier` blocks, `use`/`namespace`. Driven conservatively (source-directed breaks).
-  Includes **continuation indentation** (pipeline/method/binary chains nest one level — targeted
-  test) and the `match_arm_arrows` knob (`compact`/`align`), and preserves per-statement `;`. *DoD:
-  safety + idempotency green over the comment-free subset of the corpus, under both arrow settings.*
+- **F3 — AST→Doc printer, source-directed (`wrap = false`).** Full coverage of the surface: `Stmt`
+  (~13 variants), `Expr` (~35 variants), `TypeRef`, `Pattern`, `MatchArm`, all decls
+  (`struct`/`class`/`enum`/`impl`/`fn`), attributes/`@tier` blocks, `use`/`namespace`. Groups break
+  source-directed. Includes **continuation indentation** (pipeline/method/binary chains nest one level
+  — targeted test) and the `match_arm_arrows` knob (`compact`/`align`), and preserves per-statement
+  `;`. *DoD: safety + idempotency green over the comment-free corpus, under both arrow settings.*
 - **F4 — comment reattachment.** Leading/trailing/dangling model + placement in the `Doc`; comment
   completeness property green over the **full** corpus; safety + idempotency now full-corpus.
-- **F5 — CLI completion.** `--check` (unified diff), `--stdin`, dir recursion, atomic in-place write,
+- **F5 — width-driven wrapping (`wrap = true`).** Add the width-driven fits-test policy to the renderer
+  (the group-break decision described in *The printer*): arg-list / method+pipeline-chain / long-union
+  wrapping, trailing commas on broken lists, `line_width` respected. No structural change to the
+  `Doc` lowering — only the fits policy and a few `group` boundaries. *DoD: safety + idempotency green
+  over the corpus with `wrap = true`; a wrapping golden-test suite (long lines → expected layout).
+  The default path (`wrap = false`) is unaffected, so the corpus stays byte-stable.*
+- **F6 — CLI completion.** `--check` (unified diff), `--stdin`, dir recursion, atomic in-place write,
   parse-failure + safety-failure handling, exit codes. End-to-end `verify` on real files.
-- **F6 — LSP `textDocument/formatting`.** Register the provider in `noeta-lsp` over the same engine
+- **F7 — LSP `textDocument/formatting`.** Register the provider in `noeta-lsp` over the same engine
   (range-formatting optional). *Editor "format on save" without shelling out.*
 
 ## Non-goals / deferred (recorded in `plans/deferred.md`)
 
-- **F7 — width-driven wrapping** (long arg lists, method-chain breaking, long-union wrapping, trailing
-  commas on broken lists). The `Doc` algebra is built for it; turning it on is a bounded follow-on but
-  a large *style-canon* decision (it reflows the whole corpus), so it ships separately behind its own
-  review.
 - **Comment *content* reflow** (rewrapping prose inside `//`/`/* */`) — never; we preserve comment
-  text verbatim.
+  text verbatim, even when `wrap = true`.
+- **Per-construct / per-region wrap control** — `wrap` is one whole-document setting in v1; finer
+  granularity is a later follow-on.
 - **Import sorting / `use` grouping**, **format-on-type**, **`// fmt: off` regions**, and a **broader
-  config surface** — later follow-ons. v1 ships the `[fmt]` seam with exactly one knob
-  (`match_arm_arrows`); further options are added deliberately, one review at a time, not opened up
-  wholesale.
+  config surface** — later follow-ons. v1 ships the `[fmt]` seam with exactly three knobs (`wrap`,
+  `line_width`, `match_arm_arrows`); further options are added deliberately, one review at a time, not
+  opened up wholesale.
 - **`check` subcommand** (the other "intentionally absent" verb) — unrelated arc.
 
 ## Decisions
 
 Resolved with the language owner:
 
-1. **Wrapping scope for v1** — **conservative** (source-directed breaks); width-driven wrapping is F7.
+1. **Wrapping** — **in v1** (slice F5) as the `[fmt] wrap` knob, **default `false`** (keep author
+   line breaks) so the existing corpus needs no reflow; `wrap = true` opts into width-driven layout.
 2. **Trailing `;`** — **preserved as written**; the formatter neither adds nor strips (per-statement
    trivia).
-3. **`match` `=>` alignment** — **configurable** via `[fmt] match_arm_arrows`, default `compact`,
-   `align` opt-in — so the readability of column alignment is available without being forced on
-   anyone.
+3. **`match` `=>` alignment** — **configurable** via `[fmt] match_arm_arrows`, **default `compact`**,
+   `align` opt-in — readability of column alignment available without being forced on anyone.
 4. **Continuation indentation** — multi-line pipelines/chains nest one 4-space level; a first-class
-   F3 requirement with its own test.
+   F3 requirement with its own test, correct under both `wrap` settings.
 
-Still to confirm before F3:
-
-- **Default for `match_arm_arrows`** — proposed `compact` (edit-stable, minimal diffs). Confirm, or
-  flip the default to `align`.
+No open decisions remain; F0 is ready to start.
