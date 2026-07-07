@@ -519,11 +519,7 @@ impl Printer<'_> {
         for p in params {
             docs.push(self.param(p)?);
         }
-        Ok(Doc::concat([
-            Doc::text("("),
-            Doc::join(docs, Doc::text(", ")),
-            Doc::text(")"),
-        ]))
+        Ok(self.delimited("(", docs, ")", false))
     }
 
     fn param(&self, param: &Param) -> Result<Doc, FmtError> {
@@ -1166,7 +1162,24 @@ impl Printer<'_> {
                     self.operand(rhs, p, true)?,
                 ])
             }
+            Expr::Pipeline { left, right, .. } if self.config.wrap => {
+                // Width-driven: flatten the whole `a |> b |> c` chain into one group so it lays out
+                // flat when it fits and one stage per line (indented) when it does not.
+                let (head, stages) = flatten_pipeline(left, right);
+                let mut tail = Vec::new();
+                for s in stages {
+                    tail.push(Doc::line());
+                    tail.push(Doc::text("|> "));
+                    tail.push(self.operand(s, 1, true)?);
+                }
+                Doc::concat([
+                    self.operand(head, 1, false)?,
+                    Doc::concat(tail).nest(INDENT),
+                ])
+                .group()
+            }
             Expr::Pipeline { left, right, .. } => {
+                // Source-directed: break at the operator only where the author did.
                 let sep = if self.broke_between(left.span().end, right.span().start) {
                     Doc::concat([Doc::hardline(), Doc::text("|> ")]).nest(INDENT)
                 } else {
@@ -1196,25 +1209,25 @@ impl Printer<'_> {
                 Doc::text("]"),
             ]),
             Expr::List { items, .. } => {
-                Doc::concat([Doc::text("["), self.comma_seq(items)?, Doc::text("]")])
+                let mut ds = Vec::new();
+                for i in items {
+                    ds.push(self.expr(i)?);
+                }
+                self.delimited("[", ds, "]", false)
             }
             Expr::Tuple { items, .. } => {
-                Doc::concat([Doc::text("("), self.comma_seq(items)?, Doc::text(")")])
+                let mut ds = Vec::new();
+                for i in items {
+                    ds.push(self.expr(i)?);
+                }
+                self.delimited("(", ds, ")", false)
             }
             Expr::Map { entries, .. } => {
-                if entries.is_empty() {
-                    Doc::text("{}")
-                } else {
-                    let mut ds = Vec::new();
-                    for (k, v) in entries {
-                        ds.push(Doc::concat([self.expr(k)?, Doc::text(": "), self.expr(v)?]));
-                    }
-                    Doc::concat([
-                        Doc::text("{"),
-                        Doc::join(ds, Doc::text(", ")),
-                        Doc::text("}"),
-                    ])
+                let mut ds = Vec::new();
+                for (k, v) in entries {
+                    ds.push(Doc::concat([self.expr(k)?, Doc::text(": "), self.expr(v)?]));
                 }
+                self.delimited("{", ds, "}", false)
             }
             Expr::Range {
                 start,
@@ -1321,21 +1334,50 @@ impl Printer<'_> {
     }
 
     /// A parenthesized, comma-separated argument list.
-    fn arg_list(&self, args: &[Expr]) -> Result<Doc, FmtError> {
-        Ok(Doc::concat([
-            Doc::text("("),
-            self.comma_seq(args)?,
-            Doc::text(")"),
-        ]))
+    /// A comma-delimited `open … close` sequence. With `wrap = false` (default) it lays out flat —
+    /// `[a, b, c]`, or `{ a, b }` when `spaced` — reproducing the pre-wrap output byte-for-byte. With
+    /// `wrap = true` it becomes a width-driven [`Doc::group`]: flat if it fits [`FmtConfig::line_width`],
+    /// otherwise one element per line, indented, with the delimiters on their own lines. No trailing
+    /// comma (call arguments reject one).
+    fn delimited(&self, open: &str, elems: Vec<Doc>, close: &str, spaced: bool) -> Doc {
+        if elems.is_empty() {
+            return Doc::text(format!("{open}{close}"));
+        }
+        if self.config.wrap {
+            let boundary = if spaced { Doc::line() } else { Doc::softline() };
+            Doc::concat([
+                Doc::text(open),
+                Doc::concat([
+                    boundary.clone(),
+                    Doc::join(elems, Doc::concat([Doc::text(","), Doc::line()])),
+                ])
+                .nest(INDENT),
+                boundary,
+                Doc::text(close),
+            ])
+            .group()
+        } else {
+            let inner = Doc::join(elems, Doc::text(", "));
+            if spaced {
+                Doc::concat([
+                    Doc::text(open),
+                    Doc::text(" "),
+                    inner,
+                    Doc::text(" "),
+                    Doc::text(close),
+                ])
+            } else {
+                Doc::concat([Doc::text(open), inner, Doc::text(close)])
+            }
+        }
     }
 
-    /// Comma-separated expressions (no surrounding delimiter).
-    fn comma_seq(&self, items: &[Expr]) -> Result<Doc, FmtError> {
+    fn arg_list(&self, args: &[Expr]) -> Result<Doc, FmtError> {
         let mut ds = Vec::new();
-        for i in items {
-            ds.push(self.expr(i)?);
+        for a in args {
+            ds.push(self.expr(a)?);
         }
-        Ok(Doc::join(ds, Doc::text(", ")))
+        Ok(self.delimited("(", ds, ")", false))
     }
 
     fn interp(&self, parts: &[StrPart]) -> Result<Doc, FmtError> {
@@ -1441,9 +1483,8 @@ impl Printer<'_> {
             return Ok(Doc::text(format!("{} {{}}", obj.type_name)));
         }
         Ok(Doc::concat([
-            Doc::text(format!("{} {{ ", obj.type_name)),
-            Doc::join(ds, Doc::text(", ")),
-            Doc::text(" }"),
+            Doc::text(format!("{} ", obj.type_name)),
+            self.delimited("{", ds, "}", true),
         ]))
     }
 
@@ -1543,6 +1584,19 @@ fn head_is_object(e: &Expr) -> bool {
         Expr::Range { start, .. } => head_is_object(start),
         _ => false,
     }
+}
+
+/// Flatten a left-nested pipeline chain `((head |> s1) |> s2) |> …` given its outermost node's
+/// `left`/`right`, returning `(head, [s1, s2, …])` in source order.
+fn flatten_pipeline<'e>(left: &'e Expr, right: &'e Expr) -> (&'e Expr, Vec<&'e Expr>) {
+    let mut stages = vec![right];
+    let mut head = left;
+    while let Expr::Pipeline { left, right, .. } = head {
+        stages.push(right);
+        head = left;
+    }
+    stages.reverse();
+    (head, stages)
 }
 
 fn binop_prec(op: BinaryOp) -> u8 {

@@ -42,20 +42,19 @@
 //!
 //! # Status
 //!
-//! **F0–F4** done: crate skeleton, [`FmtConfig`] seam, the [`format_source`] entry point with the
-//! safety gate, the **full source-directed printer** ([`print`], on the [`doc`] algebra) — total
-//! over every parseable program (precedence-minimal parentheses, restricted-head handling,
-//! list-spread re-sugaring, per-member `;`, config-driven match-arm alignment) — and **comment
-//! reattachment** (leading / trailing / dangling, interleaved through statement blocks, struct/class
-//! and enum bodies, and match arms; every comment preserved). Width-driven wrapping (`wrap`) is F5.
+//! **F0–F5** done: crate skeleton, [`FmtConfig`] seam, the [`format_source`] entry point with the
+//! safety gate, the **full printer** ([`print`], on the [`doc`] algebra) — total over every parseable
+//! program (precedence-minimal parentheses, restricted-head handling, list-spread re-sugaring,
+//! per-member `;`, config-driven match-arm alignment), **comment reattachment** (leading / trailing /
+//! dangling), and **width-driven wrapping** ([`FmtConfig::wrap`]: default off keeps author breaks and
+//! is byte-stable; on, delimited sequences and pipeline chains break at [`FmtConfig::line_width`]).
+//! Remaining: the CLI polish (F6) and the LSP provider (F7).
 
 use noeta_diagnostics::Diagnostic;
 use noeta_span::{Source, SourceId};
 
-// The Wadler pretty-printing algebra (F2). F3 lowers the printer onto it using hardlines + text
-// (source-directed policy); the width-driven combinators (`group`/`line`/`softline`) are exercised
-// when F5 adds `wrap = true`, so they stay `allow(dead_code)` until then.
-#[allow(dead_code)]
+// The Wadler pretty-printing algebra (F2): source-directed hardlines (`wrap = false`) and
+// width-driven groups (`wrap = true`) both lower onto it.
 mod doc;
 mod print;
 mod safety;
@@ -176,6 +175,49 @@ mod tests {
 
     fn fmt(text: &str) -> Result<String, FmtError> {
         format_source("test.noe", text, &FmtConfig::default())
+    }
+
+    fn fmt_wrapped(text: &str, width: usize) -> Result<String, FmtError> {
+        format_source(
+            "test.noe",
+            text,
+            &FmtConfig {
+                wrap: true,
+                line_width: width,
+                ..FmtConfig::default()
+            },
+        )
+    }
+
+    #[test]
+    fn wrap_breaks_long_sequences_but_not_short_ones() {
+        // Fits → flat.
+        assert_eq!(
+            fmt_wrapped("echo [1, 2, 3]", 40).unwrap(),
+            "echo [1, 2, 3]\n"
+        );
+        // Exceeds width → one element per line, indented, no trailing comma.
+        assert_eq!(
+            fmt_wrapped("echo [11111, 22222, 33333]", 12).unwrap(),
+            "echo [\n    11111,\n    22222,\n    33333\n]\n"
+        );
+    }
+
+    #[test]
+    fn wrap_breaks_pipeline_chains() {
+        assert_eq!(
+            fmt_wrapped("y = aaaa |> bbbb() |> cccc() |> dddd()", 20).unwrap(),
+            "y = aaaa\n    |> bbbb()\n    |> cccc()\n    |> dddd()\n"
+        );
+    }
+
+    #[test]
+    fn wrap_false_leaves_collections_flat() {
+        // The default policy never width-wraps (byte-stable with the pre-wrap printer).
+        assert_eq!(
+            fmt("echo [11111, 22222, 33333]").unwrap(),
+            "echo [11111, 22222, 33333]\n"
+        );
     }
 
     #[test]

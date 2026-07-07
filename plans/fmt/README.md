@@ -283,12 +283,16 @@ gates re-run every slice.
   source-directed (no forced blanks). **Completeness gate added to the corpus harness** (input vs
   output comment multiset) — green over all 521 files, still safe + idempotent. Also fixed a
   gate-invisible fidelity bug: enum-variant/field `;` (whose span *covers* the `;`) is now preserved.
-- **F5 — width-driven wrapping (`wrap = true`).** Add the width-driven fits-test policy to the renderer
-  (the group-break decision described in *The printer*): arg-list / method+pipeline-chain / long-union
-  wrapping, trailing commas on broken lists, `line_width` respected. No structural change to the
-  `Doc` lowering — only the fits policy and a few `group` boundaries. *DoD: safety + idempotency green
-  over the corpus with `wrap = true`; a wrapping golden-test suite (long lines → expected layout).
-  The default path (`wrap = false`) is unaffected, so the corpus stays byte-stable.*
+- **F5 — width-driven wrapping (`wrap = true`). ✅ DONE.** A `delimited` helper renders every
+  comma sequence (call args, lists, tuples, maps, object literals, params) flat when `wrap = false`
+  (byte-stable) and as a width-driven `group` when `wrap = true` — one element per line, indented,
+  delimiters on their own lines. Pipeline chains flatten into a single group so `a |> b |> c` breaks
+  as one `|>`-per-line unit. **No trailing commas** (verified: call args reject one; universally safe
+  without). The corpus harness now runs **both** policies — safety + idempotency + completeness green
+  over all 521 files under each; the default stays byte-identical. Golden unit tests pin the wrapped
+  layouts. *Deferred refinements (noted): width-wrapping of long binary chains, method chains, and
+  `A | B | C` unions (currently source-directed/flat even under `wrap`); trailing commas where the
+  grammar allows.*
 - **F6 — CLI completion.** `--check` (unified diff), `--stdin`, dir recursion, atomic in-place write,
   parse-failure + safety-failure handling, exit codes. End-to-end `verify` on real files.
 - **F7 — LSP `textDocument/formatting`.** Register the provider in `noeta-lsp` over the same engine

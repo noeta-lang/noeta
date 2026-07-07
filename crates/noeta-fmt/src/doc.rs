@@ -100,7 +100,9 @@ impl Doc {
         Doc::Group(Box::new(self))
     }
 
-    /// Append `other` after `self`.
+    /// Append `other` after `self`. A test-only builder convenience (the printer uses
+    /// [`Doc::concat`]); `#[cfg(test)]` so it does not read as dead code in release builds.
+    #[cfg(test)]
     pub fn append(self, other: Doc) -> Doc {
         match self {
             Doc::Concat(mut v) => {

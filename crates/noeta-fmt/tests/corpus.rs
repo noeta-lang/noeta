@@ -64,42 +64,62 @@ fn collect_noe(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[test]
 fn corpus_is_safe_and_idempotent() {
-    let config = FmtConfig::default();
+    // Both formatting policies must be safe, idempotent, and comment-complete: the default
+    // (source-directed) and width-driven wrapping (`wrap = true`).
+    let configs = [
+        ("wrap=false", FmtConfig::default()),
+        (
+            "wrap=true",
+            FmtConfig {
+                wrap: true,
+                line_width: 80,
+                ..FmtConfig::default()
+            },
+        ),
+    ];
     let files = corpus_files();
     assert!(!files.is_empty(), "found no corpus files — wrong root?");
 
-    let (mut ok, mut parse_err) = (0u32, 0u32);
-
-    for path in &files {
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        let name = path.to_string_lossy();
-        match format_source(&name, &text, &config) {
-            Ok(once) => {
-                ok += 1;
-                // Idempotency: formatting the output again must be a fixed point.
-                let twice = format_source(&name, &once, &config)
-                    .unwrap_or_else(|e| panic!("{name}: re-format failed: {e}"));
-                assert_eq!(once, twice, "{name}: formatting is not idempotent");
-                // Completeness: every comment in the input survives to the output.
-                assert_eq!(
-                    comment_texts(&text),
-                    comment_texts(&once),
-                    "{name}: comments were lost or duplicated"
-                );
+    for (label, config) in configs {
+        let (mut ok, mut parse_err) = (0u32, 0u32);
+        for path in &files {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let name = path.to_string_lossy();
+            match format_source(&name, &text, &config) {
+                Ok(once) => {
+                    ok += 1;
+                    // Idempotency: formatting the output again must be a fixed point.
+                    let twice = format_source(&name, &once, &config)
+                        .unwrap_or_else(|e| panic!("[{label}] {name}: re-format failed: {e}"));
+                    assert_eq!(
+                        once, twice,
+                        "[{label}] {name}: formatting is not idempotent"
+                    );
+                    // Completeness: every comment in the input survives to the output.
+                    assert_eq!(
+                        comment_texts(&text),
+                        comment_texts(&once),
+                        "[{label}] {name}: comments were lost or duplicated"
+                    );
+                }
+                // Intentional error-case corpus files do not parse; the formatter declines them.
+                Err(FmtError::Parse(_)) => parse_err += 1,
+                // A safety failure is always a printer bug — surface it loudly.
+                Err(FmtError::Safety(why)) => {
+                    panic!("[{label}] {name}: SAFETY GATE tripped: {why}")
+                }
             }
-            // Intentional error-case corpus files do not parse; the formatter declines them.
-            Err(FmtError::Parse(_)) => parse_err += 1,
-            // A safety failure is always a printer bug — surface it loudly.
-            Err(FmtError::Safety(why)) => panic!("{name}: SAFETY GATE tripped: {why}"),
         }
+        eprintln!(
+            "fmt corpus [{label}]: {} files | ok+idempotent {ok} | parse-err {parse_err}",
+            files.len()
+        );
+        // The printer is total over parseable programs: every non-error file must format.
+        assert!(
+            ok > 500,
+            "[{label}] expected most corpus files to format, got {ok}"
+        );
     }
-
-    eprintln!(
-        "fmt corpus: {} files | ok+idempotent {ok} | parse-err {parse_err}",
-        files.len()
-    );
-    // The printer is total over parseable programs: every non-error file must format.
-    assert!(ok > 500, "expected most corpus files to format, got {ok}");
 }
