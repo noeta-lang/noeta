@@ -242,8 +242,11 @@ fn spawn_run(
             json!({ "reason": "started", "threadId": MAIN_THREAD_ID }),
         ));
         let run = match session::compile_file(&path) {
-            Ok(compiled) => {
+            Ok(mut compiled) => {
                 let stops = resolve_breakpoints(&compiled.module, &compiled.sources, &breakpoints);
+                // The launch's session checker moves into the debugger (C3): console fragments
+                // check on this worker, against everything the program declared and bound.
+                let checker = std::mem::take(&mut compiled.checker);
                 let hook = Box::new(DapDebugger::new(
                     stops,
                     stop_on_entry,
@@ -252,6 +255,7 @@ fn spawn_run(
                     paused,
                     out.clone(),
                     resume,
+                    checker,
                 ));
                 session::run_compiled(compiled, Some(hook))
             }
@@ -1033,6 +1037,67 @@ mod tests {
         );
         // ...and the frame local is untouched.
         assert_eq!(session.evaluate("xs.len()")["body"]["result"], "3");
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    /// C3 (session-checker): a console fragment type-checks against the program's session BEFORE
+    /// it runs — an ill-typed fragment answers with its `E0xxx` diagnostics and the VM never sees
+    /// it; clean fragments (and the session) are unaffected.
+    #[test]
+    fn console_fragments_type_check_before_running() {
+        let path = fixture(
+            "console_check",
+            "fn twice(n: int): int { return n * 2 }\n\
+             fn probe(): void {\n    \
+             mut xs = [10, 20, 30]\n    \
+             echo \"here\"\n}\n\
+             probe()\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 4 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+
+        // A mut retype inside the fragment is a STATIC error now — E0007 at the console, skipped.
+        let retype = session.evaluate("mut y: int = 1; y = \"s\"");
+        assert_eq!(retype["success"], false, "{retype:#?}");
+        assert!(
+            retype["message"].as_str().unwrap().contains("E0007"),
+            "console error carries the code: {retype:#?}"
+        );
+        // A wrong-arity call to a PROGRAM function is caught statically too.
+        let arity = session.evaluate("twice(1, 2)");
+        assert_eq!(arity["success"], false, "{arity:#?}");
+        assert!(
+            arity["message"].as_str().unwrap().contains("E00"),
+            "arity error carries a code: {arity:#?}"
+        );
+        // The session is untouched: clean fragments still run, frame locals included.
+        assert_eq!(session.evaluate("twice(xs.len())")["body"]["result"], "6");
+        // A setVariable VALUE is checked the same way.
+        session.send("scopes", json!({ "frameId": 0 }));
+        let var_ref = session.response("scopes")["body"]["scopes"][0]["variablesReference"]
+            .as_i64()
+            .unwrap();
+        session.send(
+            "setVariable",
+            json!({ "variablesReference": var_ref, "name": "xs", "value": "twice(1, 2, 3)" }),
+        );
+        let bad_set = session.response("setVariable");
+        assert_eq!(bad_set["success"], false, "{bad_set:#?}");
 
         session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
         session.disconnect_and_join();

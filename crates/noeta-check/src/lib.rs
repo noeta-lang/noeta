@@ -192,24 +192,28 @@ fn check_all_impl(program: &Program, record_expr_types: bool) -> Checked {
     checker.compute_relevance(program);
     checker.check_semantic_roles(program);
     checker.check_program(program);
-    Checked {
-        diagnostics: checker.diags,
-        expr_types: checker.sites.expr_types,
-        sites: Sites {
-            type_of_sites: checker.sites.type_of_sites,
-            construction_sites: checker.sites.construction_sites,
-            packed_list_sites: checker.sites.packed_list_sites,
-            ext_call_sites: checker.sites.ext_call_sites,
-            map_packed_sites: checker.sites.map_packed_sites,
-            index_field_sites: checker.sites.index_field_sites,
-            for_stream_sites: checker.sites.for_stream_sites,
-            width_sites: checker.sites.width_sites,
-            handle_sites: checker.sites.handle_sites,
-            bound_handle_sites: checker.sites.bound_handle_sites,
-            f32_literal_sites: checker.sites.f32_literal_sites,
-            destructor_relevance: checker.relevance,
-        },
-    }
+    checker.into_checked()
+}
+
+/// [`check_all`], but the checker **stays alive as a [`SessionChecker`]** — the debug console's
+/// seed (session-checker C3): console fragments then check against everything the program
+/// declared and bound, exactly as later REPL entries check against earlier ones. The returned
+/// [`Checked`] is identical to [`check_all`]'s (same phases, same env — merely kept instead of
+/// dropped, the same move `compile_with_sites_session` made for the compiler).
+pub fn check_all_session(program: &Program) -> (Checked, SessionChecker) {
+    let mut checker = Checker::default();
+    checker.register_prelude();
+    checker.collect(program);
+    checker.compute_relevance(program);
+    checker.check_semantic_roles(program);
+    let mut env: Env = vec![HashMap::new()];
+    checker.check_program_in(program, &mut env);
+    let checked = Checked {
+        diagnostics: std::mem::take(&mut checker.diags),
+        expr_types: checker.sites.expr_types.clone(),
+        sites: checker.sites.clone().to_sites(checker.relevance.clone()),
+    };
+    (checked, SessionChecker { checker, env })
 }
 
 /// A persistent, incremental checker for a REPL / debug-console session (session-checker C0/C1):
@@ -304,20 +308,10 @@ impl SessionChecker {
     /// (span-keyed by per-entry `SourceId`s, so a consumer's lookups only ever hit the right
     /// entry). What a checked session compile (C5) threads into `compile_with_sites`.
     pub fn sites_snapshot(&self) -> Sites {
-        Sites {
-            type_of_sites: self.checker.sites.type_of_sites.clone(),
-            construction_sites: self.checker.sites.construction_sites.clone(),
-            packed_list_sites: self.checker.sites.packed_list_sites.clone(),
-            ext_call_sites: self.checker.sites.ext_call_sites.clone(),
-            map_packed_sites: self.checker.sites.map_packed_sites.clone(),
-            index_field_sites: self.checker.sites.index_field_sites.clone(),
-            for_stream_sites: self.checker.sites.for_stream_sites.clone(),
-            width_sites: self.checker.sites.width_sites.clone(),
-            handle_sites: self.checker.sites.handle_sites.clone(),
-            bound_handle_sites: self.checker.sites.bound_handle_sites.clone(),
-            f32_literal_sites: self.checker.sites.f32_literal_sites.clone(),
-            destructor_relevance: self.checker.relevance.clone(),
-        }
+        self.checker
+            .sites
+            .clone()
+            .to_sites(self.checker.relevance.clone())
     }
 
     /// Reset the per-entry lexical scratch to its neutral state. The whole-program phases leave
@@ -674,6 +668,29 @@ struct SiteMaps {
     f32_literal_sites: HashSet<Span>,
 }
 
+impl SiteMaps {
+    /// Project the accumulator into the public compile-input [`Sites`] bundle (consuming the
+    /// accumulated maps; `expr_types` stays behind — it is the IDE index, not a compile input).
+    /// One projection shared by `check_all`, `check_all_session`, and the session snapshot, so the
+    /// three can never drift field-wise.
+    fn to_sites(self, destructor_relevance: DestructorRelevance) -> Sites {
+        Sites {
+            type_of_sites: self.type_of_sites,
+            construction_sites: self.construction_sites,
+            packed_list_sites: self.packed_list_sites,
+            ext_call_sites: self.ext_call_sites,
+            map_packed_sites: self.map_packed_sites,
+            index_field_sites: self.index_field_sites,
+            for_stream_sites: self.for_stream_sites,
+            width_sites: self.width_sites,
+            handle_sites: self.handle_sites,
+            bound_handle_sites: self.bound_handle_sites,
+            f32_literal_sites: self.f32_literal_sites,
+            destructor_relevance,
+        }
+    }
+}
+
 // `Clone` so a [`SessionChecker`] entry is transactional (clone-before, restore-on-error) —
 // prompt-scale state, so the per-entry clone is cheap insurance, never a hot path.
 #[derive(Clone, Default)]
@@ -907,6 +924,19 @@ impl Checker {
                      cannot be shadowed",
                 ),
             );
+        }
+    }
+
+    /// Consume the checker into the public [`Checked`] result — the whole-program finisher
+    /// (`check_all` moves; the session flavor clones and keeps the checker alive instead).
+    fn into_checked(self) -> Checked {
+        let relevance = self.relevance;
+        let mut sites = self.sites;
+        let expr_types = std::mem::take(&mut sites.expr_types);
+        Checked {
+            diagnostics: self.diags,
+            expr_types,
+            sites: sites.to_sites(relevance),
         }
     }
 

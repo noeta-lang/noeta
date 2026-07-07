@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use noeta_ast::Program;
+use noeta_ast::{ClosureBody, Expr, Param, Program, Stmt};
 use noeta_bytecode::Module;
 use noeta_parser::parse_fragment;
 use noeta_span::{SourceId, SourceMap};
@@ -197,6 +197,12 @@ pub struct DapDebugger {
     /// The step in progress, if the last resume was a step. `Some` between a `Resume::Step` and the
     /// instruction it lands on; `None` while running freely.
     step: Option<StepState>,
+    /// The session type-checker seeded from the launch's checked compile (session-checker C3): a
+    /// console/watch fragment is checked against everything the program declared and bound BEFORE
+    /// it is handed to the VM — an ill-typed fragment answers with its `E0xxx` diagnostics and the
+    /// VM never sees it. Runs here (the worker) because this thread owns the paused view the
+    /// wrapper's parameters come from; hover skips it (the purity gate already bounds hover).
+    checker: noeta_check::SessionChecker,
     /// Whether we are already inside a stop, waiting for a resume. Set when a pause first announces
     /// itself (captures the stack + emits `stopped`); it lets the VM re-consult the debugger after
     /// servicing an evaluate (the D5.2 trampoline leaves and re-enters `before_op`) without
@@ -206,6 +212,7 @@ pub struct DapDebugger {
 }
 
 impl DapDebugger {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stops: HashSet<(u32, usize)>,
         stop_on_entry: bool,
@@ -214,6 +221,7 @@ impl DapDebugger {
         paused: Paused,
         events: Sender<Value>,
         resume: Receiver<Resume>,
+        checker: noeta_check::SessionChecker,
     ) -> DapDebugger {
         DapDebugger {
             stops,
@@ -226,6 +234,7 @@ impl DapDebugger {
             resume,
             step: None,
             mid_pause: false,
+            checker,
         }
     }
 
@@ -251,55 +260,135 @@ impl DapDebugger {
         self.wait(view)
     }
 
-    /// Block for one resume command. Continue / step / terminate leave the pause (via
-    /// [`DapDebugger::finish`]); an [`Resume::Evaluate`] is handed to the VM as
-    /// [`DebugAction::Evaluate`] — the VM services it with `&mut self`, then re-consults `before_op`,
-    /// which (seeing `mid_pause`) calls straight back here without re-announcing the stop. That
-    /// re-entry is how several watches/hovers get answered while the program stays parked at one
-    /// instruction — so this handles exactly one command and returns, no loop of its own.
+    /// Block until a resume command needs acting on. Continue / step / terminate leave the pause
+    /// (via [`DapDebugger::finish`]); an [`Resume::Evaluate`] is **type-checked first**
+    /// (session-checker C3) — an ill-typed fragment answers with its diagnostics right here and the
+    /// wait continues — and a clean one is handed to the VM as [`DebugAction::Evaluate`]. The VM
+    /// services it with `&mut self`, then re-consults `before_op`, which (seeing `mid_pause`)
+    /// calls straight back here without re-announcing the stop.
     fn wait(&mut self, view: &DebugView) -> DebugAction {
-        match self.resume.recv() {
-            // Ignore any step/continue that raced a termination request.
-            _ if self.terminate.load(Ordering::Relaxed) => self.finish(DebugAction::Terminate),
-            Ok(Resume::Continue) => self.finish(DebugAction::Continue),
-            // Arm the step relative to this pause point, then resume; `before_op` lands it.
-            Ok(Resume::Step(mode)) => {
-                self.step = Some(StepState {
-                    mode,
-                    origin_depth: view.depth(),
-                    origin_line: top_line(view, &self.sources),
-                });
-                self.finish(DebugAction::Continue)
+        loop {
+            match self.resume.recv() {
+                // Ignore any step/continue that raced a termination request.
+                _ if self.terminate.load(Ordering::Relaxed) => {
+                    return self.finish(DebugAction::Terminate);
+                }
+                Ok(Resume::Continue) => return self.finish(DebugAction::Continue),
+                // Arm the step relative to this pause point, then resume; `before_op` lands it.
+                Ok(Resume::Step(mode)) => {
+                    self.step = Some(StepState {
+                        mode,
+                        origin_depth: view.depth(),
+                        origin_line: top_line(view, &self.sources),
+                    });
+                    return self.finish(DebugAction::Continue);
+                }
+                // A console/watch fragment checks against the program's session first; only a
+                // clean one reaches the VM. Hover skips the check (its purity gate already bounds
+                // it, and mouse-over latency matters). We stay paused either way: `mid_pause`
+                // remains set and the captured stack is left in place.
+                Ok(Resume::Evaluate {
+                    program,
+                    text,
+                    frame,
+                    allow_calls,
+                    reply,
+                }) => {
+                    if allow_calls && let Err(message) = self.check_fragment(&program, frame, view)
+                    {
+                        let _ = reply.send(DebugEvalOutcome::Error(message));
+                        continue;
+                    }
+                    return DebugAction::Evaluate(DebugEvalRequest {
+                        program,
+                        text,
+                        frame,
+                        allow_calls,
+                        reply,
+                    });
+                }
+                // Hand the register write to the VM; we stay paused, exactly like an evaluate.
+                // The replacement value is checked like any console fragment.
+                Ok(Resume::SetVariable {
+                    name,
+                    value,
+                    frame,
+                    reply,
+                }) => {
+                    if let Err(message) = self.check_fragment(&value, frame, view) {
+                        let _ = reply.send(DebugEvalOutcome::Error(message));
+                        continue;
+                    }
+                    return DebugAction::SetVariable(DebugSetRequest {
+                        name,
+                        value,
+                        frame,
+                        reply,
+                    });
+                }
+                // Terminate, or the adapter dropped the channel (session gone).
+                Ok(Resume::Terminate) | Err(_) => return self.finish(DebugAction::Terminate),
             }
-            // Hand the evaluate to the VM (it may run a call). We stay paused: `mid_pause` remains set
-            // and the captured stack is left in place, so `before_op` resumes waiting after.
-            Ok(Resume::Evaluate {
-                program,
-                text,
-                frame,
-                allow_calls,
-                reply,
-            }) => DebugAction::Evaluate(DebugEvalRequest {
-                program,
-                text,
-                frame,
-                allow_calls,
-                reply,
-            }),
-            // Hand the register write to the VM; we stay paused, exactly like an evaluate.
-            Ok(Resume::SetVariable {
-                name,
-                value,
-                frame,
-                reply,
-            }) => DebugAction::SetVariable(DebugSetRequest {
-                name,
-                value,
-                frame,
-                reply,
-            }),
-            // Terminate, or the adapter dropped the channel (session gone).
-            Ok(Resume::Terminate) | Err(_) => self.finish(DebugAction::Terminate),
+        }
+    }
+
+    /// Type-check one console fragment against the program's session (session-checker C3): the
+    /// fragment is wrapped as a bare closure expression whose parameters are the selected frame's
+    /// in-scope locals — the same shape the VM compiles — and checked as one entry. Closure
+    /// parameters are inference-typed, so frame locals check as unconstrained (never a false
+    /// positive; refinement from runtime types is a follow-on); everything the fragment touches in
+    /// the PROGRAM — functions, methods, types, globals — checks precisely. `Err` carries the
+    /// rendered `E0xxx` lines. (The bare-closure wrapper commits nothing to the session: its
+    /// bindings are closure-locals to the checker, so cross-fragment console bindings stay
+    /// runtime-deferred — under-constrained, never wrong.)
+    fn check_fragment(
+        &mut self,
+        program: &Program,
+        frame: usize,
+        view: &DebugView,
+    ) -> Result<(), String> {
+        let Some(view_idx) = view.depth().checked_sub(frame + 1) else {
+            return Err(format!("no frame {frame} in the paused stack"));
+        };
+        let f = view.frame(view_idx);
+        let here = f.line_span();
+        let span = program.span;
+        let params = f
+            .locals()
+            .filter(|(_, def_span, _)| match here {
+                Some(h) => def_span.start < h.start,
+                None => true,
+            })
+            .map(|(name, _, _)| Param {
+                name: name.to_string(),
+                name_span: span,
+                ty: None,
+                default: None,
+                span,
+            })
+            .collect();
+        let wrapper = Program {
+            stmts: vec![Stmt::Expr {
+                expr: Expr::Closure {
+                    params,
+                    ret: None,
+                    body: ClosureBody::Block(program.stmts.clone()),
+                    span,
+                },
+                span,
+            }],
+            span,
+        };
+        let diagnostics = self.checker.check_entry(&wrapper);
+        let errors: Vec<String> = diagnostics
+            .iter()
+            .filter(|d| d.severity == noeta_diagnostics::Severity::Error)
+            .map(|d| format!("{}: {}", d.code, d.message))
+            .collect();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("\n"))
         }
     }
 

@@ -25,6 +25,9 @@ pub struct Compiled {
     pub module: Module,
     pub sources: SourceMap,
     pub session: noeta_compiler::SessionCompiler,
+    /// The session type-checker the checked launch compile left behind (session-checker C3) —
+    /// console fragments check against it before running.
+    pub checker: noeta_check::SessionChecker,
 }
 
 /// One chunk of program output, tagged with the DAP `output`-event category it belongs to.
@@ -76,7 +79,9 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
         Ok(Ok(linked)) => linked,
     };
 
-    let checked = noeta_check::check_all(&linked.program);
+    // The session flavor keeps the checker alive (C3): console fragments will check against the
+    // typing environment this whole-program check accumulates.
+    let (checked, checker) = noeta_check::check_all_session(&linked.program);
     if !checked.diagnostics.is_empty() {
         return Err(RunOutput::failed(
             render_mapped(&linked.sources, checked.diagnostics.iter()),
@@ -89,6 +94,7 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
             module,
             sources: linked.sources,
             session,
+            checker,
         }),
         Err(reason) => Err(RunOutput::failed(format!("noeta: {reason}\n"), 1)),
     }
