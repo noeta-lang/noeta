@@ -1081,7 +1081,9 @@ fn a_panicking_isolate_ships_its_stack_trace_home() {
         .stderr(predicate::str::contains(
             "stack trace (most recent call first):",
         ))
-        .stderr(predicate::str::contains("at explode (").and(predicate::str::contains(":2)")));
+        .stderr(predicate::str::contains("at explode (").and(predicate::str::contains(":2)")))
+        // The async body's synthesized step closure inherits the fn's name (`Func::name`).
+        .stderr(predicate::str::contains("at work ("));
 }
 
 #[test]

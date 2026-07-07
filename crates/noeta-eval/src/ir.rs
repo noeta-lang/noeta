@@ -448,7 +448,7 @@ impl Interpreter {
     fn exec_ir_decl(&mut self, decl: &noeta_ir::Decl) {
         match decl {
             noeta_ir::Decl::Fn { name, func, .. } => {
-                let closure = self.make_ir_closure(func, Some(name.clone()));
+                let closure = self.make_ir_closure(func);
                 self.scope
                     .declare(name.clone(), Value::Function(Rc::new(closure)), false);
             }
@@ -460,16 +460,17 @@ impl Interpreter {
     }
 
     /// Build a closure value from a lowered IR function template, capturing the current
-    /// lexical scope — the IR analogue of `declare_fn`'s/`Expr::Closure`'s construction. `name` is
-    /// the declared name for the abort traceback (`"f"`, `"Type.method"`); `None` for an anonymous
-    /// closure value — the same naming the VM threads onto its `Chunk`s.
-    fn make_ir_closure(&self, func: &Rc<noeta_ir::Func>, name: Option<String>) -> Closure {
+    /// lexical scope — the IR analogue of `declare_fn`'s/`Expr::Closure`'s construction. The trace
+    /// name comes from the IR itself (`Func::name`, set at lowering: `"f"`, `"Type.method"`, an
+    /// async/generator step under its enclosing function's name, `None` for a user's anonymous
+    /// closure) — the same single source the VM's synthesized-closure prototypes read.
+    fn make_ir_closure(&self, func: &Rc<noeta_ir::Func>) -> Closure {
         Closure::new(
             func.params.clone(),
             func.defaults.clone(),
             Rc::clone(func),
             Rc::clone(&self.scope),
-            name,
+            func.name.clone(),
         )
     }
 
@@ -488,13 +489,7 @@ impl Interpreter {
         let methods = strukt
             .methods
             .iter()
-            .map(|(name, func)| {
-                (
-                    name.clone(),
-                    // Methods trace as `Type.method`, matching the VM's chunk naming.
-                    Rc::new(self.make_ir_closure(func, Some(format!("{}.{name}", decl.name)))),
-                )
-            })
+            .map(|(name, func)| (name.clone(), Rc::new(self.make_ir_closure(func))))
             .collect();
         let def = TypeDef {
             name: decl.name.clone(),
@@ -532,13 +527,7 @@ impl Interpreter {
         let methods = en
             .methods
             .iter()
-            .map(|(name, func)| {
-                (
-                    name.clone(),
-                    // Methods trace as `Type.method`, matching the VM's chunk naming.
-                    Rc::new(self.make_ir_closure(func, Some(format!("{}.{name}", decl.name)))),
-                )
-            })
+            .map(|(name, func)| (name.clone(), Rc::new(self.make_ir_closure(func))))
             .collect();
         let def = EnumDef {
             name: decl.name.clone(),
@@ -564,13 +553,7 @@ impl Interpreter {
         let methods = class
             .methods
             .iter()
-            .map(|(name, func)| {
-                (
-                    name.clone(),
-                    // Methods trace as `Type.method`, matching the VM's chunk naming.
-                    Rc::new(self.make_ir_closure(func, Some(format!("{}.{name}", decl.name)))),
-                )
-            })
+            .map(|(name, func)| (name.clone(), Rc::new(self.make_ir_closure(func))))
             .collect();
         let def = TypeDef {
             name: decl.name.clone(),
@@ -1355,7 +1338,7 @@ impl Interpreter {
                 )
             }
             noeta_ir::Rvalue::Closure { func, .. } => {
-                Ok(Value::Function(Rc::new(self.make_ir_closure(func, None))))
+                Ok(Value::Function(Rc::new(self.make_ir_closure(func))))
             }
             // Wrap the step closure into a generator iterator (Track G.1b) — the tree-walker mirror of
             // the VM's `Op::MakeGen`.

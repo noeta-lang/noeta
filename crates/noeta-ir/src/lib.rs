@@ -715,6 +715,12 @@ impl Stmt {
 /// `temp_count` sizes the activation's temporary frame.
 #[derive(Debug, Clone)]
 pub struct Func {
+    /// The declared name this callable traces under (`"f"`, `"Type.method"`, `"Type::destruct"`),
+    /// set at lowering — `None` for a user's anonymous closure. A synthesized async/generator step
+    /// closure inherits its **enclosing** function's name, so an `async fn work` panic traces as
+    /// `work`, not `<anonymous>`. Both backends read this one field, so trace names agree by
+    /// construction.
+    pub name: Option<String>,
     pub params: Vec<String>,
     /// Each parameter's default thunk, parallel to `params` (`None` for a required
     /// parameter). A default is evaluated in the *captured* scope when its argument is

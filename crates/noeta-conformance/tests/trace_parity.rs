@@ -129,6 +129,41 @@ fn method_panic_traces_identically() {
 }
 
 #[test]
+fn async_fn_panic_traces_under_the_functions_name() {
+    // An async body lowers to a synthesized step closure; it inherits the enclosing function's
+    // name (`Func::name`, set at lowering), so the frame is `fetch`, not `<anonymous>` — and both
+    // backends read the same IR field, so they agree by construction.
+    let (vm, eval, source) = both_traces(
+        "async fn fetch(n: int): int {\n    panic(\"async boom\")\n}\nconcurrent {\n    h = spawn fetch(1)\n    echo h.await\n}\n",
+    );
+    let vm_story = story(&vm, &source);
+    let eval_story = story(&eval, &source);
+    // The *names* agree in full. The awaiting frame's location is a known structural asymmetry:
+    // the VM reaches an async panic through a re-entrant run, whose outer segment's top frame
+    // carries no span (its saved pc is stale — only synced at calls), while the oracle's shadow
+    // stack still knows the await site. So spans are compared on the innermost (async) frame,
+    // where both are precise.
+    let names = |st: &[(Option<String>, Option<u32>)]| {
+        st.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(&vm_story),
+        names(&eval_story),
+        "vm={vm:#?} eval={eval:#?}"
+    );
+    assert_eq!(
+        vm_story.first(),
+        eval_story.first(),
+        "innermost frames should agree exactly"
+    );
+    assert_eq!(
+        vm_story.first().map(|(n, l)| (n.as_deref(), *l)),
+        Some((Some("fetch"), Some(2))),
+        "the async frame should carry the function's name: {vm_story:?}"
+    );
+}
+
+#[test]
 fn anonymous_closure_panic_traces_identically() {
     let (vm, eval, source) = both_traces(
         "mut f = fn(x: int) => panic(\"in closure\")\nfn call_it(): int {\n    return f(1)\n}\nmut r = call_it()\necho r\n",

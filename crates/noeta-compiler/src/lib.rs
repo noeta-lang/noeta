@@ -2728,8 +2728,12 @@ impl<'m> FnCompiler<'m> {
                 // the captured cells into the new closure.
                 let (upvalues, captures) = self.resolve_captures(func)?;
                 let enclosing = self.child_enclosing();
-                // An anonymous closure literal — no debugger name.
-                let proto = self.module.add_function(func, upvalues, enclosing, None)?;
+                // The IR carries the trace name: `None` for a user's anonymous closure, the enclosing
+                // function's name for a synthesized async/generator step closure — so an `async fn
+                // work` panic traces as `work`, not `<anonymous>`.
+                let proto =
+                    self.module
+                        .add_function(func, upvalues, enclosing, func.name.clone())?;
                 self.code.push(Op::MakeClosure {
                     dst,
                     proto,
