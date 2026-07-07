@@ -810,7 +810,7 @@ pub enum Op {
         args: Box<[Reg]>,
         /// Boxed (P-VMT-OPSZ): a `TypeRecipe` is 48 bytes and only a call-site-typed native call
         /// (`json.parse::<T>`) carries one, so it lives behind a pointer.
-        recipe: Option<Box<noeta_stdlib::TypeRecipe>>,
+        recipe: Option<Box<noeta_native::TypeRecipe>>,
         span: Span,
     },
     /// A `match` literal test: if `src` equals the literal, continue; else jump to `fail` (the
@@ -894,7 +894,7 @@ pub enum Op {
     },
     /// `dst = mask_to_width(src, signed, bits)` — reduce an erased i64 to a fixed-width integer's
     /// range (Tier W). Emitted after a same-width `+ - *` / unary `-` on an `IntN`. Total (never
-    /// raises); the shared `noeta_stdlib::mask_to_width` runs identically here and in the tree-walker.
+    /// raises); the shared `noeta_native::mask_to_width` runs identically here and in the tree-walker.
     MaskWidth {
         dst: Reg,
         src: Reg,
@@ -922,7 +922,7 @@ pub enum Op {
     WidthIntMethod {
         dst: Reg,
         recv: Reg,
-        method: noeta_stdlib::IntMethod,
+        method: noeta_native::IntMethod,
         arg: Option<Reg>,
         bits: u8,
         span: Span,

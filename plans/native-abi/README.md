@@ -53,10 +53,18 @@ crate depends back on native's consumers. `noeta-value` → native + stdlib (it 
 `json::stringify`, so it legitimately keeps stdlib; it does not shed the tree — that's honest).
 
 ## Who sheds `noeta-stdlib` (the concrete internal win)
-`noeta-ir`, `noeta-bytecode`, `noeta-db` — they use only `{IntMethod, int_method_width,
-mask_to_width, TypeRecipe}`, all native. They switch their Cargo dep `noeta-stdlib → noeta-native`
-and drop the crypto/uuid/serde_json/bytemuck tree from their build. Everyone else keeps stdlib
-(they run or inspect the full std surface — legitimate) and rides the re-exports.
+`noeta-ir`, `noeta-bytecode`, `noeta-db` use only `{IntMethod, int_method_width, mask_to_width,
+TypeRecipe}`, all native — so all three switch their Cargo dep `noeta-stdlib → noeta-native` (the
+correct home for those ABI types).
+
+Tree-shedding actually lands for **`noeta-ir` and `noeta-bytecode`**: `cargo tree` confirms 0
+heavy crates (no bcrypt/sha2/uuid/serde_json/bytemuck) in their transitive graphs after the swap.
+**`noeta-db` does NOT shed** the tree — it transitively depends on `noeta-check`/`noeta-compiler`,
+which legitimately need `noeta-stdlib` for the dispatch router — but sourcing `TypeRecipe` from its
+true home (native) rather than a stdlib re-export is still the right import.
+
+Everyone else keeps stdlib (they run or inspect the full std surface — legitimate) and rides the
+re-exports.
 
 ## Slices (commit per green slice; full gate = 73 suites + differential + leak + doc-samples + fmt + clippy)
 - **N0** — scaffold `noeta-native` (Cargo.toml + empty lib.rs). Workspace builds.
