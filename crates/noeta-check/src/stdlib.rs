@@ -54,8 +54,17 @@ pub(super) fn is_std_module(name: &str) -> bool {
     registry::find_module(name).is_some() || registry::is_virtual_module(name)
 }
 
-/// Map the registry's neutral [`registry::SigType`] onto a checker [`Type`].
+/// Map the registry's neutral [`registry::SigType`] onto a checker [`Type`], variable-free
+/// signatures only — the common case. A signature using [`registry::SigType::Var`] goes through
+/// [`sig_to_type_bound`] with bindings from the call site; here a stray variable is a hole.
 fn sig_to_type(sig: &registry::SigType) -> Type {
+    sig_to_type_bound(sig, &[])
+}
+
+/// Map a [`registry::SigType`] onto a checker [`Type`] under call-site variable `bindings`
+/// (higher-order-abi H1): `Var(n)` becomes its bound type, or a gradual hole when the call's
+/// arguments never determined it — permissive, never a wrong concrete type.
+fn sig_to_type_bound(sig: &registry::SigType, bindings: &[Option<Type>]) -> Type {
     use registry::SigType;
     match sig {
         SigType::Int => Type::Int,
@@ -66,15 +75,79 @@ fn sig_to_type(sig: &registry::SigType) -> Type {
         SigType::Bytes => Type::Bytes,
         SigType::Unit => Type::Unit,
         SigType::Dyn => Type::Dyn,
-        SigType::List(t) => list(sig_to_type(t)),
-        SigType::Option(t) => opt(sig_to_type(t)),
-        SigType::Map(k, v) => Type::Map(Box::new(sig_to_type(k)), Box::new(sig_to_type(v))),
-        SigType::Future(t) => Type::Named(FUTURE.to_string(), vec![sig_to_type(t)]),
+        SigType::List(t) => list(sig_to_type_bound(t, bindings)),
+        SigType::Option(t) => opt(sig_to_type_bound(t, bindings)),
+        SigType::Map(k, v) => Type::Map(
+            Box::new(sig_to_type_bound(k, bindings)),
+            Box::new(sig_to_type_bound(v, bindings)),
+        ),
+        SigType::Future(t) => Type::Named(FUTURE.to_string(), vec![sig_to_type_bound(t, bindings)]),
         SigType::Named(n) => Type::Named((*n).to_string(), vec![]),
-        SigType::Union(members) => Type::union(members.iter().map(sig_to_type)),
+        SigType::Union(members) => {
+            Type::union(members.iter().map(|m| sig_to_type_bound(m, bindings)))
+        }
         // A trailing-optional param's type IS the wrapped type when present (http arc H4); the
         // optionality is carried separately as the required-argument count, not in the type.
-        SigType::Optional(inner) => sig_to_type(inner),
+        SigType::Optional(inner) => sig_to_type_bound(inner, bindings),
+        SigType::Fn(params, ret) => Type::Fn {
+            params: params.iter().map(|p| sig_to_type_bound(p, bindings)).collect(),
+            ret: Box::new(sig_to_type_bound(ret, bindings)),
+        },
+        SigType::Var(n) => bindings
+            .get(*n as usize)
+            .and_then(Clone::clone)
+            .unwrap_or(Type::Unknown),
+    }
+}
+
+/// Bind a declared signature's type variables from the call's actual argument types
+/// (higher-order-abi H1): walk each parameter structurally against its argument, binding each
+/// `Var(n)` at its **first** occurrence with a determined type. Substituting the bindings back
+/// into the parameters makes a *second* occurrence of the same variable a concrete expectation —
+/// so `all(List<Future<T>>)` given `List<Future<int>>` types as `List<int>`, and a `map_bounded`
+/// closure must accept the list's element type. Structural mismatches bind nothing (the ordinary
+/// param check reports them); an undetermined variable stays a hole.
+fn bind_params(params: &[registry::SigType], args: &[Type]) -> Vec<Option<Type>> {
+    let mut bindings = Vec::new();
+    for (sig, arg) in params.iter().zip(args) {
+        bind_sig(sig, arg, &mut bindings);
+    }
+    bindings
+}
+
+fn bind_sig(sig: &registry::SigType, arg: &Type, bindings: &mut Vec<Option<Type>>) {
+    use registry::SigType;
+    match (sig, arg) {
+        (SigType::Var(n), t) => {
+            let i = *n as usize;
+            if bindings.len() <= i {
+                bindings.resize(i + 1, None);
+            }
+            // First determined occurrence wins; a hole never binds (a later concrete one may).
+            if bindings[i].is_none() && *t != Type::Unknown {
+                bindings[i] = Some(t.clone());
+            }
+        }
+        (SigType::List(s), Type::List(t)) | (SigType::Option(s), Type::Option(t)) => {
+            bind_sig(s, t, bindings)
+        }
+        (SigType::Map(k, v), Type::Map(ak, av)) => {
+            bind_sig(k, ak, bindings);
+            bind_sig(v, av, bindings);
+        }
+        (SigType::Future(s), Type::Named(n, targs)) if n == FUTURE => {
+            if let Some(t) = targs.first() {
+                bind_sig(s, t, bindings);
+            }
+        }
+        (SigType::Fn(ps, r), Type::Fn { params, ret }) => {
+            for (p, a) in ps.iter().zip(params) {
+                bind_sig(p, a, bindings);
+            }
+            bind_sig(r, ret, bindings);
+        }
+        (SigType::Optional(s), t) => bind_sig(s, t, bindings),
+        _ => {}
     }
 }
 
@@ -528,8 +601,11 @@ fn map_params(name: &str, key: &Type, val: &Type) -> Option<Vec<Type>> {
 
 /// The parameter types a Ring 2 module function expects, or `None` if unknown. Numeric-polymorphic
 /// parameters (`math.abs`/`min`/`max`, and any numeric position) are typed `dyn` so an `int` or
-/// `float` argument is accepted without a spurious mismatch.
-pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
+/// `float` argument is accepted without a spurious mismatch. `args` — the call's actual argument
+/// types — feed the signature's type variables (higher-order-abi H1): the params come back with
+/// each `Var` substituted by its first-occurrence binding, so the ordinary argument check enforces
+/// the repeated-variable positions.
+pub(super) fn module_params(module: &str, name: &str, args: &[Type]) -> Option<Vec<Type>> {
     // `fs.list` (and its async twin, extern-types X6) takes an optional dir argument (0 or 1) —
     // not arity-checked. (Both are registered with a fixed signature for dispatch, so this skip
     // must precede the registry lookup.)
@@ -538,7 +614,13 @@ pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
     }
     // Migrated modules: parameter types come from the native-extension registry.
     if let Some(f) = registry::find_function_sig(module, name) {
-        return Some(f.params.iter().map(sig_to_type).collect());
+        let bindings = bind_params(f.params, args);
+        return Some(
+            f.params
+                .iter()
+                .map(|p| sig_to_type_bound(p, &bindings))
+                .collect(),
+        );
     }
     // Not in the registry: the `vec` bulk `*_all` kernels (per-backend, deferred with vec/quat's
     // eventual eviction to a package).
@@ -648,11 +730,12 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
     }
     // Migrated modules: the result type comes from the registry's `RetTy`. `SameAsArg(i)` carries the
     // i-th argument's type (`vec.add(v, w): typeof v`); `NumericPreserving` is the `math.abs`/min/max
-    // kind-preserving rule; `Concrete` maps directly.
+    // kind-preserving rule; `Concrete` maps directly, with any signature type variables bound from
+    // the argument types (higher-order-abi H1) — `all(List<Future<T>>) -> List<T>` recovers `T`.
     if let Some(f) = registry::find_function_sig(module, name) {
         use registry::RetTy;
         return Some(match f.ret {
-            RetTy::Concrete(s) => sig_to_type(&s),
+            RetTy::Concrete(s) => sig_to_type_bound(&s, &bind_params(f.params, args)),
             RetTy::SameAsArg(i) => args.get(i).cloned().unwrap_or(Type::Dyn),
             RetTy::NumericPreserving => numeric_preserving(args),
             // The call-site-typed turbofish form lands in Phase B; until then no registered function
@@ -677,5 +760,109 @@ fn numeric_preserving(args: &[Type]) -> Type {
         Type::Float
     } else {
         Type::Unknown // unknown args → numeric hole (gradual), not the `dyn` escape
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The H1 bind-and-substitute machinery, exercised directly: no *registered* function uses
+    //! `SigType::Fn`/`Var` until the H2 task-combinator migration, so these pin the semantics the
+    //! migration will rely on — first-occurrence binding, substitution into repeated positions,
+    //! and the unbound-variable hole.
+
+    use super::*;
+    use registry::SigType;
+
+    const VAR_A: SigType = SigType::Var(0);
+    const VAR_B: SigType = SigType::Var(1);
+    const FUT_A: SigType = SigType::Future(&VAR_A);
+    const FUT_B: SigType = SigType::Future(&VAR_B);
+    /// `all(fs: List<Future<A>>) -> List<A>`.
+    const ALL_PARAMS: &[SigType] = &[SigType::List(&FUT_A)];
+    const ALL_RET: SigType = SigType::List(&VAR_A);
+    /// `map_bounded(items: List<A>, n: int, f: Fn(A) -> Future<B>) -> List<B>`.
+    const MB_PARAMS: &[SigType] = &[
+        SigType::List(&VAR_A),
+        SigType::Int,
+        SigType::Fn(&[VAR_A], &FUT_B),
+    ];
+    const MB_RET: SigType = SigType::List(&VAR_B);
+
+    fn fut(t: Type) -> Type {
+        Type::Named(FUTURE.to_string(), vec![t])
+    }
+    fn func(params: Vec<Type>, ret: Type) -> Type {
+        Type::Fn {
+            params,
+            ret: Box::new(ret),
+        }
+    }
+
+    #[test]
+    fn var_binds_through_list_of_futures_and_substitutes_into_return() {
+        let args = [list(fut(Type::Int))];
+        let bindings = bind_params(ALL_PARAMS, &args);
+        assert_eq!(sig_to_type_bound(&ALL_RET, &bindings), list(Type::Int));
+        // The substituted param is the concrete expectation the argument check enforces.
+        assert_eq!(
+            sig_to_type_bound(&ALL_PARAMS[0], &bindings),
+            list(fut(Type::Int))
+        );
+    }
+
+    #[test]
+    fn first_occurrence_wins_so_a_mismatched_closure_param_is_flagged_not_adopted() {
+        // items: List<string> binds A=string; the closure wrongly takes int — the substituted
+        // third param demands `Fn(string) -> Future<bool>`, so the mismatch lands on the closure
+        // argument rather than silently retyping A.
+        let args = [
+            list(Type::String),
+            Type::Int,
+            func(vec![Type::Int], fut(Type::Bool)),
+        ];
+        let bindings = bind_params(MB_PARAMS, &args);
+        assert_eq!(
+            sig_to_type_bound(&MB_PARAMS[2], &bindings),
+            func(vec![Type::String], fut(Type::Bool))
+        );
+        // B still binds from the closure's actual return: the result type stays useful.
+        assert_eq!(sig_to_type_bound(&MB_RET, &bindings), list(Type::Bool));
+    }
+
+    #[test]
+    fn variable_bound_inside_a_closure_return_reaches_the_result() {
+        let args = [
+            list(Type::Int),
+            Type::Int,
+            func(vec![Type::Int], fut(Type::String)),
+        ];
+        let bindings = bind_params(MB_PARAMS, &args);
+        assert_eq!(sig_to_type_bound(&MB_RET, &bindings), list(Type::String));
+    }
+
+    #[test]
+    fn unbound_variable_is_a_gradual_hole_never_a_wrong_type() {
+        // No argument (arity error path) and a structurally foreign argument both leave the
+        // variable undetermined: the return is a hole, and so is the substituted param position.
+        for args in [&[][..], &[Type::Bytes][..]] {
+            let bindings = bind_params(ALL_PARAMS, args);
+            assert_eq!(sig_to_type_bound(&ALL_RET, &bindings), list(Type::Unknown));
+        }
+    }
+
+    #[test]
+    fn a_hole_argument_does_not_bind_but_a_later_concrete_occurrence_does() {
+        // items: List<Unknown> (e.g. an empty list literal) must not pin A to Unknown — the
+        // closure's concrete param type still gets to determine it.
+        let args = [
+            list(Type::Unknown),
+            Type::Int,
+            func(vec![Type::Float], fut(Type::Bool)),
+        ];
+        let bindings = bind_params(MB_PARAMS, &args);
+        assert_eq!(
+            sig_to_type_bound(&MB_PARAMS[2], &bindings),
+            func(vec![Type::Float], fut(Type::Bool))
+        );
     }
 }

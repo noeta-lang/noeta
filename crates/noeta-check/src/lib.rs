@@ -4189,7 +4189,7 @@ impl Checker {
                 if let Some((module, func)) = self.imported_fns.get(name).cloned()
                     && lookup(env, name).is_none()
                 {
-                    if let Some(params) = stdlib::module_params(&module, &func) {
+                    if let Some(params) = stdlib::module_params(&module, &func, args) {
                         let required =
                             stdlib::module_required(&module, &func).unwrap_or(params.len());
                         self.check_args(&params, required, args, arg_exprs, span, &func);
@@ -4230,7 +4230,7 @@ impl Checker {
                 if let Expr::Ident { name: m, .. } = receiver.as_ref()
                     && self.modules.contains(m)
                 {
-                    if let Some(params) = stdlib::module_params(m, name) {
+                    if let Some(params) = stdlib::module_params(m, name, args) {
                         let required = stdlib::module_required(m, name).unwrap_or(params.len());
                         self.check_args(&params, required, args, arg_exprs, span, name);
                     }

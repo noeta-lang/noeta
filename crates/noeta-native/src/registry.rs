@@ -150,6 +150,17 @@ pub enum SigType {
     /// backend change and no default-value machinery is needed. Convention: once a parameter is
     /// `Optional`, every following parameter is too.
     Optional(&'static SigType),
+    /// A function/closure parameter (higher-order-abi H1) — `task.map_bounded(items, n,
+    /// f: Fn([A]) -> Future<B>)`. The checker maps it onto the language's structural `Type::Fn`;
+    /// the dispatch receives the closure as an opaque ctx slot and invokes it via
+    /// [`crate::NativeCtx::call`], so `NativeValue` never grows a closure variant.
+    Fn(&'static [SigType], &'static SigType),
+    /// A signature-level type variable (higher-order-abi H1) — `task.all(fs: List<Future<Var(0)>>)
+    /// -> List<Var(0)>`. The checker binds each variable at its first structural occurrence in the
+    /// call's argument types and substitutes the bindings into the remaining parameters and the
+    /// return, replacing the hand-written per-function checker arms the `Builtin` family needed.
+    /// An unbound variable is a gradual hole (`Unknown`), never a wrong concrete type.
+    Var(u8),
 }
 
 impl SigType {
