@@ -748,6 +748,11 @@ thread_local! {
 /// ABI. It only bumps a thread-local counter here; J1+ registers the real `retain`/`release`/`call`
 /// helpers beside it and reconstitutes `&mut Vm` from `vm` to service them.
 #[cfg(feature = "jit")]
+#[cfg_attr(
+    feature = "aot",
+    allow(unsafe_code),
+    unsafe(export_name = "noeta_jit_observe")
+)]
 extern "C" fn jit_observe(_vm: *mut core::ffi::c_void) {
     JIT_OBSERVE_COUNT.with(|c| c.set(c.get().wrapping_add(1)));
 }
@@ -769,6 +774,7 @@ fn jit_observe_count() -> u64 {
 /// `jit_enter`, where no other borrow of `*vm` is active.
 #[cfg(feature = "jit")]
 #[allow(unsafe_code)]
+#[cfg_attr(feature = "aot", unsafe(export_name = "noeta_jit_note_global_bound"))]
 extern "C" fn jit_note_global_bound(vm: *mut core::ffi::c_void, g: u32) {
     let vm = unsafe { &mut *(vm as *mut Vm) };
     vm.global_order.push(g);
@@ -776,6 +782,11 @@ extern "C" fn jit_note_global_bound(vm: *mut core::ffi::c_void, g: u32) {
 
 /// Runtime helper: bump a value's refcount (heap-aware register moves, J3). No-op on an immediate.
 #[cfg(feature = "jit")]
+#[cfg_attr(
+    feature = "aot",
+    allow(unsafe_code),
+    unsafe(export_name = "noeta_jit_retain")
+)]
 extern "C" fn jit_retain(v: u64) {
     retain(Value::from_bits(v));
 }
@@ -783,6 +794,11 @@ extern "C" fn jit_retain(v: u64) {
 /// Runtime helper: drop one reference to a value — the plain, non-destructor release the
 /// interpreter's `set_reg` uses on an overwritten register (J3). No-op on an immediate.
 #[cfg(feature = "jit")]
+#[cfg_attr(
+    feature = "aot",
+    allow(unsafe_code),
+    unsafe(export_name = "noeta_jit_release")
+)]
 extern "C" fn jit_release(v: u64) {
     release(Value::from_bits(v));
 }
@@ -794,6 +810,7 @@ extern "C" fn jit_release(v: u64) {
 /// `vm` must be the live `*mut Vm` the tier-1 ABI passed (see [`jit_note_global_bound`]).
 #[cfg(feature = "jit")]
 #[allow(unsafe_code)]
+#[cfg_attr(feature = "aot", unsafe(export_name = "noeta_jit_release_value"))]
 extern "C" fn jit_release_value(vm: *mut core::ffi::c_void, v: u64) {
     let vm = unsafe { &mut *(vm as *mut Vm) };
     vm.release_value(Value::from_bits(v));
@@ -860,6 +877,7 @@ fn vec_header_words() -> (usize, usize, usize) {
 /// synchronously inside `jit_enter`, where no other borrow of them is active.
 #[cfg(feature = "jit")]
 #[allow(unsafe_code)]
+#[cfg_attr(feature = "aot", unsafe(export_name = "noeta_jit_call"))]
 extern "C" fn jit_call(
     vm: *mut core::ffi::c_void,
     frames: *mut core::ffi::c_void,
@@ -937,6 +955,7 @@ extern "C" fn jit_call(
 /// `vm`/`frames`/`regs_vec` must be the live pointers the tier-1 ABI passed.
 #[cfg(feature = "jit")]
 #[allow(unsafe_code)]
+#[cfg_attr(feature = "aot", unsafe(export_name = "noeta_jit_return"))]
 extern "C" fn jit_return(
     vm: *mut core::ffi::c_void,
     frames: *mut core::ffi::c_void,
@@ -979,6 +998,7 @@ struct PreparedCall {
 /// `vm`/`frames`/`regs_vec` must be the live pointers the tier-1 ABI passed.
 #[cfg(feature = "jit")]
 #[allow(unsafe_code)]
+#[cfg_attr(feature = "aot", unsafe(export_name = "noeta_jit_prepare_call"))]
 extern "C" fn jit_prepare_call(
     vm: *mut core::ffi::c_void,
     frames: *mut core::ffi::c_void,
@@ -1108,6 +1128,7 @@ extern "C" fn jit_prepare_call(
 /// `frames` must be the live pointer the tier-1 ABI passed.
 #[cfg(feature = "jit")]
 #[allow(unsafe_code)]
+#[cfg_attr(feature = "aot", unsafe(export_name = "noeta_jit_after_call"))]
 extern "C" fn jit_after_call(
     _vm: *mut core::ffi::c_void,
     frames: *mut core::ffi::c_void,
@@ -1141,6 +1162,7 @@ extern "C" fn jit_after_call(
 /// `vm`/`regs_vec` must be the live pointers the tier-1 ABI passed.
 #[cfg(feature = "jit")]
 #[allow(unsafe_code)]
+#[cfg_attr(feature = "aot", unsafe(export_name = "noeta_jit_run_leaf_op"))]
 extern "C" fn jit_run_leaf_op(
     vm: *mut core::ffi::c_void,
     regs_vec: *mut core::ffi::c_void,
@@ -7269,6 +7291,29 @@ mod tests {
     use noeta_lexer::lex;
     use noeta_parser::parse;
     use noeta_span::{Source, SourceId};
+
+    /// P-AOT L3.2b drift guard: the `#[export_name]` literals on the JIT helpers (which an AOT
+    /// program object links against) must equal the `noeta_jit::*_HELPER` name constants the JIT
+    /// declares its imports under. The literals are hardcoded (an attribute needs a string literal,
+    /// not a const), so this asserts they still agree — a changed constant fails here, flagging the
+    /// export attributes to update in lockstep.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn aot_helper_export_names_match_the_jit_constants() {
+        assert_eq!(noeta_jit::OBSERVE_HELPER, "noeta_jit_observe");
+        assert_eq!(
+            noeta_jit::NOTE_GLOBAL_BOUND_HELPER,
+            "noeta_jit_note_global_bound"
+        );
+        assert_eq!(noeta_jit::RETAIN_HELPER, "noeta_jit_retain");
+        assert_eq!(noeta_jit::RELEASE_HELPER, "noeta_jit_release");
+        assert_eq!(noeta_jit::RELEASE_VALUE_HELPER, "noeta_jit_release_value");
+        assert_eq!(noeta_jit::CALL_HELPER, "noeta_jit_call");
+        assert_eq!(noeta_jit::RETURN_HELPER, "noeta_jit_return");
+        assert_eq!(noeta_jit::PREPARE_CALL_HELPER, "noeta_jit_prepare_call");
+        assert_eq!(noeta_jit::AFTER_CALL_HELPER, "noeta_jit_after_call");
+        assert_eq!(noeta_jit::LEAF_OP_HELPER, "noeta_jit_run_leaf_op");
+    }
 
     fn run(src: &str) -> RunResult {
         let source = Source::new(SourceId::FIRST, "test.noe", src);

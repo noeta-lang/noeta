@@ -26,6 +26,11 @@ noeta-jit = { workspace = true, optional = true }
 # and the interpreter/sandbox/differential are byte-identical — the same gating the real-thread
 # isolates use. `noeta-conformance` turns it on to run the `--jit-differential` oracle.
 jit = ["dep:noeta-jit"]
+# P-AOT L3.2b: export the JIT runtime helpers (`noeta_jit_*`) under their canonical C symbol names
+# so an ahead-of-time-compiled program object can link against this crate as its runtime, and pull
+# in the JIT machinery (dispatch tables, native-call helpers) the pre-linked native bodies ride.
+# Off by default — only the AOT runtime staticlib turns it on; the normal `noeta` binary is unchanged.
+aot = ["jit"]
 
 [dev-dependencies]
 noeta-lexer = { workspace = true }
