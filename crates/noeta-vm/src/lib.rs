@@ -880,6 +880,44 @@ pub fn frame_layout() -> noeta_jit::FrameLayout {
     }
 }
 
+/// The zero-initialized [`Frame`] the JIT bakes its call-frame push from (P-CALL): every field at its
+/// resting value (`proto`/`base`/`pc`/`ret_dst` = 0, `ret_transform` = `None`, `upvalues` = empty
+/// `Vec`). The native frame-push codegen reads this template's *words* — not its address — and bakes
+/// them as position-independent immediates (L3.1a audit), so the same literal produces byte-identical
+/// codegen in the runtime JIT and the AOT object, and a bound native body writes a valid initial
+/// `Frame` into any VM's frame stack. Shared by [`Vm::init_jit`], [`Vm::init_jit_service`], and the
+/// AOT [`compile_module_aot`].
+#[cfg(feature = "jit")]
+fn fresh_frame_template() -> Box<Frame> {
+    Box::new(Frame {
+        proto: 0,
+        base: 0,
+        pc: 0,
+        ret_dst: 0,
+        ret_transform: RetTransform::None,
+        upvalues: Vec::new(),
+    })
+}
+
+/// Ahead-of-time compile **every** eligible prototype of `module` to a relocatable **object file**
+/// (P-AOT L3.2b): the same native codegen as the runtime JIT, emitted into a host object
+/// (ELF/Mach-O/COFF) with the [`noeta_jit::AOT_DISPATCH_SYMBOL`] dispatch table, instead of
+/// finalized to executable pages. Returns the object bytes for `noeta build --native` to link
+/// against the AOT runtime staticlib.
+///
+/// This lives in `noeta-vm` (not the CLI) because only this crate knows the [`Frame`] layout: the
+/// object bakes the [`fresh_frame_template`] words as immediates, so it must be built from the exact
+/// same template the runtime uses. The template is read during `compile_module` and needs to outlive
+/// only that call, so a local box suffices.
+#[cfg(feature = "jit")]
+pub fn compile_module_aot(module: &Module) -> Result<Vec<u8>, String> {
+    let template = fresh_frame_template();
+    let template_ptr = template.as_ref() as *const Frame as *const u8;
+    let mut jit = noeta_jit::Jit::new_object("noeta_aot", frame_layout(), template_ptr)?;
+    jit.compile_module(module)?;
+    jit.finish()
+}
+
 /// Identify which of a `Vec`'s three pointer-sized words hold its data pointer, length, and capacity,
 /// by constructing a `Vec` with distinct, recognizable values and reading its raw words. `Vec<T>`'s
 /// header layout is `T`-independent, so a `Vec<usize>` stands in for `Vec<Frame>`/`Vec<Value>`.
@@ -1804,16 +1842,9 @@ impl<'m> Vm<'m> {
             (noeta_jit::AFTER_CALL_HELPER, jit_after_call as *const u8),
             (noeta_jit::LEAF_OP_HELPER, jit_run_leaf_op as *const u8),
         ];
-        let template = self.jit_frame_template.get_or_insert_with(|| {
-            Box::new(Frame {
-                proto: 0,
-                base: 0,
-                pc: 0,
-                ret_dst: 0,
-                ret_transform: RetTransform::None,
-                upvalues: Vec::new(),
-            })
-        });
+        let template = self
+            .jit_frame_template
+            .get_or_insert_with(fresh_frame_template);
         let template_ptr = template.as_ref() as *const Frame as *const u8;
         match noeta_jit::Jit::new(helpers, frame_layout(), template_ptr) {
             Ok(mut jit) => {
@@ -1864,16 +1895,9 @@ impl<'m> Vm<'m> {
                 jit_run_leaf_op as *const u8 as usize,
             ),
         ];
-        let template = self.jit_frame_template.get_or_insert_with(|| {
-            Box::new(Frame {
-                proto: 0,
-                base: 0,
-                pc: 0,
-                ret_dst: 0,
-                ret_transform: RetTransform::None,
-                upvalues: Vec::new(),
-            })
-        });
+        let template = self
+            .jit_frame_template
+            .get_or_insert_with(fresh_frame_template);
         let template_addr = template.as_ref() as *const Frame as usize;
         self.jit_service =
             jit_service::JitService::spawn(module, helpers, frame_layout(), template_addr);
@@ -7456,6 +7480,29 @@ mod tests {
             "AOT-bound native run matches tier-0"
         );
         drop(keep); // hold the code pages live until the AOT run has finished
+    }
+
+    /// P-AOT L3.2b(3): [`compile_module_aot`] wires the object backend end-to-end — it emits a
+    /// relocatable object carrying the [`noeta_jit::AOT_DISPATCH_SYMBOL`] table. Byte-identity of the
+    /// native codegen itself is proven corpus-wide by the `NOETA_JIT_AOT` oracle; this asserts the
+    /// object is produced, is non-trivial, and defines the dispatch symbol (its name lands in the
+    /// object's string table as raw ASCII — a dependency-free way to see the table was emitted).
+    #[cfg(feature = "jit")]
+    #[test]
+    fn compile_module_aot_emits_a_linkable_object_with_the_dispatch_table() {
+        let src = "mut t = 0\nfor i in 0..2000 { t = t + i * i }\necho t\n";
+        let source = Source::new(SourceId::FIRST, "aot.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).expect("compiles");
+
+        let obj = compile_module_aot(&module).expect("emits an object");
+        assert!(obj.len() > 64, "object carries real content");
+        let needle = noeta_jit::AOT_DISPATCH_SYMBOL.as_bytes();
+        assert!(
+            obj.windows(needle.len()).any(|w| w == needle),
+            "the dispatch symbol name appears in the object"
+        );
     }
 
     /// Run a source program through the sandboxed traced entry, returning the result + traceback.
