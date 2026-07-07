@@ -1,9 +1,12 @@
 # AOT & bundling arc — source-free binaries (P-AOT)
 
-**Status: PLANNED (not started).** Goal: ship a runnable artifact that does **not** include the
-`.noe` source. Three levels of increasing ambition and cost — bytecode bundle → self-contained
-executable → native AOT + DCE. Levels 1–2 deliver the source-hiding goal cheaply and hand Level 3
-its interpreter-fallback substrate for free; Level 3 is the performance/opacity milestone.
+**Status: Levels 1 & 2 COMPLETE (branch `aot-bundling`, unmerged); Level 3 not started.** Goal:
+ship a runnable artifact that does **not** include the `.noe` source. Three levels of increasing
+ambition and cost — bytecode bundle → self-contained executable → native AOT + DCE. Levels 1–2
+deliver the source-hiding goal cheaply and hand Level 3 its interpreter-fallback substrate for free;
+Level 3 is the performance/opacity milestone. **Delivered: `noeta build` → obfuscated `.noeb`
+(`noeta run app.noeb`), and `noeta build --exe` → a single self-contained executable — both source-
+free, differential-proven identical to a source run.**
 
 Provenance: design conversation 2026-07-07 (after the P-JCT JIT compile-throughput arc). The user
 confirmed **JIT op-coverage expansion is deferred to a separate later track** — AOT ships at
@@ -100,8 +103,8 @@ Control *who may run or hold* the artifact → the developer builds that in thei
 
 | # | Slice | Depends | Notes |
 |---|---|---|---|
-| L2.0 | embedded-blob bootstrap | L1.2 | At startup the runtime checks for an embedded `.noeb` (trailer with `[magic][offset]` appended to its own executable, read via `std::env::current_exe`); if present, run it; else behave as the normal CLI. Trailer-append is the portable approach (no per-OS section surgery). |
-| L2.1 | `noeta build --exe -o app` | L2.0 | Concatenate a copy of the runtime binary + the blob + trailer → a single executable. No `.noe`, no separate `noeta` install. Still bytecode under the hood; the embedded blob is obfuscated (L1.4). |
+| L2.0 ✅ | embedded-blob bootstrap | L1.2 | **DONE** (`64c9f9d`). At startup `main` reads only the tail of its own executable (`current_exe` + seek, not a slurp): a fixed 16-byte trailer `[bundle_len u64 LE | "NOEBEXE\0"]`. Sentinel present → run the embedded bundle via `cmd_run_bundle`; absent → normal CLI. Any IO/format hiccup ⇒ "no bundle" (toolchain must still start). Trailer-append, no per-OS section surgery. |
+| L2.1 ✅ | `noeta build --exe -o app` | L2.0 | **DONE** (`64c9f9d`). `noeta_bundle::staple(runtime, bundle)` = `[runtime image | bundle | trailer]`; the OS still sees a valid exe. `noeta build --exe` embeds *this* binary + the obfuscated bundle (default out = input with extension stripped, `.exe` on Windows; `chmod 0o755` on Unix; refuses to clobber the source). Still bytecode under the hood (obfuscated, L1.4). 2 bundle unit + 2 CLI e2e tests. |
 
 **Cross-compilation** (building an `app` for a different target triple) is **out of Level 2 v1** —
 it ships the host-target runtime. Flagged as a later extension (needs prebuilt per-target runtime
