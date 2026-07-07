@@ -1,0 +1,6 @@
+// A stdlib union signature is statically enforced (crypto C1/C2): `crypto.sha256` takes
+// `string|bytes`, so an `int` argument is a type mismatch at the call site — SigType::Union
+// maps onto the language's declared-union type and rides the ordinary assignability check.
+// expect: error E0007 at 6:6
+use std.{crypto}
+echo crypto.sha256(42).to_hex()

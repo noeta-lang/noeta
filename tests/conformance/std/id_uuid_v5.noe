@@ -1,0 +1,29 @@
+// Name-based UUIDs (crypto arc C5): `id.uuid_v5(ns, name)` is PURE — the SHA-1 of namespace
+// bytes + name, so the same inputs give the same UUID on any host, forever (no entropy pin
+// needed: these are exact by definition). The RFC 9562 well-known namespaces come as zero-arg
+// constructors; any Uuid (including a v5 result) can be a namespace.
+// expect: stdout "2ed6657d-e927-568b-95e1-2665a8aea6a2"
+// expect: stdout "5"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+// expect: stdout "a9e31410-8448-5a43-be94-2be0c8f93edf"
+// expect: stdout "522c7623-197a-5518-a5ee-4f0750ee5589"
+// expect: stdout "none"
+// expect: exit 0
+use std.{id}
+
+u = id.uuid_v5(id.namespace_dns(), "www.example.com")
+echo u
+echo u.version()
+echo u == id.uuid_v5(id.namespace_dns(), "www.example.com")
+echo u == id.uuid_v5(id.namespace_dns(), "www.example.org")
+
+echo id.namespace_dns()
+echo id.uuid_v5(id.namespace_url(), "https://noeta.dev")
+
+// A v5 result is itself a valid namespace (hierarchical naming).
+echo id.uuid_v5(u, "chained")
+
+// v5 carries no timestamp.
+echo u.timestamp_ms()

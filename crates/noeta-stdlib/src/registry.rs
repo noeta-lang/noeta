@@ -150,6 +150,10 @@ pub enum SigType {
     Future(&'static SigType),
     /// A named type — an extension type or a user-declared type.
     Named(&'static str),
+    /// A union of accepted types (crypto arc C1) — `crypto.sha256(data: string|bytes)`. The
+    /// checker maps it onto the language's declared-union `Type::union`, so a mismatched
+    /// argument is a static error; the dispatch still validates the concrete kind it received.
+    Union(&'static [SigType]),
 }
 
 /// How a function's **return type** is determined. Most are [`RetTy::Concrete`]; the rest capture
@@ -299,6 +303,12 @@ const STD_TYPES: &[ExtType] = &[
         methods: FILE_HANDLE_METHODS,
         dispatch: file_handle_dispatch,
         key_capable: false,
+    },
+    ExtType {
+        name: crate::crypto::HASHER_TYPE_NAME,
+        methods: HASHER_METHODS,
+        dispatch: hasher_method_dispatch,
+        key_capable: false, // `update` mutates — a hasher can never key a map
     },
 ];
 
@@ -676,7 +686,299 @@ fn id_dispatch(
                 Err(_) => NativeOut::None,
             })
         }
+        "uuid_v5" => {
+            want_arity(func, args, 2)?;
+            let Some(NativeValue::Extern(ns_box)) = args.first() else {
+                return Err(type_error(func, "Uuid"));
+            };
+            let Some(ns) = ns_box.as_any().downcast_ref::<uuid::Uuid>() else {
+                return Err(type_error(func, "Uuid"));
+            };
+            let name = want_str(func, args, 1)?;
+            Ok(NativeOut::Extern(crate::ExternBox::new(crate::id::v5(
+                ns, name,
+            ))))
+        }
+        "namespace_dns" | "namespace_url" | "namespace_oid" | "namespace_x500" => {
+            want_arity(func, args, 0)?;
+            let ns = match func {
+                "namespace_dns" => uuid::Uuid::NAMESPACE_DNS,
+                "namespace_url" => uuid::Uuid::NAMESPACE_URL,
+                "namespace_oid" => uuid::Uuid::NAMESPACE_OID,
+                _ => uuid::Uuid::NAMESPACE_X500,
+            };
+            Ok(NativeOut::Extern(crate::ExternBox::new(ns)))
+        }
         _ => Err(no_function_error("id", func)),
+    }
+}
+
+// --- `crypto`: digests, HMAC (crypto arc C2) -----------------------------------------------------
+
+/// A digest input: a string hashes as its UTF-8 bytes, a `bytes` buffer as-is.
+const STR_OR_BYTES: SigType = SigType::Union(&[SigType::String, SigType::Bytes]);
+
+/// Project a `string|bytes` argument onto the byte view the digest functions consume.
+fn want_data<'a>(func: &str, args: &'a [NativeValue], index: usize) -> Result<&'a [u8], StdError> {
+    match args.get(index) {
+        Some(NativeValue::Str(s)) => Ok(s.as_bytes()),
+        Some(NativeValue::Bytes(b)) => Ok(b),
+        _ => Err(type_error(func, "string|bytes")),
+    }
+}
+
+/// An HMAC tag argument — `bytes` only (a tag is raw bytes; a "string tag" is a smell).
+fn want_tag<'a>(func: &str, args: &'a [NativeValue], index: usize) -> Result<&'a [u8], StdError> {
+    match args.get(index) {
+        Some(NativeValue::Bytes(b)) => Ok(b),
+        _ => Err(type_error(func, "bytes")),
+    }
+}
+
+const CRYPTO_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "sha256",
+        params: &[STR_OR_BYTES],
+        ret: Concrete(SigType::Bytes),
+    },
+    ExtFn {
+        name: "sha512",
+        params: &[STR_OR_BYTES],
+        ret: Concrete(SigType::Bytes),
+    },
+    // Interop-only digests (UUID v5, legacy checksums) — documented as not collision-resistant.
+    ExtFn {
+        name: "sha1",
+        params: &[STR_OR_BYTES],
+        ret: Concrete(SigType::Bytes),
+    },
+    ExtFn {
+        name: "md5",
+        params: &[STR_OR_BYTES],
+        ret: Concrete(SigType::Bytes),
+    },
+    ExtFn {
+        name: "hmac_sha256",
+        params: &[STR_OR_BYTES, STR_OR_BYTES],
+        ret: Concrete(SigType::Bytes),
+    },
+    ExtFn {
+        name: "hmac_sha512",
+        params: &[STR_OR_BYTES, STR_OR_BYTES],
+        ret: Concrete(SigType::Bytes),
+    },
+    // Constant-time verification (C7): tag comparison must not short-circuit like `bytes ==`.
+    ExtFn {
+        name: "hmac_sha256_verify",
+        params: &[STR_OR_BYTES, STR_OR_BYTES, SigType::Bytes],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        name: "hmac_sha512_verify",
+        params: &[STR_OR_BYTES, STR_OR_BYTES, SigType::Bytes],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        name: "constant_time_eq",
+        params: &[STR_OR_BYTES, STR_OR_BYTES],
+        ret: Concrete(SigType::Bool),
+    },
+    // Incremental hashing (C3): per-algorithm constructors, one `Hasher` type.
+    ExtFn {
+        name: "sha256_hasher",
+        params: &[],
+        ret: Concrete(HASHER_SIG),
+    },
+    ExtFn {
+        name: "sha512_hasher",
+        params: &[],
+        ret: Concrete(HASHER_SIG),
+    },
+    // Password hashing + crypto-grade randomness (C4) — the module's Host-entropy corner.
+    ExtFn {
+        name: "bcrypt_hash",
+        params: &[Str, Int],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "bcrypt_verify",
+        params: &[Str, Str],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        name: "random_bytes",
+        params: &[Int],
+        ret: Concrete(SigType::Bytes),
+    },
+];
+
+/// The `Hasher` signature type, named once.
+const HASHER_SIG: SigType = SigType::Named(crate::crypto::HASHER_TYPE_NAME);
+
+/// The `Hasher` instance methods (crypto C3): `update` is the mutable + host-free seam corner —
+/// it mutates the receiver through the shared cell and never touches the Host; `digest` is a
+/// non-destructive read (interim digests keep flowing).
+const HASHER_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "update",
+        params: &[STR_OR_BYTES],
+        ret: Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "digest",
+        params: &[],
+        ret: Concrete(SigType::Bytes),
+    },
+];
+
+fn hasher_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(hasher) = recv.as_any_mut().downcast_mut::<crate::crypto::Hasher>() else {
+        return Err(type_error(method, "Hasher"));
+    };
+    match method {
+        "update" => {
+            want_arity(method, args, 1)?;
+            hasher.update(want_data(method, args, 0)?);
+            Ok(NativeOut::Unit)
+        }
+        "digest" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Bytes(hasher.digest()))
+        }
+        _ => Err(crate::no_method_error(
+            crate::crypto::HASHER_TYPE_NAME,
+            method,
+        )),
+    }
+}
+
+fn crypto_dispatch(
+    func: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match func {
+        "sha256" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Bytes(crate::crypto::sha256(want_data(
+                func, args, 0,
+            )?)))
+        }
+        "sha512" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Bytes(crate::crypto::sha512(want_data(
+                func, args, 0,
+            )?)))
+        }
+        "sha1" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Bytes(crate::crypto::sha1(want_data(
+                func, args, 0,
+            )?)))
+        }
+        "md5" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Bytes(crate::crypto::md5(want_data(
+                func, args, 0,
+            )?)))
+        }
+        "hmac_sha256" => {
+            want_arity(func, args, 2)?;
+            Ok(NativeOut::Bytes(crate::crypto::hmac_sha256(
+                want_data(func, args, 0)?,
+                want_data(func, args, 1)?,
+            )))
+        }
+        "hmac_sha512" => {
+            want_arity(func, args, 2)?;
+            Ok(NativeOut::Bytes(crate::crypto::hmac_sha512(
+                want_data(func, args, 0)?,
+                want_data(func, args, 1)?,
+            )))
+        }
+        "hmac_sha256_verify" => {
+            want_arity(func, args, 3)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(
+                crate::crypto::hmac_sha256_verify(
+                    want_data(func, args, 0)?,
+                    want_data(func, args, 1)?,
+                    want_tag(func, args, 2)?,
+                ),
+            )))
+        }
+        "hmac_sha512_verify" => {
+            want_arity(func, args, 3)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(
+                crate::crypto::hmac_sha512_verify(
+                    want_data(func, args, 0)?,
+                    want_data(func, args, 1)?,
+                    want_tag(func, args, 2)?,
+                ),
+            )))
+        }
+        "constant_time_eq" => {
+            want_arity(func, args, 2)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(
+                crate::crypto::constant_time_eq(
+                    want_data(func, args, 0)?,
+                    want_data(func, args, 1)?,
+                ),
+            )))
+        }
+        "sha256_hasher" => {
+            want_arity(func, args, 0)?;
+            Ok(NativeOut::Extern(crate::ExternBox::new(
+                crate::crypto::Hasher::Sha256(Default::default()),
+            )))
+        }
+        "sha512_hasher" => {
+            want_arity(func, args, 0)?;
+            Ok(NativeOut::Extern(crate::ExternBox::new(
+                crate::crypto::Hasher::Sha512(Default::default()),
+            )))
+        }
+        "bcrypt_hash" => {
+            want_arity(func, args, 2)?;
+            let password = want_str(func, args, 0)?;
+            let cost = want_int(func, args, 1)?;
+            // The salt is the effectful input: two Entropy words, drawn here at the seam so
+            // `crypto::bcrypt_hash` itself stays pure (and unit-testable against pinned salts).
+            let mut salt = [0u8; 16];
+            salt[..8].copy_from_slice(&host.entropy_u64().to_be_bytes());
+            salt[8..].copy_from_slice(&host.entropy_u64().to_be_bytes());
+            Ok(NativeOut::Str(crate::crypto::bcrypt_hash(
+                password, cost, salt,
+            )?))
+        }
+        "bcrypt_verify" => {
+            want_arity(func, args, 2)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(
+                crate::crypto::bcrypt_verify(want_str(func, args, 0)?, want_str(func, args, 1)?)?,
+            )))
+        }
+        "random_bytes" => {
+            want_arity(func, args, 1)?;
+            let n = want_int(func, args, 0)?;
+            if n < 0 {
+                return Err(StdError {
+                    kind: crate::ErrorKind::ArgType,
+                    message: format!("`crypto.random_bytes` count must be non-negative, got {n}"),
+                });
+            }
+            let n = n as usize;
+            let mut out = Vec::with_capacity(n.next_multiple_of(8));
+            while out.len() < n {
+                out.extend_from_slice(&host.entropy_u64().to_be_bytes());
+            }
+            out.truncate(n);
+            Ok(NativeOut::Bytes(out))
+        }
+        _ => Err(no_function_error("crypto", func)),
     }
 }
 
@@ -1196,6 +1498,33 @@ const ID_FNS: &[ExtFn] = &[
         params: &[Str],
         ret: Concrete(SigType::Option(&UUID_SIG)),
     },
+    // Name-based UUIDs (crypto arc C5): pure — same namespace + name = same UUID, everywhere.
+    ExtFn {
+        name: "uuid_v5",
+        params: &[UUID_SIG, Str],
+        ret: Concrete(UUID_SIG),
+    },
+    // The RFC 9562 well-known namespaces, as zero-arg constructors (a module has no constants).
+    ExtFn {
+        name: "namespace_dns",
+        params: &[],
+        ret: Concrete(UUID_SIG),
+    },
+    ExtFn {
+        name: "namespace_url",
+        params: &[],
+        ret: Concrete(UUID_SIG),
+    },
+    ExtFn {
+        name: "namespace_oid",
+        params: &[],
+        ret: Concrete(UUID_SIG),
+    },
+    ExtFn {
+        name: "namespace_x500",
+        params: &[],
+        ret: Concrete(UUID_SIG),
+    },
 ];
 
 /// The `Uuid` signature type, named once (`SigType::Option` borrows a static).
@@ -1548,6 +1877,12 @@ const STD_MODULES: &[ExtModule] = &[
         name: "id",
         functions: ID_FNS,
         dispatch: id_dispatch,
+        deep_marshal: false,
+    },
+    ExtModule {
+        name: "crypto",
+        functions: CRYPTO_FNS,
+        dispatch: crypto_dispatch,
         deep_marshal: false,
     },
     ExtModule {

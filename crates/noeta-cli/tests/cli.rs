@@ -391,6 +391,26 @@ fn run_async_metadata_twins_on_the_real_executor() {
 }
 
 #[test]
+fn run_bcrypt_round_trips_on_real_entropy() {
+    // Crypto arc C4: on the RealHost the bcrypt salt comes from OS entropy, so the hash string
+    // is unpredictable — but it must verify against the password that made it (and not against
+    // another), and carry the requested cost in its self-describing prefix.
+    let src = "use std.{crypto}\n\
+               h = crypto.bcrypt_hash(\"hunter2\", 4)\n\
+               echo h.starts_with(\"$2b$04$\")\n\
+               echo crypto.bcrypt_verify(\"hunter2\", h)\n\
+               echo crypto.bcrypt_verify(\"wr0ng\", h)\n\
+               echo crypto.random_bytes(16).len()\n";
+    let file = temp_program("run_bcrypt_real", src);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("true\ntrue\nfalse\n16\n");
+}
+
+#[test]
 fn run_writes_files_asynchronously_on_the_real_executor() {
     // Track A.10: `fs.write_async`/`append_async` hit the REAL disk via the real executor's tokio
     // runtime, awaited like any future. A write/append/read round-trip lands on disk.

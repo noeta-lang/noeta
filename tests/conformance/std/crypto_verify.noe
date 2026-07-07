@@ -1,0 +1,31 @@
+// Constant-time verification (crypto arc C7): `bytes ==` short-circuits on the first differing
+// byte — fine for content digests, a timing oracle for secrets — so tag comparison gets
+// purpose-named functions (the hmac crate's constant-time verify underneath), and other secrets
+// get `constant_time_eq`. Verification failure is `false`, never an error: a truncated,
+// tampered, or wrong-key tag is an ordinary outcome.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "false"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: exit 0
+use std.{crypto}
+
+msg = "what do ya want for nothing?"
+tag = crypto.hmac_sha256("Jefe", msg)
+echo crypto.hmac_sha256_verify("Jefe", msg, tag)
+echo crypto.hmac_sha256_verify("Jefe", "tampered", tag)
+echo crypto.hmac_sha256_verify("wr0ng", msg, tag)
+// A 512 tag never verifies as a 256 tag (length mismatch is false, not an error).
+echo crypto.hmac_sha256_verify("Jefe", msg, crypto.hmac_sha512("Jefe", msg))
+echo crypto.hmac_sha512_verify("Jefe", msg, crypto.hmac_sha512("Jefe", msg))
+
+// Generic constant-time equality over string or bytes secrets.
+echo crypto.constant_time_eq("tok_123", "tok_123")
+echo crypto.constant_time_eq("tok_123", "tok_124")
+echo crypto.constant_time_eq("tok_123", "tok_12")
+echo crypto.constant_time_eq(crypto.sha256("a"), crypto.sha256("a"))
