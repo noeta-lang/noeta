@@ -51,11 +51,30 @@ guard), the typed⇒!heap invariant preserved by strengthening heap at a superse
 sites, `slot_hazard_map` unaffected (hazards raised at def sites persist — a guard can't
 un-track a stale slot). All suites + jit-differential green.
 
-**New finding (recorded, not yet acted on): the egraph is superlinear in body size.** At
-`opt_level=none` compile time is linear in insts (~0.75 µs/inst at every size); at `speed` the
-per-inst cost grows with body size (1.27 → 1.89 µs/inst from 40 to 160 stmts). Very large
-bodies would benefit from a size-tiered opt level, but Cranelift fixes `opt_level` per ISA/module
-— it would need a second engine on the compile thread. Deferred unless real programs hit it.
+**Finding: the egraph is superlinear in body size.** At `opt_level=none` compile time is linear
+in insts (~0.75 µs/inst at every size); at `speed` the per-inst cost grows with body size
+(1.27 → 1.89 µs/inst from 40 to 160 stmts). Very large bodies would benefit from a size-tiered
+opt level, but Cranelift fixes `opt_level` per ISA/module — it would need a second engine on the
+compile thread.
+
+## Post-C3 `opt=none` re-measurement (2026-07-07, pinned A/B, same binary, median of 5)
+
+The hypothesis: with C3's static claims doing much of what the egraph cleaned up dynamically,
+maybe the code-quality gap shrank enough to default to `none` (linear compiles, superlinearity
+gone). **Measured — it did not.** The egraph still earns its keep on the JIT's target workload:
+
+| workload (runtime-dominated) | compile: none faster | generated code: `speed` vs `none` |
+|---|--:|--:|
+| 30× 5-stmt hot fns × 2,000,000 calls | 1.80× | **speed +8.5% faster** |
+| mixed fixture × 100,000 calls | 2.19× | −2.5% (a wash, within noise) |
+
+**Verdict: keep `speed` as the production default.** On tight hot loops — exactly the code that
+goes native and runs millions of times, the JIT's whole reason to exist — `speed`'s GVN/LICM buys
+8.5%, which outweighs a compile-time win that S4 already moved off the mutator (it's
+latency-to-native, not pauses). On larger/one-shot bodies the gap is noise. A hotness-tiered opt
+choice (OSR loops → `speed`, one-shot promotions → `none`) is the only version that could win on
+both axes, but it needs the two-engine complexity above for a marginal payoff — **not worth it;
+the egraph is not a profitable target.** `NOETA_JIT_OPT` stays a dev knob.
 
 ## C0 findings — the cost is IR volume, not Cranelift
 
