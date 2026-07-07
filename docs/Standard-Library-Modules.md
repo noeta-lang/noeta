@@ -146,6 +146,8 @@ Identity generation — sequential ids and UUIDs.
 | `uuid` | `uuid() -> Uuid` | A UUID (version 4, random) — the default choice. |
 | `uuid_v7` | `uuid_v7() -> Uuid` | A time-ordered UUID (version 7, unix-ms + random) — for ids that should sort by creation time. |
 | `parse` | `parse(s: string) -> Uuid?` | Any RFC form; `none` on malformed input. |
+| `uuid_v5` | `uuid_v5(ns: Uuid, name: string) -> Uuid` | A name-based UUID (version 5, SHA-1) — **pure**: same namespace + name gives the same UUID on any host, forever. |
+| `namespace_dns` … | `namespace_dns() -> Uuid` | The RFC 9562 well-known namespaces: `namespace_dns`, `namespace_url`, `namespace_oid`, `namespace_x500`. Any `Uuid` (including a v5 result) can be a namespace. |
 
 `Uuid` is a first-class value type: it compares by value, orders by its bytes (so v7 ids sort by creation time), and displays in the canonical hyphenated lowercase form. Instance methods: `to_string() -> string`, `version() -> int`, and `timestamp_ms() -> int?` — `some(ms)` exactly when the version carries a timestamp (v7), `none` otherwise.
 
@@ -158,9 +160,57 @@ echo key.version()           // 4
 echo ordered.version()       // 7
 echo key is Uuid             // true
 echo id.parse(key.to_string()) == some(key)   // true — canonical round-trip
+
+// v5: deterministic, hierarchical naming — no entropy involved.
+user_ns = id.uuid_v5(id.namespace_dns(), "example.com")
+echo id.uuid_v5(user_ns, "alice")   // the same UUID on every machine, every run
 ```
 
 UUIDs flow through the host seam: in the deterministic sandbox (tests, the differential oracle) they are exactly reproducible — drawn from an entropy stream **independent of `random`** (generating an id never perturbs a seeded sequence, and `random.seed` never rewinds ids), with v7 timestamps built on a fixed epoch plus the logical clock (so `time.sleep` advances them). Under `noeta run`, `uuid()` uses real OS entropy and `uuid_v7()` real wall time.
+
+## `crypto`
+
+Everyday cryptographic primitives: content digests, keyed digests (HMAC), password hashing
+(bcrypt), and crypto-grade random bytes.
+
+| Function | Signature | Notes |
+|---|---|---|
+| `sha256`, `sha512` | `sha256(data: string\|bytes) -> bytes` | Content digests. A string hashes as its UTF-8 bytes. |
+| `sha1`, `md5` | `sha1(data: string\|bytes) -> bytes` | **Interop only** (legacy checksums, UUID v5) — not collision-resistant; don't build integrity on them. |
+| `hmac_sha256`, `hmac_sha512` | `hmac_sha256(key: string\|bytes, data: string\|bytes) -> bytes` | Keyed digests (RFC 2104) — message authentication, API signatures. |
+| `hmac_sha256_verify`, `hmac_sha512_verify` | `hmac_sha256_verify(key: string\|bytes, data: string\|bytes, tag: bytes) -> bool` | **Constant-time** tag verification — always use this, never `tag == …` (which short-circuits and leaks timing). A tampered, truncated, or wrong-key tag is `false`, never an error. |
+| `constant_time_eq` | `constant_time_eq(a: string\|bytes, b: string\|bytes) -> bool` | Constant-time equality for other secrets (session tokens, API keys, stored digests). Unequal lengths are `false`. |
+| `sha256_hasher`, `sha512_hasher` | `sha256_hasher() -> Hasher` | An incremental hasher for streaming input. |
+| `bcrypt_hash` | `bcrypt_hash(password: string, cost: int) -> string` | Password hashing; the salt comes from host entropy. Cost is bcrypt's 4..=31 (12 is a sensible production default). Returns the self-describing `$2b$…` string. |
+| `bcrypt_verify` | `bcrypt_verify(password: string, hash: string) -> bool` | `false` on a wrong password; an **error** on a string that isn't a bcrypt hash. Accepts hashes from any bcrypt implementation. |
+| `random_bytes` | `random_bytes(n: int) -> bytes` | Crypto-grade random bytes (tokens, keys) from host entropy — distinct from `random`'s seeded stream, like `id.uuid`. |
+
+Digests are `bytes` — composable (hash a hash, key an HMAC with a digest) — and render with
+`bytes.to_hex()`. Comparing **content** digests with `==` is fine; comparing anything secret
+(auth tags, tokens) must go through the constant-time functions above. `Hasher` is a first-class value type: `update(data: string|bytes)` absorbs
+input (mutating the hasher in place, with reference semantics like a file handle), and
+`digest() -> bytes` reads the current digest *without* consuming the state, so interim digests
+keep flowing.
+
+```noeta
+use std.{crypto}
+echo crypto.sha256("abc").to_hex()   // ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+echo crypto.hmac_sha256("key", "message").to_hex()   // 6e9ef29b75fffc5b7abae527d58fdadb2fe42e7219011976917343065f58ed4a
+
+h = crypto.sha256_hasher()           // streaming: feed input as it arrives
+h.update("ab")
+h.update("c")
+echo h.digest() == crypto.sha256("abc")   // true — incremental matches one-shot
+
+hash = crypto.bcrypt_hash("hunter2", 4)   // cost 4 for demo speed; use ~12 in production
+echo crypto.bcrypt_verify("hunter2", hash)   // true
+echo crypto.bcrypt_verify("wr0ng", hash)     // false
+```
+
+Like `id`, the effectful inputs ride the host seam: the bcrypt salt and `random_bytes` draw from
+the host's entropy capability — exactly reproducible in the deterministic sandbox, real OS
+entropy under `noeta run`. The digest functions are pure: the same input gives the same digest
+everywhere (the conformance suite pins the published NIST/RFC vectors).
 
 ## `vec` & `quat`
 

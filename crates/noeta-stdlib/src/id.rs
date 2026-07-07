@@ -47,6 +47,21 @@ pub fn v7(unix_ms: u64, ra: u64, rb: u64) -> uuid::Uuid {
     uuid::Builder::from_unix_timestamp_millis(unix_ms, &tail).into_uuid()
 }
 
+/// A v5 (name-based, RFC 9562 §5.5) UUID — pure, no Host input: the SHA-1 of the namespace's
+/// bytes followed by the name, with the version nibble (`5`) and variant bits overwriting their
+/// fixed positions. Same namespace + same name = same UUID, everywhere, forever — the point.
+/// The digest comes from our own `sha1` dep (crypto arc C5) rather than the uuid crate's `v5`
+/// feature, which would drag in a second SHA-1 implementation (`sha1_smol`).
+pub fn v5(ns: &uuid::Uuid, name: &str) -> uuid::Uuid {
+    let mut input = Vec::with_capacity(16 + name.len());
+    input.extend_from_slice(ns.as_bytes());
+    input.extend_from_slice(name.as_bytes());
+    let digest = crate::crypto::sha1(&input);
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    uuid::Builder::from_sha1_bytes(bytes).into_uuid()
+}
+
 /// The v7 timestamp read back as unix milliseconds — `some` iff the version carries a timestamp
 /// (`u.timestamp_ms()`; the Option IS the version distinction, surfaced where it matters).
 pub fn timestamp_ms(u: &uuid::Uuid) -> Option<u64> {
@@ -153,6 +168,16 @@ mod tests {
             Some(1_767_225_600_005)
         );
         assert_eq!(timestamp_ms(&v4(1, 2)), None);
+    }
+
+    /// The RFC 9562 v5 example (DNS namespace, "www.example.com") — independently confirmed
+    /// against Python's `uuid.uuid5`. Deterministic by definition, so an exact pin.
+    #[test]
+    fn v5_matches_the_rfc_9562_example() {
+        let u = v5(&uuid::Uuid::NAMESPACE_DNS, "www.example.com");
+        assert_eq!(u.to_string(), "2ed6657d-e927-568b-95e1-2665a8aea6a2");
+        assert_eq!(u.get_version_num(), 5);
+        assert_eq!(u, v5(&uuid::Uuid::NAMESPACE_DNS, "www.example.com"));
     }
 
     #[test]

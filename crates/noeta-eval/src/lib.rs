@@ -2308,6 +2308,11 @@ impl Interpreter {
             ("len", Value::Map(entries, _)) if arity_ok => Some(Value::Int(entries.len() as i64)),
             ("len", Value::Str(s)) if arity_ok => Some(Value::Int(s.chars().count() as i64)),
             ("len", Value::Bytes(b)) if arity_ok => Some(Value::Int(b.len() as i64)),
+            // Lowercase hex rendering of a `bytes` buffer (crypto arc C1) — the shared helper,
+            // so both backends print digests identically.
+            ("to_hex", Value::Bytes(b)) if arity_ok => {
+                Some(Value::Str(noeta_stdlib::bytes_to_hex(b)))
+            }
             // `.enumerate()` yields a list of `(index, value)` **tuples** (object-model slice 4b —
             // tuples are the positional-pair type), destructured by a `for (i, x) in …` pattern.
             ("enumerate", Value::List(items)) if arity_ok => {

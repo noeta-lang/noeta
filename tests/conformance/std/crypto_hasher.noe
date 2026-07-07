@@ -1,0 +1,44 @@
+// The incremental `Hasher` (crypto arc C3) — the third extern-seam client, and the first in the
+// mutable + host-free corner: `update` mutates the receiver through the shared cell (reference
+// semantics, like FileHandle) without ever touching the Host. `digest()` is non-destructive —
+// interim digests keep flowing — and incremental hashing matches the one-shot functions exactly.
+// expect: stdout "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+// expect: stdout "fb8e20fc2e4c3f248c60c39bd652f3c1347298bb977b8b4d5903b85055620603"
+// expect: stdout "true"
+// expect: stdout "<sha256 hasher>"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+use std.{crypto}
+
+h = crypto.sha256_hasher()
+// A fresh hasher's digest is the empty-input digest.
+echo h.digest().to_hex()
+
+h.update("ab")
+echo h.digest().to_hex()
+h.update("c")
+echo h.digest() == crypto.sha256("abc")
+
+echo h
+echo h is Hasher
+
+// Reference semantics: an alias updates the same state.
+g = h
+g.update("!")
+echo h.digest() == crypto.sha256("abc!")
+
+// bytes input, and feeding one digest into another algorithm's hasher.
+b = crypto.sha512_hasher()
+b.update(crypto.sha256("abc"))
+echo b.digest() == crypto.sha512(crypto.sha256("abc"))
+
+// Narrowing from dyn recovers the type.
+d: dyn = crypto.sha256_hasher()
+echo d is Hasher
+
+// Different algorithms are never equal, even both freshly constructed.
+echo crypto.sha256_hasher() == crypto.sha512_hasher()
