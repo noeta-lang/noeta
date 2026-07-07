@@ -1,18 +1,22 @@
-//! The bundle serialization oracle (P-AOT L1.0): compile every corpus program to a
-//! [`noeta_bytecode::Module`] and assert it survives a serialize→deserialize→serialize round-trip
-//! byte-for-byte. This proves the whole bytecode graph — ops, constants, shapes, method/derive
-//! tables, and the reflection artifact — serializes losslessly, the precondition for shipping a
-//! `.noeb` bundle instead of source.
+//! The bundle oracle (P-AOT L1.0 + L1.3): compile every corpus program to a
+//! [`noeta_bytecode::Module`] and prove it survives serialization on two levels.
 //!
-//! `Module` does not derive `PartialEq` (its ops carry no equality), so the round-trip is checked
-//! structurally via **byte stability**: `encode(decode(encode(m)))` must equal `encode(m)`. A
-//! successful decode that re-encodes identically is a lossless round-trip. The *execution*
-//! differential (a decoded module runs identically to source) is the separate L1.3 oracle.
+//! - **L1.0 — structural round-trip.** The module encodes→decodes→re-encodes byte-for-byte, so the
+//!   whole bytecode graph (ops, constants, shapes, method/derive tables, the reflection artifact)
+//!   serializes losslessly. `Module` has no `PartialEq` (its ops carry none), so byte stability is
+//!   the structural equality check.
+//! - **L1.3 — execution differential.** The *decoded* module, run on the deterministic
+//!   [`noeta_stdlib::SandboxHost`], produces a byte-identical [`RunResult`] to the source-compiled
+//!   module. This is the real ship-safety gate: a `.noeb` runs exactly like its source. It mirrors
+//!   the backend differential's discipline (same sandbox, so the only variable is
+//!   "compiled-from-source vs decoded-from-bytes"), keeping `0 skipped`.
 
 use std::path::Path;
 
+use noeta_backend::RunResult;
 use noeta_db::LangDatabase;
 use noeta_span::{Source, SourceId};
+use noeta_vm::VmBackend;
 
 use crate::collect_cases;
 
@@ -52,9 +56,9 @@ impl BundleReport {
             self.matched, self.skipped, self.parse_failed,
         );
         if self.failures.is_empty() {
-            out.push_str("every compiled module serializes losslessly ✓\n");
+            out.push_str("every compiled module round-trips losslessly and runs identically ✓\n");
         } else {
-            let _ = writeln!(out, "{} ROUND-TRIP FAILURE(s):", self.failures.len());
+            let _ = writeln!(out, "{} BUNDLE FAILURE(s):", self.failures.len());
             for f in &self.failures {
                 let _ = writeln!(out, "  {} — {}", f.name, f.detail);
             }
@@ -98,26 +102,70 @@ pub fn run_bundle_roundtrip(root: &Path, only: Option<&Path>) -> BundleReport {
     report
 }
 
-/// Assert `module` survives an encode→decode→encode round-trip byte-for-byte, folding the outcome
-/// into `report`. Shared by the single-file and workspace paths.
+/// Check `module` on both levels — byte round-trip (L1.0) and execution differential (L1.3) —
+/// folding the first failure into `report`. Shared by the single-file and workspace paths.
 fn check(name: &str, module: &noeta_bytecode::Module, report: &mut BundleReport) {
     let blob = module.encode();
-    match noeta_bytecode::Module::decode(&blob) {
-        Err(e) => report.failures.push(BundleFailure {
-            name: name.to_string(),
-            detail: format!("decode failed: {e}"),
-        }),
-        Ok(decoded) => {
-            if decoded.encode() == blob {
-                report.matched += 1;
-            } else {
-                report.failures.push(BundleFailure {
-                    name: name.to_string(),
-                    detail: "re-encode produced different bytes (lossy round-trip)".to_string(),
-                });
-            }
+    let decoded = match noeta_bytecode::Module::decode(&blob) {
+        Ok(d) => d,
+        Err(e) => {
+            report.failures.push(BundleFailure {
+                name: name.to_string(),
+                detail: format!("decode failed: {e}"),
+            });
+            return;
         }
+    };
+    // L1.0: byte stability proves a lossless structural round-trip.
+    if decoded.encode() != blob {
+        report.failures.push(BundleFailure {
+            name: name.to_string(),
+            detail: "re-encode produced different bytes (lossy round-trip)".to_string(),
+        });
+        return;
     }
+    // L1.3: the decoded module must execute identically to the source-compiled one. Both run on the
+    // deterministic sandbox, so any divergence is a serialization fidelity bug.
+    let from_source = VmBackend::new().run_module(module);
+    let from_bundle = VmBackend::new().run_module(&decoded);
+    if let Some(detail) = describe_run_difference(&from_source, &from_bundle) {
+        report.failures.push(BundleFailure {
+            name: name.to_string(),
+            detail,
+        });
+        return;
+    }
+    report.matched += 1;
+}
+
+/// The first field on which a source-run and a bundle-run diverge, or `None` if identical.
+fn describe_run_difference(source: &RunResult, bundle: &RunResult) -> Option<String> {
+    if source.stdout != bundle.stdout {
+        return Some(format!(
+            "stdout: source {:?}, bundle {:?}",
+            source.stdout, bundle.stdout
+        ));
+    }
+    if source.exit_code != bundle.exit_code {
+        return Some(format!(
+            "exit: source {}, bundle {}",
+            source.exit_code, bundle.exit_code
+        ));
+    }
+    let codes = |r: &RunResult| {
+        r.diagnostics
+            .iter()
+            .map(|d| (d.code, d.span))
+            .collect::<Vec<_>>()
+    };
+    if codes(source) != codes(bundle) {
+        return Some(format!(
+            "diagnostics: source {:?}, bundle {:?}",
+            codes(source),
+            codes(bundle)
+        ));
+    }
+    None
 }
 
 /// Compile one single-file program to a module (gating exactly like the differential:

@@ -167,16 +167,17 @@ fn differential_backends_agree() {
     );
 }
 
-/// The bundle serialization gate (P-AOT L1.0): every module the VM compiles must survive a
-/// serialize→deserialize→serialize round-trip byte-for-byte, the precondition for shipping a
-/// `.noeb` bundle instead of source.
+/// The bundle gate (P-AOT L1.0 + L1.3): every module the VM compiles must survive a
+/// serialize→deserialize→serialize round-trip byte-for-byte (structural), *and* the decoded module
+/// must run byte-identically to the source-compiled one on the sandbox (execution) — the two
+/// preconditions for shipping a `.noeb` bundle instead of source.
 #[test]
-fn bundle_modules_round_trip_losslessly() {
+fn bundle_modules_round_trip_and_run_identically() {
     let report = noeta_conformance::run_bundle_roundtrip(&corpus_root(), None);
     eprintln!("{}", report.to_human());
     assert!(
         report.ok(),
-        "a compiled module did not survive serialization:\n{}",
+        "a compiled module did not survive bundling:\n{}",
         report.to_human()
     );
     assert_eq!(
