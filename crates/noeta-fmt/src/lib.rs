@@ -42,17 +42,19 @@
 //!
 //! # Status
 //!
-//! **F0–F1** done: crate skeleton, [`FmtConfig`] seam, the [`format_source`] entry point with the
-//! safety gate, and a **minimal** printer (literals, `echo`, `return`, bare-expression statements,
-//! and top-level `fn` with untyped params). Comments are collected via `lex_with_trivia` (available
-//! for reattachment in F4) and trailing `;` is preserved per statement. Every other construct returns
-//! [`FmtError::Unsupported`] until the full printer lands in F3.
+//! **F0–F3** done: crate skeleton, [`FmtConfig`] seam, the [`format_source`] entry point with the
+//! safety gate, and the **full source-directed printer** ([`print`], on the [`doc`] algebra) —
+//! total over every parseable program (precedence-minimal parentheses, restricted-head handling,
+//! list-spread re-sugaring, per-statement `;`, config-driven match-arm alignment). Comments are
+//! collected via `lex_with_trivia` and reattached/emitted in F4; width-driven wrapping (`wrap`) is
+//! F5.
 
 use noeta_diagnostics::Diagnostic;
-use noeta_span::{Source, SourceId, Span};
+use noeta_span::{Source, SourceId};
 
-// The Wadler pretty-printing algebra (F2). The current printer still emits strings directly; F3
-// re-lowers it onto `Doc`, at which point this `allow` comes off.
+// The Wadler pretty-printing algebra (F2). F3 lowers the printer onto it using hardlines + text
+// (source-directed policy); the width-driven combinators (`group`/`line`/`softline`) are exercised
+// when F5 adds `wrap = true`, so they stay `allow(dead_code)` until then.
 #[allow(dead_code)]
 mod doc;
 mod print;
@@ -100,9 +102,6 @@ pub enum FmtError {
     /// The input did not lex/parse cleanly; the formatter refuses to reformat broken source. Carries
     /// the diagnostics so the CLI can show them.
     Parse(Vec<Diagnostic>),
-    /// A construct the printer does not handle yet (F0's minimal subset). Removed as F3 completes the
-    /// printer; never reachable once every AST node is covered.
-    Unsupported { construct: String, span: Span },
     /// The **safety gate** tripped: the formatted output would not re-parse, or re-parses to a
     /// different AST. A formatter bug caught before it could corrupt a file — the input is preserved.
     Safety(String),
@@ -113,9 +112,6 @@ impl std::fmt::Display for FmtError {
         match self {
             FmtError::Parse(diags) => {
                 write!(f, "input does not parse ({} diagnostic(s))", diags.len())
-            }
-            FmtError::Unsupported { construct, .. } => {
-                write!(f, "unsupported construct: {construct}")
             }
             FmtError::Safety(why) => write!(f, "safety gate: {why}"),
         }
@@ -226,12 +222,11 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_construct_declines() {
-        // A `class` is outside the F0 subset — decline, do not guess.
-        assert!(matches!(
-            fmt("class C {}"),
-            Err(FmtError::Unsupported { .. })
-        ));
+    fn formats_a_class() {
+        assert_eq!(
+            fmt("class C{mut x:int\nfn get():int{return self.x}}").unwrap(),
+            "class C {\n    mut x: int\n\n    fn get(): int {\n        return self.x\n    }\n}\n"
+        );
     }
 
     #[test]

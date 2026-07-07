@@ -1,216 +1,1467 @@
-//! The AST → text printer.
+//! The AST → [`Doc`] printer (F3).
 //!
-//! **F0 scope:** a deliberately minimal subset — literals, `echo`, `return`, bare-expression
-//! statements, and top-level `fn` with untyped, default-less params — emitting the canonical style
-//! directly as strings. Anything else returns [`FmtError::Unsupported`]. F2 replaces this with the
-//! Wadler `Doc` algebra and F3 grows it to full surface coverage; the public entry point
-//! ([`print_program`]) and the canonical style it emits stay stable across that change.
+//! Emits the canonical style. This slice implements the **source-directed** policy (`wrap = false`,
+//! the default): a construct the author broke across lines stays broken; one they wrote inline stays
+//! inline. Block bodies (fn/class/match/…) always break — that is canonical, not author-directed.
+//! F5 adds the width-driven policy (`wrap = true`) by swapping the break decision in the `seq`/chain
+//! helpers for width-gated groups; the lowering below is otherwise unchanged.
+//!
+//! Correctness is underwritten by the safety gate in [`crate::format_source`]: any mis-print either
+//! fails to re-parse or re-parses to a different AST, and is caught before it can touch a file.
 
-use noeta_ast::{Expr, FnDecl, Param, Program, Stmt};
+use noeta_ast::{
+    AttrArg, AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr,
+    FieldDecl, FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, ObjectLit, Param, Pattern,
+    Program, RoleTag, Stmt, StrPart, StructDecl, TypeParam, TypeRef, VariantDecl,
+};
 use noeta_lexer::Comment;
+use noeta_span::Span;
 
-use crate::{FmtConfig, FmtError, trivia};
+use crate::doc::{Doc, render};
+use crate::{ArrowStyle, FmtConfig, FmtError, trivia};
 
-const INDENT: &str = "    "; // 4 spaces — the house style.
+const INDENT: isize = 4; // 4 spaces — the house style.
 
-/// Render `program` to its canonical textual form (F0 subset). `source` is the original text (for
-/// recovering author-choice trivia such as trailing `;`); `comments` are the collected comments,
-/// reattached and emitted in F4.
+/// Render `program` to canonical text.
 pub fn print_program(
     program: &Program,
     source: &str,
     comments: &[Comment],
     config: &FmtConfig,
 ) -> Result<String, FmtError> {
-    let mut p = Printer {
-        out: String::new(),
-        indent: 0,
+    let p = Printer {
         source,
         _comments: comments,
-        _config: config,
+        config,
     };
-    for (i, stmt) in program.stmts.iter().enumerate() {
-        if i > 0 {
-            p.out.push('\n');
-        }
-        p.stmt(stmt)?;
+    let doc = p.stmt_seq(&program.stmts, program.span.start, program.span.end)?;
+    let rendered = render(&doc, config.line_width);
+
+    // Strip trailing whitespace from every line (a blank line between indented items would otherwise
+    // carry the indent), and end the file with exactly one newline.
+    let mut out = String::with_capacity(rendered.len());
+    for line in rendered.lines() {
+        out.push_str(line.trim_end());
+        out.push('\n');
     }
-    // A well-formed source file ends with exactly one newline.
-    if !p.out.is_empty() {
-        p.out.push('\n');
+    let trimmed = out.trim_end_matches('\n');
+    out.truncate(trimmed.len());
+    if !out.is_empty() {
+        out.push('\n');
     }
-    Ok(p.out)
+    Ok(out)
 }
 
 struct Printer<'a> {
-    out: String,
-    indent: usize,
-    /// The original source, for recovering trailing-`;` trivia by span.
     source: &'a str,
     /// Collected comments — reattached and emitted in F4.
     _comments: &'a [Comment],
-    // Threaded now so F3's config-sensitive constructs (match arrows, wrapping) have it in hand.
-    _config: &'a FmtConfig,
+    config: &'a FmtConfig,
 }
 
 impl Printer<'_> {
-    fn line_indent(&mut self) {
-        for _ in 0..self.indent {
-            self.out.push_str(INDENT);
-        }
+    // ---- source-directed break helpers -------------------------------------------------------
+
+    /// Whether the source between byte offsets `a` and `b` contains a line break (the author broke
+    /// here). `a`/`b` must be a valid, ordered sub-slice of the source.
+    fn broke_between(&self, a: u32, b: u32) -> bool {
+        a <= b
+            && self
+                .source
+                .get(a as usize..b as usize)
+                .is_some_and(|s| s.contains('\n'))
     }
 
-    fn stmt(&mut self, stmt: &Stmt) -> Result<(), FmtError> {
+    /// Whether the source between `a` and `b` contains a truly **blank line** — two newlines
+    /// separated only by horizontal whitespace. (A plain newline count is wrong: a decl's span starts
+    /// at its keyword, so the gap before it includes its own directive/attribute lines like
+    /// `\n@packed\n`, which are two newlines but not a blank line.)
+    fn blank_between(&self, a: u32, b: u32) -> bool {
+        let Some(gap) = self.source.get(a as usize..b as usize) else {
+            return false;
+        };
+        let mut seen_newline = false;
+        for ch in gap.chars() {
+            match ch {
+                '\n' => {
+                    if seen_newline {
+                        return true;
+                    }
+                    seen_newline = true;
+                }
+                ' ' | '\t' | '\r' => {}
+                _ => seen_newline = false,
+            }
+        }
+        false
+    }
+
+    // ---- statements --------------------------------------------------------------------------
+
+    /// A brace-delimited statement block: ` {` on the current line, body indented, `}` on its own
+    /// line. An empty body prints as `{}`.
+    fn block(&self, body: &[Stmt], open: u32, close: u32) -> Result<Doc, FmtError> {
+        if body.is_empty() {
+            return Ok(Doc::text("{}"));
+        }
+        let inner = self.stmt_seq(body, open, close)?;
+        Ok(Doc::concat([
+            Doc::text("{"),
+            Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+            Doc::hardline(),
+            Doc::text("}"),
+        ]))
+    }
+
+    /// A sequence of statements separated by hardlines, preserving one blank line where the author
+    /// left one. `start`/`end` bound the enclosing region (for blank detection at the edges).
+    fn stmt_seq(&self, stmts: &[Stmt], _start: u32, _end: u32) -> Result<Doc, FmtError> {
+        let mut parts = Vec::new();
+        for (i, stmt) in stmts.iter().enumerate() {
+            if i > 0 {
+                parts.push(Doc::hardline());
+                if self.blank_between(stmts[i - 1].span().end, stmt.span().start) {
+                    parts.push(Doc::hardline());
+                }
+            }
+            parts.push(self.stmt(stmt)?);
+        }
+        Ok(Doc::concat(parts))
+    }
+
+    fn stmt(&self, stmt: &Stmt) -> Result<Doc, FmtError> {
         match stmt {
-            Stmt::Echo { value, span } => {
-                self.line_indent();
-                self.out.push_str("echo ");
-                self.expr(value)?;
-                self.semicolon(value.span().end, span.end);
-                Ok(())
-            }
+            Stmt::Echo { value, span } => Ok(self.leaf(
+                Doc::concat([Doc::text("echo "), self.expr(value)?]),
+                value.span().end,
+                span.end,
+            )),
             Stmt::Return { value, span } => {
-                self.line_indent();
-                self.out.push_str("return");
-                let content_end = if let Some(value) = value {
-                    self.out.push(' ');
-                    self.expr(value)?;
-                    value.span().end
-                } else {
-                    span.end
+                let (doc, content_end) = match value {
+                    Some(v) => (
+                        Doc::concat([Doc::text("return "), self.expr(v)?]),
+                        v.span().end,
+                    ),
+                    None => (Doc::text("return"), span.end),
                 };
-                self.semicolon(content_end, span.end);
-                Ok(())
+                Ok(self.leaf(doc, content_end, span.end))
             }
-            Stmt::Expr { expr, span } => {
-                self.line_indent();
-                self.expr(expr)?;
-                self.semicolon(expr.span().end, span.end);
-                Ok(())
+            Stmt::Yield { value, span } => Ok(self.leaf(
+                Doc::concat([Doc::text("yield "), self.expr(value)?]),
+                value.span().end,
+                span.end,
+            )),
+            Stmt::Break { span } => Ok(self.leaf(Doc::text("break"), span.end, span.end)),
+            Stmt::Continue { span } => Ok(self.leaf(Doc::text("continue"), span.end, span.end)),
+            Stmt::Expr { expr, span } => Ok(self.leaf(self.expr(expr)?, expr.span().end, span.end)),
+            // The `x.field = v` reassignment desugar: a binding whose value is a `FieldSet`. The
+            // canonical source is the field assignment itself, not `x = (x.field = v)`.
+            Stmt::Binding {
+                value: value @ Expr::FieldSet { .. },
+                span,
+                ..
+            } => Ok(self.leaf(self.expr(value)?, value.span().end, span.end)),
+            Stmt::Binding {
+                mut_decl,
+                name,
+                ty,
+                value,
+                span,
+                ..
+            } => {
+                let mut head = Vec::new();
+                if *mut_decl {
+                    head.push(Doc::text("mut "));
+                }
+                head.push(Doc::text(name.clone()));
+                if let Some(ty) = ty {
+                    head.push(Doc::text(": "));
+                    head.push(self.type_ref(ty)?);
+                }
+                head.push(Doc::text(" = "));
+                head.push(self.expr(value)?);
+                Ok(self.leaf(Doc::concat(head), value.span().end, span.end))
             }
+            Stmt::Destructure {
+                mut_decl,
+                targets,
+                value,
+                span,
+            } => {
+                let names = targets.iter().map(|(n, _)| Doc::text(n.clone()));
+                let mut head = Vec::new();
+                if *mut_decl {
+                    head.push(Doc::text("mut "));
+                }
+                head.push(Doc::text("("));
+                head.push(Doc::join(names, Doc::text(", ")));
+                head.push(Doc::text(") = "));
+                head.push(self.expr(value)?);
+                Ok(self.leaf(Doc::concat(head), value.span().end, span.end))
+            }
+            Stmt::Namespace { path, span } => Ok(self.leaf(
+                Doc::text(format!("namespace {}", path.join("."))),
+                span.end,
+                span.end,
+            )),
+            Stmt::Use { path, names, span } => {
+                let prefix = path.join(".");
+                let doc = match names {
+                    // `use A.B.C;` — a single leaf whose name is the last path element.
+                    n if n.len() == 1 && !prefix.is_empty() && path.last() == Some(&n[0].name) => {
+                        Doc::text(format!("use {prefix}"))
+                    }
+                    n if n.len() == 1 && prefix.is_empty() => {
+                        Doc::text(format!("use {}", n[0].name))
+                    }
+                    names => {
+                        let leaves = names.iter().map(|u| u.name.clone()).collect::<Vec<_>>();
+                        Doc::text(format!("use {prefix}.{{{}}}", leaves.join(", ")))
+                    }
+                };
+                Ok(self.leaf(doc, span.end, span.end))
+            }
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+                span,
+            } => self.if_stmt(cond, then_body, else_body.as_deref(), *span),
+            Stmt::For {
+                pattern,
+                iterable,
+                body,
+                span,
+            } => {
+                let pat = match pattern {
+                    ForPattern::Single { name, .. } => Doc::text(name.clone()),
+                    ForPattern::Tuple { names, .. } => Doc::concat([
+                        Doc::text("("),
+                        Doc::join(
+                            names.iter().map(|(n, _)| Doc::text(n.clone())),
+                            Doc::text(", "),
+                        ),
+                        Doc::text(")"),
+                    ]),
+                };
+                Ok(Doc::concat([
+                    Doc::text("for "),
+                    pat,
+                    Doc::text(" in "),
+                    self.restricted_head(iterable)?,
+                    Doc::text(" "),
+                    self.block(body, iterable.span().end, span.end)?,
+                ]))
+            }
+            Stmt::While { cond, body, span } => Ok(Doc::concat([
+                Doc::text("while "),
+                self.restricted_head(cond)?,
+                Doc::text(" "),
+                self.block(body, cond.span().end, span.end)?,
+            ])),
+            Stmt::Concurrent { body, span } => Ok(Doc::concat([
+                Doc::text("concurrent "),
+                self.block(body, span.start, span.end)?,
+            ])),
             Stmt::Fn(decl) => self.fn_decl(decl),
-            other => Err(unsupported("statement", other.span())),
+            Stmt::Struct(decl) => self.struct_decl(decl),
+            Stmt::Class(decl) => self.class_decl(decl),
+            Stmt::Enum(decl) => self.enum_decl(decl),
+            Stmt::Impl(decl) => self.impl_decl(decl),
+            Stmt::TierBlock {
+                tier,
+                args,
+                items,
+                doc_text,
+                span,
+                ..
+            } => {
+                let head = if args.is_empty() {
+                    Doc::text(format!("@{tier}"))
+                } else {
+                    let mut ds = Vec::new();
+                    for a in args {
+                        ds.push(self.attr_arg(a)?);
+                    }
+                    Doc::concat([
+                        Doc::text(format!("@{tier}(")),
+                        Doc::join(ds, Doc::text(", ")),
+                        Doc::text(")"),
+                    ])
+                };
+                match doc_text {
+                    // `@doc { … }` — a text tier: emit the body verbatim (it is free-form prose).
+                    Some(text) => Ok(Doc::concat([
+                        head,
+                        Doc::text(" {"),
+                        Doc::raw_text(text.clone()),
+                        Doc::text("}"),
+                    ])),
+                    // A code tier (`@test`/`@bench`/`@debug`): its items are ordinary statements.
+                    None => Ok(Doc::concat([
+                        head,
+                        Doc::text(" "),
+                        self.block(items, span.start, span.end)?,
+                    ])),
+                }
+            }
         }
     }
 
-    /// Re-emit a trailing `;` iff the author wrote one. `content_end` is just past the statement's
-    /// content (before any `;`); `stmt_end` is the statement span's end — we probe from whichever the
-    /// parser placed the span at, so the check is robust to either convention.
-    fn semicolon(&mut self, content_end: u32, stmt_end: u32) {
+    /// Attach a trailing `;` to a leaf statement iff the author wrote one (per-statement trivia).
+    fn leaf(&self, doc: Doc, content_end: u32, stmt_end: u32) -> Doc {
         if trivia::has_trailing_semicolon(self.source, content_end)
             || trivia::has_trailing_semicolon(self.source, stmt_end)
         {
-            self.out.push(';');
+            Doc::concat([doc, Doc::text(";")])
+        } else {
+            doc
         }
     }
 
-    fn fn_decl(&mut self, decl: &FnDecl) -> Result<(), FmtError> {
-        // F0 handles only the plain shape; richer signatures land in F3.
-        if !decl.attrs.is_empty() {
-            return Err(unsupported("function attributes", decl.span));
+    fn if_stmt(
+        &self,
+        cond: &Expr,
+        then_body: &[Stmt],
+        else_body: Option<&[Stmt]>,
+        span: Span,
+    ) -> Result<Doc, FmtError> {
+        let mut parts = vec![
+            Doc::text("if "),
+            self.restricted_head(cond)?,
+            Doc::text(" "),
+            self.block(then_body, cond.span().end, span.end)?,
+        ];
+        if let Some(else_body) = else_body {
+            parts.push(Doc::text(" else "));
+            // `else if` — the else body is a single nested `If`; print it inline (no extra braces).
+            if let [
+                Stmt::If {
+                    cond,
+                    then_body,
+                    else_body,
+                    span,
+                },
+            ] = else_body
+            {
+                parts.push(self.if_stmt(cond, then_body, else_body.as_deref(), *span)?);
+            } else {
+                parts.push(self.block(else_body, span.start, span.end)?);
+            }
         }
-        if !decl.type_params.is_empty() {
-            return Err(unsupported("generic parameters", decl.span));
+        Ok(Doc::concat(parts))
+    }
+
+    // ---- declarations ------------------------------------------------------------------------
+
+    fn fn_decl(&self, decl: &FnDecl) -> Result<Doc, FmtError> {
+        let mut parts = self.attrs(&decl.attrs)?;
+        if decl.is_public {
+            parts.push(Doc::text("pub "));
         }
         if decl.is_async {
-            return Err(unsupported("async fn", decl.span));
+            parts.push(Doc::text("async "));
         }
-        if decl.ret.is_some() {
-            return Err(unsupported("return-type annotation", decl.span));
+        parts.push(Doc::text("fn "));
+        parts.push(Doc::text(decl.name.clone()));
+        parts.push(self.type_params(&decl.type_params)?);
+        parts.push(self.params(&decl.params)?);
+        if let Some(ret) = &decl.ret {
+            parts.push(Doc::text(": "));
+            parts.push(self.type_ref(ret)?);
+        }
+        parts.push(Doc::text(" "));
+        parts.push(self.block(&decl.body, decl.name_span.end, decl.span.end)?);
+        Ok(Doc::concat(parts))
+    }
+
+    fn params(&self, params: &[Param]) -> Result<Doc, FmtError> {
+        let mut docs = Vec::new();
+        for p in params {
+            docs.push(self.param(p)?);
+        }
+        Ok(Doc::concat([
+            Doc::text("("),
+            Doc::join(docs, Doc::text(", ")),
+            Doc::text(")"),
+        ]))
+    }
+
+    fn param(&self, param: &Param) -> Result<Doc, FmtError> {
+        let mut parts = vec![Doc::text(param.name.clone())];
+        if let Some(ty) = &param.ty {
+            parts.push(Doc::text(": "));
+            parts.push(self.type_ref(ty)?);
+        }
+        if let Some(default) = &param.default {
+            parts.push(Doc::text(" = "));
+            parts.push(self.expr(default)?);
+        }
+        Ok(Doc::concat(parts))
+    }
+
+    fn type_params(&self, tps: &[TypeParam]) -> Result<Doc, FmtError> {
+        if tps.is_empty() {
+            return Ok(Doc::nil());
+        }
+        let docs = tps.iter().map(|tp| {
+            if tp.bounds.is_empty() {
+                Doc::text(tp.name.clone())
+            } else {
+                Doc::text(format!("{}: {}", tp.name, tp.bounds.join(" + ")))
+            }
+        });
+        Ok(Doc::concat([
+            Doc::text("<"),
+            Doc::join(docs, Doc::text(", ")),
+            Doc::text(">"),
+        ]))
+    }
+
+    fn struct_decl(&self, d: &StructDecl) -> Result<Doc, FmtError> {
+        let mut parts = self.decl_directives(
+            &d.derives,
+            &d.attrs,
+            d.attribute.as_deref(),
+            d.role.as_deref(),
+            d.semantic.is_some(),
+            d.packed.is_some(),
+        )?;
+        if d.is_public {
+            parts.push(Doc::text("pub "));
+        }
+        parts.push(Doc::text("struct "));
+        parts.push(Doc::text(d.name.clone()));
+        parts.push(self.type_params(&d.type_params)?);
+        parts.push(Doc::text(" "));
+        parts.push(self.type_body(&d.fields, &d.methods, &d.impls, None, d.span)?);
+        Ok(Doc::concat(parts))
+    }
+
+    fn class_decl(&self, d: &ClassDecl) -> Result<Doc, FmtError> {
+        let mut parts = self.decl_directives(
+            &d.derives,
+            &d.attrs,
+            d.attribute.as_deref(),
+            d.role.as_deref(),
+            d.semantic.is_some(),
+            d.packed.is_some(),
+        )?;
+        if d.is_public {
+            parts.push(Doc::text("pub "));
+        }
+        parts.push(Doc::text("class "));
+        parts.push(Doc::text(d.name.clone()));
+        parts.push(self.type_params(&d.type_params)?);
+        parts.push(Doc::text(" "));
+        parts.push(self.type_body(
+            &d.fields,
+            &d.methods,
+            &d.impls,
+            d.destructor.as_deref(),
+            d.span,
+        )?);
+        Ok(Doc::concat(parts))
+    }
+
+    /// The shared struct/class body: fields, then methods and `impl` blocks, then an optional
+    /// `destruct` block — each separated by a blank line, one item per line. Methods flattened out of
+    /// `impl` blocks are printed under their block, not among the free methods.
+    fn type_body(
+        &self,
+        fields: &[FieldDecl],
+        methods: &[FnDecl],
+        impls: &[ImplBlock],
+        destructor: Option<&[Stmt]>,
+        span: Span,
+    ) -> Result<Doc, FmtError> {
+        // Methods that belong to an impl block are printed within it; keep only free methods here.
+        let impl_method_names: Vec<&str> = impls
+            .iter()
+            .flat_map(|b| b.methods.iter().map(|m| m.name.as_str()))
+            .collect();
+        let free_methods: Vec<&FnDecl> = methods
+            .iter()
+            .filter(|m| !impl_method_names.contains(&m.name.as_str()))
+            .collect();
+
+        let mut groups: Vec<Doc> = Vec::new();
+        if !fields.is_empty() {
+            let mut fs = Vec::new();
+            for (i, f) in fields.iter().enumerate() {
+                if i > 0 {
+                    fs.push(Doc::hardline());
+                }
+                fs.push(self.field(f)?);
+            }
+            groups.push(Doc::concat(fs));
+        }
+        for m in &free_methods {
+            groups.push(self.fn_decl(m)?);
+        }
+        for b in impls {
+            groups.push(self.impl_block(b)?);
+        }
+        if let Some(body) = destructor {
+            groups.push(Doc::concat([
+                Doc::text("destruct "),
+                self.block(body, span.start, span.end)?,
+            ]));
         }
 
-        self.line_indent();
-        if decl.is_public {
-            self.out.push_str("pub ");
+        if groups.is_empty() {
+            return Ok(Doc::text("{}"));
         }
-        self.out.push_str("fn ");
-        self.out.push_str(&decl.name);
-        self.out.push('(');
-        for (i, param) in decl.params.iter().enumerate() {
+        // Blank line between groups; single lines within the field group already handled above.
+        let inner = Doc::join(groups, Doc::concat([Doc::hardline(), Doc::hardline()]));
+        Ok(Doc::concat([
+            Doc::text("{"),
+            Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+            Doc::hardline(),
+            Doc::text("}"),
+        ]))
+    }
+
+    fn field(&self, f: &FieldDecl) -> Result<Doc, FmtError> {
+        let mut parts = self.attrs(&f.attrs)?;
+        if f.is_public {
+            parts.push(Doc::text("pub "));
+        }
+        if f.mut_field {
+            parts.push(Doc::text("mut "));
+        }
+        parts.push(Doc::text(f.name.clone()));
+        if let Some(ty) = &f.ty {
+            parts.push(Doc::text(": "));
+            parts.push(self.type_ref(ty)?);
+        }
+        if let Some(default) = &f.default {
+            parts.push(Doc::text(" = "));
+            parts.push(self.expr(default)?);
+        }
+        // A field's trailing `;` is optional trivia, like a statement's.
+        Ok(self.leaf(Doc::concat(parts), f.span.end, f.span.end))
+    }
+
+    fn impl_block(&self, b: &ImplBlock) -> Result<Doc, FmtError> {
+        let head = Doc::text(format!("impl {} ", b.trait_name));
+        let mut ms = Vec::new();
+        for m in &b.methods {
+            ms.push(self.fn_decl(m)?);
+        }
+        let body = if ms.is_empty() {
+            Doc::text("{}")
+        } else {
+            let inner = Doc::join(ms, Doc::concat([Doc::hardline(), Doc::hardline()]));
+            Doc::concat([
+                Doc::text("{"),
+                Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+                Doc::hardline(),
+                Doc::text("}"),
+            ])
+        };
+        Ok(Doc::concat([head, body]))
+    }
+
+    fn impl_decl(&self, d: &ImplDecl) -> Result<Doc, FmtError> {
+        let head = Doc::text(format!("impl {} for {} ", d.trait_name, d.target));
+        let body = if d.methods.is_empty() {
+            Doc::text("{}")
+        } else {
+            let mut ms = Vec::new();
+            for m in &d.methods {
+                ms.push(self.fn_decl(m)?);
+            }
+            let inner = Doc::join(ms, Doc::concat([Doc::hardline(), Doc::hardline()]));
+            Doc::concat([
+                Doc::text("{"),
+                Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+                Doc::hardline(),
+                Doc::text("}"),
+            ])
+        };
+        Ok(Doc::concat([head, body]))
+    }
+
+    fn enum_decl(&self, d: &EnumDecl) -> Result<Doc, FmtError> {
+        let mut parts = self.decl_directives(
+            &d.derives,
+            &d.attrs,
+            None,
+            None,
+            d.semantic.is_some(),
+            d.packed.is_some(),
+        )?;
+        if d.is_public {
+            parts.push(Doc::text("pub "));
+        }
+        parts.push(Doc::text("enum "));
+        parts.push(Doc::text(d.name.clone()));
+        parts.push(self.type_params(&d.type_params)?);
+        if let Some(backing) = &d.backing {
+            parts.push(Doc::text(": "));
+            parts.push(self.type_ref(backing)?);
+        }
+        parts.push(Doc::text(" "));
+
+        // Body: variants (one per line, `;`-terminated as written), then methods/impls.
+        let mut groups: Vec<Doc> = Vec::new();
+        if !d.variants.is_empty() {
+            let mut vs = Vec::new();
+            for (i, v) in d.variants.iter().enumerate() {
+                if i > 0 {
+                    vs.push(Doc::hardline());
+                }
+                vs.push(self.variant(v)?);
+            }
+            groups.push(Doc::concat(vs));
+        }
+        for m in &d.methods {
+            let in_impl = d
+                .impls
+                .iter()
+                .any(|b| b.methods.iter().any(|im| im.name == m.name));
+            if !in_impl {
+                groups.push(self.fn_decl(m)?);
+            }
+        }
+        for b in &d.impls {
+            groups.push(self.impl_block(b)?);
+        }
+
+        let body = if groups.is_empty() {
+            Doc::text("{}")
+        } else {
+            let inner = Doc::join(groups, Doc::concat([Doc::hardline(), Doc::hardline()]));
+            Doc::concat([
+                Doc::text("{"),
+                Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+                Doc::hardline(),
+                Doc::text("}"),
+            ])
+        };
+        parts.push(body);
+        Ok(Doc::concat(parts))
+    }
+
+    fn variant(&self, v: &VariantDecl) -> Result<Doc, FmtError> {
+        let mut parts = self.attrs(&v.attrs)?;
+        parts.push(Doc::text(v.name.clone()));
+        if !v.fields.is_empty() {
+            let mut fs = Vec::new();
+            for f in &v.fields {
+                fs.push(self.param(f)?);
+            }
+            parts.push(Doc::concat([
+                Doc::text("("),
+                Doc::join(fs, Doc::text(", ")),
+                Doc::text(")"),
+            ]));
+        }
+        if let Some(backed) = &v.backed_value {
+            parts.push(Doc::text(" = "));
+            parts.push(self.expr(backed)?);
+        }
+        Ok(self.leaf(Doc::concat(parts), v.span.end, v.span.end))
+    }
+
+    // ---- directives & attributes -------------------------------------------------------------
+
+    /// The leading directive lines of a type declaration, each on its own line: `@derive(...)`,
+    /// `@attribute(...)`, `@role(...)`, `@semantic`, `@packed`, then `#[...]` attributes.
+    #[allow(clippy::too_many_arguments)]
+    fn decl_directives(
+        &self,
+        derives: &[DeriveSpec],
+        attrs: &[Attribute],
+        attribute: Option<&[(String, Span)]>,
+        role: Option<&[RoleTag]>,
+        semantic: bool,
+        packed: bool,
+    ) -> Result<Vec<Doc>, FmtError> {
+        let mut lines: Vec<Doc> = Vec::new();
+        if !derives.is_empty() {
+            let specs = derives.iter().map(|d| self.derive_spec(d));
+            let specs: Result<Vec<_>, _> = specs.collect();
+            lines.push(Doc::concat([
+                Doc::text("@derive("),
+                Doc::join(specs?, Doc::text(", ")),
+                Doc::text(")"),
+            ]));
+        }
+        if let Some(kinds) = attribute {
+            if kinds.is_empty() {
+                lines.push(Doc::text("@attribute"));
+            } else {
+                let names = kinds.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+                lines.push(Doc::text(format!("@attribute({})", names.join(", "))));
+            }
+        }
+        if semantic {
+            lines.push(Doc::text("@semantic"));
+        }
+        if let Some(tags) = role {
+            let each = tags
+                .iter()
+                .map(|t| {
+                    if t.enum_name.is_empty() {
+                        t.variant.clone()
+                    } else {
+                        format!("{}.{}", t.enum_name, t.variant)
+                    }
+                })
+                .collect::<Vec<_>>();
+            lines.push(Doc::text(format!("@role({})", each.join(", "))));
+        }
+        if packed {
+            lines.push(Doc::text("@packed"));
+        }
+        for a in attrs {
+            lines.push(self.attribute(a)?);
+        }
+        // Each directive on its own line, then the declaration keyword follows on the next line.
+        Ok(lines
+            .into_iter()
+            .map(|l| Doc::concat([l, Doc::hardline()]))
+            .collect())
+    }
+
+    fn derive_spec(&self, d: &DeriveSpec) -> Result<Doc, FmtError> {
+        if d.args.is_empty() {
+            Ok(Doc::text(d.name.clone()))
+        } else {
+            let mut args = Vec::new();
+            for a in &d.args {
+                args.push(self.type_ref(a)?);
+            }
+            Ok(Doc::concat([
+                Doc::text(format!("{}<", d.name)),
+                Doc::join(args, Doc::text(", ")),
+                Doc::text(">"),
+            ]))
+        }
+    }
+
+    /// Leading `#[...]` attributes as their own lines (for fn/field/variant leaders).
+    fn attrs(&self, attrs: &[Attribute]) -> Result<Vec<Doc>, FmtError> {
+        let mut out = Vec::new();
+        for a in attrs {
+            out.push(Doc::concat([self.attribute(a)?, Doc::hardline()]));
+        }
+        Ok(out)
+    }
+
+    fn attribute(&self, a: &Attribute) -> Result<Doc, FmtError> {
+        if a.args.is_empty() {
+            return Ok(Doc::text(format!("#[{}]", a.name)));
+        }
+        let args = a.args.iter().map(|arg| self.attr_arg(arg));
+        let args: Result<Vec<_>, _> = args.collect();
+        Ok(Doc::concat([
+            Doc::text(format!("#[{}(", a.name)),
+            Doc::join(args?, Doc::text(", ")),
+            Doc::text(")]"),
+        ]))
+    }
+
+    fn attr_arg(&self, arg: &AttrArg) -> Result<Doc, FmtError> {
+        let value = self.attr_value(&arg.value)?;
+        match &arg.name {
+            Some(name) => Ok(Doc::concat([Doc::text(format!("{name}: ")), value])),
+            None => Ok(value),
+        }
+    }
+
+    fn attr_value(&self, v: &AttrValue) -> Result<Doc, FmtError> {
+        Ok(match v {
+            AttrValue::Str(s) => Doc::text(format!("\"{}\"", escape(s))),
+            AttrValue::Int(i) => Doc::text(i.to_string()),
+            AttrValue::Float(f) => Doc::text(format_float(*f)),
+            AttrValue::Bool(b) => Doc::text(b.to_string()),
+            AttrValue::TypeRef(name) => Doc::text(name.clone()),
+            AttrValue::List(items) => {
+                let ds: Result<Vec<_>, _> = items.iter().map(|i| self.attr_value(i)).collect();
+                Doc::concat([
+                    Doc::text("["),
+                    Doc::join(ds?, Doc::text(", ")),
+                    Doc::text("]"),
+                ])
+            }
+            AttrValue::Set(items) => {
+                let ds: Result<Vec<_>, _> = items.iter().map(|i| self.attr_value(i)).collect();
+                Doc::concat([
+                    Doc::text("#{"),
+                    Doc::join(ds?, Doc::text(", ")),
+                    Doc::text("}"),
+                ])
+            }
+            AttrValue::Map(entries) => {
+                let mut ds = Vec::new();
+                for (k, val) in entries {
+                    ds.push(Doc::concat([
+                        Doc::text(format!("\"{}\": ", escape(k))),
+                        self.attr_value(val)?,
+                    ]));
+                }
+                Doc::concat([
+                    Doc::text("{"),
+                    Doc::join(ds, Doc::text(", ")),
+                    Doc::text("}"),
+                ])
+            }
+            AttrValue::Enum {
+                enum_name,
+                variant,
+                args,
+            } => {
+                let head = if enum_name.is_empty() {
+                    variant.clone()
+                } else {
+                    format!("{enum_name}.{variant}")
+                };
+                if args.is_empty() {
+                    Doc::text(head)
+                } else {
+                    let ds: Result<Vec<_>, _> = args.iter().map(|a| self.attr_value(a)).collect();
+                    Doc::concat([
+                        Doc::text(format!("{head}(")),
+                        Doc::join(ds?, Doc::text(", ")),
+                        Doc::text(")"),
+                    ])
+                }
+            }
+            AttrValue::Struct { type_name, fields } => {
+                let mut ds = Vec::new();
+                for (k, val) in fields {
+                    ds.push(Doc::concat([
+                        Doc::text(format!("{k}: ")),
+                        self.attr_value(val)?,
+                    ]));
+                }
+                Doc::concat([
+                    Doc::text(format!("{type_name} {{ ")),
+                    Doc::join(ds, Doc::text(", ")),
+                    Doc::text(" }"),
+                ])
+            }
+        })
+    }
+
+    // ---- types -------------------------------------------------------------------------------
+
+    fn type_ref(&self, ty: &TypeRef) -> Result<Doc, FmtError> {
+        Ok(match ty {
+            TypeRef::Named { name, args, .. } => {
+                if args.is_empty() {
+                    Doc::text(name.clone())
+                } else {
+                    let ds: Result<Vec<_>, _> = args.iter().map(|a| self.type_ref(a)).collect();
+                    Doc::concat([
+                        Doc::text(format!("{name}<")),
+                        Doc::join(ds?, Doc::text(", ")),
+                        Doc::text(">"),
+                    ])
+                }
+            }
+            TypeRef::Optional { inner, .. } => Doc::concat([Doc::text("?"), self.type_ref(inner)?]),
+            TypeRef::Union { members, .. } => {
+                let ds: Result<Vec<_>, _> = members.iter().map(|m| self.type_ref(m)).collect();
+                Doc::join(ds?, Doc::text(" | "))
+            }
+            TypeRef::Tuple { elements, .. } => {
+                let ds: Result<Vec<_>, _> = elements.iter().map(|e| self.type_ref(e)).collect();
+                Doc::concat([
+                    Doc::text("("),
+                    Doc::join(ds?, Doc::text(", ")),
+                    Doc::text(")"),
+                ])
+            }
+            TypeRef::Fn { params, ret, .. } => {
+                let ds: Result<Vec<_>, _> = params.iter().map(|p| self.type_ref(p)).collect();
+                Doc::concat([
+                    Doc::text("("),
+                    Doc::join(ds?, Doc::text(", ")),
+                    Doc::text(") -> "),
+                    self.type_ref(ret)?,
+                ])
+            }
+        })
+    }
+
+    // ---- expressions -------------------------------------------------------------------------
+
+    /// Print `e` in an operand position under a parent of binding power `parent_prec`. `is_right`
+    /// marks the right operand of a left-associative operator (which needs parentheses at equal
+    /// precedence). Inserts the minimum parentheses that preserve the parse.
+    fn operand(&self, e: &Expr, parent_prec: u8, is_right: bool) -> Result<Doc, FmtError> {
+        let cp = prec(e);
+        let need_parens = cp < parent_prec || (cp == parent_prec && is_right);
+        let doc = self.expr(e)?;
+        Ok(if need_parens {
+            Doc::concat([Doc::text("("), doc, Doc::text(")")])
+        } else {
+            doc
+        })
+    }
+
+    /// A postfix receiver (`.method`, `[i]`, `(args)`, `?`, `.await`, …): bound at precedence 14 on
+    /// the left, so a looser-binding receiver is parenthesized (`(a + b).f()`).
+    fn receiver(&self, e: &Expr) -> Result<Doc, FmtError> {
+        self.operand(e, 14, false)
+    }
+
+    /// An expression in a **restricted-head** position — the condition of `if`/`while`, a `for`
+    /// iterable, or a `match` scrutinee, each immediately followed by a `{`. A struct literal at the
+    /// head would collide with the opening brace, so it is parenthesized (`if (Cfg { .. }).debug {`).
+    fn restricted_head(&self, e: &Expr) -> Result<Doc, FmtError> {
+        let doc = self.expr(e)?;
+        Ok(if head_is_object(e) {
+            Doc::concat([Doc::text("("), doc, Doc::text(")")])
+        } else {
+            doc
+        })
+    }
+
+    /// If `e` is the desugared form of a spread list literal (`[] ~ … ~ …` with at least one `...`
+    /// operand), return its chunks in source order (each a `List` of plain elements or a `Spread`).
+    /// The base of the concat chain must be the synthetic empty list, and a [`UnaryOp::Spread`] node
+    /// is only ever produced by this desugar, so the match is unambiguous.
+    fn spread_list_chunks<'e>(&self, e: &'e Expr) -> Option<Vec<&'e Expr>> {
+        let mut chunks = Vec::new();
+        let mut cur = e;
+        loop {
+            match cur {
+                Expr::Binary {
+                    op: BinaryOp::Concat,
+                    lhs,
+                    rhs,
+                    ..
+                } => {
+                    chunks.push(rhs.as_ref());
+                    cur = lhs;
+                }
+                Expr::List { items, .. } if items.is_empty() => break, // the synthetic base
+                _ => return None,
+            }
+        }
+        chunks.reverse();
+        chunks
+            .iter()
+            .any(|c| {
+                matches!(
+                    c,
+                    Expr::Unary {
+                        op: noeta_ast::UnaryOp::Spread,
+                        ..
+                    }
+                )
+            })
+            .then_some(chunks)
+    }
+
+    fn expr(&self, expr: &Expr) -> Result<Doc, FmtError> {
+        Ok(match expr {
+            Expr::Str { value, .. } => Doc::text(format!("\"{}\"", escape(value))),
+            Expr::Int { value, .. } => Doc::text(value.to_string()),
+            Expr::Float { value, .. } => Doc::text(format_float(*value)),
+            Expr::F32 { value, .. } => Doc::text(format!("{}f32", format_float(*value as f64))),
+            Expr::F64 { value, .. } => Doc::text(format!("{}f64", format_float(*value))),
+            Expr::IntN {
+                magnitude,
+                signed,
+                bits,
+                ..
+            } => Doc::text(format!(
+                "{magnitude}{}{bits}",
+                if *signed { "i" } else { "u" }
+            )),
+            Expr::Bool { value, .. } => Doc::text(value.to_string()),
+            Expr::Ident { name, .. } => Doc::text(name.clone()),
+            Expr::Unary { op, operand, .. } => {
+                // A prefix op binds looser than postfix (13); parenthesize a looser operand.
+                Doc::concat([Doc::text(op.symbol()), self.operand(operand, 13, true)?])
+            }
+            // A list literal with spreads is desugared by the parser into `[] ~ chunk ~ …` with
+            // `...`-wrapped spread operands; re-sugar it back to `[a, ...b, c]` (the surface form —
+            // the desugared `...operand` is not valid syntax outside a list).
+            Expr::Binary {
+                op: BinaryOp::Concat,
+                ..
+            } if self.spread_list_chunks(expr).is_some() => {
+                let chunks = self.spread_list_chunks(expr).expect("checked");
+                let mut elems = Vec::new();
+                for chunk in chunks {
+                    match chunk {
+                        Expr::Unary {
+                            op: noeta_ast::UnaryOp::Spread,
+                            operand,
+                            ..
+                        } => elems.push(Doc::concat([Doc::text("..."), self.expr(operand)?])),
+                        Expr::List { items, .. } => {
+                            for it in items {
+                                elems.push(self.expr(it)?);
+                            }
+                        }
+                        other => elems.push(self.expr(other)?),
+                    }
+                }
+                Doc::concat([
+                    Doc::text("["),
+                    Doc::join(elems, Doc::text(", ")),
+                    Doc::text("]"),
+                ])
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let p = binop_prec(*op);
+                // Source-directed: preserve a break the author put around the operator.
+                let sep = if self.broke_between(lhs.span().end, rhs.span().start) {
+                    Doc::concat([Doc::hardline(), Doc::text(format!("{} ", op.symbol()))])
+                        .nest(INDENT)
+                } else {
+                    Doc::text(format!(" {} ", op.symbol()))
+                };
+                Doc::concat([
+                    self.operand(lhs, p, false)?,
+                    sep,
+                    self.operand(rhs, p, true)?,
+                ])
+            }
+            Expr::Pipeline { left, right, .. } => {
+                let sep = if self.broke_between(left.span().end, right.span().start) {
+                    Doc::concat([Doc::hardline(), Doc::text("|> ")]).nest(INDENT)
+                } else {
+                    Doc::text(" |> ")
+                };
+                Doc::concat([
+                    self.operand(left, 1, false)?,
+                    sep,
+                    self.operand(right, 1, true)?,
+                ])
+            }
+            Expr::Call { callee, args, .. } => {
+                Doc::concat([self.receiver(callee)?, self.arg_list(args)?])
+            }
+            Expr::Member { receiver, name, .. } => {
+                Doc::concat([self.receiver(receiver)?, Doc::text(format!(".{name}"))])
+            }
+            Expr::TupleIndex {
+                receiver, index, ..
+            } => Doc::concat([self.receiver(receiver)?, Doc::text(format!(".{index}"))]),
+            Expr::Index {
+                receiver, index, ..
+            } => Doc::concat([
+                self.receiver(receiver)?,
+                Doc::text("["),
+                self.expr(index)?,
+                Doc::text("]"),
+            ]),
+            Expr::List { items, .. } => {
+                Doc::concat([Doc::text("["), self.comma_seq(items)?, Doc::text("]")])
+            }
+            Expr::Tuple { items, .. } => {
+                Doc::concat([Doc::text("("), self.comma_seq(items)?, Doc::text(")")])
+            }
+            Expr::Map { entries, .. } => {
+                if entries.is_empty() {
+                    Doc::text("{}")
+                } else {
+                    let mut ds = Vec::new();
+                    for (k, v) in entries {
+                        ds.push(Doc::concat([self.expr(k)?, Doc::text(": "), self.expr(v)?]));
+                    }
+                    Doc::concat([
+                        Doc::text("{"),
+                        Doc::join(ds, Doc::text(", ")),
+                        Doc::text("}"),
+                    ])
+                }
+            }
+            Expr::Range {
+                start,
+                end,
+                inclusive,
+                ..
+            } => Doc::concat([
+                self.operand(start, 6, false)?,
+                Doc::text(if *inclusive { "..=" } else { ".." }),
+                self.operand(end, 6, true)?,
+            ]),
+            Expr::Interp { parts, .. } => self.interp(parts)?,
+            Expr::Closure {
+                params, ret, body, ..
+            } => self.closure(params, ret.as_ref(), body)?,
+            Expr::Match {
+                scrutinee, arms, ..
+            } => self.match_expr(scrutinee, arms)?,
+            Expr::Object(obj) => self.object(obj)?,
+            Expr::Try { expr, .. } => Doc::concat([self.receiver(expr)?, Doc::text("?")]),
+            Expr::Await { expr, .. } => Doc::concat([self.receiver(expr)?, Doc::text(".await")]),
+            Expr::Spawn {
+                future, isolate, ..
+            } => Doc::concat([
+                Doc::text(if *isolate { "isolate " } else { "spawn " }),
+                self.operand(future, 13, true)?,
+            ]),
+            Expr::Coalesce {
+                value, fallback, ..
+            } => Doc::concat([
+                self.operand(value, 2, false)?,
+                Doc::text(" ?? "),
+                self.operand(fallback, 2, true)?,
+            ]),
+            Expr::As { expr, ty, .. } => Doc::concat([
+                self.receiver(expr)?,
+                Doc::text(".as<"),
+                self.type_ref(ty)?,
+                Doc::text(">()"),
+            ]),
+            Expr::TypeTest { expr, ty, .. } => {
+                Doc::concat([self.receiver(expr)?, Doc::text(" is "), self.type_ref(ty)?])
+            }
+            Expr::AttributesOf { ty, .. } => Doc::concat([
+                Doc::text("attributes_of::<"),
+                self.type_ref(ty)?,
+                Doc::text(">()"),
+            ]),
+            Expr::TypeOf { value, .. } => {
+                Doc::concat([Doc::text("type_of("), self.expr(value)?, Doc::text(")")])
+            }
+            Expr::FromBytes { ty, blob, .. } => Doc::concat([
+                Doc::text("from_bytes::<"),
+                self.type_ref(ty)?,
+                Doc::text(">("),
+                self.expr(blob)?,
+                Doc::text(")"),
+            ]),
+            Expr::Channel { elem, capacity, .. } => Doc::concat([
+                Doc::text("channel::<"),
+                self.type_ref(elem)?,
+                Doc::text(">("),
+                self.expr(capacity)?,
+                Doc::text(")"),
+            ]),
+            Expr::TypedModuleCall {
+                recv,
+                func,
+                ty,
+                args,
+                ..
+            } => Doc::concat([
+                self.receiver(recv)?,
+                Doc::text(format!(".{func}::<")),
+                self.type_ref(ty)?,
+                Doc::text(">"),
+                self.arg_list(args)?,
+            ]),
+            Expr::RolesOf { .. } => Doc::text("roles_of()"),
+            Expr::Invoke {
+                recv, name, args, ..
+            } => Doc::concat([
+                Doc::text("invoke("),
+                self.expr(recv)?,
+                Doc::text(", "),
+                self.expr(name)?,
+                Doc::text(", "),
+                self.expr(args)?,
+                Doc::text(")"),
+            ]),
+            Expr::FieldSet {
+                receiver,
+                field,
+                value,
+                ..
+            } => Doc::concat([
+                self.expr(receiver)?,
+                Doc::text(format!(".{field} = ")),
+                self.expr(value)?,
+            ]),
+        })
+    }
+
+    /// A parenthesized, comma-separated argument list.
+    fn arg_list(&self, args: &[Expr]) -> Result<Doc, FmtError> {
+        Ok(Doc::concat([
+            Doc::text("("),
+            self.comma_seq(args)?,
+            Doc::text(")"),
+        ]))
+    }
+
+    /// Comma-separated expressions (no surrounding delimiter).
+    fn comma_seq(&self, items: &[Expr]) -> Result<Doc, FmtError> {
+        let mut ds = Vec::new();
+        for i in items {
+            ds.push(self.expr(i)?);
+        }
+        Ok(Doc::join(ds, Doc::text(", ")))
+    }
+
+    fn interp(&self, parts: &[StrPart]) -> Result<Doc, FmtError> {
+        let mut s = String::from("\"");
+        let mut docs: Vec<Doc> = Vec::new();
+        let flush = |s: &mut String, docs: &mut Vec<Doc>| {
+            if !s.is_empty() {
+                docs.push(Doc::text(std::mem::take(s)));
+            }
+        };
+        for part in parts {
+            match part {
+                StrPart::Literal(lit) => s.push_str(&escape(lit)),
+                StrPart::Hole(expr) => {
+                    s.push_str("${");
+                    flush(&mut s, &mut docs);
+                    docs.push(self.expr(expr)?);
+                    s.push('}');
+                }
+            }
+        }
+        s.push('"');
+        flush(&mut s, &mut docs);
+        Ok(Doc::concat(docs))
+    }
+
+    fn closure(
+        &self,
+        params: &[Param],
+        ret: Option<&TypeRef>,
+        body: &ClosureBody,
+    ) -> Result<Doc, FmtError> {
+        let mut parts = vec![Doc::text("fn"), self.params(params)?];
+        if let Some(ret) = ret {
+            parts.push(Doc::text(": "));
+            parts.push(self.type_ref(ret)?);
+        }
+        match body {
+            ClosureBody::Expr(e) => {
+                parts.push(Doc::text(" => "));
+                parts.push(self.expr(e)?);
+            }
+            ClosureBody::Block(stmts) => {
+                parts.push(Doc::text(" "));
+                parts.push(self.block(stmts, 0, 0)?);
+            }
+        }
+        Ok(Doc::concat(parts))
+    }
+
+    fn match_expr(&self, scrutinee: &Expr, arms: &[MatchArm]) -> Result<Doc, FmtError> {
+        if arms.is_empty() {
+            return Ok(Doc::concat([
+                Doc::text("match "),
+                self.restricted_head(scrutinee)?,
+                Doc::text(" {}"),
+            ]));
+        }
+        // Optional column alignment of the `=>` arrows (config).
+        let arrow_col = if self.config.match_arm_arrows == ArrowStyle::Align {
+            let mut widths = Vec::new();
+            for a in arms {
+                widths.push(pattern_width(self.pattern(&a.pattern)?));
+            }
+            widths.into_iter().max().unwrap_or(0)
+        } else {
+            0
+        };
+
+        let mut rows = Vec::new();
+        for (i, a) in arms.iter().enumerate() {
             if i > 0 {
-                self.out.push_str(", ");
+                rows.push(Doc::hardline());
             }
-            self.param(param)?;
+            let pat = self.pattern(&a.pattern)?;
+            let pad = if self.config.match_arm_arrows == ArrowStyle::Align {
+                let w = pattern_width_ref(&pat);
+                " ".repeat(arrow_col.saturating_sub(w))
+            } else {
+                String::new()
+            };
+            rows.push(Doc::concat([
+                pat,
+                Doc::text(format!("{pad} => ")),
+                self.expr(&a.body)?,
+                Doc::text(","),
+            ]));
         }
-        self.out.push_str(") {");
-
-        if !decl.body.is_empty() {
-            self.indent += 1;
-            for stmt in &decl.body {
-                self.out.push('\n');
-                self.stmt(stmt)?;
-            }
-            self.indent -= 1;
-            self.out.push('\n');
-            self.line_indent();
-        }
-        self.out.push('}');
-        Ok(())
+        let inner = Doc::concat(rows);
+        Ok(Doc::concat([
+            Doc::text("match "),
+            self.restricted_head(scrutinee)?,
+            Doc::text(" {"),
+            Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+            Doc::hardline(),
+            Doc::text("}"),
+        ]))
     }
 
-    fn param(&mut self, param: &Param) -> Result<(), FmtError> {
-        if param.ty.is_some() {
-            return Err(unsupported("parameter type annotation", param.span));
+    fn object(&self, obj: &ObjectLit) -> Result<Doc, FmtError> {
+        let mut ds = Vec::new();
+        for f in &obj.fields {
+            ds.push(Doc::concat([
+                Doc::text(format!("{}: ", f.name)),
+                self.expr(&f.value)?,
+            ]));
         }
-        if param.default.is_some() {
-            return Err(unsupported("parameter default", param.span));
+        if let Some(spread) = &obj.spread {
+            ds.push(Doc::concat([Doc::text("..."), self.expr(spread)?]));
         }
-        self.out.push_str(&param.name);
-        Ok(())
+        if ds.is_empty() {
+            return Ok(Doc::text(format!("{} {{}}", obj.type_name)));
+        }
+        Ok(Doc::concat([
+            Doc::text(format!("{} {{ ", obj.type_name)),
+            Doc::join(ds, Doc::text(", ")),
+            Doc::text(" }"),
+        ]))
     }
 
-    fn expr(&mut self, expr: &Expr) -> Result<(), FmtError> {
-        match expr {
-            Expr::Int { value, .. } => {
-                self.out.push_str(&value.to_string());
-                Ok(())
+    fn pattern(&self, pat: &Pattern) -> Result<Doc, FmtError> {
+        Ok(match pat {
+            Pattern::Wildcard { .. } => Doc::text("_"),
+            Pattern::Binding { name, .. } => Doc::text(name.clone()),
+            Pattern::Int { value, .. } => Doc::text(value.to_string()),
+            Pattern::Str { value, .. } => Doc::text(format!("\"{}\"", escape(value))),
+            Pattern::Bool { value, .. } => Doc::text(value.to_string()),
+            Pattern::IsType { ty, .. } => Doc::concat([Doc::text("is "), self.type_ref(ty)?]),
+            Pattern::Variant {
+                type_name,
+                variant,
+                bindings,
+                ..
+            } => {
+                let head = match type_name {
+                    Some(t) => format!("{t}.{variant}"),
+                    None => variant.clone(),
+                };
+                if bindings.is_empty() {
+                    Doc::text(head)
+                } else {
+                    let mut ds = Vec::new();
+                    for b in bindings {
+                        ds.push(self.pattern(b)?);
+                    }
+                    Doc::concat([
+                        Doc::text(format!("{head}(")),
+                        Doc::join(ds, Doc::text(", ")),
+                        Doc::text(")"),
+                    ])
+                }
             }
-            Expr::Float { value, .. } => {
-                self.out.push_str(&format_float(*value));
-                Ok(())
+            Pattern::Tuple { elements, .. } => {
+                let mut ds = Vec::new();
+                for e in elements {
+                    ds.push(self.pattern(e)?);
+                }
+                Doc::concat([
+                    Doc::text("("),
+                    Doc::join(ds, Doc::text(", ")),
+                    Doc::text(")"),
+                ])
             }
-            Expr::Bool { value, .. } => {
-                self.out.push_str(if *value { "true" } else { "false" });
-                Ok(())
-            }
-            Expr::Str { value, .. } => {
-                self.out.push('"');
-                escape_into(&mut self.out, value);
-                self.out.push('"');
-                Ok(())
-            }
-            Expr::Ident { name, .. } => {
-                self.out.push_str(name);
-                Ok(())
-            }
-            other => Err(unsupported("expression", other.span())),
-        }
+        })
     }
 }
 
-fn unsupported(kind: &str, span: noeta_span::Span) -> FmtError {
-    FmtError::Unsupported {
-        construct: kind.to_string(),
-        span,
+/// The binding power of an expression's head operator, matching the parser's Pratt table
+/// (`noeta-parser`: pipeline 1 … multiplicative 12, prefix 13, postfix 14). Atoms and
+/// postfix-headed expressions are maximal (never need parenthesizing as an operand). Used to insert
+/// the minimum parentheses that preserve the parse — parentheses are not in the AST, so a naive
+/// printer would re-associate `Sub(Shl(a,b),c)` into `a << b - c`.
+fn prec(e: &Expr) -> u8 {
+    match e {
+        Expr::Pipeline { .. } => 1,
+        Expr::Coalesce { .. } => 2,
+        Expr::Binary { op, .. } => binop_prec(*op),
+        Expr::Range { .. } => 6,
+        Expr::Unary { .. } | Expr::Spawn { .. } => 13,
+        // Postfix-position forms (bind tightest among operators).
+        Expr::Call { .. }
+        | Expr::Member { .. }
+        | Expr::Index { .. }
+        | Expr::TupleIndex { .. }
+        | Expr::Try { .. }
+        | Expr::Await { .. }
+        | Expr::As { .. }
+        | Expr::TypeTest { .. }
+        | Expr::TypedModuleCall { .. } => 14,
+        // `receiver.field = value` — only ever a binding's RHS; parenthesize if it somehow nests.
+        Expr::FieldSet { .. } => 0,
+        // Atoms and self-delimiting forms never need parentheses as an operand.
+        _ => u8::MAX,
     }
 }
 
-/// Escape a decoded string value back into the body of a `"…"` literal.
-fn escape_into(out: &mut String, value: &str) {
-    for ch in value.chars() {
+/// Whether `e`'s leftmost leaf (down the receiver/lhs spine) is a struct literal — so it would be
+/// misparsed at the head of a brace-introduced construct and needs parenthesizing there.
+fn head_is_object(e: &Expr) -> bool {
+    match e {
+        Expr::Object(_) => true,
+        Expr::Member { receiver, .. }
+        | Expr::Index { receiver, .. }
+        | Expr::TupleIndex { receiver, .. }
+        | Expr::TypedModuleCall { recv: receiver, .. } => head_is_object(receiver),
+        Expr::Call { callee, .. } => head_is_object(callee),
+        Expr::Try { expr, .. }
+        | Expr::Await { expr, .. }
+        | Expr::As { expr, .. }
+        | Expr::TypeTest { expr, .. } => head_is_object(expr),
+        Expr::Binary { lhs, .. } => head_is_object(lhs),
+        Expr::Pipeline { left, .. } => head_is_object(left),
+        Expr::Coalesce { value, .. } => head_is_object(value),
+        Expr::Range { start, .. } => head_is_object(start),
+        _ => false,
+    }
+}
+
+fn binop_prec(op: BinaryOp) -> u8 {
+    match op {
+        BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => 12,
+        BinaryOp::Add | BinaryOp::Sub => 11,
+        BinaryOp::Shl | BinaryOp::Shr => 10,
+        BinaryOp::BitAnd => 9,
+        BinaryOp::BitXor => 8,
+        BinaryOp::BitOr => 7,
+        BinaryOp::Concat => 6,
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => 5,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Identity | BinaryOp::NotIdentity => 4,
+        BinaryOp::And => 3,
+        BinaryOp::Or => 2,
+    }
+}
+
+/// The rendered flat width of a pattern doc (for `=>` alignment). Only meaningful for the
+/// single-line patterns match arms use.
+fn pattern_width(doc: Doc) -> usize {
+    render(&doc, usize::MAX).chars().count()
+}
+
+fn pattern_width_ref(doc: &Doc) -> usize {
+    render(doc, usize::MAX).chars().count()
+}
+
+/// Escape a decoded string value back into the body of a `"…"` literal. All string kinds (plain,
+/// raw `'…'`, template `` `…` ``) share `Expr::Str`/`Expr::Interp` with a decoded value, so the
+/// canonical form is a double-quoted literal that decodes to the same value — the supported escapes
+/// are `\\ \" \n \t` and `\$` (the last neutralizes a literal `${`, which would otherwise re-lex as
+/// interpolation). A bare `$`, `{`, or `}` needs no escape. (`\r` has no escape; the rare literal CR
+/// passes through — a valid string body byte.)
+fn escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
         match ch {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
             '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '$' if chars.peek() == Some(&'{') => out.push_str("\\$"),
             _ => out.push(ch),
         }
     }
+    out
 }
 
-/// Render a float so it always round-trips as a float literal (never bare `2`, which would re-lex as
-/// an int). Uses Rust's shortest round-tripping form and appends `.0` when it has no fraction/exponent.
+/// Render a float so it round-trips as a float literal (never a bare integer that would re-lex as an
+/// `int`).
 fn format_float(value: f64) -> String {
     let s = format!("{value}");
     if s.contains('.')

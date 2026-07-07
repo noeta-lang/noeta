@@ -22,6 +22,10 @@ pub enum Doc {
     Nil,
     /// Literal text (newline-free).
     Text(String),
+    /// Verbatim text that may contain newlines, emitted exactly as-is with **no** indentation
+    /// applied to its internal line breaks — for content whose interior whitespace is significant
+    /// (a `@doc { … }` body, a multiline string literal).
+    RawText(String),
     /// A break that flattens to a single space.
     Line,
     /// A break that flattens to nothing.
@@ -46,6 +50,11 @@ impl Doc {
             "Doc::text must not contain newlines: {s:?}"
         );
         Doc::Text(s)
+    }
+
+    /// Verbatim, possibly-multiline text (see [`Doc::RawText`]).
+    pub fn raw_text(s: impl Into<String>) -> Doc {
+        Doc::RawText(s.into())
     }
 
     pub fn line() -> Doc {
@@ -131,6 +140,14 @@ pub fn render(doc: &Doc, width: usize) -> String {
                 out.push_str(s);
                 col += width_of(s);
             }
+            Doc::RawText(s) => {
+                out.push_str(s);
+                // Column tracks the tail after the last newline (interior lines are not re-indented).
+                col = match s.rfind('\n') {
+                    Some(nl) => width_of(&s[nl + 1..]),
+                    None => col + width_of(s),
+                };
+            }
             Doc::Concat(docs) => {
                 for d in docs.iter().rev() {
                     stack.push((indent, mode, d));
@@ -200,6 +217,9 @@ fn fits(
         match doc {
             Doc::Nil => {}
             Doc::Text(s) => remaining -= width_of(s),
+            // A multiline raw text can never lie flat on the current line.
+            Doc::RawText(s) if s.contains('\n') => return matches!(mode, Mode::Break),
+            Doc::RawText(s) => remaining -= width_of(s),
             Doc::Concat(docs) => {
                 for d in docs.iter().rev() {
                     local.push((indent, mode, d));

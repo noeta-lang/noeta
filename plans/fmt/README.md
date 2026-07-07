@@ -263,12 +263,18 @@ gates re-run every slice.
   `fits` lookahead that consumes the trailing continuation). Unit tests cover flat/break by width,
   hardline forcing, nest-indents-broken-lines-only, and independent nested groups. Gated
   `#[allow(dead_code)]` until F3 lowers the printer onto it.
-- **F3 — AST→Doc printer, source-directed (`wrap = false`).** Full coverage of the surface: `Stmt`
-  (~13 variants), `Expr` (~35 variants), `TypeRef`, `Pattern`, `MatchArm`, all decls
-  (`struct`/`class`/`enum`/`impl`/`fn`), attributes/`@tier` blocks, `use`/`namespace`. Groups break
-  source-directed. Includes **continuation indentation** (pipeline/method/binary chains nest one level
-  — targeted test) and the `match_arm_arrows` knob (`compact`/`align`), and preserves per-statement
-  `;`. *DoD: safety + idempotency green over the comment-free corpus, under both arrow settings.*
+- **F3 — AST→Doc printer, source-directed (`wrap = false`). ✅ DONE.** `print.rs` lowers the **whole**
+  surface onto `Doc` — every `Stmt`/`Expr`/`TypeRef`/`Pattern`/decl/directive/`@tier` block — and is
+  **total** over any parseable program (`FmtError::Unsupported` removed). The safety gate drove out a
+  series of real bugs, each now handled: **precedence-minimal parenthesization** (matching the
+  parser's Pratt table, so `Sub(Shl(a,b),c)` prints `(a << b) - c`), **restricted-head** parens (a
+  struct literal at an `if`/`while`/`for`/`match` head), the **`x.field = v`** binding desugar,
+  **list-spread re-sugaring** (`[] ~ ...a ~ [x]` → `[...a, x]`), **string re-escaping** (`\$` guards a
+  literal `${}`; raw/template strings round-trip), blank-line preservation (real blank lines only),
+  and trailing-whitespace stripping. Pipeline/binary continuation nests one level; `match_arm_arrows`
+  `compact`/`align` both verified. Also: the safety-gate comparator was hardened (drop fragile
+  quote-tracking). **Corpus: 521/530 ok+idempotent, 0 unsupported, 9 intentional parse-errors; safety
+  held on all.** `examples/orders.noe` formats and runs byte-identically. fmt+clippy clean.
 - **F4 — comment reattachment.** Leading/trailing/dangling model + placement in the `Doc`; comment
   completeness property green over the **full** corpus; safety + idempotency now full-corpus.
 - **F5 — width-driven wrapping (`wrap = true`).** Add the width-driven fits-test policy to the renderer

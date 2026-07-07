@@ -337,11 +337,6 @@ fn report_fmt_error(name: &str, err: &noeta_fmt::FmtError) {
                 diags.len()
             );
         }
-        FmtError::Unsupported { construct, .. } => {
-            eprintln!(
-                "{name}: not formatted — unsupported construct: {construct} (coming in a later slice)"
-            );
-        }
         FmtError::Safety(why) => {
             eprintln!("{name}: not formatted — internal safety check failed: {why}");
         }

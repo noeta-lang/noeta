@@ -49,7 +49,7 @@ fn corpus_is_safe_and_idempotent() {
     let files = corpus_files();
     assert!(!files.is_empty(), "found no corpus files — wrong root?");
 
-    let (mut ok, mut unsupported, mut parse_err) = (0u32, 0u32, 0u32);
+    let (mut ok, mut parse_err) = (0u32, 0u32);
 
     for path in &files {
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -64,7 +64,7 @@ fn corpus_is_safe_and_idempotent() {
                     .unwrap_or_else(|e| panic!("{name}: re-format failed: {e}"));
                 assert_eq!(once, twice, "{name}: formatting is not idempotent");
             }
-            Err(FmtError::Unsupported { .. }) => unsupported += 1,
+            // Intentional error-case corpus files do not parse; the formatter declines them.
             Err(FmtError::Parse(_)) => parse_err += 1,
             // A safety failure is always a printer bug — surface it loudly.
             Err(FmtError::Safety(why)) => panic!("{name}: SAFETY GATE tripped: {why}"),
@@ -72,7 +72,9 @@ fn corpus_is_safe_and_idempotent() {
     }
 
     eprintln!(
-        "fmt corpus: {} files | ok+idempotent {ok} | unsupported {unsupported} | parse-err {parse_err}",
+        "fmt corpus: {} files | ok+idempotent {ok} | parse-err {parse_err}",
         files.len()
     );
+    // The printer is total over parseable programs: every non-error file must format.
+    assert!(ok > 500, "expected most corpus files to format, got {ok}");
 }
