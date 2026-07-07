@@ -684,6 +684,102 @@ fn id_dispatch(
     }
 }
 
+// --- `crypto`: digests, HMAC (crypto arc C2) -----------------------------------------------------
+
+/// A digest input: a string hashes as its UTF-8 bytes, a `bytes` buffer as-is.
+const STR_OR_BYTES: SigType = SigType::Union(&[SigType::String, SigType::Bytes]);
+
+/// Project a `string|bytes` argument onto the byte view the digest functions consume.
+fn want_data<'a>(func: &str, args: &'a [NativeValue], index: usize) -> Result<&'a [u8], StdError> {
+    match args.get(index) {
+        Some(NativeValue::Str(s)) => Ok(s.as_bytes()),
+        Some(NativeValue::Bytes(b)) => Ok(b),
+        _ => Err(type_error(func, "string|bytes")),
+    }
+}
+
+const CRYPTO_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "sha256",
+        params: &[STR_OR_BYTES],
+        ret: Concrete(SigType::Bytes),
+    },
+    ExtFn {
+        name: "sha512",
+        params: &[STR_OR_BYTES],
+        ret: Concrete(SigType::Bytes),
+    },
+    // Interop-only digests (UUID v5, legacy checksums) — documented as not collision-resistant.
+    ExtFn {
+        name: "sha1",
+        params: &[STR_OR_BYTES],
+        ret: Concrete(SigType::Bytes),
+    },
+    ExtFn {
+        name: "md5",
+        params: &[STR_OR_BYTES],
+        ret: Concrete(SigType::Bytes),
+    },
+    ExtFn {
+        name: "hmac_sha256",
+        params: &[STR_OR_BYTES, STR_OR_BYTES],
+        ret: Concrete(SigType::Bytes),
+    },
+    ExtFn {
+        name: "hmac_sha512",
+        params: &[STR_OR_BYTES, STR_OR_BYTES],
+        ret: Concrete(SigType::Bytes),
+    },
+];
+
+fn crypto_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match func {
+        "sha256" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Bytes(crate::crypto::sha256(want_data(
+                func, args, 0,
+            )?)))
+        }
+        "sha512" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Bytes(crate::crypto::sha512(want_data(
+                func, args, 0,
+            )?)))
+        }
+        "sha1" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Bytes(crate::crypto::sha1(want_data(
+                func, args, 0,
+            )?)))
+        }
+        "md5" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Bytes(crate::crypto::md5(want_data(
+                func, args, 0,
+            )?)))
+        }
+        "hmac_sha256" => {
+            want_arity(func, args, 2)?;
+            Ok(NativeOut::Bytes(crate::crypto::hmac_sha256(
+                want_data(func, args, 0)?,
+                want_data(func, args, 1)?,
+            )))
+        }
+        "hmac_sha512" => {
+            want_arity(func, args, 2)?;
+            Ok(NativeOut::Bytes(crate::crypto::hmac_sha512(
+                want_data(func, args, 0)?,
+                want_data(func, args, 1)?,
+            )))
+        }
+        _ => Err(no_function_error("crypto", func)),
+    }
+}
+
 // --- `env` / `args`: host introspection ---------------------------------------------------------
 
 fn env_dispatch(
@@ -1552,6 +1648,12 @@ const STD_MODULES: &[ExtModule] = &[
         name: "id",
         functions: ID_FNS,
         dispatch: id_dispatch,
+        deep_marshal: false,
+    },
+    ExtModule {
+        name: "crypto",
+        functions: CRYPTO_FNS,
+        dispatch: crypto_dispatch,
         deep_marshal: false,
     },
     ExtModule {

@@ -20,6 +20,7 @@
 //! differential holds by construction). Each backend only binds the module value and marshals
 //! arguments/results across the neutral [`registry::NativeValue`]/[`registry::NativeOut`] seam.
 
+pub mod crypto;
 pub mod env;
 pub mod executor;
 pub mod extern_value;
