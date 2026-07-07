@@ -1,6 +1,10 @@
 # http.serve + `noeta serve` — a bundled, concurrent HTTP server over the Network capability
 
-**Status: PLANNED (decisions locked; building).** This is the arc the `std.http` *client*
+**Status: ARC COMPLETE (S0–S6), branch `http-server` (local, unpushed).** All slices landed
+differential + leak-0 green; `noeta serve` verified end-to-end against a real client. Deliberate
+non-goals + follow-ons (multi-core, `--host`/graceful-drain, WS/reactivity transport, streaming, TLS,
+first-party router, raw sockets, and the higher-order-native-ABI + extension-commands migration) are
+recorded in `plans/deferred.md`. This is the arc the `std.http` *client*
 explicitly deferred (`plans/http/README.md` non-goals; `plans/deferred.md` §HTTP → "`http.serve` …
 its own arc"). It is the keystone that unblocks the reactivity transport layer (WS minimal-diff push
 / LiveView), HMR, and — further out — reactive persistence.
@@ -225,9 +229,13 @@ first-party router/middleware library is a follow-on arc or a documented example
   `plans/deferred.md`):** a *bare top-level `fn` used as a value* is typed `fn() -> Response` — the
   checker drops its parameters in the function-handle path — so an annotated closure is used instead;
   a pre-existing function-handle typing gap, not introduced here.
-- **S6** — docs (Standard-Library-Modules `http.serve` + `noeta serve`; Concurrency/Concurrency-
-  Internals the two-tier model + reaping scope + sandbox-script/real-listener split; Native-Extensions
-  inbound-Network rows), plan outcome, deferred entries, memory.
+- **S6 — done (`<pending>`).** Docs: Standard-Library-Modules gained an `http.serve` + `noeta serve`
+  section (`Request`/`Response`-builder tables, routers/middleware-as-code, sandbox-script note);
+  Concurrency-Internals gained a "Serving HTTP: inversion of control" section (async-leaf accept +
+  reaping loop + sandbox-script/real-listener split + the isolate-native fd-over-channel multi-core
+  note); Native-Extensions documented the inbound Network capability + the higher-order-ABI follow-on.
+  Deferred entries recorded (multi-core, raw sockets, fn-handle typing, higher-order ABI); memory
+  updated. Doc-samples gate green.
 
 ## Deliberate non-goals (recorded, not silently cut)
 
