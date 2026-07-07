@@ -1584,6 +1584,7 @@ dependencies = [
  "mimalloc",
  "noeta-ast",
  "noeta-backend",
+ "noeta-bundle",
  "noeta-bytecode",
  "noeta-check",
  "noeta-compiler",

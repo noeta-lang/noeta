@@ -1283,3 +1283,49 @@ fn a_repl_panic_prints_a_stack_trace_and_the_session_continues() {
         // The session survives the panic and evaluates the next entry.
         .stdout(predicate::str::contains("still alive"));
 }
+
+// --- `build` / `.noeb` bundles (P-AOT L1.2) -----------------------------------------
+
+#[test]
+fn build_then_run_bundle_matches_source_run() {
+    // A bundle runs byte-for-byte like its source, but ships no `.noe`.
+    let file = temp_program(
+        "build_roundtrip",
+        "fn sq(n: int): int { return n * n }\nmut t = 0\nfor i in 0..5 {\n    t = t + sq(i)\n}\necho t\n",
+    );
+    let bundle = file.with_extension("noeb");
+
+    // Source run — the reference output.
+    let src_out = lang().arg("run").arg(&file).assert().success();
+    let src_stdout = String::from_utf8(src_out.get_output().stdout.clone()).unwrap();
+    assert_eq!(src_stdout.trim(), "30");
+
+    // Build the bundle, then run it — identical stdout, and the artifact starts with the magic.
+    lang().arg("build").arg(&file).assert().success();
+    let blob = std::fs::read(&bundle).expect("bundle written");
+    assert_eq!(&blob[0..4], b"NOEB", "artifact carries the .noeb magic");
+
+    lang()
+        .arg("run")
+        .arg(&bundle)
+        .assert()
+        .success()
+        .stdout(predicate::str::diff(src_stdout));
+}
+
+#[test]
+fn bundle_run_rejects_build_time_flags() {
+    // Tiers are baked at build time; passing them to a bundle run is a usage error, not a silent
+    // no-op.
+    let file = temp_program("build_flag_reject", "echo 1\n");
+    lang().arg("build").arg(&file).assert().success();
+    let bundle = file.with_extension("noeb");
+    lang()
+        .arg("run")
+        .arg(&bundle)
+        .arg("--tier")
+        .arg("debug")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("apply at build time"));
+}

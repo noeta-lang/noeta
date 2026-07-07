@@ -97,6 +97,23 @@ enum Command {
         #[arg(long)]
         profile: Option<String>,
     },
+    /// Compile a program to a self-contained `.noeb` bundle (P-AOT L1): the versioned bytecode a
+    /// `noeta run app.noeb` executes directly, so a program ships **without its `.noe` source**.
+    /// Uses the same compile pipeline as `run`; dev-tier blocks are stripped unless made live by
+    /// `--tier`/`--profile`, so a production build never carries `@test`/`@debug`/`@doc` content.
+    Build {
+        /// Path to the entry `.noe` file.
+        file: PathBuf,
+        /// Output path for the bundle (default: the input path with a `.noeb` extension).
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+        /// Activate a dev-tier for this build, e.g. `--tier debug`. Repeatable.
+        #[arg(long)]
+        tier: Vec<String>,
+        /// Activate the tiers a `noeta.toml` build profile makes live. Unioned with any `--tier`.
+        #[arg(long)]
+        profile: Option<String>,
+    },
     /// Disassemble a program to its VM bytecode (a debugging aid: shows the exact opcodes,
     /// constants, shapes, and method tables `noeta run` executes). Compiled with the same pipeline
     /// as `run`, so the output reflects what actually runs.
@@ -142,6 +159,12 @@ fn main() -> ExitCode {
             profile,
         } => cmd_bench(&file, iterations, &profile),
         Command::Doc { file, profile } => cmd_doc(&file, &profile),
+        Command::Build {
+            file,
+            out,
+            tier,
+            profile,
+        } => cmd_build(&file, out.as_deref(), &tier, &profile),
         Command::Dump {
             file,
             tier,
@@ -269,7 +292,17 @@ fn execute_real_host(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
 ) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), String> {
-    let module = std::sync::Arc::new(compile_real(program, checked)?);
+    Ok(run_module_real_host(std::sync::Arc::new(compile_real(
+        program, checked,
+    )?)))
+}
+
+/// Run an already-compiled [`Module`] against the real host — the shared execution core of
+/// [`execute_real_host`] (source path) and the `.noeb` bundle runner (P-AOT L1.2), which loads a
+/// module directly with no source to compile.
+fn run_module_real_host(
+    module: std::sync::Arc<noeta_bytecode::Module>,
+) -> (noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>) {
     // A factory that mints a fresh real host + wall-clock executor per isolate (isolates I.4b): the
     // main program gets one, and each real-thread `isolate f(args)` gets its own so a worker's disk /
     // clock / async state is independent. Injected here (not in `noeta-vm`) so the VM crate needs no
@@ -286,10 +319,7 @@ fn execute_real_host(
     let (host, executor) = factory();
     // Real isolates run on OS threads (out-of-oracle); channel-shipping isolates fall back to
     // cooperative tasks (cross-thread channels are I.4c). The differential keeps the sandbox pair.
-    Ok(
-        VmBackend::new()
-            .run_module_with_host_and_executor_parallel(module, host, executor, factory),
-    )
+    VmBackend::new().run_module_with_host_and_executor_parallel(module, host, executor, factory)
 }
 
 fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a Diagnostic>) {
@@ -314,6 +344,22 @@ fn emit_diagnostics_mapped<'a>(
 }
 
 fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -> ExitCode {
+    // P-AOT L1.2: a `.noeb` bundle runs directly — no source, no compile. Sniff the magic (cheap,
+    // and we need the bytes to load it anyway); anything else is source, handled below. Tiers are a
+    // *build*-time concern (they are already baked into the bundle), so `--tier`/`--profile` on a
+    // bundle run are meaningless — reject them rather than silently ignore.
+    if let Ok(bytes) = std::fs::read(file)
+        && noeta_bundle::is_bundle(&bytes)
+    {
+        if !tiers.is_empty() || profile.is_some() {
+            eprintln!(
+                "lang: --tier/--profile apply at build time; a .noeb bundle is already built"
+            );
+            return ExitCode::from(2);
+        }
+        return cmd_run_bundle(file, &bytes);
+    }
+
     // The active tier set is the union of any `--profile`'s live tiers (from `noeta.toml`) and any
     // explicit `--tier` flags, resolved before loading so a bad profile fails fast.
     let mut active: Vec<String> = match profile {
@@ -363,6 +409,34 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
             ExitCode::from(1)
         }
     }
+}
+
+/// Run a `.noeb` bundle (P-AOT L1.2): decode the module from the versioned container and execute it
+/// on the real host, exactly as a source run does after compiling — but with no source to compile
+/// or type-check (both happened at build time). A runtime abort's diagnostics/trace carry spans but
+/// the bundle ships no source text, so they render against a synthetic empty source (message + code
+/// + location show; no code snippet) — the honest cost of a source-free artifact.
+fn cmd_run_bundle(file: &std::path::Path, bytes: &[u8]) -> ExitCode {
+    let module = match noeta_bundle::read(bytes) {
+        Ok(module) => module,
+        Err(err) => {
+            eprintln!("lang: cannot load {}: {err}", file.display());
+            return ExitCode::from(2);
+        }
+    };
+    let sources = SourceMap::new(vec![Source::new(
+        SourceId::FIRST,
+        file.display().to_string(),
+        "",
+    )]);
+    let (result, trace) = run_module_real_host(std::sync::Arc::new(module));
+    print!("{}", result.stdout);
+    let _ = io::stdout().flush();
+    emit_diagnostics_mapped(&sources, result.diagnostics.iter());
+    if trace.len() >= 2 {
+        eprint!("{}", noeta_vm::render_trace(&trace, &sources));
+    }
+    exit_code(result.exit_code)
 }
 
 /// `noeta dump <FILE>` — disassemble the program to its VM bytecode and print it to stdout. Loads,
@@ -422,6 +496,91 @@ fn cmd_dump(file: &std::path::Path, tiers: &[String], profile: &Option<String>) 
                     ExitCode::from(1)
                 } else {
                     dump(&activated.program)
+                }
+            }
+        }
+        Ok(Err(load_diagnostics)) => {
+            let mut stderr = io::stderr();
+            for ld in &load_diagnostics {
+                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+            }
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `noeta build <FILE>` — compile a program to a self-contained `.noeb` bundle (P-AOT L1.2).
+/// Loads + links, activates any `--tier`/`--profile`, type-checks, and compiles through the **same**
+/// `compile_real` pipeline as `run`/`dump`, then serializes the module into the versioned container
+/// (`noeta_bundle::write`). The bundle carries no source — `noeta run app.noeb` executes it directly.
+/// A type error prints diagnostics and exits non-zero, like `run`.
+fn cmd_build(
+    file: &std::path::Path,
+    out: Option<&std::path::Path>,
+    tiers: &[String],
+    profile: &Option<String>,
+) -> ExitCode {
+    let mut active: Vec<String> = match profile {
+        Some(name) => match manifest::resolve_active_tiers(file, name) {
+            Ok(tiers) => tiers,
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(1);
+            }
+        },
+        None => Vec::new(),
+    };
+    for tier in tiers {
+        if !active.contains(tier) {
+            active.push(tier.clone());
+        }
+    }
+
+    match noeta_loader::load(file) {
+        Err(err) => {
+            eprintln!("lang: cannot read {}: {err}", file.display());
+            ExitCode::from(2)
+        }
+        Ok(Ok(linked)) => {
+            // Check + compile a (possibly tier-activated) program and write its bundle.
+            let build = |program: &Program| -> ExitCode {
+                let checked = noeta_check::check_all(program);
+                if !checked.diagnostics.is_empty() {
+                    emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+                    return ExitCode::from(1);
+                }
+                let module = match compile_real(program, &checked) {
+                    Ok(module) => module,
+                    Err(err) => {
+                        eprintln!("lang: {err}");
+                        return ExitCode::from(1);
+                    }
+                };
+                let blob = noeta_bundle::write(&module);
+                let out_path = out
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(|| file.with_extension("noeb"));
+                match std::fs::write(&out_path, &blob) {
+                    Ok(()) => {
+                        eprintln!("wrote {} ({} bytes)", out_path.display(), blob.len());
+                        ExitCode::SUCCESS
+                    }
+                    Err(err) => {
+                        eprintln!("lang: cannot write {}: {err}", out_path.display());
+                        ExitCode::from(2)
+                    }
+                }
+            };
+            if active.is_empty() {
+                build(&linked.program)
+            } else {
+                let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
+                let activated = noeta_check::activate_tiers(&linked.program, &active_refs);
+                if !activated.diagnostics.is_empty() {
+                    emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
+                    ExitCode::from(1)
+                } else {
+                    build(&activated.program)
                 }
             }
         }

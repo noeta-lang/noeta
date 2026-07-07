@@ -21,6 +21,7 @@ noeta-parser = { workspace = true }
 noeta-vm = { workspace = true }
 noeta-compiler = { workspace = true }
 noeta-bytecode = { workspace = true }
+noeta-bundle = { workspace = true }
 noeta-check = { workspace = true }
 noeta-loader = { workspace = true }
 noeta-runtime = { workspace = true }
