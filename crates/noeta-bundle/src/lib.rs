@@ -30,6 +30,15 @@
 //! the developer's to build on the crypto/network primitives the language ships (`plans/aot`).
 //! `FLAG_ENCRYPTED` (bit 1) stays a reserved header bit for forward-compat; a reader rejects any
 //! bundle that sets it.
+//!
+//! ## Stapled executables (P-AOT L2)
+//!
+//! A `.noeb` can also be **appended to a copy of the runtime binary** to make a single
+//! self-contained executable (`noeta build --exe`). The layout is the runtime image, then the
+//! bundle, then a fixed 16-byte trailer `[bundle_len: u64 LE | "NOEBEXE\0"]`. On startup the
+//! `noeta` binary reads only that trailer (a cheap seek to end, not the whole image) and, if the
+//! sentinel is present, runs the embedded bundle instead of the toolchain CLI. See [`staple`] /
+//! [`extract_stapled`] / [`stapled_len`].
 
 use noeta_bytecode::Module;
 
@@ -194,6 +203,51 @@ pub fn is_bundle(bytes: &[u8]) -> bool {
     bytes.len() >= 4 && &bytes[0..4] == MAGIC
 }
 
+/// The sentinel closing a stapled-executable trailer (P-AOT L2). Placed at the very end of a
+/// `noeta build --exe` artifact so startup can detect an embedded bundle by reading the tail alone.
+pub const EXE_MAGIC: &[u8; 8] = b"NOEBEXE\0";
+
+/// The fixed trailer size a stapled executable ends with: an 8-byte little-endian bundle length
+/// followed by [`EXE_MAGIC`].
+pub const TRAILER_LEN: usize = 16;
+
+/// Append `bundle` (the bytes from [`write`]) to a copy of the runtime image `runtime`, producing a
+/// self-contained executable (P-AOT L2). The bundle sits between the untouched runtime image and a
+/// locating trailer, so the OS still sees a valid executable while startup can recover the bundle.
+pub fn staple(runtime: &[u8], bundle: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(runtime.len() + bundle.len() + TRAILER_LEN);
+    out.extend_from_slice(runtime);
+    out.extend_from_slice(bundle);
+    out.extend_from_slice(&(bundle.len() as u64).to_le_bytes());
+    out.extend_from_slice(EXE_MAGIC);
+    out
+}
+
+/// If `trailer` is exactly the final [`TRAILER_LEN`] bytes of a stapled executable, return the
+/// embedded bundle's length in bytes. `None` for the plain runtime binary (no sentinel) — the
+/// startup fast path that avoids reading the whole image just to learn there is no bundle.
+pub fn stapled_len(trailer: &[u8]) -> Option<usize> {
+    if trailer.len() != TRAILER_LEN || &trailer[8..] != EXE_MAGIC {
+        return None;
+    }
+    let len = u64::from_le_bytes(trailer[0..8].try_into().ok()?);
+    Some(len as usize)
+}
+
+/// Recover the embedded bundle from a whole stapled-executable `image`, or `None` if it carries no
+/// trailer (a plain runtime binary). A convenience over [`stapled_len`] for callers that already
+/// hold the full bytes (tests); the CLI seeks the tail instead of reading the whole binary.
+pub fn extract_stapled(image: &[u8]) -> Option<&[u8]> {
+    if image.len() < TRAILER_LEN {
+        return None;
+    }
+    let (body, trailer) = image.split_at(image.len() - TRAILER_LEN);
+    let bundle_len = stapled_len(trailer)?;
+    body.len()
+        .checked_sub(bundle_len)
+        .map(|start| &body[start..])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +305,35 @@ mod tests {
             err(&blob),
             BundleError::UnsupportedTransform { .. }
         ));
+    }
+
+    #[test]
+    fn a_stapled_bundle_round_trips_out_of_a_runtime_image() {
+        // A fake "runtime image" with a real bundle stapled on: the trailer locates the bundle and
+        // `extract_stapled` recovers exactly the bytes `write` produced.
+        let runtime = b"pretend this is a big ELF binary".as_slice();
+        let bundle = write(&tiny_module());
+        let image = staple(runtime, &bundle);
+        assert_eq!(
+            &image[..runtime.len()],
+            runtime,
+            "runtime image is untouched"
+        );
+        let recovered = extract_stapled(&image).expect("trailer present");
+        assert_eq!(recovered, bundle.as_slice());
+        // And the recovered bundle loads back into a module.
+        let back = read(recovered).expect("embedded bundle is valid");
+        assert_eq!(back.encode(), tiny_module().encode());
+    }
+
+    #[test]
+    fn a_plain_runtime_image_has_no_stapled_bundle() {
+        // No trailer sentinel ⇒ the startup fast path reports "no bundle" from the tail alone.
+        let runtime = b"pretend this is a big ELF binary with no bundle".as_slice();
+        assert!(extract_stapled(runtime).is_none());
+        assert!(stapled_len(&runtime[runtime.len() - TRAILER_LEN..]).is_none());
+        // Too short to even hold a trailer.
+        assert!(extract_stapled(b"tiny").is_none());
     }
 
     #[test]
