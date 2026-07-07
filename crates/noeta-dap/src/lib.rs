@@ -894,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_resolves_variable_paths_in_a_paused_frame() {
+    fn evaluate_resolves_paths_and_operators_in_a_paused_frame() {
         // At the breakpoint, `p` (a struct) and `xs` (a list) are in scope in `probe`.
         let path = fixture(
             "evaluate",
@@ -938,13 +938,22 @@ mod tests {
             "struct render: {p:#?}"
         );
 
-        // Beyond a variable path → a clean error pointing at the D5.1 follow-on (not a crash, not a
-        // wrong value), so a watch on `p.x + 1` shows the message rather than pretending.
-        let arith = session.evaluate("p.x + 1");
-        assert_eq!(arith["success"], false);
+        // Operators evaluate with the VM's own arithmetic / comparison semantics (read-only).
+        assert_eq!(session.evaluate("p.x + 1")["body"]["result"], "4");
+        assert_eq!(session.evaluate("p.x + p.y")["body"]["result"], "7");
+        assert_eq!(session.evaluate("p.x * 2")["body"]["result"], "6");
+        assert_eq!(session.evaluate("p.x > p.y")["body"]["result"], "false");
+        assert_eq!(session.evaluate("xs[0] + xs[1]")["body"]["result"], "30");
+        // A computed index works (it is itself an expression).
+        assert_eq!(session.evaluate("xs[p.x - 3]")["body"]["result"], "10");
+
+        // A call would run user code → a clean error pointing at the D5.2 follow-on (not a crash),
+        // so a hover/watch stays side-effect-free.
+        let call = session.evaluate("xs.len()");
+        assert_eq!(call["success"], false);
         assert!(
-            arith["message"].as_str().unwrap().contains("D5.1"),
-            "arith error: {arith:#?}"
+            call["message"].as_str().unwrap().contains("D5.2"),
+            "call error: {call:#?}"
         );
         // An unknown name reports it by name.
         let missing = session.evaluate("nope");

@@ -15,12 +15,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use noeta_ast::{Expr, Stmt};
+use noeta_ast::{BinaryOp, Expr, Stmt};
 use noeta_bytecode::Module;
 use noeta_lexer::lex;
 use noeta_parser::parse;
 use noeta_span::{Source, SourceId, SourceMap};
-use noeta_value::Value as RuntimeValue;
+use noeta_value::{Value as RuntimeValue, apply_binary, apply_unary};
 use noeta_vm::{DebugAction, DebugFrame, DebugView, Debugger};
 use serde_json::{Value, json};
 
@@ -38,7 +38,8 @@ pub enum Resume {
     /// Evaluate `expr` against the paused frame at snapshot index `frame` (as the client numbers stack
     /// frames, innermost first) and send the result back on `reply`. Handled **without leaving the
     /// pause** — a watch/hover re-query must not resume the program — so the worker services it and
-    /// loops back to waiting. Read-only variable-path evaluation (D5); full expressions are D5.1.
+    /// loops back to waiting. Read-only: variable paths, literals, and operators (D5/D5.1); a call
+    /// (which would run user code) is the D5.2 follow-on.
     Evaluate {
         expr: String,
         frame: usize,
@@ -273,7 +274,7 @@ impl DapDebugger {
                 // A read-only evaluate: resolve against the live frames on this (the run) thread and
                 // reply, then keep waiting — the program stays paused.
                 Ok(Resume::Evaluate { expr, frame, reply }) => {
-                    let _ = reply.send(evaluate_path(view, frame, &expr));
+                    let _ = reply.send(evaluate_readonly(view, frame, &expr));
                 }
                 // Terminate, or the adapter dropped the channel (session gone).
                 Ok(Resume::Terminate) | Err(_) => break DebugAction::Terminate,
@@ -402,7 +403,7 @@ fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
 ///
 /// Runs on the run worker thread, where the paused `view`'s [`RuntimeValue`]s (and the heap they point
 /// into) are valid; only the rendered strings travel back to the adapter thread.
-fn evaluate_path(view: &DebugView, frame: usize, expr: &str) -> EvalReply {
+fn evaluate_readonly(view: &DebugView, frame: usize, expr: &str) -> EvalReply {
     // Snapshot frames are innermost-first; the `view` is bottom-first — invert the index.
     let Some(view_idx) = view.depth().checked_sub(frame + 1) else {
         return EvalReply::error(format!("no frame {frame} in the paused stack"));
@@ -411,25 +412,28 @@ fn evaluate_path(view: &DebugView, frame: usize, expr: &str) -> EvalReply {
     let Some(ast) = parse_expr(expr) else {
         return EvalReply::error("could not parse the expression");
     };
-    // A bare literal renders directly — no path resolution, no heap allocation.
-    match &ast {
-        Expr::Int { value, .. } => return EvalReply::value(value.to_string(), "int".into()),
-        Expr::Bool { value, .. } => return EvalReply::value(value.to_string(), "bool".into()),
-        Expr::Str { value, .. } => return EvalReply::value(value.clone(), "string".into()),
-        _ => {}
-    }
     match resolve(&ast, &frame) {
         Ok(value) => EvalReply::value(value.display(), render_type(value)),
         Err(msg) => EvalReply::error(msg),
     }
 }
 
-/// Resolve a variable-path expression against a frame's in-scope locals, read-only: a bare name,
-/// chained `.field` access, or `[index]` list/map indexing. Anything else (an operator, a call) is
-/// deferred to D5.1 with a message the watch window can show.
+/// Evaluate a **read-only** expression against a frame's in-scope locals: a variable path (a name,
+/// chained `.field`, `[index]`), a literal, and arithmetic / comparison / logical / concat operators
+/// (via the VM's own [`apply_binary`] / [`apply_unary`], so the semantics match a real run). It never
+/// runs user code — no function or method *call* — so it is side-effect-free and safe even as a hover
+/// query; a call returns a clear error pointing at the follow-on that runs expressions in the paused
+/// VM (D5.2). This is the debugger-thread evaluator; the values it reads and builds live on this (the
+/// run) thread.
 fn resolve(expr: &Expr, frame: &DebugFrame) -> Result<RuntimeValue, String> {
     match expr {
         Expr::Ident { name, .. } => local(frame, name),
+        // Literal leaves. Primitives are word-sized (no heap); a string literal allocates a short-lived
+        // value — a negligible, non-checked leak on a debug run.
+        Expr::Int { value, .. } => Ok(RuntimeValue::int(*value)),
+        Expr::Float { value, .. } => Ok(RuntimeValue::float(*value)),
+        Expr::Bool { value, .. } => Ok(RuntimeValue::bool(*value)),
+        Expr::Str { value, .. } => Ok(RuntimeValue::string(value)),
         Expr::Member { receiver, name, .. } => {
             let recv = resolve(receiver, frame)?;
             recv.field(name)
@@ -441,9 +445,52 @@ fn resolve(expr: &Expr, frame: &DebugFrame) -> Result<RuntimeValue, String> {
             let recv = resolve(receiver, frame)?;
             index_into(recv, index, frame)
         }
+        // `&&` / `||` short-circuit — the right operand is evaluated only when needed, so an unreached
+        // side (`false && xs[99]`) never raises a spurious error. (`apply_binary` excludes these two.)
+        Expr::Binary {
+            op: BinaryOp::And,
+            lhs,
+            rhs,
+            ..
+        } => {
+            let l = resolve(lhs, frame)?;
+            if l.as_bool() == Some(false) {
+                Ok(RuntimeValue::bool(false))
+            } else {
+                resolve(rhs, frame)
+            }
+        }
+        Expr::Binary {
+            op: BinaryOp::Or,
+            lhs,
+            rhs,
+            ..
+        } => {
+            let l = resolve(lhs, frame)?;
+            if l.as_bool() == Some(true) {
+                Ok(RuntimeValue::bool(true))
+            } else {
+                resolve(rhs, frame)
+            }
+        }
+        Expr::Binary { op, lhs, rhs, .. } => {
+            let l = resolve(lhs, frame)?;
+            let r = resolve(rhs, frame)?;
+            apply_binary(*op, l, r).map_err(|e| e.text)
+        }
+        Expr::Unary { op, operand, .. } => {
+            let v = resolve(operand, frame)?;
+            apply_unary(*op, v).map_err(|e| e.text)
+        }
+        Expr::Call { .. } => Err(
+            "calling a function or method here would run user code — not yet \
+                                  supported (a debug-eval follow-on runs expressions in the paused \
+                                  VM, D5.2). Names, `.field`, `[index]`, and operators do work"
+                .to_string(),
+        ),
         _ => Err(
-            "only a variable path (a name, `.field`, or `[index]`) can be evaluated so far — \
-                  full expressions (arithmetic, calls) are planned as D5.1"
+            "this expression form cannot be evaluated in a watch yet — supported: names, \
+                  `.field`, `[index]`, arithmetic / comparison / logical operators, and literals"
                 .to_string(),
         ),
     }
@@ -458,44 +505,25 @@ fn local(frame: &DebugFrame, name: &str) -> Result<RuntimeValue, String> {
         .ok_or_else(|| format!("no variable `{name}` in scope"))
 }
 
-/// Index into a list (by integer) or a map (by string key). The index may be a literal or an in-scope
-/// variable holding an int/string; a computed index is a D5.1 expression.
+/// Index into a list (by an integer) or a map (by a string key). The index is any read-only
+/// expression that evaluates to an int or a string — a literal, a variable, or a computed value
+/// (`xs[i + 1]`).
 fn index_into(
     recv: RuntimeValue,
     index: &Expr,
     frame: &DebugFrame,
 ) -> Result<RuntimeValue, String> {
-    enum Key {
-        Int(i64),
-        Str(String),
-    }
-    let key = match index {
-        Expr::Int { value, .. } => Key::Int(*value),
-        Expr::Str { value, .. } => Key::Str(value.clone()),
-        Expr::Ident { .. } => {
-            let v = resolve(index, frame)?;
-            if let Some(i) = v.as_int() {
-                Key::Int(i)
-            } else if let Some(s) = v.as_string() {
-                Key::Str(s)
-            } else {
-                return Err("an index variable must hold an int or a string".to_string());
-            }
+    let key = resolve(index, frame)?;
+    if let Some(i) = key.as_int() {
+        if i < 0 {
+            return Err(format!("negative index {i}"));
         }
-        _ => {
-            return Err(
-                "an index must be an integer, a string key, or a variable — a computed \
-                        index is a D5.1 expression"
-                    .to_string(),
-            );
-        }
-    };
-    match key {
-        Key::Int(i) if i >= 0 => recv
-            .list_get(i as usize)
-            .ok_or_else(|| format!("index {i} is out of bounds")),
-        Key::Int(i) => Err(format!("negative index {i}")),
-        Key::Str(s) => recv.map_get(&s).ok_or_else(|| format!("no key `{s}`")),
+        recv.list_get(i as usize)
+            .ok_or_else(|| format!("index {i} is out of bounds"))
+    } else if let Some(s) = key.as_string() {
+        recv.map_get(&s).ok_or_else(|| format!("no key `{s}`"))
+    } else {
+        Err("an index must evaluate to an int (list position) or a string (map key)".to_string())
     }
 }
 

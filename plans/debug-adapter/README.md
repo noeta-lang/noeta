@@ -1,8 +1,9 @@
 # Debugger — `noeta dap` Debug Adapter Protocol server
 
-**Status: D0–D4 COMPLETE + D5 (path evaluation) shipped; D5.1 (full expressions) is the one remaining
+**Status: D0–D4 COMPLETE + D5/D5.1 (read-only `evaluate`) shipped; D5.2 (calls) is the one remaining
 follow-on.** `noeta dap` runs over stdio, the VS Code/VSCodium client launches on F5, and breakpoints,
-stepping, stack/scopes/variables, and read-only `evaluate` (variable paths) all work. This is the next
+stepping, stack/scopes/variables, and read-only `evaluate` (variable paths **and** arithmetic /
+comparison / logical operators) all work. This is the next
 milestone after the `noeta lsp` language server shipped and merged to `main`. It mirrors that arc: a new `noeta-dap` crate
 plus a `noeta dap` CLI subcommand, speaking a stdio wire protocol to any DAP-capable editor (VS Code /
 VSCodium's built-in debug UI, Neovim `nvim-dap`, etc.). Where the LSP was a thin *read* adapter over the
@@ -226,19 +227,20 @@ the `reg→name` / `proto→name` tables).
 | **D2** | Call stack + scopes + variables | The paused state is inspectable | `stackTrace` from the live VM `Frame` stack + `proto→{name,def_span}` (name + file:line per frame); `scopes` (Locals; `self`/fields when in a method); `variables` reads each frame's register window through the `reg→name` table → DAP `Variable{name, value, type}` (value via the VM's value display; type from the runtime value or checker). |
 | **D3** | Stepping | Step over / into / out | Extend `DebugHook` with a step-mode over the frame stack: `next` (stop at next line, same frame depth), `stepIn` (any deeper), `stepOut` (shallower), using pc→span line-change + `frames.len()` depth. Each emits `stopped(reason: step)`. |
 | **D4** | Wire the VS Code / VSCodium client | F5 launches the debugger | Add a `DebugAdapterDescriptorFactory` + `launch.json` contribution to `editors/vscode-noeta/` spawning `noeta dap`. Mirrors the existing LSP client wiring. Works in VSCodium (built-in DAP UI, no Marketplace dep). |
-| **D5** ✅ | Evaluate — **variable paths** (watch / hover / repl) | A name, `.field`, `[index]` against a paused frame | `evaluate(expr, frameId, context)`: parse the expression, and if it is a variable **path** resolve it read-only against the paused frame's live register window (a `Resume::Evaluate` serviced inside the pause loop on the run worker, where the values live). All contexts resolve paths for now; **hover is path-only by design** (a hover must never run user code). `supportsEvaluateForHovers` advertised. A non-path (operator/call) returns a clean error pointing at D5.1, so a watch shows the message rather than a wrong value. |
-| **D5.1** | Evaluate — **full read-only expressions** (watch / repl) | `x + 1`, `xs.len()`, `f(x)` | *Follow-on, not yet built.* See the sketch below. Runs the expression in the program's own module/globals context. |
+| **D5** ✅ | Evaluate — **variable paths** (watch / hover / repl) | A name, `.field`, `[index]` against a paused frame | `evaluate(expr, frameId, context)`: parse the expression and resolve it read-only against the paused frame's live register window (a `Resume::Evaluate` serviced inside the pause loop on the run worker, where the values live). `supportsEvaluateForHovers` advertised. A resolution failure (unknown name, out of bounds) returns a clean error, so a hover shows nothing rather than a wrong value. |
+| **D5.1** ✅ | Evaluate — **operators** (arithmetic / comparison / logical) | `x + 1`, `p.x > p.y`, `xs[i] + 1`, `a && b` | Extend the resolver with `Binary` / `Unary` via the VM's own `apply_binary` / `apply_unary` (so the semantics match a real run), literal leaves, computed indices, and `&&`/`||` short-circuit. Still **side-effect-free** (no calls), so it is safe for hover too — no VM run-loop change. A **call** (`xs.len()`, `f(x)`) returns a clean error pointing at D5.2. |
+| **D5.2** | Evaluate — **calls** (user functions/methods) | `xs.len()`, `f(x)`, `p.mag()` | *Follow-on, not yet built.* Needs to *run* code in the program's context, which the pause point cannot today. See the sketch below. Hover must exclude calls (side-effect-free); watch/repl allow them. |
 
 ---
 
-## D5.1 — full read-only expression evaluation (the follow-on's architecture)
+## D5.2 — evaluating **calls** (the follow-on's architecture)
 
-D5 answers variable *paths* by walking the live register window read-only — which is exactly the correct,
-permanent implementation of `context: "hover"` (a hover must never run user code). Full expressions
-(`x + 1`, `xs.len()`, `f(x)`) for `watch`/`repl` need to *run* code in the program's context, which the
-pause point cannot do today: the debugger is consulted **inside** the dispatch loop
-(`self.debugger.before_op(&view)`), so it holds a read-only `DebugView`, not `&mut Vm`. Two pieces make
-this tractable without restructuring the loop:
+D5/D5.1 answer variable paths and operators by reading the live register window and applying the VM's own
+`apply_binary`/`apply_unary` on the run worker — entirely side-effect-free, so correct for hover too, and
+needing no VM run-loop change. What is left is **calls** (`xs.len()`, `f(x)`, `p.mag()`): they must *run*
+code in the program's context, which the pause point cannot do today, because the debugger is consulted
+**inside** the dispatch loop (`self.debugger.before_op(&view)`), so it holds a read-only `DebugView`, not
+`&mut Vm`. Two pieces make this tractable without restructuring the loop:
 
 1. **The `DebugAction::Evaluate` trampoline.** Extend `DebugAction` with an `Evaluate { … }` variant. On
    an evaluate request the paused debugger *returns* it to the dispatch loop instead of handling it in
@@ -253,11 +255,11 @@ this tractable without restructuring the loop:
 
 The genuinely hard part is **module extension**: the fragment must resolve globals, functions, and method
 tables against the *running* module's id spaces, which today come from a one-shot checked `compile()`. The
-REPL solved exactly this with stable-id accumulation — but *checkerless* (`SessionCompiler`). D5.1 wants
+REPL solved exactly this with stable-id accumulation — but *checkerless* (`SessionCompiler`). D5.2 wants
 the same on a program compiled *with* the checker. Recommended: **compile debug-eval fragments
 checkerless**, reusing the REPL's `SessionCompiler`-style accumulation seeded from the running module —
 defensible because the REPL is checkerless too, and an ill-typed fragment surfaces as a watch-window error,
-not a crash. (Assignment / side-effects stay deferred beyond D5.1.)
+not a crash. (Assignment / side-effects stay deferred beyond D5.2.)
 
 ---
 
