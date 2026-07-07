@@ -94,6 +94,10 @@ pub enum DebugAction {
     /// This is the D5.2 trampoline: it is the one path on which a paused program runs code (a call in a
     /// watch), and it stays off the `Debugger` trait so no VM internals leak.
     Evaluate(DebugEvalRequest),
+    /// The paused debugger asked to **write a frame local** (the Variables-panel edit, U1). Same
+    /// trampoline shape as [`DebugAction::Evaluate`]; the dispatch loop additionally holds the
+    /// mutable register stack, so it can store the evaluated value into the frame's register.
+    SetVariable(DebugSetRequest),
 }
 
 /// A paused-frame `evaluate` request handed from the [`Debugger`] to the VM (see
@@ -124,6 +128,23 @@ pub enum DebugEvalOutcome {
     /// The expression could not be evaluated (unknown name, out of bounds, a call disabled in a hover,
     /// a runtime error while running a call, …).
     Error(String),
+}
+
+/// A paused-frame **`setVariable`** request (tooling-unification U1): evaluate `value` (a console
+/// fragment, frame locals visible) and write the result into the named local's register in the
+/// selected frame — the DAP Variables-panel edit. Replies with the written value rendered, or an
+/// error (unknown/out-of-scope name, `self`, or an evaluation failure — the frame is untouched
+/// then).
+#[derive(Debug)]
+pub struct DebugSetRequest {
+    /// The local to write, by its source name.
+    pub name: String,
+    /// The parsed replacement-value fragment (evaluated exactly like a console entry).
+    pub value: Program,
+    /// Which paused frame, as the client numbers frames (innermost first).
+    pub frame: usize,
+    /// The rendered outcome (the new value on success), back to the adapter thread.
+    pub reply: Sender<DebugEvalOutcome>,
 }
 
 /// A read-only view of the paused VM handed to [`Debugger::before_op`]: the live frame stack and each
@@ -2964,6 +2985,32 @@ impl<'m> Vm<'m> {
                                 };
                                 let _ = reply.send(outcome);
                             }
+                            // A Variables-panel edit (U1): evaluate the replacement value as a
+                            // console fragment and write the frame's register in place.
+                            DebugAction::SetVariable(req) => {
+                                let DebugSetRequest {
+                                    name,
+                                    value,
+                                    frame,
+                                    reply,
+                                } = req;
+                                let outcome = if self.debug_session.is_some() {
+                                    self.debug_set_variable(
+                                        &name,
+                                        &value,
+                                        frame,
+                                        &frames[..],
+                                        &mut regs[..],
+                                    )
+                                } else {
+                                    DebugEvalOutcome::Error(
+                                        "this debug run has no console session — setVariable needs \
+                                         a session launch"
+                                            .to_string(),
+                                    )
+                                };
+                                let _ = reply.send(outcome);
+                            }
                         }
                     }
                     self.debugger = Some(dbg);
@@ -5661,6 +5708,28 @@ impl<'m> Vm<'m> {
         frames: &[Frame],
         regs: &[Value],
     ) -> DebugEvalOutcome {
+        match self.eval_fragment_owned(program, frame, pure, frames, regs) {
+            Ok(v) => {
+                let text = v.display();
+                let ty = v.type_display();
+                release(v);
+                DebugEvalOutcome::Value { text, ty }
+            }
+            Err(msg) => DebugEvalOutcome::Error(msg),
+        }
+    }
+
+    /// The value-returning core of [`Vm::debug_eval_fragment`]: evaluate the fragment and hand back
+    /// the resulting **owned** [`Value`] (one reference the caller must consume — render + release
+    /// for an `evaluate`, store into a register for a `setVariable`).
+    fn eval_fragment_owned(
+        &mut self,
+        program: &Program,
+        frame: usize,
+        pure: bool,
+        frames: &[Frame],
+        regs: &[Value],
+    ) -> Result<Value, String> {
         if pure {
             // Hover: exactly one expression, from the side-effect-free surface.
             let gated = match &program.stmts[..] {
@@ -5668,7 +5737,7 @@ impl<'m> Vm<'m> {
                 _ => false,
             };
             if !gated {
-                return DebugEvalOutcome::Error(
+                return Err(
                     "hover stays read-only — supported: names, `.field`, `[index]`, operators, \
                      and literals (use a watch or the debug console to run code)"
                         .to_string(),
@@ -5685,7 +5754,7 @@ impl<'m> Vm<'m> {
                 regs,
             };
             let Some(view_idx) = view.depth().checked_sub(frame + 1) else {
-                return DebugEvalOutcome::Error(format!("no frame {frame} in the paused stack"));
+                return Err(format!("no frame {frame} in the paused stack"));
             };
             let f = view.frame(view_idx);
             let here = f.line_span();
@@ -5746,20 +5815,18 @@ impl<'m> Vm<'m> {
     /// Install and run one wrapped fragment: entry run binds the sentinel closure, which is then
     /// taken out of its slot (one-shot — the sentinel never lingers) and called with the paused
     /// frame's local values. `args` are borrowed from the paused register window; they are retained
-    /// only at the call (which consumes one reference each).
+    /// only at the call (which consumes one reference each). Returns the fragment's **owned**
+    /// result value.
     fn run_fragment(
         &mut self,
         wrapper: &Program,
         args: Vec<Value>,
         span: Span,
-    ) -> DebugEvalOutcome {
-        let entry = match self.install_fragment(wrapper) {
-            Ok(entry) => entry,
-            Err(msg) => return DebugEvalOutcome::Error(msg),
-        };
+    ) -> Result<Value, String> {
+        let entry = self.install_fragment(wrapper)?;
         match self.run_thunk(entry, &[]) {
             Ok(v) => release(v),
-            Err(Abort) => return DebugEvalOutcome::Error(self.last_diag_message()),
+            Err(Abort) => return Err(self.last_diag_message()),
         }
         let Some(slot) = self
             .module
@@ -5767,25 +5834,74 @@ impl<'m> Vm<'m> {
             .iter()
             .position(|n| n == FRAGMENT_SENTINEL)
         else {
-            return DebugEvalOutcome::Error("internal error: fragment sentinel not bound".into());
+            return Err("internal error: fragment sentinel not bound".into());
         };
         let closure = std::mem::replace(&mut self.globals[slot], Value::unbound());
         if closure.is_unbound() {
-            return DebugEvalOutcome::Error("the fragment did not produce a value".into());
+            return Err("the fragment did not produce a value".into());
         }
         for a in &args {
             retain(*a);
         }
         let result = self.call_value(closure, args, span);
         release(closure);
-        match result {
+        result.map_err(|Abort| self.last_diag_message())
+    }
+
+    /// Service a paused-frame **`setVariable`** (U1): evaluate `value` as a console fragment (frame
+    /// locals visible), then overwrite the named in-scope local's register in the selected frame.
+    /// The old value is released with destructor semantics (this is a reassignment); on any error
+    /// the frame is untouched. `self` is refused — replacing a method's receiver mid-body is a
+    /// footgun, not a feature.
+    fn debug_set_variable(
+        &mut self,
+        name: &str,
+        value: &Program,
+        frame: usize,
+        frames: &[Frame],
+        regs: &mut [Value],
+    ) -> DebugEvalOutcome {
+        if name == "self" {
+            return DebugEvalOutcome::Error("`self` cannot be reassigned".to_string());
+        }
+        // Resolve the target register first, so an unknown name fails before the value evaluates.
+        let Some(view_idx) = frames.len().checked_sub(frame + 1) else {
+            return DebugEvalOutcome::Error(format!("no frame {frame} in the paused stack"));
+        };
+        let target = &frames[view_idx];
+        let chunk = &self.module.protos[target.proto as usize];
+        // The frame's current line, with the same innermost/caller pc adjustment `DebugView::frame`
+        // makes — the in-scope filter must match what the Variables panel showed.
+        let pc = if view_idx + 1 == frames.len() {
+            target.pc
+        } else {
+            target.pc.saturating_sub(1)
+        };
+        let here = chunk.line_span(pc);
+        let Some(reg) = chunk
+            .debug_locals
+            .iter()
+            .find(|ld| {
+                ld.name == name
+                    && match here {
+                        Some(h) => ld.def_span.start < h.start,
+                        None => true,
+                    }
+            })
+            .map(|ld| ld.reg as usize)
+        else {
+            return DebugEvalOutcome::Error(format!("no variable `{name}` in scope"));
+        };
+        let slot = target.base + reg;
+        match self.eval_fragment_owned(value, frame, false, frames, regs) {
             Ok(v) => {
                 let text = v.display();
                 let ty = v.type_display();
-                release(v);
+                let old = std::mem::replace(&mut regs[slot], v);
+                self.release_value(old);
                 DebugEvalOutcome::Value { text, ty }
             }
-            Err(Abort) => DebugEvalOutcome::Error(self.last_diag_message()),
+            Err(msg) => DebugEvalOutcome::Error(msg),
         }
     }
 

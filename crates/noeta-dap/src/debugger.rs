@@ -19,7 +19,9 @@ use noeta_ast::Program;
 use noeta_bytecode::Module;
 use noeta_parser::parse_fragment;
 use noeta_span::{SourceId, SourceMap};
-use noeta_vm::{DebugAction, DebugEvalOutcome, DebugEvalRequest, DebugView, Debugger};
+use noeta_vm::{
+    DebugAction, DebugEvalOutcome, DebugEvalRequest, DebugSetRequest, DebugView, Debugger,
+};
 use serde_json::{Value, json};
 
 use crate::MAIN_THREAD_ID;
@@ -44,6 +46,16 @@ pub enum Resume {
         program: Program,
         frame: usize,
         allow_calls: bool,
+        reply: Sender<DebugEvalOutcome>,
+    },
+    /// Write a paused frame's local (the Variables-panel edit, U1): evaluate `value` as a console
+    /// fragment and store the result into `name`'s register in frame `frame`. Handled by the VM via
+    /// [`DebugAction::SetVariable`]; the program stays paused, and the refreshed stack snapshot is
+    /// re-captured when the debugger re-enters its wait.
+    SetVariable {
+        name: String,
+        value: Program,
+        frame: usize,
         reply: Sender<DebugEvalOutcome>,
     },
 }
@@ -270,6 +282,18 @@ impl DapDebugger {
                 allow_calls,
                 reply,
             }),
+            // Hand the register write to the VM; we stay paused, exactly like an evaluate.
+            Ok(Resume::SetVariable {
+                name,
+                value,
+                frame,
+                reply,
+            }) => DebugAction::SetVariable(DebugSetRequest {
+                name,
+                value,
+                frame,
+                reply,
+            }),
             // Terminate, or the adapter dropped the channel (session gone).
             Ok(Resume::Terminate) | Err(_) => self.finish(DebugAction::Terminate),
         }
@@ -314,9 +338,12 @@ impl DapDebugger {
 
 impl Debugger for DapDebugger {
     fn before_op(&mut self, proto: u32, pc: usize, view: &DebugView) -> DebugAction {
-        // Re-entry after the VM serviced an evaluate (the D5.2 trampoline left and re-entered here):
-        // we are still parked at the same instruction, so resume waiting without re-announcing it.
+        // Re-entry after the VM serviced an evaluate or setVariable (the trampoline left and
+        // re-entered here): we are still parked at the same instruction, so resume waiting without
+        // re-announcing the stop — but RE-CAPTURE the stack first, so a `variables` request after a
+        // register write (U1) reads the new value rather than the stale pause-time snapshot.
         if self.mid_pause {
+            *self.paused.lock().unwrap() = Some(capture(view, &self.sources));
             return self.wait(view);
         }
         if self.terminate.load(Ordering::Relaxed) {

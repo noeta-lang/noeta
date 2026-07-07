@@ -187,6 +187,16 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
                     let _ = tx.send(error_response(&request, &message));
                 }
             },
+            // Edit a paused frame's local from the Variables panel (U1): the value string
+            // evaluates as a console fragment, and the frame's register is written in place.
+            "setVariable" => match set_variable(&request, &paused, resume_tx.as_ref()) {
+                Ok(body) => {
+                    let _ = tx.send(response(&request, body));
+                }
+                Err(message) => {
+                    let _ = tx.send(error_response(&request, &message));
+                }
+            },
             "disconnect" => {
                 signal_terminate(&terminate, &resume_tx);
                 let _ = tx.send(response(&request, json!({})));
@@ -279,6 +289,9 @@ fn capabilities() -> Value {
         // The editor may evaluate a hovered expression (VS Code's debug hover). We answer read-only
         // variable paths (D5); hover is path-only by design (a hover must never run user code).
         "supportsEvaluateForHovers": true,
+        // The Variables-panel edit (U1): a local's value can be replaced while paused; the new
+        // value is any console-evaluable expression (frame locals visible).
+        "supportsSetVariable": true,
     })
 }
 
@@ -491,6 +504,65 @@ fn evaluate(
         })),
         Ok(DebugEvalOutcome::Error(message)) => Err(message),
         Err(_) => Err("evaluation did not complete".to_string()),
+    }
+}
+
+/// Answer a DAP `setVariable` request while paused (U1): the `variablesReference` names the frame
+/// (`frame + 1`, as `scopes` handed it out), `name` the local, and `value` an expression evaluated
+/// as a console fragment (frame locals visible) whose result replaces the local's register. Returns
+/// the new value rendered, exactly as the Variables panel expects; `Err` when the program isn't
+/// paused, the name isn't an in-scope local (or is `self`), or the value doesn't evaluate — the
+/// frame is untouched then.
+fn set_variable(
+    request: &Value,
+    paused: &Option<Paused>,
+    resume_tx: Option<&Sender<Resume>>,
+) -> Result<Value, String> {
+    let args = request.get("arguments");
+    let name = args
+        .and_then(|a| a.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let value_text = args
+        .and_then(|a| a.get("value"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if name.is_empty() || value_text.is_empty() {
+        return Err("setVariable needs a variable name and a value".to_string());
+    }
+    // `scopes` hands out `variablesReference = frame + 1` (0 is DAP's "not expandable" sentinel).
+    let reference = args
+        .and_then(|a| a.get("variablesReference"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if reference == 0 {
+        return Err("setVariable needs the frame's variablesReference".to_string());
+    }
+    let frame = (reference - 1) as usize;
+    let value = parse_console_fragment(value_text).ok_or("could not parse the value")?;
+    if with_paused(paused, |_| ()).is_none() {
+        return Err("can only set a variable while the program is paused".to_string());
+    }
+    let resume = resume_tx.ok_or("the program is not running")?;
+    let (reply_tx, reply_rx) = mpsc::channel::<DebugEvalOutcome>();
+    resume
+        .send(Resume::SetVariable {
+            name,
+            value,
+            frame,
+            reply: reply_tx,
+        })
+        .map_err(|_| "the program is no longer running".to_string())?;
+    match reply_rx.recv() {
+        Ok(DebugEvalOutcome::Value { text, ty }) => Ok(json!({
+            "value": text,
+            "type": ty,
+            "variablesReference": 0,
+        })),
+        Ok(DebugEvalOutcome::Error(message)) => Err(message),
+        Err(_) => Err("the write did not complete".to_string()),
     }
 }
 
@@ -903,6 +975,86 @@ mod tests {
         assert_eq!(named("result")["value"], "41");
 
         session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    /// U1 (tooling-unification): `setVariable` writes a paused frame's local — the response carries
+    /// the new value, a `variables` re-read shows it (the snapshot refreshes), and the RESUMED
+    /// program actually uses the written register.
+    #[test]
+    fn set_variable_writes_a_frame_local_the_resumed_program_uses() {
+        let path = fixture(
+            "set_variable",
+            "fn probe(): void {\n    \
+             mut n = 10\n    \
+             mut label = \"hi\"\n    \
+             echo n\n}\n\
+             probe()\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 4 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+
+        session.send("scopes", json!({ "frameId": 0 }));
+        let scopes = session.response("scopes");
+        let var_ref = scopes["body"]["scopes"][0]["variablesReference"]
+            .as_i64()
+            .unwrap();
+
+        // The replacement value is a full console expression — frame locals visible.
+        session.send(
+            "setVariable",
+            json!({ "variablesReference": var_ref, "name": "n", "value": "n * 4 + label.len()" }),
+        );
+        let set = session.response("setVariable");
+        assert_eq!(set["success"], true, "{set:#?}");
+        assert_eq!(set["body"]["value"], "42");
+        assert_eq!(set["body"]["type"], "int");
+
+        // A `variables` re-read sees the write (the pause snapshot refreshed).
+        session.send("variables", json!({ "variablesReference": var_ref }));
+        let variables = session.response("variables");
+        let vars = variables["body"]["variables"].as_array().unwrap();
+        let n = vars.iter().find(|v| v["name"] == "n").unwrap();
+        assert_eq!(n["value"], "42");
+
+        // An unknown name (or a bad value) leaves the frame untouched and errors cleanly.
+        session.send(
+            "setVariable",
+            json!({ "variablesReference": var_ref, "name": "nope", "value": "1" }),
+        );
+        let missing = session.response("setVariable");
+        assert_eq!(missing["success"], false);
+
+        // The resumed program executes `echo n` against the WRITTEN register.
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        let mut stdout = String::new();
+        loop {
+            let message = session.recv_until(|m| {
+                (m["type"] == "event" && (m["event"] == "output" || m["event"] == "terminated"))
+                    || m["type"] == "response"
+            });
+            if message["type"] == "event" && message["event"] == "output" {
+                if message["body"]["category"] == "stdout" {
+                    stdout.push_str(message["body"]["output"].as_str().unwrap_or(""));
+                }
+            } else if message["type"] == "event" && message["event"] == "terminated" {
+                break;
+            }
+        }
+        assert_eq!(stdout, "42\n");
         session.disconnect_and_join();
     }
 
