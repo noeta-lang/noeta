@@ -27,11 +27,10 @@ use clap::{Parser, Subcommand};
 use noeta_ast::{AttrArg, AttrValue, Expr, Program, Stmt};
 use noeta_check::TierFn;
 use noeta_diagnostics::{Diagnostic, DiagnosticCode, render};
-use noeta_eval::{Session, SessionOutput};
 use noeta_lexer::{TokenKind, lex};
 use noeta_parser::parse;
 use noeta_span::{Source, SourceId, SourceMap, Span};
-use noeta_vm::VmBackend;
+use noeta_vm::{SessionOutput, VmBackend, VmSession};
 
 mod manifest;
 
@@ -1193,9 +1192,22 @@ enum ReplStep {
     Incomplete,
 }
 
+/// The deterministic sandbox environment the REPL runs against — an in-memory filesystem, a logical
+/// clock, and a seeded PRNG, rebuilt on `:reset`. Matches the environment the tree-walker REPL used, so
+/// moving the REPL onto the VM is a behaviour-preserving swap (a real-host prompt is a follow-on;
+/// see `plans/repl-on-vm`).
+fn sandbox_repl_env() -> noeta_vm::HostFactory {
+    Box::new(|| {
+        (
+            Box::new(noeta_stdlib::SandboxHost::new()) as Box<dyn noeta_stdlib::Host>,
+            Box::new(noeta_stdlib::SandboxExecutor::new()) as Box<dyn noeta_stdlib::Executor>,
+        )
+    })
+}
+
 fn cmd_repl() -> ExitCode {
     let stdin = io::stdin();
-    let mut session = Session::new();
+    let mut session = VmSession::new(sandbox_repl_env());
     let mut buffer = String::new();
     let mut entry_no: u32 = 0;
     eprint!("lang repl — type a statement, Ctrl-D to exit\n» ");
@@ -1251,7 +1263,7 @@ enum MetaOutcome {
 /// top-level bindings alive across entries — extended lifetime, unlike compiled code's last-use
 /// destruction — so `:drop` is how a destructor is observed or an object reclaimed interactively,
 /// and `:type` reports a value's runtime type in a session that runs no checker.
-fn repl_meta(session: &mut Session, line: &str) -> MetaOutcome {
+fn repl_meta(session: &mut VmSession, line: &str) -> MetaOutcome {
     let body = line.strip_prefix(':').unwrap_or(line);
     let mut parts = body.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("");
@@ -1299,7 +1311,7 @@ fn repl_meta(session: &mut Session, line: &str) -> MetaOutcome {
 }
 
 /// `:type <expr>` — parse `expr`, evaluate it in the session, and print its runtime type.
-fn repl_type(session: &mut Session, expr: &str) {
+fn repl_type(session: &mut VmSession, expr: &str) {
     let source = Source::new(SourceId::FIRST, "<repl-type>", format!("{expr};"));
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
@@ -1339,7 +1351,7 @@ fn print_repl_help() {
 /// printed. If the only parse problem is hitting end-of-input, the entry is treated as
 /// incomplete and more input is requested (multiline). Any other error is reported, and the
 /// buffer is reset so one bad entry cannot wedge the session.
-fn repl_step(session: &mut Session, buffer: &str, entry_no: &mut u32) -> ReplStep {
+fn repl_step(session: &mut VmSession, buffer: &str, entry_no: &mut u32) -> ReplStep {
     let source = Source::new(
         SourceId::FIRST,
         format!("<repl:{entry_no}>"),

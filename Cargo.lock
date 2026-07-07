@@ -1134,7 +1134,6 @@ dependencies = [
  "noeta-compiler",
  "noeta-dap",
  "noeta-diagnostics",
- "noeta-eval",
  "noeta-lexer",
  "noeta-loader",
  "noeta-lsp",
