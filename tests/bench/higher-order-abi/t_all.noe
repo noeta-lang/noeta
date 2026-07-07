@@ -1,0 +1,20 @@
+// H-BENCH: all() over 200k already-spawned cheap futures — measures the join loop's per-future
+// poll/collect overhead. Gates H2 (Builtin::All → shared ctx dispatch).
+use std.task.{all}
+
+async fn dbl(n: int): int {
+    return n * 2
+}
+
+mut fs: List<Future<int>> = []
+mut i = 0
+while i < 200000 {
+    fs ~= [dbl(i)]
+    i = i + 1
+}
+ys = all(fs)
+mut total = 0
+for y in ys {
+    total = total + y
+}
+echo "total=${total}"

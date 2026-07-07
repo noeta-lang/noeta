@@ -1,0 +1,21 @@
+// H-BENCH: map_bounded over 200k items, window 16, cheap async body (no timers — measures the
+// combinator's window loop + future plumbing, not sleep). Gates H2 (Builtin::MapBounded → shared
+// ctx dispatch).
+use std.task.{map_bounded}
+
+async fn dbl(n: int): int {
+    return n * 2
+}
+
+mut xs: List<int> = []
+mut i = 0
+while i < 200000 {
+    xs ~= [i]
+    i = i + 1
+}
+ys = map_bounded(xs, 16, dbl)
+mut total = 0
+for y in ys {
+    total = total + y
+}
+echo "total=${total}"

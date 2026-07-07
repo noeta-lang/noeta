@@ -1,0 +1,12 @@
+// H-BENCH: hot signal reads — 5M `.get()` calls in a tight loop. Gates the H5 handle-method
+// migration (today: integer-compare intercept on Value::Reactive; after: ctx-form extern dispatch).
+use std.reactive.{signal}
+
+s = signal(7)
+mut total = 0
+mut i = 0
+while i < 5000000 {
+    total = total + s.get()
+    i = i + 1
+}
+echo "total=${total}"

@@ -1,0 +1,8 @@
+// H-BENCH: minimal serve app for the loopback throughput case (run.py drives N sequential
+// requests against `noeta serve` and reports req/s). Gates H3 (Builtin::Serve → shared ctx
+// dispatch): per-request overhead of the accept→handle→reply loop.
+use std.{http}
+
+fn fetch(req: Request): Response {
+    return http.response(200, "ok")
+}
