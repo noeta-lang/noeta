@@ -37,7 +37,9 @@ use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use noeta_ast::{BinaryOp, ClosureBody, Expr, Param, Program, Stmt};
-use noeta_backend::{Backend, RunResult};
+// `RunResult` is re-exported below (`pub use noeta_backend::{RunResult, …}`), so it is not imported
+// privately here (that would be a duplicate binding).
+use noeta_backend::Backend;
 use noeta_bytecode::{
     BoolSide, Builtin, CaptureFrom, Chunk, Const, Module, NarrowTarget, Op, Reg, ReuseCheck,
     StrPart,
@@ -396,6 +398,40 @@ impl VmBackend {
         // The abort traceback (empty for a clean run) rides beside the result — `RunResult` itself
         // stays the differential's compared unit, which the trace is deliberately not part of (yet):
         // the oracle grows its own traceback first.
+        let trace = std::mem::take(&mut vm.abort_trace);
+        (result, trace)
+    }
+
+    /// Run a module whose native prototype entries were **compiled ahead of time and linked in**
+    /// (P-AOT L3.2b). Instead of arming the JIT compiler, bind the entries from `dispatch` — the
+    /// [`noeta_jit::AOT_DISPATCH_SYMBOL`] table (`[count][main_0, fast_0, …]`, pointer-width words the
+    /// linker resolved to real code addresses) — into the mutable per-proto mirror tables, then run.
+    /// Prototypes with a null slot (ineligible, or no fast body) interpret. Real host + executor +
+    /// isolate factory, exactly like the production `parallel` path; out-of-oracle.
+    ///
+    /// # Safety
+    /// `dispatch` must point at a valid dispatch table of that layout whose function pointers stay
+    /// valid for the whole run — in a linked AOT binary they live in the executable's text, so this
+    /// always holds. A null `dispatch` is allowed (binds nothing; everything interprets).
+    #[cfg(feature = "jit")]
+    #[allow(unsafe_code)]
+    pub unsafe fn run_module_aot(
+        &self,
+        module: Arc<Module>,
+        dispatch: *const usize,
+        host: Box<dyn noeta_stdlib::Host>,
+        executor: Box<dyn noeta_stdlib::Executor>,
+        factory: IsolateFactory,
+    ) -> (RunResult, Vec<TraceFrame>) {
+        noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+        let mut vm = Vm::load(&module, host, executor);
+        vm.parallel_isolates = true;
+        vm.isolate_module = Some(Arc::clone(&module));
+        vm.isolate_factory = Some(factory);
+        vm.aot = true;
+        // SAFETY: the caller guarantees `dispatch` is a valid, live dispatch table (contract above).
+        unsafe { vm.bind_aot_dispatch(dispatch) };
+        let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
         let trace = std::mem::take(&mut vm.abort_trace);
         (result, trace)
     }
@@ -796,6 +832,13 @@ struct Vm<'m> {
     /// exclusive with the synchronous `jit` engine (which the `force_jit` oracle keeps).
     #[cfg(feature = "jit")]
     jit_service: Option<jit_service::JitService>,
+    /// P-AOT L3.2b: native entries were **bound ahead of time** (from a linked dispatch table),
+    /// not JIT-compiled — so `self.jit`/`jit_service` are both `None` yet the mirror tables carry
+    /// real native entry points. This makes the frame-entry dispatch consult those pre-installed
+    /// entries even with the compiler absent; an uncompiled (ineligible) prototype still falls
+    /// through to the interpreter.
+    #[cfg(feature = "jit")]
+    aot: bool,
     /// The **mirror tables** — the single tier-1 lookup source for the dispatch loop and the
     /// native call helpers, in both modes: the sync engine fills them right after compiling,
     /// the service via the mailbox drain. The engine's own tables are never read by the
@@ -839,7 +882,7 @@ struct Vm<'m> {
 
 /// The traceback vocabulary is shared with the tree-walker oracle through the backend contract
 /// crate, so both backends produce the same `TraceFrame` shape (and can eventually be compared).
-pub use noeta_backend::{TraceFrame, render_trace};
+pub use noeta_backend::{RunResult, TraceFrame, render_trace};
 
 /// Tier-1 promotion threshold: a prototype interprets until it has been entered this many times,
 /// then the JIT compiles it (P-JIT). The `--jit-differential` oracle bypasses this via `force_jit`.
@@ -875,6 +918,11 @@ thread_local! {
 /// ABI. It only bumps a thread-local counter here; J1+ registers the real `retain`/`release`/`call`
 /// helpers beside it and reconstitutes `&mut Vm` from `vm` to service them.
 #[cfg(feature = "jit")]
+#[cfg_attr(
+    feature = "aot",
+    allow(unsafe_code),
+    unsafe(export_name = "noeta_jit_observe")
+)]
 extern "C" fn jit_observe(_vm: *mut core::ffi::c_void) {
     JIT_OBSERVE_COUNT.with(|c| c.set(c.get().wrapping_add(1)));
 }
@@ -896,6 +944,7 @@ fn jit_observe_count() -> u64 {
 /// `jit_enter`, where no other borrow of `*vm` is active.
 #[cfg(feature = "jit")]
 #[allow(unsafe_code)]
+#[cfg_attr(feature = "aot", unsafe(export_name = "noeta_jit_note_global_bound"))]
 extern "C" fn jit_note_global_bound(vm: *mut core::ffi::c_void, g: u32) {
     let vm = unsafe { &mut *(vm as *mut Vm) };
     vm.global_order.push(g);
@@ -903,6 +952,11 @@ extern "C" fn jit_note_global_bound(vm: *mut core::ffi::c_void, g: u32) {
 
 /// Runtime helper: bump a value's refcount (heap-aware register moves, J3). No-op on an immediate.
 #[cfg(feature = "jit")]
+#[cfg_attr(
+    feature = "aot",
+    allow(unsafe_code),
+    unsafe(export_name = "noeta_jit_retain")
+)]
 extern "C" fn jit_retain(v: u64) {
     retain(Value::from_bits(v));
 }
@@ -910,6 +964,11 @@ extern "C" fn jit_retain(v: u64) {
 /// Runtime helper: drop one reference to a value — the plain, non-destructor release the
 /// interpreter's `set_reg` uses on an overwritten register (J3). No-op on an immediate.
 #[cfg(feature = "jit")]
+#[cfg_attr(
+    feature = "aot",
+    allow(unsafe_code),
+    unsafe(export_name = "noeta_jit_release")
+)]
 extern "C" fn jit_release(v: u64) {
     release(Value::from_bits(v));
 }
@@ -921,6 +980,7 @@ extern "C" fn jit_release(v: u64) {
 /// `vm` must be the live `*mut Vm` the tier-1 ABI passed (see [`jit_note_global_bound`]).
 #[cfg(feature = "jit")]
 #[allow(unsafe_code)]
+#[cfg_attr(feature = "aot", unsafe(export_name = "noeta_jit_release_value"))]
 extern "C" fn jit_release_value(vm: *mut core::ffi::c_void, v: u64) {
     let vm = unsafe { &mut *(vm as *mut Vm) };
     vm.release_value(Value::from_bits(v));
@@ -947,6 +1007,44 @@ pub fn frame_layout() -> noeta_jit::FrameLayout {
         vec_len_word,
         vec_cap_word,
     }
+}
+
+/// The zero-initialized [`Frame`] the JIT bakes its call-frame push from (P-CALL): every field at its
+/// resting value (`proto`/`base`/`pc`/`ret_dst` = 0, `ret_transform` = `None`, `upvalues` = empty
+/// `Vec`). The native frame-push codegen reads this template's *words* — not its address — and bakes
+/// them as position-independent immediates (L3.1a audit), so the same literal produces byte-identical
+/// codegen in the runtime JIT and the AOT object, and a bound native body writes a valid initial
+/// `Frame` into any VM's frame stack. Shared by [`Vm::init_jit`], [`Vm::init_jit_service`], and the
+/// AOT [`compile_module_aot`].
+#[cfg(feature = "jit")]
+fn fresh_frame_template() -> Box<Frame> {
+    Box::new(Frame {
+        proto: 0,
+        base: 0,
+        pc: 0,
+        ret_dst: 0,
+        ret_transform: RetTransform::None,
+        upvalues: Vec::new(),
+    })
+}
+
+/// Ahead-of-time compile **every** eligible prototype of `module` to a relocatable **object file**
+/// (P-AOT L3.2b): the same native codegen as the runtime JIT, emitted into a host object
+/// (ELF/Mach-O/COFF) with the [`noeta_jit::AOT_DISPATCH_SYMBOL`] dispatch table, instead of
+/// finalized to executable pages. Returns the object bytes for `noeta build --native` to link
+/// against the AOT runtime staticlib.
+///
+/// This lives in `noeta-vm` (not the CLI) because only this crate knows the [`Frame`] layout: the
+/// object bakes the [`fresh_frame_template`] words as immediates, so it must be built from the exact
+/// same template the runtime uses. The template is read during `compile_module` and needs to outlive
+/// only that call, so a local box suffices.
+#[cfg(feature = "jit")]
+pub fn compile_module_aot(module: &Module) -> Result<Vec<u8>, String> {
+    let template = fresh_frame_template();
+    let template_ptr = template.as_ref() as *const Frame as *const u8;
+    let mut jit = noeta_jit::Jit::new_object("noeta_aot", frame_layout(), template_ptr)?;
+    jit.compile_module(module)?;
+    jit.finish()
 }
 
 /// Identify which of a `Vec`'s three pointer-sized words hold its data pointer, length, and capacity,
@@ -987,6 +1085,7 @@ fn vec_header_words() -> (usize, usize, usize) {
 /// synchronously inside `jit_enter`, where no other borrow of them is active.
 #[cfg(feature = "jit")]
 #[allow(unsafe_code)]
+#[cfg_attr(feature = "aot", unsafe(export_name = "noeta_jit_call"))]
 extern "C" fn jit_call(
     vm: *mut core::ffi::c_void,
     frames: *mut core::ffi::c_void,
@@ -1064,6 +1163,7 @@ extern "C" fn jit_call(
 /// `vm`/`frames`/`regs_vec` must be the live pointers the tier-1 ABI passed.
 #[cfg(feature = "jit")]
 #[allow(unsafe_code)]
+#[cfg_attr(feature = "aot", unsafe(export_name = "noeta_jit_return"))]
 extern "C" fn jit_return(
     vm: *mut core::ffi::c_void,
     frames: *mut core::ffi::c_void,
@@ -1106,6 +1206,7 @@ struct PreparedCall {
 /// `vm`/`frames`/`regs_vec` must be the live pointers the tier-1 ABI passed.
 #[cfg(feature = "jit")]
 #[allow(unsafe_code)]
+#[cfg_attr(feature = "aot", unsafe(export_name = "noeta_jit_prepare_call"))]
 extern "C" fn jit_prepare_call(
     vm: *mut core::ffi::c_void,
     frames: *mut core::ffi::c_void,
@@ -1235,6 +1336,7 @@ extern "C" fn jit_prepare_call(
 /// `frames` must be the live pointer the tier-1 ABI passed.
 #[cfg(feature = "jit")]
 #[allow(unsafe_code)]
+#[cfg_attr(feature = "aot", unsafe(export_name = "noeta_jit_after_call"))]
 extern "C" fn jit_after_call(
     _vm: *mut core::ffi::c_void,
     frames: *mut core::ffi::c_void,
@@ -1268,6 +1370,7 @@ extern "C" fn jit_after_call(
 /// `vm`/`regs_vec` must be the live pointers the tier-1 ABI passed.
 #[cfg(feature = "jit")]
 #[allow(unsafe_code)]
+#[cfg_attr(feature = "aot", unsafe(export_name = "noeta_jit_run_leaf_op"))]
 extern "C" fn jit_run_leaf_op(
     vm: *mut core::ffi::c_void,
     regs_vec: *mut core::ffi::c_void,
@@ -1823,6 +1926,8 @@ impl<'m> Vm<'m> {
             #[cfg(feature = "jit")]
             jit_service: None,
             #[cfg(feature = "jit")]
+            aot: false,
+            #[cfg(feature = "jit")]
             jit_entries: Vec::new(),
             #[cfg(feature = "jit")]
             jit_fast: Vec::new(),
@@ -1868,16 +1973,9 @@ impl<'m> Vm<'m> {
             (noeta_jit::AFTER_CALL_HELPER, jit_after_call as *const u8),
             (noeta_jit::LEAF_OP_HELPER, jit_run_leaf_op as *const u8),
         ];
-        let template = self.jit_frame_template.get_or_insert_with(|| {
-            Box::new(Frame {
-                proto: 0,
-                base: 0,
-                pc: 0,
-                ret_dst: 0,
-                ret_transform: RetTransform::None,
-                upvalues: Vec::new(),
-            })
-        });
+        let template = self
+            .jit_frame_template
+            .get_or_insert_with(fresh_frame_template);
         let template_ptr = template.as_ref() as *const Frame as *const u8;
         match noeta_jit::Jit::new(helpers, frame_layout(), template_ptr) {
             Ok(mut jit) => {
@@ -1928,19 +2026,42 @@ impl<'m> Vm<'m> {
                 jit_run_leaf_op as *const u8 as usize,
             ),
         ];
-        let template = self.jit_frame_template.get_or_insert_with(|| {
-            Box::new(Frame {
-                proto: 0,
-                base: 0,
-                pc: 0,
-                ret_dst: 0,
-                ret_transform: RetTransform::None,
-                upvalues: Vec::new(),
-            })
-        });
+        let template = self
+            .jit_frame_template
+            .get_or_insert_with(fresh_frame_template);
         let template_addr = template.as_ref() as *const Frame as usize;
         self.jit_service =
             jit_service::JitService::spawn(module, helpers, frame_layout(), template_addr);
+    }
+
+    /// Bind a linked AOT dispatch table into the mirror tables (P-AOT L3.2b) — see
+    /// [`noeta_jit::AOT_DISPATCH_SYMBOL`] for the layout (`[count][main_0, fast_0, …]`, pointer-width
+    /// words). Each non-null main slot is a finalized `CompiledFn`-ABI entry point; null slots
+    /// (interpreted prototype, or no fast body) are skipped.
+    ///
+    /// # Safety
+    /// `dispatch` must point at a valid table of that layout whose entry pointers stay valid for the
+    /// VM's lifetime.
+    #[cfg(feature = "jit")]
+    #[allow(unsafe_code)]
+    unsafe fn bind_aot_dispatch(&mut self, dispatch: *const usize) {
+        if dispatch.is_null() {
+            return;
+        }
+        // SAFETY: word 0 is the prototype count; words then come in (main, fast) pairs (contract).
+        let count = unsafe { *dispatch };
+        for p in 0..count {
+            let main = unsafe { *dispatch.add(1 + 2 * p) };
+            let fast = unsafe { *dispatch.add(1 + 2 * p + 1) };
+            if main != 0 {
+                // SAFETY: a non-null slot is a finalized entry with the `CompiledFn` ABI, exactly the
+                // pointer `finalize_ptr` transmutes — here it arrives as a linker-resolved address.
+                let entry = unsafe {
+                    std::mem::transmute::<*const u8, noeta_jit::CompiledFn>(main as *const u8)
+                };
+                self.jit_install(p, entry, (fast != 0).then_some(fast));
+            }
+        }
     }
 
     /// Install a compiled prototype into the mirror tables — the single lookup source for the
@@ -2896,7 +3017,7 @@ impl<'m> Vm<'m> {
             // resume pc otherwise; the compiled code jumps to that block (or bails if it has no entry
             // for it).
             #[cfg(feature = "jit")]
-            if self.jit.is_some() || self.jit_service.is_some() {
+            if self.jit.is_some() || self.jit_service.is_some() || self.aot {
                 match self.jit_enter(proto, frames, regs, fbase, pc) {
                     // Not compiled → interpret as usual.
                     None => {}
@@ -7759,6 +7880,29 @@ mod tests {
     use noeta_parser::parse;
     use noeta_span::{Source, SourceId};
 
+    /// P-AOT L3.2b drift guard: the `#[export_name]` literals on the JIT helpers (which an AOT
+    /// program object links against) must equal the `noeta_jit::*_HELPER` name constants the JIT
+    /// declares its imports under. The literals are hardcoded (an attribute needs a string literal,
+    /// not a const), so this asserts they still agree — a changed constant fails here, flagging the
+    /// export attributes to update in lockstep.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn aot_helper_export_names_match_the_jit_constants() {
+        assert_eq!(noeta_jit::OBSERVE_HELPER, "noeta_jit_observe");
+        assert_eq!(
+            noeta_jit::NOTE_GLOBAL_BOUND_HELPER,
+            "noeta_jit_note_global_bound"
+        );
+        assert_eq!(noeta_jit::RETAIN_HELPER, "noeta_jit_retain");
+        assert_eq!(noeta_jit::RELEASE_HELPER, "noeta_jit_release");
+        assert_eq!(noeta_jit::RELEASE_VALUE_HELPER, "noeta_jit_release_value");
+        assert_eq!(noeta_jit::CALL_HELPER, "noeta_jit_call");
+        assert_eq!(noeta_jit::RETURN_HELPER, "noeta_jit_return");
+        assert_eq!(noeta_jit::PREPARE_CALL_HELPER, "noeta_jit_prepare_call");
+        assert_eq!(noeta_jit::AFTER_CALL_HELPER, "noeta_jit_after_call");
+        assert_eq!(noeta_jit::LEAF_OP_HELPER, "noeta_jit_run_leaf_op");
+    }
+
     fn run(src: &str) -> RunResult {
         let source = Source::new(SourceId::FIRST, "test.noe", src);
         let lexed = lex(&source);
@@ -7766,6 +7910,90 @@ mod tests {
         VmBackend::new()
             .try_run(&parsed.program)
             .expect("program should be in the M1.0 subset")
+    }
+
+    /// P-AOT L3.2b: prove the dispatch-table binding + native dispatch **in-process**, isolating the
+    /// linker as the only remaining unknown for a real AOT binary. Force-JIT a hot call-free loop,
+    /// harvest its finalized entry pointer into an [`noeta_jit::AOT_DISPATCH_SYMBOL`]-shaped table,
+    /// then run a *fresh* VM bound to that table with the compiler unarmed (`vm.aot = true`, `jit`
+    /// stays `None`). The native entry must actually run — not interpret — and match the tier-0
+    /// output. A call-free body keeps the harvested entry self-contained (no per-site inline caches
+    /// to share across VMs); the call path is covered corpus-wide by the `NOETA_JIT_AOT` oracle.
+    #[cfg(feature = "jit")]
+    #[allow(unsafe_code)]
+    #[test]
+    fn aot_bound_dispatch_runs_native_in_process() {
+        let src = "mut t = 0\nfor i in 0..2000 { t = t + i * i }\necho t\n";
+        let source = Source::new(SourceId::FIRST, "aot.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).expect("compiles");
+        let expected = VmBackend::new().run_module(&module).stdout;
+
+        // Harvest a dispatch table from a force-JIT VM. That VM owns the finalized code pages, so it
+        // is kept alive (`keep`) across the AOT run below.
+        let mut keep = Vm::load(
+            &module,
+            Box::new(noeta_stdlib::SandboxHost::new()),
+            Box::new(noeta_stdlib::SandboxExecutor::new()),
+        );
+        keep.force_jit = true;
+        keep.init_jit();
+        let n = keep.jit_entries.len();
+        assert!(
+            keep.jit_entries.iter().any(Option::is_some),
+            "at least one prototype went native"
+        );
+        let mut table = vec![0usize; 1 + 2 * n];
+        table[0] = n;
+        for p in 0..n {
+            if let Some(f) = keep.jit_entries[p] {
+                table[1 + 2 * p] = f as usize;
+            }
+            if let Some(ff) = keep.jit_fast[p] {
+                table[1 + 2 * p + 1] = ff;
+            }
+        }
+
+        // Fresh VM, compiler unarmed, bound to the harvested AOT table.
+        let mut vm = Vm::load(
+            &module,
+            Box::new(noeta_stdlib::SandboxHost::new()),
+            Box::new(noeta_stdlib::SandboxExecutor::new()),
+        );
+        vm.aot = true;
+        assert!(vm.jit.is_none(), "the AOT VM arms no compiler");
+        noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+        unsafe { vm.bind_aot_dispatch(table.as_ptr()) };
+        let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
+        assert_eq!(
+            result.stdout, expected,
+            "AOT-bound native run matches tier-0"
+        );
+        drop(keep); // hold the code pages live until the AOT run has finished
+    }
+
+    /// P-AOT L3.2b(3): [`compile_module_aot`] wires the object backend end-to-end — it emits a
+    /// relocatable object carrying the [`noeta_jit::AOT_DISPATCH_SYMBOL`] table. Byte-identity of the
+    /// native codegen itself is proven corpus-wide by the `NOETA_JIT_AOT` oracle; this asserts the
+    /// object is produced, is non-trivial, and defines the dispatch symbol (its name lands in the
+    /// object's string table as raw ASCII — a dependency-free way to see the table was emitted).
+    #[cfg(feature = "jit")]
+    #[test]
+    fn compile_module_aot_emits_a_linkable_object_with_the_dispatch_table() {
+        let src = "mut t = 0\nfor i in 0..2000 { t = t + i * i }\necho t\n";
+        let source = Source::new(SourceId::FIRST, "aot.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).expect("compiles");
+
+        let obj = compile_module_aot(&module).expect("emits an object");
+        assert!(obj.len() > 64, "object carries real content");
+        let needle = noeta_jit::AOT_DISPATCH_SYMBOL.as_bytes();
+        assert!(
+            obj.windows(needle.len()).any(|w| w == needle),
+            "the dispatch symbol name appears in the object"
+        );
     }
 
     /// Run a source program through the sandboxed traced entry, returning the result + traceback.
