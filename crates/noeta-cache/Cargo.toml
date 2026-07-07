@@ -1,0 +1,16 @@
+[package]
+name = "noeta-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Only dependency: a collision-resistant digest for the content-addressed cache key. The cache
+# stores opaque `.noeb` blobs (produced by noeta-bundle in the CLI) and has no knowledge of Module
+# or the bytecode format — so it stays off the compile DAG entirely.
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

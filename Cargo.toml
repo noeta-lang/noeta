@@ -25,6 +25,10 @@ noeta-value = { path = "crates/noeta-value" }
 noeta-gc = { path = "crates/noeta-gc" }
 noeta-bytecode = { path = "crates/noeta-bytecode" }
 noeta-bundle = { path = "crates/noeta-bundle" }
+# Transparent startup cache (M3): content-addressed `.noeb` blob store under ~/.cache/noeta/ so a
+# repeated `noeta run`/test/bench of unchanged sources skips the front-end. Blob-shaped, off the
+# compile DAG — depends only on sha2.
+noeta-cache = { path = "crates/noeta-cache" }
 noeta-compiler = { path = "crates/noeta-compiler" }
 noeta-vm = { path = "crates/noeta-vm" }
 # JIT backend (milestone P-JIT): Cranelift tier-1 compiler, behind noeta-vm's `jit` feature.
