@@ -24,6 +24,7 @@ noeta-object = { path = "crates/noeta-object" }
 noeta-value = { path = "crates/noeta-value" }
 noeta-gc = { path = "crates/noeta-gc" }
 noeta-bytecode = { path = "crates/noeta-bytecode" }
+noeta-bundle = { path = "crates/noeta-bundle" }
 noeta-compiler = { path = "crates/noeta-compiler" }
 noeta-vm = { path = "crates/noeta-vm" }
 # JIT backend (milestone P-JIT): Cranelift tier-1 compiler, behind noeta-vm's `jit` feature.

@@ -1542,6 +1542,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-bundle"
+version = "0.0.0"
+dependencies = [
+ "noeta-bytecode",
+]
+
+[[package]]
 name = "noeta-bytecode"
 version = "0.0.0"
 dependencies = [

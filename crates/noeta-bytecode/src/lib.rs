@@ -1187,7 +1187,7 @@ pub enum PackedFieldDef {
 /// `MakeClosure`/`Call`/the method table via their index. `shapes` is the layout table
 /// (referenced by index from `MakeStruct`/`MakeEnum`); `methods` is the instance-method
 /// dispatch table.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone)]
 pub struct Module {
     pub protos: Vec<Chunk>,
     pub shapes: Vec<Shape>,
