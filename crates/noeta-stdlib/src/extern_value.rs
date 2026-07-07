@@ -120,7 +120,10 @@ mod tests {
             other.as_any().downcast_ref::<Token>() == Some(self)
         }
         fn cmp_value(&self, other: &dyn ExternValue) -> Option<Ordering> {
-            other.as_any().downcast_ref::<Token>().map(|o| self.0.cmp(&o.0))
+            other
+                .as_any()
+                .downcast_ref::<Token>()
+                .map(|o| self.0.cmp(&o.0))
         }
         fn hash_value(&self) -> u64 {
             u64::from(self.0)
@@ -151,7 +154,10 @@ mod tests {
             other.as_any().downcast_ref::<Other>().is_some()
         }
         fn cmp_value(&self, other: &dyn ExternValue) -> Option<Ordering> {
-            other.as_any().downcast_ref::<Other>().map(|_| Ordering::Equal)
+            other
+                .as_any()
+                .downcast_ref::<Other>()
+                .map(|_| Ordering::Equal)
         }
         fn hash_value(&self) -> u64 {
             0

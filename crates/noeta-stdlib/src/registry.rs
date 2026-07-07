@@ -478,8 +478,10 @@ pub fn is_module_function(module: &str, func: &str) -> bool {
         || virtual_module_function(module, func)
         || matches!(
             (module, func),
-            ("vec", "add_all" | "sub_all" | "scale_all" | "dot_all" | "length_all")
-                | ("fs", "list")
+            (
+                "vec",
+                "add_all" | "sub_all" | "scale_all" | "dot_all" | "length_all"
+            ) | ("fs", "list")
         )
 }
 
@@ -658,7 +660,9 @@ fn id_dispatch(
             let ms = host.clock_unix_ms();
             let ra = host.entropy_u64();
             let rb = host.entropy_u64();
-            Ok(NativeOut::Extern(crate::ExternBox::new(crate::id::v7(ms, ra, rb))))
+            Ok(NativeOut::Extern(crate::ExternBox::new(crate::id::v7(
+                ms, ra, rb,
+            ))))
         }
         // `parse(s) -> Uuid?`: any RFC form the crate accepts; `none` on malformed input (the
         // Option is the error channel — parse failure is an ordinary outcome, not a panic).

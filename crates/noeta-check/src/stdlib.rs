@@ -44,9 +44,8 @@ pub(super) const EFFECT: &str = "Effect";
 /// tables live in THIS file because their values are backend builtins coupled to the executor or
 /// reactive graph. Together with the registry's extern types (`registry::find_type`) these form
 /// the E0049 reservation set — a user declaration of any of them is rejected.
-pub(super) const NATIVE_TYPE_NAMES: &[&str] = &[
-    ITERATOR, FUTURE, SENDER, RECEIVER, SIGNAL, COMPUTED, EFFECT,
-];
+pub(super) const NATIVE_TYPE_NAMES: &[&str] =
+    &[ITERATOR, FUTURE, SENDER, RECEIVER, SIGNAL, COMPUTED, EFFECT];
 
 /// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. Every module — `json` included
 /// (B4) — comes from the native-extension registry now; only the `vec` bulk `*_all` kernels keep a
@@ -354,7 +353,6 @@ fn map_method(name: &str, key: &Type, val: &Type) -> Option<Type> {
     })
 }
 
-
 /// The parameter types a **built-in** method expects (for arity + argument checking), given the
 /// receiver kind — or `None` if `name` is not a known built-in method on that kind.
 pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
@@ -460,8 +458,8 @@ fn string_params(name: &str) -> Option<Vec<Type>> {
 
 fn list_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "reverse" | "sorted" | "len" | "sum" | "first" | "last" | "to_set"
-        | "enumerate" | "to_bytes" | "iter" => {
+        "reverse" | "sorted" | "len" | "sum" | "first" | "last" | "to_set" | "enumerate"
+        | "to_bytes" | "iter" => {
             vec![]
         }
         "contains" => vec![elem.clone()],
@@ -502,7 +500,6 @@ fn map_params(name: &str, key: &Type, val: &Type) -> Option<Vec<Type>> {
         _ => return None,
     })
 }
-
 
 /// The parameter types a Ring 2 module function expects, or `None` if unknown. Numeric-polymorphic
 /// parameters (`math.abs`/`min`/`max`, and any numeric position) are typed `dyn` so an `int` or

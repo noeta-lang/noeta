@@ -3267,9 +3267,8 @@ impl<'m> Vm<'m> {
                                     // the contract (extern-types X4); anything else is the
                                     // existing type error.
                                     if idx.is_extern()
-                                        && idx.with_extern(
-                                            noeta_stdlib::map_key::extern_key_capable,
-                                        )
+                                        && idx
+                                            .with_extern(noeta_stdlib::map_key::extern_key_capable)
                                     {
                                         if let Some(element) =
                                             idx.with_extern(|e| v.map_get_extern(e))
@@ -5005,7 +5004,9 @@ impl<'m> Vm<'m> {
                 },
                 None => 0,
             };
-            return Ok(Value::int(noeta_stdlib::int_method(recv_int, int_method, arg)));
+            return Ok(Value::int(noeta_stdlib::int_method(
+                recv_int, int_method, arg,
+            )));
         }
         // Cross-domain numeric conversions (S0): `int→float/f32`, `float/f32→int`,
         // `float↔f32`. The `IntMethod` branch above handled `int→int` and returned; an
@@ -5218,7 +5219,8 @@ impl<'m> Vm<'m> {
                 .or_else(|| v.as_string().map(|s| s.chars().count()))
                 .or_else(|| v.bytes_len())
                 .map(|n| Value::int(n as i64))
-        } else if method == "enumerate" && matches!(hk, Some(HeapKind::List | HeapKind::PackedList)) {
+        } else if method == "enumerate" && matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
+        {
             // A list of `(index, value)` **tuples** (object-model slice 4b), matching the
             // tree-walker's `Value::Tuple` pairs. A packed list is materialized to a
             // temporary boxed list first (then released).
@@ -5239,14 +5241,12 @@ impl<'m> Vm<'m> {
         };
         match result {
             Some(value) => Ok(value),
-            None if !args.is_empty() && (method == "len" || method == "enumerate") =>
-            {
-                Err(self.error(
+            None if !args.is_empty() && (method == "len" || method == "enumerate") => Err(self
+                .error(
                     DiagnosticCode::TypeMismatch,
                     span,
                     format!("method `{method}` takes no arguments"),
-                ))
-            }
+                )),
             None => Err(self.error(
                 DiagnosticCode::UnknownName,
                 span,
@@ -7765,9 +7765,7 @@ mod tests {
 
     #[test]
     fn filter_map_sum_pipeline() {
-        let r = run(
-            "echo [1, 2, 3, 4].filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).sum();\n",
-        );
+        let r = run("echo [1, 2, 3, 4].filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).sum();\n");
         assert_eq!(r.stdout, "60\n");
         assert_eq!(r.exit_code, 0);
     }

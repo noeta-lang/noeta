@@ -1365,18 +1365,13 @@ impl Checker {
                             self.modules.insert(name.name.clone());
                         } else if let Some(module) = &selective {
                             if noeta_stdlib::registry::is_module_function(module, &name.name) {
-                                self.imported_fns.insert(
-                                    name.name.clone(),
-                                    (module.clone(), name.name.clone()),
-                                );
+                                self.imported_fns
+                                    .insert(name.name.clone(), (module.clone(), name.name.clone()));
                             } else {
                                 self.error(
                                     DiagnosticCode::UnknownName,
                                     name.span,
-                                    format!(
-                                        "module `{module}` has no function `{}`",
-                                        name.name
-                                    ),
+                                    format!("module `{module}` has no function `{}`", name.name),
                                 );
                             }
                         } else {
@@ -2478,11 +2473,19 @@ impl Checker {
                     "Set" => args.first(),
                     _ => None,
                 };
-                if let Some(TypeRef::Named { name: key_name, span: key_span, .. }) = key_position
+                if let Some(TypeRef::Named {
+                    name: key_name,
+                    span: key_span,
+                    ..
+                }) = key_position
                     && let Some(ext) = noeta_stdlib::registry::find_type(key_name)
                     && !ext.key_capable
                 {
-                    let role = if name == "Map" { "key a map" } else { "member a set" };
+                    let role = if name == "Map" {
+                        "key a map"
+                    } else {
+                        "member a set"
+                    };
                     self.error(
                         DiagnosticCode::TypeMismatch,
                         *key_span,

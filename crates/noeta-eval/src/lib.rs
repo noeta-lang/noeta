@@ -1120,10 +1120,7 @@ impl Interpreter {
     /// default deterministic executor. `new` uses the deterministic sandbox (what the differential
     /// needs); the CLI/REPL pass a real host here.
     fn with_host(host: Box<dyn noeta_stdlib::Host>) -> Interpreter {
-        Interpreter::with_host_and_executor(
-            host,
-            Box::new(noeta_stdlib::SandboxExecutor::new()),
-        )
+        Interpreter::with_host_and_executor(host, Box::new(noeta_stdlib::SandboxExecutor::new()))
     }
 
     /// Build an interpreter against caller-provided host *and* executor (Track A.4). The CLI pairs a
@@ -2331,13 +2328,11 @@ impl Interpreter {
             // always `UnknownName` regardless of arity. (Without this guard, `xs.map(f)` — `map` is a
             // free function, not a method — reported `TypeMismatch` here while the VM reported
             // `UnknownName`; the guard makes both backends agree.)
-            None if !arity_ok && (name == "len" || name == "enumerate") => {
-                Err(self.runtime_error(
-                    DiagnosticCode::TypeMismatch,
-                    span,
-                    format!("method `{name}` takes no arguments"),
-                ))
-            }
+            None if !arity_ok && (name == "len" || name == "enumerate") => Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("method `{name}` takes no arguments"),
+            )),
             None => Err(self.runtime_error(
                 DiagnosticCode::UnknownName,
                 span,
@@ -3090,7 +3085,10 @@ impl Interpreter {
             noeta_stdlib::MapMethod::GetOr => {
                 self.expect_std_arity(name, args, 2, span)?;
                 let key = self.expect_map_key(name, &args[0], span)?;
-                Ok(entries.get(&key).cloned().unwrap_or_else(|| args[1].clone()))
+                Ok(entries
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| args[1].clone()))
             }
         }
     }
@@ -3277,9 +3275,7 @@ impl Interpreter {
             Value::Builtin(builtin) => self.call_builtin(builtin, args, span),
             // A selectively-imported module function (`use std.math.sqrt`) called by its bare name —
             // dispatched exactly like the `math.sqrt(...)` member call.
-            Value::ModuleFn(module, func) => {
-                self.call_native_module(&module, &func, &args, span)
-            }
+            Value::ModuleFn(module, func) => self.call_native_module(&module, &func, &args, span),
             // An unbound method handle (`Type.method` as a value). An associated handle dispatches
             // on the named type (`ty.method(args)`); an instance handle takes its first argument as
             // the receiver (`recv.method(rest)`). Both route through the ordinary (total) method call.
@@ -4804,9 +4800,7 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
 pub(crate) fn value_map_key(value: &Value) -> Option<noeta_stdlib::MapKey> {
     match value {
         Value::Str(s) => Some(noeta_stdlib::MapKey::from(s.as_str())),
-        Value::Extern(e)
-            if noeta_stdlib::map_key::extern_key_capable(&**e.borrow()) =>
-        {
+        Value::Extern(e) if noeta_stdlib::map_key::extern_key_capable(&**e.borrow()) => {
             Some(noeta_stdlib::MapKey::Extern(e.borrow().clone()))
         }
         _ => None,
@@ -5442,7 +5436,10 @@ mod tests {
         assert_eq!(out.value.as_deref(), Some("15"));
         // `next_id()` continuity persists across entries.
         assert_eq!(
-            session.eval(&program_of("use std.id.{next_id}; next_id();")).value.as_deref(),
+            session
+                .eval(&program_of("use std.id.{next_id}; next_id();"))
+                .value
+                .as_deref(),
             Some("1")
         );
         assert_eq!(
@@ -5616,8 +5613,7 @@ mod tests {
     #[test]
     fn map_filter_sum_pipeline() {
         // Method-chain form since P1.2 — the free `map`/`filter`/`sum` left the prelude.
-        let src =
-            "echo [1, 2, 3, 4].filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).sum();";
+        let src = "echo [1, 2, 3, 4].filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).sum();";
         assert_eq!(run(src).stdout, "60\n");
     }
 
@@ -5764,7 +5760,10 @@ mod tests {
 
     #[test]
     fn next_id_is_deterministic() {
-        assert_eq!(run("use std.id.{next_id}; echo next_id(); echo next_id();").stdout, "1\n2\n");
+        assert_eq!(
+            run("use std.id.{next_id}; echo next_id(); echo next_id();").stdout,
+            "1\n2\n"
+        );
     }
 
     #[test]

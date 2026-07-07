@@ -440,7 +440,8 @@ fn values_equal(left: Value, right: Value) -> bool {
         return a == b;
     }
     // Bound handles compare by method name + receiver value equality.
-    if let (Some((ra, ma)), Some((rb, mb))) = (left.bound_method_parts(), right.bound_method_parts())
+    if let (Some((ra, ma)), Some((rb, mb))) =
+        (left.bound_method_parts(), right.bound_method_parts())
     {
         return ma == mb && values_equal(ra, rb);
     }

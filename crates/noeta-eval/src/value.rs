@@ -56,7 +56,10 @@ pub enum Value {
     /// R1), set at literal construction so `type_of` recovers it after a `dyn` launder; `None` for a
     /// derived/mutated map. Invisible to value semantics — equality compares only the entries — the
     /// tree-walker twin of the VM's node tag.
-    Map(Rc<BTreeMap<noeta_stdlib::MapKey, Value>>, Option<Rc<TypeRepr>>),
+    Map(
+        Rc<BTreeMap<noeta_stdlib::MapKey, Value>>,
+        Option<Rc<TypeRepr>>,
+    ),
     /// A user-defined function or closure.
     Function(Rc<Closure>),
     /// A built-in (native) function from the prelude.
@@ -725,7 +728,9 @@ impl Value {
             Value::Function(_) => "<fn>".to_string(),
             // A selectively-imported module function renders as a function (matching the VM's
             // `Payload::ModuleFn` → `<fn>`), not with the module's `<module …>` form.
-            Value::ModuleFn(..) | Value::MethodHandle(..) | Value::BoundMethod(..) => "<fn>".to_string(),
+            Value::ModuleFn(..) | Value::MethodHandle(..) | Value::BoundMethod(..) => {
+                "<fn>".to_string()
+            }
             Value::Builtin(b) => format!("<builtin {}>", b.name()),
             Value::EnumType(def) => format!("<enum {}>", def.name()),
             Value::Enum(value) => value.display(),
@@ -820,7 +825,11 @@ impl fmt::Debug for Value {
             Value::Function(_) => write!(f, "Function(<fn>)"),
             Value::ModuleFn(module, func) => write!(f, "ModuleFn({module}.{func})"),
             Value::MethodHandle(ty, method, associated) => {
-                write!(f, "MethodHandle({ty}.{method}{})", if *associated { " assoc" } else { "" })
+                write!(
+                    f,
+                    "MethodHandle({ty}.{method}{})",
+                    if *associated { " assoc" } else { "" }
+                )
             }
             Value::BoundMethod(recv, method) => write!(f, "BoundMethod({recv:?}.{method})"),
             Value::Builtin(b) => write!(f, "Builtin({})", b.name()),

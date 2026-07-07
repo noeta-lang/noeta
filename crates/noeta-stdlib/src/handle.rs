@@ -383,7 +383,6 @@ impl crate::ExternValue for FileHandle {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

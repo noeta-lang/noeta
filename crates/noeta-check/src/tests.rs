@@ -1098,10 +1098,7 @@ fn reserved_names_reject_every_declaration_form() {
     ); // parameter
     assert_eq!(codes("for none in [1] { echo 1; }\n"), ["E0046"]); // for binder
     assert_eq!(codes("struct Ok { x: int }\n"), ["E0046"]); // type name
-    assert_eq!(
-        codes("f = fn(Err: int) => Err;\necho f(1);\n"),
-        ["E0046"]
-    ); // closure parameter
+    assert_eq!(codes("f = fn(Err: int) => Err;\necho f(1);\n"), ["E0046"]); // closure parameter
 }
 
 #[test]
@@ -1120,7 +1117,10 @@ fn prelude_functions_are_typed() {
     assert!(codes("fn f(): int { return [1, 2].sum(); }\n").is_empty()); // sum(List<int>) -> int
     // The remaining prelude free functions stay typed.
     assert!(codes("use std.id.{next_id}\nfn f(): int { return next_id(); }\n").is_empty()); // next_id -> int
-    assert_eq!(codes("use std.id.{next_id}\nfn f(): string { return next_id(); }\n"), ["E0007"]);
+    assert_eq!(
+        codes("use std.id.{next_id}\nfn f(): string { return next_id(); }\n"),
+        ["E0007"]
+    );
 }
 
 #[test]

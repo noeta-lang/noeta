@@ -148,7 +148,10 @@ mod tests {
 
     #[test]
     fn timestamp_reads_back_from_v7_and_none_from_v4() {
-        assert_eq!(timestamp_ms(&v7(1_767_225_600_005, 1, 2)), Some(1_767_225_600_005));
+        assert_eq!(
+            timestamp_ms(&v7(1_767_225_600_005, 1, 2)),
+            Some(1_767_225_600_005)
+        );
         assert_eq!(timestamp_ms(&v4(1, 2)), None);
     }
 

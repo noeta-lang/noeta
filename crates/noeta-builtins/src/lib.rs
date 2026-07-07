@@ -13,11 +13,7 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "echo",
     // `len`/`map`/`filter`/`sum` left the prelude (prelude-redesign P1.2): they are collection
     // METHODS now (`xs.len()`, `xs.map(f)`), passable as values via method handles (`list.len`).
-    "Ok",
-    "Err",
-    "some",
-    "none",
-    "panic",
+    "Ok", "Err", "some", "none", "panic",
     "assert",
     // `signal`/`computed`/`effect` left the prelude (P2a) for `use std.reactive`, and
     // `sleep`/`all`/`race`/`map_bounded` (P2b) for `use std.task` (`registry::VIRTUAL_MODULES`).

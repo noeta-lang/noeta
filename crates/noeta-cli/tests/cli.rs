@@ -54,7 +54,8 @@ fn run_real_host_uuids_are_real() {
             "canonical 8-4-4-4-12 form: {id}"
         );
         assert!(
-            id.chars().all(|c| c == '-' || c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            id.chars()
+                .all(|c| c == '-' || c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "lowercase hex only: {id}"
         );
         let version = if i < 2 { "4" } else { "7" };
@@ -68,7 +69,11 @@ fn run_real_host_uuids_are_real() {
     assert_ne!(lines[0], lines[1]);
     // Real wall time: the v7 48-bit timestamp is past 2026-01-01 and non-decreasing.
     let ms = |id: &str| u64::from_str_radix(&id.replace('-', "")[..12], 16).unwrap();
-    assert!(ms(lines[2]) > 1_767_225_600_000, "v7 dates after 2026: {}", lines[2]);
+    assert!(
+        ms(lines[2]) > 1_767_225_600_000,
+        "v7 dates after 2026: {}",
+        lines[2]
+    );
     assert!(ms(lines[3]) >= ms(lines[2]), "v7 time is non-decreasing");
 }
 

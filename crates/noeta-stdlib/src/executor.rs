@@ -45,11 +45,7 @@ pub enum RealBody {
     /// Run this blocking closure on the runtime's blocking pool (true concurrency).
     Blocking(Box<dyn FnOnce() -> Result<crate::NativeOut, StdError> + Send>),
     /// Drive this future on the runtime (true concurrency, for genuinely async clients).
-    Async(
-        std::pin::Pin<
-            Box<dyn Future<Output = Result<crate::NativeOut, StdError>> + Send>,
-        >,
-    ),
+    Async(std::pin::Pin<Box<dyn Future<Output = Result<crate::NativeOut, StdError>> + Send>>),
 }
 
 impl std::fmt::Debug for RealBody {
@@ -86,12 +82,12 @@ impl ExternIo for FsIo {
     fn run_sync(&mut self, host: &mut dyn Host) -> Result<crate::NativeOut, StdError> {
         match self {
             FsIo::Read(path) => host.fs_read(path).map(crate::NativeOut::Str),
-            FsIo::Write(path, content) => {
-                host.fs_write(path, content).map(|()| crate::NativeOut::Unit)
-            }
-            FsIo::Append(path, content) => {
-                host.fs_append(path, content).map(|()| crate::NativeOut::Unit)
-            }
+            FsIo::Write(path, content) => host
+                .fs_write(path, content)
+                .map(|()| crate::NativeOut::Unit),
+            FsIo::Append(path, content) => host
+                .fs_append(path, content)
+                .map(|()| crate::NativeOut::Unit),
             FsIo::Exists(path) => Ok(crate::NativeOut::Scalar(crate::Scalar::Bool(
                 host.fs_exists(path),
             ))),

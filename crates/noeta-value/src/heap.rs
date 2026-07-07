@@ -327,7 +327,10 @@ pub(crate) enum Payload {
     /// value or called directly. A leaf (two owned `String`s, no child values); dispatched through
     /// the same `call_native_module` path as a `<module>.<func>` member call, so the two backends
     /// agree by construction.
-    ModuleFn { module: String, func: String },
+    ModuleFn {
+        module: String,
+        func: String,
+    },
     /// An unbound method handle (`Type.method` as a value). When called it dispatches by name — as
     /// an instance method on its first argument (`associated == false`), or as an associated call
     /// `ty.method(args)` (`associated == true`). A leaf (owned `String`s + a bool). Both backends
@@ -342,7 +345,10 @@ pub(crate) enum Payload {
     /// mutations are visible through the handle; for a value type a value-semantic copy). Calling it
     /// dispatches `method` on the captured receiver. NOT a leaf: `recv` is a child value (traversed
     /// by the cycle collector, released with the handle).
-    BoundMethod { recv: Value, method: String },
+    BoundMethod {
+        recv: Value,
+        method: String,
+    },
     /// A lazy iterator (Track I): a reference-semantic pull cursor. The base (`iter()`) is a cursor
     /// over a list; adapters (`take`/`drop`/`chain`/…) wrap one or two **source** iterators and pull
     /// from them on demand, so a pipeline fuses with no intermediate list. It **owns one reference**
@@ -935,11 +941,12 @@ pub(crate) fn free_shallow(value: Value) {
     drop(boxed);
 }
 
-
-
 /// Read an extern-type value under a closure (extern-types X1). The caller must have checked the
 /// value is an `Extern`.
-pub(crate) fn with_extern<R>(value: Value, f: impl FnOnce(&dyn noeta_stdlib::ExternValue) -> R) -> R {
+pub(crate) fn with_extern<R>(
+    value: Value,
+    f: impl FnOnce(&dyn noeta_stdlib::ExternValue) -> R,
+) -> R {
     let obj = unsafe { &*obj_ptr(value) };
     let Payload::Extern(e) = &obj.payload else {
         panic!("with_extern on a non-extern value");
@@ -1152,9 +1159,9 @@ impl SharedRegion {
                 Payload::List(items) => PromoteJob::List(items.clone()),
                 Payload::Tuple(items) => PromoteJob::Tuple(items.clone()),
                 Payload::Set(items) => PromoteJob::Set(items.clone()),
-                Payload::Map(entries) => PromoteJob::Map(
-                    entries.iter().map(|(k, &v)| (k.clone(), v)).collect(),
-                ),
+                Payload::Map(entries) => {
+                    PromoteJob::Map(entries.iter().map(|(k, &v)| (k.clone(), v)).collect())
+                }
                 Payload::Object { shape, slots } => {
                     PromoteJob::Object(Rc::clone(shape), slots.clone())
                 }

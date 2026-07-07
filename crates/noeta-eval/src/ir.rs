@@ -133,11 +133,7 @@ impl TreeWalkBackend {
         executor: Box<dyn noeta_stdlib::Executor>,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
     ) -> RunResult {
-        Interpreter::with_host_and_executor(host, executor).run_ir(
-            ast,
-            ir,
-            type_of_sites,
-        )
+        Interpreter::with_host_and_executor(host, executor).run_ir(ast, ir, type_of_sites)
     }
 }
 

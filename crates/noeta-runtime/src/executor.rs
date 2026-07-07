@@ -118,9 +118,11 @@ impl Executor for RealExecutor {
             // Real concurrency: the descriptor's own body proceeds on the runtime (blocking
             // pool or native future) concurrently with the isolate's cooperative scheduling.
             Some(RealBody::Blocking(f)) => {
-                let handle = self
-                    .runtime
-                    .spawn(async move { tokio::task::spawn_blocking(f).await.unwrap_or_else(|e| Err(join_error(e))) });
+                let handle = self.runtime.spawn(async move {
+                    tokio::task::spawn_blocking(f)
+                        .await
+                        .unwrap_or_else(|e| Err(join_error(e)))
+                });
                 self.io.insert(id, handle);
             }
             Some(RealBody::Async(fut)) => {
@@ -156,7 +158,6 @@ impl Executor for RealExecutor {
         }
     }
 }
-
 
 /// Build an `ErrorKind::Io` (`E0021`) error from a real-disk read failure — the read-async
 /// counterpart of [`crate::io_error`] (kept local so the executor module is self-contained).

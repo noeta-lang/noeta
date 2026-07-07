@@ -148,7 +148,10 @@ pub enum Const {
     /// A selectively-imported native-module function (`use std.math.sqrt`): the `(module, func)`
     /// pair, loaded then stored into the bare-name global. Called (or passed as a value) through the
     /// same `call_native_module` path as a `<module>.<func>` member call.
-    ModuleFn { module: String, func: String },
+    ModuleFn {
+        module: String,
+        func: String,
+    },
     /// An unbound method handle (`Type.method` as a value): the `(ty, method, associated)` triple.
     /// Called by dispatching on its first argument (instance) or as an associated call (associated).
     MethodHandle {
@@ -1304,7 +1307,10 @@ fn const_repr(c: &Const) -> String {
             ty,
             method,
             associated,
-        } => format!("handle {ty}.{method}{}", if *associated { " (assoc)" } else { "" }),
+        } => format!(
+            "handle {ty}.{method}{}",
+            if *associated { " (assoc)" } else { "" }
+        ),
     }
 }
 

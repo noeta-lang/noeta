@@ -775,10 +775,6 @@ impl Value {
         out
     }
 
-
-
-
-
     /// A registered extern-type value (extern-types X1) — the general form of
     /// [`Value::file_handle`]. A GC leaf (the contract owns no child values).
     pub fn extern_value(value: noeta_stdlib::ExternBox) -> Value {
@@ -797,10 +793,7 @@ impl Value {
 
     /// Mutate this extern value under a closure (the receiver of a mutating method). The caller
     /// must have checked [`Value::is_extern`].
-    pub fn with_extern_mut<R>(
-        self,
-        f: impl FnOnce(&mut dyn noeta_stdlib::ExternValue) -> R,
-    ) -> R {
+    pub fn with_extern_mut<R>(self, f: impl FnOnce(&mut dyn noeta_stdlib::ExternValue) -> R) -> R {
         heap::with_extern_mut(self, f)
     }
 
@@ -1786,9 +1779,7 @@ impl Value {
     pub fn map_get_extern(self, key: &dyn noeta_stdlib::ExternValue) -> Option<Value> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Map(entries) => {
-                    entries.get(&noeta_stdlib::ExternKeyRef(key)).copied()
-                }
+                Payload::Map(entries) => entries.get(&noeta_stdlib::ExternKeyRef(key)).copied(),
                 _ => None,
             })
         } else {

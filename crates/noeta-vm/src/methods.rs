@@ -337,10 +337,9 @@ impl<'m> Vm<'m> {
         // intercepts here, ahead of registry dispatch, exactly like `fs.*_async`. The tree-walker
         // mirrors this in its own `call_native_module`.
         if noeta_stdlib::registry::is_virtual_module(module) {
-            let Some(builtin) =
-                noeta_stdlib::registry::virtual_module_function(module, func)
-                    .then(|| Builtin::from_name(func))
-                    .flatten()
+            let Some(builtin) = noeta_stdlib::registry::virtual_module_function(module, func)
+                .then(|| Builtin::from_name(func))
+                .flatten()
             else {
                 return Err(self.error(
                     DiagnosticCode::UnknownName,
@@ -663,14 +662,13 @@ impl<'m> Vm<'m> {
         let nargs: Vec<noeta_stdlib::NativeValue> =
             args.iter().map(|a| marshal_native_arg(*a)).collect();
         let host = &mut *self.host;
-        let result =
-            recv.with_extern_mut(|e| noeta_stdlib::registry::dispatch_method(e, method, host, &nargs));
+        let result = recv
+            .with_extern_mut(|e| noeta_stdlib::registry::dispatch_method(e, method, host, &nargs));
         match result {
             Ok(out) => Ok(materialize_native(out)),
             Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
         }
     }
-
 
     /// Dispatch an iterator method (Track I). Mirrors the tree-walker's `call_iter_method`. `next`/
     /// `collect`/`count` consume the cursor; `take`/`drop`/`chain` build a new adapter that retains
@@ -1033,9 +1031,7 @@ impl<'m> Vm<'m> {
             Ok(noeta_stdlib::MapKey::Str(key.take_string_in_place()))
         } else if let Some(k) = key.as_compact_string() {
             Ok(noeta_stdlib::MapKey::Str(k))
-        } else if key.is_extern()
-            && key.with_extern(noeta_stdlib::map_key::extern_key_capable)
-        {
+        } else if key.is_extern() && key.with_extern(noeta_stdlib::map_key::extern_key_capable) {
             Ok(key.with_extern(|e| {
                 noeta_stdlib::MapKey::Extern(noeta_stdlib::ExternBox(e.clone_box()))
             }))
