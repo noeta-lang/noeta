@@ -572,6 +572,29 @@ struct DebugSession<'m> {
 /// trailing-expression sentinel).
 const FRAGMENT_SENTINEL: &str = "\0debug-fragment";
 
+/// Whether `expr` belongs to the hover-safe **read-only surface** (T6): names, `.field` chains,
+/// `[index]`, arithmetic / comparison / logical operators, and plain literals. Everything else —
+/// a call, a construction, a closure, an interpolated string (its holes hide expressions), a
+/// `match`/`if` form — is refused: a hover fires on mouse-over and must never run code. This is
+/// the static gate; the receiver-dependent dispatches it cannot decide (an object's `Index` impl,
+/// a user ordering method — both frame pushes) are backstopped at run time by `Vm::pure_eval`.
+fn is_pure_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident { .. }
+        | Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Bool { .. }
+        | Expr::Str { .. } => true,
+        Expr::Member { receiver, .. } => is_pure_expr(receiver),
+        Expr::Index {
+            receiver, index, ..
+        } => is_pure_expr(receiver) && is_pure_expr(index),
+        Expr::Binary { lhs, rhs, .. } => is_pure_expr(lhs) && is_pure_expr(rhs),
+        Expr::Unary { operand, .. } => is_pure_expr(operand),
+        _ => false,
+    }
+}
+
 impl std::fmt::Debug for DebugSession<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DebugSession")
@@ -591,6 +614,13 @@ struct Vm<'m> {
     module: &'m Module,
     /// See [`DebugSession`]; `None` on every non-debug run.
     debug_session: Option<DebugSession<'m>>,
+    /// Set while a **hover** fragment runs (tooling-unification T6): a hover must stay
+    /// side-effect-free, so the dispatch loop refuses any frame push beyond the fragment wrapper's
+    /// own frame — the one chokepoint every way of running user code (a call, an object's `Index`
+    /// impl, a user ordering method) passes through. The fragment's AST is pre-gated to the
+    /// read-only surface (names / members / indexing / operators / literals); this flag is the
+    /// runtime backstop for the receiver-dependent dispatches the gate cannot decide.
+    pure_eval: bool,
     /// One shared `&'static Shape` per shape-table entry — cloned into every value of that shape,
     /// so equal-built aggregates point at one shape (identity is a pointer comparison).
     shapes: Vec<&'static Shape>,
@@ -1715,6 +1745,7 @@ impl<'m> Vm<'m> {
         Vm {
             module,
             debug_session: None,
+            pure_eval: false,
             shapes,
             packed_schemas,
             type_reprs,
@@ -2801,6 +2832,22 @@ impl<'m> Vm<'m> {
             if caches.len() < module.cache_slots as usize {
                 caches.resize(module.cache_slots as usize, None);
             }
+            // Hover purity chokepoint (T6): a hover fragment runs as a single wrapper frame; every
+            // way of running user code — a call, an object's `Index` impl, a user ordering method —
+            // pushes a second frame, which re-enters `'reload` here. Refuse it instead of running.
+            // `pure_eval` is false on every non-hover run (one predicted branch per frame transfer).
+            if self.pure_eval && frames.len() > 1 {
+                let span = module.protos[frames[frames.len() - 1].proto as usize]
+                    .line_span(0)
+                    .unwrap_or_else(|| Span::empty_at(0));
+                return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    "hover stays read-only — evaluating this expression would run code \
+                     (use a watch or the debug console)"
+                        .to_string(),
+                ));
+            }
             let top = frames.len() - 1;
             let fbase = frames[top].base;
             let proto = frames[top].proto as usize;
@@ -2896,33 +2943,24 @@ impl<'m> Vm<'m> {
                                     allow_calls,
                                     reply,
                                 } = req;
-                                // A watch / console fragment on a session run compiles through the
-                                // adopted session — full language, closures included (T5). Hover
-                                // (`allow_calls = false`) and session-less debug runs walk the
-                                // trailing expression read-only instead.
-                                let outcome = if allow_calls && self.debug_session.is_some() {
+                                // Every evaluate compiles through the adopted session (T5): full
+                                // language for a watch/console, and for a hover
+                                // (`allow_calls = false`) the same engine gated to the read-only
+                                // surface (T6) — one evaluator, not two.
+                                let outcome = if self.debug_session.is_some() {
                                     self.debug_eval_fragment(
                                         &program,
                                         frame,
+                                        !allow_calls,
                                         &frames[..],
                                         &regs[..],
                                     )
                                 } else {
-                                    match program.stmts.last() {
-                                        Some(Stmt::Expr { expr, .. }) => {
-                                            let expr = expr.clone();
-                                            self.debug_eval_request(
-                                                &expr,
-                                                frame,
-                                                allow_calls,
-                                                &frames[..],
-                                                &regs[..],
-                                            )
-                                        }
-                                        _ => DebugEvalOutcome::Error(
-                                            "only an expression can be evaluated here".to_string(),
-                                        ),
-                                    }
+                                    DebugEvalOutcome::Error(
+                                        "this debug run has no console session — evaluate needs a \
+                                         session launch"
+                                            .to_string(),
+                                    )
                                 };
                                 let _ = reply.send(outcome);
                             }
@@ -5609,13 +5647,34 @@ impl<'m> Vm<'m> {
     ///
     /// A fragment's transient diagnostics/abort-trace are rolled back afterwards, so a failed
     /// console entry never pollutes the debugged run.
+    ///
+    /// With `pure` set (a **hover** — T6), the same engine runs gated to the read-only surface:
+    /// the fragment must be a single expression built from names / members / indexing / operators /
+    /// literals ([`is_pure_expr`]), and [`Vm::pure_eval`] backstops the receiver-dependent
+    /// dispatches the AST cannot decide (an object's `Index` impl, a user ordering method) by
+    /// refusing any frame push during the run. One evaluator for hover, watch, and console.
     fn debug_eval_fragment(
         &mut self,
         program: &Program,
         frame: usize,
+        pure: bool,
         frames: &[Frame],
         regs: &[Value],
     ) -> DebugEvalOutcome {
+        if pure {
+            // Hover: exactly one expression, from the side-effect-free surface.
+            let gated = match &program.stmts[..] {
+                [Stmt::Expr { expr, .. }] => is_pure_expr(expr),
+                _ => false,
+            };
+            if !gated {
+                return DebugEvalOutcome::Error(
+                    "hover stays read-only — supported: names, `.field`, `[index]`, operators, \
+                     and literals (use a watch or the debug console to run code)"
+                        .to_string(),
+                );
+            }
+        }
         // Resolve the target frame (snapshot indices are innermost-first, the view bottom-first)
         // and collect its in-scope locals — the same declared-before-the-paused-instruction filter
         // the Variables view applies, so the console sees exactly what the panel shows.
@@ -5675,7 +5734,9 @@ impl<'m> Vm<'m> {
         };
         let diag_mark = self.diagnostics.len();
         let trace_mark = self.abort_trace.len();
+        self.pure_eval = pure;
         let outcome = self.run_fragment(&wrapper, args, span);
+        self.pure_eval = false;
         // A console entry is a side query — its errors must not leak into the run being debugged.
         self.diagnostics.truncate(diag_mark);
         self.abort_trace.truncate(trace_mark);
@@ -5728,272 +5789,12 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Service a paused-frame `evaluate` (the D5.2 trampoline — see [`DebugAction::Evaluate`]). Runs on
-    /// the VM with `&mut self`, so a call in the expression can execute; the caller (the dispatch loop)
-    /// has already lifted the debugger out of `self`, so a call's own body does not re-break. Reads the
-    /// target frame's in-scope locals out of the paused register window, evaluates the expression, and
-    /// renders the result — only the strings travel back to the adapter thread.
-    ///
-    /// Running a call can push a diagnostic (an arity/type/`panic` error surfaces as the watch error)
-    /// and grow the abort trace; both are rolled back afterwards so a failed watch never pollutes the
-    /// program's own diagnostics or a later real traceback.
-    fn debug_eval_request(
-        &mut self,
-        expr: &Expr,
-        frame: usize,
-        allow_calls: bool,
-        frames: &[Frame],
-        regs: &[Value],
-    ) -> DebugEvalOutcome {
-        // Snapshot the frame's locals as (name, borrowed-handle) pairs, then drop the view so the
-        // evaluator can borrow `self` mutably for calls. The handles stay valid: the paused frame keeps
-        // its references, and no collection runs on this thread between here and use.
-        let locals: Vec<(String, Value)> = {
-            let view = DebugView {
-                module: self.module,
-                frames,
-                regs,
-            };
-            let Some(view_idx) = view.depth().checked_sub(frame + 1) else {
-                return DebugEvalOutcome::Error(format!("no frame {frame} in the paused stack"));
-            };
-            view.frame(view_idx)
-                .locals()
-                .map(|(n, _, v)| (n.to_string(), v))
-                .collect()
-        };
-        let diag_mark = self.diagnostics.len();
-        let trace_mark = self.abort_trace.len();
-        let outcome = match self.debug_eval(expr, &locals, allow_calls) {
-            Ok(value) => {
-                let text = value.display();
-                let ty = value.type_display();
-                // The evaluator returns an owned reference; render it, then drop it.
-                release(value);
-                DebugEvalOutcome::Value { text, ty }
-            }
-            Err(msg) => DebugEvalOutcome::Error(msg),
-        };
-        // A watch is a side query — its errors must not leak into the run being debugged.
-        self.diagnostics.truncate(diag_mark);
-        self.abort_trace.truncate(trace_mark);
-        outcome
-    }
-
-    /// Evaluate a debug-watch expression against a frame's `locals`, returning a freshly **owned**
-    /// [`Value`] (one reference the caller must release) or an error message. Every rung follows the
-    /// precise-RC discipline — retain what it reads, release what it consumes — because unlike the
-    /// hover-safe read-only resolver (in `noeta-dap`, borrow-and-display) this runs against the *live*
-    /// heap of a paused program: a stray release would corrupt it. Paths and operators mirror that
-    /// resolver's semantics; a **call** (`allow_calls`) additionally runs code through the ordinary VM
-    /// call machinery ([`Vm::run_method_handle`] / [`Vm::call_value`]), so a watch and a real run agree.
-    fn debug_eval(
-        &mut self,
-        expr: &Expr,
-        locals: &[(String, Value)],
-        allow_calls: bool,
-    ) -> Result<Value, String> {
-        match expr {
-            // A name: a frame local shadows a module global. Either way retain it so the caller owns
-            // the returned reference.
-            Expr::Ident { name, .. } => {
-                if let Some((_, v)) = locals.iter().find(|(n, _)| n == name) {
-                    retain(*v);
-                    Ok(*v)
-                } else if let Some(slot) =
-                    self.module.global_names.iter().position(|g| g == name)
-                {
-                    let v = self.globals[slot];
-                    if v.is_unbound() {
-                        return Err(format!("no variable `{name}` in scope"));
-                    }
-                    retain(v);
-                    Ok(v)
-                } else {
-                    Err(format!("no variable `{name}` in scope"))
-                }
-            }
-            // Literal leaves. A string allocates a fresh owned value; primitives are word-sized.
-            Expr::Int { value, .. } => Ok(Value::int(*value)),
-            Expr::Float { value, .. } => Ok(Value::float(*value)),
-            Expr::Bool { value, .. } => Ok(Value::bool(*value)),
-            Expr::Str { value, .. } => Ok(Value::string(value)),
-            // A field read. Retain the field before releasing the receiver, in case the receiver was
-            // the field's last owner (a chained `a.b.c`).
-            Expr::Member { receiver, name, .. } => {
-                let recv = self.debug_eval(receiver, locals, allow_calls)?;
-                match recv.field(name) {
-                    Some(field) => {
-                        retain(field);
-                        release(recv);
-                        Ok(field)
-                    }
-                    None => {
-                        release(recv);
-                        Err(format!("value has no field `{name}`"))
-                    }
-                }
-            }
-            Expr::Index {
-                receiver, index, ..
-            } => {
-                let recv = self.debug_eval(receiver, locals, allow_calls)?;
-                let key = self.debug_eval(index, locals, allow_calls)?;
-                Self::debug_index(recv, key)
-            }
-            // `&&` / `||` short-circuit: the right side is evaluated (and can error) only if reached.
-            Expr::Binary {
-                op: BinaryOp::And,
-                lhs,
-                rhs,
-                ..
-            } => {
-                let l = self.debug_eval(lhs, locals, allow_calls)?;
-                let short = l.as_bool() == Some(false);
-                release(l);
-                if short {
-                    Ok(Value::bool(false))
-                } else {
-                    self.debug_eval(rhs, locals, allow_calls)
-                }
-            }
-            Expr::Binary {
-                op: BinaryOp::Or,
-                lhs,
-                rhs,
-                ..
-            } => {
-                let l = self.debug_eval(lhs, locals, allow_calls)?;
-                let short = l.as_bool() == Some(true);
-                release(l);
-                if short {
-                    Ok(Value::bool(true))
-                } else {
-                    self.debug_eval(rhs, locals, allow_calls)
-                }
-            }
-            // Every other operator via the VM's own value ops (so `+`, `==`, `~`, … match a real run).
-            // `apply_binary`/`apply_unary` borrow their operands and return a fresh owned value, so the
-            // operands are released after.
-            Expr::Binary { op, lhs, rhs, .. } => {
-                let l = self.debug_eval(lhs, locals, allow_calls)?;
-                let r = self.debug_eval(rhs, locals, allow_calls)?;
-                let out = apply_binary(*op, l, r).map_err(|e| e.text);
-                release(l);
-                release(r);
-                out
-            }
-            Expr::Unary { op, operand, .. } => {
-                let v = self.debug_eval(operand, locals, allow_calls)?;
-                let out = apply_unary(*op, v).map_err(|e| e.text);
-                release(v);
-                out
-            }
-            // A call runs user code, so it is refused in a hover (which must stay side-effect-free); a
-            // watch / debug console allows it.
-            Expr::Call { callee, args, span } => {
-                if !allow_calls {
-                    return Err(
-                        "evaluating a call here would run code — a hover stays read-only; \
-                         use a watch or the debug console"
-                            .to_string(),
-                    );
-                }
-                self.debug_eval_call(callee, args, *span, locals)
-            }
-            _ => Err(
-                "this expression form cannot be evaluated in a watch — supported: names, `.field`, \
-                 `[index]`, operators, literals, and function / method calls"
-                    .to_string(),
-            ),
-        }
-    }
-
-    /// Evaluate a **call** in a debug watch: a method call `recv.m(args)` (user method, or a built-in
-    /// like `xs.len()`) via [`Vm::run_method_handle`], or a bare `f(args)` where `f` is a local or
-    /// global closure via [`Vm::call_value`]. Both dispatch by the same name/type resolution a real
-    /// call uses and consume their owned arguments; an abort is surfaced as the recorded diagnostic's
-    /// message (the caller rolls the diagnostic back).
-    fn debug_eval_call(
-        &mut self,
-        callee: &Expr,
-        args: &[Expr],
-        span: Span,
-        locals: &[(String, Value)],
-    ) -> Result<Value, String> {
-        // `recv.method(args)` — dispatch on the receiver's runtime type (falls back to a built-in
-        // method for a non-object receiver, exactly as an unbound method handle does).
-        if let Expr::Member { receiver, name, .. } = callee {
-            let recv = self.debug_eval(receiver, locals, true)?;
-            let mut owned = Vec::with_capacity(args.len() + 1);
-            owned.push(recv);
-            for arg in args {
-                match self.debug_eval(arg, locals, true) {
-                    Ok(v) => owned.push(v),
-                    Err(e) => {
-                        for o in owned {
-                            release(o);
-                        }
-                        return Err(e);
-                    }
-                }
-            }
-            return self
-                .run_method_handle("", name, false, owned, span)
-                .map_err(|_| self.last_diag_message());
-        }
-        // `f(args)` — resolve the callee to a value, then run it (a closure, a method handle, …).
-        let func = self.debug_eval(callee, locals, true)?;
-        let mut owned = Vec::with_capacity(args.len());
-        for arg in args {
-            match self.debug_eval(arg, locals, true) {
-                Ok(v) => owned.push(v),
-                Err(e) => {
-                    release(func);
-                    for o in owned {
-                        release(o);
-                    }
-                    return Err(e);
-                }
-            }
-        }
-        self.call_value(func, owned, span)
-            .map_err(|_| self.last_diag_message())
-    }
-
     /// The message of the most recently recorded diagnostic, to surface a watch call's abort as text.
     fn last_diag_message(&self) -> String {
         self.diagnostics
             .last()
             .map(|d| d.message.clone())
             .unwrap_or_else(|| "the call could not be evaluated".to_string())
-    }
-
-    /// Index a debug-watch receiver by an already-evaluated key: an int selects a list element, a
-    /// string a map value. Both `recv` and `key` are owned (consumed here); the element is retained
-    /// into a fresh owned reference before they are released, so it survives even if `recv` was its
-    /// last owner.
-    fn debug_index(recv: Value, key: Value) -> Result<Value, String> {
-        let result = if let Some(i) = key.as_int() {
-            if i < 0 {
-                Err(format!("negative index {i}"))
-            } else {
-                recv.list_get(i as usize)
-                    .ok_or_else(|| format!("index {i} is out of bounds"))
-            }
-        } else if let Some(s) = key.as_string() {
-            recv.map_get(&s).ok_or_else(|| format!("no key `{s}`"))
-        } else {
-            Err(
-                "an index must evaluate to an int (list position) or a string (map key)"
-                    .to_string(),
-            )
-        };
-        // Retain the shared element into a fresh owned reference before dropping recv/key.
-        let owned = result.inspect(|&element| retain(element));
-        release(recv);
-        release(key);
-        owned
     }
 
     /// Call a value with already-owned arguments (each carrying one reference transferred to

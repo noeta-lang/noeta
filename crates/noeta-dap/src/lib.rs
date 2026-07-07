@@ -1120,6 +1120,61 @@ mod tests {
         session.disconnect_and_join();
     }
 
+    /// T6 (tooling-unification): hover purity has two layers — the AST gate (a call is refused
+    /// before compiling) and the RUNTIME backstop for receiver-dependent dispatches the AST cannot
+    /// decide: `b[0]` on a value whose type has an `Index` impl would push a `get` frame, refused
+    /// under hover but allowed in a watch. One evaluator serves both, gated.
+    #[test]
+    fn hover_refuses_an_object_index_that_would_run_code() {
+        let path = fixture(
+            "hover_purity",
+            "struct Boxy {\n    \
+             xs: List<int>\n    \
+             fn get(i: int): int { return self.xs[i] }\n\
+             }\n\
+             fn probe(): void {\n    \
+             mut b = Boxy { xs: [7, 8] }\n    \
+             echo \"here\"\n}\n\
+             probe()\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 7 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+
+        // The watch runs the `Index` impl (user code — allowed there).
+        let watch = session.evaluate("b[0]");
+        assert_eq!(watch["success"], true, "{watch:#?}");
+        assert_eq!(watch["body"]["result"], "7");
+        // The hover refuses it at run time (the AST gate allows `[index]`; the frame-push backstop
+        // catches the object receiver).
+        let hover = session.evaluate_in("b[0]", "hover");
+        assert_eq!(hover["success"], false, "{hover:#?}");
+        assert!(
+            hover["message"].as_str().unwrap().contains("read-only"),
+            "hover error names the purity rule: {hover:#?}"
+        );
+        // A plain path still hovers fine.
+        assert_eq!(
+            session.evaluate_in("b.xs[1]", "hover")["body"]["result"],
+            "8"
+        );
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
     #[test]
     fn stepping_moves_by_source_line_over_into_and_out() {
         // `add` is called from `main` at line 6; stepping walks lines, not bytecode ops.
