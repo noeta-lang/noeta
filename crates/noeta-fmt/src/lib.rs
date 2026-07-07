@@ -51,6 +51,10 @@
 use noeta_diagnostics::Diagnostic;
 use noeta_span::{Source, SourceId, Span};
 
+// The Wadler pretty-printing algebra (F2). The current printer still emits strings directly; F3
+// re-lowers it onto `Doc`, at which point this `allow` comes off.
+#[allow(dead_code)]
+mod doc;
 mod print;
 mod safety;
 mod trivia;

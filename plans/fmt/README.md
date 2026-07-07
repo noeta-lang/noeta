@@ -258,8 +258,11 @@ gates re-run every slice.
   (comment-heavy 36.6ms vs comment-free 41.3ms). `noeta-fmt` now lexes with trivia (comments threaded
   to the printer, emitted in F4) and **preserves trailing `;` per statement** via
   `trivia::has_trailing_semicolon`. Full workspace + conformance green.
-- **F2 — `Doc` algebra.** Wadler/Leijen `text|line|softline|hardline|nest|group|concat` + best-fit
-  renderer + unit tests (fits/breaks, nesting, groups).
+- **F2 — `Doc` algebra. ✅ DONE.** Wadler/Leijen `text|line|softline|hardline|nest|group|concat|join`
+  in `doc.rs` + best-fit `render(doc, width)` (Lindig iterative form: work-stack renderer +
+  `fits` lookahead that consumes the trailing continuation). Unit tests cover flat/break by width,
+  hardline forcing, nest-indents-broken-lines-only, and independent nested groups. Gated
+  `#[allow(dead_code)]` until F3 lowers the printer onto it.
 - **F3 — AST→Doc printer, source-directed (`wrap = false`).** Full coverage of the surface: `Stmt`
   (~13 variants), `Expr` (~35 variants), `TypeRef`, `Pattern`, `MatchArm`, all decls
   (`struct`/`class`/`enum`/`impl`/`fn`), attributes/`@tier` blocks, `use`/`namespace`. Groups break
