@@ -235,6 +235,36 @@ pub struct ExtModule {
     /// the scalar/`vec`/`quat` modules keep the cheap flat marshalling, so their hot path is
     /// untouched. The module declares its own need here so the backends stay data-driven.
     pub deep_marshal: bool,
+    /// The module's **higher-order** functions (higher-order-abi H0): signatures whose calls route
+    /// to [`ExtModule::ctx_dispatch`] with opaque slot arguments instead of marshalled values —
+    /// for functions that take closures, drive the executor, or orchestrate futures. Same
+    /// signature vocabulary as [`ExtModule::functions`]; a name appears in exactly one table.
+    pub ctx_functions: &'static [ExtFn],
+    /// The shared dispatch for [`ExtModule::ctx_functions`] (`None` when the table is empty).
+    pub ctx_dispatch: Option<crate::ctx::CtxDispatch>,
+}
+
+impl ExtModule {
+    /// Field defaults for the optional capabilities, so a module literal only names what it uses:
+    /// `ExtModule { name, functions, dispatch, deep_marshal, ..ExtModule::DEFAULTS }`. A future
+    /// capability field lands here once instead of in every registration.
+    pub const DEFAULTS: ExtModule = ExtModule {
+        name: "",
+        functions: &[],
+        dispatch: no_dispatch,
+        deep_marshal: false,
+        ctx_functions: &[],
+        ctx_dispatch: None,
+    };
+}
+
+/// The [`ExtModule::DEFAULTS`] dispatch placeholder — reached only by a module that registers no
+/// plain functions (e.g. a ctx-only module), where any name is unknown by definition.
+fn no_dispatch(func: &str, _host: &mut dyn Host, _args: &[NativeValue]) -> Result<NativeOut, StdError> {
+    Err(StdError {
+        kind: crate::ErrorKind::UnknownName,
+        message: format!("no function `{func}`"),
+    })
 }
 
 /// A type's method dispatch (extern-types X1): given the receiver, the method name, the host

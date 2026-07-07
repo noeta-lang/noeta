@@ -332,21 +332,16 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
-        // A virtual module's functions (`reactive.signal(...)`, prelude-redesign P2) are builtins —
-        // they need the executor/reactive graph the registry seam cannot reach — so a qualified call
-        // intercepts here, ahead of registry dispatch, exactly like `fs.*_async`. The tree-walker
-        // mirrors this in its own `call_native_module`.
-        if noeta_stdlib::registry::is_virtual_module(module) {
-            let Some(builtin) = noeta_stdlib::registry::virtual_module_function(module, func)
-                .then(|| Builtin::from_name(func))
-                .flatten()
-            else {
-                return Err(self.error(
-                    DiagnosticCode::UnknownName,
-                    span,
-                    format!("module `{module}` has no function `{func}`"),
-                ));
-            };
+        // A virtual-module function (`reactive.signal(...)`, prelude-redesign P2) is a builtin —
+        // it needs the executor/reactive graph the plain registry seam cannot reach — so a
+        // qualified call intercepts here, ahead of registry dispatch, exactly like `fs.*_async`.
+        // Per-**function**, not per-module (higher-order-abi H0): a module migrates onto the ctx
+        // seam name by name (`task.sleep` is registered, `task.all` still virtual), so unmatched
+        // names fall through to the registry arms and the shared unknown-function error below.
+        // The tree-walker mirrors this in its own `call_native_module`.
+        if noeta_stdlib::registry::virtual_module_function(module, func) {
+            let builtin =
+                Builtin::from_name(func).expect("every virtual-module function is a named builtin");
             return self.call_builtin(builtin, args, span);
         }
         // `http.serve(port, handler)` (http-server S3) — a builtin, not a registry function: the
@@ -381,6 +376,13 @@ impl<'m> Vm<'m> {
                 Ok(out) => Ok(materialize_ext(out, sig.ret, args)),
                 Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
             };
+        }
+        // A registered **higher-order** function (higher-order-abi H0) dispatches through the
+        // `NativeCtx` seam: opaque slots + backend re-entry instead of marshalled values. Checked
+        // after the plain table — plain functions vastly outnumber ctx ones, and the two name
+        // sets are disjoint, so order is behavior-neutral and keeps the common path lean.
+        if noeta_stdlib::registry::find_ctx_function(module, func).is_some() {
+            return self.call_ctx_function(module, func, args, span);
         }
         // `vec`'s bulk `*_all` kernels are the only unmigrated native functions and stay per-backend;
         // every other reachable name is registered, so anything else here is an unknown function.

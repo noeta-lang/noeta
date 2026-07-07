@@ -21,6 +21,7 @@ pub mod drop_audit;
 mod ids;
 mod ir;
 mod leak;
+mod native_ctx;
 mod ops;
 mod value;
 
@@ -346,9 +347,8 @@ pub enum Builtin {
     /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
     /// The assertion primitive `@test` blocks rest on (object-model slice 6).
     Assert,
-    /// `sleep(ms)` — a leaf timer future (Track A.2) ready once the executor clock reaches
-    /// `now + ms`. The first future that can report `Pending`.
-    Sleep,
+    /// (`sleep` was the `Sleep` variant here until higher-order-abi H0 — migrated onto the
+    /// registry's `NativeCtx` dispatch, `noeta-stdlib/src/task.rs`.)
     /// `all(list)` — await every future concurrently, returning their results as a `List<T>` in
     /// order (Track A.9).
     All,
@@ -388,7 +388,6 @@ impl Builtin {
             Builtin::MakeSome => "some",
             Builtin::Panic => "panic",
             Builtin::Assert => "assert",
-            Builtin::Sleep => "sleep",
             Builtin::All => "all",
             Builtin::Race => "race",
             Builtin::MapBounded => "map_bounded",
@@ -407,7 +406,6 @@ impl Builtin {
             "signal" => Some(Builtin::Signal),
             "computed" => Some(Builtin::Computed),
             "effect" => Some(Builtin::Effect),
-            "sleep" => Some(Builtin::Sleep),
             "all" => Some(Builtin::All),
             "race" => Some(Builtin::Race),
             "map_bounded" => Some(Builtin::MapBounded),
@@ -2683,20 +2681,16 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
-        // A virtual module's functions (`reactive.signal(...)`, prelude-redesign P2) are builtins —
-        // they need the executor/reactive graph the registry seam cannot reach — so a qualified call
-        // intercepts here, ahead of registry dispatch, exactly like `fs.*_async`. Mirrors the VM.
-        if noeta_stdlib::registry::is_virtual_module(module) {
-            let Some(builtin) = noeta_stdlib::registry::virtual_module_function(module, func)
-                .then(|| Builtin::from_virtual_name(func))
-                .flatten()
-            else {
-                return Err(self.runtime_error(
-                    DiagnosticCode::UnknownName,
-                    span,
-                    format!("module `{module}` has no function `{func}`"),
-                ));
-            };
+        // A virtual-module function (`reactive.signal(...)`, prelude-redesign P2) is a builtin —
+        // it needs the executor/reactive graph the plain registry seam cannot reach — so a
+        // qualified call intercepts here, ahead of registry dispatch, exactly like `fs.*_async`.
+        // Per-**function**, not per-module (higher-order-abi H0): a module migrates onto the ctx
+        // seam name by name (`task.sleep` is registered, `task.all` still virtual), so unmatched
+        // names fall through to the registry arms and the shared unknown-function error below.
+        // Mirrors the VM.
+        if noeta_stdlib::registry::virtual_module_function(module, func) {
+            let builtin = Builtin::from_virtual_name(func)
+                .expect("every virtual-module function is a named builtin");
             return self.call_builtin(builtin, args.to_vec(), span);
         }
         // `http.serve(port, handler)` (http-server S3) — a builtin, not a registry function: the
@@ -2733,6 +2727,13 @@ impl Interpreter {
                     Err(self.runtime_error(std_error_code(error.kind), span, error.message))
                 }
             };
+        }
+        // A registered **higher-order** function (higher-order-abi H0) dispatches through the
+        // `NativeCtx` seam: opaque slots + backend re-entry instead of marshalled values. Checked
+        // after the plain table — plain functions vastly outnumber ctx ones, and the two name
+        // sets are disjoint, so order is behavior-neutral and keeps the common path lean.
+        if noeta_stdlib::registry::find_ctx_function(module, func).is_some() {
+            return self.call_ctx_function(module, func, args, span);
         }
         // `vec`'s bulk `*_all` kernels are the only unmigrated native functions and stay per-backend;
         // every other reachable name is registered, so anything else here is an unknown function.
@@ -3701,27 +3702,8 @@ impl Interpreter {
                     Err(self.runtime_error(DiagnosticCode::Panic, span, message))
                 }
             }
-            // `sleep(ms)` — a leaf timer future (Track A.2). Its deadline is fixed at creation from the
-            // current logical clock; awaiting it advances the clock to that deadline. A negative or
-            // non-int `ms` is a `TypeMismatch` (checked identically in the VM).
-            Builtin::Sleep => {
-                self.expect_arity(builtin, &args, 1, span)?;
-                let Value::Int(ms) = args[0] else {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!("`sleep` expects an int (ms), found {}", args[0].display()),
-                    ));
-                };
-                if ms < 0 {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!("`sleep` expects a non-negative duration, found {ms}"),
-                    ));
-                }
-                Ok(Value::Timer(self.executor.now() + ms as u64))
-            }
+            // (`sleep` migrated to the registry's `NativeCtx` dispatch — higher-order-abi H0,
+            // `noeta-stdlib/src/task.rs`, reached via `call_ctx_function`.)
             // `all(list)` — await every future concurrently, results as a `List<T>` in order (A.9).
             Builtin::All => {
                 self.expect_arity(builtin, &args, 1, span)?;

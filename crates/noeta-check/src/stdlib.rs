@@ -425,7 +425,7 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
 /// fallback), whose params are all required. Runs alongside [`module_params`] so the arity gate
 /// admits `http.get(url)` as well as `http.get(url, headers)`.
 pub(super) fn module_required(module: &str, name: &str) -> Option<usize> {
-    registry::find_function(module, name).map(|f| registry::SigType::required_count(f.params))
+    registry::find_function_sig(module, name).map(|f| registry::SigType::required_count(f.params))
 }
 
 /// The required-argument count of a registered extern type's method (http arc H4); `None` for a
@@ -537,7 +537,7 @@ pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
         return None;
     }
     // Migrated modules: parameter types come from the native-extension registry.
-    if let Some(f) = registry::find_function(module, name) {
+    if let Some(f) = registry::find_function_sig(module, name) {
         return Some(f.params.iter().map(sig_to_type).collect());
     }
     // Not in the registry: the `vec` bulk `*_all` kernels (per-backend, deferred with vec/quat's
@@ -613,14 +613,14 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
     }
     // (`id` was virtual here until the id-entropy arc de-virtualized it — `next_id`/`uuid`/
     // `uuid_v7` now type through the registry fallback below like any migrated module.)
-    // The virtual `task` module (prelude-redesign P2b): the concurrency combinators.
-    // `sleep(ms) -> Future<void>` (Track A.2) — awaiting it suspends until the executor clock
-    // reaches the deadline; `all(List<Future<T>>) -> List<T>` (results in order);
+    // The still-virtual `task` combinators (prelude-redesign P2b):
+    // `all(List<Future<T>>) -> List<T>` (results in order);
     // `race(List<Future<T>>) -> T` (first result, losers cancelled);
     // `map_bounded(List<A>, int, Fn(A) -> Future<B>) -> List<B>` (≤n in flight). (Track A.9.)
+    // (`sleep` migrated to `task`'s registry ctx table — higher-order-abi H0 — and types through
+    // the registry fallback below; an unmatched name falls through the same way.)
     if module == "task" {
-        return match name {
-            "sleep" => Some(Type::Named(FUTURE.to_string(), vec![Type::Unit])),
+        let t = match name {
             "all" => Some(list(future_elem(args.first()))),
             "race" => Some(future_elem(args.first())),
             "map_bounded" => Some(match args.get(2) {
@@ -634,6 +634,9 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
             }),
             _ => None,
         };
+        if t.is_some() {
+            return t;
+        }
     }
     // `http.serve(port, handler)` (http-server S3): a builtin (the handler is a closure the registry
     // seam cannot carry), so it is typed here rather than via an `ExtFn`. It runs the accept loop and
@@ -646,7 +649,7 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
     // Migrated modules: the result type comes from the registry's `RetTy`. `SameAsArg(i)` carries the
     // i-th argument's type (`vec.add(v, w): typeof v`); `NumericPreserving` is the `math.abs`/min/max
     // kind-preserving rule; `Concrete` maps directly.
-    if let Some(f) = registry::find_function(module, name) {
+    if let Some(f) = registry::find_function_sig(module, name) {
         use registry::RetTy;
         return Some(match f.ret {
             RetTy::Concrete(s) => sig_to_type(&s),

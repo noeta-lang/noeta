@@ -59,6 +59,7 @@ mod jit_service;
 mod values;
 pub(crate) use values::*;
 mod methods;
+mod native_ctx;
 mod scheduler;
 mod session;
 pub use session::{HostFactory, SessionOutput, VmSession};
@@ -7247,27 +7248,8 @@ impl<'m> Vm<'m> {
                     Err(self.error(DiagnosticCode::Panic, span, message))
                 }
             }
-            // `sleep(ms)` — a leaf timer future (Track A.2), ready once the executor clock reaches
-            // `now + ms`. Mirrors the tree-walker's `Builtin::Sleep`: the deadline is fixed at
-            // creation from the current logical clock. A non-int or negative `ms` is a `TypeMismatch`.
-            Builtin::Sleep => {
-                self.check_arity(builtin, args, 1, span)?;
-                let Some(ms) = args[0].as_int() else {
-                    return Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!("`sleep` expects an int (ms), found {}", args[0].display()),
-                    ));
-                };
-                if ms < 0 {
-                    return Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!("`sleep` expects a non-negative duration, found {ms}"),
-                    ));
-                }
-                Ok(Value::make_timer(self.executor.now() + ms as u64))
-            }
+            // (`sleep` — the leaf timer future — migrated to the registry's `NativeCtx` dispatch,
+            // higher-order-abi H0: `noeta-stdlib/src/task.rs`, reached via `call_ctx_function`.)
             // `all(list)` — await every future concurrently, returning a `List<T>` of results in order
             // (Track A.9). Drives the scheduler until each element is ready, collecting its (retained)
             // result; the collected list is a fresh owned value.

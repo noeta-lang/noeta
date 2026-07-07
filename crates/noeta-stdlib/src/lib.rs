@@ -47,6 +47,7 @@ pub mod net;
 pub mod quat;
 pub mod random;
 pub mod registry;
+pub mod task;
 pub mod vec3;
 
 // The stdlib-only surface (the ABI items above arrive via the `noeta_native::*` glob).

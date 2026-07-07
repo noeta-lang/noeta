@@ -171,6 +171,35 @@ pub fn find_function(module: &str, func: &str) -> Option<&'static ExtFn> {
         .find(|f| f.name == func)
 }
 
+/// Find a registered **higher-order** function's signature (higher-order-abi H0) — the ctx-table
+/// twin of [`find_function`]. The backends route a matched name through the `NativeCtx` seam.
+pub fn find_ctx_function(module: &str, func: &str) -> Option<&'static ExtFn> {
+    find_module(module)?
+        .ctx_functions
+        .iter()
+        .find(|f| f.name == func)
+}
+
+/// A function's signature from **either** table — what the checker and name resolution consult
+/// (they don't care how a call dispatches, only that the name exists and what it types as).
+pub fn find_function_sig(module: &str, func: &str) -> Option<&'static ExtFn> {
+    find_function(module, func).or_else(|| find_ctx_function(module, func))
+}
+
+/// Dispatch a registered higher-order function through the module's [`crate::CtxDispatch`]
+/// (higher-order-abi H0). Mirrors [`dispatch`] for the ctx table.
+pub fn dispatch_ctx(
+    module: &str,
+    func: &str,
+    ctx: &mut dyn crate::NativeCtx,
+    args: &[crate::Slot],
+) -> Result<crate::CtxOut, crate::CtxError> {
+    match find_module(module).and_then(|m| m.ctx_dispatch) {
+        Some(d) => d(func, ctx, args),
+        None => Err(no_function_error(module, func).into()),
+    }
+}
+
 /// Find a registered extern type by name (extern-types X1).
 pub fn find_type(name: &str) -> Option<&'static ExtType> {
     extensions()
@@ -217,9 +246,12 @@ pub fn dispatch_method(
 /// (`id` was virtual at P2c; the id-entropy arc de-virtualized it — the counter moved into the
 /// Host's [`crate::host::Ids`] capability, so `next_id`/`uuid`/`uuid_v7` are ordinary registry
 /// functions and both backends share one dispatch.)
+/// (`sleep` was virtual here until higher-order-abi H0 — it migrated to `task`'s **ctx** table,
+/// dispatched through the `NativeCtx` seam; the remaining names follow in later phases, and this
+/// mechanism dies with the last of them.)
 pub const VIRTUAL_MODULES: &[(&str, &[&str])] = &[
     ("reactive", &["signal", "computed", "effect"]),
-    ("task", &["sleep", "all", "race", "map_bounded"]),
+    ("task", &["all", "race", "map_bounded"]),
 ];
 
 /// Whether `name` is a virtual std module (importable, but not registry-backed).
@@ -241,7 +273,7 @@ pub fn virtual_module_function(module: &str, func: &str) -> bool {
 /// fallback (the `vec` bulk `*_all` kernels and `fs.list`, both pending `vec`/`fs` refinements —
 /// see `noeta-check::stdlib`).
 pub fn is_module_function(module: &str, func: &str) -> bool {
-    find_function(module, func).is_some()
+    find_function_sig(module, func).is_some()
         || virtual_module_function(module, func)
         || matches!(
             (module, func),
@@ -2019,30 +2051,35 @@ const STD_MODULES: &[ExtModule] = &[
         functions: MATH_FNS,
         dispatch: math_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "random",
         functions: RANDOM_FNS,
         dispatch: random_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "time",
         functions: TIME_FNS,
         dispatch: time_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "id",
         functions: ID_FNS,
         dispatch: id_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "crypto",
         functions: CRYPTO_FNS,
         dispatch: crypto_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "http",
@@ -2051,36 +2088,42 @@ const STD_MODULES: &[ExtModule] = &[
         // The optional `headers` argument is a `Map` — needs the deep marshalling that surfaces
         // it as `NativeValue::Map` (http arc H5). url/body strings project fine either way.
         deep_marshal: true,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "env",
         functions: ENV_FNS,
         dispatch: env_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "args",
         functions: ARGS_FNS,
         dispatch: args_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "fs",
         functions: FS_FNS,
         dispatch: fs_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "vec",
         functions: VEC_FNS,
         dispatch: vec_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "quat",
         functions: QUAT_FNS,
         dispatch: quat_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "json",
@@ -2088,6 +2131,16 @@ const STD_MODULES: &[ExtModule] = &[
         dispatch: json_dispatch,
         // `json.stringify` introspects an arbitrary value, so its arguments are marshalled deeply.
         deep_marshal: true,
+        ..ExtModule::DEFAULTS
+    },
+    // The `task` concurrency module (higher-order-abi H0): its functions need the executor, so
+    // they live in the **ctx** table and dispatch through the `NativeCtx` seam. Migration is
+    // per-function — the names still in `VIRTUAL_MODULES` stay backend builtins until their phase.
+    ExtModule {
+        name: "task",
+        ctx_functions: crate::task::TASK_CTX_FNS,
+        ctx_dispatch: Some(crate::task::task_ctx_dispatch),
+        ..ExtModule::DEFAULTS
     },
 ];
 

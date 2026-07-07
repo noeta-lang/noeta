@@ -69,9 +69,8 @@ pub enum Builtin {
     /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
     /// The assertion primitive the test runner's `@test` blocks (object-model slice 6) rest on.
     Assert,
-    /// `sleep(ms)` — produce a leaf timer future (Track A.2) that becomes ready once the executor's
-    /// logical clock reaches `now + ms`. The first future that can actually report `Pending`.
-    Sleep,
+    /// (`sleep` was the `Sleep` variant here until higher-order-abi H0 — the first builtin
+    /// migrated onto the registry's `NativeCtx` dispatch, `noeta-stdlib/src/task.rs`.)
     /// `all(list)` — await every future in `list` concurrently, returning a `List<T>` of their
     /// results in order (Track A.9). Drives the scheduler until all are ready.
     All,
@@ -108,7 +107,6 @@ impl Builtin {
             Builtin::Filter => "filter",
             Builtin::Sum => "sum",
             Builtin::Assert => "assert",
-            Builtin::Sleep => "sleep",
             Builtin::All => "all",
             Builtin::Race => "race",
             Builtin::MapBounded => "map_bounded",
@@ -127,7 +125,6 @@ impl Builtin {
             "filter" => Some(Builtin::Filter),
             "sum" => Some(Builtin::Sum),
             "assert" => Some(Builtin::Assert),
-            "sleep" => Some(Builtin::Sleep),
             "all" => Some(Builtin::All),
             "race" => Some(Builtin::Race),
             "map_bounded" => Some(Builtin::MapBounded),
