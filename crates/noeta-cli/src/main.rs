@@ -168,11 +168,19 @@ enum Command {
     Profile {
         /// Path to a `.noe` file.
         file: PathBuf,
-        /// Run the **instrumenting** profiler: exact per-function call counts + self/total time
-        /// (a table on stderr), instead of just timing the run. (Wall-time flamegraph sampling is
-        /// a later slice.)
+        /// Run the **instrumenting** profiler instead of sampling: exact per-function call counts +
+        /// self/total time (a table on stderr). Takes precedence over the sampling flags.
         #[arg(long)]
         instrument: bool,
+        /// Sampling rate in Hz for the wall-time flamegraph (default 1000). Ignored with
+        /// `--instrument` or `--every`.
+        #[arg(long)]
+        hz: Option<u32>,
+        /// Deterministic sampling: take one sample every N executed ops instead of on a wall clock —
+        /// a reproducible, op-weighted flamegraph (for stable diffs / tests). Ignored with
+        /// `--instrument`.
+        #[arg(long, value_name = "N")]
+        every: Option<u64>,
     },
     /// Serve a program's HTTP handler. The file defines a top-level `fn fetch(req: Request):
     /// Response` (sync or async) and `use std.{http}`; `noeta serve` runs the file's top-level
@@ -232,7 +240,12 @@ fn main() -> ExitCode {
         Command::Repl { no_check, load } => cmd_repl(!no_check, load),
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),
-        Command::Profile { file, instrument } => cmd_profile(&file, instrument),
+        Command::Profile {
+            file,
+            instrument,
+            hz,
+            every,
+        } => cmd_profile(&file, instrument, hz, every),
         Command::Serve { file, port } => cmd_serve(&file, port),
     }
 }
@@ -250,11 +263,22 @@ fn cmd_dap() -> ExitCode {
 }
 
 /// Profile a program: run it tier-0 under the production VM and report where it spends its time.
-fn cmd_profile(file: &std::path::Path, instrument: bool) -> ExitCode {
+/// Sampling (wall-time flamegraph) is the default; `--instrument` selects the exact per-function
+/// profiler; `--every N` makes sampling deterministic (op-weighted).
+fn cmd_profile(
+    file: &std::path::Path,
+    instrument: bool,
+    hz: Option<u32>,
+    every: Option<u64>,
+) -> ExitCode {
     let mode = if instrument {
         noeta_prof::Mode::Instrument
+    } else if let Some(every) = every {
+        noeta_prof::Mode::Sample(noeta_prof::SampleClock::Ops { every })
     } else {
-        noeta_prof::Mode::Summary
+        noeta_prof::Mode::Sample(noeta_prof::SampleClock::Wall {
+            hz: hz.unwrap_or(1000),
+        })
     };
     noeta_prof::run(file, mode)
 }

@@ -208,3 +208,124 @@ fn render_table_is_empty_without_instrumentation() {
     let report = noeta_prof::profile(&path, noeta_prof::Mode::Summary);
     assert!(noeta_prof::render_table(&report).is_empty());
 }
+
+// ---- P2: sampling profiler -----------------------------------------------------------------------
+
+use noeta_prof::{Mode, SampleClock};
+
+/// A program with one clearly-dominant hot function (`hot`, a big loop) called from the top level.
+const HOT_SRC: &str = "fn hot(n: int): int {\n\
+     \x20   mut acc = 0\n\
+     \x20   mut i = 0\n\
+     \x20   while i < n { acc = acc + i; i = i + 1; }\n\
+     \x20   return acc;\n\
+     }\n\
+     echo hot(2000000);\n";
+
+#[test]
+fn op_clock_sampling_is_deterministic() {
+    // The whole point of the op-clock mode: two runs of the same program produce byte-identical
+    // flamegraphs (unlike wall-clock sampling), so the fixtures can assert exactly.
+    let path = fixture("det", HOT_SRC);
+    let mode = Mode::Sample(SampleClock::Ops { every: 1000 });
+    let a = noeta_prof::profile(&path, mode);
+    let b = noeta_prof::profile(&path, mode);
+
+    let fa = a.flamegraph.as_ref().expect("sample mode fills flamegraph");
+    let fb = b.flamegraph.as_ref().unwrap();
+    assert_eq!(fa.total, fb.total, "sample count is reproducible");
+    assert!(fa.total > 0, "a long run takes samples");
+    assert_eq!(
+        noeta_prof::render_folded(&a),
+        noeta_prof::render_folded(&b),
+        "folded output is identical across runs"
+    );
+}
+
+#[test]
+fn sampling_attributes_most_samples_to_the_hot_function() {
+    let path = fixture("hot_fg", HOT_SRC);
+    let report = noeta_prof::profile(&path, Mode::Sample(SampleClock::Ops { every: 1000 }));
+    assert_eq!(report.exit_code, 0, "{}", report.stderr);
+    assert!(
+        report.functions.is_none(),
+        "sample mode has no function table"
+    );
+
+    let flame = report.flamegraph.as_ref().unwrap();
+    // Stacks are sorted heaviest-first; the top one is the hot loop, rooted at the top-level frame.
+    let top = &flame.stacks[0];
+    assert_eq!(
+        top.frames.last().map(String::as_str),
+        Some("hot"),
+        "leaf is `hot`"
+    );
+    assert_eq!(
+        top.frames.first().map(String::as_str),
+        Some("main"),
+        "rooted at top level"
+    );
+    // The hot stack holds the overwhelming majority of samples.
+    assert!(
+        top.count * 100 / flame.total >= 80,
+        "the hot loop dominates: {}/{} samples",
+        top.count,
+        flame.total
+    );
+    // Every sample is accounted for by exactly one stack.
+    let summed: u64 = flame.stacks.iter().map(|s| s.count).sum();
+    assert_eq!(summed, flame.total, "stack counts sum to the total");
+}
+
+#[test]
+fn op_clock_rate_changes_the_sample_count_proportionally() {
+    // Sampling twice as often (every 500 ops vs every 1000) takes ~2× the samples — a sanity check
+    // that the op-clock trigger actually fires on the configured cadence.
+    let path = fixture("rate", HOT_SRC);
+    let coarse = noeta_prof::profile(&path, Mode::Sample(SampleClock::Ops { every: 2000 }));
+    let fine = noeta_prof::profile(&path, Mode::Sample(SampleClock::Ops { every: 1000 }));
+    let c = coarse.flamegraph.unwrap().total;
+    let f = fine.flamegraph.unwrap().total;
+    assert!(
+        f > c,
+        "finer op-clock takes more samples: fine={f} coarse={c}"
+    );
+}
+
+#[test]
+fn folded_lines_are_well_formed() {
+    let path = fixture("folded", HOT_SRC);
+    let report = noeta_prof::profile(&path, Mode::Sample(SampleClock::Ops { every: 1000 }));
+    for line in noeta_prof::render_folded(&report).lines() {
+        // Each line is "<frame>;<frame>;… <count>".
+        let (stack, count) = line
+            .rsplit_once(' ')
+            .expect("a folded line ends in a count");
+        assert!(count.parse::<u64>().is_ok(), "count is a number: {line:?}");
+        assert!(
+            !stack.is_empty(),
+            "a stack has at least one frame: {line:?}"
+        );
+        assert!(
+            stack.starts_with("main"),
+            "stacks are rooted at main: {line:?}"
+        );
+    }
+}
+
+#[test]
+fn wall_clock_sampling_produces_a_profile() {
+    // Nondeterministic, so only structural assertions: a long run gets samples, all under `hot`.
+    let path = fixture("wall", HOT_SRC);
+    let report = noeta_prof::profile(&path, Mode::Sample(SampleClock::Wall { hz: 2000 }));
+    assert_eq!(report.exit_code, 0, "{}", report.stderr);
+    let flame = report.flamegraph.as_ref().unwrap();
+    assert!(flame.total > 0, "wall-clock sampling took samples");
+    assert!(
+        flame
+            .stacks
+            .iter()
+            .any(|s| s.frames.iter().any(|f| f == "hot")),
+        "the hot function appears in the profile"
+    );
+}

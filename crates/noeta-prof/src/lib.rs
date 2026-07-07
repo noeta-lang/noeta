@@ -6,26 +6,42 @@
 //! interpreter-executed and observable at an op boundary. Because its signal is wall-time and call
 //! structure — not program output — it lives outside the differential oracle (as DAP/LSP do).
 //!
-//! Two modes are planned: an *instrumenting* profiler (exact per-function call counts + self/total
-//! time — **P1, implemented here**) and a *sampling* profiler (wall-time flamegraphs — P2). The
-//! collectors ride one per-op seam on the VM ([`noeta_vm::ProfileHook`]); this crate owns the
-//! collectors, the `proto → name @ file:line` resolution, and the report rendering.
+//! Two modes: an *instrumenting* profiler (exact per-function call counts + self/total time —
+//! `instrument`) and a *sampling* profiler (wall-time or deterministic op-weighted flamegraphs —
+//! `sample`). Both collectors ride one per-op seam on the VM ([`noeta_vm::ProfileHook`]); this crate
+//! owns the collectors, the `proto → name @ file:line` resolution, and the report rendering (a
+//! per-function table, and folded stacks for the flamegraph).
 
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 mod instrument;
+mod sample;
 mod session;
 
-/// Which profiler to run. `Summary` just times the run (the P0 baseline); `Instrument` attaches the
-/// exact per-function collector. (`Sample` — wall-time flamegraphs — arrives in P2.)
+/// Which profiler to run. `Summary` just times the run; `Instrument` attaches the exact per-function
+/// collector; `Sample` builds a wall-time (or, deterministically, op-weighted) flamegraph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// Time the whole run, no per-function breakdown.
     Summary,
     /// Exact per-function call counts + self/total time (the instrumenting profiler).
     Instrument,
+    /// Periodic stack sampling → a folded-stack flamegraph.
+    Sample(SampleClock),
+}
+
+/// What clock drives the sampling profiler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SampleClock {
+    /// Real wall-clock ticks at `hz` Hz — the true, nondeterministic profile.
+    Wall { hz: u32 },
+    /// One sample every `every` executed ops — deterministic and reproducible (for tests / stable
+    /// diffs), work-weighted rather than time-weighted.
+    Ops { every: u64 },
 }
 
 /// One function's resolved profile row: its label + source location and its counters/times.
@@ -61,6 +77,26 @@ pub struct Report {
     /// The per-function breakdown, sorted by self-time descending. `Some` only in [`Mode::Instrument`]
     /// (and empty if the program failed to start).
     pub functions: Option<Vec<FnStat>>,
+    /// The sampled flamegraph as folded stacks. `Some` only in [`Mode::Sample`].
+    pub flamegraph: Option<Flamegraph>,
+}
+
+/// A sampled flamegraph: every distinct call stack that was sampled, with its sample count.
+#[derive(Debug, Clone)]
+pub struct Flamegraph {
+    /// Total samples taken across the run.
+    pub total: u64,
+    /// One folded stack per distinct sampled call chain, sorted for a stable (diffable) order.
+    pub stacks: Vec<FoldedStack>,
+}
+
+/// One folded stack: the chain of frame labels root → leaf, and how many samples landed on it.
+#[derive(Debug, Clone)]
+pub struct FoldedStack {
+    /// Frame labels from the outermost (`main`) to the innermost (leaf) frame.
+    pub frames: Vec<String>,
+    /// Sample count for this exact stack.
+    pub count: u64,
 }
 
 /// Compile the program at `path` tier-0 and run it under the chosen profiler, returning the outcome
@@ -69,23 +105,67 @@ pub struct Report {
 pub fn profile(path: &Path, mode: Mode) -> Report {
     let compiled = match session::compile_file(path) {
         Ok(compiled) => compiled,
-        Err(out) => return report_from(out, None),
+        Err(out) => return report_from(out, None, None),
     };
 
-    let hook: Option<Box<dyn noeta_vm::ProfileHook>> = match mode {
-        Mode::Summary => None,
-        Mode::Instrument => Some(Box::new(instrument::InstrumentCollector::new(
-            compiled.module.protos.len(),
-        ))),
-    };
+    match mode {
+        Mode::Summary => {
+            let (out, _) = session::run(&compiled, None);
+            report_from(out, None, None)
+        }
+        Mode::Instrument => {
+            let hook = Box::new(instrument::InstrumentCollector::new(
+                compiled.module.protos.len(),
+            ));
+            let (out, hook) = session::run(&compiled, Some(hook));
+            let functions = hook.map(|hook| resolve_functions(hook, &compiled));
+            report_from(out, functions, None)
+        }
+        Mode::Sample(clock) => {
+            // Wall-clock sampling needs a timer thread bumping a shared atomic; op-clock is
+            // self-contained. Either way the collector rides the per-op seam and comes back with the
+            // aggregated stacks, which we resolve to labels here.
+            let (collector, timer) = match clock {
+                SampleClock::Wall { hz } => {
+                    let pending = Arc::new(AtomicU32::new(0));
+                    let timer = sample::spawn_timer(hz, Arc::clone(&pending));
+                    (sample::SampleCollector::wall(pending), Some(timer))
+                }
+                SampleClock::Ops { every } => (sample::SampleCollector::ops(every), None),
+            };
+            let (out, hook) = session::run(&compiled, Some(Box::new(collector)));
+            // Stop the timer *before* resolving, so no further ticks accrue.
+            if let Some(timer) = timer {
+                timer.stop();
+            }
+            let flamegraph = hook.map(|hook| resolve_flamegraph(hook, &compiled));
+            report_from(out, None, flamegraph)
+        }
+    }
+}
 
-    let (out, hook) = session::run(&compiled, hook);
-    let functions = hook.map(|hook| resolve(hook, &compiled));
-    report_from(out, functions)
+/// The display label for a prototype: its function name, or `<anonymous>@file:line` for a nameless
+/// closure/thunk (so distinct anonymous frames stay distinguishable in a flamegraph).
+fn proto_label(compiled: &session::Compiled, proto: u32) -> String {
+    let chunk = &compiled.module.protos[proto as usize];
+    if let Some(name) = &chunk.name {
+        return name.clone();
+    }
+    match chunk.def_span {
+        Some(span) => {
+            let file = compiled.sources.source(span.source).name();
+            let line = compiled.sources.line_col(span).line;
+            format!("<anonymous>@{file}:{line}")
+        }
+        None => "<anonymous>".to_string(),
+    }
 }
 
 /// Resolve the collector's raw per-proto counters into labelled, self-time-sorted [`FnStat`] rows.
-fn resolve(hook: Box<dyn noeta_vm::ProfileHook>, compiled: &session::Compiled) -> Vec<FnStat> {
+fn resolve_functions(
+    hook: Box<dyn noeta_vm::ProfileHook>,
+    compiled: &session::Compiled,
+) -> Vec<FnStat> {
     let collector = *hook
         .into_any()
         .downcast::<instrument::InstrumentCollector>()
@@ -126,7 +206,38 @@ fn resolve(hook: Box<dyn noeta_vm::ProfileHook>, compiled: &session::Compiled) -
     rows
 }
 
-fn report_from(out: session::RunOutput, functions: Option<Vec<FnStat>>) -> Report {
+/// Resolve the sampler's raw proto-chain counts into labelled folded stacks, sorted for a stable
+/// (diffable, op-clock-reproducible) order.
+fn resolve_flamegraph(
+    hook: Box<dyn noeta_vm::ProfileHook>,
+    compiled: &session::Compiled,
+) -> Flamegraph {
+    let collector = *hook
+        .into_any()
+        .downcast::<sample::SampleCollector>()
+        .expect("the sample mode installs a SampleCollector");
+    let (total, raw) = collector.finish();
+    let mut stacks: Vec<FoldedStack> = raw
+        .into_iter()
+        .map(|folded| FoldedStack {
+            frames: folded
+                .chain
+                .iter()
+                .map(|&proto| proto_label(compiled, proto))
+                .collect(),
+            count: folded.count,
+        })
+        .collect();
+    // Heaviest stacks first; ties broken by the folded label so the order is deterministic.
+    stacks.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.frames.cmp(&b.frames)));
+    Flamegraph { total, stacks }
+}
+
+fn report_from(
+    out: session::RunOutput,
+    functions: Option<Vec<FnStat>>,
+    flamegraph: Option<Flamegraph>,
+) -> Report {
     let mut stdout = String::new();
     let mut stderr = String::new();
     for chunk in out.chunks {
@@ -141,7 +252,25 @@ fn report_from(out: session::RunOutput, functions: Option<Vec<FnStat>>) -> Repor
         exit_code: out.exit_code,
         wall: out.wall,
         functions,
+        flamegraph,
     }
+}
+
+/// Render a flamegraph as **folded stacks** — the Brendan-Gregg collapsed format
+/// (`main;fib;fib <count>`), one line per stack, which `inferno`/`flamegraph.pl`/speedscope consume.
+/// Empty when there is no flamegraph (or no samples).
+pub fn render_folded(report: &Report) -> String {
+    let Some(flame) = &report.flamegraph else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for stack in &flame.stacks {
+        out.push_str(&stack.frames.join(";"));
+        out.push(' ');
+        out.push_str(&stack.count.to_string());
+        out.push('\n');
+    }
+    out
 }
 
 /// Render the instrumenting profiler's per-function table (a fixed-width text table). Empty string
@@ -237,6 +366,24 @@ pub fn run(path: &Path, mode: Mode) -> ExitCode {
                 report.wall
             );
             let _ = write!(err, "{}", render_table(&report));
+        }
+        Mode::Sample(clock) => {
+            let flame = report.flamegraph.as_ref();
+            let clock_desc = match clock {
+                SampleClock::Wall { hz } => format!("wall-clock {hz} Hz"),
+                SampleClock::Ops { every } => format!("op-clock 1/{every}"),
+            };
+            let _ = writeln!(
+                err,
+                "noeta profile: {} samples over {} stacks, program ran in {:.3?} \
+                 (tier-0, sampling, {clock_desc})",
+                flame.map_or(0, |f| f.total),
+                flame.map_or(0, |f| f.stacks.len()),
+                report.wall
+            );
+            // The folded stacks are the artifact; they go to stderr (keeping the program's stdout
+            // clean). `-o <file>` / SVG / speedscope rendering arrive in P3.
+            let _ = write!(err, "{}", render_folded(&report));
         }
     }
     ExitCode::from(report.exit_code.clamp(0, 255) as u8)
