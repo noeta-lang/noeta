@@ -56,6 +56,10 @@ enum Command {
         /// `--profile dev`. Unioned with any `--tier`.
         #[arg(long)]
         profile: Option<String>,
+        /// Bypass the transparent startup cache for this run: don't read a cached compile and don't
+        /// write one. Equivalent to setting `NOETA_NO_CACHE`. Recompiles from source regardless.
+        #[arg(long)]
+        no_cache: bool,
     },
     /// Discover and run a program's `@test` blocks (object-model slice 6).
     Test {
@@ -207,7 +211,8 @@ fn main() -> ExitCode {
             file,
             tier,
             profile,
-        } => cmd_run(&file, &tier, &profile),
+            no_cache,
+        } => cmd_run(&file, &tier, &profile, no_cache),
         Command::Test {
             file,
             fail_fast,
@@ -278,17 +283,19 @@ fn tier_active_in_profile(
 /// Type-check and run a program, writing stdout to the real stdout and rendering any diagnostics to
 /// stderr — each against the source its span belongs to (via the `SourceMap`). Returns the process
 /// exit code. `program` is the loaded program, possibly after dev-tier activation (`cmd_run`).
-fn run_program(program: &noeta_ast::Program, sources: &SourceMap) -> i32 {
+fn run_program(program: &noeta_ast::Program, sources: &SourceMap, cache: Option<&CacheSlot>) -> i32 {
     // The loader already lexed + parsed (and reported any lex/parse errors); type-check then run.
     // One `check_all` produces both the gate diagnostics and the `type_of` site map the backend
     // needs, so the checker runs exactly once (it previously ran again inside the backend).
     let checked = noeta_check::check_all(program);
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(sources, checked.diagnostics.iter());
+        // A program that does not check clean is never run, so it is never cached — a cache hit
+        // therefore always corresponds to a clean check, and the hit path can skip checking.
         return 1;
     }
 
-    match execute_real_host(program, &checked) {
+    match execute_real_host(program, &checked, cache) {
         Ok((result, trace)) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();
@@ -350,10 +357,45 @@ fn compile_real(
 fn execute_real_host(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
+    cache: Option<&CacheSlot>,
 ) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), String> {
-    Ok(run_module_real_host(std::sync::Arc::new(compile_real(
-        program, checked,
-    )?)))
+    let module = std::sync::Arc::new(compile_real(program, checked)?);
+    // Transparent startup cache (M3): on a miss we've just compiled the module — encode + write it
+    // to the cache concurrently with running it, so populating the cache adds ~no latency (the write
+    // overlaps execution). The `Module` is immutable shared data, so the writer thread reading it
+    // while the VM runs it is safe. Join before returning so the cache is durably written before the
+    // process can exit; the write is best-effort (a failure never touches the run's outcome).
+    let writer = cache.map(|slot| spawn_cache_write(slot, &module));
+    let out = run_module_real_host(module);
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
+    Ok(out)
+}
+
+/// A resolved startup-cache slot for one invocation: an open cache, the content key for this
+/// program, and the workspace `SourceMap` (so a cache hit can render diagnostics against real source
+/// without re-parsing). Present only when caching is enabled and the cache opened.
+struct CacheSlot {
+    cache: noeta_cache::Cache,
+    key: noeta_cache::CacheKey,
+    sources: SourceMap,
+}
+
+/// Encode a freshly-compiled module to a `.noeb` blob and store it under `slot.key`, on a background
+/// thread. Returns the handle so the caller can join it before exit. Best-effort throughout: any
+/// encode/write failure is swallowed (the cache is an optimization, never a correctness dependency).
+fn spawn_cache_write(
+    slot: &CacheSlot,
+    module: &std::sync::Arc<noeta_bytecode::Module>,
+) -> thread::JoinHandle<()> {
+    let cache = slot.cache.clone();
+    let key = slot.key.clone();
+    let module = module.clone();
+    thread::spawn(move || {
+        let blob = noeta_bundle::write(&module);
+        let _ = cache.store(&key, &blob);
+    })
 }
 
 /// Run an already-compiled [`Module`] against the real host — the shared execution core of
@@ -424,7 +466,12 @@ fn emit_diagnostics_mapped<'a>(
     let _ = io::stderr().write_all(render_mapped(sources, diagnostics).as_bytes());
 }
 
-fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -> ExitCode {
+fn cmd_run(
+    file: &std::path::Path,
+    tiers: &[String],
+    profile: &Option<String>,
+    no_cache: bool,
+) -> ExitCode {
     // P-AOT L1.2: a `.noeb` bundle runs directly — no source, no compile. Sniff the magic (cheap,
     // and we need the bytes to load it anyway); anything else is source, handled below. Tiers are a
     // *build*-time concern (they are already baked into the bundle), so `--tier`/`--profile` on a
@@ -459,6 +506,18 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
         }
     }
 
+    // Transparent startup cache (M3): build the content key from the raw workspace (entry + sibling
+    // sources) + runtime version + binary identity + active tiers. On a hit, run the cached compiled
+    // module directly — the whole front-end (load → check → compile) is skipped. On a miss, the slot
+    // is threaded through so `execute_real_host` populates the cache after compiling.
+    let cache = open_startup_cache(file, &active, no_cache);
+    if let Some(slot) = &cache
+        && let Some(blob) = slot.cache.load(&slot.key)
+        && let Ok(module) = noeta_bundle::read(&blob)
+    {
+        return run_compiled_module(std::sync::Arc::new(module), &slot.sources);
+    }
+
     // Load + link the program: sibling `.noe` modules the entry `use`s are resolved and merged
     // (M1.9); a lone file with no sibling modules links to exactly itself.
     match noeta_loader::load(file) {
@@ -472,7 +531,7 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
             // as-is and every tier block is stripped at lowering (the default). Activation borrows
             // nothing from the run, so an owned activated program is produced only when needed.
             if active.is_empty() {
-                return exit_code(run_program(&linked.program, &linked.sources));
+                return exit_code(run_program(&linked.program, &linked.sources, cache.as_ref()));
             }
             let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
             let activated = noeta_check::activate_tiers(&linked.program, &active_refs);
@@ -480,7 +539,11 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
                 emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
                 return ExitCode::from(1);
             }
-            exit_code(run_program(&activated.program, &linked.sources))
+            exit_code(run_program(
+                &activated.program,
+                &linked.sources,
+                cache.as_ref(),
+            ))
         }
         Ok(Err(load_diagnostics)) => {
             let mut stderr = io::stderr();
@@ -705,7 +768,9 @@ fn cmd_serve(file: &std::path::Path, port: u16) -> ExitCode {
     });
 
     eprintln!("noeta serve: listening on http://0.0.0.0:{port} (Ctrl-C to stop)");
-    exit_code(run_program(&linked.program, &linked.sources))
+    // `serve` is a long-lived process: it compiles once at boot and amortizes over its lifetime, so
+    // the startup cache buys it almost nothing — left uncached in v1 (`plans/startup-cache`).
+    exit_code(run_program(&linked.program, &linked.sources, None))
 }
 
 /// Run a `.noeb` bundle (P-AOT L1.2): decode the module from the versioned container and execute it
@@ -726,14 +791,81 @@ fn cmd_run_bundle(file: &std::path::Path, bytes: &[u8]) -> ExitCode {
         file.display().to_string(),
         "",
     )]);
-    let (result, trace) = run_module_real_host(std::sync::Arc::new(module));
+    run_compiled_module(std::sync::Arc::new(module), &sources)
+}
+
+/// Run an already-compiled [`Module`] on the real host and render its output — the shared tail of the
+/// `.noeb` bundle runner and the startup-cache *hit* path (both have a module with no source to
+/// compile). Diagnostics/trace render against `sources` (real workspace sources on a cache hit; a
+/// synthetic empty source for a source-free bundle).
+fn run_compiled_module(
+    module: std::sync::Arc<noeta_bytecode::Module>,
+    sources: &SourceMap,
+) -> ExitCode {
+    let (result, trace) = run_module_real_host(module);
     print!("{}", result.stdout);
     let _ = io::stdout().flush();
-    emit_diagnostics_mapped(&sources, result.diagnostics.iter());
+    emit_diagnostics_mapped(sources, result.diagnostics.iter());
     if trace.len() >= 2 {
-        eprint!("{}", noeta_vm::render_trace(&trace, &sources));
+        eprint!("{}", noeta_vm::render_trace(&trace, sources));
     }
     exit_code(result.exit_code)
+}
+
+/// Build the startup-cache slot for a source run: open the cache and compute the content key from
+/// the raw workspace (entry + sibling module sources) + runtime version + binary identity + the
+/// active tier set. Returns `None` — meaning "run uncached" — when caching is disabled
+/// (`--no-cache` or `NOETA_NO_CACHE`), the running binary can't be identified (so freshness can't be
+/// guaranteed), the entry can't be read, or the cache directory can't be opened.
+fn open_startup_cache(
+    file: &std::path::Path,
+    active: &[String],
+    no_cache: bool,
+) -> Option<CacheSlot> {
+    if no_cache || std::env::var_os("NOETA_NO_CACHE").is_some() {
+        return None;
+    }
+    // The binary's build identity is mandatory: without it a same-version local toolchain rebuild
+    // would reuse stale bytecode. If we can't obtain it, we must not cache.
+    let binary = noeta_cache::binary_identity()?;
+    // Read the entry + sibling sources (no lex/parse) — both the key material and, on a hit, the
+    // SourceMap for rendering. SourceIds here match `noeta_loader::load`'s assignment (entry = 0,
+    // sorted siblings 1..), so a cached module's spans resolve correctly against this map.
+    let workspace = noeta_loader::read_workspace(file).ok()?;
+    let mut key = noeta_cache::KeyBuilder::new();
+    key.source(
+        source_key_name(&workspace.entry),
+        workspace.entry.text().as_bytes(),
+    );
+    for module in &workspace.modules {
+        key.source(source_key_name(module), module.text().as_bytes());
+    }
+    key.runtime_version(noeta_bundle::RUNTIME_VERSION)
+        .binary_identity(binary);
+    for tier in active {
+        key.tier(tier);
+    }
+    let key = key.finish();
+
+    let cache = noeta_cache::Cache::open()?;
+    let mut sources = Vec::with_capacity(1 + workspace.modules.len());
+    sources.push(workspace.entry);
+    sources.extend(workspace.modules);
+    Some(CacheSlot {
+        cache,
+        key,
+        sources: SourceMap::new(sources),
+    })
+}
+
+/// The cache-key name for a source: its file name, so the key is independent of the path the program
+/// was invoked through (`./app.noe` and `app.noe` share an entry). Two distinct programs can only
+/// share a name here if their whole hashed content also matches — in which case they are identical.
+fn source_key_name(source: &Source) -> &str {
+    std::path::Path::new(source.name())
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_else(|| source.name())
 }
 
 /// `noeta dump <FILE>` — disassemble the program to its VM bytecode and print it to stdout. Loads,
@@ -1626,7 +1758,9 @@ fn run_one_test(setup: &[Stmt], case: &TestCase, span: Span) -> TestOutcome {
         };
     }
 
-    match execute_real_host(&program, &checked) {
+    // The `@test`/`@bench` runners compile each case per-invocation; startup-cache wiring for them is
+    // C2 (their active-tier sets key distinctly from `run`), so they pass `None` for now.
+    match execute_real_host(&program, &checked, None) {
         // The `@test` runner reports the failing diagnostic; the trace is a `noeta run` affordance.
         Ok((result, _trace)) => {
             let passed = result.exit_code == 0 && result.diagnostics.is_empty();

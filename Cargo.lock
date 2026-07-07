@@ -1627,6 +1627,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-cache"
+version = "0.0.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "noeta-check"
 version = "0.0.0"
 dependencies = [
@@ -1651,6 +1658,7 @@ dependencies = [
  "noeta-backend",
  "noeta-bundle",
  "noeta-bytecode",
+ "noeta-cache",
  "noeta-check",
  "noeta-compiler",
  "noeta-dap",
