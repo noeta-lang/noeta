@@ -216,9 +216,15 @@ first-party router/middleware library is a follow-on arc or a documented example
   an alternative that *would* need the dep). `noeta serve` itself is slated to become an
   extension-provided command (the higher-order-ABI follow-on), so it is kept lean rather than
   gold-plated in core.
-- **S5** — the **composability proof**: a conformance test building a tiny in-language router + a
-  logging middleware over the primitive (sandbox script, differential), demonstrating the seam
-  end-to-end without shipping a framework.
+- **S5 — done (`<pending>`).** The **composability proof** (`serve_composition.noe`): a router and a
+  logging middleware built as ordinary in-language code over `http.serve` — no framework, no runtime
+  hook. Middleware is a handler-transformer (closes over `next`); the router is a handler that
+  dispatches to sub-handlers; `app = logging(route)` composes to the one `(Request) -> Response` the
+  server runs. Handlers are annotated closures typed `(Request) -> Response`. Differential + leak 0
+  (the closure captures reclaim cleanly) green in both backends. **Finding (orthogonal, recorded in
+  `plans/deferred.md`):** a *bare top-level `fn` used as a value* is typed `fn() -> Response` — the
+  checker drops its parameters in the function-handle path — so an annotated closure is used instead;
+  a pre-existing function-handle typing gap, not introduced here.
 - **S6** — docs (Standard-Library-Modules `http.serve` + `noeta serve`; Concurrency/Concurrency-
   Internals the two-tier model + reaping scope + sandbox-script/real-listener split; Native-Extensions
   inbound-Network rows), plan outcome, deferred entries, memory.
