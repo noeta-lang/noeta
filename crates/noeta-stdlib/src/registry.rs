@@ -154,6 +154,24 @@ pub enum SigType {
     /// checker maps it onto the language's declared-union `Type::union`, so a mismatched
     /// argument is a static error; the dispatch still validates the concrete kind it received.
     Union(&'static [SigType]),
+    /// A **trailing-optional** parameter (http arc H4) — `http.get(url, headers?)`. The wrapped
+    /// type is what the argument must be *when present*; a call may omit it (and every parameter
+    /// after it). The checker derives the required-argument count from the first `Optional`; the
+    /// dispatch reads the slot with `args.get(i)` and supplies its own default when absent, so no
+    /// backend change and no default-value machinery is needed. Convention: once a parameter is
+    /// `Optional`, every following parameter is too.
+    Optional(&'static SigType),
+}
+
+impl SigType {
+    /// The count of leading **required** parameters in `params` — everything up to the first
+    /// [`SigType::Optional`] (http arc H4). All-required signatures return `params.len()`.
+    pub fn required_count(params: &[SigType]) -> usize {
+        params
+            .iter()
+            .take_while(|p| !matches!(p, SigType::Optional(_)))
+            .count()
+    }
 }
 
 /// How a function's **return type** is determined. Most are [`RetTy::Concrete`]; the rest capture
@@ -2171,6 +2189,23 @@ mod tests {
 
     fn host() -> SandboxHost {
         SandboxHost::new()
+    }
+
+    #[test]
+    fn required_count_stops_at_the_first_optional_param() {
+        // All-required.
+        assert_eq!(SigType::required_count(&[SigType::String, SigType::Int]), 2);
+        // Trailing optional.
+        assert_eq!(
+            SigType::required_count(&[SigType::String, SigType::Optional(&SigType::Int)]),
+            1
+        );
+        // Every param optional.
+        assert_eq!(
+            SigType::required_count(&[SigType::Optional(&SigType::String)]),
+            0
+        );
+        assert_eq!(SigType::required_count(&[]), 0);
     }
 
     #[test]

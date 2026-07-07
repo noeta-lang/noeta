@@ -77,10 +77,32 @@ seam never gets a real client, which defeats part of the point.
   `RealBody::Async` (RealExecutor's runtime gains `enable_io`). Conformance: zero-edit async
   corpus; real-executor CLI test hits a real endpoint (network-gated / `#[ignore]` by default so
   CI stays hermetic).
-- **H4** — request options: headers (a `Map<string,string>` arg), timeout, maybe a JSON-body
-  helper. (Scope TBD at H4 — surfaced then, not silently cut.)
-- **H5** — docs (Standard-Library-Modules `http` section, Native-Extensions network-capability
-  row, Concurrency-Internals sandbox/real split), plan outcome, deferred entries, memory.
+- **H4** — **general optional-param support in the registry** (decided with the user: build it
+  properly, not a per-function arity hack). Design:
+  - A new `SigType::Optional(&SigType)` wrapper marks a **trailing-optional** param. Optionality
+    lives *in the `params` array* (which already varies per function), NOT a new `ExtFn` field —
+    so the 112 existing `ExtFn` literals are untouched; only functions that want optional params
+    change. Convention (matching the language's own optional params + `check_args`'s
+    leading-required model): once a param is `Optional`, every following one is too.
+  - Checker: `sig_to_type(Optional(t)) = sig_to_type(t)` (the type used for assignability when the
+    arg is present). A new `required` count = index of the first `Optional` param; the four
+    `check_args` call sites (module + method, `module.func` and `x.method`) pass that instead of
+    `params.len()`. `check_args` already accepts `required < params.len()` — no change there.
+  - Backends: **none.** `call_native_module` marshals exactly the caller's args (verified — no
+    padding), so a short call hands the dispatch fewer `NativeValue`s; the dispatch reads optional
+    args with `args.get(i)` and supplies the default. Extern-type methods get optional params for
+    free (same `ExtFn`).
+  - Dispatch helper: `want_arity_range(func, args, min, max)` for functions with optional params.
+  - Conformance: a focused test that a registry function with an optional param accepts both
+    arities and rejects too-few/too-many (E0007), in both backends.
+- **H5** — `std.http` request options *using* H4: an optional trailing `headers: Map<string,string>`
+  on every verb (the `http` module gains `deep_marshal` to read the map). Plus the **`QUERY`**
+  verb (RFC-draft HTTP QUERY — safe, idempotent, body-carrying): `http.query(url, body, headers?)`
+  + `query_async`. Sandbox responder echoes the method as today, so QUERY and custom headers are
+  differential-pinnable. Timeout deferred to a follow-on (recorded).
+- **H6** — docs (Standard-Library-Modules `http` section, Native-Extensions network-capability +
+  optional-param rows, Concurrency-Internals sandbox/real split), plan outcome, deferred entries,
+  memory.
 
 ## Deliberate non-goals (recorded, not silently cut)
 Server/listener (`http.serve`) — its own arc; WebSockets; HTTP/2 tuning; a cookie jar / redirect
