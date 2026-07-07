@@ -30,6 +30,9 @@ jit = ["dep:noeta-jit"]
 [dev-dependencies]
 noeta-lexer = { workspace = true }
 noeta-parser = { workspace = true }
+# The adopted-session test compiles a *checked* program (`compile_with_sites_session`), the same
+# dance the debug adapter's launch path runs. Test-only — the VM itself stays checker-free.
+noeta-check = { workspace = true }
 insta = { workspace = true }
 criterion = { workspace = true }
 

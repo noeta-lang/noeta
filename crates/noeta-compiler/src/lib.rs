@@ -163,21 +163,84 @@ pub fn compile_with_sites(
     )
 }
 
-// Threads the checker's site bundle plus the pre-converted relevance through to the IR lowering.
+// Threads the checker's site bundle plus the pre-converted relevance through to the IR lowering,
+// then MOVES the compiler's tables into the `Module` (the production finisher — no clone tax on
+// `noeta run`). The session path (`compile_with_sites_session`) shares `compile_to_mc` and keeps
+// the compiler alive instead.
 fn compile_inner(
     program: &Program,
     sites: noeta_check::Sites,
     relevance: Option<noeta_ir_passes::Relevance>,
-    // Per-type destruct-reachability (Phase 4.3), exported straight to the `Module` for the VM's
-    // container-before-contained field-walk gate; not consumed by the compiler itself.
     destruct_reachable: Vec<String>,
+    real_isolates: bool,
+    debug: bool,
+) -> Result<Module, Unsupported> {
+    let reflection = noeta_ast::reflect::build(program);
+    let (module, map_packed_sites) =
+        compile_to_mc(program, sites, relevance, real_isolates, debug)?;
+    Ok(Module {
+        protos: module.protos,
+        shapes: module.shapes,
+        packed_schemas: module.packed_schemas,
+        map_packed_sites,
+        methods: module.methods,
+        destructors: module.destructors,
+        field_defaults: module.field_defaults,
+        comparable_derives: module.comparable_derives,
+        tojson_derives: module.tojson_derives,
+        destruct_reachable,
+        cache_slots: module.cache_slots,
+        // The attribute manifest + type registry, built from the AST by the *same* pure builder the
+        // tree-walker uses — so reflection is identical across backends by construction.
+        reflection,
+        type_reprs: module.type_reprs,
+        names: module.names,
+        global_names: module.global_names,
+    })
+}
+
+/// Compile a whole **checked** program and keep the compiler alive as a [`SessionCompiler`] — the
+/// debug console's seed (tooling-unification T3). The returned session's tables *are* the module's
+/// own id-spaces (proto indices, global slots, shapes, interned names), so a later
+/// [`SessionCompiler::extend`] appends a fragment onto the running program exactly as a REPL entry
+/// appends onto a session: stable prefix, new ids at the end. The initial compile is fully checked
+/// (identical to [`compile_with_sites`] — same lowering, drops, debug info); only the *fragments*
+/// compiled through `extend` are checkerless, matching the REPL's stance.
+pub fn compile_with_sites_session(
+    program: &Program,
+    sites: noeta_check::Sites,
+    real_isolates: bool,
+    debug: bool,
+) -> Result<(Module, SessionCompiler), Unsupported> {
+    let relevance = Some(passes_relevance(&sites.destructor_relevance));
+    let destruct_reachable: Vec<String> = sites
+        .destructor_relevance
+        .reachable_types
+        .iter()
+        .cloned()
+        .collect();
+    let reflection = noeta_ast::reflect::build(program);
+    let (mc, map_packed_sites) = compile_to_mc(program, sites, relevance, real_isolates, debug)?;
+    let session = SessionCompiler { mc, reflection };
+    let module = session.snapshot(map_packed_sites, destruct_reachable);
+    Ok((module, session))
+}
+
+// The core of the checked compile: lower the program (with the checker's site maps) and compile it
+// into a live [`ModuleCompiler`], returning the compiler plus the interned `map(...)`-result packed
+// pairs. Shared by [`compile_inner`] (which moves the tables into a `Module`) and
+// [`compile_with_sites_session`] (which keeps the compiler alive and snapshots).
+fn compile_to_mc(
+    program: &Program,
+    sites: noeta_check::Sites,
+    relevance: Option<noeta_ir_passes::Relevance>,
     // Whether `isolate f(args)` lowers to `Rvalue::SpawnIsolate` (real OS-thread path, I.4b). Only the
     // CLI's real (VM) execution passes true; the differential/salsa keep false (byte-identical sandbox).
     real_isolates: bool,
     // Whether to emit per-prototype debug info + pin named locals through coalescing (see the public
     // `compile_with_sites` doc). Threaded onto `ModuleCompiler` and read at `into_chunk`/`declare_local`.
     debug: bool,
-) -> Result<Module, Unsupported> {
+) -> Result<(ModuleCompiler, Vec<(Span, u32)>), Unsupported> {
     let noeta_check::Sites {
         type_of_sites,
         construction_sites,
@@ -273,25 +336,7 @@ fn compile_inner(
             .map(|(span, layout)| (span, module.intern_packed_schema(layout)))
             .collect()
     };
-    Ok(Module {
-        protos: module.protos,
-        shapes: module.shapes,
-        packed_schemas: module.packed_schemas,
-        map_packed_sites,
-        methods: module.methods,
-        destructors: module.destructors,
-        field_defaults: module.field_defaults,
-        comparable_derives: module.comparable_derives,
-        tojson_derives: module.tojson_derives,
-        destruct_reachable,
-        cache_slots: module.cache_slots,
-        // The attribute manifest + type registry, built from the AST by the *same* pure builder the
-        // tree-walker uses — so reflection is identical across backends by construction.
-        reflection: noeta_ast::reflect::build(program),
-        type_reprs: module.type_reprs,
-        names: module.names,
-        global_names: module.global_names,
-    })
+    Ok((module, map_packed_sites))
 }
 
 /// A persistent, incremental compiler for a REPL session (REPL-on-VM). Where [`compile`] builds a
@@ -406,14 +451,27 @@ impl SessionCompiler {
         // way, keeping the session differential green.
         self.reflection.accumulate(noeta_ast::reflect::build(entry));
 
-        // Snapshot the persistent tables into a runnable module. Cloned (not moved) so the tables stay
-        // alive for the next entry; O(total bytecode) per entry, negligible at an interactive prompt.
-        Ok(Module {
+        // Snapshot the persistent tables into a runnable module (cloned, not moved, so the tables
+        // stay alive for the next entry). Checkerless, so no `map(...)`-result packed-layout sites
+        // (that fusion is a checker output).
+        Ok(self.snapshot(Vec::new(), destruct_reachable))
+    }
+
+    /// Snapshot the persistent tables into a runnable [`Module`]. Cloned (not moved) so the tables
+    /// stay alive for the next entry; O(total bytecode) per snapshot, negligible at an interactive
+    /// prompt. `map_packed_sites` / `destruct_reachable` differ by path: a checkerless REPL entry
+    /// passes empty / all-types (conservative), the checked session seed
+    /// ([`compile_with_sites_session`]) passes the checker's precise outputs.
+    fn snapshot(
+        &self,
+        map_packed_sites: Vec<(Span, u32)>,
+        destruct_reachable: Vec<String>,
+    ) -> Module {
+        Module {
             protos: self.mc.protos.clone(),
             shapes: self.mc.shapes.clone(),
             packed_schemas: self.mc.packed_schemas.clone(),
-            // Checkerless: no `map(...)`-result packed-layout sites (that fusion is a checker output).
-            map_packed_sites: Vec::new(),
+            map_packed_sites,
             methods: self.mc.methods.clone(),
             destructors: self.mc.destructors.clone(),
             field_defaults: self.mc.field_defaults.clone(),
@@ -425,7 +483,7 @@ impl SessionCompiler {
             type_reprs: self.mc.type_reprs.clone(),
             names: self.mc.names.clone(),
             global_names: self.mc.global_names.clone(),
-        })
+        }
     }
 
     /// The current global slot table (global name → dense slot index), for the REPL's `:drop` /
