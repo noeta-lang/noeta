@@ -1192,22 +1192,25 @@ enum ReplStep {
     Incomplete,
 }
 
-/// The deterministic sandbox environment the REPL runs against — an in-memory filesystem, a logical
-/// clock, and a seeded PRNG, rebuilt on `:reset`. Matches the environment the tree-walker REPL used, so
-/// moving the REPL onto the VM is a behaviour-preserving swap (a real-host prompt is a follow-on;
-/// see `plans/repl-on-vm`).
-fn sandbox_repl_env() -> noeta_vm::HostFactory {
+/// The environment the REPL runs against: a **real** host + wall-clock executor, so `fs`, `time`,
+/// `env`, and `uuid()` work at the prompt against the real machine — exactly as `noeta run` does. Built
+/// fresh on `:reset`. (The deterministic sandbox exists only to make the differential oracle
+/// reproducible; it is not what an interactive prompt wants.) A real-thread `isolate f(args)` falls
+/// back to a cooperative task here, since the session does not arm the parallel-isolate path.
+fn real_repl_env() -> noeta_vm::HostFactory {
     Box::new(|| {
-        (
-            Box::new(noeta_stdlib::SandboxHost::new()) as Box<dyn noeta_stdlib::Host>,
-            Box::new(noeta_stdlib::SandboxExecutor::new()) as Box<dyn noeta_stdlib::Executor>,
-        )
+        let host: Box<dyn noeta_stdlib::Host> =
+            Box::new(noeta_runtime::RealHost::new().expect("cannot start the REPL's runtime"));
+        let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
+            noeta_runtime::RealExecutor::new().expect("cannot start the REPL's async executor"),
+        );
+        (host, executor)
     })
 }
 
 fn cmd_repl() -> ExitCode {
     let stdin = io::stdin();
-    let mut session = VmSession::new(sandbox_repl_env());
+    let mut session = VmSession::new(real_repl_env());
     let mut buffer = String::new();
     // Each evaluated entry is parsed with a **distinct** `SourceId` (its index here) and kept, so a
     // stack trace into a function defined in an *earlier* entry renders against that entry's real text
