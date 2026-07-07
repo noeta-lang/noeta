@@ -214,6 +214,13 @@ impl SourceMap {
     pub fn line_col(&self, span: Span) -> LineCol {
         self.source(span.source).line_col(span.start)
     }
+
+    /// Consume the map into its sources, in id order — for a consumer that continues assigning
+    /// `SourceId`s where the loader stopped (the REPL's `--load` bootstrap: entry ids follow the
+    /// file's, so a stack trace into a bootstrap function renders against its real text).
+    pub fn into_sources(self) -> Vec<Source> {
+        self.sources
+    }
 }
 
 #[cfg(test)]

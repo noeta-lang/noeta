@@ -140,6 +140,12 @@ enum Command {
         /// errors surface at run time). Also toggleable at the prompt with `:check on` / `:check off`.
         #[arg(long)]
         no_check: bool,
+        /// Run this program to completion first (fully checked, imports resolved), then open the
+        /// prompt with everything it declared and bound live — a bootstrapped session ("tinker"):
+        /// a framework's bootstrap script gives an app-context REPL. A bootstrap that fails to
+        /// load, check, or run exits with its diagnostics instead of opening a broken prompt.
+        #[arg(long, value_name = "FILE")]
+        load: Option<PathBuf>,
     },
     /// Run the Noeta language server over stdio (LSP). Started by an editor client (e.g. the
     /// VS Code extension); speaks JSON-RPC on stdin/stdout. Provides live diagnostics, hover
@@ -190,7 +196,7 @@ fn main() -> ExitCode {
             tier,
             profile,
         } => cmd_dump(&file, &tier, &profile),
-        Command::Repl { no_check } => cmd_repl(!no_check),
+        Command::Repl { no_check, load } => cmd_repl(!no_check, load),
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),
     }
@@ -1472,14 +1478,90 @@ fn real_repl_env() -> noeta_vm::HostFactory {
     })
 }
 
-fn cmd_repl(check: bool) -> ExitCode {
+/// Load, check, compile, and RUN the `--load` bootstrap, returning the adopted session and the
+/// bootstrap's sources (the REPL's entry ids continue after them). The bootstrap is a *file*, so
+/// it is always fully checked — as it would be under `noeta run` — regardless of `--no-check`
+/// (which governs prompt entries); with checking on, the bootstrap's own checker session carries
+/// forward, so entries check against everything it declared and bound. Isolates in a bootstrap run
+/// cooperatively (the session's execution model). Any failure — unreadable file, load/check
+/// diagnostics, a runtime abort — exits with diagnostics instead of opening a broken prompt.
+fn repl_bootstrap(
+    path: &std::path::Path,
+    checker: &mut Option<noeta_check::SessionChecker>,
+) -> Result<(VmSession, Vec<Source>), ExitCode> {
+    let linked = match noeta_loader::load(path) {
+        Err(err) => {
+            eprintln!("noeta: cannot read {}: {err}", path.display());
+            return Err(ExitCode::from(2));
+        }
+        Ok(Err(load_diagnostics)) => {
+            for ld in &load_diagnostics {
+                eprint!("{}", render(&ld.source, &ld.diagnostic));
+            }
+            return Err(ExitCode::FAILURE);
+        }
+        Ok(Ok(linked)) => linked,
+    };
+
+    // Always checked (it is a file); the session flavor keeps the checker when the prompt wants it.
+    let (checked, session_checker) = noeta_check::check_all_session(&linked.program);
+    if !checked.diagnostics.is_empty() {
+        emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+        return Err(ExitCode::FAILURE);
+    }
+    if checker.is_some() {
+        *checker = Some(session_checker);
+    }
+
+    // Cooperative isolates + no debug info: the prompt's own execution model.
+    let (module, compiler) = match noeta_compiler::compile_with_sites_session(
+        &linked.program,
+        checked.sites,
+        false,
+        false,
+    ) {
+        Ok(pair) => pair,
+        Err(u) => {
+            eprintln!(
+                "noeta: internal error: the VM cannot compile this program: {}",
+                u.reason
+            );
+            return Err(ExitCode::FAILURE);
+        }
+    };
+    let (session, out) = VmSession::adopted(&module, compiler, real_repl_env());
+    print!("{}", out.stdout);
+    let _ = io::stdout().flush();
+    if !out.diagnostics.is_empty() {
+        // A bootstrap that aborts is a broken app context — fail fast, exactly like `noeta run`.
+        emit_diagnostics_mapped(&linked.sources, out.diagnostics.iter());
+        emit_trace(&out.trace, &linked.sources);
+        return Err(ExitCode::FAILURE);
+    }
+    eprintln!("(loaded {})", path.display());
+    Ok((session, linked.sources.into_sources()))
+}
+
+fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {
     let stdin = io::stdin();
-    let mut session = VmSession::new(real_repl_env());
     // The optional per-entry type checker (session-checker C2): `Some` = every entry is checked
     // against the accumulated session before it runs; an erroring entry prints diagnostics and is
     // skipped (and commits nothing — `check_entry` is transactional). Toggleable at the prompt.
+    // A `--load` bootstrap replaces the fresh checker with one seeded from the bootstrap's own
+    // whole-program check, so entries check against everything the bootstrap declared.
     let mut checker: Option<noeta_check::SessionChecker> =
         check.then(noeta_check::SessionChecker::new);
+    // A bootstrapped session ("tinker"): the file runs to completion as entry 0 — checked,
+    // imports resolved — and the prompt opens over its final state. Its sources seed the entry
+    // list so later `SourceId`s continue past them (a trace into a bootstrap function renders
+    // against its real text).
+    let (mut session, preloaded_sources) = match &load {
+        None => (VmSession::new(real_repl_env()), Vec::new()),
+        Some(path) => match repl_bootstrap(path, &mut checker) {
+            Ok(booted) => booted,
+            Err(code) => return code,
+        },
+    };
     // Whether SITE-DRIVEN codegen is still sound (session-checker C5): true only while the checker
     // has seen every entry of the session. `:check off` clears it PERMANENTLY — precise destructor
     // relevance derived from a registry that missed an unchecked entry's `destruct` class could
@@ -1492,7 +1574,7 @@ fn cmd_repl(check: bool) -> ExitCode {
     // and line — rather than degrading to name-only, as it did when every entry reused
     // `SourceId::FIRST` (REPL-on-VM follow-on). Only entries that actually run are kept; a syntax-error
     // entry compiles nothing, so no future trace can reference it.
-    let mut sources: Vec<Source> = Vec::new();
+    let mut sources: Vec<Source> = preloaded_sources;
     eprint!("lang repl — type a statement, Ctrl-D to exit\n» ");
     let _ = io::stderr().flush();
 

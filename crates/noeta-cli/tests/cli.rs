@@ -1454,3 +1454,67 @@ fn repl_checked_codegen_gives_type_of_full_fidelity() {
         .success()
         .stdout(predicate::str::contains("Type.List(Type.Dyn)"));
 }
+
+#[test]
+fn repl_load_bootstraps_a_session_with_the_programs_context() {
+    // The "tinker" shape: the bootstrap runs to completion (its output first), then the prompt
+    // opens with its functions, types, and bindings live — and entries check against them.
+    let path = temp_program(
+        "repl_load",
+        "fn twice(n: int): int { return n * 2 }\nmut base = 21\necho \"booted\"\n",
+    );
+    lang()
+        .arg("repl")
+        .arg("--load")
+        .arg(&path)
+        .write_stdin("echo twice(base);\nbase = 5\ntwice(base)\n")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("booted")
+                .and(predicate::str::contains("42"))
+                .and(predicate::str::contains("10")),
+        );
+}
+
+#[test]
+fn repl_load_entries_type_check_against_the_bootstrap() {
+    // A wrong-arity call against a BOOTSTRAP function is a static error at the prompt.
+    let path = temp_program(
+        "repl_load_check",
+        "fn twice(n: int): int { return n * 2 }\n",
+    );
+    lang()
+        .arg("repl")
+        .arg("--load")
+        .arg(&path)
+        .write_stdin("twice(1, 2)\necho twice(3);\n")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("E00"))
+        .stdout(predicate::str::contains("6"));
+}
+
+#[test]
+fn repl_load_fails_fast_on_a_broken_bootstrap() {
+    // A bootstrap that does not type-check exits with its diagnostics — no broken prompt.
+    let bad_check = temp_program("repl_load_bad_check", "mut x: int = \"s\"\n");
+    lang()
+        .arg("repl")
+        .arg("--load")
+        .arg(&bad_check)
+        .write_stdin("echo 1;\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0007"));
+    // A bootstrap that panics at run time exits with the abort — same rule.
+    let panics = temp_program("repl_load_panics", "panic(\"boom\")\n");
+    lang()
+        .arg("repl")
+        .arg("--load")
+        .arg(&panics)
+        .write_stdin("echo 1;\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("boom"));
+}
