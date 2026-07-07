@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use noeta_ast::Expr;
+use noeta_ast::Program;
 use noeta_bytecode::Module;
 use noeta_parser::parse_fragment;
 use noeta_span::{SourceId, SourceMap};
@@ -33,14 +33,15 @@ pub enum Resume {
     Step(StepMode),
     /// Abandon the run (the client disconnected).
     Terminate,
-    /// Evaluate `expr` against the paused frame at snapshot index `frame` (as the client numbers stack
-    /// frames, innermost first) and send the rendered result back on `reply`. The debugger cannot run
-    /// this itself — resolving a call needs `&mut Vm` — so it hands the request to the VM (via
-    /// [`DebugAction::Evaluate`]); the program **stays paused** throughout, so a watch/hover re-query
-    /// never resumes it. `allow_calls` is `false` for a hover (side-effect-free): a call then errors
-    /// rather than running.
+    /// Evaluate a parsed console fragment against the paused frame at snapshot index `frame` (as
+    /// the client numbers stack frames, innermost first) and send the rendered result back on
+    /// `reply`. The debugger cannot run this itself — running code needs `&mut Vm` — so it hands
+    /// the request to the VM (via [`DebugAction::Evaluate`]); the program **stays paused**
+    /// throughout, so a watch/hover re-query never resumes it. With `allow_calls` the VM compiles
+    /// the fragment through the debug session (full language, closures included — T5);
+    /// `allow_calls = false` (a hover) stays side-effect-free and refuses to run code.
     Evaluate {
-        expr: Expr,
+        program: Program,
         frame: usize,
         allow_calls: bool,
         reply: Sender<DebugEvalOutcome>,
@@ -259,12 +260,12 @@ impl DapDebugger {
             // Hand the evaluate to the VM (it may run a call). We stay paused: `mid_pause` remains set
             // and the captured stack is left in place, so `before_op` resumes waiting after.
             Ok(Resume::Evaluate {
-                expr,
+                program,
                 frame,
                 allow_calls,
                 reply,
             }) => DebugAction::Evaluate(DebugEvalRequest {
-                expr: Box::new(expr),
+                program,
                 frame,
                 allow_calls,
                 reply,
@@ -394,14 +395,18 @@ fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
     PausedState { frames }
 }
 
-/// Parse a single expression string (appended with `;` so it parses as a trailing bare expression);
-/// `None` if it does not lex/parse cleanly. The adapter parses a watch string here, then hands the
-/// [`Expr`] to the VM (via [`Resume::Evaluate`]) which walks it — evaluation lives on the VM so a call
-/// can run through the real call machinery (D5.2).
-pub fn parse_expr(expr: &str) -> Option<Expr> {
-    let fragment = parse_fragment(SourceId::FIRST, "<eval>", expr);
+/// Parse a console fragment (statements allowed; a trailing bare expression is its value); `None`
+/// if it does not lex/parse cleanly. The adapter parses here, then hands the [`Program`] to the VM
+/// (via [`Resume::Evaluate`]), which compiles it through the debug session (T5) — or, for a hover,
+/// walks its trailing expression read-only.
+///
+/// The fragment's [`SourceId`] is deliberately far outside the program's range: fragment spans must
+/// never collide with real source spans (the session compiler's span-keyed tables, trace rendering
+/// — `SourceMap::source` degrades an unknown id to the entry rather than panicking).
+pub fn parse_console_fragment(text: &str) -> Option<Program> {
+    let fragment = parse_fragment(SourceId(u32::MAX), "<console>", text);
     if !fragment.diagnostics.is_empty() {
         return None;
     }
-    fragment.trailing_expr().cloned()
+    Some(fragment.program)
 }

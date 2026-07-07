@@ -33,7 +33,9 @@ use std::thread::{self, JoinHandle};
 
 use serde_json::{Value, json};
 
-use debugger::{DapDebugger, FrameInfo, Paused, Resume, StepMode, parse_expr, resolve_breakpoints};
+use debugger::{
+    DapDebugger, FrameInfo, Paused, Resume, StepMode, parse_console_fragment, resolve_breakpoints,
+};
 use noeta_vm::DebugEvalOutcome;
 use protocol::{Writer, command_of, error_response, event, read_message, response};
 
@@ -241,7 +243,7 @@ fn spawn_run(
                     out.clone(),
                     resume,
                 ));
-                session::run_compiled(&compiled, Some(hook))
+                session::run_compiled(compiled, Some(hook))
             }
             // A load/check/compile failure never started the VM — replay it as a stderr chunk.
             Err(failure) => failure,
@@ -466,7 +468,7 @@ fn evaluate(
         .unwrap_or(0) as usize;
     // A hover must not run code (VS Code fires it on mouse-over); a watch / debug console may.
     let allow_calls = args.and_then(|a| a.get("context")).and_then(Value::as_str) != Some("hover");
-    let expr = parse_expr(expression).ok_or("could not parse the expression")?;
+    let program = parse_console_fragment(expression).ok_or("could not parse the expression")?;
     // Evaluation reads the paused frames on the run worker — there must be a paused program.
     if with_paused(paused, |_| ()).is_none() {
         return Err("can only evaluate while the program is paused".to_string());
@@ -475,7 +477,7 @@ fn evaluate(
     let (reply_tx, reply_rx) = mpsc::channel::<DebugEvalOutcome>();
     resume
         .send(Resume::Evaluate {
-            expr,
+            program,
             frame,
             allow_calls,
             reply: reply_tx,
@@ -1036,6 +1038,85 @@ mod tests {
         assert_eq!(hover_call["success"], false, "{hover_call:#?}");
 
         session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    /// T5 (tooling-unification): the debug console is a REPL over the paused program — fragments
+    /// compile through the adopted session, so **closures** work, statements execute, and a value
+    /// that ESCAPES into program state (a fragment closure rebound into a program global) is still
+    /// live after `continue`, called by the program's own resumed code.
+    #[test]
+    fn evaluate_compiles_fragments_with_closures_and_escape_survives_resume() {
+        let path = fixture(
+            "evaluate_fragments",
+            "fn twice(n: int): int { return n * 2 }\n\
+             mut cb = fn(n: int) => n\n\
+             fn probe(): void {\n    \
+             mut xs = [10, 20, 30]\n    \
+             echo \"here\"\n}\n\
+             probe()\n\
+             echo cb(7)\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        // Break on the `echo "here"` line, inside `probe`, with `xs` in scope.
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 5 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+
+        // A closure ARGUMENT — new code, compiled into a new proto and run through the real
+        // `filter` machinery against the frame-local list.
+        let filtered = session.evaluate("xs.filter(fn(x) => x > 15)");
+        assert_eq!(filtered["success"], true, "{filtered:#?}");
+        assert_eq!(filtered["body"]["result"], "[20, 30]");
+        // A closure that composes a frame local with a program function.
+        assert_eq!(
+            session.evaluate("xs.map(fn(x) => twice(x))")["body"]["result"],
+            "[20, 40, 60]"
+        );
+        // Statements execute; a trailing bare expression is the fragment's value. The `mut` local
+        // lives only inside the fragment (persistent console bindings are a deferred follow-on).
+        assert_eq!(
+            session.evaluate("mut y = xs.len() * 10; y + 1")["body"]["result"],
+            "31"
+        );
+
+        // ESCAPE: rebind the program's `cb` global to a fragment closure that captures the frame
+        // local `xs` and calls the program's `twice` — a proto index that exists only in the
+        // extended module.
+        let escape = session.evaluate("cb = fn(n: int) => twice(n) + xs.len();");
+        assert_eq!(escape["success"], true, "{escape:#?}");
+        // The escaped closure is callable from a later fragment while still paused.
+        assert_eq!(session.evaluate("cb(1)")["body"]["result"], "5");
+
+        // Resume: the program's own `echo cb(7)` now calls the escaped fragment closure through
+        // the swapped module — twice(7) + xs.len() = 17.
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        let mut stdout = String::new();
+        loop {
+            let message = session.recv_until(|m| {
+                (m["type"] == "event" && (m["event"] == "output" || m["event"] == "terminated"))
+                    || m["type"] == "response"
+            });
+            if message["type"] == "event" && message["event"] == "output" {
+                if message["body"]["category"] == "stdout" {
+                    stdout.push_str(message["body"]["output"].as_str().unwrap_or(""));
+                }
+            } else if message["type"] == "event" && message["event"] == "terminated" {
+                break;
+            }
+        }
+        assert_eq!(stdout, "here\n17\n");
         session.disconnect_and_join();
     }
 

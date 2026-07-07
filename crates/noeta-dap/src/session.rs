@@ -17,11 +17,14 @@ use noeta_diagnostics::{render, render_mapped};
 use noeta_span::SourceMap;
 use noeta_vm::{Debugger, VmBackend};
 
-/// A program compiled and ready to run under the debugger: the bytecode plus the source map that
-/// resolves each instruction's span back to a file + line.
+/// A program compiled and ready to run under the debugger: the bytecode, the source map that
+/// resolves each instruction's span back to a file + line, and the **live session compiler** the
+/// checked compile left behind (tooling-unification T3/T5) — console fragments extend it at run
+/// time, appending onto the program's own id-spaces.
 pub struct Compiled {
     pub module: Module,
     pub sources: SourceMap,
+    pub session: noeta_compiler::SessionCompiler,
 }
 
 /// One chunk of program output, tagged with the DAP `output`-event category it belongs to.
@@ -82,18 +85,20 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
     }
 
     match compile_checked(&linked.program, &checked) {
-        Ok(module) => Ok(Compiled {
+        Ok((module, session)) => Ok(Compiled {
             module,
             sources: linked.sources,
+            session,
         }),
         Err(reason) => Err(RunOutput::failed(format!("noeta: {reason}\n"), 1)),
     }
 }
 
 /// Run an already-compiled program (JIT unarmed) with an optional [`Debugger`] attached, collecting
-/// its output. Never panics on ordinary failure: a host/executor that cannot start becomes a `stderr`
-/// chunk with a non-zero exit.
-pub fn run_compiled(compiled: &Compiled, debugger: Option<Box<dyn Debugger>>) -> RunOutput {
+/// its output. Consumes the [`Compiled`]'s session — the run owns it from here (console fragments
+/// extend it on the run worker). Never panics on ordinary failure: a host/executor that cannot
+/// start becomes a `stderr` chunk with a non-zero exit.
+pub fn run_compiled(compiled: Compiled, debugger: Option<Box<dyn Debugger>>) -> RunOutput {
     let host: Box<dyn noeta_stdlib::Host> = match noeta_runtime::RealHost::new() {
         Ok(host) => Box::new(host),
         Err(err) => return RunOutput::failed(format!("noeta: cannot start host: {err}\n"), 2),
@@ -103,8 +108,13 @@ pub fn run_compiled(compiled: &Compiled, debugger: Option<Box<dyn Debugger>>) ->
         Err(err) => return RunOutput::failed(format!("noeta: cannot start executor: {err}\n"), 2),
     };
 
-    let (result, trace) =
-        VmBackend::new().run_module_debug(&compiled.module, host, executor, debugger);
+    let (result, trace) = VmBackend::new().run_module_debug_session(
+        &compiled.module,
+        compiled.session,
+        host,
+        executor,
+        debugger,
+    );
 
     let mut chunks = Vec::new();
     if !result.stdout.is_empty() {
@@ -133,16 +143,17 @@ pub fn run_compiled(compiled: &Compiled, debugger: Option<Box<dyn Debugger>>) ->
     }
 }
 
-/// Compile an already-checked program to a bytecode [`Module`] **with debug info**. The same
-/// `compile_with_sites` call the CLI's `compile_real` makes (the checker's [`noeta_check::Sites`]
-/// bundle threaded through), but with `debug = true`: emit the debug-info side-tables (reg→name
-/// locals, proto names + spans) and pin named locals through coalescing — the one difference from
-/// `noeta run`'s compile.
+/// Compile an already-checked program to a bytecode [`Module`] **with debug info**, keeping the
+/// compiler alive as a session (tooling-unification T3/T5). The same checked compile the CLI's
+/// `compile_real` performs (the checker's [`noeta_check::Sites`] bundle threaded through), with two
+/// debug-run differences: `debug = true` (the debug-info side-tables — reg→name locals, proto
+/// names + spans — and named locals pinned through coalescing), and the session-flavored entry so
+/// console fragments can extend the program's id-spaces at run time.
 fn compile_checked(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
-) -> Result<Module, String> {
-    noeta_compiler::compile_with_sites(
+) -> Result<(Module, noeta_compiler::SessionCompiler), String> {
+    noeta_compiler::compile_with_sites_session(
         program,
         checked.sites.clone(),
         // Real execution lowers `isolate f(args)` to real OS-thread spawns, as `noeta run` does.

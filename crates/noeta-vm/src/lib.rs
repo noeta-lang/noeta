@@ -36,7 +36,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
-use noeta_ast::{BinaryOp, Expr, Program};
+use noeta_ast::{BinaryOp, ClosureBody, Expr, Param, Program, Stmt};
 use noeta_backend::{Backend, RunResult};
 use noeta_bytecode::{
     BoolSide, Builtin, CaptureFrom, Chunk, Const, Module, NarrowTarget, Op, Reg, ReuseCheck,
@@ -97,15 +97,18 @@ pub enum DebugAction {
 }
 
 /// A paused-frame `evaluate` request handed from the [`Debugger`] to the VM (see
-/// [`DebugAction::Evaluate`]). Owns everything the VM needs to run the expression and reply.
+/// [`DebugAction::Evaluate`]). Owns everything the VM needs to run the fragment and reply.
 #[derive(Debug)]
 pub struct DebugEvalRequest {
-    /// The parsed expression to evaluate (the adapter parses the watch string; the VM walks the AST).
-    pub expr: Box<Expr>,
+    /// The parsed fragment (the adapter parses the console string; statements are allowed — a
+    /// trailing bare expression is the fragment's value). On a session run with `allow_calls` the
+    /// VM compiles it through the adopted session (closures included, tooling-unification T5);
+    /// hover walks its trailing expression read-only.
+    pub program: Program,
     /// Which paused frame's scope to evaluate against, as the client numbers frames (innermost first).
     pub frame: usize,
-    /// Whether a **call** may run. `false` for a hover (a hover must stay side-effect-free): a call
-    /// then errors instead of executing. `true` for a watch / debug console.
+    /// Whether the fragment may run **code** (calls, closures, statements). `false` for a hover — a
+    /// hover must stay side-effect-free, so it evaluates paths/operators only and refuses a call.
     pub allow_calls: bool,
     /// Where the rendered outcome is sent back. Only strings cross this channel — the runtime values
     /// are thread-local, so they are rendered on the run worker before the reply travels back.
@@ -307,6 +310,35 @@ impl VmBackend {
         noeta_value::set_collector_mode(mode);
         let mut vm = Vm::load(module, host, executor);
         vm.debugger = debugger;
+        let result = run_and_teardown(&mut vm, mode);
+        let trace = std::mem::take(&mut vm.abort_trace);
+        (result, trace)
+    }
+
+    /// Like [`VmBackend::run_module_debug`], but with the **debug console armed** (tooling-
+    /// unification T5): `session` is the live compiler
+    /// [`noeta_compiler::compile_with_sites_session`] returned alongside `module`, and every
+    /// console fragment the debugger sends compiles through it and installs into the running Vm —
+    /// full language, closures included. The arena owning each extended module snapshot lives
+    /// here, for exactly the run's duration; an escaped fragment value stays resolvable until the
+    /// program exits.
+    pub fn run_module_debug_session(
+        &self,
+        module: &Module,
+        session: noeta_compiler::SessionCompiler,
+        host: Box<dyn noeta_stdlib::Host>,
+        executor: Box<dyn noeta_stdlib::Executor>,
+        debugger: Option<Box<dyn Debugger>>,
+    ) -> (RunResult, Vec<TraceFrame>) {
+        let mode = noeta_value::CollectorMode::Trace;
+        noeta_value::set_collector_mode(mode);
+        let arena = typed_arena::Arena::new();
+        let mut vm = Vm::load(module, host, executor);
+        vm.debugger = debugger;
+        vm.debug_session = Some(DebugSession {
+            compiler: session,
+            arena: &arena,
+        });
         let result = run_and_teardown(&mut vm, mode);
         let trace = std::mem::take(&mut vm.abort_trace);
         (result, trace)
@@ -529,13 +561,16 @@ struct Abort;
 /// snapshot — old frames keep executing their (prefix-identical) code, new frames resolve
 /// fragment protos/names through the newest module, and an escaped fragment closure stays callable
 /// after the program resumes.
-// TODO(tooling-unification T5): the `allow` comes off when the debugger trampoline's fragment path
-// lands — until then only the tests construct a session.
-#[allow(dead_code)]
 struct DebugSession<'m> {
     compiler: noeta_compiler::SessionCompiler,
     arena: &'m typed_arena::Arena<Module>,
 }
+
+/// The unforgeable global a wrapped console fragment binds its closure to (see
+/// [`Vm::debug_eval_fragment`]) — a NUL-prefixed name no user identifier can collide with, taken
+/// back out of its slot immediately after the entry runs (the same trick as the REPL's
+/// trailing-expression sentinel).
+const FRAGMENT_SENTINEL: &str = "\0debug-fragment";
 
 impl std::fmt::Debug for DebugSession<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2856,18 +2891,39 @@ impl<'m> Vm<'m> {
                             // `&mut self`, reply, then loop: `before_op` re-enters its wait silently.
                             DebugAction::Evaluate(req) => {
                                 let DebugEvalRequest {
-                                    expr,
+                                    program,
                                     frame,
                                     allow_calls,
                                     reply,
                                 } = req;
-                                let outcome = self.debug_eval_request(
-                                    &expr,
-                                    frame,
-                                    allow_calls,
-                                    &frames[..],
-                                    &regs[..],
-                                );
+                                // A watch / console fragment on a session run compiles through the
+                                // adopted session — full language, closures included (T5). Hover
+                                // (`allow_calls = false`) and session-less debug runs walk the
+                                // trailing expression read-only instead.
+                                let outcome = if allow_calls && self.debug_session.is_some() {
+                                    self.debug_eval_fragment(
+                                        &program,
+                                        frame,
+                                        &frames[..],
+                                        &regs[..],
+                                    )
+                                } else {
+                                    match program.stmts.last() {
+                                        Some(Stmt::Expr { expr, .. }) => {
+                                            let expr = expr.clone();
+                                            self.debug_eval_request(
+                                                &expr,
+                                                frame,
+                                                allow_calls,
+                                                &frames[..],
+                                                &regs[..],
+                                            )
+                                        }
+                                        _ => DebugEvalOutcome::Error(
+                                            "only an expression can be evaluated here".to_string(),
+                                        ),
+                                    }
+                                };
                                 let _ = reply.send(outcome);
                             }
                         }
@@ -5462,8 +5518,6 @@ impl<'m> Vm<'m> {
     ///
     /// Returns the relocated entry's proto index; the caller runs it via [`Vm::run_thunk`]. Debug
     /// runs keep the JIT unarmed (asserted): tier-1 mirror tables never see a swapped module.
-    // TODO(tooling-unification T5): the `allow` comes off when the debugger trampoline calls this.
-    #[allow(dead_code)]
     fn install_fragment(&mut self, fragment: &Program) -> Result<u32, String> {
         #[cfg(feature = "jit")]
         assert!(
@@ -5539,6 +5593,139 @@ impl<'m> Vm<'m> {
         // (3) Swap to the arena'd snapshot; the dispatch loop picks it up at the next frame transfer.
         self.module = arena.alloc(extended);
         Ok(entry_idx)
+    }
+
+    /// Evaluate a debug-console **fragment** against a paused frame by *compiling* it — the T5
+    /// evaluator: the console is a REPL over the paused program. The fragment is wrapped as a
+    /// closure whose parameters are the frame's in-scope locals (frame-scope binding via the
+    /// ordinary call protocol — the REPL's sentinel idea in frame scope), its trailing bare
+    /// expression rewritten to a `return`; the wrapper is bound to an unforgeable sentinel global
+    /// by [`Vm::install_fragment`] + one entry run, then called with the values read straight from
+    /// the paused register window. Everything the language can do works — calls, closures
+    /// (`xs.filter(fn(x) => x > 15)`), statements, assignment to program globals — with semantics
+    /// that are the compiler's by construction. An escaped value (a closure stored into program
+    /// state) stays callable after resume because the installed module lives for the rest of the
+    /// run.
+    ///
+    /// A fragment's transient diagnostics/abort-trace are rolled back afterwards, so a failed
+    /// console entry never pollutes the debugged run.
+    fn debug_eval_fragment(
+        &mut self,
+        program: &Program,
+        frame: usize,
+        frames: &[Frame],
+        regs: &[Value],
+    ) -> DebugEvalOutcome {
+        // Resolve the target frame (snapshot indices are innermost-first, the view bottom-first)
+        // and collect its in-scope locals — the same declared-before-the-paused-instruction filter
+        // the Variables view applies, so the console sees exactly what the panel shows.
+        let (params, args): (Vec<String>, Vec<Value>) = {
+            let view = DebugView {
+                module: self.module,
+                frames,
+                regs,
+            };
+            let Some(view_idx) = view.depth().checked_sub(frame + 1) else {
+                return DebugEvalOutcome::Error(format!("no frame {frame} in the paused stack"));
+            };
+            let f = view.frame(view_idx);
+            let here = f.line_span();
+            f.locals()
+                .filter(|(_, def_span, _)| match here {
+                    Some(h) => def_span.start < h.start,
+                    None => true,
+                })
+                .map(|(name, _, value)| (name.to_string(), value))
+                .unzip()
+        };
+        // Wrap: `mut <sentinel> = fn(<locals>) { <fragment>; return <trailing expr> };`
+        let span = program.span;
+        let mut body = program.stmts.clone();
+        if let Some(Stmt::Expr { expr, span }) = body.last() {
+            let (expr, span) = (expr.clone(), *span);
+            *body.last_mut().expect("non-empty: matched last") = Stmt::Return {
+                value: Some(expr),
+                span,
+            };
+        }
+        let wrapper = Program {
+            stmts: vec![Stmt::Binding {
+                mut_decl: true,
+                name: FRAGMENT_SENTINEL.to_string(),
+                name_span: span,
+                ty: None,
+                value: Expr::Closure {
+                    params: params
+                        .iter()
+                        .map(|name| Param {
+                            name: name.clone(),
+                            name_span: span,
+                            ty: None,
+                            default: None,
+                            span,
+                        })
+                        .collect(),
+                    ret: None,
+                    body: ClosureBody::Block(body),
+                    span,
+                },
+                span,
+            }],
+            span,
+        };
+        let diag_mark = self.diagnostics.len();
+        let trace_mark = self.abort_trace.len();
+        let outcome = self.run_fragment(&wrapper, args, span);
+        // A console entry is a side query — its errors must not leak into the run being debugged.
+        self.diagnostics.truncate(diag_mark);
+        self.abort_trace.truncate(trace_mark);
+        outcome
+    }
+
+    /// Install and run one wrapped fragment: entry run binds the sentinel closure, which is then
+    /// taken out of its slot (one-shot — the sentinel never lingers) and called with the paused
+    /// frame's local values. `args` are borrowed from the paused register window; they are retained
+    /// only at the call (which consumes one reference each).
+    fn run_fragment(
+        &mut self,
+        wrapper: &Program,
+        args: Vec<Value>,
+        span: Span,
+    ) -> DebugEvalOutcome {
+        let entry = match self.install_fragment(wrapper) {
+            Ok(entry) => entry,
+            Err(msg) => return DebugEvalOutcome::Error(msg),
+        };
+        match self.run_thunk(entry, &[]) {
+            Ok(v) => release(v),
+            Err(Abort) => return DebugEvalOutcome::Error(self.last_diag_message()),
+        }
+        let Some(slot) = self
+            .module
+            .global_names
+            .iter()
+            .position(|n| n == FRAGMENT_SENTINEL)
+        else {
+            return DebugEvalOutcome::Error("internal error: fragment sentinel not bound".into());
+        };
+        let closure = std::mem::replace(&mut self.globals[slot], Value::unbound());
+        if closure.is_unbound() {
+            return DebugEvalOutcome::Error("the fragment did not produce a value".into());
+        }
+        for a in &args {
+            retain(*a);
+        }
+        let result = self.call_value(closure, args, span);
+        release(closure);
+        match result {
+            Ok(v) => {
+                let text = v.display();
+                let ty = v.type_display();
+                release(v);
+                DebugEvalOutcome::Value { text, ty }
+            }
+            Err(Abort) => DebugEvalOutcome::Error(self.last_diag_message()),
+        }
     }
 
     /// Service a paused-frame `evaluate` (the D5.2 trampoline — see [`DebugAction::Evaluate`]). Runs on
