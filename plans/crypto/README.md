@@ -1,6 +1,13 @@
 # std.crypto — hashing, HMAC, bcrypt, and `id.uuid_v5` (the third seam client)
 
-**Status: IN PROGRESS.** Branch `std-crypto` (off local main `6d069ca`, post extern-types merge).
+**Status: ARC COMPLETE (2026-07-07).** C0 `4cbdafb`, C1 `6d5fd4e`, C2 `445cadf`, C3 `b128b63`,
+C4 `4557cf2`, C5 `aa11b98`, C6 docs+plan+memory. Branch `std-crypto` (off local main `6d069ca`).
+Gates: all published vectors pinned (NIST FIPS 180, RFC 4231, RFC 9562, openwall bcrypt —
+digest/HMAC values cross-checked against Python hashlib, v5 against Python uuid5); C2/C3/C5
+landed with **zero backend edits** (the registry seam carried a new module, a new extern type,
+and new module functions alone); bcrypt sandbox hash exact-pinned by the differential +
+real-entropy CLI round-trip. Follow-ons in `plans/deferred.md` §Crypto (blake3, argon2,
+encryption, constant-time hmac_verify).
 
 A tier-2 stdlib module for the everyday cryptographic primitives an application language needs:
 content digests (sha256/sha512, plus sha1/md5 for interop), keyed digests (HMAC), password
