@@ -110,7 +110,7 @@ pub struct Checked {
     pub packed_list_sites: std::collections::HashMap<Span, noeta_ast::reflect::PackedLayout>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`), carried here for the same reason as
     /// `packed_list_sites`: the lowering bakes them into `Rvalue::ExtCall`, computed once per check.
-    pub ext_call_sites: std::collections::HashMap<Span, noeta_stdlib::TypeRecipe>,
+    pub ext_call_sites: std::collections::HashMap<Span, noeta_native::TypeRecipe>,
     /// `map(...)` call sites whose result element type is packed (P-PACK 2.6 category B), carried here
     /// for the same reason as `packed_list_sites`: the VM builds a flat `map` result at these spans.
     pub map_packed_sites: std::collections::HashMap<Span, noeta_ast::reflect::PackedLayout>,

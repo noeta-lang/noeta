@@ -8,7 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 noeta-ast = { workspace = true }
-noeta-stdlib = { workspace = true }
+noeta-native = { workspace = true }
 noeta-span = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-object = { workspace = true }

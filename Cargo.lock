@@ -1525,9 +1525,9 @@ version = "0.0.0"
 dependencies = [
  "noeta-ast",
  "noeta-diagnostics",
+ "noeta-native",
  "noeta-object",
  "noeta-span",
- "noeta-stdlib",
 ]
 
 [[package]]
@@ -1649,9 +1649,9 @@ dependencies = [
  "noeta-diagnostics",
  "noeta-lexer",
  "noeta-loader",
+ "noeta-native",
  "noeta-parser",
  "noeta-span",
- "noeta-stdlib",
  "salsa",
 ]
 
@@ -1701,9 +1701,9 @@ dependencies = [
  "noeta-ast",
  "noeta-diagnostics",
  "noeta-lexer",
+ "noeta-native",
  "noeta-parser",
  "noeta-span",
- "noeta-stdlib",
  "noeta-types",
 ]
 
@@ -1770,6 +1770,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-native"
+version = "0.0.0"
+dependencies = [
+ "compact_str",
+ "equivalent",
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "noeta-object"
 version = "0.0.0"
 
@@ -1819,6 +1828,7 @@ dependencies = [
  "equivalent",
  "hmac",
  "md-5",
+ "noeta-native",
  "serde_json",
  "sha1",
  "sha2",

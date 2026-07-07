@@ -81,7 +81,7 @@ pub struct LoweringSites<'a> {
     /// to a single [`Rvalue::IndexField`], reading a packed element's field without materializing it.
     pub index_field_sites: &'a HashSet<Span>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`), baked into [`Rvalue::ExtCall`].
-    pub ext_call_sites: &'a HashMap<Span, noeta_stdlib::TypeRecipe>,
+    pub ext_call_sites: &'a HashMap<Span, noeta_native::TypeRecipe>,
     /// `for` spans whose iterable is statically an `Iterator<T>` → the lowered [`Stmt::For`] streams
     /// via `next()` rather than snapshotting a list (Track I.2).
     pub for_stream_sites: &'a HashSet<Span>,
@@ -994,8 +994,8 @@ impl Lowerer<'_> {
                     // `Method` (which would compute on the full erased i64). A `Convert` (`to_*`) is not
                     // width-relative — it stays an ordinary method.
                     if let Some(&(_, bits)) = self.sites.width_sites.get(span)
-                        && let Some(method) = noeta_stdlib::IntMethod::from_name(name)
-                        && !matches!(method, noeta_stdlib::IntMethod::Convert { .. })
+                        && let Some(method) = noeta_native::IntMethod::from_name(name)
+                        && !matches!(method, noeta_native::IntMethod::Convert { .. })
                     {
                         return Ok(self.emit(
                             out,
