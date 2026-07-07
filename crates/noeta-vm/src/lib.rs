@@ -7143,6 +7143,108 @@ impl<'m> Vm<'m> {
                     }
                 }
             }
+            // `http.serve(port, handler)` — the inbound accept→handle→reply loop (http-server S3).
+            // Serial for now: one connection handled to completion before the next is accepted;
+            // concurrent in-flight dispatch is S3b. Under the sandbox the accept leaf drives a finite
+            // request script and reports the listener closed, so the loop terminates in-oracle. The
+            // tree-walker mirror of this is its own `Builtin::Serve`.
+            Builtin::Serve => {
+                self.check_arity(builtin, args, 2, span)?;
+                let Some(port) = args[0].as_int() else {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`http.serve` expects an int port, found {}",
+                            args[0].type_name()
+                        ),
+                    ));
+                };
+                let handler = args[1];
+                let addr = format!("0.0.0.0:{port}");
+                let listener = self
+                    .host
+                    .net_listen(&addr)
+                    .map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
+                let server_error = || noeta_stdlib::NetResponse {
+                    status: 500,
+                    headers: Vec::new(),
+                    body: b"Internal Server Error".to_vec(),
+                };
+                loop {
+                    // Accept — an async leaf driven to ready. `none` means the listener closed.
+                    // `make_async_io` allocates a heap ticket; `drive_future` only borrows it, so
+                    // release it here (destructor-aware, as `Op::RunFuture` does) or it leaks.
+                    let accept_io = self.host.net_accept(listener);
+                    let accept_id = self.executor.spawn_ext(&mut *self.host, accept_io);
+                    let accept_future = Value::make_async_io(accept_id);
+                    let accepted = self.drive_future(accept_future, span)?;
+                    self.release_value(accept_future);
+                    let is_some = accepted
+                        .shape()
+                        .map(|s| s.name == "Option" && s.variant.as_deref() == Some("some"))
+                        .unwrap_or(false);
+                    if !is_some {
+                        release(accepted);
+                        break;
+                    }
+                    // The `Request` payload is shared (not retained) by `enum_data`; keep it alive
+                    // past releasing the `Option` enum that carried it.
+                    let request = accepted
+                        .enum_data()
+                        .and_then(|d| d.into_iter().next())
+                        .expect("some carries the request");
+                    retain(request);
+                    release(accepted);
+                    // The conn id rides inside the `Request`; the handler never sees it.
+                    let conn = if request.is_extern() {
+                        request.with_extern(|e| {
+                            e.as_any()
+                                .downcast_ref::<noeta_stdlib::net::Request>()
+                                .map(|r| r.conn)
+                        })
+                    } else {
+                        None
+                    }
+                    .expect("accept yields a Request extern value");
+                    // Call `handler(request)` (consumes the request reference) and drive its result (a
+                    // sync handler returns the `Response` directly; an async one a `Future`). The
+                    // result future must be released after driving — `drive_future` only borrows it and
+                    // `poll_once` retains a non-future pass-through, exactly as `Op::RunFuture` handles
+                    // an awaited future. A handler error → 500, and the server keeps running.
+                    let response = match self.call_value(handler, vec![request], span) {
+                        Ok(fut) => {
+                            let driven = self.drive_future(fut, span);
+                            self.release_value(fut);
+                            match driven {
+                                Ok(resp_val) => {
+                                    let net = if resp_val.is_extern() {
+                                        resp_val.with_extern(|e| {
+                                            e.as_any()
+                                                .downcast_ref::<noeta_stdlib::NetResponse>()
+                                                .cloned()
+                                        })
+                                    } else {
+                                        None
+                                    };
+                                    release(resp_val);
+                                    net.unwrap_or_else(server_error)
+                                }
+                                Err(_) => server_error(),
+                            }
+                        }
+                        Err(_) => server_error(),
+                    };
+                    // Reply — another async leaf — then loop for the next connection.
+                    let reply_io = self.host.net_reply(conn, response);
+                    let reply_id = self.executor.spawn_ext(&mut *self.host, reply_io);
+                    let reply_future = Value::make_async_io(reply_id);
+                    let unit = self.drive_future(reply_future, span)?;
+                    self.release_value(reply_future);
+                    release(unit);
+                }
+                Ok(Value::unit())
+            }
             Builtin::Signal => {
                 self.check_arity(builtin, args, 1, span)?;
                 // `signal(v)` — allocate a reactive cell holding `v`. The graph keeps its own

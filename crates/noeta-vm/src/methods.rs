@@ -349,6 +349,13 @@ impl<'m> Vm<'m> {
             };
             return self.call_builtin(builtin, args, span);
         }
+        // `http.serve(port, handler)` (http-server S3) — a builtin, not a registry function: the
+        // handler is a closure (which the `NativeValue` seam cannot carry) and the loop needs the
+        // executor + inbound Network capability. Intercept it ahead of `http`'s registry functions
+        // (which stay registry-dispatched). The tree-walker mirrors this.
+        if module == "http" && func == "serve" {
+            return self.call_builtin(Builtin::Serve, args, span);
+        }
         // A function registered in the native-extension registry dispatches through the shared
         // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host
         // threaded in), and materialize the `NativeOut` result (the result shape supplied from the

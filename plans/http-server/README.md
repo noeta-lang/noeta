@@ -175,7 +175,20 @@ first-party router/middleware library is a follow-on arc or a documented example
   `body_bytes`, registry, zero backend edits) and the **`http.response(status, body?, headers?)`
   builder** (+ a copy-modify `with_header` so middleware can augment a response). Conformance builds a
   `Request` from a fixture and a `Response`, reading both back, in both backends.
-- **S3** — the **serve construct** (the core green slice): grammar for `http.serve(port, handler)`
+- **S3a — done (`<pending>`).** The **serve construct**, serial loop. `http.serve` is a `Builtin`
+  (not a registry `ExtFn` — the handler is a closure the `NativeValue` seam can't carry, and the loop
+  needs the executor + inbound Network capability), intercepted on the qualified `http.serve` call in
+  each backend's `call_native_module` ahead of `http`'s registry functions. The checker types it as
+  `-> Unit` in `module_return` (arguments not strictly validated against a signature, matching the
+  `task`/`reactive` virtual-builtin precedent — strict `handler: (Request) -> Response` validation is
+  a follow-on). Both backends run the identical `accept().await` → call handler → `net_reply` loop,
+  serially (one connection to completion before the next), with a handler error caught → 500 (the
+  server keeps running). Conformance `serve_routing.noe` drives the sandbox script through a routing
+  handler; differential + leak (0) green in both backends. **S3b** adds concurrent in-flight dispatch.
+- **S3b** — upgrade the serve loop to **concurrent dispatch**: a server-owned reaping scope that
+  spawns each handler as a task and reaps completions, so a slow (async) handler yields while the next
+  connection is accepted. An async-handler conformance test pins the (deterministic) interleaving.
+- **S3 (original, superseded by S3a+S3b)** — the **serve construct** (the core green slice): grammar for `http.serve(port, handler)`
   (checker-recognized, validates `handler: (Request) -> Response`, sync or async), one shared IR
   lowering, `Op::Serve` in the VM. Both backends implement the **Tier-1 async reaping loop** —
   `accept().await` → spawn a handler task into the server-owned scope → marshal `NetRequest ↔ Request`

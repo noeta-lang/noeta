@@ -356,6 +356,12 @@ pub enum Builtin {
     /// `map_bounded(items, n, f)` — apply async `f` to each item, at most `n` concurrently, results
     /// as a `List<B>` in item order (Track A.9).
     MapBounded,
+    /// `http.serve(port, handler)` — bind an inbound listener and run the accept→handle→reply loop
+    /// (http-server S3), calling `handler(request)` per connection and replying with its `Response`.
+    /// Under the sandbox the loop drives a finite request script and terminates; on the real host it
+    /// serves until the listener closes. A handler error becomes a 500. Reaches the Host's inbound
+    /// Network capability + the executor, which registry dispatch cannot.
+    Serve,
     /// `signal(v)` — create a reactive cell holding `v` (reactivity S1); the tree-walker twin of the
     /// VM's `Builtin::Signal`. Returns a `Signal<T>` handle read/updated via the interpreter's graph.
     Signal,
@@ -384,6 +390,7 @@ impl Builtin {
             Builtin::All => "all",
             Builtin::Race => "race",
             Builtin::MapBounded => "map_bounded",
+            Builtin::Serve => "serve",
             Builtin::Signal => "signal",
             Builtin::Computed => "computed",
             Builtin::Effect => "effect",
@@ -2690,6 +2697,13 @@ impl Interpreter {
             };
             return self.call_builtin(builtin, args.to_vec(), span);
         }
+        // `http.serve(port, handler)` (http-server S3) — a builtin, not a registry function: the
+        // handler is a closure (which the `NativeValue` seam cannot carry) and the loop needs the
+        // executor + inbound Network capability. Intercept it here, ahead of `http`'s registry
+        // functions (which stay registry-dispatched). Mirrors the VM.
+        if module == "http" && func == "serve" {
+            return self.call_builtin(Builtin::Serve, args.to_vec(), span);
+        }
         // A function registered in the native-extension registry dispatches through the shared
         // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host
         // threaded in), and materialize the `NativeOut` result (the result shape supplied from the
@@ -3864,6 +3878,80 @@ impl Interpreter {
                         ));
                     }
                 }
+            }
+            // `http.serve(port, handler)` — the inbound accept→handle→reply loop (http-server S3).
+            // Serial for now: one connection is handled to completion before the next is accepted.
+            // Concurrent in-flight dispatch is S3b. Under the sandbox the accept leaf drives a finite
+            // request script and eventually reports the listener closed, so the loop terminates
+            // in-oracle; on the real host it serves until the socket closes. The tree-walker mirror of
+            // the VM's `Builtin::Serve`.
+            Builtin::Serve => {
+                self.expect_arity(builtin, &args, 2, span)?;
+                let Value::Int(port) = args[0] else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`http.serve` expects an int port, found {}",
+                            args[0].type_name()
+                        ),
+                    ));
+                };
+                let handler = args[1].clone();
+                let addr = format!("0.0.0.0:{port}");
+                let listener = self
+                    .host
+                    .net_listen(&addr)
+                    .map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?;
+                // The reply for a handler that errors or returns a non-`Response`.
+                let server_error = || noeta_stdlib::NetResponse {
+                    status: 500,
+                    headers: Vec::new(),
+                    body: b"Internal Server Error".to_vec(),
+                };
+                loop {
+                    // Accept the next connection — an async leaf ticketed on the executor, driven to
+                    // ready. `none` means the listener closed (the script is exhausted).
+                    let accept_io = self.host.net_accept(listener);
+                    let accept_id = self.executor.spawn_ext(&mut *self.host, accept_io);
+                    let accepted = self.drive_future(Value::AsyncIo(accept_id), span)?;
+                    let request = match &accepted {
+                        Value::Enum(e) if e.enum_name == "Option" && e.variant == "some" => {
+                            e.data.first().cloned().expect("some carries the request")
+                        }
+                        _ => break,
+                    };
+                    // The connection id rides inside the `Request` value; the handler never sees it.
+                    let conn = match &request {
+                        Value::Extern(cell) => cell
+                            .borrow()
+                            .as_any()
+                            .downcast_ref::<noeta_stdlib::net::Request>()
+                            .map(|r| r.conn),
+                        _ => None,
+                    }
+                    .expect("accept yields a Request extern value");
+                    // Call `handler(request)` and drive it (a sync handler returns the `Response`; an
+                    // async one returns a `Future` the loop drives). A handler error becomes a 500 and
+                    // the server keeps running.
+                    let response = match self
+                        .call(handler.clone(), vec![request], span)
+                        .and_then(|result| self.drive_future(result, span))
+                    {
+                        Ok(Value::Extern(cell)) => cell
+                            .borrow()
+                            .as_any()
+                            .downcast_ref::<noeta_stdlib::NetResponse>()
+                            .cloned()
+                            .unwrap_or_else(server_error),
+                        Ok(_) | Err(_) => server_error(),
+                    };
+                    // Reply — another async leaf — then loop for the next connection.
+                    let reply_io = self.host.net_reply(conn, response);
+                    let reply_id = self.executor.spawn_ext(&mut *self.host, reply_io);
+                    self.drive_future(Value::AsyncIo(reply_id), span)?;
+                }
+                Ok(Value::Unit)
             }
             Builtin::Signal => {
                 self.expect_arity(builtin, &args, 1, span)?;
