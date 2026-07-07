@@ -172,9 +172,23 @@ flags) and dispatches unmatched names to registered commands (`cargo clippy` mod
   Behavior-neutral for every var-free signature; semantics pinned by unit tests in
   `noeta-check/src/stdlib.rs` (first-occurrence-wins on a mismatched closure; empty-list-literal
   hole defers to a later concrete occurrence). Workspace green, clippy silent.
-- **H2** — migrate **std.task** (`sleep`/`all`/`race`/`map_bounded`): shared dispatch in
-  `noeta-stdlib`; delete the four `Builtin`s, the task `VIRTUAL_MODULES` entry, both backend
-  mirrors, the checker arms. Async corpus green.
+- **H2 ✅ DONE** — `all`/`race`/`map_bounded` migrated: one shared drive loop each in
+  `noeta-stdlib/src/task.rs` (first users of H1's `Fn`/`Var` signatures — the checker recovers
+  `T` by substitution; `future_elem` + the hand-written task arms deleted). `NativeCtx` grew
+  `cancel`, `wake_generation`/`wait_external_wake` (the VM's isolate-wake term in the deadlock
+  condition; the tree-walker returns constant/false = its old condition), `is_list`/`type_name`
+  (message-parity validation), `call_with_element` (fused per-item call), and two ownership
+  refinements: `poll` **spends** the future slot on Ready (result takes over its index in
+  place), `make_list` **consumes** element slots. `ErrorKind::Panic` + `panic_error` carry the
+  deadlock/empty-race panics. Deleted: `Builtin::{All,Race,MapBounded}` (both enums, all six
+  arms), the task `VIRTUAL_MODULES` entry. **Collateral checker fix:** a bare user-function
+  reference now carries its full `Fn` signature type (was params-erased, which no arity-checked
+  `Fn` param could ever accept — `[1,2].map(inc)` failed E0007 on main). **Bench (pinned
+  interleaved A/B, quiet box):** t_map_bounded +6–8%, t_all +1–5%, reactive ±2% (untouched),
+  serve no regression — within the ≤10% orchestration budget; the fixture is adversarial
+  (200k no-op bodies ≈ 45ns/item seam cost), any real body dilutes it below ~5%. Learned: the
+  per-item `free` discipline is what keeps the slot table window-sized and cache-hot — skipping
+  frees grew it to 400k cold entries and doubled the fixture.
 - **H3** — migrate **http.serve**: shared serve loop over ctx; delete `Builtin::Serve` + both
   intercepts + the checker special case. http_server corpus green.
 - **H4** — Class-3 machinery: per-run `ExtState` + retained-value arena (leak-oracle/cycle-
