@@ -1,0 +1,21 @@
+// Crypto arc C1: `bytes.to_hex()` — lowercase hex rendering of a byte buffer, the digest-display
+// companion (`crypto.sha256(s).to_hex()`). Bytes are built from a packed-int list, whose flat
+// buffer is the little-endian field bytes — so the hex string is pinned exactly.
+// expect: stdout "0201000000000000"
+// expect: stdout "ff00000000000000fe00000000000000"
+// expect: stdout ""
+// expect: stdout "true"
+// expect: exit 0
+@packed struct W { v: int }
+
+one = [W { v: 258 }].to_bytes()
+echo one.to_hex()
+
+two = [W { v: 255 }, W { v: 254 }].to_bytes()
+echo two.to_hex()
+
+empty: List<W> = []
+echo empty.to_bytes().to_hex()
+
+// The rendering is a plain string — usable anywhere a string is.
+echo one.to_hex().len() == 16

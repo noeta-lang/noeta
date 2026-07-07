@@ -150,6 +150,10 @@ pub enum SigType {
     Future(&'static SigType),
     /// A named type — an extension type or a user-declared type.
     Named(&'static str),
+    /// A union of accepted types (crypto arc C1) — `crypto.sha256(data: string|bytes)`. The
+    /// checker maps it onto the language's declared-union `Type::union`, so a mismatched
+    /// argument is a static error; the dispatch still validates the concrete kind it received.
+    Union(&'static [SigType]),
 }
 
 /// How a function's **return type** is determined. Most are [`RetTy::Concrete`]; the rest capture

@@ -290,6 +290,17 @@ pub fn no_method_error(type_name: &str, method: &str) -> StdError {
     }
 }
 
+/// Lowercase hex rendering of a byte buffer — the `bytes.to_hex()` method (crypto arc C1),
+/// defined once so both backends print digests identically.
+pub fn bytes_to_hex(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len() * 2);
+    for b in data {
+        use std::fmt::Write;
+        write!(out, "{b:02x}").expect("writing to a String cannot fail");
+    }
+    out
+}
+
 /// Build the canonical "invalid JSON" error for `json.parse` (→ `E0007`).
 pub fn invalid_json_error(detail: &str) -> StdError {
     StdError {
