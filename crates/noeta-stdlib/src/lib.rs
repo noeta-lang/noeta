@@ -27,12 +27,14 @@
 //! concrete `std` modules on top: the `core`/`std` relationship. Every existing `noeta_stdlib::`
 //! path keeps resolving.
 
+// The ABI — the [`registry`] contract, the [`Host`] capability seam, the extern-value contract,
+// the neutral marshalling, `MapKey`, the async executor seam, and the Ring 1 primitives — lives in
+// `noeta-native` and is re-exported here (the `core`/`std` relation), so every existing
+// `noeta_stdlib::` path resolves unchanged.
 pub use noeta_native::*;
 
 pub mod crypto;
 pub mod env;
-pub mod executor;
-pub mod extern_value;
 pub mod fs;
 pub mod handle;
 pub mod host;
@@ -47,14 +49,8 @@ pub mod random;
 pub mod registry;
 pub mod vec3;
 
-pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
-pub use extern_value::{ExternBox, ExternValue};
-pub use handle::{FileHandle, FileMode, Flush, ReadSource};
-pub use host::{Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Rng, SandboxHost};
+// The stdlib-only surface (the ABI items above arrive via the `noeta_native::*` glob).
+pub use handle::{FileHandle, FileMode, Flush};
+pub use host::SandboxHost;
 pub use iter::IterMethod;
-pub use map_key::{ExternKeyRef, MapKey};
-pub use net::{NetFetchIo, NetRequest, NetResponse};
-pub use registry::{
-    ExtFn, ExtModule, ExtType, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType,
-    StdExtension, TypeDispatch, TypeRecipe,
-};
+pub use registry::StdExtension;

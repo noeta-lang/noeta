@@ -1,5 +1,7 @@
-//! The `Network` capability's seam types and its deterministic sandbox responder (http arc H1) —
-//! the [`crate::fs::Vfs`] analog for the network.
+//! The `Network` capability's deterministic sandbox responder (http arc H1) — the [`crate::fs::Vfs`]
+//! analog for the network. The seam *types* (`NetRequest`/`NetResponse`/`NetFetchIo`) live in the
+//! ABI crate ([`noeta_native::net`], re-exported here); the responder stays here because it uses
+//! `serde_json`, which the lean ABI crate deliberately does not pull.
 //!
 //! A network has no program-visible "write" step, so unlike the Vfs there is no mutable store to
 //! seed: the sandbox responder is a **pure function of the request**, deterministic by
@@ -7,86 +9,16 @@
 //! response path and pin exact bytes. Under the sandbox every request — whatever its URL — is
 //! answered here; a program that wants real data runs under `noeta run` (the real host).
 
-use crate::extern_value::ExternValue;
+pub use noeta_native::net::{NetFetchIo, NetRequest, NetResponse, RESPONSE_TYPE_NAME};
+
 use serde_json::json;
-use std::any::Any;
-use std::cmp::Ordering;
 
-/// The registered extern-type name of an HTTP response value (http arc H2): `http.get(url)`
-/// returns one, and it narrows (`is Response`), compares by value, and exposes accessor methods.
-pub const RESPONSE_TYPE_NAME: &str = "Response";
-
-/// An outbound HTTP request crossing the [`crate::host::Network`] seam. Plain `Send` data (like
-/// [`crate::ReadSource`]): the `http` dispatch builds it, whichever host runs it consumes it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NetRequest {
-    /// The HTTP method, uppercased (`"GET"`, `"POST"`, …).
-    pub method: String,
-    /// The absolute request URL.
-    pub url: String,
-    /// Request headers in insertion order (name, value).
-    pub headers: Vec<(String, String)>,
-    /// The request body bytes — empty for a bodyless request.
-    pub body: Vec<u8>,
-}
-
-/// An HTTP response crossing the [`crate::host::Network`] seam.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NetResponse {
-    /// The HTTP status code (e.g. `200`, `404`).
-    pub status: u16,
-    /// Response headers (name, value).
-    pub headers: Vec<(String, String)>,
-    /// The response body bytes.
-    pub body: Vec<u8>,
-}
-
-impl NetResponse {
-    /// A response with a single `content-type` header.
-    fn typed(status: u16, content_type: &str, body: impl Into<Vec<u8>>) -> NetResponse {
-        NetResponse {
-            status,
-            headers: vec![("content-type".to_string(), content_type.to_string())],
-            body: body.into(),
-        }
-    }
-
-    /// The value of header `name`, matched case-insensitively (HTTP header names are), or `None`.
-    pub fn header_value(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
-    }
-}
-
-/// `NetResponse` IS the user-facing `Response` extern type (http arc H2) — pure, host-free, not
-/// key-capable. Accessor methods (`status`/`ok`/`body`/`body_bytes`/`header`) dispatch through the
-/// registry like `Uuid`'s; equality is by content, and it has no order.
-impl ExternValue for NetResponse {
-    fn type_name(&self) -> &'static str {
-        RESPONSE_TYPE_NAME
-    }
-    fn eq_value(&self, other: &dyn ExternValue) -> bool {
-        other.as_any().downcast_ref::<NetResponse>() == Some(self)
-    }
-    fn cmp_value(&self, _other: &dyn ExternValue) -> Option<Ordering> {
-        None
-    }
-    fn hash_value(&self) -> u64 {
-        0 // not key-capable
-    }
-    fn display(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
-        write!(out, "<response {}>", self.status)
-    }
-    fn clone_box(&self) -> Box<dyn ExternValue> {
-        Box::new(self.clone())
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
+/// A response with a single `content-type` header (the responder's shorthand).
+fn typed(status: u16, content_type: &str, body: impl Into<Vec<u8>>) -> NetResponse {
+    NetResponse {
+        status,
+        headers: vec![("content-type".to_string(), content_type.to_string())],
+        body: body.into(),
     }
 }
 
@@ -119,8 +51,8 @@ pub fn sandbox_respond(request: &NetRequest) -> NetResponse {
     let path = path_of(&request.url);
     if let Some(rest) = path.strip_prefix("/status/") {
         return match rest.parse::<u16>() {
-            Ok(n) if (100..=599).contains(&n) => NetResponse::typed(n, "text/plain", ""),
-            _ => NetResponse::typed(400, "text/plain", "invalid status"),
+            Ok(n) if (100..=599).contains(&n) => typed(n, "text/plain", ""),
+            _ => typed(400, "text/plain", "invalid status"),
         };
     }
     match path {
@@ -130,7 +62,7 @@ pub fn sandbox_respond(request: &NetRequest) -> NetResponse {
                 "path": path,
                 "body": String::from_utf8_lossy(&request.body),
             });
-            NetResponse::typed(200, "application/json", doc.to_string())
+            typed(200, "application/json", doc.to_string())
         }
         "/headers" => {
             // BTreeMap → JSON object with keys sorted, so the body is stable regardless of header
@@ -140,34 +72,13 @@ pub fn sandbox_respond(request: &NetRequest) -> NetResponse {
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
-            NetResponse::typed(200, "application/json", json!(sorted).to_string())
+            typed(200, "application/json", json!(sorted).to_string())
         }
-        _ => NetResponse::typed(
+        _ => typed(
             200,
             "text/plain",
             format!("noeta sandbox: {} {path}", request.method),
         ),
-    }
-}
-
-/// The default async network descriptor (http arc H3): it performs the request synchronously
-/// through the Host **at spawn** and has no real body. The sandbox uses this (deterministic,
-/// resolved at spawn — the differential never observes a real body); the real host overrides
-/// [`crate::host::Network::net_spawn`] with a concurrent reqwest-backed descriptor. This is the
-/// same "serial degradation for free" the fs metadata twins rely on.
-#[derive(Debug)]
-pub struct NetFetchIo {
-    /// The request to perform when the descriptor is driven.
-    pub request: NetRequest,
-}
-
-impl crate::ExternIo for NetFetchIo {
-    fn run_sync(
-        &mut self,
-        host: &mut dyn crate::Host,
-    ) -> Result<crate::NativeOut, crate::StdError> {
-        let response = host.net_fetch(self.request.clone())?;
-        Ok(crate::NativeOut::Extern(crate::ExternBox::new(response)))
     }
 }
 

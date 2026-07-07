@@ -5,6 +5,24 @@
 //! Split out of `noeta-stdlib` so the contract does not drag core's batteries (crypto/UUID/JSON):
 //! a third-party extension — and internal mid-end crates like `noeta-ir` — depend on this lean
 //! crate, while `noeta-stdlib` re-exports it (`pub use noeta_native::*`) and adds the concrete
+//! `std` modules on top (the `core`/`std` relationship). See `plans/native-abi/README.md`.
+
+pub mod executor;
+pub mod extern_value;
+pub mod host;
+pub mod map_key;
+pub mod net;
+pub mod registry;
+
+pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
+pub use extern_value::{ExternBox, ExternValue};
+pub use host::{Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, ReadSource, Rng};
+pub use map_key::{ExternKeyRef, MapKey};
+pub use net::{NetFetchIo, NetRequest, NetResponse};
+pub use registry::{
+    ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut, NativeValue, RetTy, Scalar,
+    SigType, TypeDispatch, TypeRecipe,
+};
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the
 /// stdlib introspects. Each backend cheaply projects its own `Value` onto this; anything

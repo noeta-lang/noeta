@@ -1,6 +1,6 @@
 //! The first-class `Uuid` extern type and its constructors (id-entropy U2 → extern-types X2).
 //!
-//! Construction is pure functions from raw bits/time to a [`uuid::Uuid`] — the host supplies the
+//! Construction is pure functions from raw bits/time to a [`Uuid`] — the host supplies the
 //! inputs ([`crate::host::Entropy`] for random bits, [`crate::host::Clock::clock_unix_ms`] for
 //! the v7 timestamp), so the same code produces deterministic UUIDs on the sandbox and real ones
 //! on the real host, and the differential holds by shared dispatch like every other registry
@@ -8,34 +8,58 @@
 //! WITHOUT the self-generating `v4`/`v7` features, so no entropy or time source exists outside
 //! the Host seam.
 //!
-//! The value is `uuid::Uuid` itself, registered through the extern-type seam
+//! [`Uuid`] is a newtype around [`uuid::Uuid`], registered through the extern-type seam
 //! ([`crate::ExternValue`] below): one type both backends host, ordered by its bytes (a v7
 //! therefore sorts by time), key-capable, displayed in the canonical lowercase hyphenated form
-//! `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (8-4-4-4-12).
+//! `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (8-4-4-4-12). The newtype is required because the
+//! extern-value contract (`ExternValue`) now lives in the `noeta-native` ABI crate while the
+//! `uuid` crate is foreign to it — the orphan rule forbids `impl ExternValue for uuid::Uuid`, so
+//! we wrap it, exactly as a third-party extension would wrap any foreign type it wants to expose.
 
 use std::any::Any;
 use std::cmp::Ordering;
 use std::fmt;
+use std::ops::Deref;
 
 use crate::extern_value::ExternValue;
 
 /// The registered extern-type name (`ExtType::name`, `type_of`, `x is Uuid`).
 pub const TYPE_NAME: &str = "Uuid";
 
+/// The first-class `Uuid` value — a newtype around [`uuid::Uuid`] carrying the [`ExternValue`]
+/// contract. [`Deref`]s to the inner `uuid::Uuid` so its accessors (`to_string`, `as_bytes`,
+/// `get_version_num`, `get_timestamp`) are reached directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Uuid(pub uuid::Uuid);
+
+impl Deref for Uuid {
+    type Target = uuid::Uuid;
+    fn deref(&self) -> &uuid::Uuid {
+        &self.0
+    }
+}
+
+impl fmt::Display for Uuid {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `uuid::Uuid`'s `Display` is exactly the canonical hyphenated lowercase form.
+        write!(f, "{}", self.0)
+    }
+}
+
 /// A v4 (random) UUID from 128 raw bits: 122 of them survive; the version nibble (`4`) and the
 /// variant bits (`10`) overwrite their fixed positions.
-pub fn v4(hi: u64, lo: u64) -> uuid::Uuid {
+pub fn v4(hi: u64, lo: u64) -> Uuid {
     let mut bytes = [0u8; 16];
     bytes[..8].copy_from_slice(&hi.to_be_bytes());
     bytes[8..].copy_from_slice(&lo.to_be_bytes());
-    uuid::Builder::from_random_bytes(bytes).into_uuid()
+    Uuid(uuid::Builder::from_random_bytes(bytes).into_uuid())
 }
 
 /// A v7 (time-ordered) UUID: 48 bits of unix milliseconds, then the version nibble (`7`),
 /// 12 random bits (`rand_a`, from `ra`'s low bits), the variant bits (`10`), and 62 random bits
 /// (`rand_b`, from `rb`). Millisecond ties sort by their random tail — fine for an id (v7 orders
 /// by *time*; sub-millisecond ordering is what `next_id` is for).
-pub fn v7(unix_ms: u64, ra: u64, rb: u64) -> uuid::Uuid {
+pub fn v7(unix_ms: u64, ra: u64, rb: u64) -> Uuid {
     // rand_a's 12 low bits land in counter bytes 0-1 (the version nibble overwrites byte 0's
     // high half); rand_b's 64 bits land in bytes 2-9 (the variant bits overwrite the top two,
     // leaving 62). Identical bit placement to the id-entropy arc's hand-rolled layout — the
@@ -44,7 +68,7 @@ pub fn v7(unix_ms: u64, ra: u64, rb: u64) -> uuid::Uuid {
     tail[0] = (ra >> 8) as u8;
     tail[1] = ra as u8;
     tail[2..].copy_from_slice(&rb.to_be_bytes());
-    uuid::Builder::from_unix_timestamp_millis(unix_ms, &tail).into_uuid()
+    Uuid(uuid::Builder::from_unix_timestamp_millis(unix_ms, &tail).into_uuid())
 }
 
 /// A v5 (name-based, RFC 9562 §5.5) UUID — pure, no Host input: the SHA-1 of the namespace's
@@ -52,19 +76,19 @@ pub fn v7(unix_ms: u64, ra: u64, rb: u64) -> uuid::Uuid {
 /// fixed positions. Same namespace + same name = same UUID, everywhere, forever — the point.
 /// The digest comes from our own `sha1` dep (crypto arc C5) rather than the uuid crate's `v5`
 /// feature, which would drag in a second SHA-1 implementation (`sha1_smol`).
-pub fn v5(ns: &uuid::Uuid, name: &str) -> uuid::Uuid {
+pub fn v5(ns: &Uuid, name: &str) -> Uuid {
     let mut input = Vec::with_capacity(16 + name.len());
     input.extend_from_slice(ns.as_bytes());
     input.extend_from_slice(name.as_bytes());
     let digest = crate::crypto::sha1(&input);
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
-    uuid::Builder::from_sha1_bytes(bytes).into_uuid()
+    Uuid(uuid::Builder::from_sha1_bytes(bytes).into_uuid())
 }
 
 /// The v7 timestamp read back as unix milliseconds — `some` iff the version carries a timestamp
 /// (`u.timestamp_ms()`; the Option IS the version distinction, surfaced where it matters).
-pub fn timestamp_ms(u: &uuid::Uuid) -> Option<u64> {
+pub fn timestamp_ms(u: &Uuid) -> Option<u64> {
     u.get_timestamp().map(|ts| {
         let (secs, nanos) = ts.to_unix();
         secs * 1000 + u64::from(nanos) / 1_000_000
@@ -73,19 +97,19 @@ pub fn timestamp_ms(u: &uuid::Uuid) -> Option<u64> {
 
 /// The `Uuid` extern-value contract: ordered by bytes (v7 = time order), content-hashed,
 /// canonical lowercase hyphenated display. `key_capable` — no mutating methods.
-impl ExternValue for uuid::Uuid {
+impl ExternValue for Uuid {
     fn type_name(&self) -> &'static str {
         TYPE_NAME
     }
 
     fn eq_value(&self, other: &dyn ExternValue) -> bool {
-        other.as_any().downcast_ref::<uuid::Uuid>() == Some(self)
+        other.as_any().downcast_ref::<Uuid>() == Some(self)
     }
 
     fn cmp_value(&self, other: &dyn ExternValue) -> Option<Ordering> {
         other
             .as_any()
-            .downcast_ref::<uuid::Uuid>()
+            .downcast_ref::<Uuid>()
             .map(|o| self.as_bytes().cmp(o.as_bytes()))
     }
 
@@ -97,7 +121,6 @@ impl ExternValue for uuid::Uuid {
     }
 
     fn display(&self, out: &mut dyn fmt::Write) -> fmt::Result {
-        // `uuid::Uuid`'s `Display` is exactly the canonical hyphenated lowercase form.
         write!(out, "{self}")
     }
 
@@ -118,7 +141,7 @@ impl ExternValue for uuid::Uuid {
 mod tests {
     use super::*;
 
-    fn nibble(uuid: &uuid::Uuid, index: usize) -> char {
+    fn nibble(uuid: &Uuid, index: usize) -> char {
         uuid.to_string()
             .chars()
             .filter(|c| *c != '-')
@@ -174,10 +197,10 @@ mod tests {
     /// against Python's `uuid.uuid5`. Deterministic by definition, so an exact pin.
     #[test]
     fn v5_matches_the_rfc_9562_example() {
-        let u = v5(&uuid::Uuid::NAMESPACE_DNS, "www.example.com");
+        let u = v5(&Uuid(uuid::Uuid::NAMESPACE_DNS), "www.example.com");
         assert_eq!(u.to_string(), "2ed6657d-e927-568b-95e1-2665a8aea6a2");
         assert_eq!(u.get_version_num(), 5);
-        assert_eq!(u, v5(&uuid::Uuid::NAMESPACE_DNS, "www.example.com"));
+        assert_eq!(u, v5(&Uuid(uuid::Uuid::NAMESPACE_DNS), "www.example.com"));
     }
 
     #[test]
