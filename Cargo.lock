@@ -1606,6 +1606,7 @@ dependencies = [
  "noeta-compiler",
  "noeta-dap",
  "noeta-diagnostics",
+ "noeta-fmt",
  "noeta-lexer",
  "noeta-loader",
  "noeta-lsp",
@@ -1731,6 +1732,17 @@ dependencies = [
  "noeta-span",
  "noeta-stdlib",
  "proptest",
+]
+
+[[package]]
+name = "noeta-fmt"
+version = "0.0.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-diagnostics",
+ "noeta-lexer",
+ "noeta-parser",
+ "noeta-span",
 ]
 
 [[package]]

@@ -156,6 +156,20 @@ enum Command {
         #[arg(long, default_value_t = 8080)]
         port: u16,
     },
+    /// Format `.noe` source into the canonical style (F0: a minimal subset; more each slice). By
+    /// default rewrites each file in place; style is read from the nearest `noeta.toml` `[fmt]`
+    /// table (or built-in defaults). Files that do not parse, or that use a construct the formatter
+    /// does not handle yet, are left untouched and reported.
+    Fmt {
+        /// Files to format in place. Omit when using `--stdin`.
+        files: Vec<PathBuf>,
+        /// Do not write; exit non-zero if any file is not already canonically formatted (for CI).
+        #[arg(long)]
+        check: bool,
+        /// Read source from stdin and write the formatted result to stdout (editor "format on save").
+        #[arg(long)]
+        stdin: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -201,6 +215,11 @@ fn main() -> ExitCode {
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),
         Command::Serve { file, port } => cmd_serve(&file, port),
+        Command::Fmt {
+            files,
+            check,
+            stdin,
+        } => cmd_fmt(&files, check, stdin),
     }
 }
 
@@ -214,6 +233,119 @@ fn cmd_lsp() -> ExitCode {
 fn cmd_dap() -> ExitCode {
     noeta_dap::run_stdio();
     ExitCode::SUCCESS
+}
+
+/// `noeta fmt` — format `.noe` source into the canonical style. F0 CLI stub: single files (no
+/// directory recursion yet — that is F6), `--check`, and `--stdin`. Files that do not parse or use
+/// a not-yet-supported construct are left untouched and reported; the safety gate inside
+/// `noeta_fmt::format_source` guarantees a written file never changes meaning.
+fn cmd_fmt(files: &[PathBuf], check: bool, stdin: bool) -> ExitCode {
+    if stdin {
+        return cmd_fmt_stdin();
+    }
+    if files.is_empty() {
+        eprintln!("noeta fmt: no files given (use `--stdin` to format standard input)");
+        return ExitCode::FAILURE;
+    }
+
+    let mut failed = false; // a parse/unsupported/io error on any file
+    let mut would_change = false; // `--check`: some file is not already formatted
+
+    for file in files {
+        let dir = file.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let config = match manifest::resolve_fmt_config(dir) {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("noeta fmt: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let original = match std::fs::read_to_string(file) {
+            Ok(text) => text,
+            Err(err) => {
+                eprintln!("noeta fmt: cannot read `{}`: {err}", file.display());
+                failed = true;
+                continue;
+            }
+        };
+
+        match noeta_fmt::format_source(&file.to_string_lossy(), &original, &config) {
+            Ok(formatted) => {
+                if formatted == original {
+                    continue; // already canonical — no write, no churn
+                }
+                if check {
+                    would_change = true;
+                    println!("would reformat {}", file.display());
+                } else if let Err(err) = std::fs::write(file, &formatted) {
+                    eprintln!("noeta fmt: cannot write `{}`: {err}", file.display());
+                    failed = true;
+                } else {
+                    println!("reformatted {}", file.display());
+                }
+            }
+            Err(err) => {
+                report_fmt_error(&file.display().to_string(), &err);
+                failed = true;
+            }
+        }
+    }
+
+    if failed || (check && would_change) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Format stdin → stdout with the config discovered from the current directory.
+fn cmd_fmt_stdin() -> ExitCode {
+    let text = match io::read_to_string(io::stdin()) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("noeta fmt: cannot read stdin: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = match manifest::resolve_fmt_config(&dir) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("noeta fmt: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match noeta_fmt::format_source("<stdin>", &text, &config) {
+        Ok(formatted) => {
+            print!("{formatted}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            report_fmt_error("<stdin>", &err);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Print a one-line reason a file could not be formatted (leaving it untouched).
+fn report_fmt_error(name: &str, err: &noeta_fmt::FmtError) {
+    use noeta_fmt::FmtError;
+    match err {
+        FmtError::Parse(diags) => {
+            eprintln!(
+                "{name}: not formatted — source does not parse ({} diagnostic(s))",
+                diags.len()
+            );
+        }
+        FmtError::Unsupported { construct, .. } => {
+            eprintln!(
+                "{name}: not formatted — unsupported construct: {construct} (coming in a later slice)"
+            );
+        }
+        FmtError::Safety(why) => {
+            eprintln!("{name}: not formatted — internal safety check failed: {why}");
+        }
+    }
 }
 
 /// For a tier runner: whether its `tier` is live under `--profile`. `Ok(true)` when no profile was

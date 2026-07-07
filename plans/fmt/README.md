@@ -244,12 +244,13 @@ atomic (temp + rename) and skipped when the content is already canonical (no nee
 Each slice is independently green; safety + idempotency + (from F4) comment-completeness are standing
 gates re-run every slice.
 
-- **F0 — crate skeleton + spec + config seam + CLI stub.** Create `noeta-fmt`; commit this style spec
-  as the crate's module doc; add the `[fmt]` table to `manifest.rs` producing a `FmtConfig` (default
-  `match_arm_arrows = compact`) threaded into the printer entry point; wire `Command::Fmt` in the CLI
-  to a pass-through that lexes→parses→re-emits a *minimal* subset (literals, `echo`, top-level `fn`)
-  and errors cleanly on the rest. Stand up the corpus property-test harness (safety + idempotency)
-  skeleton. *DoD: `noeta fmt --check` runs on the minimal subset; `[fmt]` parses; harness compiles.*
+- **F0 — crate skeleton + spec + config seam + CLI stub. ✅ DONE.** `noeta-fmt` crate created
+  (`FmtConfig`/`ArrowStyle`/`FmtError`, `format_source` entry point with the **safety gate** live —
+  span-stripped `Pretty` comparison); minimal printer (literals, `echo`, `return`, bare-expr stmts,
+  top-level `fn` with untyped params); everything else → `FmtError::Unsupported`. `[fmt]` table wired
+  into `manifest.rs` (`resolve_fmt_config`, defaults + validation). `Command::Fmt` in the CLI:
+  in-place, `--check` (exit 1 if unformatted), `--stdin`. Corpus harness stands (530 files: 4
+  ok+idempotent, 517 unsupported, 9 parse-err; safety held on all). fmt+clippy clean.
 - **F1 — trivia collection.** `lex_with_trivia` / `Lexed.comments`; line + block + doc comments
   captured with spans; `tokens` provably unchanged vs. `lex`; hot-path bench shows no regression.
   Plus the print-time semicolon-presence lookup helper.

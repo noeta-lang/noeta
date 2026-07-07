@@ -1,0 +1,17 @@
+[package]
+name = "noeta-fmt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+noeta-span = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-lexer = { workspace = true }
+noeta-parser = { workspace = true }
+noeta-ast = { workspace = true }
+
+[lints]
+workspace = true
