@@ -56,7 +56,9 @@ use cranelift_codegen::ir::{
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{FuncId, Linkage, Module as ClifModule, default_libcall_names};
+use cranelift_module::{
+    DataDescription, FuncId, Linkage, Module as ClifModule, default_libcall_names,
+};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use noeta_ast::BinaryOp;
@@ -980,6 +982,15 @@ pub fn stub_symbol(p: usize) -> String {
     format!("noeta_jit_stub{p}")
 }
 
+/// The exported data symbol carrying the AOT dispatch table (P-AOT L3.2, approach A). **ABI** (the
+/// runtime binding in L3.2b must match exactly): pointer-width little-endian words —
+/// `[count][main_0, fast_0, main_1, fast_1, …, main_{count-1}, fast_{count-1}]`. Word 0 is the
+/// prototype count; then two pointer slots per prototype in index order — its main native body and
+/// its fast-convention body — each a linker-resolved code address, or **null** where the prototype
+/// is interpreted (no native body) or has no fast body. The runtime reads this one static at startup
+/// and `jit_install`s each non-null entry into its mutable per-proto dispatch tables.
+pub const AOT_DISPATCH_SYMBOL: &str = "noeta_aot_dispatch";
+
 /// What an ahead-of-time compile produced for one prototype (P-AOT L3.1b) — its slot in an
 /// [`AotManifest`], indexed by the prototype's dispatch key. `native == false` means the prototype
 /// was left for the interpreter (ineligible), so no symbol was emitted.
@@ -1147,12 +1158,16 @@ impl Jit<ObjectModule> {
     /// (the `prepare_call` helper), **not** baked direct native→native call targets — so swapping a
     /// proto never requires patching its callers.
     pub fn compile_module(&mut self, module: &Module) -> Result<AotManifest, String> {
-        let mut protos = Vec::with_capacity(module.protos.len());
+        let n = module.protos.len();
+        let mut protos = Vec::with_capacity(n);
+        // Collect the `FuncId`s as we emit, to relocate into the dispatch table below.
+        let mut main_ids: Vec<Option<FuncId>> = vec![None; n];
+        let mut fast_ids: Vec<Option<FuncId>> = vec![None; n];
         for (p, chunk) in module.protos.iter().enumerate() {
             let entry = if is_eligible(chunk) {
-                self.emit_int_body(module, p, false, true)?;
+                main_ids[p] = Some(self.emit_int_body(module, p, false, true)?);
                 let fast = if fast_ok(chunk) {
-                    self.emit_int_body(module, p, true, true)?;
+                    fast_ids[p] = Some(self.emit_int_body(module, p, true, true)?);
                     Some(fast_symbol(p))
                 } else {
                     None
@@ -1172,7 +1187,47 @@ impl Jit<ObjectModule> {
             };
             protos.push(entry);
         }
+        self.define_dispatch_table(&main_ids, &fast_ids)?;
         Ok(AotManifest { protos })
+    }
+
+    /// Emit the [`AOT_DISPATCH_SYMBOL`] data object (P-AOT L3.2, approach A): the proto-index →
+    /// entry-pointer table the runtime binds into its dispatch tables at startup. Layout is
+    /// pointer-width words: `[count][main_0, fast_0, main_1, fast_1, …]`, each function slot a
+    /// **relocation** to that proto's exported body (`write_function_addr`), or null (a zeroed slot)
+    /// for an interpreted proto or a proto with no fast body. The linker resolves the relocations
+    /// when the object is linked into the final binary, so the runtime reads real code addresses out
+    /// of this one exported static — no per-symbol `dlsym`, no dynamic-symbol table needed.
+    fn define_dispatch_table(
+        &mut self,
+        main_ids: &[Option<FuncId>],
+        fast_ids: &[Option<FuncId>],
+    ) -> Result<(), String> {
+        let n = main_ids.len();
+        let w = self.module.target_config().pointer_bytes() as usize;
+        // count word, then two pointer slots per proto.
+        let mut bytes = vec![0u8; w * (1 + 2 * n)];
+        bytes[0..8].copy_from_slice(&(n as u64).to_le_bytes());
+
+        let mut data = DataDescription::new();
+        data.define(bytes.into_boxed_slice());
+        for p in 0..n {
+            if let Some(id) = main_ids[p] {
+                let fref = self.module.declare_func_in_data(id, &mut data);
+                data.write_function_addr((w * (1 + 2 * p)) as u32, fref);
+            }
+            if let Some(id) = fast_ids[p] {
+                let fref = self.module.declare_func_in_data(id, &mut data);
+                data.write_function_addr((w * (1 + 2 * p + 1)) as u32, fref);
+            }
+        }
+        let data_id = self
+            .module
+            .declare_data(AOT_DISPATCH_SYMBOL, Linkage::Export, false, false)
+            .map_err(|e| e.to_string())?;
+        self.module
+            .define_data(data_id, &data)
+            .map_err(|e| e.to_string())
     }
 
     /// Consume the compiler and emit the finished object-file bytes (ELF/Mach-O/COFF for the host).
@@ -3653,7 +3708,7 @@ mod tests {
         use noeta_lexer::lex;
         use noeta_parser::parse;
         use noeta_span::{Source, SourceId};
-        use object::{Object, ObjectSymbol};
+        use object::{Object, ObjectSection, ObjectSymbol};
 
         // Several eligible functions + a call chain, so there are multiple native prototypes (and at
         // least one fast-convention body).
@@ -3716,6 +3771,32 @@ mod tests {
                 );
             }
         }
+
+        // P-AOT L3.2a: the dispatch table is a defined data symbol, and every native entry (main +
+        // fast) is a relocation from it to the proto's body — the wiring the runtime binding reads.
+        assert!(
+            defined.contains(AOT_DISPATCH_SYMBOL),
+            "the AOT dispatch table symbol is defined"
+        );
+        let expected_relocs = manifest
+            .protos
+            .iter()
+            .map(|e| e.symbol.is_some() as usize + e.fast_symbol.is_some() as usize)
+            .sum::<usize>();
+        let body_relocs = file
+            .sections()
+            .flat_map(|s| s.relocations().collect::<Vec<_>>())
+            .filter_map(|(_, r)| match r.target() {
+                object::RelocationTarget::Symbol(i) => file.symbol_by_index(i).ok(),
+                _ => None,
+            })
+            .filter_map(|s| s.name().ok().map(str::to_string))
+            .filter(|n| n.starts_with("noeta_jit_proto") || n.starts_with("noeta_jit_fast"))
+            .count();
+        assert_eq!(
+            body_relocs, expected_relocs,
+            "the dispatch table relocates to exactly every native main+fast body"
+        );
     }
 
     /// The ownership-transfer peephole marks a `Move dst <- src` immediately followed by `Drop src`.

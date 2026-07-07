@@ -126,6 +126,22 @@ from Levels 1–2** (the same hybrid the JIT uses at runtime).
 | L3.3 | AOT differential oracle | L3.2 | AOT-binary `RunResult` ≡ source-run, over the corpus. |
 | L3.4 | DCE / tree-shaking | L3.2 | **Own sub-milestone, optional for shipping L3.** Whole-program reachability drops unused functions + stdlib. Hard part = dynamic dispatch (trait method tables, `invoke`, reflection `attributes_of`/`type_of`, the stdlib registry): needs conservative roots (`@reflectable`) and closes the deferred "reflection-metadata elimination" row (`deferred.md`, gated on exactly this). Aggressiveness = decision point. |
 
+**Dev-tooling reuse & future convergence (checked 2026-07-07).** The `tooling-unification` arc is
+**merged to main**, but it unified the *interactive-eval* family (LSP/DAP/REPL: one type spelling,
+one fragment parser, the `SessionCompiler`/`VmSession::adopted` live-session seam, the debug console's
+mid-run module swap). AOT/build is a **different axis** (codegen + linking + batch orchestration), so
+it takes **no** LSP/DAP reuse and needs no shared refactor — it reuses the compile pipeline
+(loader→check→compiler→bytecode) exactly as `noeta build` already does. Two *future* convergences to
+keep the seams friendly toward, neither in L3.2:
+- **HMR** = the intersection of the already-merged session machinery (`SessionCompiler`,
+  `VmSession::adopted`, debug-console mid-run swap) *and* the AOT/JIT per-proto entry-table
+  indirection (`jit_install`). HMR generalizes "extend a live session with a fragment" to "replace a
+  changed module's protos + re-point the entry tables." Preserve: indirection-routed calls (no baked
+  direct native→native), runtime-mutable tables, interpreter/JIT live in HMR builds.
+- **Debuggable native binaries** = emit the DAP's debug-info side-tables (`Chunk::debug_lines`, the
+  name map, TypeRepr rendering) as cranelift **DWARF** into the AOT object, so `noeta dap` can debug
+  a native binary. L3-future ("debuggable native"); keep the manifest/symbol seam DWARF-friendly.
+
 **Obfuscation × Level 3:** an AOT binary's **native machine code** is inherently opaque (not
 bytecode — `noeta dump` can't read it), so Level 3 raises the opacity bar for free. The embedded
 **bytecode-fallback blob** (the ~75% of ops the JIT doesn't lower natively) stays obfuscated (L1.4).
