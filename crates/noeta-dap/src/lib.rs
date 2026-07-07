@@ -491,6 +491,7 @@ fn evaluate(
     resume
         .send(Resume::Evaluate {
             program,
+            text: expression.to_string(),
             frame,
             allow_calls,
             reply: reply_tx,

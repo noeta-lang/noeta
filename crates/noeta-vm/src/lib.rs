@@ -109,6 +109,9 @@ pub struct DebugEvalRequest {
     /// VM compiles it through the adopted session (closures included, tooling-unification T5);
     /// hover walks its trailing expression read-only.
     pub program: Program,
+    /// The raw console string `program` was parsed from — the memo key (U3): a re-evaluated watch
+    /// (same text, same scope shape) reuses its compiled wrapper instead of appending a new one.
+    pub text: String,
     /// Which paused frame's scope to evaluate against, as the client numbers frames (innermost first).
     pub frame: usize,
     /// Whether the fragment may run **code** (calls, closures, statements). `false` for a hover — a
@@ -359,6 +362,7 @@ impl VmBackend {
         vm.debug_session = Some(DebugSession {
             compiler: session,
             arena: &arena,
+            memo: HashMap::new(),
         });
         let result = run_and_teardown(&mut vm, mode);
         let trace = std::mem::take(&mut vm.abort_trace);
@@ -585,6 +589,13 @@ struct Abort;
 struct DebugSession<'m> {
     compiler: noeta_compiler::SessionCompiler,
     arena: &'m typed_arena::Arena<Module>,
+    /// Compiled-wrapper memo (tooling-unification U3): `(fragment text, in-scope local names)` →
+    /// the installed entry proto. A watch panel re-evaluates its expressions on **every step**;
+    /// without this each re-eval would append a fresh proto + global slot to the session for the
+    /// rest of the run. A hit skips compile + install entirely and re-runs the existing entry with
+    /// fresh values (indices stay valid forever — the module only grows). Only successful compiles
+    /// are memoized, and the param names are part of the key, so a hit is exactly a replay.
+    memo: HashMap<(String, Vec<String>), u32>,
 }
 
 /// The unforgeable global a wrapped console fragment binds its closure to (see
@@ -2960,6 +2971,7 @@ impl<'m> Vm<'m> {
                             DebugAction::Evaluate(req) => {
                                 let DebugEvalRequest {
                                     program,
+                                    text,
                                     frame,
                                     allow_calls,
                                     reply,
@@ -2973,6 +2985,7 @@ impl<'m> Vm<'m> {
                                         &program,
                                         frame,
                                         !allow_calls,
+                                        &text,
                                         &frames[..],
                                         &regs[..],
                                     )
@@ -5705,10 +5718,11 @@ impl<'m> Vm<'m> {
         program: &Program,
         frame: usize,
         pure: bool,
+        text: &str,
         frames: &[Frame],
         regs: &[Value],
     ) -> DebugEvalOutcome {
-        match self.eval_fragment_owned(program, frame, pure, frames, regs) {
+        match self.eval_fragment_owned(program, frame, pure, Some(text), frames, regs) {
             Ok(v) => {
                 let text = v.display();
                 let ty = v.type_display();
@@ -5727,6 +5741,7 @@ impl<'m> Vm<'m> {
         program: &Program,
         frame: usize,
         pure: bool,
+        text: Option<&str>,
         frames: &[Frame],
         regs: &[Value],
     ) -> Result<Value, String> {
@@ -5766,8 +5781,47 @@ impl<'m> Vm<'m> {
                 .map(|(name, _, value)| (name.to_string(), value))
                 .unzip()
         };
-        // Wrap: `mut <sentinel> = fn(<locals>) { <fragment>; return <trailing expr> };`
         let span = program.span;
+        // Compiled-wrapper memo (U3): a watch panel re-evaluates its expressions on every step —
+        // key on (raw text, in-scope local names) and reuse the installed entry on a hit, so a
+        // repeated watch appends nothing to the session. Values stay fresh (they are call
+        // arguments). Only a successful compile is memoized, and the param names are part of the
+        // key, so a hit is exactly a replay of a compile that succeeded in this same scope shape.
+        let memo_key = text.map(|t| (t.to_string(), params.clone()));
+        let cached = memo_key.as_ref().and_then(|k| {
+            self.debug_session
+                .as_ref()
+                .and_then(|s| s.memo.get(k).copied())
+        });
+        let entry = if let Some(entry) = cached {
+            entry
+        } else {
+            self.compile_fragment_entry(program, pure, &params, memo_key, span)?
+        };
+        let diag_mark = self.diagnostics.len();
+        let trace_mark = self.abort_trace.len();
+        self.pure_eval = pure;
+        let outcome = self.run_installed_fragment(entry, args, span);
+        self.pure_eval = false;
+        // A console entry is a side query — its errors must not leak into the run being debugged.
+        self.diagnostics.truncate(diag_mark);
+        self.abort_trace.truncate(trace_mark);
+        outcome
+    }
+
+    /// Compile-and-install one fragment wrapper (the memo-miss path of
+    /// [`Vm::eval_fragment_owned`]): apply the U2 binding promotion, rewrite the trailing bare
+    /// expression to a `return`, wrap as the sentinel-bound closure whose parameters are `params`,
+    /// install through the session, and memoize the entry under `memo_key`.
+    fn compile_fragment_entry(
+        &mut self,
+        program: &Program,
+        pure: bool,
+        params: &[String],
+        memo_key: Option<(String, Vec<String>)>,
+        span: Span,
+    ) -> Result<u32, String> {
+        // Wrap: `mut <sentinel> = fn(<locals>) { <fragment>; return <trailing expr> };`
         let mut body = program.stmts.clone();
         // Persistent console bindings (U2): a fragment's top-level `mut x = e` — and a bare
         // `x = e` introducing a NEW name — binds a SESSION GLOBAL, the console analogue of a REPL
@@ -5835,29 +5889,24 @@ impl<'m> Vm<'m> {
             }],
             span,
         };
-        let diag_mark = self.diagnostics.len();
-        let trace_mark = self.abort_trace.len();
-        self.pure_eval = pure;
-        let outcome = self.run_fragment(&wrapper, args, span);
-        self.pure_eval = false;
-        // A console entry is a side query — its errors must not leak into the run being debugged.
-        self.diagnostics.truncate(diag_mark);
-        self.abort_trace.truncate(trace_mark);
-        outcome
+        let entry = self.install_fragment(&wrapper)?;
+        if let (Some(key), Some(session)) = (memo_key, self.debug_session.as_mut()) {
+            session.memo.insert(key, entry);
+        }
+        Ok(entry)
     }
 
-    /// Install and run one wrapped fragment: entry run binds the sentinel closure, which is then
-    /// taken out of its slot (one-shot — the sentinel never lingers) and called with the paused
-    /// frame's local values. `args` are borrowed from the paused register window; they are retained
-    /// only at the call (which consumes one reference each). Returns the fragment's **owned**
-    /// result value.
-    fn run_fragment(
+    /// Run one **installed** fragment entry: the entry run binds the sentinel closure, which is
+    /// then taken out of its slot (one-shot — the sentinel never lingers) and called with the
+    /// paused frame's local values. `args` are borrowed from the paused register window; they are
+    /// retained only at the call (which consumes one reference each). Returns the fragment's
+    /// **owned** result value.
+    fn run_installed_fragment(
         &mut self,
-        wrapper: &Program,
+        entry: u32,
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, String> {
-        let entry = self.install_fragment(wrapper)?;
         match self.run_thunk(entry, &[]) {
             Ok(v) => release(v),
             Err(Abort) => return Err(self.last_diag_message()),
@@ -5927,7 +5976,7 @@ impl<'m> Vm<'m> {
             return DebugEvalOutcome::Error(format!("no variable `{name}` in scope"));
         };
         let slot = target.base + reg;
-        match self.eval_fragment_owned(value, frame, false, frames, regs) {
+        match self.eval_fragment_owned(value, frame, false, None, frames, regs) {
             Ok(v) => {
                 let text = v.display();
                 let ty = v.type_display();
@@ -7605,7 +7654,11 @@ mod tests {
             Box::new(noeta_stdlib::SandboxHost::new()),
             Box::new(noeta_stdlib::SandboxExecutor::new()),
         );
-        vm.debug_session = Some(DebugSession { compiler, arena });
+        vm.debug_session = Some(DebugSession {
+            compiler,
+            arena,
+            memo: HashMap::new(),
+        });
         vm
     }
 
@@ -7689,6 +7742,68 @@ mod tests {
             before,
             "teardown after fragment installs returns residency to baseline"
         );
+    }
+
+    /// U3 (tooling-unification): a re-evaluated watch — same text, same scope shape — reuses its
+    /// compiled wrapper instead of appending a fresh proto + slot to the session per step.
+    #[test]
+    fn watch_fragments_are_memoized_by_text_and_scope() {
+        let arena = typed_arena::Arena::new();
+        let mut vm = debug_session_vm(
+            &arena,
+            "fn twice(n: int): int { return n * 2 }\nmut base = 10\necho twice(base)\n",
+        );
+        vm.run_top();
+        // Fabricate the paused shape the trampoline sees: main's frame at its entry (no in-scope
+        // locals yet), over a scratch register window.
+        let frames = vec![Frame {
+            proto: 0,
+            base: 0,
+            pc: 0,
+            ret_dst: 0,
+            ret_transform: RetTransform::None,
+            upvalues: Vec::new(),
+        }];
+        let regs = vec![Value::unit(); vm.module.protos[0].num_registers as usize];
+
+        let text = "twice(base) + 1";
+        let program = fragment(text);
+        let DebugEvalOutcome::Value { text: v1, .. } =
+            vm.debug_eval_fragment(&program, 0, false, text, &frames, &regs)
+        else {
+            panic!("first eval should succeed");
+        };
+        assert_eq!(v1, "21");
+        let protos = vm.module.protos.len();
+        let globals = vm.module.global_names.len();
+
+        // Same text, same scope shape → memo hit: nothing appends, the value is fresh.
+        let DebugEvalOutcome::Value { text: v2, .. } =
+            vm.debug_eval_fragment(&program, 0, false, text, &frames, &regs)
+        else {
+            panic!("second eval should succeed");
+        };
+        assert_eq!(v2, "21");
+        assert_eq!(
+            vm.module.protos.len(),
+            protos,
+            "a repeated watch appends no protos"
+        );
+        assert_eq!(
+            vm.module.global_names.len(),
+            globals,
+            "a repeated watch appends no global slots"
+        );
+
+        // Different text → a fresh compile (the memo is per-expression, not a single slot).
+        let other = fragment("twice(base) + 2");
+        let DebugEvalOutcome::Value { text: v3, .. } =
+            vm.debug_eval_fragment(&other, 0, false, "twice(base) + 2", &frames, &regs)
+        else {
+            panic!("third eval should succeed");
+        };
+        assert_eq!(v3, "22");
+        assert!(vm.module.protos.len() > protos, "new text compiles fresh");
     }
 
     /// R0 (REPL-on-VM): [`Vm::run_top`] runs the entry chunk against globals that **persist between

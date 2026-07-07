@@ -44,6 +44,8 @@ pub enum Resume {
     /// `allow_calls = false` (a hover) stays side-effect-free and refuses to run code.
     Evaluate {
         program: Program,
+        /// The raw console string, for the VM's compiled-wrapper memo (U3).
+        text: String,
         frame: usize,
         allow_calls: bool,
         reply: Sender<DebugEvalOutcome>,
@@ -273,11 +275,13 @@ impl DapDebugger {
             // and the captured stack is left in place, so `before_op` resumes waiting after.
             Ok(Resume::Evaluate {
                 program,
+                text,
                 frame,
                 allow_calls,
                 reply,
             }) => DebugAction::Evaluate(DebugEvalRequest {
                 program,
+                text,
                 frame,
                 allow_calls,
                 reply,
