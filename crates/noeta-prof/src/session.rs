@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use noeta_bytecode::Module;
 use noeta_diagnostics::{render, render_mapped};
 use noeta_span::SourceMap;
-use noeta_vm::VmBackend;
+use noeta_vm::{ProfileHook, VmBackend};
 
 /// A program compiled tier-0 and ready to profile: the bytecode and the source map that resolves
 /// each instruction's span back to a file + line (for `proto → name @ file:line` attribution).
@@ -112,23 +112,50 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
 }
 
 /// Run an already-compiled program **tier-0** (JIT unarmed) on the real host, timing the run and
-/// collecting the program's output. Never panics on ordinary failure: a host/executor that cannot
-/// start becomes a `stderr` chunk with a non-zero exit.
-pub fn run_compiled(compiled: Compiled) -> RunOutput {
+/// collecting the program's output. With `hook = Some(..)` a [`ProfileHook`] is consulted before
+/// every op (the instrumenting/sampling collector) and handed back for its results to be reclaimed;
+/// with `None` it is the plain tier-0 run (P0). Never panics on ordinary failure: a host/executor
+/// that cannot start becomes a `stderr` chunk with a non-zero exit.
+pub fn run(
+    compiled: &Compiled,
+    hook: Option<Box<dyn ProfileHook>>,
+) -> (RunOutput, Option<Box<dyn ProfileHook>>) {
     let host: Box<dyn noeta_stdlib::Host> = match noeta_runtime::RealHost::new() {
         Ok(host) => Box::new(host),
-        Err(err) => return RunOutput::failed(format!("noeta: cannot start host: {err}\n"), 2),
+        Err(err) => {
+            return (
+                RunOutput::failed(format!("noeta: cannot start host: {err}\n"), 2),
+                hook,
+            );
+        }
     };
     let executor: Box<dyn noeta_stdlib::Executor> = match noeta_runtime::RealExecutor::new() {
         Ok(executor) => Box::new(executor),
-        Err(err) => return RunOutput::failed(format!("noeta: cannot start executor: {err}\n"), 2),
+        Err(err) => {
+            return (
+                RunOutput::failed(format!("noeta: cannot start executor: {err}\n"), 2),
+                hook,
+            );
+        }
     };
 
-    // `run_module_debug(.., None)` is the tier-0 run path (JIT never armed); the `None` debugger
-    // means no per-op consult. We wrap only the run itself in the wall-clock measurement, not the
-    // compile — a profile reports where the *program* spends time, not the toolchain.
+    // We wrap only the run itself in the wall-clock measurement, not the compile — a profile reports
+    // where the *program* spends time, not the toolchain. Both paths pin tier-0 (JIT never armed).
+    let backend = VmBackend::new();
     let start = Instant::now();
-    let (result, trace) = VmBackend::new().run_module_debug(&compiled.module, host, executor, None);
+    let (result, hook, trace) = match hook {
+        // Instrumenting/sampling run: the hook rides the per-op seam and comes back with its results.
+        Some(hook) => {
+            let (result, hook, trace) =
+                backend.run_module_profiled(&compiled.module, host, executor, hook);
+            (result, Some(hook), trace)
+        }
+        // Plain tier-0 run (`run_module_debug(.., None)` is the JIT-off path; no per-op consult).
+        None => {
+            let (result, trace) = backend.run_module_debug(&compiled.module, host, executor, None);
+            (result, None, trace)
+        }
+    };
     let wall = start.elapsed();
 
     let mut chunks = Vec::new();
@@ -150,9 +177,12 @@ pub fn run_compiled(compiled: Compiled) -> RunOutput {
             text: noeta_vm::render_trace(&trace, &compiled.sources),
         });
     }
-    RunOutput {
-        chunks,
-        exit_code: result.exit_code,
-        wall,
-    }
+    (
+        RunOutput {
+            chunks,
+            exit_code: result.exit_code,
+            wall,
+        },
+        hook,
+    )
 }

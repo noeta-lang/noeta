@@ -168,6 +168,11 @@ enum Command {
     Profile {
         /// Path to a `.noe` file.
         file: PathBuf,
+        /// Run the **instrumenting** profiler: exact per-function call counts + self/total time
+        /// (a table on stderr), instead of just timing the run. (Wall-time flamegraph sampling is
+        /// a later slice.)
+        #[arg(long)]
+        instrument: bool,
     },
     /// Serve a program's HTTP handler. The file defines a top-level `fn fetch(req: Request):
     /// Response` (sync or async) and `use std.{http}`; `noeta serve` runs the file's top-level
@@ -227,7 +232,7 @@ fn main() -> ExitCode {
         Command::Repl { no_check, load } => cmd_repl(!no_check, load),
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),
-        Command::Profile { file } => cmd_profile(&file),
+        Command::Profile { file, instrument } => cmd_profile(&file, instrument),
         Command::Serve { file, port } => cmd_serve(&file, port),
     }
 }
@@ -245,8 +250,13 @@ fn cmd_dap() -> ExitCode {
 }
 
 /// Profile a program: run it tier-0 under the production VM and report where it spends its time.
-fn cmd_profile(file: &std::path::Path) -> ExitCode {
-    noeta_prof::run(file)
+fn cmd_profile(file: &std::path::Path, instrument: bool) -> ExitCode {
+    let mode = if instrument {
+        noeta_prof::Mode::Instrument
+    } else {
+        noeta_prof::Mode::Summary
+    };
+    noeta_prof::run(file, mode)
 }
 
 /// For a tier runner: whether its `tier` is live under `--profile`. `Ok(true)` when no profile was
