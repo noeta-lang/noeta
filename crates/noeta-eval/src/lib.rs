@@ -3879,12 +3879,15 @@ impl Interpreter {
                     }
                 }
             }
-            // `http.serve(port, handler)` — the inbound accept→handle→reply loop (http-server S3).
-            // Serial for now: one connection is handled to completion before the next is accepted.
-            // Concurrent in-flight dispatch is S3b. Under the sandbox the accept leaf drives a finite
-            // request script and eventually reports the listener closed, so the loop terminates
-            // in-oracle; on the real host it serves until the socket closes. The tree-walker mirror of
-            // the VM's `Builtin::Serve`.
+            // `http.serve(port, handler)` — the inbound accept→dispatch→reply loop (http-server S3).
+            // **Concurrent (S3b):** each accepted connection's `handler(request)` is a task in a
+            // server-owned in-flight set the loop reaps; a slow (async) handler yields at its awaits
+            // while the next connection is accepted and other handlers advance — the cooperative Tier-1
+            // model (the accept future is polled alongside the handler futures each round, never
+            // drive-to-completion). Under the sandbox the accept leaf drives a finite request script
+            // and reports the listener closed, so the loop terminates in-oracle; on the real host it
+            // serves until the socket closes. The tree-walker mirror of the VM's `Builtin::Serve`;
+            // both poll in the identical order, so the interleaving is deterministic and agrees.
             Builtin::Serve => {
                 self.expect_arity(builtin, &args, 2, span)?;
                 let Value::Int(port) = args[0] else {
@@ -3909,47 +3912,107 @@ impl Interpreter {
                     headers: Vec::new(),
                     body: b"Internal Server Error".to_vec(),
                 };
+                // Reply on `conn` (an async leaf, driven to completion — a write is quick).
+                let reply = |me: &mut Self, conn: u64, response: noeta_stdlib::NetResponse| {
+                    let reply_io = me.host.net_reply(conn, response);
+                    let reply_id = me.executor.spawn_ext(&mut *me.host, reply_io);
+                    me.drive_future(Value::AsyncIo(reply_id), span).map(|_| ())
+                };
+                let mut in_flight: Vec<(u64, Value)> = Vec::new();
+                let mut accept_future: Option<Value> = None;
+                let mut closing = false;
                 loop {
-                    // Accept the next connection — an async leaf ticketed on the executor, driven to
-                    // ready. `none` means the listener closed (the script is exhausted).
-                    let accept_io = self.host.net_accept(listener);
-                    let accept_id = self.executor.spawn_ext(&mut *self.host, accept_io);
-                    let accepted = self.drive_future(Value::AsyncIo(accept_id), span)?;
-                    let request = match &accepted {
-                        Value::Enum(e) if e.enum_name == "Option" && e.variant == "some" => {
-                            e.data.first().cloned().expect("some carries the request")
-                        }
-                        _ => break,
-                    };
-                    // The connection id rides inside the `Request` value; the handler never sees it.
-                    let conn = match &request {
-                        Value::Extern(cell) => cell
-                            .borrow()
-                            .as_any()
-                            .downcast_ref::<noeta_stdlib::net::Request>()
-                            .map(|r| r.conn),
-                        _ => None,
+                    // Keep one accept in flight while the listener is open.
+                    if !closing && accept_future.is_none() {
+                        let accept_io = self.host.net_accept(listener);
+                        let id = self.executor.spawn_ext(&mut *self.host, accept_io);
+                        accept_future = Some(Value::AsyncIo(id));
                     }
-                    .expect("accept yields a Request extern value");
-                    // Call `handler(request)` and drive it (a sync handler returns the `Response`; an
-                    // async one returns a `Future` the loop drives). A handler error becomes a 500 and
-                    // the server keeps running.
-                    let response = match self
-                        .call(handler.clone(), vec![request], span)
-                        .and_then(|result| self.drive_future(result, span))
-                    {
-                        Ok(Value::Extern(cell)) => cell
-                            .borrow()
-                            .as_any()
-                            .downcast_ref::<noeta_stdlib::NetResponse>()
-                            .cloned()
-                            .unwrap_or_else(server_error),
-                        Ok(_) | Err(_) => server_error(),
-                    };
-                    // Reply — another async leaf — then loop for the next connection.
-                    let reply_io = self.host.net_reply(conn, response);
-                    let reply_id = self.executor.spawn_ext(&mut *self.host, reply_io);
-                    self.drive_future(Value::AsyncIo(reply_id), span)?;
+                    let mut progressed = false;
+                    // Poll the pending accept; on a connection, spawn its handler task.
+                    if let Some(af) = accept_future.take() {
+                        match self.poll_once(&af, span)? {
+                            Some(accepted) => {
+                                progressed = true;
+                                match &accepted {
+                                    Value::Enum(e)
+                                        if e.enum_name == "Option" && e.variant == "some" =>
+                                    {
+                                        let request = e
+                                            .data
+                                            .first()
+                                            .cloned()
+                                            .expect("some carries the request");
+                                        let conn = match &request {
+                                            Value::Extern(cell) => cell
+                                                .borrow()
+                                                .as_any()
+                                                .downcast_ref::<noeta_stdlib::net::Request>()
+                                                .map(|r| r.conn),
+                                            _ => None,
+                                        }
+                                        .expect("accept yields a Request extern value");
+                                        // Spawn the handler. A sync handler returns the `Response`
+                                        // immediately; an async one a `Future` polled below. A call-time
+                                        // error → 500 now.
+                                        match self.call(handler.clone(), vec![request], span) {
+                                            Ok(fut) => in_flight.push((conn, fut)),
+                                            Err(_) => reply(self, conn, server_error())?,
+                                        }
+                                    }
+                                    // `none` → the listener closed; stop accepting and drain.
+                                    _ => closing = true,
+                                }
+                            }
+                            None => accept_future = Some(af),
+                        }
+                    }
+                    // Reap: poll each in-flight handler; reply on completion, 500 on error.
+                    let mut k = 0;
+                    while k < in_flight.len() {
+                        let (conn, fut) = (in_flight[k].0, in_flight[k].1.clone());
+                        let done = match self.poll_once(&fut, span) {
+                            Ok(Some(value)) => {
+                                let response = match &value {
+                                    Value::Extern(cell) => cell
+                                        .borrow()
+                                        .as_any()
+                                        .downcast_ref::<noeta_stdlib::NetResponse>()
+                                        .cloned()
+                                        .unwrap_or_else(server_error),
+                                    _ => server_error(),
+                                };
+                                reply(self, conn, response)?;
+                                true
+                            }
+                            Ok(None) => false,
+                            Err(_) => {
+                                reply(self, conn, server_error())?;
+                                true
+                            }
+                        };
+                        if done {
+                            in_flight.remove(k);
+                            progressed = true;
+                        } else {
+                            k += 1;
+                        }
+                    }
+                    // Done when the listener closed and every handler has replied.
+                    if closing && in_flight.is_empty() && accept_future.is_none() {
+                        break;
+                    }
+                    // Let a handler's own `concurrent` tasks advance, then advance the clock if stalled.
+                    if !self.scopes.is_empty() {
+                        progressed |= self.poll_all_scopes_round(span)?;
+                    }
+                    if !progressed && self.executor.advance().is_none() {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::Panic,
+                            span,
+                            "async deadlock: `http.serve` stalled with no pending work".to_string(),
+                        ));
+                    }
                 }
                 Ok(Value::Unit)
             }

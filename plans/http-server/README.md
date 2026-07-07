@@ -185,9 +185,14 @@ first-party router/middleware library is a follow-on arc or a documented example
   serially (one connection to completion before the next), with a handler error caught → 500 (the
   server keeps running). Conformance `serve_routing.noe` drives the sandbox script through a routing
   handler; differential + leak (0) green in both backends. **S3b** adds concurrent in-flight dispatch.
-- **S3b** — upgrade the serve loop to **concurrent dispatch**: a server-owned reaping scope that
-  spawns each handler as a task and reaps completions, so a slow (async) handler yields while the next
-  connection is accepted. An async-handler conformance test pins the (deterministic) interleaving.
+- **S3b — done (`<pending>`).** The serve loop is now **concurrent**: a server-owned in-flight set
+  the loop reaps. The accept future is polled *alongside* the handler futures each round (never
+  drive-to-completion), so a slow async handler yields at its awaits while the next connection is
+  accepted and other handlers advance — cooperative Tier-1 dispatch. Both backends poll in the
+  identical order (accept, then in-flight by index), so the interleaving is deterministic and agrees.
+  Conformance `serve_concurrent.noe`: an async handler that `sleep(5).await`s prints all five
+  "handling" lines (every connection accepted + in flight) *before* any "done" — a serial server
+  could not. Differential + leak 0 green in both backends.
 - **S3 (original, superseded by S3a+S3b)** — the **serve construct** (the core green slice): grammar for `http.serve(port, handler)`
   (checker-recognized, validates `handler: (Request) -> Response`, sync or async), one shared IR
   lowering, `Op::Serve` in the VM. Both backends implement the **Tier-1 async reaping loop** —
