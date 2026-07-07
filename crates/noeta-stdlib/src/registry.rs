@@ -304,6 +304,12 @@ const STD_TYPES: &[ExtType] = &[
         dispatch: file_handle_dispatch,
         key_capable: false,
     },
+    ExtType {
+        name: crate::crypto::HASHER_TYPE_NAME,
+        methods: HASHER_METHODS,
+        dispatch: hasher_method_dispatch,
+        key_capable: false, // `update` mutates — a hasher can never key a map
+    },
 ];
 
 /// The `FileHandle` instance methods (extern-types X3) — the signatures the checker's
@@ -730,7 +736,63 @@ const CRYPTO_FNS: &[ExtFn] = &[
         params: &[STR_OR_BYTES, STR_OR_BYTES],
         ret: Concrete(SigType::Bytes),
     },
+    // Incremental hashing (C3): per-algorithm constructors, one `Hasher` type.
+    ExtFn {
+        name: "sha256_hasher",
+        params: &[],
+        ret: Concrete(HASHER_SIG),
+    },
+    ExtFn {
+        name: "sha512_hasher",
+        params: &[],
+        ret: Concrete(HASHER_SIG),
+    },
 ];
+
+/// The `Hasher` signature type, named once.
+const HASHER_SIG: SigType = SigType::Named(crate::crypto::HASHER_TYPE_NAME);
+
+/// The `Hasher` instance methods (crypto C3): `update` is the mutable + host-free seam corner —
+/// it mutates the receiver through the shared cell and never touches the Host; `digest` is a
+/// non-destructive read (interim digests keep flowing).
+const HASHER_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "update",
+        params: &[STR_OR_BYTES],
+        ret: Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "digest",
+        params: &[],
+        ret: Concrete(SigType::Bytes),
+    },
+];
+
+fn hasher_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(hasher) = recv.as_any_mut().downcast_mut::<crate::crypto::Hasher>() else {
+        return Err(type_error(method, "Hasher"));
+    };
+    match method {
+        "update" => {
+            want_arity(method, args, 1)?;
+            hasher.update(want_data(method, args, 0)?);
+            Ok(NativeOut::Unit)
+        }
+        "digest" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Bytes(hasher.digest()))
+        }
+        _ => Err(crate::no_method_error(
+            crate::crypto::HASHER_TYPE_NAME,
+            method,
+        )),
+    }
+}
 
 fn crypto_dispatch(
     func: &str,
@@ -774,6 +836,18 @@ fn crypto_dispatch(
             Ok(NativeOut::Bytes(crate::crypto::hmac_sha512(
                 want_data(func, args, 0)?,
                 want_data(func, args, 1)?,
+            )))
+        }
+        "sha256_hasher" => {
+            want_arity(func, args, 0)?;
+            Ok(NativeOut::Extern(crate::ExternBox::new(
+                crate::crypto::Hasher::Sha256(Default::default()),
+            )))
+        }
+        "sha512_hasher" => {
+            want_arity(func, args, 0)?;
+            Ok(NativeOut::Extern(crate::ExternBox::new(
+                crate::crypto::Hasher::Sha512(Default::default()),
             )))
         }
         _ => Err(no_function_error("crypto", func)),
