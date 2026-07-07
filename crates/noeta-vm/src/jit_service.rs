@@ -104,6 +104,7 @@ impl JitService {
                         compiled: engine.compiled_count(),
                         compile_ns_total: engine.compile_ns_total(),
                         compile_ns_max: engine.compile_ns_max(),
+                        breakdown: engine.compile_breakdown(),
                     },
                     None => JitStats::default(),
                 });

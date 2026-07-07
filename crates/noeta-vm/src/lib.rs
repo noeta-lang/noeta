@@ -353,6 +353,7 @@ impl VmBackend {
                 compiled: j.compiled_count(),
                 compile_ns_total: j.compile_ns_total(),
                 compile_ns_max: j.compile_ns_max(),
+                breakdown: j.compile_breakdown(),
             })
             .unwrap_or_default();
         (result, stats)
@@ -400,6 +401,8 @@ pub struct JitStats {
     pub compiled: usize,
     pub compile_ns_total: u64,
     pub compile_ns_max: u64,
+    /// Where `compile_ns_total` goes + compiled volume (P-JCT C0).
+    pub breakdown: noeta_jit::CompileBreakdown,
 }
 
 impl Backend for VmBackend {

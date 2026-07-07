@@ -208,6 +208,23 @@ pub const SITE_POISON: u64 = {
     l.sign_bit | l.qnan
 };
 
+/// Per-phase compile accounting (P-JCT C0): where the engine's total compile time goes, plus the
+/// volume compiled — enough to compute a bytes/s throughput comparable against Cranelift's
+/// expected range. `define_ns` covers `Module::define_function` (lowering, regalloc, and the IR
+/// verifier when enabled); `finalize_ns` covers `finalize_definitions` (relocations + W^X page
+/// flips, currently paid **per body**); IR construction is the remainder of the engine's
+/// `compile_ns_total`. `bodies` counts finalized functions (classic + fast + bail stubs — more
+/// than protos compiled), `clif_insts` the clif instructions handed to `define_function`, and
+/// `code_bytes` the finalized machine code emitted.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompileBreakdown {
+    pub define_ns: u64,
+    pub finalize_ns: u64,
+    pub bodies: u64,
+    pub clif_insts: u64,
+    pub code_bytes: u64,
+}
+
 /// The method JIT: a Cranelift [`JITModule`] plus a per-prototype cache of finalized entry points.
 ///
 /// The cache is indexed by prototype index (into [`noeta_bytecode::Module::protos`]) — the same key
@@ -244,6 +261,8 @@ pub struct Jit {
     /// hits don't count — only actual codegen work.
     compile_ns_total: u64,
     compile_ns_max: u64,
+    /// Where `compile_ns_total` actually goes (P-JCT C0) — see [`CompileBreakdown`].
+    breakdown: CompileBreakdown,
     /// Imported runtime helpers, declared once (see the `*_HELPER` name constants).
     observe_id: FuncId,
     note_bound_id: FuncId,
@@ -303,6 +322,17 @@ impl Jit {
         let opt_level = std::env::var("NOETA_JIT_OPT").unwrap_or_else(|_| "speed".to_string());
         flags
             .set("opt_level", &opt_level)
+            .map_err(|e| e.to_string())?;
+        // P-JCT C1: Cranelift's IR verifier defaults **on** and re-checks the function at every
+        // pass boundary — a pure debug tool (it never changes codegen) that dominated compile
+        // time. Debug builds (the test suites, the jit-differential oracle in CI) keep it as a
+        // safety net; release builds turn it off. `NOETA_JIT_VERIFY=1|0` overrides either way.
+        let verify = match std::env::var("NOETA_JIT_VERIFY") {
+            Ok(v) => v != "0",
+            Err(_) => cfg!(debug_assertions),
+        };
+        flags
+            .set("enable_verifier", if verify { "true" } else { "false" })
             .map_err(|e| e.to_string())?;
         let isa_builder = cranelift_native::builder().map_err(|m| m.to_string())?;
         let isa = isa_builder
@@ -407,6 +437,7 @@ impl Jit {
             native_count: 0,
             compile_ns_total: 0,
             compile_ns_max: 0,
+            breakdown: CompileBreakdown::default(),
             observe_id,
             note_bound_id,
             retain_id,
@@ -490,6 +521,11 @@ impl Jit {
         self.compile_ns_max
     }
 
+    /// Per-phase breakdown of `compile_ns_total` plus compiled volume (P-JCT C0).
+    pub fn compile_breakdown(&self) -> CompileBreakdown {
+        self.breakdown
+    }
+
     /// The tier-1 ABI signature: `(vm, regs, base, globals, frames, regs_vec) -> i64` (see
     /// [`CompiledFn`]).
     fn abi_signature(&self) -> cranelift_codegen::ir::Signature {
@@ -532,6 +568,14 @@ impl Jit {
         // of `noeta dump`, for inspecting what the JIT actually emits.
         let want_disasm = std::env::var_os("NOETA_JIT_DISASM").is_some();
         self.ctx.set_disasm(want_disasm);
+        // Debug tool: `NOETA_JIT_CLIF=1` dumps each body's clif IR as handed to Cranelift —
+        // pre-optimization, so it shows exactly what *our* emitter produced (the input-volume
+        // side of the compile-throughput ledger; `NOETA_JIT_DISASM` shows the output side).
+        if std::env::var_os("NOETA_JIT_CLIF").is_some() {
+            eprintln!("=== {name} (clif) ===\n{}", self.ctx.func.display());
+        }
+        self.breakdown.clif_insts += self.ctx.func.dfg.num_insts() as u64;
+        let define_start = std::time::Instant::now();
         let func_id = self
             .module
             .declare_function(name, Linkage::Export, &self.ctx.func.signature)
@@ -539,16 +583,20 @@ impl Jit {
         self.module
             .define_function(func_id, &mut self.ctx)
             .map_err(|e| e.to_string())?;
-        if want_disasm
-            && let Some(code) = self.ctx.compiled_code()
-            && let Some(vcode) = &code.vcode
-        {
-            eprintln!("=== {name} ===\n{vcode}");
+        self.breakdown.define_ns += define_start.elapsed().as_nanos() as u64;
+        if let Some(code) = self.ctx.compiled_code() {
+            self.breakdown.code_bytes += code.code_buffer().len() as u64;
+            if want_disasm && let Some(vcode) = &code.vcode {
+                eprintln!("=== {name} ===\n{vcode}");
+            }
         }
         self.module.clear_context(&mut self.ctx);
+        let finalize_start = std::time::Instant::now();
         self.module
             .finalize_definitions()
             .map_err(|e| e.to_string())?;
+        self.breakdown.finalize_ns += finalize_start.elapsed().as_nanos() as u64;
+        self.breakdown.bodies += 1;
         let code = self.module.get_finalized_function(func_id);
         // SAFETY: `code` is a finalized function whose Cranelift signature is exactly the
         // `extern "C" fn(ptr, ptr, usize) -> u32` this transmutes to, and it stays valid for as long
