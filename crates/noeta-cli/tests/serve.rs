@@ -40,7 +40,14 @@ fn serve_routes_a_real_request() {
         std::thread::sleep(Duration::from_millis(50));
     }
     let outcome = (|| {
-        let mut stream = stream.ok_or("server did not accept within 2.5s")?;
+        let stream = stream.ok_or("server did not accept within 2.5s")?;
+        // A hostile/empty probe first: connect and close without sending a request (what a port
+        // scan or a load balancer's TCP health check does). The accept leaf must absorb it and
+        // keep serving — propagating the wire error killed the whole server once (E0021).
+        drop(stream);
+        std::thread::sleep(Duration::from_millis(100));
+        let mut stream = std::net::TcpStream::connect(&addr)
+            .map_err(|e| format!("server died after an empty probe: {e}"))?;
         stream
             .write_all(b"GET /hi HTTP/1.1\r\nHost: x\r\n\r\n")
             .map_err(|e| e.to_string())?;

@@ -448,14 +448,22 @@ impl ExternIo for RealAcceptIo {
                 }
                 slot.as_ref().unwrap().clone()
             };
-            let (mut stream, _peer) = listener
-                .accept()
-                .await
-                .map_err(|e| io_error(format!("accept failed: {e}")))?;
-            let request = read_request(&mut stream).await?;
-            let conn = next_conn.fetch_add(1, Ordering::Relaxed);
-            conns.lock().unwrap().insert(conn, stream);
-            Ok(accept_outcome(Some((conn, request))))
+            // A connection that breaks before a complete request (a port scan, a load balancer's
+            // TCP health probe, a client that gave up) is not an event the program observes: drop
+            // it and keep accepting. Only listener-level failure surfaces — propagating the wire
+            // error was a real bug (any bare connect-and-close killed `noeta serve` with E0021).
+            loop {
+                let (mut stream, _peer) = listener
+                    .accept()
+                    .await
+                    .map_err(|e| io_error(format!("accept failed: {e}")))?;
+                let Ok(request) = read_request(&mut stream).await else {
+                    continue;
+                };
+                let conn = next_conn.fetch_add(1, Ordering::Relaxed);
+                conns.lock().unwrap().insert(conn, stream);
+                return Ok(accept_outcome(Some((conn, request))));
+            }
         })))
     }
 }
