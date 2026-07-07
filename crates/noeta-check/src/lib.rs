@@ -211,7 +211,7 @@ pub fn check_all_session(program: &Program) -> (Checked, SessionChecker) {
     let checked = Checked {
         diagnostics: std::mem::take(&mut checker.diags),
         expr_types: checker.sites.expr_types.clone(),
-        sites: checker.sites.clone().to_sites(checker.relevance.clone()),
+        sites: checker.sites.clone().into_sites(checker.relevance.clone()),
     };
     (checked, SessionChecker { checker, env })
 }
@@ -311,7 +311,7 @@ impl SessionChecker {
         self.checker
             .sites
             .clone()
-            .to_sites(self.checker.relevance.clone())
+            .into_sites(self.checker.relevance.clone())
     }
 
     /// Reset the per-entry lexical scratch to its neutral state. The whole-program phases leave
@@ -673,7 +673,7 @@ impl SiteMaps {
     /// accumulated maps; `expr_types` stays behind — it is the IDE index, not a compile input).
     /// One projection shared by `check_all`, `check_all_session`, and the session snapshot, so the
     /// three can never drift field-wise.
-    fn to_sites(self, destructor_relevance: DestructorRelevance) -> Sites {
+    fn into_sites(self, destructor_relevance: DestructorRelevance) -> Sites {
         Sites {
             type_of_sites: self.type_of_sites,
             construction_sites: self.construction_sites,
@@ -936,7 +936,7 @@ impl Checker {
         Checked {
             diagnostics: self.diags,
             expr_types,
-            sites: sites.to_sites(relevance),
+            sites: sites.into_sites(relevance),
         }
     }
 
