@@ -1,10 +1,12 @@
 # Tooling unification — one engine under REPL, DAP, and LSP
 
-**Status: PLANNED (recon complete, slices not started).** Motivated by a real smell: the tooling has
-been accreting parallel machinery — most recently the DAP's D5.2 watch evaluator, the *third* thing in
-the tree that evaluates expressions. This arc de-duplicates what has actually diverged, and lands the
-one big unification: **the debug console becomes a REPL over the paused program** (session-compiled
-fragments, closures included), which *deletes* an evaluator instead of growing one.
+**Status: ARC COMPLETE (T0–T7), branch `tooling-unification`.** Motivated by a real smell: the
+tooling had been accreting parallel machinery — most recently the DAP's D5.2 watch evaluator, the
+*third* thing in the tree that evaluated expressions. This arc de-duplicated what had actually
+diverged, and landed the one big unification: **the debug console is a REPL over the paused
+program** (session-compiled fragments, closures included, escapes surviving resume) — which
+*deleted* an evaluator instead of growing one. The tree is back to exactly two expression
+evaluators: the production VM and the conformance oracle.
 
 This document is reconnaissance-backed: three parallel sweeps mapped (1) every pipeline driver,
 (2) the session/VM ownership model, (3) cross-tool helper duplication. Findings are inlined with
@@ -141,26 +143,32 @@ confirmation.
 
 | # | Slice | Delivers | Notes |
 |---|-------|----------|-------|
-| **T0** | Merge + baseline | `debug-adapter-d5` → `main`; branch `tooling-unification` | `main` has moved (JIT-throughput arc); real merge. Full conformance + dap + vm green before anything else. |
-| **T1** | Small unifications | One spelling for types; one fragment parser; one render loop | `Value::type_display()` in noeta-value (3 sites); shared expression-fragment parse helper (REPL `:type` + DAP); `render_mapped` in noeta-diagnostics (CLI + DAP). |
-| **T2** | `Sites` bundle | `compile_with_sites(program, &Sites, opts)` | Struct lives in noeta-check (compiler already depends on it); `Checked` exposes it; update all ~9 call sites. New site map = 1 field + the sites that care. |
-| **T3** | `SessionCompiler::adopt` | A session seeded from a checked compile | Keep the launch `ModuleCompiler` alive; adopt; tests: post-adopt `extend` calls base fns/types, ids stable, shapes appended not re-wrapped. |
-| **T4** ✅ | Module swap + arena (superseded the overlay — see architecture §2) | `Vm::install_fragment`: session-extend → relocate entry → grow derived tables → swap `self.module` to the arena'd snapshot | Dispatch re-reads the module per `'reload` + cache-array growth check; JIT interlock asserted. **Bench (pinned interleaved A/B, taskset -c 2):** `vm_recursion/fib` medians t4 −5.1%/−1.2% (fib/20/24, 8 rounds — frame-transfer-heavy, the change executes per call); `vm_dispatch/loop_sum` +0.9–1.3% with overlapping spreads (structurally executes the change once per run → layout luck). Verdict: noise, no regression. |
-| **T5** | Console = session fragments | Closures at the console; walker's cases via compiled code | Trampoline: parse → `extend` (synthetic fn, params = frame locals) → append via overlay → call → render. DAP tests: closure in `map`/`filter`, **escaped closure via `effect` + resume + fire**, composition, error surfacing. |
-| **T6** | Hover purity + walker deletion | `pure_eval` flag; `Vm::debug_eval`/`debug_eval_call`/`debug_index` deleted | Evaluator count back to 2 (VM + oracle). Hover tests: paths/operators still answer; call/object-index refused at runtime. Bench the flag check (fold into T4's run). |
-| **T7** | Docs + plans sweep | Aligned docs | Update plans/debug-adapter (D5.2 walker superseded), plans/repl-on-vm cross-refs, this doc's status, memory. |
+| **T0** ✅ | Merge + baseline | `debug-adapter-d5` → `main` (real merge — http + JIT-throughput arcs had landed); branch `tooling-unification` | Full workspace (73 suites incl. conformance) green before anything else. |
+| **T1** ✅ | Small unifications | One spelling for types; one fragment parser; one render loop | `Value::type_display()` (3 verbatim sites); `noeta_parser::parse_fragment` + `Fragment::trailing_expr` (REPL `:type` + DAP); `noeta_diagnostics::render_mapped` (CLI + DAP). |
+| **T2** ✅ | `Sites` bundle | `compile_with_sites(program, Sites, real_isolates, debug)` — was 15 args | `Sites` in noeta-check (11 maps + destructor relevance); `Checked { diagnostics, expr_types, sites }`; `reference_run(program, Sites)`; noeta-db's mirror embeds it; all ~9 unpacking call sites collapsed. New site map = 1 field + the consumers that care; the differential catches a forgotten semantically-relevant map. |
+| **T3** ✅ | Session from a checked compile | `compile_with_sites_session` (keeps the `ModuleCompiler` alive) + `VmSession::adopted` | Shared `compile_to_mc` core; production `compile_inner` still MOVES its tables (no clone tax). Tests: fragment calls checked fns/globals by original ids; `Rc<Shape>`→`&'static Shape` identity across entries via structural equality; fragment closure over checked ids; stable name prefixes. `VmSession::adopted` also enables a future `noeta repl --load`. |
+| **T4** ✅ | Module swap + arena (superseded the overlay — see architecture §2) | `Vm::install_fragment`: session-extend → relocate entry (proto 0 stays `main`) → grow derived tables → swap `self.module` to the arena'd snapshot | Dispatch re-reads the module per `'reload` + cache-array growth check; JIT interlock asserted. **Bench (pinned interleaved A/B, taskset -c 2):** `vm_recursion/fib` medians t4 −5.1%/−1.2% (fib/20/24, 8 rounds — frame-transfer-heavy, the change executes per call); `vm_dispatch/loop_sum` +0.9–1.3% with overlapping spreads (structurally executes the change once per run → layout luck). Verdict: noise, no regression. |
+| **T5** ✅ | Console = session fragments | Closures at the console; statements; escapes survive resume | Adapter parses (SourceId `u32::MAX` — no span collisions); VM wraps the fragment as a closure whose params are the frame's in-scope locals, binds it to a NUL sentinel global, calls it with the paused window's values; trailing expr → `return`. `run_module_debug_session` owns the arena. Test: `xs.filter(fn(x) => x > 15)`; closure composing frame local + program fn; **escaped closure rebound into a program global, called by the program's own code after `continue`** (→ 17). |
+| **T6** ✅ | Hover purity + walker deletion | `is_pure_expr` AST gate + `Vm::pure_eval` runtime backstop; the D5.2 walker deleted (~260 lines) | Backstop is ONE chokepoint: every way of running user code pushes a frame, every frame push re-enters `'reload` — a pure run refuses there (decides object-`Index` / user-ordering, which the AST cannot). Evaluator count back to 2 (VM + oracle). Test: `b[0]` with an `Index` impl runs in a watch, refused on hover; `b.xs[1]` still hovers. |
+| **T7** ✅ | Docs + plans sweep | Aligned docs | plans/debug-adapter (D5.2 walker superseded by the fragment engine), this doc, memory. |
 
-Gate: full conformance suite (differential, leaks, jit-diff, session parity) + all DAP/LSP/VM tests
-green per slice; T4/T6 benches attached to their commits; zero new `unsafe`.
+Gate (met per slice): full conformance suite (differential, leaks, jit-diff, session parity) + all
+DAP/LSP/VM tests green; the T4 bench attached to its commit; zero new `unsafe`.
 
 ---
 
 ## Deferred (explicit, pending confirmation)
 
 - **Persistent console bindings** (`mut x = 1` across console entries): needs a frame-scope/module-
-  scope hybrid; design sketched above, not started.
-- **`setVariable` / assignment from the console** (`x = 5` mutating a frame register): the
-  DAP-protocol-shaped sibling; rides the same fragment machinery once wanted.
+  scope hybrid (a fragment's `mut` is a closure-body local today); design constraints noted above,
+  not started.
+- **`setVariable` / assignment to frame locals from the console** (`x = 5` mutating a frame
+  register): frame locals pass into fragments BY VALUE, so assigning one mutates the fragment's
+  copy — the register write-back is the DAP-protocol-shaped sibling; rides the same fragment
+  machinery once wanted.
+- **Watch-memoization**: each evaluate appends one small proto + global slot to the session; a
+  watch panel re-evaluates on every step, so a long session accumulates them. Memoize fragments by
+  (text, in-scope param names) → entry proto (indices stay valid — the module only grows).
 - **SessionChecker** (incremental type-checking at the REPL/console prompt): planned in
   plans/repl-on-vm, orthogonal to this arc; fragments stay checkerless here.
 - **REPL cosmetic convergence**: the REPL already *is* the session engine; beyond T1's shared

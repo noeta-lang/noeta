@@ -3,7 +3,17 @@
 **Status: D0–D5.2 COMPLETE — the milestone is done.** `noeta dap` runs over stdio, the VS Code/VSCodium
 client launches on F5, and breakpoints, stepping, stack/scopes/variables, and `evaluate` — variable
 paths, operators, **and calls** (`xs.len()`, `f(x)`, `p.mag()`) — all work; a hover stays
-side-effect-free (paths/operators only, calls refused). This is the next
+side-effect-free (paths/operators only, calls refused).
+
+> **Superseded downstream (tooling-unification arc):** the D5/D5.2 evaluator described below — the
+> read-only AST walker plus the by-name call dispatch — was later **replaced and deleted**. Every
+> `evaluate` now COMPILES its fragment through a session adopted from the launch's checked compile
+> (`plans/tooling-unification`): full language at the watch/console incl. **closures**
+> (`xs.filter(fn(x) => x > 15)`) and statements, escapes surviving resume; hover runs the same
+> engine gated to the read-only surface (an AST gate + a frame-push refusal at run time). This doc
+> stays as the D-milestone record; the current architecture lives in the tooling-unification plan.
+
+This is the next
 milestone after the `noeta lsp` language server shipped and merged to `main`. It mirrors that arc: a new `noeta-dap` crate
 plus a `noeta dap` CLI subcommand, speaking a stdio wire protocol to any DAP-capable editor (VS Code /
 VSCodium's built-in debug UI, Neovim `nvim-dap`, etc.). Where the LSP was a thin *read* adapter over the
