@@ -295,7 +295,15 @@ impl Jit {
         // P-JSSA: the SSA promotion leans on Cranelift's mid-end (block-param coalescing, GVN,
         // dead-load removal of unused entry inits). The default `opt_level=none` was fine for the
         // memory-form codegen; with block params it is not.
-        flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
+        //
+        // `NOETA_JIT_OPT` is a **dev measurement knob** (P-PAR S4): it lets the compile-time /
+        // code-quality trade be A/B'd without a rebuild (`none` compiles far faster, `speed` runs
+        // faster). Semantics are identical at every level, so the jit-differential is unaffected;
+        // the shipped default stays `speed`.
+        let opt_level = std::env::var("NOETA_JIT_OPT").unwrap_or_else(|_| "speed".to_string());
+        flags
+            .set("opt_level", &opt_level)
+            .map_err(|e| e.to_string())?;
         let isa_builder = cranelift_native::builder().map_err(|m| m.to_string())?;
         let isa = isa_builder
             .finish(settings::Flags::new(flags))

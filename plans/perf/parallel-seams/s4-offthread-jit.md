@@ -44,6 +44,35 @@ decision with those numbers in hand** — plausible outcomes:
 - `--jit-differential` oracle byte-identical (forced path untouched); leak-under-JIT oracle
   green.
 
+## Shipped (2026-07-07) — GO, as designed plus two findings
+
+**`opt_level` A/B first (the measurement the user asked for):** `NOETA_JIT_OPT=none` halves
+compile time (mixed: 1695.6 → 835.6 ms total, worst pause 165 → 70 ms) for only **~5% slower
+generated code** (200k-call runtime 13.75 → 14.43 s). Worth knowing — the env knob ships as a
+dev tool — but not the fix: even `none` averages 27 ms/compile, so the cost is *not* the egraph
+optimizer. Follow-up observation (out of this slice): ms-scale compiles for 7-line functions
+suggest a compile-throughput investigation (two bodies/proto, regalloc on long chains?).
+
+**Off-thread service (`crates/noeta-vm/src/jit_service.rs`):** a background thread owns the
+Cranelift engine for its whole life (`!Send` raw-pointer bakes make moving it impossible and
+unnecessary); the mutator queues prototype indices, keeps interpreting, and drains a mailbox
+into **mirror tables** (`jit_entries`/`jit_fast`) at its existing promotion checkpoints — the
+single tier-1 lookup source in both modes, so the engine's tables are never shared. Every
+request gets exactly one response (failed compile ⇒ per-proto decline), so the pending counter
+always drains. OSR requests born at a back-edge enter mid-loop the moment the entry lands
+(`jit_osr_pending`). Teardown shuts the service down **last** (destructors may call compiled
+code) and **abandons** the outstanding queue — nothing will ever run those entries; the stats
+entry points (`run_module_jit_hot_with_stats`) instead set `jit_drain_at_exit` so the OSR
+promotion tests keep deterministic counts. `force_jit` (the oracle) keeps the synchronous
+on-VM engine: the jit-differential is untouched by construction.
+
 ## Numbers
 
-_S0c baseline + (if go) after table to be recorded here._
+| Measurement | before (sync) | after (off-thread) |
+|---|--:|--:|
+| `jit_promo.noe` end-to-end (`noeta run`, 12 hot 100-stmt fns, tests/bench/parallel-seams) | 1096.2 ms | **46.9 ms** (**23×**) |
+| fib(30) end-to-end (compile lands mid-flight, native entered) | 26.6 ms | 31.2 ms (−4.6 ms: mutator interprets while Cranelift works — the intended trade on quick-hot programs) |
+| worst mutator pause (S0c) | up to ~194 ms | **0** (compile never on the mutator) |
+
+Gates: workspace 73 suites, vm+jit 140, CLI 59, conformance 501, differential agree,
+jit-differential "tier 1 agrees with tier 0 and leaks nothing" — all green.

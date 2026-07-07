@@ -53,6 +53,8 @@ use noeta_value::{
 };
 
 mod isolate;
+#[cfg(feature = "jit")]
+mod jit_service;
 mod values;
 pub(crate) use values::*;
 mod methods;
@@ -291,10 +293,11 @@ impl VmBackend {
         vm.parallel_isolates = true;
         vm.isolate_module = Some(Arc::clone(&module));
         vm.isolate_factory = Some(factory);
-        // The main isolate is a real-host production run: enable the hot-counter JIT (P-JIT). Worker
-        // isolates load through `Vm::load` and stay tier-0 (Cranelift's `JITModule` is `!Send`).
+        // The main isolate is a real-host production run: enable the hot-counter JIT (P-JIT),
+        // compiling off-thread (P-PAR S4). Worker isolates load through `Vm::load` and stay
+        // tier-0 (the engine lives on the compile-service thread).
         #[cfg(feature = "jit")]
-        vm.init_jit();
+        vm.init_jit_service(Arc::clone(&module));
         let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
         // The abort traceback (empty for a clean run) rides beside the result — `RunResult` itself
         // stays the differential's compared unit, which the trace is deliberately not part of (yet):
@@ -374,18 +377,14 @@ impl VmBackend {
             Box::new(noeta_stdlib::SandboxHost::new()),
             Box::new(noeta_stdlib::SandboxExecutor::new()),
         );
-        vm.init_jit(); // force_jit stays false → hot-counter + OSR promotion
+        // force_jit stays false → hot-counter + OSR promotion, compiled OFF-THREAD (P-PAR S4).
+        vm.init_jit_service(Arc::new(module.clone()));
+        // Stats determinism: compile the outstanding queue at exit so promotion counts don't
+        // race the program's runtime (the OSR tests assert them exactly).
+        vm.jit_drain_at_exit = true;
         let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
-        let stats = vm
-            .jit
-            .as_ref()
-            .map(|j| JitStats {
-                native: j.native_count(),
-                compiled: j.compiled_count(),
-                compile_ns_total: j.compile_ns_total(),
-                compile_ns_max: j.compile_ns_max(),
-            })
-            .unwrap_or_default();
+        // Teardown shut the service down and parked its final accounting.
+        let stats = vm.jit_final_stats.take().unwrap_or_default();
         (result, stats)
     }
 }
@@ -626,6 +625,40 @@ struct Vm<'m> {
     /// `Vm`'s lifetime; the `Jit` and its generated code are dropped with the same `Vm`).
     #[cfg(feature = "jit")]
     jit_frame_template: Option<Box<Frame>>,
+    /// The off-thread compile service (P-PAR S4) — the production hot-counter path. Mutually
+    /// exclusive with the synchronous `jit` engine (which the `force_jit` oracle keeps).
+    #[cfg(feature = "jit")]
+    jit_service: Option<jit_service::JitService>,
+    /// The **mirror tables** — the single tier-1 lookup source for the dispatch loop and the
+    /// native call helpers, in both modes: the sync engine fills them right after compiling,
+    /// the service via the mailbox drain. The engine's own tables are never read by the
+    /// mutator in service mode (they live on the compile thread).
+    #[cfg(feature = "jit")]
+    jit_entries: Vec<Option<noeta_jit::CompiledFn>>,
+    #[cfg(feature = "jit")]
+    jit_fast: Vec<Option<usize>>,
+    /// Per-prototype "request sent" flag (service mode) — a hot prototype is queued exactly once.
+    #[cfg(feature = "jit")]
+    jit_requested: Vec<bool>,
+    /// Prototypes whose compile request was born at a **loop back-edge** (service mode): when the
+    /// entry lands, the next back-edge OSR-enters mid-loop instead of waiting for a frame entry
+    /// that a single long-running loop may never make.
+    #[cfg(feature = "jit")]
+    jit_osr_pending: Vec<bool>,
+    /// Requests in flight to the service (sends minus drained responses): the mailbox mutex is
+    /// only ever locked while this is non-zero, so a program that never promotes pays nothing.
+    #[cfg(feature = "jit")]
+    jit_pending: usize,
+    /// The service's final compile accounting, captured at teardown shutdown (the engine — and
+    /// its counters — live on the compile thread until then).
+    #[cfg(feature = "jit")]
+    jit_final_stats: Option<JitStats>,
+    /// Whether teardown's service shutdown **drains** (compiles) the outstanding queue rather
+    /// than abandoning it. Off in production (a process should not linger at exit for entries
+    /// nothing will run); on for the stats entry points, whose tests/benches assert
+    /// deterministic promotion counts.
+    #[cfg(feature = "jit")]
+    jit_drain_at_exit: bool,
     /// The attached debugger (`noeta dap`), consulted before every instruction. `None` on every
     /// non-debug run (production, differential, salsa), where it costs one predicted branch per op.
     debugger: Option<Box<dyn Debugger>>,
@@ -951,14 +984,13 @@ extern "C" fn jit_prepare_call(
     if regs.len() + num_regs > regs.capacity() {
         return FALLBACK;
     }
-    let Some(jit) = vm.jit.as_ref() else {
-        return FALLBACK;
-    };
     // Fast convention (P-JSSA S4.1): the callee has a frameless-window body — reserve the window
     // WITHOUT initializing it (the fast body normalizes it before the interpreter can ever see
     // it) and skip the argument copy/retain (the arguments travel as machine arguments, borrowed
     // from the caller's still-live registers). Bit 0 of the returned pointer tags the convention.
-    if let Some(ff) = jit.get_fast(callee_proto as usize) {
+    // Lookups go through the VM's mirror tables (P-PAR S4) — empty when the JIT is off, and the
+    // only tier-1 tables the mutator may read in service mode.
+    if let Some(ff) = vm.jit_fast.get(callee_proto as usize).copied().flatten() {
         // S4.2: fill this call site's inline cache so the next call with the same callee pushes
         // the frame natively, without this helper. The cached closure is **pinned** (retained +
         // held on `jit_cache_pins` until teardown) so its bits can never be reused by another
@@ -1001,7 +1033,7 @@ extern "C" fn jit_prepare_call(
         };
     }
     // The classic direct path needs the callee's normal body compiled.
-    let Some(f) = jit.get(callee_proto as usize) else {
+    let Some(f) = vm.jit_entry(callee_proto as usize) else {
         return FALLBACK;
     };
     // Set up the callee frame (like `setup_closure_call`'s closure arm, minus defaults/upvalues).
@@ -1498,7 +1530,10 @@ fn execute_with_collector(
     // no-op without the `jit` feature; the `jit` binding is unused there, so quiet the warning.
     #[cfg(feature = "jit")]
     if jit {
-        vm.init_jit();
+        // Production hot-counter tiering compiles OFF-THREAD (P-PAR S4): the mutator never
+        // pauses for Cranelift. The compile thread outlives every `&Module` borrow, so it takes
+        // the module by `Arc` (a one-time table clone at startup).
+        vm.init_jit_service(Arc::new(module.clone()));
     }
     #[cfg(not(feature = "jit"))]
     let _ = jit;
@@ -1616,6 +1651,22 @@ impl<'m> Vm<'m> {
             jit_cache_pins: Vec::new(),
             #[cfg(feature = "jit")]
             jit_frame_template: None,
+            #[cfg(feature = "jit")]
+            jit_service: None,
+            #[cfg(feature = "jit")]
+            jit_entries: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_fast: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_requested: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_osr_pending: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_pending: 0,
+            #[cfg(feature = "jit")]
+            jit_final_stats: None,
+            #[cfg(feature = "jit")]
+            jit_drain_at_exit: false,
             debugger: None,
             abort_trace: Vec::new(),
         }
@@ -1663,12 +1714,108 @@ impl<'m> Vm<'m> {
             Ok(mut jit) => {
                 if self.force_jit {
                     for p in 0..self.module.protos.len() {
-                        let _ = jit.compile(self.module, p);
+                        if let Ok(f) = jit.compile(self.module, p) {
+                            let fast = jit.get_fast(p);
+                            self.jit_install(p, f, fast);
+                        }
                     }
                 }
                 self.jit = Some(jit);
             }
             Err(_) => self.jit = None,
+        }
+    }
+
+    /// Start the **off-thread** tier-1 compile service (P-PAR S4) — the production hot-counter
+    /// path. Mutually exclusive with [`init_jit`](Self::init_jit) (the `force_jit` oracle's
+    /// synchronous engine). Needs the module by `Arc` because the compile thread outlives every
+    /// borrow the mutator holds.
+    #[cfg(feature = "jit")]
+    fn init_jit_service(&mut self, module: Arc<Module>) {
+        let helpers: Vec<(&'static str, usize)> = vec![
+            (noeta_jit::OBSERVE_HELPER, jit_observe as *const u8 as usize),
+            (
+                noeta_jit::NOTE_GLOBAL_BOUND_HELPER,
+                jit_note_global_bound as *const u8 as usize,
+            ),
+            (noeta_jit::RETAIN_HELPER, jit_retain as *const u8 as usize),
+            (noeta_jit::RELEASE_HELPER, jit_release as *const u8 as usize),
+            (
+                noeta_jit::RELEASE_VALUE_HELPER,
+                jit_release_value as *const u8 as usize,
+            ),
+            (noeta_jit::CALL_HELPER, jit_call as *const u8 as usize),
+            (noeta_jit::RETURN_HELPER, jit_return as *const u8 as usize),
+            (
+                noeta_jit::PREPARE_CALL_HELPER,
+                jit_prepare_call as *const u8 as usize,
+            ),
+            (
+                noeta_jit::AFTER_CALL_HELPER,
+                jit_after_call as *const u8 as usize,
+            ),
+            (
+                noeta_jit::LEAF_OP_HELPER,
+                jit_run_leaf_op as *const u8 as usize,
+            ),
+        ];
+        let template = self.jit_frame_template.get_or_insert_with(|| {
+            Box::new(Frame {
+                proto: 0,
+                base: 0,
+                pc: 0,
+                ret_dst: 0,
+                ret_transform: RetTransform::None,
+                upvalues: Vec::new(),
+            })
+        });
+        let template_addr = template.as_ref() as *const Frame as usize;
+        self.jit_service =
+            jit_service::JitService::spawn(module, helpers, frame_layout(), template_addr);
+    }
+
+    /// Install a compiled prototype into the mirror tables — the single lookup source for the
+    /// dispatch loop and the native call helpers, in both sync and service modes.
+    #[cfg(feature = "jit")]
+    fn jit_install(&mut self, proto: usize, entry: noeta_jit::CompiledFn, fast: Option<usize>) {
+        if proto >= self.jit_entries.len() {
+            self.jit_entries.resize(proto + 1, None);
+            self.jit_fast.resize(proto + 1, None);
+        }
+        self.jit_entries[proto] = Some(entry);
+        self.jit_fast[proto] = fast;
+    }
+
+    /// The mirrored tier-1 entry point for `proto`, if compiled.
+    #[cfg(feature = "jit")]
+    fn jit_entry(&self, proto: usize) -> Option<noeta_jit::CompiledFn> {
+        self.jit_entries.get(proto).copied().flatten()
+    }
+
+    /// Drain the service mailbox into the mirror tables (service mode, only while requests are
+    /// in flight). A failed compile (`entry: None`) declines its prototype — same terminal state
+    /// as the worthiness gates — so every request reaches a fixed point and `jit_pending` always
+    /// returns to zero.
+    #[cfg(feature = "jit")]
+    fn jit_drain_service(&mut self) {
+        if self.jit_pending == 0 {
+            return;
+        }
+        let Some(service) = self.jit_service.as_ref() else {
+            self.jit_pending = 0;
+            return;
+        };
+        for done in service.drain() {
+            self.jit_pending = self.jit_pending.saturating_sub(1);
+            match done.entry {
+                Some(entry) => self.jit_install(done.proto, entry, done.fast),
+                None => {
+                    if done.proto >= self.jit_declined.len() {
+                        self.jit_declined.resize(done.proto + 1, false);
+                    }
+                    self.jit_declined[done.proto] = true;
+                }
+            }
         }
     }
 
@@ -1688,7 +1835,7 @@ impl<'m> Vm<'m> {
         base: usize,
         entry_pc: usize,
     ) -> Option<JitOutcome> {
-        let f = match self.jit.as_ref().and_then(|j| j.get(proto)) {
+        let f = match self.jit_entry(proto) {
             Some(f) => f,
             // Only a fresh entry drives compilation; a resume at a compiled-away frame just interprets.
             None if entry_pc == 0 => self.jit_maybe_compile(proto)?,
@@ -1726,11 +1873,21 @@ impl<'m> Vm<'m> {
     }
 
     /// Bump prototype `proto`'s entry counter and, once it is hot (or immediately under `force_jit`),
-    /// compile it — returning the fresh entry point on the promoting call. `None` while still cold or
-    /// when the JIT is unavailable.
+    /// promote it. Synchronous mode compiles in place and returns the fresh entry point on the
+    /// promoting call; **service mode** (P-PAR S4) queues the compile off-thread and keeps
+    /// interpreting — the entry lands in the mirror via the mailbox drain a later call performs.
+    /// `None` while still cold, queued, or when the JIT is unavailable.
     #[cfg(feature = "jit")]
     fn jit_maybe_compile(&mut self, proto: usize) -> Option<noeta_jit::CompiledFn> {
-        self.jit.as_ref()?;
+        if self.jit.is_none() && self.jit_service.is_none() {
+            return None;
+        }
+        // Harvest any compiles that landed since the last checkpoint (no-op at zero pending),
+        // then re-check the mirror — the promoting entry may already be ready.
+        self.jit_drain_service();
+        if let Some(f) = self.jit_entry(proto) {
+            return Some(f);
+        }
         // Already found not worth compiling (a prototype whose only loops bail) → keep interpreting.
         if self.jit_declined.get(proto).copied().unwrap_or(false) {
             return None;
@@ -1752,9 +1909,48 @@ impl<'m> Vm<'m> {
             self.jit_declined[proto] = true;
             return None;
         }
+        if self.jit_service.is_some() {
+            self.jit_request(proto, false);
+            return None;
+        }
         let module = self.module;
         let jit = self.jit.as_mut()?;
-        jit.compile(module, proto).ok()
+        let f = jit.compile(module, proto).ok()?;
+        let fast = jit.get_fast(proto);
+        self.jit_install(proto, f, fast);
+        Some(f)
+    }
+
+    /// Queue `proto` for off-thread compilation, exactly once (service mode). `osr` marks a
+    /// request born at a loop back-edge, so the landing entry OSR-enters mid-loop.
+    #[cfg(feature = "jit")]
+    fn jit_request(&mut self, proto: usize, osr: bool) {
+        if self.jit_requested.get(proto).copied().unwrap_or(false) {
+            return;
+        }
+        if proto >= self.jit_requested.len() {
+            self.jit_requested.resize(proto + 1, false);
+        }
+        self.jit_requested[proto] = true;
+        if osr {
+            if proto >= self.jit_osr_pending.len() {
+                self.jit_osr_pending.resize(proto + 1, false);
+            }
+            self.jit_osr_pending[proto] = true;
+        }
+        let sent = self
+            .jit_service
+            .as_ref()
+            .is_some_and(|service| service.request(proto));
+        if sent {
+            self.jit_pending += 1;
+        } else {
+            // The service thread is gone: decline so no caller waits on a response forever.
+            if proto >= self.jit_declined.len() {
+                self.jit_declined.resize(proto + 1, false);
+            }
+            self.jit_declined[proto] = true;
+        }
     }
 
     /// On-stack replacement trigger (P-JIT J5): a taken **backward branch** in prototype `proto` is a
@@ -1773,11 +1969,30 @@ impl<'m> Vm<'m> {
     /// would risk bouncing tier-0↔tier-1 every iteration for a loop whose body native can't sustain.
     #[cfg(feature = "jit")]
     fn jit_osr_backedge(&mut self, proto: usize) -> bool {
-        if self.jit.as_ref().and_then(|j| j.get(proto)).is_some() {
+        if self.jit_entry(proto).is_some() {
+            // Service mode: a back-edge-born compile just landed in the mirror — take the one
+            // pending OSR entry now (a single long-running loop gets no other chance to go
+            // native mid-flight). A prototype compiled via the call-entry path has no pending
+            // OSR and keeps the one-OSR-per-prototype rule: it goes native at its next `'reload`.
+            if self.jit_osr_pending.get(proto).copied().unwrap_or(false) {
+                self.jit_osr_pending[proto] = false;
+                return true;
+            }
             return false;
         }
         // Already found un-sustainable (all loops bail) → keep interpreting, no per-iteration re-scan.
         if self.jit_declined.get(proto).copied().unwrap_or(false) {
+            return false;
+        }
+        // A back-edge-born request is in flight: harvest the mailbox; enter the moment it lands.
+        if self.jit_requested.get(proto).copied().unwrap_or(false) {
+            self.jit_drain_service();
+            if self.jit_entry(proto).is_some()
+                && self.jit_osr_pending.get(proto).copied().unwrap_or(false)
+            {
+                self.jit_osr_pending[proto] = false;
+                return true;
+            }
             return false;
         }
         // Bump the back-edge counter; only decide once the prototype is hot. `force_jit` (the oracle)
@@ -1798,12 +2013,23 @@ impl<'m> Vm<'m> {
             self.jit_declined[proto] = true;
             return false;
         }
+        if self.jit_service.is_some() {
+            self.jit_request(proto, true);
+            return false;
+        }
         let module = self.module;
         let jit = match self.jit.as_mut() {
             Some(j) => j,
             None => return false,
         };
-        jit.compile(module, proto).is_ok()
+        match jit.compile(module, proto) {
+            Ok(f) => {
+                let fast = jit.get_fast(proto);
+                self.jit_install(proto, f, fast);
+                true
+            }
+            Err(_) => false,
+        }
     }
 }
 
@@ -1936,6 +2162,17 @@ impl<'m> Vm<'m> {
         // count 0; defensive here so the leak oracle's zero-residency balance holds on early
         // exits too.
         self.free_shared_region();
+
+        // Shut the off-thread compile service down LAST (P-PAR S4): the destructors above may
+        // have called compiled code, and shutdown drops the code pages with the engine. The
+        // mirrors are cleared first so no stale entry can outlive its pages; the service's final
+        // compile accounting parks on the VM for the stats entry points.
+        #[cfg(feature = "jit")]
+        if let Some(service) = self.jit_service.take() {
+            self.jit_entries.clear();
+            self.jit_fast.clear();
+            self.jit_final_stats = service.shutdown(self.jit_drain_at_exit);
+        }
 
         let exit_code = if self.diagnostics.is_empty() { 0 } else { 1 };
         RunResult {
@@ -2463,7 +2700,7 @@ impl<'m> Vm<'m> {
             // resume pc otherwise; the compiled code jumps to that block (or bails if it has no entry
             // for it).
             #[cfg(feature = "jit")]
-            if self.jit.is_some() {
+            if self.jit.is_some() || self.jit_service.is_some() {
                 match self.jit_enter(proto, frames, regs, fbase, pc) {
                     // Not compiled → interpret as usual.
                     None => {}
@@ -2494,7 +2731,10 @@ impl<'m> Vm<'m> {
                     #[cfg(feature = "jit")]
                     {
                         let _osr_t = $target as usize;
-                        if _osr_t <= pc && self.jit.is_some() && self.jit_osr_backedge(proto) {
+                        if _osr_t <= pc
+                            && (self.jit.is_some() || self.jit_service.is_some())
+                            && self.jit_osr_backedge(proto)
+                        {
                             frames[top].pc = _osr_t;
                             continue 'reload;
                         }

@@ -41,7 +41,14 @@ fn main() {
         src.push_str(&make_fn(&name, stmts));
         names.push(name);
     }
-    src.push_str("mut total = 0\nfor i in 0..60 {\n");
+    // `JIT_PAUSE_CALLS=<n>` (default 60) sets how many times each function is called. 60 just
+    // crosses the promotion threshold (pause measurement); large values make *runtime* dominate,
+    // so wall − compile compares generated-code quality across `NOETA_JIT_OPT` levels.
+    let calls: usize = std::env::var("JIT_PAUSE_CALLS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    src.push_str(&format!("mut total = 0\nfor i in 0..{calls} {{\n"));
     for name in &names {
         src.push_str(&format!("    total = total + {name}(i)\n"));
     }
@@ -78,4 +85,8 @@ fn main() {
         stats.compile_ns_max / 1_000
     );
     println!("compile avg     {:>10} µs", avg_us);
+    println!(
+        "runtime (wall − compile) {:>7.1} ms",
+        (wall.as_nanos() as f64 - stats.compile_ns_total as f64) / 1e6
+    );
 }
