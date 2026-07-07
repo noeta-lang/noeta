@@ -1883,3 +1883,139 @@ fn function_returning_or_diverging_on_every_path_is_clean() {
     // `dyn` admits `unit`, so falling through is well-typed and not flagged.
     assert!(codes("fn d(n: int): dyn { echo \"hi\" }\n").is_empty());
 }
+
+// --- SessionChecker (session-checker C0/C1): per-entry checking against an accumulated session ---
+
+/// Parse one entry with its own `SourceId` (as the REPL/console assigns them) and check it against
+/// `session`, returning this entry's diagnostic codes.
+fn entry_codes(session: &mut super::SessionChecker, id: u32, text: &str) -> Vec<String> {
+    let source = Source::new(SourceId(id), format!("<entry:{id}>"), text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(
+        lexed.diagnostics.is_empty() && parsed.diagnostics.is_empty(),
+        "entry must parse cleanly: {:?}",
+        parsed.diagnostics
+    );
+    session
+        .check_entry(&parsed.program)
+        .iter()
+        .map(|d| d.code.to_string())
+        .collect()
+}
+
+#[test]
+fn a_session_entry_sees_what_earlier_entries_committed() {
+    let mut session = super::SessionChecker::new();
+    // Entry 1: a fn, a type, a binding — all clean.
+    assert!(
+        entry_codes(
+            &mut session,
+            0,
+            "fn twice(n: int): int { return n * 2 }\nstruct P { x: int }\nmut total = 1\n",
+        )
+        .is_empty()
+    );
+    // Entry 2: uses all three across the entry boundary.
+    assert!(
+        entry_codes(
+            &mut session,
+            1,
+            "mut p = P { x: twice(total) }\ntotal = p.x\n",
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn forward_references_work_within_an_entry_and_unknown_names_stay_runtime_deferred() {
+    let mut session = super::SessionChecker::new();
+    // Within one entry, a call may precede the declaration (collect runs first) — like any file.
+    assert!(
+        entry_codes(
+            &mut session,
+            0,
+            "fn a(): int { return b() }\nfn b(): int { return 1 }\n",
+        )
+        .is_empty()
+    );
+    // A not-yet-defined name is NOT a static error — the checker's deliberate unknown-ident
+    // tolerance defers it to the runtime E0005, in a session entry exactly as in a file. (So a
+    // cross-entry "forward reference" fails at run time, not at the prompt's check.)
+    assert!(entry_codes(&mut session, 1, "echo later()\n").is_empty());
+    // Defining it in a later entry makes subsequent uses statically KNOWN (typed, not deferred).
+    assert!(entry_codes(&mut session, 2, "fn later(): int { return 3 }\n").is_empty());
+    assert!(entry_codes(&mut session, 3, "mut n: int = later()\n").is_empty());
+}
+
+#[test]
+fn mut_stability_rules_apply_across_entries() {
+    let mut session = super::SessionChecker::new();
+    assert!(entry_codes(&mut session, 0, "mut n = 1\nfixed = 2\n").is_empty());
+    // Compatible reassignment across the boundary: fine.
+    assert!(entry_codes(&mut session, 1, "n = 5\n").is_empty());
+    // Incompatible reassignment across the boundary: E0007, exactly as within a file.
+    assert_eq!(entry_codes(&mut session, 2, "n = \"s\"\n"), vec!["E0007"]);
+    // Reassigning an immutable binding from an earlier entry: E0006.
+    assert_eq!(entry_codes(&mut session, 3, "fixed = 3\n"), vec!["E0006"]);
+    // Re-`mut` re-declares — even retyped — because the language allows it.
+    assert!(entry_codes(&mut session, 4, "mut n = \"now a string\"\n").is_empty());
+    assert!(entry_codes(&mut session, 5, "n = \"still one\"\n").is_empty());
+}
+
+#[test]
+fn an_erroring_entry_leaves_the_session_usable_and_diagnostics_do_not_leak() {
+    let mut session = super::SessionChecker::new();
+    // A genuinely static error mid-entry (mut retype within the entry).
+    assert_eq!(
+        entry_codes(&mut session, 0, "mut oops = 1\noops = \"s\"\n"),
+        vec!["E0007"]
+    );
+    // The session is still usable, and the failed entry's diagnostics did not leak forward.
+    assert!(entry_codes(&mut session, 1, "mut ok = 1\necho ok\n").is_empty());
+}
+
+#[test]
+fn reserved_names_refuse_in_a_session_entry() {
+    let mut session = super::SessionChecker::new();
+    // A prelude value name (E0046) and a native type name (E0049) refuse, as in a file.
+    assert_eq!(
+        entry_codes(&mut session, 0, "fn panic(): int { return 1 }\n"),
+        vec!["E0046"]
+    );
+    assert_eq!(
+        entry_codes(&mut session, 1, "struct Uuid { x: int }\n"),
+        vec!["E0049"]
+    );
+}
+
+#[test]
+fn destruct_reachability_refixpoints_over_the_accumulated_registry() {
+    let mut session = super::SessionChecker::new();
+    // Entry 1: a plain container — nothing destructor-bearing yet.
+    assert!(
+        entry_codes(
+            &mut session,
+            0,
+            "class Holder { r: Res }\nstruct Res { x: int }\n"
+        )
+        .is_empty()
+    );
+    // Entry 2 re-declares Res as a destructor class; the fixpoint over the ACCUMULATED registry
+    // must now mark Holder reachable too.
+    assert!(
+        entry_codes(
+            &mut session,
+            1,
+            "class Res { x: int\n    destruct { echo \"drop\" }\n}\n",
+        )
+        .is_empty()
+    );
+    assert!(
+        session
+            .sites_snapshot()
+            .destructor_relevance
+            .reachable_types
+            .contains("Holder")
+    );
+}

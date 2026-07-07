@@ -212,6 +212,114 @@ fn check_all_impl(program: &Program, record_expr_types: bool) -> Checked {
     }
 }
 
+/// A persistent, incremental checker for a REPL / debug-console session (session-checker C0/C1):
+/// entry *N* type-checks against the environment and registries entries *1..N-1* accumulated, then
+/// commits its own declarations and bindings for entry *N+1*. It wraps the ordinary [`Checker`] —
+/// the same phases, the same language rules, no fork — with the session adaptations:
+///
+/// - the **global scope persists** across entries (via [`Checker::check_program_in`]), so a later
+///   entry sees earlier bindings and the mut-stability rules (E0006/E0007) apply across entries
+///   exactly as they would across statements;
+/// - **`collect` runs per entry**, appending to the persistent registries — an entry may
+///   forward-reference within itself (as any program can) but not into a *future* entry: that is
+///   prompt semantics, and it surfaces as the ordinary unknown-name diagnostic;
+/// - **destruct-reachability re-fixpoints over the accumulated registries** each entry, so an
+///   entry's `destruct` class makes an earlier entry's containing type reachable for everything
+///   checked from now on (an earlier entry's already-computed relevance is inherently stale —
+///   the same staleness any prompt redefinition has);
+/// - **diagnostics drain per entry**; the span-keyed site maps accumulate (per-entry `SourceId`s
+///   make collisions impossible) and can be snapshotted for a checked compile.
+///
+/// Rebinding needs no REPL-specific policy: the language already allows re-`mut` (even retyped),
+/// reassignment under the stability rules, and type redefinition; only the reserved prelude /
+/// native names (E0046 / E0049) refuse — so a session entry is checked by exactly the rules a
+/// file is.
+pub struct SessionChecker {
+    checker: Checker,
+    /// The persistent global scope — one frame, never popped; entries push/pop inner scopes on
+    /// top of it as any block would.
+    env: Env,
+}
+
+impl Default for SessionChecker {
+    fn default() -> SessionChecker {
+        SessionChecker::new()
+    }
+}
+
+impl std::fmt::Debug for SessionChecker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionChecker")
+            .field("globals", &self.env.first().map_or(0, |frame| frame.len()))
+            .finish_non_exhaustive()
+    }
+}
+
+impl SessionChecker {
+    /// A fresh session: prelude registered, empty registries, an empty persistent global scope.
+    pub fn new() -> SessionChecker {
+        let mut checker = Checker::default();
+        checker.register_prelude();
+        SessionChecker {
+            checker,
+            env: vec![HashMap::new()],
+        }
+    }
+
+    /// Type-check one entry against the accumulated session and commit its declarations and
+    /// bindings. Returns **this entry's** diagnostics (empty ⇒ the entry is well-typed against
+    /// everything the session knows). The checker's per-entry lexical scratch is reset first, so
+    /// one entry's context can never leak into the next.
+    pub fn check_entry(&mut self, entry: &Program) -> Vec<Diagnostic> {
+        self.reset_scratch();
+        let diag_mark = self.checker.diags.len();
+        self.checker.collect(entry);
+        // Re-run the reachability fixpoint over the ACCUMULATED registries (this entry's
+        // `destruct` class can make an earlier entry's type reachable), and record this entry's
+        // parameter relevance.
+        self.checker.compute_relevance(entry);
+        self.checker.check_semantic_roles(entry);
+        self.checker.check_program_in(entry, &mut self.env);
+        self.checker.diags.split_off(diag_mark)
+    }
+
+    /// A snapshot of the accumulated compile-input bundle — every entry's site maps so far
+    /// (span-keyed by per-entry `SourceId`s, so a consumer's lookups only ever hit the right
+    /// entry). What a checked session compile (C5) threads into `compile_with_sites`.
+    pub fn sites_snapshot(&self) -> Sites {
+        Sites {
+            type_of_sites: self.checker.sites.type_of_sites.clone(),
+            construction_sites: self.checker.sites.construction_sites.clone(),
+            packed_list_sites: self.checker.sites.packed_list_sites.clone(),
+            ext_call_sites: self.checker.sites.ext_call_sites.clone(),
+            map_packed_sites: self.checker.sites.map_packed_sites.clone(),
+            index_field_sites: self.checker.sites.index_field_sites.clone(),
+            for_stream_sites: self.checker.sites.for_stream_sites.clone(),
+            width_sites: self.checker.sites.width_sites.clone(),
+            handle_sites: self.checker.sites.handle_sites.clone(),
+            bound_handle_sites: self.checker.sites.bound_handle_sites.clone(),
+            f32_literal_sites: self.checker.sites.f32_literal_sites.clone(),
+            destructor_relevance: self.checker.relevance.clone(),
+        }
+    }
+
+    /// Reset the per-entry lexical scratch to its neutral state. The whole-program phases leave
+    /// these neutral on a *clean* pass, but an entry that errored mid-body may not — and a session
+    /// must isolate entries regardless.
+    fn reset_scratch(&mut self) {
+        self.checker.current_type = None;
+        self.checker.in_dev_tier = false;
+        self.checker.type_params.clear();
+        self.checker.current_ret = Type::Unknown;
+        self.checker.collected_returns = None;
+        self.checker.current_yield = None;
+        self.checker.current_async = false;
+        self.checker.concurrent_depth = 0;
+        self.checker.loop_depth = 0;
+        self.checker.index_on_list.clear();
+    }
+}
+
 /// Type-check a program and return every diagnostic found, in source order. An empty result
 /// means the program is well-typed (modulo the deliberate interior-hole tolerance documented
 /// in the module docs). A thin projection of [`check_all`] for callers that need only the
@@ -1420,12 +1528,21 @@ impl Checker {
     /// Pass 2: check every top-level statement with a fresh global scope.
     fn check_program(&mut self, program: &Program) {
         let mut env: Env = vec![HashMap::new()];
+        self.check_program_in(program, &mut env);
+    }
+
+    /// [`Checker::check_program`] against a **caller-owned** environment — the seam the
+    /// [`SessionChecker`] rides (session-checker C0): a REPL/console session passes its persistent
+    /// global scope, so an entry sees the bindings earlier entries committed and the session keeps
+    /// whatever this entry binds. The whole-program path passes a fresh one-frame env
+    /// (behavior-identical).
+    fn check_program_in(&mut self, program: &Program, env: &mut Env) {
         // Implicit async top level (Track A): if the module body contains a top-level `.await` (one
         // not inside a nested `fn`/closure), the top level is itself an async context, so its awaits
         // are legal (executable since A.1 — a top-level `.await` runs its future to completion).
         self.current_async = block_has_await(&program.stmts);
         for stmt in &program.stmts {
-            self.check_stmt(stmt, &mut env);
+            self.check_stmt(stmt, env);
         }
         self.current_async = false;
         self.check_unrefined_muts(&program.stmts);
