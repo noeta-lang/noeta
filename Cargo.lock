@@ -1568,6 +1568,19 @@ name = "noeta-alloc-probe"
 version = "0.0.0"
 
 [[package]]
+name = "noeta-aot-runtime"
+version = "0.0.0"
+dependencies = [
+ "noeta-bundle",
+ "noeta-bytecode",
+ "noeta-diagnostics",
+ "noeta-runtime",
+ "noeta-span",
+ "noeta-stdlib",
+ "noeta-vm",
+]
+
+[[package]]
 name = "noeta-ast"
 version = "0.0.0"
 dependencies = [
