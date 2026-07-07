@@ -159,11 +159,12 @@ Each is cheap *once the REPL is on the VM* and currently impossible or awkward:
    work at the prompt against the real machine — matching `noeta run`. Gate behind a `--sandbox` flag if
    we want the deterministic prompt back.
 
-3. **Accumulated reflection.** The eval session rebuilds reflection **per batch** (`reflect::build`), so
-   `attributes_of` / `roles_of` on a type declared in an *earlier* entry currently fails. The session
-   differential (R2) will make us match that quirk first; then we can fix it on both backends
-   (accumulate the reflection manifest across entries) or knowingly accept divergence. On the VM the
-   `Module.reflection` is already a table we can grow by append.
+3. **Accumulated reflection.** ✅ **DONE.** Both backends now accumulate reflection across entries
+   (`ReflectionInfo::accumulate`, latest-wins): the VM's `SessionCompiler` holds a persistent
+   `ReflectionInfo` that `extend` merges each entry into; the tree-walker `Session::run_batch` merges
+   into the interpreter's reflection instead of replacing it. `attributes_of` / `type_of` / `roles_of`
+   on a type declared in an earlier entry resolve; a redefined type supersedes its old records. Both
+   accumulate identically, so the session differential stays green (a new parity case pins it).
 
 4. **JIT at the prompt (optional).** Long REPL sessions with a hot loop could arm the JIT per entry. The
    catch is the module-swap-invalidates-compiled-code problem (§ architecture); deferred until there is
