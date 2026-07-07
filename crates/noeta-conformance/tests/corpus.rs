@@ -167,6 +167,26 @@ fn differential_backends_agree() {
     );
 }
 
+/// The bundle serialization gate (P-AOT L1.0): every module the VM compiles must survive a
+/// serialize→deserialize→serialize round-trip byte-for-byte, the precondition for shipping a
+/// `.noeb` bundle instead of source.
+#[test]
+fn bundle_modules_round_trip_losslessly() {
+    let report = noeta_conformance::run_bundle_roundtrip(&corpus_root(), None);
+    eprintln!("{}", report.to_human());
+    assert!(
+        report.ok(),
+        "a compiled module did not survive serialization:\n{}",
+        report.to_human()
+    );
+    assert_eq!(
+        report.failures.len(),
+        0,
+        "every compiled module must serialize losslessly; got:\n{}",
+        report.to_human()
+    );
+}
+
 /// The JIT differential gate (milestone P-JIT): every program the VM compiles must produce a
 /// byte-for-byte identical `RunResult` on the forced tier-1 JIT as on the interpreter, and leave
 /// zero heap residency under JIT. Only compiled in a `--features jit` build; the plain build's

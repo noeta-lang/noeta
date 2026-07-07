@@ -78,6 +78,7 @@ clap = { version = "4", features = ["derive"] }
 # tower-lsp — async LanguageServer trait + JSON-RPC transport, composes with our tokio.
 tower-lsp-server = "0.23"
 serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 serde_json = "1"
 insta = "1"
 proptest = "1"
