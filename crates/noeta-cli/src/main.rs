@@ -161,6 +161,14 @@ enum Command {
     /// Debug Adapter Protocol on stdin/stdout. Runs a program under the production VM (JIT unarmed
     /// for full introspection) with breakpoints, stepping, and variable inspection.
     Dap,
+    /// Profile a program and report where it spends its time. Runs the file under the production VM
+    /// tier-0 (JIT unarmed, so every frame is observable) and prints a profile to stderr; the
+    /// program's own stdout is forwarded verbatim. A dev-time tool, distinct from the `--profile`
+    /// build-tier flag on `run`/`test`/… (this profiles a program's *execution*, not build tiers).
+    Profile {
+        /// Path to a `.noe` file.
+        file: PathBuf,
+    },
     /// Serve a program's HTTP handler. The file defines a top-level `fn fetch(req: Request):
     /// Response` (sync or async) and `use std.{http}`; `noeta serve` runs the file's top-level
     /// setup, then binds a listener and drives the handler — the ergonomic entry point over an
@@ -219,6 +227,7 @@ fn main() -> ExitCode {
         Command::Repl { no_check, load } => cmd_repl(!no_check, load),
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),
+        Command::Profile { file } => cmd_profile(&file),
         Command::Serve { file, port } => cmd_serve(&file, port),
     }
 }
@@ -233,6 +242,11 @@ fn cmd_lsp() -> ExitCode {
 fn cmd_dap() -> ExitCode {
     noeta_dap::run_stdio();
     ExitCode::SUCCESS
+}
+
+/// Profile a program: run it tier-0 under the production VM and report where it spends its time.
+fn cmd_profile(file: &std::path::Path) -> ExitCode {
+    noeta_prof::run(file)
 }
 
 /// For a tier runner: whether its `tier` is live under `--profile`. `Ok(true)` when no profile was

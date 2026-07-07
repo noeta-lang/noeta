@@ -1659,6 +1659,7 @@ dependencies = [
  "noeta-loader",
  "noeta-lsp",
  "noeta-parser",
+ "noeta-prof",
  "noeta-runtime",
  "noeta-span",
  "noeta-stdlib",
@@ -1899,6 +1900,22 @@ dependencies = [
  "noeta-lexer",
  "noeta-span",
  "proptest",
+]
+
+[[package]]
+name = "noeta-prof"
+version = "0.0.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-bytecode",
+ "noeta-check",
+ "noeta-compiler",
+ "noeta-diagnostics",
+ "noeta-loader",
+ "noeta-runtime",
+ "noeta-span",
+ "noeta-stdlib",
+ "noeta-vm",
 ]
 
 [[package]]
