@@ -245,18 +245,17 @@ http.post("https://api.example.com/users", json.stringify(payload), {"content-ty
 found = http.query("https://api.example.com/search", json.stringify(filter))
 ```
 
-Concurrent fan-out uses the async twins inside a `concurrent` block (see [Concurrency](Concurrency)):
+Concurrent fan-out: `all` (from `std.task`) awaits a batch of futures together, returning their
+results in input order (see [Concurrency](Concurrency)):
 
 ```noeta ignore
 use std.{http}
-async fn fetch(url: string): int {
-    return http.get_async(url).await.status()
-}
-concurrent {
-    hs = [spawn fetch("https://a.example"), spawn fetch("https://b.example")]
-    codes = all(hs)
-    echo codes.join(",")
-}
+use std.task.{all}
+codes = all([
+    http.get_async("https://a.example"),
+    http.get_async("https://b.example"),
+])
+echo [codes[0].status(), codes[1].status()].join(",")
 ```
 
 **Sandbox vs. real.** Under `noeta run` (and the REPL) requests hit the real network. Under the
