@@ -747,6 +747,22 @@ const CRYPTO_FNS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(HASHER_SIG),
     },
+    // Password hashing + crypto-grade randomness (C4) — the module's Host-entropy corner.
+    ExtFn {
+        name: "bcrypt_hash",
+        params: &[Str, Int],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "bcrypt_verify",
+        params: &[Str, Str],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        name: "random_bytes",
+        params: &[Int],
+        ret: Concrete(SigType::Bytes),
+    },
 ];
 
 /// The `Hasher` signature type, named once.
@@ -796,7 +812,7 @@ fn hasher_method_dispatch(
 
 fn crypto_dispatch(
     func: &str,
-    _host: &mut dyn Host,
+    host: &mut dyn Host,
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError> {
     match func {
@@ -849,6 +865,42 @@ fn crypto_dispatch(
             Ok(NativeOut::Extern(crate::ExternBox::new(
                 crate::crypto::Hasher::Sha512(Default::default()),
             )))
+        }
+        "bcrypt_hash" => {
+            want_arity(func, args, 2)?;
+            let password = want_str(func, args, 0)?;
+            let cost = want_int(func, args, 1)?;
+            // The salt is the effectful input: two Entropy words, drawn here at the seam so
+            // `crypto::bcrypt_hash` itself stays pure (and unit-testable against pinned salts).
+            let mut salt = [0u8; 16];
+            salt[..8].copy_from_slice(&host.entropy_u64().to_be_bytes());
+            salt[8..].copy_from_slice(&host.entropy_u64().to_be_bytes());
+            Ok(NativeOut::Str(crate::crypto::bcrypt_hash(
+                password, cost, salt,
+            )?))
+        }
+        "bcrypt_verify" => {
+            want_arity(func, args, 2)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(
+                crate::crypto::bcrypt_verify(want_str(func, args, 0)?, want_str(func, args, 1)?)?,
+            )))
+        }
+        "random_bytes" => {
+            want_arity(func, args, 1)?;
+            let n = want_int(func, args, 0)?;
+            if n < 0 {
+                return Err(StdError {
+                    kind: crate::ErrorKind::ArgType,
+                    message: format!("`crypto.random_bytes` count must be non-negative, got {n}"),
+                });
+            }
+            let n = n as usize;
+            let mut out = Vec::with_capacity(n.next_multiple_of(8));
+            while out.len() < n {
+                out.extend_from_slice(&host.entropy_u64().to_be_bytes());
+            }
+            out.truncate(n);
+            Ok(NativeOut::Bytes(out))
         }
         _ => Err(no_function_error("crypto", func)),
     }

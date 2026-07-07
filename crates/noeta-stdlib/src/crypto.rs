@@ -6,6 +6,7 @@
 //! `sha1` and `md5` ship for interop (UUID v5, legacy checksums, cache keys) and are documented
 //! as not collision-resistant — they are not an integrity story.
 
+use crate::{ErrorKind, StdError};
 use hmac::{Hmac, Mac};
 use md5::Md5;
 use sha1::Sha1;
@@ -37,6 +38,37 @@ pub fn hmac_sha512(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut mac = <Hmac<Sha512>>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
+}
+
+/// bcrypt password hash (crypto arc C4). The 16-byte salt arrives as an ARGUMENT — drawn from
+/// the Host `Entropy` capability by the registry dispatch, never self-generated — so the sandbox
+/// stays deterministic (exact-string pinnable) and the real host gets OS entropy. The result is
+/// the standard `$2b$…` modular-crypt string, self-describing for `bcrypt_verify`.
+pub fn bcrypt_hash(password: &str, cost: i64, salt: [u8; 16]) -> Result<String, StdError> {
+    // bcrypt's defined cost range; out-of-range would panic deep in the blowfish setup.
+    if !(4..=31).contains(&cost) {
+        return Err(StdError {
+            kind: ErrorKind::ArgType,
+            message: format!("`crypto.bcrypt_hash` cost must be in 4..=31, got {cost}"),
+        });
+    }
+    bcrypt::hash_with_salt(password, cost as u32, salt)
+        .map(|parts| parts.to_string())
+        .map_err(|e| StdError {
+            kind: ErrorKind::ArgType,
+            // The one reachable failure: a password over 72 bytes (bcrypt's hard input limit —
+            // the crate errors rather than silently truncating).
+            message: format!("`crypto.bcrypt_hash`: {e}"),
+        })
+}
+
+/// Verify a password against a bcrypt hash. A wrong password is `false`; a string that is not a
+/// bcrypt hash at all is an error (a malformed hash is a program bug, not a failed login).
+pub fn bcrypt_verify(password: &str, hash: &str) -> Result<bool, StdError> {
+    bcrypt::verify(password, hash).map_err(|_| StdError {
+        kind: ErrorKind::ArgType,
+        message: "`crypto.bcrypt_verify`: the hash argument is not a bcrypt hash".to_string(),
+    })
 }
 
 /// The registered extern-type name of the incremental hasher.
@@ -168,6 +200,23 @@ mod tests {
         let other_algo = Hasher::Sha512(Default::default());
         assert!(!h.eq_value(&other_algo)); // different algorithm
         assert_eq!((&h as &dyn ExternValue).display_string(), "<sha256 hasher>");
+    }
+
+    /// bcrypt against a published vector (the openwall/John the Ripper "U*U" case) plus the
+    /// argument-validation edges. `hash` itself is pinned by conformance (sandbox-seeded salt).
+    #[test]
+    fn bcrypt_verifies_published_vector_and_validates_args() {
+        let known = "$2a$05$CCCCCCCCCCCCCCCCCCCCC.E5YPO9kmyuRGyh0XouQYb4YMJKvyOeW";
+        assert_eq!(bcrypt_verify("U*U", known), Ok(true));
+        assert_eq!(bcrypt_verify("U*U*", known), Ok(false));
+        assert!(bcrypt_verify("x", "not a hash").is_err());
+        assert!(bcrypt_hash("pw", 3, [0; 16]).is_err());
+        assert!(bcrypt_hash("pw", 32, [0; 16]).is_err());
+        // A fixed salt gives a fixed hash — the determinism the sandbox pin relies on.
+        let a = bcrypt_hash("pw", 4, [7; 16]).unwrap();
+        assert_eq!(a, bcrypt_hash("pw", 4, [7; 16]).unwrap());
+        assert!(a.starts_with("$2b$04$"));
+        assert_eq!(bcrypt_verify("pw", &a), Ok(true));
     }
 
     /// RFC 4231 test case 2 (the short-key "Jefe" case).
