@@ -289,7 +289,7 @@ enum RetTransform {
     /// Wrap a by-name invocation's return value in `Result.Ok` (P2.6). The shape is the `Result.Ok`
     /// variant shape, baked into `Op::Invoke` and cloned in at frame setup; the raw return's
     /// reference transfers into the enum payload, so the original is *not* released afterward.
-    WrapOk(Arc<Shape>),
+    WrapOk(&'static Shape),
 }
 
 impl RetTransform {
@@ -328,13 +328,13 @@ struct Abort;
 /// global environment, captured stdout, and the diagnostics recorded so far.
 struct Vm<'m> {
     module: &'m Module,
-    /// One shared `Arc<Shape>` per shape-table entry — cloned into every value of that shape,
+    /// One shared `&'static Shape` per shape-table entry — cloned into every value of that shape,
     /// so equal-built aggregates point at one shape (identity is a pointer comparison).
-    shapes: Vec<Arc<Shape>>,
+    shapes: Vec<&'static Shape>,
     /// One shared `Rc<PackedSchema>` per compiled packed-list layout (P-PACK 2.4), resolved at load
     /// from [`Module::packed_schemas`] against `shapes` — so `Op::MakePackedList` packs/materializes
     /// elements that share shape identity with directly-constructed instances.
-    packed_schemas: Vec<Arc<noeta_object::PackedSchema>>,
+    packed_schemas: Vec<&'static noeta_object::PackedSchema>,
     /// One shared `Rc<TypeRepr>` per interned reflected element type (runtime type-argument
     /// reflection, R1), built once at load from [`Module::type_reprs`]. `Op::MakeList` stamps a cheap
     /// `Rc` clone of its indexed entry onto the built list, so `type_of` recovers the element type
@@ -343,7 +343,7 @@ struct Vm<'m> {
     /// `map(...)` call span → the result element's `Rc<PackedSchema>` (P-PACK 2.6 category B), resolved
     /// at load from [`Module::map_packed_sites`]. The `map` builtin looks up its call span here to build
     /// a flat result instead of N boxed objects.
-    map_packed: HashMap<Span, Arc<noeta_object::PackedSchema>>,
+    map_packed: HashMap<Span, &'static noeta_object::PackedSchema>,
     /// Instance-method dispatch: `(type_name, method)` to the method's prototype index.
     methods: HashMap<(String, String), u32>,
     /// `type_name` to its `destruct` prototype, for classes with a destructor.
@@ -1339,11 +1339,16 @@ impl<'m> Vm<'m> {
         let destruct_reachable = module.destruct_reachable.iter().cloned().collect();
         let comparable_derives = module.comparable_derives.iter().cloned().collect();
         let tojson_derives = module.tojson_derives.iter().cloned().collect();
-        // One shared `Arc<Shape>` per shape-table entry, then resolve each packed-list layout against it.
+        // One shared `&'static Shape` per shape-table entry, then resolve each packed-list layout against it.
         // Schemas are interned inner-before-outer, so a nested struct's schema (a lower index) is always
         // built before the parent that references it.
-        let shapes: Vec<Arc<Shape>> = module.shapes.iter().cloned().map(Arc::new).collect();
-        let mut packed_schemas: Vec<Arc<noeta_object::PackedSchema>> =
+        let shapes: Vec<&'static Shape> = module
+            .shapes
+            .iter()
+            .cloned()
+            .map(noeta_object::intern_shape)
+            .collect();
+        let mut packed_schemas: Vec<&'static noeta_object::PackedSchema> =
             Vec::with_capacity(module.packed_schemas.len());
         for def in &module.packed_schemas {
             let fields = def
@@ -1355,22 +1360,22 @@ impl<'m> Vm<'m> {
                     noeta_bytecode::PackedFieldDef::F32 => noeta_object::PackedKind::F32,
                     noeta_bytecode::PackedFieldDef::Bool => noeta_object::PackedKind::Bool,
                     noeta_bytecode::PackedFieldDef::Struct(idx) => {
-                        noeta_object::PackedKind::Struct(Arc::clone(&packed_schemas[*idx as usize]))
+                        noeta_object::PackedKind::Struct(packed_schemas[*idx as usize])
                     }
                 })
                 .collect();
-            packed_schemas.push(Arc::new(noeta_object::PackedSchema {
-                shape: Arc::clone(&shapes[def.shape as usize]),
+            packed_schemas.push(noeta_object::intern_schema(noeta_object::PackedSchema {
+                shape: shapes[def.shape as usize],
                 fields,
                 byte_size: def.byte_size as usize,
                 column: def.column,
             }));
         }
         // Resolve each packed `map(...)` result site to its shared schema (P-PACK 2.6 category B).
-        let map_packed: HashMap<Span, Arc<noeta_object::PackedSchema>> = module
+        let map_packed: HashMap<Span, &'static noeta_object::PackedSchema> = module
             .map_packed_sites
             .iter()
-            .map(|(span, idx)| (*span, Arc::clone(&packed_schemas[*idx as usize])))
+            .map(|(span, idx)| (*span, packed_schemas[*idx as usize]))
             .collect();
         // Build one shared `Rc<TypeRepr>` per interned reflected element type (R1), so each tagged
         // `MakeList` is a cheap `Rc` clone rather than a fresh `TypeRepr` allocation per execution.
@@ -1804,7 +1809,7 @@ impl<'m> Vm<'m> {
     /// target. Shapes are built fresh from the shared reflection info; because shape equality is
     /// structural (name + fields), they match the tree-walker's by construction.
     fn materialize_attributes(&self, type_name: &str) -> Value {
-        let attributed_shape = Arc::new(Shape::object(
+        let attributed_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "Attributed",
             vec!["target".to_string(), "value".to_string()],
@@ -1828,12 +1833,10 @@ impl<'m> Vm<'m> {
                         .iter()
                         .map(|v| attr_value_to_vm(v, &self.module.reflection))
                         .collect();
-                let t_shape = Arc::new(Shape::object(kind, type_name, fields.clone()));
+                let t_shape =
+                    noeta_object::intern_shape(Shape::object(kind, type_name, fields.clone()));
                 let t_value = Value::object(t_shape, values);
-                Value::object(
-                    attributed_shape.clone(),
-                    vec![Value::string(&a.target), t_value],
-                )
+                Value::object(attributed_shape, vec![Value::string(&a.target), t_value])
             })
             .collect();
         Value::list(items)
@@ -1844,7 +1847,7 @@ impl<'m> Vm<'m> {
     /// shape equality is structural (name + variant + fields), the `Role` enum and `RoleBinding`
     /// struct match the tree-walker's by construction. (P2.7.)
     fn materialize_roles(&self) -> Value {
-        let binding_shape = Arc::new(Shape::object(
+        let binding_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "RoleBinding",
             vec!["target".to_string(), "role".to_string()],
@@ -1856,7 +1859,7 @@ impl<'m> Vm<'m> {
             .iter()
             .map(|r| {
                 Value::object(
-                    binding_shape.clone(),
+                    binding_shape,
                     vec![
                         Value::string(&r.target),
                         make_role(&r.enum_name, &r.variant),
@@ -2162,8 +2165,9 @@ impl<'m> Vm<'m> {
         // resolved field-slot / method prototype; a hit is a pointer compare against the cached
         // shape, skipping the field-name scan / `(type, method)` hashmap lookup. A local (not a
         // `self` field) so it neither borrows `self` in the loop nor leaks across runs; holding the
-        // `Arc<Shape>` keeps the cached shape alive, so the pointer key can never alias a freed shape.
-        let mut caches: Vec<Option<(Arc<Shape>, u32)>> = vec![None; module.cache_slots as usize];
+        // `&'static Shape` keeps the cached shape alive, so the pointer key can never alias a freed shape.
+        let mut caches: Vec<Option<(&'static Shape, u32)>> =
+            vec![None; module.cache_slots as usize];
         // S3 dispatch window (P-VMT-DISP). The interpreter is two nested loops. The OUTER `'reload`
         // loop re-derives the active frame's register window — its base, prototype (`chunk`), and
         // starting `pc` — and is re-entered ONLY when control transfers to a *different* frame: a
@@ -2480,7 +2484,7 @@ impl<'m> Vm<'m> {
                     Op::PackedListNew { dst, schema } => {
                         // Allocate the empty flat buffer the following `PackedListPush` chain fills
                         // (P-PACK 2.5 streaming construction).
-                        let schema = Arc::clone(&self.packed_schemas[*schema as usize]);
+                        let schema = self.packed_schemas[*schema as usize];
                         let list = Value::packed_list(schema, Vec::new());
                         set_reg(regs, fbase, *dst, list);
                         pc += 1;
@@ -2504,7 +2508,7 @@ impl<'m> Vm<'m> {
                                 ),
                             ));
                         };
-                        let schema = Arc::clone(&self.packed_schemas[*schema as usize]);
+                        let schema = self.packed_schemas[*schema as usize];
                         if schema.byte_size == 0 || bytes.len() % schema.byte_size != 0 {
                             return Err(self.error(
                             DiagnosticCode::TypeMismatch,
@@ -3037,7 +3041,11 @@ impl<'m> Vm<'m> {
                             let ci = *cache as usize;
                             let shape_ptr = v.object_shape_ptr();
                             let hit = match &caches[ci] {
-                                Some((cs, p)) if Some(Arc::as_ptr(cs)) == shape_ptr => Some(*p),
+                                Some((cs, p))
+                                    if Some(std::ptr::from_ref::<Shape>(cs)) == shape_ptr =>
+                                {
+                                    Some(*p)
+                                }
                                 _ => None,
                             };
                             let proto = match hit {
@@ -3432,7 +3440,7 @@ impl<'m> Vm<'m> {
                         reflect,
                         span,
                     } => {
-                        let shape = self.shapes[*shape as usize].clone();
+                        let shape = self.shapes[*shape as usize];
                         let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
                         // `...base` fills declared slots the base provides; named initializers then
                         // override. A slot left unset by both is a missing-field error (E0009).
@@ -3517,14 +3525,15 @@ impl<'m> Vm<'m> {
                         reflect,
                         span,
                     } => {
-                        let shape = self.shapes[*shape as usize].clone();
+                        let shape = self.shapes[*shape as usize];
                         // The base is consumed: take its single reference out of the register without
                         // releasing (a direct overwrite, mirroring `ConcatInPlace`), so the refcount
                         // below still counts the accumulator's reference and a `dst == base` store is
                         // safe (the old occupant is now `unit`).
                         let base_val = regs[fbase + *base as usize];
                         regs[fbase + *base as usize] = Value::unit();
-                        let same_shape = base_val.object_shape_ptr() == Some(Arc::as_ptr(&shape));
+                        let same_shape =
+                            base_val.object_shape_ptr() == Some(std::ptr::from_ref::<Shape>(shape));
                         let reuse = match check {
                             ReuseCheck::Static => {
                                 // The linearity analysis proved sole ownership, so the **refcount** check
@@ -3643,7 +3652,7 @@ impl<'m> Vm<'m> {
                         }
                         let fields: Vec<String> = bag.keys().cloned().collect();
                         let slots: Vec<Value> = bag.into_values().collect();
-                        let shape = Arc::new(Shape::object(
+                        let shape = noeta_object::intern_shape(Shape::object(
                             ShapeKind::Opaque,
                             module.name(*type_name).to_string(),
                             fields,
@@ -3657,7 +3666,7 @@ impl<'m> Vm<'m> {
                         args,
                         reflect,
                     } => {
-                        let shape = self.shapes[*shape as usize].clone();
+                        let shape = self.shapes[*shape as usize];
                         let mut data = Vec::with_capacity(args.len());
                         for &r in args.iter() {
                             let v = regs[fbase + r as usize];
@@ -3703,12 +3712,12 @@ impl<'m> Vm<'m> {
                         let result = match matched {
                             Some((_, shape_idx)) => {
                                 // Build the payload-free case; its single reference transfers onward.
-                                let shape = self.shapes[*shape_idx as usize].clone();
+                                let shape = self.shapes[*shape_idx as usize];
                                 let case = Value::enum_value(shape, Vec::new());
                                 if *panic {
                                     case
                                 } else {
-                                    let some = self.shapes[*some_shape as usize].clone();
+                                    let some = self.shapes[*some_shape as usize];
                                     Value::enum_value(some, vec![case])
                                 }
                             }
@@ -3720,7 +3729,7 @@ impl<'m> Vm<'m> {
                                 ));
                             }
                             None => {
-                                let none = self.shapes[*none_shape as usize].clone();
+                                let none = self.shapes[*none_shape as usize];
                                 Value::enum_value(none, Vec::new())
                             }
                         };
@@ -3742,7 +3751,10 @@ impl<'m> Vm<'m> {
                         // miss path mutates the same entry.
                         let ci = *cache as usize;
                         let hit = match &caches[ci] {
-                            Some((cs, slot)) if v.object_shape_ptr() == Some(Arc::as_ptr(cs)) => {
+                            Some((cs, slot))
+                                if v.object_shape_ptr()
+                                    == Some(std::ptr::from_ref::<Shape>(cs)) =>
+                            {
                                 Some(*slot as usize)
                             }
                             _ => None,
@@ -3751,7 +3763,7 @@ impl<'m> Vm<'m> {
                             Some(slot) => Some(slot),
                             None => match v.shape() {
                                 Some(sh) => sh.slot_of(field).inspect(|&s| {
-                                    caches[ci] = Some((sh.clone(), s as u32));
+                                    caches[ci] = Some((sh, s as u32));
                                 }),
                                 None => None,
                             },
@@ -3926,10 +3938,10 @@ impl<'m> Vm<'m> {
                         let v = regs[fbase + *src as usize];
                         let result = if narrow_matches(v, target) {
                             retain(v);
-                            let shape = self.shapes[*some_shape as usize].clone();
+                            let shape = self.shapes[*some_shape as usize];
                             Value::enum_value(shape, vec![v])
                         } else {
-                            let shape = self.shapes[*none_shape as usize].clone();
+                            let shape = self.shapes[*none_shape as usize];
                             Value::enum_value(shape, Vec::new())
                         };
                         set_reg(regs, fbase, *dst, result);
@@ -4216,7 +4228,7 @@ impl<'m> Vm<'m> {
                         };
                         match outcome {
                             Err(message) => {
-                                let shape = self.shapes[*err_shape as usize].clone();
+                                let shape = self.shapes[*err_shape as usize];
                                 let err = Value::enum_value(shape, vec![Value::string(&message)]);
                                 set_reg(regs, fbase, *dst, err);
                                 pc += 1;
@@ -4247,7 +4259,7 @@ impl<'m> Vm<'m> {
                                 }
                                 // The result is wrapped in `Result.Ok` as it lands in the caller, so the
                                 // invocation yields a `Result` whichever way the body returns.
-                                let ok = self.shapes[*ok_shape as usize].clone();
+                                let ok = self.shapes[*ok_shape as usize];
                                 frames[top].pc = pc + 1;
                                 frames.push(Frame {
                                     proto,

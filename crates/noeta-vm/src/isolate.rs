@@ -241,13 +241,13 @@ pub enum Wire {
 }
 
 /// The `Module.shapes` index of `value`'s shape, found by pointer identity — every shaped value shares
-/// the one interned `Arc<Shape>` per table entry, so a `ptr_eq` scan resolves the index. `None` if the
+/// the one interned `&'static Shape` per table entry, so a `ptr_eq` scan resolves the index. `None` if the
 /// value has no shape or its shape is somehow not in the table (defensive).
-fn shape_index(value: Value, shapes: &[Arc<Shape>]) -> Option<u32> {
+fn shape_index(value: Value, shapes: &[&'static Shape]) -> Option<u32> {
     let shape = value.shape()?;
     shapes
         .iter()
-        .position(|s| Arc::ptr_eq(s, &shape))
+        .position(|s| std::ptr::eq(*s, shape))
         .map(|i| i as u32)
 }
 
@@ -257,7 +257,11 @@ fn shape_index(value: Value, shapes: &[Arc<Shape>]) -> Option<u32> {
 /// away from a boundary). `channels` resolves a `Sender`/`Receiver` id to its shared channel — a
 /// `Local` (cooperative-only) channel cannot cross a thread, and returns the `"channel"` error so the
 /// caller falls back to a cooperative task.
-pub fn marshal(value: Value, shapes: &[Arc<Shape>], channels: &[Channel]) -> Result<Wire, String> {
+pub fn marshal(
+    value: Value,
+    shapes: &[&'static Shape],
+    channels: &[Channel],
+) -> Result<Wire, String> {
     // A channel endpoint ships the shared cross-thread channel (I.4c) by cloning its `Arc`.
     if let Some(id) = value.sender_id() {
         return match channels.get(id.index()) {
@@ -362,7 +366,7 @@ pub fn marshal(value: Value, shapes: &[Arc<Shape>], channels: &[Channel]) -> Res
 
 fn marshal_each(
     values: &[Value],
-    shapes: &[Arc<Shape>],
+    shapes: &[&'static Shape],
     channels: &[Channel],
 ) -> Result<Vec<Wire>, String> {
     values
@@ -372,11 +376,11 @@ fn marshal_each(
 }
 
 /// Rebuild a [`Wire`] into fresh heap objects on the current (worker) thread (isolates I.4b/I.4c),
-/// using the worker's own interned `Arc<Shape>` table (indices match the source's — same `Module`). A
+/// using the worker's own interned `&'static Shape` table (indices match the source's — same `Module`). A
 /// channel endpoint registers its shared [`ChannelCore`] into this VM's `channels` table and yields an
 /// endpoint value indexing it, so both isolates share one queue. Every returned `Value` owns one
 /// reference, exactly like a directly-constructed value.
-pub fn rebuild(wire: &Wire, shapes: &[Arc<Shape>], channels: &mut Vec<Channel>) -> Value {
+pub fn rebuild(wire: &Wire, shapes: &[&'static Shape], channels: &mut Vec<Channel>) -> Value {
     match wire {
         Wire::Unit => Value::unit(),
         Wire::Bool(b) => Value::bool(*b),
@@ -396,11 +400,11 @@ pub fn rebuild(wire: &Wire, shapes: &[Arc<Shape>], channels: &mut Vec<Channel>) 
             Value::map(map)
         }
         Wire::Object { shape, fields } => Value::object(
-            Arc::clone(&shapes[*shape as usize]),
+            shapes[*shape as usize],
             rebuild_each(fields, shapes, channels),
         ),
         Wire::Enum { shape, data } => Value::enum_value(
-            Arc::clone(&shapes[*shape as usize]),
+            shapes[*shape as usize],
             rebuild_each(data, shapes, channels),
         ),
         Wire::Function(proto) => Value::closure(*proto, Vec::new()),
@@ -424,7 +428,11 @@ pub fn rebuild(wire: &Wire, shapes: &[Arc<Shape>], channels: &mut Vec<Channel>) 
     }
 }
 
-fn rebuild_each(wires: &[Wire], shapes: &[Arc<Shape>], channels: &mut Vec<Channel>) -> Vec<Value> {
+fn rebuild_each(
+    wires: &[Wire],
+    shapes: &[&'static Shape],
+    channels: &mut Vec<Channel>,
+) -> Vec<Value> {
     wires.iter().map(|w| rebuild(w, shapes, channels)).collect()
 }
 
@@ -444,7 +452,7 @@ mod tests {
     #[test]
     fn round_trips_a_nested_value_graph() {
         // A struct shape plus the built-in-free primitives/collections a `Send` graph is made of.
-        let shapes = vec![Arc::new(Shape::object(
+        let shapes = vec![noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "Point",
             vec!["x".into(), "y".into()],
@@ -452,7 +460,7 @@ mod tests {
         // list[ (1, "two"), Point{3,4}, [true, 3.5] ] — tuples, strings, an object, a nested list, f64.
         let original = Value::list(vec![
             Value::tuple(vec![Value::int(1), Value::string("two")]),
-            Value::object(Arc::clone(&shapes[0]), vec![Value::int(3), Value::int(4)]),
+            Value::object(shapes[0], vec![Value::int(3), Value::int(4)]),
             Value::list(vec![Value::bool(true), Value::float(3.5)]),
         ]);
 
@@ -513,13 +521,13 @@ mod tests {
     #[test]
     fn round_trips_f32_and_bytes_and_enum() {
         // f32 (distinct immediate), bytes, and an enum value (shape carries name + variant).
-        let shapes = vec![Arc::new(Shape::enum_variant(
+        let shapes = vec![noeta_object::intern_shape(Shape::enum_variant(
             "Color",
             "rgb",
             vec!["r".into()],
             false,
         ))];
-        let original = Value::enum_value(Arc::clone(&shapes[0]), vec![Value::int(255)]);
+        let original = Value::enum_value(shapes[0], vec![Value::int(255)]);
         let wire = marshal(original, &shapes, &[]).unwrap();
         let rebuilt = rebuild(&wire, &shapes, &mut Vec::new());
         assert!(eq(original, rebuilt));

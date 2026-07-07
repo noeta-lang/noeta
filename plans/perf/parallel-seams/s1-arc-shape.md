@@ -83,3 +83,40 @@ pays ~1–4% and the field-assign idiom pays ~11%. Per this doc's own rule, the 
 
 The Arc swap stays on the branch meanwhile (S2 needs `Send` shapes either way; under (b) the
 arena handle — not per-object handles — becomes the `Arc`).
+
+## S1b — the approved fallback, as shipped (2026-07-07, option (b))
+
+**Design: process-wide dedup interner, `&'static` handles.** `noeta_object::intern_shape` /
+`intern_schema` (a `OnceLock<Mutex<HashMap<Key, &'static _>>>` each): every distinct shape is
+`Box::leak`ed exactly once and all requests dedup onto it, so runtime values carry a bare
+`Copy` `&'static Shape` — **zero refcount traffic** on construction/update/destruction, and
+`Send`/`Sync` for borrow-share free of charge (the very property S1 wanted from `Arc`, without
+the per-object atomics). Growth is bounded by distinct types ever loaded (REPL re-loads dedup);
+the map statics keep entries reachable, so miri's leak check stays clean.
+
+- **Dedup key = all fields including `structural_eq`** — stricter than `Shape`'s `PartialEq`
+  (which excludes it): a REPL redefinition can flip `Equatable`-ness and those shapes must stay
+  distinct. `PartialEq` users see old semantics; pointer-identity users only gain sharing.
+- **Interning is cold-path only** (module load, reflection); hot fixed shapes are
+  `OnceLock`-cached: `make_some`/`make_none` (every optional-returning native op) and the three
+  `Ordering` variants (`make_ordering` runs per comparison inside `.sorted()`).
+- `PackedSchema.shape` and `PackedKind::Struct` are `&'static` too (schemas interned at module
+  load, nested schemas keyed by address). `noeta-eval` untouched (own `TypeDef`-based schema).
+- Inline caches store `(&'static Shape, u32)` — the "keep the Rc alive" comment is obsolete;
+  a cache hit is the same pointer compare, a fill is a plain copy.
+- Isolate `shape_index`/`rebuild` work across VMs by pointer identity now (interning makes the
+  module's shapes literally the same objects in parent and worker).
+
+### S1b gate result (pinned interleaved A/B, interned-static vs the Rc baseline)
+
+| Bench | Δ idx vs Rc | Bench | Δ idx vs Rc |
+|---|--:|---|--:|
+| `vm/dispatch_fib` | **−15.4%** | `vm_field_assign/1k..8k` | **−3.3% … −8.0%** |
+| `vm_recursion/fib/20/24/28` | −9.8% / −13.0% / −12.7% | `vm_member_dispatch/1k..8k` | −2.7% … −3.7% |
+| `vm/allocation_list` | −3.0% | `vm_record_update` | −1.8% … −5.0% (one noisy +7.7% outlier at /2000 against the trend of its three neighbours) |
+| `vm/property_access` | −1.8% | | |
+
+**Gate verdict: PASSES — and beats the Rc baseline everywhere.** Eliminating the per-object
+handle traffic removed not only the would-be Arc atomics but the *pre-existing* Rc inc/dec on
+every object construction/copy/destruction. `Send` shapes for S2 came free. Conformance 496,
+differential 0-skipped/agree, workspace 69 suites, miri (noeta-value 50, noeta-gc 5) all green.

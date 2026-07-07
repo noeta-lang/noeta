@@ -38,6 +38,14 @@ miri-proven (I.3) but has **no caller on the real path**.
 
 ### Audit obligations found during S1
 
+- **COW uniqueness vs the shared tag (CRITICAL)**: `alloc_shared` leaves `refcount: 1` (frozen —
+  retain/release no-op on shared), and the VM's in-place-mutation gates are bare
+  `refcount() == 1` (`vm/lib.rs:2034/2334/2342/2370/3537`, plus the `*_in_place` preconditions
+  in `noeta-value`). A worker's `l ~= [x]` on a borrowed shared list would pass the check and
+  mutate the cross-thread shared buffer in place. S2 must add `is_uniquely_owned()`
+  (`refcount == 1 && !is_shared`) and convert every uniqueness gate, with a conformance case
+  (worker appends to a borrowed corpus → must copy, parent's corpus unchanged).
+
 - **`set_reflect` on shared objects**: heap objects carry a mutable `Option<Rc<TypeRepr>>` reflect
   tag (`heap.rs`), written by `set_reflect` at construction sites. `alloc_shared` sets
   `reflect: None` and `Wire` rebuilds don't tag either (behavioural parity ✓), but S2 must verify
