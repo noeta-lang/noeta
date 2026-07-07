@@ -11,7 +11,7 @@
 //! lets one task yield to a sibling). With a single task, awaiting is drive-to-completion: poll; on
 //! `Pending`, advance the clock and re-poll. So all the executor needs today is a logical clock and a
 //! timer set. It is deterministic and fresh per run — identical across both backends by construction,
-//! the same discipline as [`crate::SandboxHost`]'s logical clock — so the differential holds. A real
+//! the same discipline as `SandboxHost`'s logical clock — so the differential holds. A real
 //! tokio-backed executor (Track A.4, CLI-only) will offer the same surface, out-of-oracle.
 
 use crate::{Host, StdError};

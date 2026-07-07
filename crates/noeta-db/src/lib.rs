@@ -106,7 +106,9 @@ pub struct Checked {
     /// it empty so `noeta run`/differential pay nothing for it.
     pub expr_types: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// The checker's compile-input bundle (every span-keyed codegen hint + destructor relevance),
-    /// consumed as a unit by the compiler and the eval reference.
+    /// consumed as a unit by the compiler and the eval reference. (The T2 `Sites` bundling subsumed
+    /// main's flat per-map fields, including the noeta-native `TypeRecipe` rename — the bundle's
+    /// field types live in `noeta_check::Sites` and follow that rename through the re-export.)
     pub sites: noeta_check::Sites,
 }
 

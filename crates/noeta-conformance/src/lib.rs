@@ -26,6 +26,7 @@ use noeta_lexer::lex;
 use noeta_parser::parse;
 use noeta_span::{Source, SourceId, SourceMap};
 
+mod bundle;
 mod differential;
 mod expectation;
 mod ir_corpus;
@@ -37,6 +38,7 @@ mod leaks;
 pub mod reference;
 mod report;
 
+pub use bundle::{BundleFailure, BundleReport, run_bundle_roundtrip};
 pub use differential::{DiffReport, Mismatch, run_differential};
 pub use expectation::{ErrorExpectation, Expectations};
 pub use ir_corpus::{IrCorpusReport, run_ir_corpus};

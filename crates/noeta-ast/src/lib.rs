@@ -8,6 +8,7 @@
 //! M0 scope is intentionally tiny; this grows one vertical slice at a time.
 
 use noeta_span::Span;
+use serde::{Deserialize, Serialize};
 
 mod pretty;
 pub mod reflect;
@@ -271,7 +272,7 @@ pub struct Attribute {
 
 /// A single argument to a `#[...]` data attribute. Positional (`name` is `None`) or named
 /// (`#[Cache(ttl: 60)]`, `name` is `Some("ttl")`); the value is always a literal.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct AttrArg {
     /// The field name for a named argument; `None` for a positional argument.
     pub name: Option<String>,
@@ -284,7 +285,7 @@ pub struct AttrArg {
 /// recursively (a `List` of `Struct`s of `Enum`s is one tree). Never an expression — no `1 + 2`,
 /// no call, no closure, nothing that reads runtime state — so the whole value materializes at
 /// manifest-build time without running user code. (This is Java/C# annotation arguments.)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum AttrValue {
     Str(String),
     Int(i64),
@@ -1230,7 +1231,7 @@ impl Expr {
 }
 
 /// A prefix unary operator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     /// Arithmetic negation, `-x`.
     Neg,
@@ -1253,7 +1254,7 @@ impl UnaryOp {
 }
 
 /// An infix binary operator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Add,
     Sub,

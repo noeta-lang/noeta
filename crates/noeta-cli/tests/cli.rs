@@ -1283,3 +1283,105 @@ fn a_repl_panic_prints_a_stack_trace_and_the_session_continues() {
         // The session survives the panic and evaluates the next entry.
         .stdout(predicate::str::contains("still alive"));
 }
+
+// --- `build` / `.noeb` bundles (P-AOT L1.2) -----------------------------------------
+
+#[test]
+fn build_then_run_bundle_matches_source_run() {
+    // A bundle runs byte-for-byte like its source, but ships no `.noe`.
+    let file = temp_program(
+        "build_roundtrip",
+        "fn sq(n: int): int { return n * n }\nmut t = 0\nfor i in 0..5 {\n    t = t + sq(i)\n}\necho t\n",
+    );
+    let bundle = file.with_extension("noeb");
+
+    // Source run — the reference output.
+    let src_out = lang().arg("run").arg(&file).assert().success();
+    let src_stdout = String::from_utf8(src_out.get_output().stdout.clone()).unwrap();
+    assert_eq!(src_stdout.trim(), "30");
+
+    // Build the bundle, then run it — identical stdout, and the artifact starts with the magic.
+    lang().arg("build").arg(&file).assert().success();
+    let blob = std::fs::read(&bundle).expect("bundle written");
+    assert_eq!(&blob[0..4], b"NOEB", "artifact carries the .noeb magic");
+
+    lang()
+        .arg("run")
+        .arg(&bundle)
+        .assert()
+        .success()
+        .stdout(predicate::str::diff(src_stdout));
+}
+
+// --- `build --exe` / self-contained executables (P-AOT L2) --------------------------
+
+#[test]
+fn build_exe_runs_the_program_with_no_source_or_bundle_alongside() {
+    // `noeta build --exe -o app` staples the compiled program onto a copy of the runtime binary.
+    // The resulting `app` runs the program directly — no `.noe`, no `.noeb`, no `noeta run` — and
+    // its stdout matches a source run byte-for-byte. Running it also proves the startup trailer
+    // detection fires (the toolchain would otherwise demand a subcommand).
+    let file = temp_program(
+        "build_exe",
+        "fn sq(n: int): int { return n * n }\nmut t = 0\nfor i in 0..5 {\n    t = t + sq(i)\n}\necho t\n",
+    );
+    let app = file.parent().unwrap().join("app");
+    let _ = std::fs::remove_file(&app);
+
+    lang()
+        .arg("build")
+        .arg(&file)
+        .arg("--exe")
+        .arg("-o")
+        .arg(&app)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("self-contained"));
+
+    // The artifact carries neither the `.noeb` magic at its head (it starts with the runtime image)
+    // nor the source; running it on its own yields the program's output.
+    Command::new(&app).assert().success().stdout("30\n");
+    let _ = std::fs::remove_file(&app);
+}
+
+#[test]
+fn build_exe_reports_a_runtime_abort_from_the_stapled_program() {
+    // A panic in a stapled exe surfaces as the same abort a source/bundle run gives — the embedded
+    // program runs on the real host through the identical path, just with no source text to quote.
+    let file = temp_program("build_exe_panic", "echo \"before\"\npanic(\"boom\")\n");
+    let app = file.parent().unwrap().join("app_panic");
+    let _ = std::fs::remove_file(&app);
+
+    lang()
+        .arg("build")
+        .arg(&file)
+        .arg("--exe")
+        .arg("-o")
+        .arg(&app)
+        .assert()
+        .success();
+
+    Command::new(&app)
+        .assert()
+        .failure()
+        .stdout("before\n")
+        .stderr(predicate::str::contains("panic: boom"));
+    let _ = std::fs::remove_file(&app);
+}
+
+#[test]
+fn bundle_run_rejects_build_time_flags() {
+    // Tiers are baked at build time; passing them to a bundle run is a usage error, not a silent
+    // no-op.
+    let file = temp_program("build_flag_reject", "echo 1\n");
+    lang().arg("build").arg(&file).assert().success();
+    let bundle = file.with_extension("noeb");
+    lang()
+        .arg("run")
+        .arg(&bundle)
+        .arg("--tier")
+        .arg("debug")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("apply at build time"));
+}

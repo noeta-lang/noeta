@@ -44,7 +44,7 @@
 //! never buffered whole. The cursor/line/character logic below is identical for both; only where the
 //! bytes come from differs.
 
-use crate::{ErrorKind, FileReader, StdError};
+use crate::{ErrorKind, FileReader, ReadSource, StdError};
 
 /// The mode a handle was opened in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,20 +84,6 @@ pub enum Flush {
     Write { path: String, content: String },
     /// Append `content` to `path` (an `a` handle).
     Append { path: String, content: String },
-}
-
-/// How a read handle's bytes are delivered, decided by the host at `fs.open` time and handed to
-/// [`FileHandle::open_read`]. Keeping this choice in one neutral enum is what lets the same handle be
-/// eager on the deterministic sandbox and lazy on the real host without the handle knowing which.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReadSource {
-    /// The entire file content, already in memory. The handle streams over it with no further host
-    /// calls — deterministic, and byte-identical to the pre-P-LAZY snapshot behavior. The sandbox
-    /// always uses this (its files are small in-memory fixtures).
-    Snapshot(String),
-    /// A host-side lazy reader identified by this id; the handle pulls more bytes via
-    /// [`crate::FileReader::fs_read_more`] as the cursor consumes them. Real-host only.
-    Lazy(u64),
 }
 
 /// A read handle's private refill strategy — the companion to the cursor. `Eager` is fully buffered
