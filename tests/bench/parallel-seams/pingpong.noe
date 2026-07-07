@@ -1,0 +1,41 @@
+// P-PAR S0b: parent↔worker ping-pong over two shared cross-thread channels, 2000 rounds.
+// Every round the parent's scheduler stalls until the isolate's reply lands, so each round eats
+// the `isolate_in_flight_wait` 100 µs sleep-spin quantum; after P-PAR-WAKE the wait is
+// wakeup-bound. Compare pingpong_coop.noe (same program, cooperative `spawn`) for the
+// scheduler-overhead floor without any cross-thread stall.
+async fn echoer(inp: Receiver<int>, out: Sender<int>): void {
+    mut running = true
+    while running {
+        r = inp.recv().await
+        (v, keep) = match r { some(x) => (x, true), none => (0, false) }
+        if keep {
+            out.send(v + 1).await
+        }
+        running = keep
+    }
+    out.close()
+}
+
+async fn driver(out: Sender<int>, inp: Receiver<int>, rounds: int): int {
+    mut last = 0
+    for i in 0..rounds {
+        out.send(i).await
+        r = inp.recv().await
+        last = match r { some(x) => x, none => 0 - 1 }
+    }
+    out.close()
+    return last
+}
+
+async fn run(): int {
+    (tx1, rx1) = channel::<int>(1)
+    (tx2, rx2) = channel::<int>(1)
+    mut result = 0
+    concurrent {
+        isolate echoer(rx1, tx2)
+        h = spawn driver(tx1, rx2, 2000)
+        result = h.await
+    }
+    return result
+}
+echo run().await

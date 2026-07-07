@@ -25,8 +25,8 @@ mod ids;
 mod ops;
 
 pub use heap::{
-    CollectorMode, Color, SharedRegion, collector_mode, live_count, live_objects, live_peak,
-    note_refcount_anomalies, refcount_anomalies, reset_peak, reset_refcount_anomalies,
+    CollectorMode, Color, SharedRegion, SharedRoot, collector_mode, live_count, live_objects,
+    live_peak, note_refcount_anomalies, refcount_anomalies, reset_peak, reset_refcount_anomalies,
     set_collector_mode, take_candidates,
 };
 pub use ids::{ChannelId, ScopeId, TaskId};
@@ -396,7 +396,7 @@ impl Value {
     /// interpreted through `schema`. A leaf — it owns no child `Value`s (only primitive bytes), so
     /// freeing it just drops the buffer. The elements are materialized on demand (index, iterate,
     /// demote), so the layout is invisible to `RunResult`.
-    pub fn packed_list(schema: Rc<PackedSchema>, bytes: Vec<u8>) -> Value {
+    pub fn packed_list(schema: &'static PackedSchema, bytes: Vec<u8>) -> Value {
         heap::alloc(Payload::PackedList { schema, bytes })
     }
 
@@ -449,7 +449,7 @@ impl Value {
     #[must_use]
     pub fn packed_push(self, element: Value) -> bool {
         debug_assert!(
-            self.is_packed_list() && heap::refcount(self) == 1,
+            self.is_packed_list() && heap::refcount(self) == 1 && !heap::is_shared(self),
             "packed_push requires a uniquely-owned packed list"
         );
         heap::with_payload_mut(self, |p| match p {
@@ -503,11 +503,11 @@ impl Value {
                     let offset = index * stride;
                     bytes[offset..offset + stride].to_vec()
                 };
-                (Rc::clone(schema), elem)
+                (*schema, elem)
             }
             _ => unreachable!("packed_get on a non-packed list"),
         });
-        unpack_element(&schema, &elem, 0).0
+        unpack_element(schema, &elem, 0).0
     }
 
     /// Read a single field of the packed element at `index` (P-PACK 2.5+ fused `list[i].field`),
@@ -550,7 +550,7 @@ impl Value {
     /// `f32` fields — return its shared schema and a copy of its byte buffer (the input to the bulk
     /// `vec` kernels, P-PACK 4.2). `None` for a boxed list or any other element schema, so the caller
     /// takes the scalar fallback.
-    pub fn packed_vec3_data(self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
+    pub fn packed_vec3_data(self) -> Option<(&'static PackedSchema, Vec<u8>)> {
         if !self.is_packed_list() {
             return None;
         }
@@ -564,7 +564,7 @@ impl Value {
                     && schema.fields.len() == 3
                     && schema.fields.iter().all(|k| matches!(k, PackedKind::F32)) =>
             {
-                Some((Rc::clone(schema), bytes.clone()))
+                Some((*schema, bytes.clone()))
             }
             _ => None,
         })
@@ -574,7 +574,7 @@ impl Value {
     /// schema and column-order byte buffer (`[x×n][y×n][z×n]`) — the direct input to the SoA reduction
     /// kernels (P-SIMD C3), which read the three contiguous `f32` columns with no transpose. `None`
     /// for a row list (which takes `packed_vec3_data`) or any other element schema.
-    pub fn packed_vec3_columns(self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
+    pub fn packed_vec3_columns(self) -> Option<(&'static PackedSchema, Vec<u8>)> {
         if !self.is_packed_list() {
             return None;
         }
@@ -584,7 +584,7 @@ impl Value {
                     && schema.fields.len() == 3
                     && schema.fields.iter().all(|k| matches!(k, PackedKind::F32)) =>
             {
-                Some((Rc::clone(schema), bytes.clone()))
+                Some((*schema, bytes.clone()))
             }
             _ => None,
         })
@@ -593,7 +593,7 @@ impl Value {
     /// If this is a packed `List<Vec3<f32>>` of **either** layout, its schema and byte buffer — for
     /// the layout-agnostic element-wise kernels (`add`/`sub`/`scale`, P-SIMD C3), which operate over
     /// the flat `f32` array and so preserve whichever layout the input carries.
-    pub fn packed_vec3_any(self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
+    pub fn packed_vec3_any(self) -> Option<(&'static PackedSchema, Vec<u8>)> {
         if !self.is_packed_list() {
             return None;
         }
@@ -602,7 +602,7 @@ impl Value {
                 if schema.fields.len() == 3
                     && schema.fields.iter().all(|k| matches!(k, PackedKind::F32)) =>
             {
-                Some((Rc::clone(schema), bytes.clone()))
+                Some((*schema, bytes.clone()))
             }
             _ => None,
         })
@@ -628,7 +628,7 @@ impl Value {
                     }
                     out
                 };
-                (Rc::clone(schema), buf)
+                (*schema, buf)
             }
             _ => unreachable!("packed_select on a non-packed list"),
         });
@@ -640,17 +640,17 @@ impl Value {
     /// `element`. Returns `None` (so the caller demotes) if `element` does not pack into the schema.
     pub fn packed_set(self, index: usize, element: Value) -> Option<Value> {
         let (schema, mut buf) = heap::with_payload(self, |p| match p {
-            Payload::PackedList { schema, bytes } => (Rc::clone(schema), bytes.clone()),
+            Payload::PackedList { schema, bytes } => (*schema, bytes.clone()),
             _ => unreachable!("packed_set on a non-packed list"),
         });
         let stride = schema.byte_size;
         let mut staged = Vec::with_capacity(stride);
-        if !element.pack_element(&schema, &mut staged) {
+        if !element.pack_element(schema, &mut staged) {
             return None;
         }
         if schema.column {
             let count = schema.count(buf.len());
-            column_set(&schema, &mut buf, index, count, &staged);
+            column_set(schema, &mut buf, index, count, &staged);
         } else {
             buf[index * stride..index * stride + stride].copy_from_slice(&staged);
         }
@@ -665,7 +665,7 @@ impl Value {
     #[must_use]
     pub fn packed_set_in_place(self, index: usize, element: Value) -> bool {
         debug_assert!(
-            self.is_packed_list() && heap::refcount(self) == 1,
+            self.is_packed_list() && heap::refcount(self) == 1 && !heap::is_shared(self),
             "packed_set_in_place requires a uniquely-owned packed list"
         );
         heap::with_payload_mut(self, |p| match p {
@@ -696,19 +696,19 @@ impl Value {
             return None;
         }
         let (schema, mut buf) = heap::with_payload(self, |p| match p {
-            Payload::PackedList { schema, bytes } => (Rc::clone(schema), bytes.clone()),
+            Payload::PackedList { schema, bytes } => (*schema, bytes.clone()),
             _ => unreachable!("packed_concat on a non-packed list"),
         });
         let other_bytes = heap::with_payload(other, |p| match p {
             Payload::PackedList {
                 schema: s2,
                 bytes: b2,
-            } => Rc::ptr_eq(&schema.shape, &s2.shape).then(|| b2.clone()),
+            } => std::ptr::eq(schema.shape, s2.shape).then(|| b2.clone()),
             _ => None,
         })?;
         // Same shape ⇒ same layout. Row appends the buffers; column interleaves per column (P-SIMD C2).
         if schema.column {
-            buf = column_concat(&schema, &buf, &other_bytes);
+            buf = column_concat(schema, &buf, &other_bytes);
         } else {
             buf.extend_from_slice(&other_bytes);
         }
@@ -722,19 +722,19 @@ impl Value {
     #[must_use]
     pub fn packed_extend_in_place(self, other: Value) -> bool {
         debug_assert!(
-            self.is_packed_list() && heap::refcount(self) == 1,
+            self.is_packed_list() && heap::refcount(self) == 1 && !heap::is_shared(self),
             "packed_extend_in_place requires a uniquely-owned packed list"
         );
         if !other.is_packed_list() {
             return false;
         }
         let (other_schema, other_bytes) = heap::with_payload(other, |p| match p {
-            Payload::PackedList { schema, bytes } => (Rc::clone(schema), bytes.clone()),
+            Payload::PackedList { schema, bytes } => (*schema, bytes.clone()),
             _ => unreachable!("packed_extend_in_place on a non-packed list"),
         });
         heap::with_payload_mut(self, |p| match p {
             Payload::PackedList { schema, bytes }
-                if Rc::ptr_eq(&schema.shape, &other_schema.shape) =>
+                if std::ptr::eq(schema.shape, other_schema.shape) =>
             {
                 if schema.column {
                     // Column layout must rebuild (each column grows in the middle of the buffer).
@@ -753,7 +753,7 @@ impl Value {
     /// across element construction.
     fn packed_items(self) -> Vec<Value> {
         let (schema, bytes) = heap::with_payload(self, |p| match p {
-            Payload::PackedList { schema, bytes } => (Rc::clone(schema), bytes.clone()),
+            Payload::PackedList { schema, bytes } => (*schema, bytes.clone()),
             _ => unreachable!("packed_items on a non-packed list"),
         });
         let count = schema.count(bytes.len());
@@ -761,13 +761,13 @@ impl Value {
         if schema.column {
             // Column-major: each element is scattered across columns — gather it to row order first.
             for i in 0..count {
-                let row = gather_row(&schema, &bytes, i, count);
-                out.push(unpack_element(&schema, &row, 0).0);
+                let row = gather_row(schema, &bytes, i, count);
+                out.push(unpack_element(schema, &row, 0).0);
             }
         } else {
             let mut at = 0;
             for _ in 0..count {
-                let (value, next) = unpack_element(&schema, &bytes, at);
+                let (value, next) = unpack_element(schema, &bytes, at);
                 out.push(value);
                 at = next;
             }
@@ -1432,13 +1432,13 @@ impl Value {
 
     /// A heap object (refcount 1): a struct/class/opaque instance laying out `slots` in the
     /// `shape`'s field order. The object takes ownership of one reference to each slot value.
-    pub fn object(shape: Rc<Shape>, slots: Vec<Value>) -> Value {
+    pub fn object(shape: &'static Shape, slots: Vec<Value>) -> Value {
         heap::alloc(Payload::Object { shape, slots })
     }
 
     /// A heap enum value (refcount 1): a `(enum, variant)` instance carrying the variant's
     /// positional `data`. The value takes ownership of one reference to each data element.
-    pub fn enum_value(shape: Rc<Shape>, data: Vec<Value>) -> Value {
+    pub fn enum_value(shape: &'static Shape, data: Vec<Value>) -> Value {
         heap::alloc(Payload::Enum { shape, data })
     }
 
@@ -1681,7 +1681,7 @@ impl Value {
     /// not a set.
     pub fn set_insert_sorted(self, value: Value) -> bool {
         debug_assert!(
-            !self.is_set() || heap::refcount(self) == 1,
+            !self.is_set() || heap::refcount(self) == 1 && !heap::is_shared(self),
             "set_insert_sorted requires a uniquely-owned set (the COW invariant)"
         );
         if self.is_set() {
@@ -1711,7 +1711,7 @@ impl Value {
     /// contract as [`Value::set_insert_sorted`]; the copy-on-write `set.remove(x)` fast path.
     pub fn set_remove_sorted(self, target: Value) -> Option<Value> {
         debug_assert!(
-            !self.is_set() || heap::refcount(self) == 1,
+            !self.is_set() || heap::refcount(self) == 1 && !heap::is_shared(self),
             "set_remove_sorted requires a uniquely-owned set (the COW invariant)"
         );
         if self.is_set() {
@@ -1808,7 +1808,7 @@ impl Value {
     /// borrowed (untouched). No-op if either value is not a list.
     pub fn list_extend(self, other: Value) {
         debug_assert!(
-            self.is_list() && heap::refcount(self) == 1,
+            self.is_list() && heap::refcount(self) == 1 && !heap::is_shared(self),
             "list_extend requires a uniquely-owned list (the COW invariant)"
         );
         if let Some(others) = other.list_items() {
@@ -1834,7 +1834,7 @@ impl Value {
     /// valid, cheap-to-free object, so the caller's later `Drop`/overwrite of the register is sound.
     pub fn take_string_in_place(self) -> CompactString {
         debug_assert!(
-            self.is_string() && heap::refcount(self) == 1,
+            self.is_string() && heap::refcount(self) == 1 && !heap::is_shared(self),
             "take_string_in_place requires a uniquely-owned string"
         );
         heap::with_payload_mut(self, |p| {
@@ -1852,7 +1852,7 @@ impl Value {
     /// [`Self::list_extend`] for lists.
     pub fn str_push_in_place(self, s: &str) {
         debug_assert!(
-            self.is_string() && heap::refcount(self) == 1,
+            self.is_string() && heap::refcount(self) == 1 && !heap::is_shared(self),
             "str_push_in_place requires a uniquely-owned string (the COW invariant)"
         );
         heap::with_payload_mut(self, |p| {
@@ -1868,7 +1868,7 @@ impl Value {
     /// (P-PACK 2.5). No-op if this is not a boxed list.
     pub fn list_push(self, element: Value) {
         debug_assert!(
-            self.is_list() && heap::refcount(self) == 1,
+            self.is_list() && heap::refcount(self) == 1 && !heap::is_shared(self),
             "list_push requires a uniquely-owned list (the COW invariant)"
         );
         heap::with_payload_mut(self, |p| {
@@ -1887,7 +1887,7 @@ impl Value {
     /// `unit` (a no-op) if this is not a list or `index` is out of range.
     pub fn list_replace_slot(self, index: usize, value: Value) -> Value {
         debug_assert!(
-            !self.is_list() || heap::refcount(self) == 1,
+            !self.is_list() || heap::refcount(self) == 1 && !heap::is_shared(self),
             "list_replace_slot requires a uniquely-owned list (the COW invariant)"
         );
         if self.is_pointer() {
@@ -1962,7 +1962,7 @@ impl Value {
     /// the caller to release. Returns `None` (a no-op) if this is not a map.
     pub fn map_insert(self, key: noeta_stdlib::MapKey, value: Value) -> Option<Value> {
         debug_assert!(
-            !self.is_map() || heap::refcount(self) == 1,
+            !self.is_map() || heap::refcount(self) == 1 && !heap::is_shared(self),
             "map_insert requires a uniquely-owned map (the COW invariant)"
         );
         if self.is_map() {
@@ -1982,7 +1982,7 @@ impl Value {
     /// present). Same uniqueness requirement and reference-handback contract as [`Value::map_insert`].
     pub fn map_remove(self, key: &str) -> Option<Value> {
         debug_assert!(
-            !self.is_map() || heap::refcount(self) == 1,
+            !self.is_map() || heap::refcount(self) == 1 && !heap::is_shared(self),
             "map_remove requires a uniquely-owned map (the COW invariant)"
         );
         if self.is_map() {
@@ -2002,7 +2002,7 @@ impl Value {
     /// [`Value::map_remove`], same uniqueness requirement and handback contract.
     pub fn map_remove_extern(self, key: &dyn noeta_stdlib::ExternValue) -> Option<Value> {
         debug_assert!(
-            !self.is_map() || heap::refcount(self) == 1,
+            !self.is_map() || heap::refcount(self) == 1 && !heap::is_shared(self),
             "map_remove_extern requires a uniquely-owned map (the COW invariant)"
         );
         if self.is_map() {
@@ -2072,10 +2072,10 @@ impl Value {
     }
 
     /// A clone of this value's shape handle, if it is an object or enum.
-    pub fn shape(self) -> Option<Rc<Shape>> {
+    pub fn shape(self) -> Option<&'static Shape> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Object { shape, .. } | Payload::Enum { shape, .. } => Some(shape.clone()),
+                Payload::Object { shape, .. } | Payload::Enum { shape, .. } => Some(*shape),
                 _ => None,
             })
         } else {
@@ -2084,14 +2084,14 @@ impl Value {
     }
 
     /// The object's shape **identity** as a raw pointer, without bumping the `Rc` refcount — the
-    /// cheap key for an inline-cache hit test (`shape_ptr() == Some(Rc::as_ptr(&cached))`). The
+    /// cheap key for an inline-cache hit test (`shape_ptr() == Some(Arc::as_ptr(&cached))`). The
     /// pointer is only valid while a live reference to the shape exists; the VM's cache holds an
-    /// `Rc<Shape>` clone to keep the cached shape alive, so a hit comparison can never alias a freed
+    /// `&'static Shape` clone to keep the cached shape alive, so a hit comparison can never alias a freed
     /// shape. `None` for a non-object (an enum or a scalar).
     pub fn object_shape_ptr(self) -> Option<*const Shape> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Object { shape, .. } => Some(Rc::as_ptr(shape)),
+                Payload::Object { shape, .. } => Some(std::ptr::from_ref::<Shape>(shape)),
                 _ => None,
             })
         } else {
@@ -2545,6 +2545,23 @@ impl Value {
         self.is_pointer() && heap::is_shared(self)
     }
 
+    /// Whether this heap value may be **mutated in place** under the COW invariant: the caller
+    /// holds the only reference (`refcount == 1`) *and* the object is not borrow-shared (P-PAR
+    /// S2). A shared object's refcount is frozen at 1 (retain/release no-op), so a bare
+    /// `refcount() == 1` test would wrongly treat a corpus borrowed from a [`SharedRegion`] as
+    /// uniquely owned and mutate a buffer other isolate threads are reading — every in-place
+    /// fast path must gate on this, never on `refcount()` alone.
+    pub fn is_uniquely_owned(self) -> bool {
+        self.is_pointer() && heap::refcount(self) == 1 && !heap::is_shared(self)
+    }
+
+    /// Whether this value's whole graph can be promoted into a [`SharedRegion`] (P-PAR S2) —
+    /// `Send` **data** kinds only. A function value, bound method, or channel endpoint is
+    /// `Wire`-shippable but not promotable, so an argument containing one keeps the copy path.
+    pub fn is_promotable_graph(self) -> bool {
+        heap::promotable_graph(self)
+    }
+
     /// Increment the refcount (no-op for immediates, and for a borrow-shared object).
     pub fn inc_ref(self) {
         if self.is_pointer() {
@@ -2766,7 +2783,7 @@ fn unpack_element(schema: &PackedSchema, bytes: &[u8], offset: usize) -> (Value,
             }
         }
     }
-    (Value::object(Rc::clone(&schema.shape), slots), at)
+    (Value::object(schema.shape, slots), at)
 }
 
 /// Gather element `index`'s fields (a buffer of `count` elements) into a fresh **row-order** byte
@@ -2929,13 +2946,13 @@ mod tests {
         // P-PACK 2.4: a flat `List<packed>` packs elements into raw words and materializes them on
         // demand. Exercise construct → len → packed_get → realize → equality → display → free so
         // miri checks the materialize/free paths for use-after-free or double-free.
-        let shape = Rc::new(Shape::object(
+        let shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "V",
             vec!["x".into(), "y".into()],
         ));
-        let schema = Rc::new(PackedSchema {
-            shape: Rc::clone(&shape),
+        let schema = noeta_object::intern_schema(PackedSchema {
+            shape,
             fields: vec![PackedKind::Int, PackedKind::Int],
             byte_size: 16,
             column: false,
@@ -2944,13 +2961,13 @@ mod tests {
         // Pack two `V { x, y }` instances into one flat buffer (the source objects are freed after).
         let mut bytes = Vec::new();
         for (x, y) in [(3_i64, 1_i64), (1, 2)] {
-            let obj = Value::object(Rc::clone(&shape), vec![Value::int(x), Value::int(y)]);
-            assert!(obj.pack_element(&schema, &mut bytes));
+            let obj = Value::object(shape, vec![Value::int(x), Value::int(y)]);
+            assert!(obj.pack_element(schema, &mut bytes));
             obj.release();
         }
         assert_eq!(bytes.len(), 32); // 2 elements × 2 int fields × 8 bytes
 
-        let list = Value::packed_list(Rc::clone(&schema), bytes);
+        let list = Value::packed_list(schema, bytes);
         assert!(list.is_packed_list());
         assert!(list.is_list());
         assert_eq!(list.list_len(), Some(2));
@@ -2959,7 +2976,7 @@ mod tests {
         // A single element materializes to an owned object, shape-identical to a constructed one.
         let first = list.packed_get(0);
         assert_eq!(first.display(), "V {x: 3, y: 1}");
-        let constructed = Value::object(Rc::clone(&shape), vec![Value::int(3), Value::int(1)]);
+        let constructed = Value::object(shape, vec![Value::int(3), Value::int(1)]);
         assert!(
             apply_binary(noeta_ast::BinaryOp::Eq, first, constructed)
                 .unwrap()
@@ -2972,8 +2989,8 @@ mod tests {
         // The whole list displays and compares as the boxed equivalent.
         assert_eq!(list.display(), "[V {x: 3, y: 1}, V {x: 1, y: 2}]");
         let boxed = Value::list(vec![
-            Value::object(Rc::clone(&shape), vec![Value::int(3), Value::int(1)]),
-            Value::object(Rc::clone(&shape), vec![Value::int(1), Value::int(2)]),
+            Value::object(shape, vec![Value::int(3), Value::int(1)]),
+            Value::object(shape, vec![Value::int(1), Value::int(2)]),
         ]);
         assert!(
             apply_binary(noeta_ast::BinaryOp::Eq, list, boxed)
@@ -2994,22 +3011,22 @@ mod tests {
         // the heap while mutating the list through the heap (two distinct objects), so this exercises
         // that nested `with_payload_mut`/`with_payload` access for use-after-free under miri, and
         // confirms the element object is freed by the caller after its primitives are copied.
-        let shape = Rc::new(Shape::object(
+        let shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "V",
             vec!["x".into(), "y".into()],
         ));
-        let schema = Rc::new(PackedSchema {
-            shape: Rc::clone(&shape),
+        let schema = noeta_object::intern_schema(PackedSchema {
+            shape,
             fields: vec![PackedKind::Int, PackedKind::Int],
             byte_size: 16,
             column: false,
         });
 
-        let list = Value::packed_list(Rc::clone(&schema), Vec::new());
+        let list = Value::packed_list(schema, Vec::new());
         assert_eq!(list.list_len(), Some(0));
         for (x, y) in [(3_i64, 1_i64), (1, 2), (7, 9)] {
-            let obj = Value::object(Rc::clone(&shape), vec![Value::int(x), Value::int(y)]);
+            let obj = Value::object(shape, vec![Value::int(x), Value::int(y)]);
             assert!(list.packed_push(obj)); // primitives copied into the buffer (no retain)
             obj.release(); // the caller still owns the element — free it (its data is now in `words`)
         }
@@ -3022,7 +3039,7 @@ mod tests {
 
         // The demote fall-back: push onto a boxed list in place (the caller hands over one reference).
         let boxed = Value::list(Vec::new());
-        let elem = Value::object(Rc::clone(&shape), vec![Value::int(5), Value::int(6)]);
+        let elem = Value::object(shape, vec![Value::int(5), Value::int(6)]);
         boxed.list_push(elem); // boxed now owns the reference handed over
         assert_eq!(boxed.list_len(), Some(1));
         assert_eq!(boxed.display(), "[V {x: 5, y: 6}]");
@@ -3036,22 +3053,22 @@ mod tests {
         // `column_append`'s O(n) rebuild), then check get / field / select / set / concat all read the
         // right values through the column offset math — and free clean under miri. Mixed field widths
         // (`int` 8 + `bool` 1) stress the non-uniform column strides.
-        let shape = Rc::new(Shape::object(
+        let shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "P",
             vec!["v".into(), "flag".into()],
         ));
-        let schema = Rc::new(PackedSchema {
-            shape: Rc::clone(&shape),
+        let schema = noeta_object::intern_schema(PackedSchema {
+            shape,
             fields: vec![PackedKind::Int, PackedKind::Bool],
             byte_size: 9,
             column: true,
         });
 
         // Stream three elements in — each `column_append` rebuilds the buffer in column order.
-        let list = Value::packed_list(Rc::clone(&schema), Vec::new());
+        let list = Value::packed_list(schema, Vec::new());
         for (v, flag) in [(10_i64, true), (20, false), (30, true)] {
-            let obj = Value::object(Rc::clone(&shape), vec![Value::int(v), Value::bool(flag)]);
+            let obj = Value::object(shape, vec![Value::int(v), Value::bool(flag)]);
             assert!(list.packed_push(obj));
             obj.release();
         }
@@ -3084,7 +3101,7 @@ mod tests {
         );
         rev.release();
 
-        let repl = Value::object(Rc::clone(&shape), vec![Value::int(99), Value::bool(false)]);
+        let repl = Value::object(shape, vec![Value::int(99), Value::bool(false)]);
         let set = list.packed_set(1, repl).unwrap();
         assert_eq!(
             set.display(),
@@ -3094,8 +3111,8 @@ mod tests {
         set.release();
 
         // `concat` of two column lists interleaves per column.
-        let other = Value::packed_list(Rc::clone(&schema), Vec::new());
-        let tail = Value::object(Rc::clone(&shape), vec![Value::int(40), Value::bool(false)]);
+        let other = Value::packed_list(schema, Vec::new());
+        let tail = Value::object(shape, vec![Value::int(40), Value::bool(false)]);
         assert!(other.packed_push(tail));
         tail.release();
         let joined = list.packed_concat(other).unwrap();
@@ -3221,8 +3238,8 @@ mod tests {
     }
 
     /// Build a `Point { x: int; y: int }` struct value on a shared shape (helper for the I.3 tests).
-    fn point(shape: &Rc<Shape>, x: i64, y: i64) -> Value {
-        Value::object(Rc::clone(shape), vec![Value::int(x), Value::int(y)])
+    fn point(shape: &&'static Shape, x: i64, y: i64) -> Value {
+        Value::object(shape, vec![Value::int(x), Value::int(y)])
     }
 
     #[test]
@@ -3231,7 +3248,7 @@ mod tests {
         // `release` no-op on it, so a storm of them across "isolates" touches no count and frees
         // nothing. The region alone owns it and frees it wholesale. miri verifies no use-after-free.
         let base = live_count();
-        let shape = Rc::new(Shape::object(
+        let shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "Point",
             vec!["x".into(), "y".into()],
@@ -3270,7 +3287,7 @@ mod tests {
         // copy intact and readable (it shares no allocation with the original). Then `free_all` returns
         // the live count exactly to baseline (leak-clean, both allocations balanced).
         let base = live_count();
-        let shape = Rc::new(Shape::object(
+        let shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "Point",
             vec!["x".into(), "y".into()],
@@ -3314,8 +3331,9 @@ mod tests {
         // preserves that sharing rather than duplicating. Freeing the region then frees the shared node
         // exactly once — miri would flag a double-free otherwise.
         let base = live_count();
-        let shape = Rc::new(Shape::object(ShapeKind::Struct, "P", vec!["x".into()]));
-        let p = Value::object(Rc::clone(&shape), vec![Value::int(7)]); // refcount 1
+        let shape =
+            noeta_object::intern_shape(Shape::object(ShapeKind::Struct, "P", vec!["x".into()]));
+        let p = Value::object(shape, vec![Value::int(7)]); // refcount 1
         // A tuple *transfers* one reference per slot in, so to alias `p` in both slots we owe it two
         // references: bump the count once more, then hand both to the tuple (refcount 2).
         p.inc_ref();
@@ -3352,6 +3370,69 @@ mod tests {
     }
 
     #[test]
+    fn promote_with_memo_dedups_across_calls() {
+        // P-PAR S2: the spawn path keeps one memo across every `isolate f(corpus)` in flight, so
+        // fanning one corpus to N workers promotes once — the second call returns the same
+        // promoted root and the region grows by nothing.
+        let base = live_count();
+        let corpus = Value::list(vec![Value::string("a"), Value::string("b")]);
+        let mut region = SharedRegion::new();
+        let mut memo = std::collections::HashMap::new();
+        let first = region.promote_with(corpus, &mut memo);
+        let after_first = region.len();
+        let second = region.promote_with(corpus, &mut memo);
+        assert_eq!(
+            first.bits(),
+            second.bits(),
+            "memo hit returns the same root"
+        );
+        assert_eq!(region.len(), after_first, "a memo hit adds nothing");
+        corpus.release();
+        region.free_all();
+        assert_eq!(live_count(), base);
+    }
+
+    #[test]
+    fn shared_values_are_never_uniquely_owned() {
+        // P-PAR S2 (the COW gate): a shared object's refcount is frozen at 1, so the in-place
+        // mutation fast paths must consult `is_uniquely_owned`, which excludes it — a worker
+        // "mutating" a borrowed corpus copies instead of touching the shared buffer.
+        let base = live_count();
+        let local = Value::list(vec![Value::int(1)]);
+        assert!(local.is_uniquely_owned());
+        let mut region = SharedRegion::new();
+        let shared = region.promote(local);
+        assert_eq!(
+            shared.refcount(),
+            1,
+            "a shared object's count is frozen at 1"
+        );
+        assert!(
+            !shared.is_uniquely_owned(),
+            "shared must never pass the COW uniqueness gate"
+        );
+        local.release();
+        region.free_all();
+        assert_eq!(live_count(), base);
+    }
+
+    #[test]
+    fn promotable_graph_accepts_data_and_rejects_functions() {
+        // P-PAR S2: promotability = Send *data* kinds. A closure is Wire-shippable but has no
+        // promoted form, so a graph containing one falls back to the copy path.
+        let list = Value::list(vec![Value::int(1), Value::string("x")]);
+        assert!(list.is_promotable_graph());
+        let f = Value::closure(0, Vec::new());
+        assert!(!f.is_promotable_graph());
+        let holding = Value::list(vec![f]);
+        f.inc_ref(); // the list owns one reference; keep ours for the assert below
+        assert!(!holding.is_promotable_graph());
+        holding.release();
+        f.release();
+        list.release();
+    }
+
+    #[test]
     fn f32_is_immediate_and_round_trips() {
         // P-PACK Phase 3: an `f32` is an *immediate* NaN-boxed value — no heap allocation, not
         // refcounted (like an immediate int/float). Round-trips through `as_f32`, names itself `f32`,
@@ -3382,26 +3463,26 @@ mod tests {
         // P-PACK 3.2b: an `f32` packed field is 4 bytes, an `int` 8 — a mixed `{f32, int}` element is
         // 12 bytes, exercising unaligned byte offsets (the int starts at byte 4). Pack two, then read
         // each field back: the f32 keeps f32 precision and the int its full value. Checked under miri.
-        let shape = Rc::new(Shape::object(
+        let shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "P",
             vec!["a".into(), "b".into()],
         ));
-        let schema = Rc::new(PackedSchema {
-            shape: Rc::clone(&shape),
+        let schema = noeta_object::intern_schema(PackedSchema {
+            shape,
             fields: vec![PackedKind::F32, PackedKind::Int],
             byte_size: 12,
             column: false,
         });
         let mut bytes = Vec::new();
         for (a, b) in [(0.1f32 + 0.2, 7_i64), (-1.5, 1_000_000)] {
-            let obj = Value::object(Rc::clone(&shape), vec![Value::f32(a), Value::int(b)]);
-            assert!(obj.pack_element(&schema, &mut bytes));
+            let obj = Value::object(shape, vec![Value::f32(a), Value::int(b)]);
+            assert!(obj.pack_element(schema, &mut bytes));
             obj.release();
         }
         assert_eq!(bytes.len(), 24); // 2 elements × 12 bytes
 
-        let list = Value::packed_list(Rc::clone(&schema), bytes);
+        let list = Value::packed_list(schema, bytes);
         assert_eq!(list.list_len(), Some(2));
         assert_eq!(
             list.display(),
@@ -3426,19 +3507,19 @@ mod tests {
         // P-PACK 2.5+: the fused `list[i].field` read decodes a single field's word, returning an
         // owned primitive (or `None` for an out-of-range index / unknown field). Exercised under miri
         // to confirm the targeted slice read borrows the buffer correctly and leaks nothing.
-        let shape = Rc::new(Shape::object(
+        let shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "V",
             vec!["x".into(), "y".into()],
         ));
-        let schema = Rc::new(PackedSchema {
-            shape: Rc::clone(&shape),
+        let schema = noeta_object::intern_schema(PackedSchema {
+            shape,
             fields: vec![PackedKind::Int, PackedKind::Int],
             byte_size: 16,
             column: false,
         });
         // Two elements: (3, 1) and (7, 9).
-        let list = Value::packed_list(Rc::clone(&schema), ibytes(&[3, 1, 7, 9]));
+        let list = Value::packed_list(schema, ibytes(&[3, 1, 7, 9]));
 
         assert_eq!(list.packed_field(0, "x").and_then(Value::as_int), Some(3));
         assert_eq!(list.packed_field(0, "y").and_then(Value::as_int), Some(1));
@@ -3456,19 +3537,19 @@ mod tests {
         // P-PACK 2.6: `packed_select` rebuilds a flat buffer from chosen element word-blocks (the
         // selection producers reverse/slice/filter). The result is still a packed list (no demote) and
         // owns no child refs, so it frees cleanly — checked under miri.
-        let shape = Rc::new(Shape::object(
+        let shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "V",
             vec!["x".into(), "y".into()],
         ));
-        let schema = Rc::new(PackedSchema {
-            shape: Rc::clone(&shape),
+        let schema = noeta_object::intern_schema(PackedSchema {
+            shape,
             fields: vec![PackedKind::Int, PackedKind::Int],
             byte_size: 16,
             column: false,
         });
         // Three elements: (3,1), (1,2), (7,9).
-        let list = Value::packed_list(Rc::clone(&schema), ibytes(&[3, 1, 1, 2, 7, 9]));
+        let list = Value::packed_list(schema, ibytes(&[3, 1, 1, 2, 7, 9]));
 
         // Reverse-order selection yields a flat packed list with the blocks reordered.
         let reversed = list.packed_select(&[2, 1, 0]);
@@ -3495,20 +3576,19 @@ mod tests {
         // `packed_set_in_place` (sole-owner overwrite) replace one element's words; `packed_concat`
         // (copy) and `packed_extend_in_place` (sole-owner append) join same-layout buffers. All
         // results are still packed lists owning no child refs — checked under miri.
-        let shape = Rc::new(Shape::object(
+        let shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "V",
             vec!["x".into(), "y".into()],
         ));
-        let schema = Rc::new(PackedSchema {
-            shape: Rc::clone(&shape),
+        let schema = noeta_object::intern_schema(PackedSchema {
+            shape,
             fields: vec![PackedKind::Int, PackedKind::Int],
             byte_size: 16,
             column: false,
         });
-        let mk = |vals: &[i64]| Value::packed_list(Rc::clone(&schema), ibytes(vals));
-        let elem =
-            |x: i64, y: i64| Value::object(Rc::clone(&shape), vec![Value::int(x), Value::int(y)]);
+        let mk = |vals: &[i64]| Value::packed_list(schema, ibytes(vals));
+        let elem = |x: i64, y: i64| Value::object(shape, vec![Value::int(x), Value::int(y)]);
 
         // Functional `set`: a fresh flat list with one element replaced; the original is untouched.
         let list = mk(&[1, 1, 2, 2, 3, 3]);
@@ -3731,19 +3811,19 @@ mod tests {
 
     #[test]
     fn objects_display_in_slot_order_and_free_their_slots() {
-        let shape = Rc::new(Shape::object(
+        let shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "Item",
             vec!["price".into(), "qty".into()],
         ));
-        let obj = Value::object(shape.clone(), vec![Value::float(2.5), Value::int(4)]);
+        let obj = Value::object(shape, vec![Value::float(2.5), Value::int(4)]);
         assert_eq!(obj.type_name(), "object");
         assert_eq!(obj.display(), "Item {price: 2.5, qty: 4}");
         assert_eq!(obj.field("price").unwrap().as_float(), Some(2.5));
         assert!(obj.field("missing").is_none());
         // Same shape handle (the `Rc`) is shared, not copied per-instance.
-        let obj2 = Value::object(shape.clone(), vec![Value::float(2.5), Value::int(4)]);
-        assert!(Rc::ptr_eq(&obj.shape().unwrap(), &obj2.shape().unwrap()));
+        let obj2 = Value::object(shape, vec![Value::float(2.5), Value::int(4)]);
+        assert!(std::ptr::eq(obj.shape().unwrap(), obj2.shape().unwrap()));
         // Structural equality (M0 parity): same type + equal fields.
         assert!(
             apply_binary(noeta_ast::BinaryOp::Eq, obj, obj2)
@@ -3760,14 +3840,14 @@ mod tests {
     #[test]
     fn structural_compare_orders_objects_lexicographically() {
         use std::cmp::Ordering;
-        let shape = Rc::new(Shape::object(
+        let shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "Version",
             vec!["major".into(), "minor".into()],
         ));
-        let v19 = Value::object(shape.clone(), vec![Value::int(1), Value::int(9)]);
-        let v20 = Value::object(shape.clone(), vec![Value::int(2), Value::int(0)]);
-        let v19b = Value::object(shape.clone(), vec![Value::int(1), Value::int(9)]);
+        let v19 = Value::object(shape, vec![Value::int(1), Value::int(9)]);
+        let v20 = Value::object(shape, vec![Value::int(2), Value::int(0)]);
+        let v19b = Value::object(shape, vec![Value::int(1), Value::int(9)]);
         // major dominates; equal major falls to minor; equal objects compare Equal.
         assert_eq!(structural_compare(v19, v20), Some(Ordering::Less));
         assert_eq!(structural_compare(v20, v19), Some(Ordering::Greater));
@@ -3786,11 +3866,12 @@ mod tests {
 
     #[test]
     fn enum_values_display_and_compare() {
-        let pending = Rc::new(Shape::enum_variant("Status", "Pending", vec![], false));
-        let a = Value::enum_value(pending.clone(), vec![]);
+        let pending =
+            noeta_object::intern_shape(Shape::enum_variant("Status", "Pending", vec![], false));
+        let a = Value::enum_value(pending, vec![]);
         assert_eq!(a.type_name(), "enum");
         assert_eq!(a.display(), "Status.Pending");
-        let b = Value::enum_value(pending.clone(), vec![]);
+        let b = Value::enum_value(pending, vec![]);
         assert!(
             apply_binary(noeta_ast::BinaryOp::Eq, a, b)
                 .unwrap()
@@ -3799,7 +3880,12 @@ mod tests {
         );
 
         // A built-in Result variant displays bare, with its data unquoted.
-        let err = Rc::new(Shape::enum_variant("Result", "Err", vec!["0".into()], true));
+        let err = noeta_object::intern_shape(Shape::enum_variant(
+            "Result",
+            "Err",
+            vec!["0".into()],
+            true,
+        ));
         let e = Value::enum_value(err, vec![Value::string("boom")]);
         assert_eq!(e.display(), "Err(boom)");
         for v in [a, b, e] {
@@ -4086,13 +4172,13 @@ mod tests {
         // heap elements, plus the adapter owning the heap step value — live count returns to baseline.
         let before = live_count();
 
-        let some_shape = std::rc::Rc::new(noeta_object::Shape::enum_variant(
+        let some_shape = noeta_object::intern_shape(noeta_object::Shape::enum_variant(
             "Option",
             "some",
             vec!["0".into()],
             true,
         ));
-        let none_shape = std::rc::Rc::new(noeta_object::Shape::enum_variant(
+        let none_shape = noeta_object::intern_shape(noeta_object::Shape::enum_variant(
             "Option",
             "none",
             Vec::new(),
@@ -4108,9 +4194,9 @@ mod tests {
             arg.release(); // the resume argument is consumed by the call
             calls += 1;
             Ok(match calls {
-                1 => Value::enum_value(std::rc::Rc::clone(&some_shape), vec![Value::string("a")]),
-                2 => Value::enum_value(std::rc::Rc::clone(&some_shape), vec![Value::string("b")]),
-                _ => Value::enum_value(std::rc::Rc::clone(&none_shape), Vec::new()),
+                1 => Value::enum_value(some_shape, vec![Value::string("a")]),
+                2 => Value::enum_value(some_shape, vec![Value::string("b")]),
+                _ => Value::enum_value(none_shape, Vec::new()),
             })
         };
 
@@ -4124,7 +4210,6 @@ mod tests {
             e.release();
         }
         g.release(); // frees the generator and its step value
-        drop((some_shape, none_shape));
         assert_eq!(live_count(), before);
     }
 

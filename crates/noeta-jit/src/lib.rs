@@ -239,6 +239,11 @@ pub struct Jit {
     site_slots: Vec<Box<CallSiteCache>>,
     /// How many prototypes were compiled to *real* native code (vs a bail stub) — the coverage stat.
     native_count: usize,
+    /// Total / worst-case wall time spent inside [`Jit::compile`] (P-PAR S0c): every compile runs
+    /// synchronously on the mutator thread today, so these are the pauses the program felt. Cache
+    /// hits don't count — only actual codegen work.
+    compile_ns_total: u64,
+    compile_ns_max: u64,
     /// Imported runtime helpers, declared once (see the `*_HELPER` name constants).
     observe_id: FuncId,
     note_bound_id: FuncId,
@@ -290,7 +295,15 @@ impl Jit {
         // P-JSSA: the SSA promotion leans on Cranelift's mid-end (block-param coalescing, GVN,
         // dead-load removal of unused entry inits). The default `opt_level=none` was fine for the
         // memory-form codegen; with block params it is not.
-        flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
+        //
+        // `NOETA_JIT_OPT` is a **dev measurement knob** (P-PAR S4): it lets the compile-time /
+        // code-quality trade be A/B'd without a rebuild (`none` compiles far faster, `speed` runs
+        // faster). Semantics are identical at every level, so the jit-differential is unaffected;
+        // the shipped default stays `speed`.
+        let opt_level = std::env::var("NOETA_JIT_OPT").unwrap_or_else(|_| "speed".to_string());
+        flags
+            .set("opt_level", &opt_level)
+            .map_err(|e| e.to_string())?;
         let isa_builder = cranelift_native::builder().map_err(|m| m.to_string())?;
         let isa = isa_builder
             .finish(settings::Flags::new(flags))
@@ -392,6 +405,8 @@ impl Jit {
             frame_template,
             site_slots: Vec::new(),
             native_count: 0,
+            compile_ns_total: 0,
+            compile_ns_max: 0,
             observe_id,
             note_bound_id,
             retain_id,
@@ -442,6 +457,7 @@ impl Jit {
         if let Some(f) = self.compiled[proto] {
             return Ok(f);
         }
+        let compile_start = std::time::Instant::now();
         let chunk = &module.protos[proto];
         let f = if is_eligible(chunk) {
             let f = self.emit_int_body(module, proto, false)?;
@@ -458,7 +474,20 @@ impl Jit {
             self.emit_bail_stub(proto)?
         };
         self.compiled[proto] = Some(f);
+        let ns = compile_start.elapsed().as_nanos() as u64;
+        self.compile_ns_total += ns;
+        self.compile_ns_max = self.compile_ns_max.max(ns);
         Ok(f)
+    }
+
+    /// Total wall time spent compiling across the run, in nanoseconds (P-PAR S0c).
+    pub fn compile_ns_total(&self) -> u64 {
+        self.compile_ns_total
+    }
+
+    /// The single longest compile — the worst pause the mutator felt, in nanoseconds (P-PAR S0c).
+    pub fn compile_ns_max(&self) -> u64 {
+        self.compile_ns_max
     }
 
     /// The tier-1 ABI signature: `(vm, regs, base, globals, frames, regs_vec) -> i64` (see

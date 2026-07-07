@@ -1,0 +1,25 @@
+// P-PAR S0a baseline: build the corpus and score it once, inline — no isolates, so the
+// build + one reduction is the floor the fan-out variants are compared against.
+struct Rec { name: string; a: int; b: int }
+
+fn build(sz: int): List<Rec> {
+    mut l: List<Rec> = []
+    for i in 0..sz {
+        l ~= [Rec { name: "record-${i}", a: i, b: i * 2 }]
+    }
+    return l
+}
+
+async fn score(corpus: List<Rec>): int {
+    mut s = 0
+    for r in corpus {
+        s = s + r.a + r.b
+    }
+    return s
+}
+
+async fn run(): int {
+    corpus = build(100000)
+    return score(corpus).await
+}
+echo run().await

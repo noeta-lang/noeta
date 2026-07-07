@@ -341,12 +341,12 @@ mod tests {
         assert_eq!(v.as_int(), Some(7));
     }
 
+    use noeta_object::intern_shape;
     use noeta_object::{Shape, ShapeKind};
-    use std::rc::Rc;
 
     /// A one-slot object whose slot starts as unit — the building block for a heap cycle.
     fn cell() -> Value {
-        let shape = Rc::new(Shape::object(ShapeKind::Class, "Cell", vec!["next".into()]));
+        let shape = intern_shape(Shape::object(ShapeKind::Class, "Cell", vec!["next".into()]));
         Value::object(shape, vec![Value::unit()])
     }
 

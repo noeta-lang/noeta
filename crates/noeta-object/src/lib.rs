@@ -8,8 +8,10 @@
 //!
 //! Shapes are pure, immutable layout data — no runtime `Value` lives here, so this crate sits
 //! below `noeta-value` in the dependency DAG. The compiler emits a flat shape table into the
-//! compiled module; the VM wraps each entry in an `Rc<Shape>` once and clones that handle into
-//! every value of that shape, making shape identity a cheap pointer comparison.
+//! compiled module; the VM [interns](intern_shape) each entry once (P-PAR S1b) and every value of
+//! that shape carries the same `Copy` `&'static Shape`, making shape identity a cheap pointer
+//! comparison with **zero refcount traffic** — and, being `'static` of a `Sync` type, a handle
+//! shared-region borrow-share can hand to other isolate threads for free.
 //!
 //! Inline caches (monomorphic call-site/field-access caches keyed by shape) are a pure
 //! performance layer over this representation — invisible in observable output — and are
@@ -134,12 +136,12 @@ impl Shape {
 /// instance into, and materialize it back from, a contiguous run of raw primitive words. Built once
 /// per packed list type (the VM resolves it at module load from the compiled
 /// `PackedSchemaDef`/shape table; the tree-walker has its own equivalent over `TypeDef`). Holds the
-/// element's `Rc<Shape>` so a materialized element shares shape identity with a directly-constructed
-/// one, plus each field's kind in slot (declared) order and the total word width.
+/// element's interned `&'static Shape` so a materialized element shares shape identity with a
+/// directly-constructed one, plus each field's kind in slot (declared) order and the total width.
 #[derive(Debug, Clone)]
 pub struct PackedSchema {
     /// The element type's shape — materialized elements use this exact handle.
-    pub shape: std::rc::Rc<Shape>,
+    pub shape: &'static Shape,
     /// One entry per field, in `shape.fields` (slot) order.
     pub fields: Vec<PackedKind>,
     /// **Bytes** per element — the sum of each field's [`PackedKind::byte_width`] (P-PACK 3.2b: the
@@ -190,7 +192,7 @@ pub enum PackedKind {
     /// A 32-bit float field (P-PACK Phase 3) — **4 bytes** (slice 3.2b), half an `int`/`float`.
     F32,
     Bool,
-    Struct(std::rc::Rc<PackedSchema>),
+    Struct(&'static PackedSchema),
 }
 
 impl PackedKind {
@@ -204,6 +206,140 @@ impl PackedKind {
             PackedKind::Struct(inner) => inner.byte_size,
         }
     }
+}
+
+// P-PAR S1: shape/schema handles ride inside shared-region objects that other isolate threads
+// borrow, so both types must stay `Send + Sync` (immutable plain data). Compile-time lock — a
+// future non-`Send` field is a build error here, not a latent data race.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Shape>();
+    assert_send_sync::<PackedSchema>();
+};
+
+/// The process-wide shape/schema interner (P-PAR S1b). Runtime values carry a bare
+/// `&'static Shape` — a `Copy` handle with **zero refcount traffic** on the object hot path
+/// (construction, functional update, destruction), where per-object `Rc` cost ~2 plain RMWs and
+/// the `Arc` prerequisite for cross-thread borrow-share benched +10–12% on `vm_field_assign`
+/// (2 atomic RMWs per update). Interning gives the handle its `'static` lifetime: each distinct
+/// shape is leaked exactly once and every later request dedups onto it, so growth is bounded by
+/// the number of *distinct* types the process ever loads (a REPL re-loading a module re-uses its
+/// entries) — the hidden-class arena every production VM ends up with.
+///
+/// The dedup key is **every field including `structural_eq`** — deliberately stricter than
+/// `Shape`'s hand-written `PartialEq` (which excludes it so reflection-materialized shapes
+/// compare equal to compiler-interned ones): a REPL redefinition can legitimately flip a class's
+/// `Equatable`-ness, and those two shapes must stay distinct objects. Code relying on `PartialEq`
+/// sees exactly the old semantics; code relying on pointer identity (inline caches, packed
+/// materialization, isolate `shape_index`) only ever gains sharing.
+///
+/// Interning locks a process mutex, so it belongs on **cold paths only** (module load,
+/// reflection); per-value hot sites cache their interned handle in a `OnceLock` instead.
+mod intern {
+    use super::{PackedKind, PackedSchema, Shape, ShapeKind};
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    /// All of [`Shape`], including `structural_eq` (see module doc for why the stricter key).
+    #[derive(PartialEq, Eq, Hash)]
+    struct ShapeKey {
+        kind: ShapeKind,
+        name: String,
+        fields: Vec<String>,
+        variant: Option<String>,
+        builtin_result_option: bool,
+        structural_eq: bool,
+    }
+
+    impl ShapeKey {
+        fn of(shape: &Shape) -> ShapeKey {
+            ShapeKey {
+                kind: shape.kind,
+                name: shape.name.clone(),
+                fields: shape.fields.clone(),
+                variant: shape.variant.clone(),
+                builtin_result_option: shape.builtin_result_option,
+                structural_eq: shape.structural_eq,
+            }
+        }
+    }
+
+    /// A schema's identity: its (already-interned) shape by address, its field kinds with nested
+    /// schemas by address, and the layout axis. Pointer-keying the nested parts is sound because
+    /// they are themselves interned (same content ⇒ same address).
+    #[derive(PartialEq, Eq, Hash)]
+    struct SchemaKey {
+        shape: usize,
+        fields: Vec<KindKey>,
+        byte_size: usize,
+        column: bool,
+    }
+
+    #[derive(PartialEq, Eq, Hash)]
+    enum KindKey {
+        Int,
+        Float,
+        F32,
+        Bool,
+        Struct(usize),
+    }
+
+    impl SchemaKey {
+        fn of(schema: &PackedSchema) -> SchemaKey {
+            SchemaKey {
+                shape: std::ptr::from_ref(schema.shape).addr(),
+                fields: schema
+                    .fields
+                    .iter()
+                    .map(|k| match k {
+                        PackedKind::Int => KindKey::Int,
+                        PackedKind::Float => KindKey::Float,
+                        PackedKind::F32 => KindKey::F32,
+                        PackedKind::Bool => KindKey::Bool,
+                        PackedKind::Struct(inner) => {
+                            KindKey::Struct(std::ptr::from_ref::<PackedSchema>(inner).addr())
+                        }
+                    })
+                    .collect(),
+                byte_size: schema.byte_size,
+                column: schema.column,
+            }
+        }
+    }
+
+    /// Intern `shape`: the one `&'static Shape` every structurally-identical request shares.
+    pub fn shape(shape: Shape) -> &'static Shape {
+        static SHAPES: OnceLock<Mutex<HashMap<ShapeKey, &'static Shape>>> = OnceLock::new();
+        let mut map = SHAPES
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .expect("shape interner poisoned");
+        map.entry(ShapeKey::of(&shape))
+            .or_insert_with(|| Box::leak(Box::new(shape)))
+    }
+
+    /// Intern `schema` (its `shape` and nested `Struct` schemas must already be interned).
+    pub fn schema(schema: PackedSchema) -> &'static PackedSchema {
+        static SCHEMAS: OnceLock<Mutex<HashMap<SchemaKey, &'static PackedSchema>>> =
+            OnceLock::new();
+        let mut map = SCHEMAS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .expect("schema interner poisoned");
+        map.entry(SchemaKey::of(&schema))
+            .or_insert_with(|| Box::leak(Box::new(schema)))
+    }
+}
+
+/// Intern a [`Shape`], returning the process-wide shared `&'static Shape` (see [`intern`]).
+pub fn intern_shape(shape: Shape) -> &'static Shape {
+    intern::shape(shape)
+}
+
+/// Intern a [`PackedSchema`] (see [`intern`]). Its `shape` and any nested `Struct` field schemas
+/// must already be interned handles.
+pub fn intern_schema(schema: PackedSchema) -> &'static PackedSchema {
+    intern::schema(schema)
 }
 
 #[cfg(test)]

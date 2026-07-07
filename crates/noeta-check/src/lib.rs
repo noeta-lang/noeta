@@ -1611,7 +1611,9 @@ impl Checker {
                                         self.error(
                                             DiagnosticCode::ImmutableAssignment,
                                             *name_span,
-                                            format!("cannot assign to `{name}`, which is immutable"),
+                                            format!(
+                                                "cannot assign to `{name}`, which is immutable"
+                                            ),
                                         )
                                         .help(format!(
                                             "declare it `mut {name} = …` to allow reassignment"
