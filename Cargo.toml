@@ -80,6 +80,7 @@ clap = { version = "4", features = ["derive"] }
 tower-lsp-server = "0.23"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
+miniz_oxide = "0.8"
 serde_json = "1"
 insta = "1"
 proptest = "1"

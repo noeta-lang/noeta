@@ -16,9 +16,17 @@
 //! `fmt_ver` versions the *container* layout (this crate); `rt_ver` records the **runtime version**
 //! that built the artifact. Payload compatibility is not self-describing (postcard is not), so v1's
 //! policy is that **artifacts are pinned to the runtime that built them**: [`read`] rejects a
-//! `rt_ver` mismatch with a clear error rather than risk decoding a stale layout. `flags` reserves
-//! bit 0 (compressed) and bit 1 (encrypted) for L1.4/L1.5; both are 0 today and any set bit in a v1
-//! reader is an "unsupported transform" error.
+//! `rt_ver` mismatch with a clear error rather than risk decoding a stale layout.
+//!
+//! ## Obfuscation (P-AOT L1.4)
+//!
+//! The default payload is **obfuscated, not plaintext**: the postcard module is deflate-compressed
+//! (a size win that also defeats `strings`/`grep`) and then XOR-scrambled with a fixed-seed
+//! keystream, so `noeta dump`, a hex editor, and automated tooling all fail on the shipped file
+//! (`FLAG_COMPRESSED` marks it). This is **obfuscation, honestly labeled — not security**: the
+//! transform is fully reversible from this open-source runtime, and the module is recoverable from
+//! process memory at run time. It raises the bar against casual inspection, nothing more.
+//! `FLAG_ENCRYPTED` (bit 1) is reserved for the opt-in keyed layer (L1.5); a v1 reader rejects it.
 
 use noeta_bytecode::Module;
 
@@ -33,10 +41,15 @@ pub const FORMAT_VERSION: u8 = 1;
 /// mismatch is the signal to rebuild the bundle.
 pub const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// `flags` bit 0: the payload is compressed (P-AOT L1.4). Not yet emitted or accepted.
+/// `flags` bit 0: the payload is obfuscated (deflate-compressed + scrambled, P-AOT L1.4). Set on
+/// every bundle [`write`] emits.
 pub const FLAG_COMPRESSED: u8 = 1 << 0;
 /// `flags` bit 1: the payload is encrypted (P-AOT L1.5). Not yet emitted or accepted.
 pub const FLAG_ENCRYPTED: u8 = 1 << 1;
+
+/// The fixed seed for the obfuscation keystream (P-AOT L1.4). Not a secret — obfuscation only; it
+/// lives in this open-source runtime. Chosen arbitrarily (no significance to the value).
+const SCRAMBLE_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// Why a byte slice is not a loadable `.noeb`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,15 +92,16 @@ impl std::fmt::Display for BundleError {
 
 impl std::error::Error for BundleError {}
 
-/// Serialize `module` into a `.noeb` bundle: the versioned header followed by the encoded module.
-/// L1.1 emits an untransformed payload (`flags == 0`); L1.4/L1.5 will set the flag bits.
+/// Serialize `module` into an obfuscated `.noeb` bundle: the versioned header followed by the
+/// deflate-compressed, scrambled module payload (`FLAG_COMPRESSED`). See the module docs for what
+/// obfuscation does and does not protect.
 pub fn write(module: &Module) -> Vec<u8> {
     let rt = RUNTIME_VERSION.as_bytes();
-    let payload = module.encode();
+    let payload = obfuscate(&module.encode());
     let mut out = Vec::with_capacity(4 + 3 + rt.len() + payload.len());
     out.extend_from_slice(MAGIC);
     out.push(FORMAT_VERSION);
-    out.push(0); // flags: no transform yet
+    out.push(FLAG_COMPRESSED);
     out.push(rt.len() as u8);
     out.extend_from_slice(rt);
     out.extend_from_slice(&payload);
@@ -111,7 +125,8 @@ pub fn read(bytes: &[u8]) -> Result<Module, BundleError> {
         });
     }
     let flags = bytes[5];
-    if flags & (FLAG_COMPRESSED | FLAG_ENCRYPTED) != 0 {
+    // Encryption (L1.5) is not implemented here; any other unknown bit is a future transform.
+    if flags & !FLAG_COMPRESSED != 0 {
         return Err(BundleError::UnsupportedTransform { flags });
     }
     let rt_len = bytes[6] as usize;
@@ -126,7 +141,46 @@ pub fn read(bytes: &[u8]) -> Result<Module, BundleError> {
             current: RUNTIME_VERSION.to_string(),
         });
     }
-    Module::decode(&bytes[rt_end..]).map_err(|_| BundleError::Decode)
+    let payload = &bytes[rt_end..];
+    let encoded = if flags & FLAG_COMPRESSED != 0 {
+        deobfuscate(payload)?
+    } else {
+        payload.to_vec()
+    };
+    Module::decode(&encoded).map_err(|_| BundleError::Decode)
+}
+
+/// Deflate-compress then scramble a raw module payload (P-AOT L1.4).
+fn obfuscate(encoded: &[u8]) -> Vec<u8> {
+    let mut compressed = miniz_oxide::deflate::compress_to_vec(encoded, 8);
+    scramble(&mut compressed);
+    compressed
+}
+
+/// Reverse [`obfuscate`]: de-scramble then inflate. `Err` on a corrupt/foreign payload.
+fn deobfuscate(payload: &[u8]) -> Result<Vec<u8>, BundleError> {
+    let mut buf = payload.to_vec();
+    scramble(&mut buf); // XOR is its own inverse
+    miniz_oxide::inflate::decompress_to_vec(&buf).map_err(|_| BundleError::Decode)
+}
+
+/// XOR `buf` in place with a SplitMix64 keystream seeded from [`SCRAMBLE_SEED`] — its own inverse.
+/// A byte-level scramble so the shipped payload is not literally "just deflate, inflate it";
+/// obfuscation only (the seed is public), not encryption.
+fn scramble(buf: &mut [u8]) {
+    let mut state = SCRAMBLE_SEED;
+    let mut keystream = 0u64;
+    for (i, byte) in buf.iter_mut().enumerate() {
+        if i % 8 == 0 {
+            // SplitMix64: advance and mix a fresh 64-bit keystream word every 8 bytes.
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            keystream = z ^ (z >> 31);
+        }
+        *byte ^= (keystream >> ((i % 8) * 8)) as u8;
+    }
 }
 
 /// Whether `bytes` begins with the `.noeb` magic — a cheap sniff for the CLI to decide between
@@ -184,14 +238,29 @@ mod tests {
     }
 
     #[test]
-    fn a_set_transform_flag_is_unsupported_in_v1() {
+    fn the_encryption_flag_is_unsupported_in_v1() {
+        // L1.4 supports FLAG_COMPRESSED; the keyed-encryption bit (L1.5) is still rejected.
         let mut blob = write(&tiny_module());
-        blob[5] = FLAG_COMPRESSED;
-        assert_eq!(
+        blob[5] |= FLAG_ENCRYPTED;
+        assert!(matches!(
             err(&blob),
-            BundleError::UnsupportedTransform {
-                flags: FLAG_COMPRESSED
-            }
+            BundleError::UnsupportedTransform { .. }
+        ));
+    }
+
+    #[test]
+    fn the_payload_is_obfuscated_not_plaintext_bytecode() {
+        let m = tiny_module();
+        let blob = write(&m);
+        // The compression flag is set…
+        assert_eq!(blob[5] & FLAG_COMPRESSED, FLAG_COMPRESSED);
+        // …and the on-disk payload is not the raw postcard encoding (a transform was applied).
+        let rt_len = blob[6] as usize;
+        let payload = &blob[7 + rt_len..];
+        assert_ne!(
+            payload,
+            m.encode().as_slice(),
+            "payload must be transformed"
         );
     }
 }
