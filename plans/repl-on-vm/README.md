@@ -190,11 +190,17 @@ REPL needs a **persistent typing environment** accumulated across entries:
   declared `type`/`enum`/`class` signature, every top-level `fn` signature, and the coherence/trait
   registry. Entry *N* type-checks its statements against this environment, then commits its new bindings
   and declarations into it.
-- Rebinding semantics decision (surface to the user): does a bare `x = expr` at the prompt **update** the
-  existing binding (must type-check against `x`'s established type) or **shadow** it (fresh type, like a
-  new `mut x`)? Python/JS-REPL intuition says shadow; a statically-typed language says update. Recommend
-  **shadow on `mut`, update on bare assignment** — matching the language's own rule that `mut` introduces
-  a binding and bare `=` mutates — so the REPL has no special typing rule, it just runs the language's.
+- Rebinding semantics: **resolved — no REPL-specific policy needed.** The language already allows what a
+  REPL wants, verified against the checker (merged main): re-`mut x` re-declares (even with a *different*
+  type — `mut x = 1; mut x = "hi"` is legal), a bare `x = expr` reassigns and flow-updates the type, a
+  nested `mut x` lexically shadows, and redefining a `struct`/`class` is allowed. The *only* no-shadow
+  rules are the reserved names: prelude value names (E0046 — `Ok`/`Err`/`some`/`none`/`panic`/`assert`)
+  and native type names (E0049 — `Uuid`/`FileHandle`/`Iterator`/`Future`/`Sender`/`Receiver`/`Signal`/
+  `Computed`/`Effect`). So the `SessionChecker` just runs the language's own rules per entry against the
+  accumulated environment — no special REPL rebinding rule, and re-defining a binding at the prompt is
+  not "shadowing the language forbids", it is exactly what the language already does. (Sharp edge, same
+  as the checkerless REPL today: an entry that retypes `x` can leave a function compiled in an earlier
+  entry against the old type stale — inherent to REPL redefinition, not caught by a per-entry check.)
 - The checker's site maps (`type_of_sites`, `packed_list_sites`, `handle_sites`, …) become **per-entry**
   outputs threaded into that entry's `compile_with_sites` (the machinery already exists — the CLI/salsa
   path threads exactly these), so the REPL gets the optimized codegen the checkerless path forgoes.
