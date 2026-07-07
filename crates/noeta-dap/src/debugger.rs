@@ -15,11 +15,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use noeta_ast::{Expr, Stmt};
+use noeta_ast::Expr;
 use noeta_bytecode::Module;
-use noeta_lexer::lex;
-use noeta_parser::parse;
-use noeta_span::{Source, SourceId, SourceMap};
+use noeta_parser::parse_fragment;
+use noeta_span::{SourceId, SourceMap};
 use noeta_vm::{DebugAction, DebugEvalOutcome, DebugEvalRequest, DebugView, Debugger};
 use serde_json::{Value, json};
 
@@ -379,13 +378,9 @@ fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
             .map(|(name, _, value)| VarInfo {
                 name: name.to_string(),
                 value: value.display(),
-                // Prefer the value's reified type tag rendered as surface syntax (`List<int>`,
-                // `Box<int>` — the same spelling LSP hover shows), falling back to the coarse
-                // kind name (`int`, `string`) for untagged primitives.
-                ty: value
-                    .reflect()
-                    .map(|t| t.to_string())
-                    .unwrap_or_else(|| value.type_name().to_string()),
+                // The shared surface-syntax type spelling (`List<int>` — the same the LSP hover and
+                // REPL `:type` show), falling back to the coarse kind name for untagged primitives.
+                ty: value.type_display(),
             })
             .collect();
         frames.push(FrameInfo {
@@ -404,14 +399,9 @@ fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
 /// [`Expr`] to the VM (via [`Resume::Evaluate`]) which walks it — evaluation lives on the VM so a call
 /// can run through the real call machinery (D5.2).
 pub fn parse_expr(expr: &str) -> Option<Expr> {
-    let source = Source::new(SourceId::FIRST, "<eval>", format!("{expr};"));
-    let lexed = lex(&source);
-    let parsed = parse(&source, &lexed.tokens);
-    if !lexed.diagnostics.is_empty() || !parsed.diagnostics.is_empty() {
+    let fragment = parse_fragment(SourceId::FIRST, "<eval>", expr);
+    if !fragment.diagnostics.is_empty() {
         return None;
     }
-    match parsed.program.stmts.last() {
-        Some(Stmt::Expr { expr, .. }) => Some(expr.clone()),
-        _ => None,
-    }
+    fragment.trailing_expr().cloned()
 }

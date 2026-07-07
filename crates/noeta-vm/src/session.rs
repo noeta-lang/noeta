@@ -222,13 +222,7 @@ impl VmSession {
     /// reflection + the `TypeRepr` surface spelling (`List<int>`), falling back to the runtime kind
     /// name for an untagged primitive — the same rendering the debugger shows.
     pub fn type_of(&mut self, program: &Program) -> SessionOutput {
-        self.run_capturing(program, |v| {
-            Some(
-                v.reflect()
-                    .map(|r| r.to_string())
-                    .unwrap_or_else(|| v.type_name().to_string()),
-            )
-        })
+        self.run_capturing(program, |v| Some(v.type_display()))
     }
 
     /// Compile and run one entry, then — if the final statement was a bare expression — hand its

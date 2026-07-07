@@ -5437,10 +5437,7 @@ impl<'m> Vm<'m> {
         let outcome = match self.debug_eval(expr, &locals, allow_calls) {
             Ok(value) => {
                 let text = value.display();
-                let ty = value
-                    .reflect()
-                    .map(|t| t.to_string())
-                    .unwrap_or_else(|| value.type_name().to_string());
+                let ty = value.type_display();
                 // The evaluator returns an owned reference; render it, then drop it.
                 release(value);
                 DebugEvalOutcome::Value { text, ty }

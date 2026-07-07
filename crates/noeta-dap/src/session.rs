@@ -13,7 +13,7 @@
 use std::path::Path;
 
 use noeta_bytecode::Module;
-use noeta_diagnostics::{Diagnostic, render};
+use noeta_diagnostics::{render, render_mapped};
 use noeta_span::SourceMap;
 use noeta_vm::{Debugger, VmBackend};
 
@@ -76,7 +76,7 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
     let checked = noeta_check::check_all(&linked.program);
     if !checked.diagnostics.is_empty() {
         return Err(RunOutput::failed(
-            render_all(&linked.sources, checked.diagnostics.iter()),
+            render_mapped(&linked.sources, checked.diagnostics.iter()),
             1,
         ));
     }
@@ -116,7 +116,7 @@ pub fn run_compiled(compiled: &Compiled, debugger: Option<Box<dyn Debugger>>) ->
     if !result.diagnostics.is_empty() {
         chunks.push(OutputChunk {
             category: "stderr",
-            text: render_all(&compiled.sources, result.diagnostics.iter()),
+            text: render_mapped(&compiled.sources, result.diagnostics.iter()),
         });
     }
     // The abort's stack trace, after the diagnostic it belongs to (same rendering + same "only when
@@ -168,17 +168,4 @@ fn compile_checked(
             u.reason
         )
     })
-}
-
-/// Render each diagnostic against the source its span belongs to (via the [`SourceMap`]), matching
-/// the CLI's cross-module diagnostic rendering.
-fn render_all<'a>(
-    sources: &SourceMap,
-    diagnostics: impl Iterator<Item = &'a Diagnostic>,
-) -> String {
-    let mut text = String::new();
-    for diagnostic in diagnostics {
-        text.push_str(&render(sources.source(diagnostic.span.source), diagnostic));
-    }
-    text
 }

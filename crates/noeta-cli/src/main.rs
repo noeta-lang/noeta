@@ -26,9 +26,9 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 use noeta_ast::{AttrArg, AttrValue, Expr, Program, Stmt};
 use noeta_check::TierFn;
-use noeta_diagnostics::{Diagnostic, DiagnosticCode, render};
+use noeta_diagnostics::{Diagnostic, DiagnosticCode, render, render_mapped};
 use noeta_lexer::{TokenKind, lex};
-use noeta_parser::parse;
+use noeta_parser::{parse, parse_fragment};
 use noeta_span::{Source, SourceId, SourceMap, Span};
 use noeta_vm::{SessionOutput, VmBackend, VmSession};
 
@@ -299,18 +299,13 @@ fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a D
     }
 }
 
-/// Render each diagnostic against the source it belongs to (resolved by its span's `SourceId`
-/// through the [`SourceMap`]), so a diagnostic on a declaration merged in from a sibling module
-/// renders against that module's file and text rather than the entry's.
+/// Print [`noeta_diagnostics::render_mapped`]'s cross-module rendering to stderr — each diagnostic
+/// resolved against the source its span belongs to.
 fn emit_diagnostics_mapped<'a>(
     sources: &SourceMap,
     diagnostics: impl Iterator<Item = &'a Diagnostic>,
 ) {
-    let mut stderr = io::stderr();
-    for diagnostic in diagnostics {
-        let source = sources.source(diagnostic.span.source);
-        let _ = stderr.write_all(render(source, diagnostic).as_bytes());
-    }
+    let _ = io::stderr().write_all(render_mapped(sources, diagnostics).as_bytes());
 }
 
 fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -> ExitCode {
@@ -1324,25 +1319,17 @@ fn repl_meta(session: &mut VmSession, line: &str, sources: &[Source]) -> MetaOut
 /// query defines nothing, so no later trace can reference it.
 fn repl_type(session: &mut VmSession, expr: &str, sources: &[Source]) {
     let id = SourceId(sources.len() as u32);
-    let source = Source::new(id, "<repl-type>", format!("{expr};"));
-    let lexed = lex(&source);
-    let parsed = parse(&source, &lexed.tokens);
-    let diags: Vec<Diagnostic> = lexed
-        .diagnostics
-        .iter()
-        .chain(parsed.diagnostics.iter())
-        .cloned()
-        .collect();
-    if !diags.is_empty() {
-        emit_diagnostics(&source, diags.iter());
+    let fragment = parse_fragment(id, "<repl-type>", expr);
+    if !fragment.diagnostics.is_empty() {
+        emit_diagnostics(&fragment.source, fragment.diagnostics.iter());
         return;
     }
-    let out = session.type_of(&parsed.program);
+    let out = session.type_of(&fragment.program);
     print!("{}", out.stdout);
     let _ = io::stdout().flush();
     // Render diagnostics / any abort trace against all entries plus this `:type` source.
     let mut map_sources = sources.to_vec();
-    map_sources.push(source);
+    map_sources.push(fragment.source);
     let map = SourceMap::new(map_sources);
     if !out.diagnostics.is_empty() {
         emit_diagnostics_mapped(&map, out.diagnostics.iter());

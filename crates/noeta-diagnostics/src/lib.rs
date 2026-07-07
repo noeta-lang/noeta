@@ -402,4 +402,4 @@ impl Diagnostic {
 }
 
 mod render;
-pub use render::render;
+pub use render::{render, render_mapped};
