@@ -7,7 +7,7 @@
 
 use noeta_diagnostics::DiagnosticCode;
 use noeta_span::Span;
-use noeta_value::{CompactString, Value};
+use noeta_value::Value;
 
 use crate::*;
 
@@ -332,24 +332,14 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
-        // `fs.*_async` (Track A.4c/A.10) are not synchronous dispatch: each produces a leaf async-IO
-        // *future* (ticketed in the executor) that `.await` later resolves. Intercepted here, ahead of
-        // the normal registry dispatch (which is synchronous, value-only).
-        if module == "fs"
-            && let Some(req) = vm_fs_async_request(func, args)
-        {
-            let id = self.executor.spawn_io(&mut *self.host, req);
-            return Ok(Value::make_async_io(id));
-        }
         // A virtual module's functions (`reactive.signal(...)`, prelude-redesign P2) are builtins —
         // they need the executor/reactive graph the registry seam cannot reach — so a qualified call
         // intercepts here, ahead of registry dispatch, exactly like `fs.*_async`. The tree-walker
         // mirrors this in its own `call_native_module`.
         if noeta_stdlib::registry::is_virtual_module(module) {
-            let Some(builtin) =
-                noeta_stdlib::registry::virtual_module_function(module, func)
-                    .then(|| Builtin::from_name(func))
-                    .flatten()
+            let Some(builtin) = noeta_stdlib::registry::virtual_module_function(module, func)
+                .then(|| Builtin::from_name(func))
+                .flatten()
             else {
                 return Err(self.error(
                     DiagnosticCode::UnknownName,
@@ -374,6 +364,13 @@ impl<'m> Vm<'m> {
                 args.iter().map(|a| marshal_native_arg(*a)).collect()
             };
             return match noeta_stdlib::registry::dispatch(module, func, &mut *self.host, &nargs) {
+                // Async WORK (extern-types X5): ticket the descriptor on the executor and hand
+                // back a leaf async-IO future `.await` later resolves — the same shape the old
+                // per-backend `fs.*_async` intercept produced, now reached by ordinary dispatch.
+                Ok(noeta_stdlib::NativeOut::Spawn(spawn)) => {
+                    let id = self.executor.spawn_ext(&mut *self.host, spawn.0);
+                    Ok(Value::make_async_io(id))
+                }
                 Ok(out) => Ok(materialize_ext(out, sig.ret, args)),
                 Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
             };
@@ -651,74 +648,25 @@ impl<'m> Vm<'m> {
         Ok(Value::list(out))
     }
 
-    /// Dispatch a file-handle method. Mirrors the tree-walker's `call_file_handle_method`: the
-    /// cursor logic lives in the shared `FileHandle`, so the two backends differ only in value glue
-    /// (building `some`/`none`, routing the close flush through `self.host`).
-    pub(crate) fn call_file_handle_method(
+    /// Dispatch a method on an extern-type receiver (extern-types X1) through its registered
+    /// [`noeta_stdlib::ExtType`]'s shared dispatch — project the arguments, run the one shared
+    /// body (host threaded in, receiver `&mut`), materialize the result. Mirrors the
+    /// tree-walker's `call_extern_method`, so the two backends agree by construction.
+    pub(crate) fn call_extern_method(
         &mut self,
         recv: Value,
-        method: noeta_stdlib::FileHandleMethod,
-        name: &str,
+        method: &str,
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
-        use noeta_stdlib::FileHandleMethod as M;
-        match method {
-            M::ReadLine => {
-                self.stdlib_arity(name, args, 0, span)?;
-                // `with_file_handle_mut` works on `recv` (a `Value`), not on `self`, so capturing
-                // `self.host` in the closure is conflict-free; a lazy handle refills through it.
-                let host = &mut *self.host;
-                match recv.with_file_handle_mut(|handle| handle.read_line(host)) {
-                    Ok(Some(line)) => Ok(make_some(Value::string(&line))),
-                    Ok(None) => Ok(make_none()),
-                    Err(error) => {
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            M::Read => {
-                self.stdlib_arity(name, args, 1, span)?;
-                let count = self.stdlib_int(name, args[0], span)?;
-                let host = &mut *self.host;
-                match recv.with_file_handle_mut(|handle| handle.read(count, host)) {
-                    Ok(Some(chunk)) => Ok(make_some(Value::string(&chunk))),
-                    Ok(None) => Ok(make_none()),
-                    Err(error) => {
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            M::Write => {
-                self.stdlib_arity(name, args, 1, span)?;
-                let chunk = self.stdlib_string(name, args[0], span)?;
-                match recv.with_file_handle_mut(|handle| handle.write(&chunk)) {
-                    Ok(()) => Ok(Value::unit()),
-                    Err(error) => {
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            M::Close => {
-                self.stdlib_arity(name, args, 0, span)?;
-                // Take the flush instruction first (the handle borrow ends), then hit the host.
-                let flush = recv.with_file_handle_mut(|handle| handle.close());
-                let result = match flush {
-                    None => Ok(()),
-                    Some(noeta_stdlib::Flush::Write { path, content }) => {
-                        self.host.fs_write(&path, &content)
-                    }
-                    Some(noeta_stdlib::Flush::Append { path, content }) => {
-                        self.host.fs_append(&path, &content)
-                    }
-                };
-                match result {
-                    Ok(()) => Ok(Value::unit()),
-                    Err(error) => {
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
+        let nargs: Vec<noeta_stdlib::NativeValue> =
+            args.iter().map(|a| marshal_native_arg(*a)).collect();
+        let host = &mut *self.host;
+        let result = recv
+            .with_extern_mut(|e| noeta_stdlib::registry::dispatch_method(e, method, host, &nargs));
+        match result {
+            Ok(out) => Ok(materialize_native(out)),
+            Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
         }
     }
 
@@ -910,7 +858,16 @@ impl<'m> Vm<'m> {
             noeta_stdlib::MapMethod::Keys => {
                 self.stdlib_arity(name, args, 0, span)?;
                 let keys = map.map_keys().expect("map receiver");
-                Ok(Value::list(keys.iter().map(|k| Value::string(k)).collect()))
+                // A string key becomes a fresh string value; an extern key a fresh extern value
+                // (its box cloned — a key is a snapshot).
+                Ok(Value::list(
+                    keys.into_iter()
+                        .map(|k| match k {
+                            noeta_stdlib::MapKey::Str(s) => Value::string(s.as_str()),
+                            noeta_stdlib::MapKey::Extern(e) => Value::extern_value(e),
+                        })
+                        .collect(),
+                ))
             }
             noeta_stdlib::MapMethod::Values => {
                 self.stdlib_arity(name, args, 0, span)?;
@@ -922,49 +879,38 @@ impl<'m> Vm<'m> {
             }
             noeta_stdlib::MapMethod::Has => {
                 self.stdlib_arity(name, args, 1, span)?;
-                // Borrow the key's `&str` for the lookup — no clone.
-                let present = match args[0].with_str(|key| map.map_get(key).is_some()) {
-                    Some(p) => p,
-                    None => {
-                        self.stdlib_string(name, args[0], span)?; // non-string key → the type error
-                        false
-                    }
-                };
+                // Borrow the key's `&str` (or probe through the extern contract) — no clone.
+                let present = self.map_probe(map, args[0], name, span)?.is_some();
                 Ok(Value::bool(present))
             }
             noeta_stdlib::MapMethod::Set => {
                 self.stdlib_arity(name, args, 2, span)?;
-                let key = self.stdlib_string(name, args[0], span)?;
-                let mut new = map.map_entries().expect("map receiver");
-                new.insert(key, args[1]);
+                let key = self.map_update_key(false, args[0], name, span)?;
+                let mut new = map.map_entries_keyed().expect("map receiver");
+                new.retain(|(k, _)| *k != key);
+                new.push((key, args[1]));
                 // The receiver is borrowed (untouched); the new map is a fresh owner, so retain each
                 // value it ends up holding exactly once. A displaced/absent value is simply not in
                 // `new`, so it keeps only the receiver's reference — no leak, no double-free.
-                for &value in new.values() {
+                for &(_, value) in &new {
                     retain(value);
                 }
-                Ok(Value::map(new))
+                Ok(Value::map_keyed(new))
             }
             noeta_stdlib::MapMethod::Remove => {
                 self.stdlib_arity(name, args, 1, span)?;
-                let key = self.stdlib_string(name, args[0], span)?;
-                let mut new = map.map_entries().expect("map receiver");
-                new.remove(&key);
-                for &value in new.values() {
+                let key = self.map_update_key(false, args[0], name, span)?;
+                let mut new = map.map_entries_keyed().expect("map receiver");
+                new.retain(|(k, _)| *k != key);
+                for &(_, value) in &new {
                     retain(value);
                 }
-                Ok(Value::map(new))
+                Ok(Value::map_keyed(new))
             }
             noeta_stdlib::MapMethod::GetOr => {
                 self.stdlib_arity(name, args, 2, span)?;
-                // Borrow the key's `&str` for the single probe — no clone.
-                let found = match args[0].with_str(|key| map.map_get(key)) {
-                    Some(found) => found,
-                    None => {
-                        self.stdlib_string(name, args[0], span)?; // non-string key → the type error
-                        None
-                    }
-                };
+                // Borrow the key's `&str` (or probe through the extern contract) — no clone.
+                let found = self.map_probe(map, args[0], name, span)?;
                 // Hit: the value is borrowed from the map. Miss: `default` is borrowed from the
                 // caller's argument register. Either way the result register is a new owner.
                 let out = found.unwrap_or(args[1]);
@@ -1055,7 +1001,11 @@ impl<'m> Vm<'m> {
             noeta_stdlib::MapMethod::Remove => {
                 self.stdlib_arity(name, args, 1, span)?;
                 let key = self.map_update_key(consume_key, args[0], name, span)?;
-                if let Some(old) = map.map_remove(&key) {
+                let removed = match &key {
+                    noeta_stdlib::MapKey::Str(k) => map.map_remove(k.as_str()),
+                    noeta_stdlib::MapKey::Extern(e) => map.map_remove_extern(&**e),
+                };
+                if let Some(old) = removed {
                     self.release_value(old);
                 }
                 Ok(map)
@@ -1065,30 +1015,49 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Extract the owned key for an in-place map `set`/`remove`, in the map's own
-    /// [`CompactString`] representation. When `consume_key` is set (the compiler proved the key
-    /// is a single-use temporary) and the key value is a sole-owned string, **move** its buffer
-    /// out instead of cloning it — the register still holds the value (now an empty string,
-    /// freed later), and a single-use temp is never read again. Otherwise clone — allocation-free
-    /// for inline (≤ 24-byte) content, which map keys overwhelmingly are (P-SSO). A non-string
-    /// key raises the type error through `stdlib_string`, exactly as before.
+    /// Extract the owned [`noeta_stdlib::MapKey`] for a map `set`/`remove`. A string key keeps
+    /// its P-SSO paths exactly: when `consume_key` is set (the compiler proved the key a
+    /// single-use temporary) and the value is a sole-owned string, **move** its buffer out; else
+    /// clone (allocation-free for inline ≤ 24-byte content). A key-capable extern value snapshots
+    /// via `clone_box` (extern-types X4). Anything else raises the shared map-key error.
     fn map_update_key(
         &mut self,
         consume_key: bool,
         key: Value,
-        name: &str,
+        _name: &str,
         span: Span,
-    ) -> Result<CompactString, Abort> {
+    ) -> Result<noeta_stdlib::MapKey, Abort> {
         if consume_key && key.is_string() && key.refcount() == 1 {
-            Ok(key.take_string_in_place())
+            Ok(noeta_stdlib::MapKey::Str(key.take_string_in_place()))
         } else if let Some(k) = key.as_compact_string() {
-            Ok(k)
+            Ok(noeta_stdlib::MapKey::Str(k))
+        } else if key.is_extern() && key.with_extern(noeta_stdlib::map_key::extern_key_capable) {
+            Ok(key.with_extern(|e| {
+                noeta_stdlib::MapKey::Extern(noeta_stdlib::ExternBox(e.clone_box()))
+            }))
         } else {
-            // Not a string: surface the same type error the clone path always raised.
-            Err(self
-                .stdlib_string(name, key, span)
-                .expect_err("non-string key must be a type error"))
+            let error = noeta_stdlib::map_key::map_key_error(key.type_name());
+            Err(self.error(stdlib_error_code(error.kind), span, error.message))
         }
+    }
+
+    /// Probe a map by a key argument — a borrowed `&str` (no clone) or the extern contract
+    /// (no boxing). A non-key value raises the shared map-key error.
+    fn map_probe(
+        &mut self,
+        map: Value,
+        key: Value,
+        _name: &str,
+        span: Span,
+    ) -> Result<Option<Value>, Abort> {
+        if let Some(found) = key.with_str(|k| map.map_get(k)) {
+            return Ok(found);
+        }
+        if key.is_extern() && key.with_extern(noeta_stdlib::map_key::extern_key_capable) {
+            return Ok(key.with_extern(|e| map.map_get_extern(e)));
+        }
+        let error = noeta_stdlib::map_key::map_key_error(key.type_name());
+        Err(self.error(stdlib_error_code(error.kind), span, error.message))
     }
 
     /// In-place `add`/`remove` for a reuse-marked set self-update (`s = s.add(x)` / `s = s.remove(x)`).

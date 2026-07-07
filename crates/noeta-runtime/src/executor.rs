@@ -13,7 +13,7 @@
 //! to IO) extended to scheduling. It is constructed only by the CLI/REPL/server and is **never** run
 //! in the differential, so it stays out-of-oracle.
 
-use noeta_stdlib::{Executor, Host, IoOutcome, IoRequest, StdError};
+use noeta_stdlib::{Executor, ExternIo, Host, NativeOut, RealBody, StdError};
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
@@ -33,12 +33,14 @@ pub struct RealExecutor {
     /// Absolute deadlines (ms since `start`) of timers polled while pending. Ordered, so `advance`
     /// deterministically picks the earliest — though "deterministic" here still races real time.
     timers: BTreeSet<u64>,
-    /// In-flight `fs.*_async` requests spawned onto `runtime`, keyed by ticket id. Each runs on the
-    /// tokio blocking pool concurrently; `advance` harvests one (driving the runtime, which also lets
-    /// the others finish), and `poll_io` returns a finished one.
-    io: HashMap<u64, JoinHandle<Result<IoOutcome, StdError>>>,
-    /// Requests harvested by `advance` but not yet returned by `poll_io`, keyed by ticket id.
-    resolved: HashMap<u64, Result<IoOutcome, StdError>>,
+    /// In-flight async work descriptors spawned onto `runtime`, keyed by ticket id. Each runs
+    /// on the tokio blocking pool (or as a native future) concurrently; `advance` harvests one
+    /// (driving the runtime, which also lets the others finish), and `poll_ext` returns a
+    /// finished one.
+    io: HashMap<u64, JoinHandle<Result<NativeOut, StdError>>>,
+    /// Work harvested by `advance` (or resolved synchronously at spawn — the `run_sync`
+    /// fallback) but not yet returned by `poll_ext`, keyed by ticket id.
+    resolved: HashMap<u64, Result<NativeOut, StdError>>,
     /// Monotonic ticket source for `io`/`resolved`.
     next_io_id: u64,
 }
@@ -109,17 +111,34 @@ impl Executor for RealExecutor {
         Some(now)
     }
 
-    fn spawn_io(&mut self, _host: &mut dyn Host, req: IoRequest) -> u64 {
-        // Spawn the real IO onto the runtime; it proceeds on the blocking pool concurrently with the
-        // rest of the isolate's cooperative scheduling. The host is unused — tokio hits the real disk.
+    fn spawn_ext(&mut self, host: &mut dyn Host, mut io: Box<dyn ExternIo>) -> u64 {
         let id = self.next_io_id;
         self.next_io_id += 1;
-        let handle = self.runtime.spawn(async move { run_io_real(req).await });
-        self.io.insert(id, handle);
+        match io.run_real() {
+            // Real concurrency: the descriptor's own body proceeds on the runtime (blocking
+            // pool or native future) concurrently with the isolate's cooperative scheduling.
+            Some(RealBody::Blocking(f)) => {
+                let handle = self.runtime.spawn(async move {
+                    tokio::task::spawn_blocking(f)
+                        .await
+                        .unwrap_or_else(|e| Err(join_error(e)))
+                });
+                self.io.insert(id, handle);
+            }
+            Some(RealBody::Async(fut)) => {
+                let handle = self.runtime.spawn(fut);
+                self.io.insert(id, handle);
+            }
+            // No real body: the deterministic sync body runs against the (real) Host at spawn —
+            // correct, serial. The degradation an extension gets for free.
+            None => {
+                self.resolved.insert(id, io.run_sync(host));
+            }
+        }
         id
     }
 
-    fn poll_io(&mut self, id: u64) -> Option<Result<IoOutcome, StdError>> {
+    fn poll_ext(&mut self, id: u64) -> Option<Result<NativeOut, StdError>> {
         // Harvested by a prior `advance`?
         if let Some(result) = self.resolved.remove(&id) {
             return Some(result);
@@ -136,37 +155,6 @@ impl Executor for RealExecutor {
             )
         } else {
             None
-        }
-    }
-}
-
-/// Perform an [`IoRequest`] against the **real disk** via `tokio::fs` — the real executor's async IO
-/// body (the sandbox runs the synchronous `noeta_stdlib::run_io_sync` against its VFS instead).
-async fn run_io_real(req: IoRequest) -> Result<IoOutcome, StdError> {
-    match req {
-        IoRequest::Read(path) => tokio::fs::read_to_string(&path)
-            .await
-            .map(IoOutcome::Text)
-            .map_err(|e| io_error(format!("cannot read `{path}`: {e}"))),
-        IoRequest::Write(path, content) => tokio::fs::write(&path, content)
-            .await
-            .map(|()| IoOutcome::Unit)
-            .map_err(|e| io_error(format!("cannot write `{path}`: {e}"))),
-        IoRequest::Append(path, content) => {
-            use tokio::io::AsyncWriteExt;
-            async {
-                let mut file = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)
-                    .await
-                    .map_err(|e| io_error(format!("cannot open `{path}` for append: {e}")))?;
-                file.write_all(content.as_bytes())
-                    .await
-                    .map_err(|e| io_error(format!("cannot append to `{path}`: {e}")))?;
-                Ok(IoOutcome::Unit)
-            }
-            .await
         }
     }
 }

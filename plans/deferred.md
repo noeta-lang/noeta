@@ -140,10 +140,22 @@ own; these are additive capabilities.
 | **Synced / CRDT `synced_signal`** (§9.15) — a signal whose state is replicated peer-to-peer | reactivity milestone (design) | The p2p stack; opt-in per app. |
 | **Value-equality suppression** (opt-in) — a `set` to an equal value need not re-fire dependents | reactivity S0 (noted in core tests) | A benchmark or program where redundant re-fires cost enough to justify it; must stay opt-in (structural equality is not always cheap, and "a change is a set" is the current, simpler contract). |
 
+## Extern types (extern-types arc — the seam is COMPLETE, these are follow-ons)
+
+| Item | Source | Trigger to implement |
+|---|---|---|
+| **Host-coupled finalizers** — an extern value whose drop needs the Host (e.g. flush-on-drop) | extern-types X1 design | GC free cannot reach the Host, so drop is plain Rust drop; self-contained RAII works, buffered types keep explicit `close()`. Revisit only if a type genuinely cannot use either. |
+| **Non-extern map-key kinds** (`int`, tuples) | extern-types X4 | The `MapKey` enum is where they land. NOTE the latent divergence below (int keys accepted statically today) — fixing that is the natural moment. |
+| **Inline caches for extern-type methods** | extern-types X1 | A workload where registry method lookup on an extern receiver is measurably hot (none today — Uuid accessors and file IO are not loop arithmetic). Wire into P-IC. |
+| **Borrowed arg projection for registry dispatch** — `handle.write(chunk)` clones its string arg (`NativeValue::Str` is owned), like every registry module fn always has | extern-types X3 note | A write-loop bench objecting. The fix is registry-wide (a borrowed `NativeValue` view), not per-type. |
+| **HTTP library** — the first out-of-tree-shaped async client | extern-types X5 design | Its own arc: a network `Host` capability + a deterministic virtual network (the Vfs analog) + a real stack. The `ExternIo` seam is ready for it (`RealBody::Async`). |
+| **Async extern-type *methods*** | extern-types X5 | Falls out free (`TypeDispatch` returns `NativeOut`, so a method may return `Spawn`) — untested until a client needs one. |
+
 ## Backend divergences (latent — would fail the differential if a corpus case reached it)
 
 | Item | Source | Trigger / note |
 |---|---|---|
+| **Int-keyed maps type-check but fail at runtime** — the checker accepts `Map<int, V>` and `{1: "a"}` (key types unify freely; no static string/key-capable gate for NON-extern kinds), while all runtimes reject at `RequireMapKey`/literal eval. Extern kinds got the static gate in extern-types X4; primitives did not (scope-confirmed). | pre-existing; surveyed in extern-types X4 | Either gate statically (breaking: today it is a runtime E0007) or implement int keys via `MapKey` — decide when non-extern keys are wanted. |
 | ~~**Shadowing a prelude builtin name with a local binding** (`sum = 5`, `map = x`, …) diverges between the backends~~ | found during reactivity S5 hardening | **Done (prelude-redesign arc, `plans/prelude/`)** — fixed from both sides: the prelude SHRANK to `Ok`/`Err`/`some`/`none`/`panic`/`assert` (`len`/`map`/`filter`/`sum` are collection methods; `signal`/`sleep`/`next_id`/… are `use std.reactive`/`std.task`/`std.id` imports), so `sum = 5` is an ordinary legal binding (pinned by `bindings/shadow_former_prelude.noe` under the differential); the 6 remaining names are statically RESERVED (**E0046 ReservedName**, every declaration form), so neither backend reaches the divergent runtime paths. |
 
 ## Notes

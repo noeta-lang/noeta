@@ -1425,12 +1425,10 @@ impl<'m> FnCompiler<'m> {
         // Inside a method, `self` and the class's fields resolve against the receiver. Locals
         // (parameters) are checked first, so a parameter shadows a same-named field — matching
         // the tree-walker, which binds fields, then `self`, then parameters (last wins).
-        if let Some(_ctx) = &self.method {
-            if name == "self" {
-                return Resolved::SelfRecv;
-            }
-            // A bare name inside a method NEVER resolves to a field (prelude-redesign EX.1 —
-            // member access is explicit): `self.field` reads it; a bare name is a local/global.
+        // (A bare name inside a method NEVER resolves to a field — prelude-redesign EX.1,
+        // member access is explicit: `self.field` reads it; a bare name is a local/global.)
+        if self.method.is_some() && name == "self" {
+            return Resolved::SelfRecv;
         }
         // A name captured from an enclosing function resolves to an upvalue cell. Checked before
         // globals/prelude: the tree-walker captures the nearest lexical binding, so a same-named
@@ -3149,10 +3147,6 @@ impl<'m> FnCompiler<'m> {
                 "Err" => self.make_result_option("Result", "Err", args, dst),
                 "some" => self.make_result_option("Option", "some", args, dst),
                 "panic" => self.make_panic(args, span),
-                "next_id" if args.is_empty() => {
-                    self.code.push(Op::NextId { dst });
-                    Ok(())
-                }
                 _ => unsupported("prelude function not in the VM subset"),
             };
         }

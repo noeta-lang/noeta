@@ -125,11 +125,11 @@ impl<'m> Vm<'m> {
         // aborts (E0021) at the `.await`, matching the synchronous `fs.*`; pending → `Poll::Pending`
         // (the sandbox always resolves on the first poll).
         if let Some(id) = future.async_io_id() {
-            return match self.executor.poll_io(id) {
-                Some(Ok(noeta_stdlib::IoOutcome::Text(contents))) => {
-                    Ok(Poll::Ready(Value::string(&contents)))
-                }
-                Some(Ok(noeta_stdlib::IoOutcome::Unit)) => Ok(Poll::Ready(Value::unit())),
+            return match self.executor.poll_ext(id) {
+                // Ready → materialize the descriptor's `NativeOut` exactly like a synchronous
+                // dispatch result (extern-types X5); an IO failure aborts (E0021) at the
+                // `.await`, matching the synchronous `fs.*`.
+                Some(Ok(out)) => Ok(Poll::Ready(crate::values::materialize_native(out))),
                 Some(Err(error)) => {
                     Err(self.error(stdlib_error_code(error.kind), span, error.message))
                 }

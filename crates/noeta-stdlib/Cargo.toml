@@ -9,6 +9,9 @@ rust-version.workspace = true
 [dependencies]
 serde_json = { workspace = true }
 bytemuck = { workspace = true }
+uuid = { workspace = true }
+compact_str = { workspace = true }
+equivalent = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

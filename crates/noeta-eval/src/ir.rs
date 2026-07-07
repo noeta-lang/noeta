@@ -103,7 +103,7 @@ impl TreeWalkBackend {
         ir: &noeta_ir::Program,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
     ) -> RunResult {
-        Interpreter::new(self.seed).run_ir(ast, ir, type_of_sites)
+        Interpreter::new().run_ir(ast, ir, type_of_sites)
     }
 
     /// As [`TreeWalkBackend::run_ir`], plus the abort traceback (empty for a clean run) — the
@@ -114,7 +114,7 @@ impl TreeWalkBackend {
         ir: &noeta_ir::Program,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
     ) -> (RunResult, Vec<noeta_backend::TraceFrame>) {
-        Interpreter::new(self.seed).run_ir_traced(ast, ir, type_of_sites)
+        Interpreter::new().run_ir_traced(ast, ir, type_of_sites)
     }
 
     /// As [`TreeWalkBackend::run_ir`], but against a caller-provided [`noeta_stdlib::Host`]
@@ -129,7 +129,7 @@ impl TreeWalkBackend {
         host: Box<dyn noeta_stdlib::Host>,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
     ) -> RunResult {
-        Interpreter::with_host(self.seed, host).run_ir(ast, ir, type_of_sites)
+        Interpreter::with_host(host).run_ir(ast, ir, type_of_sites)
     }
 
     /// As [`TreeWalkBackend::run_ir_with_host`], but also swapping the async executor (Track A.4).
@@ -144,11 +144,7 @@ impl TreeWalkBackend {
         executor: Box<dyn noeta_stdlib::Executor>,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
     ) -> RunResult {
-        Interpreter::with_host_and_executor(self.seed, host, executor).run_ir(
-            ast,
-            ir,
-            type_of_sites,
-        )
+        Interpreter::with_host_and_executor(host, executor).run_ir(ast, ir, type_of_sites)
     }
 }
 
@@ -1003,15 +999,15 @@ impl Interpreter {
             } => {
                 let mut map = BTreeMap::new();
                 for (key_atom, value_atom) in entries {
-                    let key = match self.eval_ir_atom(key_atom, frame)? {
-                        Value::Str(s) => s,
-                        other => {
-                            return Err(self.runtime_error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!("map keys must be strings, found {}", other.type_name()),
-                            ));
-                        }
+                    let key_value = self.eval_ir_atom(key_atom, frame)?;
+                    // A string, or a key-capable extern value (extern-types X4).
+                    let Some(key) = crate::value_map_key(&key_value) else {
+                        let error = noeta_stdlib::map_key::map_key_error(key_value.type_name());
+                        return Err(self.runtime_error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            error.message,
+                        ));
                     };
                     let value = self.eval_ir_atom(value_atom, frame)?;
                     map.insert(key, value);
@@ -1532,6 +1528,11 @@ impl Interpreter {
             NativeOut::Str(s) => Ok(Value::Str(s)),
             NativeOut::Bytes(b) => Ok(Value::Bytes(Rc::new(b))),
             NativeOut::Unit => Ok(Value::Unit),
+            // A `TypeRecipe` names only JSON shapes; extern values and async work can never
+            // decode from one.
+            NativeOut::Extern(_) | NativeOut::Spawn(_) => {
+                unreachable!("json recipes never produce extern/spawn results")
+            }
             NativeOut::None => Ok(crate::builtin_enum("Option", "none", vec![])),
             NativeOut::Some(inner) => {
                 let value = self.materialize_recipe(*inner, span)?;
@@ -1548,7 +1549,7 @@ impl Interpreter {
                 let mut map = std::collections::BTreeMap::new();
                 for (key, value) in entries {
                     let value = self.materialize_recipe(value, span)?;
-                    map.insert(key, value);
+                    map.insert(noeta_stdlib::MapKey::from(key), value);
                 }
                 Ok(Value::map_value(Rc::new(map)))
             }
@@ -1562,9 +1563,9 @@ impl Interpreter {
                 // recovered head-only from the shape; untagged.
                 self.construct_object(&name, span, field_values, None, None, span)
             }
-            // `Object` (shape-from-argument) and `FileHandle` are never produced by a recipe decode.
-            NativeOut::Object(_) | NativeOut::FileHandle(_) => {
-                unreachable!("json.parse recipe decode never yields an Object/FileHandle result")
+            // `Object` (shape-from-argument) is never produced by a recipe decode.
+            NativeOut::Object(_) => {
+                unreachable!("json.parse recipe decode never yields an Object result")
             }
         }
     }
@@ -1633,8 +1634,8 @@ impl Interpreter {
         };
         let new_value = values.pop().expect("set takes two args");
         let key_value = values.pop().expect("set takes two args");
-        let Value::Str(key) = key_value else {
-            // Defensive: a non-string key cannot occur for a checked map `set`; rebuild via the
+        let Some(key) = crate::value_map_key(&key_value) else {
+            // Defensive: a non-key value cannot occur for a checked map `set`; rebuild via the
             // ordinary path so the error (if any) matches.
             return self.call_method(
                 Value::map_value(rc),
@@ -1670,7 +1671,7 @@ impl Interpreter {
             unreachable!("caller checked the receiver is a map")
         };
         let key_value = values.pop().expect("remove takes one arg");
-        let Value::Str(key) = key_value else {
+        let Some(key) = crate::value_map_key(&key_value) else {
             return self.call_method(Value::map_value(rc), "remove", vec![key_value], span);
         };
         match Rc::get_mut(&mut rc) {

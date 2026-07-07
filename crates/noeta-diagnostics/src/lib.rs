@@ -201,6 +201,11 @@ pub enum DiagnosticCode {
     /// a `void` function may fall through; any other declared type must be produced on every path, or
     /// the caller binds the promised type to a `unit` value. Enforced statically at the definition.
     MissingReturn,
+    /// A declaration binds a **reserved native type name** (extern-types X1) — a registered
+    /// extern type (`Uuid`) or a checker-native type (`FileHandle`, `Iterator`, `Future`,
+    /// `Sender`, `Receiver`, `Signal`, `Computed`, `Effect`). Shadowing one would make the
+    /// name's method tables ambiguous, so it is rejected statically.
+    ReservedTypeName,
 }
 
 impl DiagnosticCode {
@@ -255,6 +260,7 @@ impl DiagnosticCode {
         DiagnosticCode::ReservedName,
         DiagnosticCode::InvalidReceiver,
         DiagnosticCode::MissingReturn,
+        DiagnosticCode::ReservedTypeName,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -309,6 +315,7 @@ impl DiagnosticCode {
             DiagnosticCode::ReservedName => "E0046",
             DiagnosticCode::InvalidReceiver => "E0047",
             DiagnosticCode::MissingReturn => "E0048",
+            DiagnosticCode::ReservedTypeName => "E0049",
         }
     }
 

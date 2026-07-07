@@ -963,7 +963,6 @@ pub enum StrPart {
     Hole(Expr),
 }
 
-
 impl Stmt {
     /// Whether any statement (or nested body/expression) mentions the bare identifier `name` —
     /// the statement-level companion of [`Expr::mentions`], and exactly as conservative (a
@@ -990,9 +989,7 @@ impl Stmt {
                     || stmts(then_body)
                     || else_body.as_ref().is_some_and(|b| stmts(b))
             }
-            Stmt::For {
-                iterable, body, ..
-            } => iterable.mentions(name) || stmts(body),
+            Stmt::For { iterable, body, .. } => iterable.mentions(name) || stmts(body),
             Stmt::While { cond, body, .. } => cond.mentions(name) || stmts(body),
             Stmt::Concurrent { body, .. } => stmts(body),
             Stmt::TierBlock { items, .. } => stmts(items),

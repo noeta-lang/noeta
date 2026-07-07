@@ -62,10 +62,6 @@ pub enum CaptureFrom {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtin {
     Len,
-    /// `next_id()` — the deterministic seeded counter (`use std.id`, prelude-redesign P2c). Direct
-    /// calls compile to the dedicated `Op::NextId`; this variant exists so the imported name can be
-    /// bound as a first-class value (`Op::LoadNativeFn`) and dispatched indirectly.
-    NextId,
     Map,
     Filter,
     Sum,
@@ -101,7 +97,6 @@ impl Builtin {
     /// The surface name, for diagnostics ("`map` expects a list, ...").
     pub fn name(self) -> &'static str {
         match self {
-            Builtin::NextId => "next_id",
             Builtin::Len => "len",
             Builtin::Map => "map",
             Builtin::Filter => "filter",
@@ -120,7 +115,6 @@ impl Builtin {
     /// The builtin a prelude name refers to, if it is one this slice implements.
     pub fn from_name(name: &str) -> Option<Builtin> {
         match name {
-            "next_id" => Some(Builtin::NextId),
             "len" => Some(Builtin::Len),
             "map" => Some(Builtin::Map),
             "filter" => Some(Builtin::Filter),
@@ -154,7 +148,10 @@ pub enum Const {
     /// A selectively-imported native-module function (`use std.math.sqrt`): the `(module, func)`
     /// pair, loaded then stored into the bare-name global. Called (or passed as a value) through the
     /// same `call_native_module` path as a `<module>.<func>` member call.
-    ModuleFn { module: String, func: String },
+    ModuleFn {
+        module: String,
+        func: String,
+    },
     /// An unbound method handle (`Type.method` as a value): the `(ty, method, associated)` triple.
     /// Called by dispatching on its first argument (instance) or as an associated call (associated).
     MethodHandle {
@@ -621,11 +618,6 @@ pub enum Op {
         value: Reg,
         reuse: bool,
         span: Span,
-    },
-    /// `dst = next_id()` — the deterministic seeded counter (1, 2, 3, …), reproducing the M0
-    /// tree-walker's `IdGen` (seed 1).
-    NextId {
-        dst: Reg,
     },
     /// `panic(msg)` — record E0010 ("panic: <msg display>") at `span` and abort the program.
     Panic {
@@ -1375,7 +1367,10 @@ fn const_repr(c: &Const) -> String {
             ty,
             method,
             associated,
-        } => format!("handle {ty}.{method}{}", if *associated { " (assoc)" } else { "" }),
+        } => format!(
+            "handle {ty}.{method}{}",
+            if *associated { " (assoc)" } else { "" }
+        ),
     }
 }
 
@@ -1611,7 +1606,6 @@ fn op_repr(
                 n(field)
             )
         }
-        Op::NextId { dst } => format!("NextId      r{dst}"),
         Op::Panic { msg, .. } => format!("Panic       r{msg}"),
         Op::TryUnwrap {
             dst, src, on_error, ..

@@ -177,9 +177,14 @@ fn packed_producers_keep_the_list_flat() {
             kib(boxed_peak),
             boxed_peak as f64 / packed_peak.max(1) as f64
         );
+        // A demotion puts packed ≈ boxed (ratio ~1×); a healthy flat producer sits near 2×. The
+        // guard threshold is 1.8× rather than a clean 2×: extern-types X3 removed the inline
+        // `Payload::FileHandle` variant (80 B), shrinking EVERY boxed heap object's payload from
+        // 88 to 56 bytes — the boxed baseline improved, so packed's *relative* margin narrowed
+        // (slice measured 1.97× after) while its absolute footprint is unchanged.
         assert!(
-            packed_peak * 2 < boxed_peak,
-            "{label}: packed peak ({packed_peak} B) should be < half boxed ({boxed_peak} B) — \
+            packed_peak * 9 < boxed_peak * 5,
+            "{label}: packed peak ({packed_peak} B) should be < boxed/1.8 ({boxed_peak} B) — \
              did the producer silently demote the packed list to boxed?"
         );
     }

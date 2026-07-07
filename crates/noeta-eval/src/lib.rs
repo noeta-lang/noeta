@@ -14,7 +14,6 @@ use std::rc::{Rc, Weak};
 
 use noeta_ast::reflect::TypeRepr;
 use noeta_ast::{BinaryOp, ForPattern, Pattern, Program, Stmt, TypeRef, UnaryOp};
-use noeta_builtins::IdGen;
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
 
@@ -35,23 +34,15 @@ use value::{PackedList, PackedSchema, PackedSlot, SlotKind};
 // `noeta_eval::{Backend, RunResult}` users keep working.
 pub use noeta_backend::{Backend, RunResult};
 
-/// The default seed for the deterministic id source, so output is reproducible.
-const DEFAULT_SEED: u64 = 1;
-
 /// The M0 tree-walking interpreter, exposed as a [`Backend`].
+/// (The id-source seed field left with `IdGen` — sequential ids are host-owned now, so the
+/// deterministic counter is the sandbox host's, not this backend's.)
 #[derive(Debug, Clone)]
-pub struct TreeWalkBackend {
-    seed: u64,
-}
+pub struct TreeWalkBackend {}
 
 impl TreeWalkBackend {
     pub fn new() -> TreeWalkBackend {
-        TreeWalkBackend { seed: DEFAULT_SEED }
-    }
-
-    /// Use a specific seed for the id source (tests pin this for reproducibility).
-    pub fn with_seed(seed: u64) -> TreeWalkBackend {
-        TreeWalkBackend { seed }
+        TreeWalkBackend {}
     }
 
     // The AST-walk entry points (`run_with_host`, `run_with_sites`, `run_with_host_sites`) were
@@ -105,20 +96,6 @@ impl Backend for TreeWalkBackend {
     }
 }
 
-/// Build the [`noeta_stdlib::IoRequest`] for an `fs.*_async` call (Track A.4c/A.10), or `None` if
-/// `func` is not an async fs op. Marshals this backend's `Value`s to strings; the func→request
-/// mapping is shared in [`noeta_stdlib::IoRequest::from_fs_async`].
-fn eval_fs_async_request(func: &str, args: &[Value]) -> Option<noeta_stdlib::IoRequest> {
-    let strings: Vec<Option<String>> = args
-        .iter()
-        .map(|v| match v {
-            Value::Str(s) => Some(s.clone()),
-            _ => None,
-        })
-        .collect();
-    noeta_stdlib::IoRequest::from_fs_async(func, &strings)
-}
-
 /// The drop pass's relevance form, copied from the checker's (identical sets) — the noeta-eval
 /// counterpart to `noeta-conformance`'s `to_relevance` and the compiler's `passes_relevance`, so the
 /// `Backend::run` entry point annotates drops identically to the production reference and the VM.
@@ -151,7 +128,7 @@ impl std::fmt::Debug for Session {
 
 impl Session {
     pub fn new() -> Session {
-        let interp = Interpreter::new(DEFAULT_SEED);
+        let interp = Interpreter::new();
         let prelude = interp.scope.names().into_iter().collect();
         Session { interp, prelude }
     }
@@ -226,7 +203,7 @@ impl Session {
 
     /// Reset to a fresh session: a new global scope, id counter, and reflection — `:reset`.
     pub fn reset(&mut self) {
-        self.interp = Interpreter::new(DEFAULT_SEED);
+        self.interp = Interpreter::new();
         self.prelude = self.interp.scope.names().into_iter().collect();
     }
 
@@ -344,8 +321,6 @@ pub struct SessionOutput {
 /// A built-in (native) function from the prelude.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtin {
-    /// `next_id()` — a deterministic, seeded counter.
-    NextId,
     /// `len(x)` — element/character count of a list, map, or string.
     Len,
     /// `map(list, fn)` — a new list with `fn` applied to each element.
@@ -392,7 +367,6 @@ pub enum Builtin {
 impl Builtin {
     pub fn name(self) -> &'static str {
         match self {
-            Builtin::NextId => "next_id",
             Builtin::Len => "len",
             Builtin::Map => "map",
             Builtin::Filter => "filter",
@@ -424,7 +398,6 @@ impl Builtin {
             "all" => Some(Builtin::All),
             "race" => Some(Builtin::Race),
             "map_bounded" => Some(Builtin::MapBounded),
-            "next_id" => Some(Builtin::NextId),
             _ => None,
         }
     }
@@ -432,7 +405,6 @@ impl Builtin {
     /// The prelude functions registered in every program's global scope. `none` is a
     /// prelude *value* (not a function), so it is bound separately in [`Interpreter::new`].
     const PRELUDE: &'static [Builtin] = &[
-        // `NextId` left the prelude (P2c) for `use std.id` — like the P2a/P2b names below.
         // `Len`/`Map`/`Filter`/`Sum` left the prelude (prelude-redesign P1.2): the collection
         // METHOD forms route to the same impls; `list.len`-style handles cover value use.
         Builtin::MakeOk,
@@ -1106,7 +1078,6 @@ struct Channel {
 struct Interpreter {
     stdout: String,
     diagnostics: Vec<Diagnostic>,
-    ids: IdGen,
     scope: Rc<Scope>,
     /// The root (global) scope, held so a field-default thunk can be run in the type's **definition
     /// scope** (object-model slice 5) — types are top-level, so their defaults resolve globals only,
@@ -1166,25 +1137,20 @@ struct Interpreter {
 }
 
 impl Interpreter {
-    fn new(seed: u64) -> Interpreter {
-        Interpreter::with_host(seed, Box::new(noeta_stdlib::SandboxHost::new()))
+    fn new() -> Interpreter {
+        Interpreter::with_host(Box::new(noeta_stdlib::SandboxHost::new()))
     }
 
     /// Build an interpreter against a caller-provided [`noeta_stdlib::Host`] (M2.3), keeping the
     /// default deterministic executor. `new` uses the deterministic sandbox (what the differential
     /// needs); the CLI/REPL pass a real host here.
-    fn with_host(seed: u64, host: Box<dyn noeta_stdlib::Host>) -> Interpreter {
-        Interpreter::with_host_and_executor(
-            seed,
-            host,
-            Box::new(noeta_stdlib::SandboxExecutor::new()),
-        )
+    fn with_host(host: Box<dyn noeta_stdlib::Host>) -> Interpreter {
+        Interpreter::with_host_and_executor(host, Box::new(noeta_stdlib::SandboxExecutor::new()))
     }
 
     /// Build an interpreter against caller-provided host *and* executor (Track A.4). The CLI pairs a
     /// real host with a real wall-clock executor; the differential always uses the sandbox pair.
     fn with_host_and_executor(
-        seed: u64,
         host: Box<dyn noeta_stdlib::Host>,
         executor: Box<dyn noeta_stdlib::Executor>,
     ) -> Interpreter {
@@ -1220,7 +1186,6 @@ impl Interpreter {
         Interpreter {
             stdout: String::new(),
             diagnostics: Vec::new(),
-            ids: IdGen::new(seed),
             globals: Rc::clone(&global),
             scope: global,
             host,
@@ -1483,7 +1448,7 @@ impl Interpreter {
 
     /// Destroy a map's values in sorted-key order (its keys are strings — no destructors). Only at
     /// the last reference.
-    fn destroy_map(&mut self, entries: Rc<BTreeMap<String, Value>>) {
+    fn destroy_map(&mut self, entries: Rc<BTreeMap<noeta_stdlib::MapKey, Value>>) {
         if let Ok(entries) = Rc::try_unwrap(entries) {
             for (_, value) in entries {
                 self.destroy_value(value);
@@ -2219,13 +2184,11 @@ impl Interpreter {
         {
             return self.call_set_method(method, items, name, &args, span);
         }
-        // File-handle methods (read_line/read/write/close) — the shared `FileHandleMethod` enum
-        // keeps the two backends in lockstep, like the collection methods above.
-        if let Value::FileHandle(handle) = &receiver
-            && let Some(method) = noeta_stdlib::FileHandleMethod::from_name(name)
-        {
-            let handle = Rc::clone(handle);
-            return self.call_file_handle_method(method, &handle, name, &args, span);
+        // Extern-type methods (extern-types X1): every registry-contributed type routes through
+        // its registered `ExtType`'s one shared dispatch. Mirrors the VM's `call_extern_method`.
+        if let Value::Extern(cell) = &receiver {
+            let cell = Rc::clone(cell);
+            return self.call_extern_method(&cell, name, &args, span);
         }
         // Channel endpoint methods (isolates I.1): `tx.send(v)`/`tx.close()` on a sender, `rx.recv()`
         // on a receiver. `send`/`recv` return leaf futures (enqueue/dequeue when polled); `close` is
@@ -2393,13 +2356,11 @@ impl Interpreter {
             // always `UnknownName` regardless of arity. (Without this guard, `xs.map(f)` — `map` is a
             // free function, not a method — reported `TypeMismatch` here while the VM reported
             // `UnknownName`; the guard makes both backends agree.)
-            None if !arity_ok && (name == "len" || name == "enumerate") => {
-                Err(self.runtime_error(
-                    DiagnosticCode::TypeMismatch,
-                    span,
-                    format!("method `{name}` takes no arguments"),
-                ))
-            }
+            None if !arity_ok && (name == "len" || name == "enumerate") => Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("method `{name}` takes no arguments"),
+            )),
             None => Err(self.runtime_error(
                 DiagnosticCode::UnknownName,
                 span,
@@ -2704,15 +2665,6 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
-        // `fs.*_async` (Track A.4c/A.10) are not synchronous dispatch: each produces a leaf async-IO
-        // *future* (ticketed in the executor) that `.await` later resolves. Intercepted here, ahead of
-        // the normal registry dispatch (which is synchronous, value-only).
-        if module == "fs"
-            && let Some(req) = eval_fs_async_request(func, args)
-        {
-            let id = self.executor.spawn_io(&mut *self.host, req);
-            return Ok(Value::AsyncIo(id));
-        }
         // A virtual module's functions (`reactive.signal(...)`, prelude-redesign P2) are builtins —
         // they need the executor/reactive graph the registry seam cannot reach — so a qualified call
         // intercepts here, ahead of registry dispatch, exactly like `fs.*_async`. Mirrors the VM.
@@ -2745,6 +2697,12 @@ impl Interpreter {
                 args.iter().map(marshal_native_arg).collect()
             };
             return match noeta_stdlib::registry::dispatch(name, func, &mut *self.host, &nargs) {
+                // Async WORK (extern-types X5): ticket the descriptor on the executor and hand
+                // back the leaf async-IO future — mirrors the VM.
+                Ok(noeta_stdlib::NativeOut::Spawn(spawn)) => {
+                    let id = self.executor.spawn_ext(&mut *self.host, spawn.0);
+                    Ok(Value::AsyncIo(id))
+                }
                 Ok(out) => Ok(materialize_ext(out, sig.ret, args)),
                 Err(error) => {
                     Err(self.runtime_error(std_error_code(error.kind), span, error.message))
@@ -2958,73 +2916,29 @@ impl Interpreter {
         }
     }
 
-    /// Dispatch a file-handle method (`read_line`/`read`/`write`/`close`). Mirrors the VM's
-    /// `call_file_handle_method`: the cursor logic lives in the shared `FileHandle`, so the two
-    /// backends differ only in value glue (building `some`/`none`, routing the close flush through
-    /// `self.host`).
-    fn call_file_handle_method(
+    /// Dispatch a method on an extern-type receiver (extern-types X1) through its registered
+    /// [`noeta_stdlib::ExtType`]'s shared dispatch — project the arguments, run the one shared
+    /// body (host threaded in, receiver borrowed mutably), materialize the result. Mirrors the
+    /// VM's `call_extern_method`, so the two backends agree by construction.
+    fn call_extern_method(
         &mut self,
-        method: noeta_stdlib::FileHandleMethod,
-        handle: &Rc<RefCell<noeta_stdlib::FileHandle>>,
+        cell: &Rc<RefCell<noeta_stdlib::ExternBox>>,
         name: &str,
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
-        use noeta_stdlib::FileHandleMethod as M;
-        match method {
-            M::ReadLine => {
-                self.expect_std_arity(name, args, 0, span)?;
-                // `handle` is an independent `Rc`, so borrowing it and `self.host` at once is fine;
-                // a lazy handle refills through the host mid-read.
-                match handle.borrow_mut().read_line(&mut *self.host) {
-                    Ok(Some(line)) => Ok(builtin_enum("Option", "some", vec![Value::Str(line)])),
-                    Ok(None) => Ok(builtin_enum("Option", "none", Vec::new())),
-                    Err(error) => {
-                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            M::Read => {
-                self.expect_std_arity(name, args, 1, span)?;
-                let count = self.expect_std_int(name, &args[0], span)?;
-                match handle.borrow_mut().read(count, &mut *self.host) {
-                    Ok(Some(chunk)) => Ok(builtin_enum("Option", "some", vec![Value::Str(chunk)])),
-                    Ok(None) => Ok(builtin_enum("Option", "none", Vec::new())),
-                    Err(error) => {
-                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            M::Write => {
-                self.expect_std_arity(name, args, 1, span)?;
-                let chunk = self.expect_std_string(name, &args[0], span)?.to_string();
-                match handle.borrow_mut().write(&chunk) {
-                    Ok(()) => Ok(Value::Unit),
-                    Err(error) => {
-                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            M::Close => {
-                self.expect_std_arity(name, args, 0, span)?;
-                // Take the flush instruction first (the borrow ends), then hit the host.
-                let flush = handle.borrow_mut().close();
-                let result = match flush {
-                    None => Ok(()),
-                    Some(noeta_stdlib::Flush::Write { path, content }) => {
-                        self.host.fs_write(&path, &content)
-                    }
-                    Some(noeta_stdlib::Flush::Append { path, content }) => {
-                        self.host.fs_append(&path, &content)
-                    }
-                };
-                match result {
-                    Ok(()) => Ok(Value::Unit),
-                    Err(error) => {
-                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
+        let nargs: Vec<noeta_stdlib::NativeValue> = args.iter().map(marshal_native_arg).collect();
+        // `cell` is an independent `Rc`, so borrowing it and `self.host` at once is fine (the
+        // FileHandle discipline).
+        let result = noeta_stdlib::registry::dispatch_method(
+            &mut **cell.borrow_mut(),
+            name,
+            &mut *self.host,
+            &nargs,
+        );
+        match result {
+            Ok(out) => Ok(materialize_native(out)),
+            Err(error) => Err(self.runtime_error(std_error_code(error.kind), span, error.message)),
         }
     }
 
@@ -3153,7 +3067,7 @@ impl Interpreter {
     fn call_map_method(
         &mut self,
         method: noeta_stdlib::MapMethod,
-        entries: &BTreeMap<String, Value>,
+        entries: &BTreeMap<noeta_stdlib::MapKey, Value>,
         name: &str,
         args: &[Value],
         span: Span,
@@ -3161,7 +3075,16 @@ impl Interpreter {
         match method {
             noeta_stdlib::MapMethod::Keys => {
                 self.expect_std_arity(name, args, 0, span)?;
-                let keys = entries.keys().map(|k| Value::Str(k.clone())).collect();
+                // A string key becomes a fresh string value; an extern key a fresh extern value.
+                let keys = entries
+                    .keys()
+                    .map(|k| match k {
+                        noeta_stdlib::MapKey::Str(s) => Value::Str(s.as_str().to_owned()),
+                        noeta_stdlib::MapKey::Extern(e) => {
+                            Value::Extern(Rc::new(RefCell::new(e.clone())))
+                        }
+                    })
+                    .collect();
                 Ok(Value::list(keys))
             }
             noeta_stdlib::MapMethod::Values => {
@@ -3170,27 +3093,47 @@ impl Interpreter {
             }
             noeta_stdlib::MapMethod::Has => {
                 self.expect_std_arity(name, args, 1, span)?;
-                let key = self.expect_std_string(name, &args[0], span)?;
-                Ok(Value::Bool(entries.contains_key(key)))
+                let key = self.expect_map_key(name, &args[0], span)?;
+                Ok(Value::Bool(entries.contains_key(&key)))
             }
             noeta_stdlib::MapMethod::Set => {
                 self.expect_std_arity(name, args, 2, span)?;
-                let key = self.expect_std_string(name, &args[0], span)?.to_string();
+                let key = self.expect_map_key(name, &args[0], span)?;
                 let mut new = entries.clone();
                 new.insert(key, args[1].clone());
                 Ok(Value::map_value(Rc::new(new)))
             }
             noeta_stdlib::MapMethod::Remove => {
                 self.expect_std_arity(name, args, 1, span)?;
-                let key = self.expect_std_string(name, &args[0], span)?;
+                let key = self.expect_map_key(name, &args[0], span)?;
                 let mut new = entries.clone();
-                new.remove(key);
+                new.remove(&key);
                 Ok(Value::map_value(Rc::new(new)))
             }
             noeta_stdlib::MapMethod::GetOr => {
                 self.expect_std_arity(name, args, 2, span)?;
-                let key = self.expect_std_string(name, &args[0], span)?;
-                Ok(entries.get(key).cloned().unwrap_or_else(|| args[1].clone()))
+                let key = self.expect_map_key(name, &args[0], span)?;
+                Ok(entries
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| args[1].clone()))
+            }
+        }
+    }
+
+    /// Read a map-key argument (string or key-capable extern), raising the shared map-key error
+    /// otherwise. Mirrors the VM's `map_update_key`/`map_probe` gate.
+    fn expect_map_key(
+        &mut self,
+        _name: &str,
+        value: &Value,
+        span: Span,
+    ) -> Eval<noeta_stdlib::MapKey> {
+        match value_map_key(value) {
+            Some(key) => Ok(key),
+            None => {
+                let error = noeta_stdlib::map_key::map_key_error(value.type_name());
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
             }
         }
     }
@@ -3308,21 +3251,22 @@ impl Interpreter {
                 }
                 Ok(items.get(i as usize).expect("bounds checked above"))
             }
-            // `m[k]` on a map looks the value up by its string key; a missing key is `E0018`.
+            // `m[k]` on a map looks the value up by its key — a string, or a key-capable
+            // extern value (extern-types X4); a missing key is `E0018`.
             Value::Map(entries, _) => {
-                let Value::Str(key) = &index else {
+                let Some(key) = value_map_key(&index) else {
                     return Err(self.runtime_error(
                         DiagnosticCode::TypeMismatch,
                         span,
                         format!("map index must be a string, found {}", index.type_name()),
                     ));
                 };
-                match entries.get(key) {
+                match entries.get(&key) {
                     Some(value) => Ok(value.clone()),
                     None => Err(self.runtime_error(
                         DiagnosticCode::KeyNotFound,
                         span,
-                        format!("map has no key {key:?}"),
+                        format!("map has no key {}", key.render()),
                     )),
                 }
             }
@@ -3359,9 +3303,7 @@ impl Interpreter {
             Value::Builtin(builtin) => self.call_builtin(builtin, args, span),
             // A selectively-imported module function (`use std.math.sqrt`) called by its bare name —
             // dispatched exactly like the `math.sqrt(...)` member call.
-            Value::ModuleFn(module, func) => {
-                self.call_native_module(&module, &func, &args, span)
-            }
+            Value::ModuleFn(module, func) => self.call_native_module(&module, &func, &args, span),
             // An unbound method handle (`Type.method` as a value). An associated handle dispatches
             // on the named type (`ty.method(args)`); an instance handle takes its first argument as
             // the receiver (`recv.method(rest)`). Both route through the ordinary (total) method call.
@@ -3610,10 +3552,6 @@ impl Interpreter {
 
     fn call_builtin(&mut self, builtin: Builtin, args: Vec<Value>, span: Span) -> Eval<Value> {
         match builtin {
-            Builtin::NextId => {
-                self.expect_arity(builtin, &args, 0, span)?;
-                Ok(Value::Int(self.ids.next_id() as i64))
-            }
             Builtin::Len => {
                 self.expect_arity(builtin, &args, 1, span)?;
                 match &args[0] {
@@ -3990,11 +3928,11 @@ impl Interpreter {
             // sandbox always resolves on the first poll).
             Value::AsyncIo(id) => {
                 let id = *id;
-                match self.executor.poll_io(id) {
-                    Some(Ok(noeta_stdlib::IoOutcome::Text(contents))) => {
-                        Ok(Some(Value::Str(contents)))
-                    }
-                    Some(Ok(noeta_stdlib::IoOutcome::Unit)) => Ok(Some(Value::Unit)),
+                match self.executor.poll_ext(id) {
+                    // Ready → materialize the descriptor's `NativeOut` exactly like a
+                    // synchronous dispatch result (extern-types X5); an IO failure aborts
+                    // (E0021) at the `.await`, matching the synchronous `fs.*`.
+                    Some(Ok(out)) => Ok(Some(materialize_native(out))),
                     Some(Err(error)) => {
                         Err(self.runtime_error(std_error_code(error.kind), span, error.message))
                     }
@@ -4696,11 +4634,13 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
             .as_ref()
             .map(|r| (**r).clone())
             .unwrap_or_else(|| TypeRepr::Class(o.def.name().to_string(), Vec::new())),
-        // A type value, module, file handle, iterator, or enum-type has no nameable lattice type → top.
+        // An extern-type value reflects as its registered nominal type (`Uuid`), mirroring the
+        // checker's `Type::Named` for it.
+        Value::Extern(e) => TypeRepr::Named(e.borrow().type_name().to_string(), Vec::new()),
+        // A type value, module, iterator, or enum-type has no nameable lattice type → top.
         Value::EnumType(_)
         | Value::Type(_)
         | Value::NativeModule(_)
-        | Value::FileHandle(_)
         | Value::Iter(_)
         | Value::Future(_)
         | Value::Timer(_)
@@ -4828,7 +4768,7 @@ fn attr_value_to_eval(
         A::Map(entries) => {
             let mut map = BTreeMap::new();
             for (k, v) in entries {
-                map.insert(k.clone(), recur(v));
+                map.insert(noeta_stdlib::MapKey::from(k.as_str()), recur(v));
             }
             Value::map_value(Rc::new(map))
         }
@@ -4891,10 +4831,12 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
                 "Enum" => matches!(value, Value::Enum(_)),
                 "Struct" => matches!(value, Value::Object(o) if o.def.is_struct),
                 "Class" => matches!(value, Value::Object(o) if !o.def.is_struct),
-                // `Option`/`Result` are enums whose shape name is the type name, like a user enum.
+                // `Option`/`Result` are enums whose shape name is the type name, like a user
+                // enum; an extern-type value matches its registered type name (`x is Uuid`).
                 other => match value {
                     Value::Object(object) => object.def.name() == other,
                     Value::Enum(enum_value) => enum_value.enum_name == other,
+                    Value::Extern(e) => e.borrow().type_name() == other,
                     _ => false,
                 },
             };
@@ -4915,6 +4857,19 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
     }
 }
 
+/// Extract the owned [`noeta_stdlib::MapKey`] a map operation keys by: a string, or a
+/// key-capable extern value (a boxed snapshot — extern-types X4). `None` for anything else;
+/// the caller raises the shared map-key error. Mirrors the VM's key extraction.
+pub(crate) fn value_map_key(value: &Value) -> Option<noeta_stdlib::MapKey> {
+    match value {
+        Value::Str(s) => Some(noeta_stdlib::MapKey::from(s.as_str())),
+        Value::Extern(e) if noeta_stdlib::map_key::extern_key_capable(&**e.borrow()) => {
+            Some(noeta_stdlib::MapKey::Extern(e.borrow().clone()))
+        }
+        _ => None,
+    }
+}
+
 /// Project a tree-walker `Value` onto the native-extension registry's argument view. One of the
 /// two functions (with [`materialize_native`]) that form the backend's half of the value seam;
 /// every migrated module call goes through these rather than a per-function `read_*`. The
@@ -4929,6 +4884,9 @@ fn marshal_native_arg(value: &Value) -> noeta_stdlib::NativeValue {
         Value::Bool(b) => NativeValue::Scalar(Scalar::Bool(*b)),
         Value::Str(s) => NativeValue::Str(s.clone()),
         Value::Bytes(b) => NativeValue::Bytes((**b).clone()),
+        // An extern-type argument crosses by value (`clone_box`); extern producers are host/IO
+        // shaped, never a hot path. Mirrors the VM-side projection.
+        Value::Extern(e) => NativeValue::Extern(e.borrow().clone()),
         // An object with all-scalar fields (e.g. a `Vec3`) projects to its field scalars in slot
         // order; anything with a non-scalar field is opaque (a dispatch that wanted an object will
         // report the type error). Mirrors the prior `read_vec3`.
@@ -5015,19 +4973,25 @@ fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         NativeOut::Map(entries) => Value::map_value(Rc::new(
             entries
                 .into_iter()
-                .map(|(k, v)| (k, materialize_native(v)))
+                .map(|(k, v)| (noeta_stdlib::MapKey::from(k), materialize_native(v)))
                 .collect(),
         )),
-        NativeOut::FileHandle(handle) => Value::FileHandle(Rc::new(RefCell::new(handle))),
+        // An extern-type value: host the box in the shared cell (extern-types X1).
+        NativeOut::Extern(e) => Value::Extern(Rc::new(RefCell::new(e))),
         // Object results carry no shape, so they are built by `materialize_ext` (which has the
         // function's `RetTy` + arguments) and never reach here.
         NativeOut::Object(_) => {
             unreachable!("object results are materialized by `materialize_ext`")
         }
+        // Option results from ordinary dispatch (`id.parse`, extern-type methods like
+        // `timestamp_ms` — extern-types X2).
+        NativeOut::None => builtin_enum("Option", "none", Vec::new()),
+        NativeOut::Some(inner) => builtin_enum("Option", "some", vec![materialize_native(*inner)]),
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
-        // path (`materialize_recipe`, which has the interpreter's type registry), not here.
-        NativeOut::Struct { .. } | NativeOut::None | NativeOut::Some(_) => {
-            unreachable!("recipe results are materialized by the typed-call path")
+        // path (`materialize_recipe`, which has the interpreter's type registry), not here; async
+        // work is ticketed at the dispatch return (extern-types X5), never materialized.
+        NativeOut::Struct { .. } | NativeOut::Spawn(_) => {
+            unreachable!("recipe/spawn results never reach materialize_native")
         }
     }
 }
@@ -5138,10 +5102,11 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
         Value::Tuple(items) | Value::Set(items, _) => {
             NativeValue::List(items.iter().map(value_to_native_deep).collect())
         }
+        // An extern key marshals as its canonical display form (JSON keys are strings).
         Value::Map(entries, _) => NativeValue::Map(
             entries
                 .iter()
-                .map(|(k, v)| (k.clone(), value_to_native_deep(v)))
+                .map(|(k, v)| (k.as_native_str(), value_to_native_deep(v)))
                 .collect(),
         ),
         Value::Object(object) => {
@@ -5165,7 +5130,9 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
         | Value::MethodHandle(..)
         | Value::BoundMethod(..) => NativeValue::Str("<fn>".to_string()),
         Value::NativeModule(module) => NativeValue::Str(format!("<module {module}>")),
-        Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
+        // An extern-type value marshals as itself; the shared serializer renders its display
+        // form as a JSON string (a `Uuid` is its canonical string).
+        Value::Extern(e) => NativeValue::Extern(e.borrow().clone()),
         // An iterator has no JSON analog — its opaque display form, like the VM.
         Value::Iter(_) => NativeValue::Str("<iterator>".to_string()),
         Value::Future(_)
@@ -5192,6 +5159,9 @@ pub(crate) fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp:
     match (left, right) {
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
         (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
+        // Extern-type values order through their contract (extern-types X1) — a total order per
+        // key-capable kind; `None` for unordered kinds. Mirrors the VM's `compare_primitive`.
+        (Value::Extern(a), Value::Extern(b)) => a.borrow().cmp_value(&**b.borrow()),
         _ => {
             let num = |v: &Value| match v {
                 Value::Int(i) => Some(*i as f64),
@@ -5529,7 +5499,10 @@ mod tests {
         assert_eq!(out.value.as_deref(), Some("15"));
         // `next_id()` continuity persists across entries.
         assert_eq!(
-            session.eval(&program_of("use std.id.{next_id}; next_id();")).value.as_deref(),
+            session
+                .eval(&program_of("use std.id.{next_id}; next_id();"))
+                .value
+                .as_deref(),
             Some("1")
         );
         assert_eq!(
@@ -5703,8 +5676,7 @@ mod tests {
     #[test]
     fn map_filter_sum_pipeline() {
         // Method-chain form since P1.2 — the free `map`/`filter`/`sum` left the prelude.
-        let src =
-            "echo [1, 2, 3, 4].filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).sum();";
+        let src = "echo [1, 2, 3, 4].filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).sum();";
         assert_eq!(run(src).stdout, "60\n");
     }
 
@@ -5851,7 +5823,10 @@ mod tests {
 
     #[test]
     fn next_id_is_deterministic() {
-        assert_eq!(run("use std.id.{next_id}; echo next_id(); echo next_id();").stdout, "1\n2\n");
+        assert_eq!(
+            run("use std.id.{next_id}; echo next_id(); echo next_id();").stdout,
+            "1\n2\n"
+        );
     }
 
     #[test]

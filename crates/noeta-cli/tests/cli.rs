@@ -33,6 +33,51 @@ fn lang() -> Command {
 // --- `run` ------------------------------------------------------------------------
 
 #[test]
+fn run_real_host_uuids_are_real() {
+    // Under `noeta run` (the real host, id-entropy U3) `id.uuid()` draws OS entropy and
+    // `id.uuid_v7()` real wall time — unlike the sandbox's pinned values (`std/id_uuid.noe`),
+    // here we assert the *shape*: canonical form, correct version/variant, distinct v4s, and
+    // non-decreasing v7 timestamps.
+    let file = temp_program(
+        "run_uuid",
+        "use std.{id}\necho id.uuid()\necho id.uuid()\necho id.uuid_v7()\necho id.uuid_v7()\n",
+    );
+    let out = lang().arg("run").arg(&file).assert().success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 4, "four ids, one per line:\n{stdout}");
+    for (i, id) in lines.iter().enumerate() {
+        let groups: Vec<&str> = id.split('-').collect();
+        assert_eq!(
+            groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
+            [8, 4, 4, 4, 12],
+            "canonical 8-4-4-4-12 form: {id}"
+        );
+        assert!(
+            id.chars()
+                .all(|c| c == '-' || c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "lowercase hex only: {id}"
+        );
+        let version = if i < 2 { "4" } else { "7" };
+        assert_eq!(&groups[2][..1], version, "version nibble of {id}");
+        assert!(
+            matches!(&groups[3][..1], "8" | "9" | "a" | "b"),
+            "variant bits of {id}"
+        );
+    }
+    // Real entropy: consecutive v4s differ (a collision is a 2^-122 event, i.e. a wiring bug).
+    assert_ne!(lines[0], lines[1]);
+    // Real wall time: the v7 48-bit timestamp is past 2026-01-01 and non-decreasing.
+    let ms = |id: &str| u64::from_str_radix(&id.replace('-', "")[..12], 16).unwrap();
+    assert!(
+        ms(lines[2]) > 1_767_225_600_000,
+        "v7 dates after 2026: {}",
+        lines[2]
+    );
+    assert!(ms(lines[3]) >= ms(lines[2]), "v7 time is non-decreasing");
+}
+
+#[test]
 fn run_executes_a_program_to_stdout() {
     let file = temp_program("run_ok", "echo \"hello\"; echo 1 + 2;");
     lang()
@@ -313,6 +358,36 @@ fn run_reads_files_asynchronously_on_the_real_executor() {
         .stdout("a=alpha\nb=beta\ndone\n");
     let _ = std::fs::remove_file(dir.join("a.txt"));
     let _ = std::fs::remove_file(dir.join("b.txt"));
+}
+
+#[test]
+fn run_async_metadata_twins_on_the_real_executor() {
+    // Extern-types X6: `fs.exists_async`/`remove_async`/`list_async` have NO real body — the
+    // real executor's None fallback runs their sync body against the RealHost at spawn. This
+    // exercises that degradation path end-to-end on real disk.
+    let dir = std::env::temp_dir().join("noeta_cli_async_meta_dir");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create work dir");
+    std::fs::write(dir.join("keep.txt"), "k").expect("write keep");
+    std::fs::write(dir.join("gone.txt"), "g").expect("write gone");
+    let src = "use std.{fs}\n\
+               async fn run(): void {\n\
+               \x20   echo \"exists=\" ~ fs.exists_async(\"keep.txt\").await\n\
+               \x20   echo \"removed=\" ~ fs.remove_async(\"gone.txt\").await\n\
+               \x20   echo \"exists-after=\" ~ fs.exists_async(\"gone.txt\").await\n\
+               }\n\
+               run().await\n";
+    let file = temp_program("run_async_meta", src);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .current_dir(&dir)
+        .assert()
+        .success()
+        .stdout("exists=true\nremoved=true\nexists-after=false\n");
+    // The removal really happened on disk.
+    assert!(!dir.join("gone.txt").exists());
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

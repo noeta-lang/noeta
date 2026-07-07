@@ -1,9 +1,11 @@
 //! The REPL session on the VM (REPL-on-VM R1).
 //!
 //! A [`VmSession`] runs many REPL entries against **one persistent runtime** so bindings, `fn` /
-//! `type` / `enum` / `class` declarations, channels, the reactive graph, and the `next_id()` counter
-//! survive between entries — the same continuity the tree-walker `noeta_eval::Session` gave the REPL,
-//! now on the production VM so the oracle backend can be cut from the shipped binary.
+//! `type` / `enum` / `class` declarations, channels, the reactive graph, and the host's id / entropy /
+//! clock state survive between entries — the same continuity the tree-walker `noeta_eval::Session`
+//! gave the REPL, now on the production VM so the oracle backend can be cut from the shipped binary.
+//! (The `next_id()` counter now lives on the `Host`, which the session persists, so it carries across
+//! entries for free.)
 //!
 //! The design keeps the hot path untouched (see `plans/repl-on-vm`): the `Vm` struct and its dispatch
 //! loop are unchanged. Each entry builds an **ephemeral** [`Vm`] over the session's persistent
@@ -38,7 +40,6 @@ pub type HostFactory = Box<dyn Fn() -> (Box<dyn Host>, Box<dyn Executor>)>;
 pub(crate) struct SessionState {
     globals: Vec<Value>,
     global_order: Vec<u32>,
-    next_id: u64,
     channels: Vec<Channel>,
     channel_progress: u64,
     reactive: Rc<ReactiveGraph<GcVal>>,
@@ -59,7 +60,6 @@ impl SessionState {
         SessionState {
             globals: Vec::new(),
             global_order: Vec::new(),
-            next_id: 1,
             channels: Vec::new(),
             channel_progress: 0,
             reactive: Rc::new(ReactiveGraph::new()),
@@ -122,7 +122,6 @@ impl<'m> Vm<'m> {
         let mut vm = Vm::load(module, state.host, state.executor);
         vm.globals = state.globals;
         vm.global_order = state.global_order;
-        vm.next_id = state.next_id;
         vm.channels = state.channels;
         vm.channel_progress = state.channel_progress;
         vm.reactive = state.reactive;
@@ -146,7 +145,6 @@ impl<'m> Vm<'m> {
         SessionState {
             globals: self.globals,
             global_order: self.global_order,
-            next_id: self.next_id,
             channels: self.channels,
             channel_progress: self.channel_progress,
             reactive: self.reactive,

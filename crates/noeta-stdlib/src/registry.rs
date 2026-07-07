@@ -65,6 +65,10 @@ pub enum NativeValue {
     Map(Vec<(String, NativeValue)>),
     /// Any value a dispatch function never inspects — carries the type name for error messages.
     Opaque(&'static str),
+    /// A registered extern-type value (extern-types X1), cloned into the seam via
+    /// [`crate::ExternValue::clone_box`]. Extern arguments are never a hot path (their producers
+    /// are host/IO-shaped), so by-value marshalling matches the rest of this view.
+    Extern(crate::ExternBox),
 }
 
 /// A backend-agnostic **result** the backend materializes into its own `Value`.
@@ -80,9 +84,6 @@ pub enum NativeOut {
     /// A homogeneous list (e.g. `env.keys()` → list of strings). The backend builds its native
     /// list; nested `NativeOut` keeps it general for later recursive modules.
     List(Vec<NativeOut>),
-    /// A file handle (`fs.open`). The shared dispatch builds the backend-agnostic
-    /// [`crate::FileHandle`]; each backend wraps it in its own mutable-handle value.
-    FileHandle(crate::FileHandle),
     /// A value-struct instance built by a call-site type recipe (`json.parse::<T>`): the type name
     /// and its `(field, value)` pairs **in the type's declared order**. Unlike [`NativeOut::Object`]
     /// — whose shape is supplied from an argument via [`RetTy::SameAsArg`] — a `Struct` names its own
@@ -99,6 +100,32 @@ pub enum NativeOut {
     None,
     /// `Option::Some(x)` — a present optional value.
     Some(Box<NativeOut>),
+    /// A registered extern-type value (extern-types X1) — `Uuid`, a `FileHandle`, … Each
+    /// backend wraps it in its single extern hosting variant.
+    Extern(crate::ExternBox),
+    /// Async WORK instead of a value (extern-types X5): the backend tickets the descriptor on
+    /// its executor (`spawn_ext`) and hands back a future — intercepted at the dispatch return,
+    /// never reaching `materialize`. This is how an extension implements an async function
+    /// without ever seeing the executor.
+    Spawn(SpawnBox),
+}
+
+/// A one-shot [`crate::ExternIo`] carrier inside [`NativeOut`] (which derives `Clone` +
+/// `PartialEq` for its value variants — meaningless for work): cloning panics (a descriptor is
+/// ticketed exactly once, on the dispatch return path), equality is always `false`.
+#[derive(Debug)]
+pub struct SpawnBox(pub Box<dyn crate::ExternIo>);
+
+impl Clone for SpawnBox {
+    fn clone(&self) -> SpawnBox {
+        unreachable!("a Spawn result is one-shot — ticketed at the dispatch return, never cloned")
+    }
+}
+
+impl PartialEq for SpawnBox {
+    fn eq(&self, _other: &SpawnBox) -> bool {
+        false
+    }
 }
 
 /// noeta-stdlib's small signature vocabulary. noeta-stdlib cannot depend on `noeta_types::Type` (that
@@ -199,11 +226,45 @@ pub struct ExtModule {
     pub deep_marshal: bool,
 }
 
-/// A bundle of native modules (and, later, types) registered into the language. Core implements
-/// this once as [`StdExtension`]; a third-party crate implements it to contribute its own modules.
+/// A type's method dispatch (extern-types X1): given the receiver, the method name, the host
+/// seam, and the projected arguments, run the method and return a neutral result. ONE signature
+/// covers the whole {pure, mutable} × {host-free, effectful} matrix — a pure method simply does
+/// not mutate `recv` or touch `host` (`Uuid.version()`), an effectful one does both
+/// (`FileHandle.read_line(host)`).
+pub type TypeDispatch = fn(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError>;
+
+/// A first-class value type contributed by an extension (extern-types X1): a reserved type name,
+/// its instance-method signatures, their shared dispatch, and the key capability the checker
+/// reads. The value behavior itself (equality, ordering, hash, display) lives on the
+/// [`crate::ExternValue`] impl the type's constructors box up.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtType {
+    /// The surface type name (`Uuid`). Reserved: a user declaration of this name is E0049.
+    pub name: &'static str,
+    /// Instance-method signatures — same vocabulary as module functions.
+    pub methods: &'static [ExtFn],
+    pub dispatch: TypeDispatch,
+    /// Whether values may key a `Map` / member a `Set`. Declaring `true` promises: no mutating
+    /// methods, [`crate::ExternValue::cmp_value`] is a total order over the kind, and
+    /// [`crate::ExternValue::hash_value`] is stable and content-derived.
+    pub key_capable: bool,
+}
+
+/// A bundle of native modules and types registered into the language. Core implements this once
+/// as [`StdExtension`]; a third-party crate implements it to contribute its own modules/types.
 pub trait Extension: Sync {
     fn name(&self) -> &'static str;
     fn modules(&self) -> &'static [ExtModule];
+    /// The extension's first-class value types. Default empty — a modules-only extension does
+    /// not change.
+    fn types(&self) -> &'static [ExtType] {
+        &[]
+    }
 }
 
 /// Core's "std" extension — the dogfood. Registers the Ring 2 modules through the same API a
@@ -218,6 +279,103 @@ impl Extension for StdExtension {
     }
     fn modules(&self) -> &'static [ExtModule] {
         STD_MODULES
+    }
+    fn types(&self) -> &'static [ExtType] {
+        STD_TYPES
+    }
+}
+
+/// Core's extern types: `Uuid` (X2 — pure, byte-ordered, key-capable) and `FileHandle` (X3 —
+/// mutable + effectful, the other corner of the matrix; NOT key-capable).
+const STD_TYPES: &[ExtType] = &[
+    ExtType {
+        name: crate::id::TYPE_NAME,
+        methods: UUID_METHODS,
+        dispatch: uuid_method_dispatch,
+        key_capable: true,
+    },
+    ExtType {
+        name: "FileHandle",
+        methods: FILE_HANDLE_METHODS,
+        dispatch: file_handle_dispatch,
+        key_capable: false,
+    },
+];
+
+/// The `FileHandle` instance methods (extern-types X3) — the signatures the checker's
+/// `file_handle_method`/`file_handle_params` tables used to hardcode.
+const FILE_HANDLE_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "read_line",
+        params: &[],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        name: "read",
+        params: &[Int],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        name: "write",
+        params: &[Str],
+        ret: Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "close",
+        params: &[],
+        ret: Concrete(SigType::Unit),
+    },
+];
+
+/// Method dispatch for `FileHandle` (extern-types X3): the cursor logic lives on the shared
+/// [`crate::FileHandle`] as before — this replaces the two per-backend `call_file_handle_method`
+/// twins with ONE body. The receiver mutates in place (reference semantics through the shared
+/// cell) and `close` flushes through the host — the whole effectful corner of the matrix.
+fn file_handle_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(handle) = recv.as_any_mut().downcast_mut::<crate::FileHandle>() else {
+        return Err(type_error(method, "FileHandle"));
+    };
+    let some_str = |s: Option<String>| match s {
+        Some(text) => NativeOut::Some(Box::new(NativeOut::Str(text))),
+        None => NativeOut::None,
+    };
+    match method {
+        "read_line" => {
+            want_arity(method, args, 0)?;
+            Ok(some_str(handle.read_line(host)?))
+        }
+        "read" => {
+            want_arity(method, args, 1)?;
+            let NativeValue::Scalar(Scalar::Int(count)) = args[0] else {
+                return Err(type_error(method, "int"));
+            };
+            Ok(some_str(handle.read(count, host)?))
+        }
+        "write" => {
+            want_arity(method, args, 1)?;
+            let NativeValue::Str(chunk) = &args[0] else {
+                return Err(type_error(method, "string"));
+            };
+            handle.write(chunk)?;
+            Ok(NativeOut::Unit)
+        }
+        "close" => {
+            want_arity(method, args, 0)?;
+            // Take the flush instruction first (ends the handle borrow's logical role), then
+            // hit the host — the same order both backend twins used.
+            match handle.close() {
+                None => {}
+                Some(crate::Flush::Write { path, content }) => host.fs_write(&path, &content)?,
+                Some(crate::Flush::Append { path, content }) => host.fs_append(&path, &content)?,
+            }
+            Ok(NativeOut::Unit)
+        }
+        _ => Err(crate::no_method_error("FileHandle", method)),
     }
 }
 
@@ -246,6 +404,40 @@ pub fn find_function(module: &str, func: &str) -> Option<&'static ExtFn> {
         .find(|f| f.name == func)
 }
 
+/// Find a registered extern type by name (extern-types X1).
+pub fn find_type(name: &str) -> Option<&'static ExtType> {
+    extensions()
+        .iter()
+        .flat_map(|e| e.types())
+        .find(|t| t.name == name)
+}
+
+/// Find a registered extern type's method signature.
+pub fn find_type_method(type_name: &str, method: &str) -> Option<&'static ExtFn> {
+    find_type(type_name)?
+        .methods
+        .iter()
+        .find(|m| m.name == method)
+}
+
+/// Dispatch a method on an extern receiver through its registered [`ExtType`]. Returns the
+/// canonical "no such method" error for an unknown method, mirroring [`dispatch`] for modules.
+pub fn dispatch_method(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let type_name = recv.type_name();
+    let Some(ext) = find_type(type_name) else {
+        return Err(StdError {
+            kind: crate::ErrorKind::UnknownName,
+            message: format!("`{type_name}` is not a registered type"),
+        });
+    };
+    (ext.dispatch)(recv, method, host, args)
+}
+
 /// The **virtual** std modules (prelude-redesign P2): importable module names whose functions are
 /// interpreter/VM *builtins* rather than registry natives — they need the executor or the reactive
 /// graph, which the registry seam (`ModuleDispatch` = value-in/value-out + `Host`) deliberately
@@ -255,10 +447,12 @@ pub fn find_function(module: &str, func: &str) -> Option<&'static ExtFn> {
 /// pattern `fs.*_async` uses.
 /// (`task` is named `task` rather than `async` because `async` is a keyword — `use std.async.…`
 /// would not parse; decided with the user at P2b.)
+/// (`id` was virtual at P2c; the id-entropy arc de-virtualized it — the counter moved into the
+/// Host's [`crate::host::Ids`] capability, so `next_id`/`uuid`/`uuid_v7` are ordinary registry
+/// functions and both backends share one dispatch.)
 pub const VIRTUAL_MODULES: &[(&str, &[&str])] = &[
     ("reactive", &["signal", "computed", "effect"]),
     ("task", &["sleep", "all", "race", "map_bounded"]),
-    ("id", &["next_id"]),
 ];
 
 /// Whether `name` is a virtual std module (importable, but not registry-backed).
@@ -284,8 +478,10 @@ pub fn is_module_function(module: &str, func: &str) -> bool {
         || virtual_module_function(module, func)
         || matches!(
             (module, func),
-            ("vec", "add_all" | "sub_all" | "scale_all" | "dot_all" | "length_all")
-                | ("fs", "list")
+            (
+                "vec",
+                "add_all" | "sub_all" | "scale_all" | "dot_all" | "length_all"
+            ) | ("fs", "list")
         )
 }
 
@@ -345,6 +541,7 @@ fn native_type_name(value: &NativeValue) -> &str {
         NativeValue::List(_) => "list",
         NativeValue::Map(_) => "map",
         NativeValue::Object { type_name, .. } | NativeValue::Opaque(type_name) => type_name,
+        NativeValue::Extern(e) => e.type_name(),
     }
 }
 
@@ -363,7 +560,8 @@ fn to_arg(value: &NativeValue) -> Arg<'_> {
         | NativeValue::List(_)
         | NativeValue::Map(_)
         | NativeValue::Object { .. }
-        | NativeValue::Opaque(_) => Arg::Other,
+        | NativeValue::Opaque(_)
+        | NativeValue::Extern(_) => Arg::Other,
     }
 }
 
@@ -437,6 +635,48 @@ fn time_dispatch(
             Ok(NativeOut::Unit)
         }
         _ => Err(no_function_error("time", func)),
+    }
+}
+
+// --- `id`: sequential ids + UUIDs (id-entropy U2) ------------------------------------------------
+
+fn id_dispatch(
+    func: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match func {
+        "next_id" => {
+            want_arity(func, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Int(host.id_next() as i64)))
+        }
+        "uuid" => {
+            want_arity(func, args, 0)?;
+            let u = crate::id::v4(host.entropy_u64(), host.entropy_u64());
+            Ok(NativeOut::Extern(crate::ExternBox::new(u)))
+        }
+        "uuid_v7" => {
+            want_arity(func, args, 0)?;
+            let ms = host.clock_unix_ms();
+            let ra = host.entropy_u64();
+            let rb = host.entropy_u64();
+            Ok(NativeOut::Extern(crate::ExternBox::new(crate::id::v7(
+                ms, ra, rb,
+            ))))
+        }
+        // `parse(s) -> Uuid?`: any RFC form the crate accepts; `none` on malformed input (the
+        // Option is the error channel — parse failure is an ordinary outcome, not a panic).
+        "parse" => {
+            want_arity(func, args, 1)?;
+            let NativeValue::Str(s) = &args[0] else {
+                return Err(type_error(func, "string"));
+            };
+            Ok(match uuid::Uuid::parse_str(s) {
+                Ok(u) => NativeOut::Some(Box::new(NativeOut::Extern(crate::ExternBox::new(u)))),
+                Err(_) => NativeOut::None,
+            })
+        }
+        _ => Err(no_function_error("id", func)),
     }
 }
 
@@ -576,7 +816,48 @@ fn fs_dispatch(
                 crate::FileMode::Write => crate::FileHandle::open_write(path),
                 crate::FileMode::Append => crate::FileHandle::open_append(path),
             };
-            Ok(NativeOut::FileHandle(handle))
+            Ok(NativeOut::Extern(crate::ExternBox::new(handle)))
+        }
+        // The async fs surface (Track A.4c/A.10, on the open seam since extern-types X5): each
+        // returns WORK (`NativeOut::Spawn`), which the backend tickets on its executor — the
+        // per-backend by-name intercepts are gone.
+        "read_async" => {
+            want_arity(func, args, 1)?;
+            let path = want_str(func, args, 0)?;
+            Ok(NativeOut::Spawn(SpawnBox(Box::new(crate::FsIo::Read(
+                path.to_string(),
+            )))))
+        }
+        "write_async" | "append_async" => {
+            want_arity(func, args, 2)?;
+            let path = want_str(func, args, 0)?.to_string();
+            let content = want_str(func, args, 1)?.to_string();
+            let io = if func == "write_async" {
+                crate::FsIo::Write(path, content)
+            } else {
+                crate::FsIo::Append(path, content)
+            };
+            Ok(NativeOut::Spawn(SpawnBox(Box::new(io))))
+        }
+        // The async metadata twins (extern-types X6).
+        "exists_async" | "remove_async" => {
+            want_arity(func, args, 1)?;
+            let path = want_str(func, args, 0)?.to_string();
+            let io = if func == "exists_async" {
+                crate::FsIo::Exists(path)
+            } else {
+                crate::FsIo::Remove(path)
+            };
+            Ok(NativeOut::Spawn(SpawnBox(Box::new(io))))
+        }
+        "list_async" => {
+            // 0-or-1 args, mirroring the sync `list` (whole sandbox vs one directory).
+            let dir = match args.len() {
+                0 => None,
+                1 => Some(want_str(func, args, 0)?.to_string()),
+                n => return Err(arity_error(func, 1, n)),
+            };
+            Ok(NativeOut::Spawn(SpawnBox(Box::new(crate::FsIo::List(dir)))))
         }
         _ => Err(no_function_error("fs", func)),
     }
@@ -891,6 +1172,87 @@ const TIME_FNS: &[ExtFn] = &[
     },
 ];
 
+const ID_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "next_id",
+        params: &[],
+        ret: Concrete(Int),
+    },
+    // `uuid()` is v4 — the "just give me a UUID" default; `uuid_v7()` (time-ordered keys) is the
+    // explicit opt-in. Both return the first-class `Uuid` (extern-types X2), which displays in
+    // canonical hyphenated lowercase.
+    ExtFn {
+        name: "uuid",
+        params: &[],
+        ret: Concrete(UUID_SIG),
+    },
+    ExtFn {
+        name: "uuid_v7",
+        params: &[],
+        ret: Concrete(UUID_SIG),
+    },
+    ExtFn {
+        name: "parse",
+        params: &[Str],
+        ret: Concrete(SigType::Option(&UUID_SIG)),
+    },
+];
+
+/// The `Uuid` signature type, named once (`SigType::Option` borrows a static).
+const UUID_SIG: SigType = SigType::Named(crate::id::TYPE_NAME);
+
+/// The `Uuid` instance methods (extern-types X2): all pure (`key_capable` demands it).
+/// `version()` reads the version nibble back; `timestamp_ms()` is `some(ms)` iff the version
+/// carries a timestamp (v7) — the Option IS the version distinction.
+const UUID_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "to_string",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "version",
+        params: &[],
+        ret: Concrete(Int),
+    },
+    ExtFn {
+        name: "timestamp_ms",
+        params: &[],
+        ret: Concrete(SigType::Option(&SigType::Int)),
+    },
+];
+
+/// Method dispatch for `Uuid` — downcast the receiver, run the pure accessor. No mutation, no
+/// host (the whole point of `key_capable`).
+fn uuid_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(u) = recv.as_any().downcast_ref::<uuid::Uuid>() else {
+        return Err(type_error(method, "Uuid"));
+    };
+    match method {
+        "to_string" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Str(u.to_string()))
+        }
+        "version" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Int(u.get_version_num() as i64)))
+        }
+        "timestamp_ms" => {
+            want_arity(method, args, 0)?;
+            Ok(match crate::id::timestamp_ms(u) {
+                Some(ms) => NativeOut::Some(Box::new(NativeOut::Scalar(Scalar::Int(ms as i64)))),
+                None => NativeOut::None,
+            })
+        }
+        _ => Err(crate::no_method_error(crate::id::TYPE_NAME, method)),
+    }
+}
+
 const ENV_FNS: &[ExtFn] = &[
     ExtFn {
         name: "get",
@@ -953,6 +1315,23 @@ const FS_FNS: &[ExtFn] = &[
         name: "append_async",
         params: &[Str, Str],
         ret: Concrete(SigType::Future(&SigType::Unit)),
+    },
+    // The async metadata twins (extern-types X6) — pure `FsIo` additions: no backend code
+    // changed to add these, which is the point of the open seam.
+    ExtFn {
+        name: "exists_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&SigType::Bool)),
+    },
+    ExtFn {
+        name: "remove_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&SigType::Bool)),
+    },
+    ExtFn {
+        name: "list_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&SigType::List(&Str))),
     },
     ExtFn {
         name: "read_lines",
@@ -1166,6 +1545,12 @@ const STD_MODULES: &[ExtModule] = &[
         deep_marshal: false,
     },
     ExtModule {
+        name: "id",
+        functions: ID_FNS,
+        dispatch: id_dispatch,
+        deep_marshal: false,
+    },
+    ExtModule {
         name: "env",
         functions: ENV_FNS,
         dispatch: env_dispatch,
@@ -1312,6 +1697,51 @@ mod tests {
             &[NativeValue::Scalar(Scalar::Int(1))],
         );
         assert!(matches!(out, Err(e) if e.kind == crate::ErrorKind::Arity));
+    }
+
+    #[test]
+    fn id_module_is_registry_backed_and_sandbox_deterministic() {
+        // `next_id` reads the host's counter: 1, 2, 3 — one dispatch shared by both backends.
+        let mut h = host();
+        for want in 1..=3 {
+            let out = dispatch("id", "next_id", &mut h, &[]);
+            assert_eq!(out, Ok(NativeOut::Scalar(Scalar::Int(want))));
+        }
+        // UUIDs draw from the sandbox entropy/wall-time streams, so a fresh sandbox reproduces
+        // them exactly (what lets conformance pin exact values) — and consecutive draws differ.
+        let a = dispatch("id", "uuid", &mut h, &[]).unwrap();
+        let b = dispatch("id", "uuid", &mut h, &[]).unwrap();
+        assert_ne!(a, b);
+        let mut fresh = host();
+        assert_eq!(dispatch("id", "uuid", &mut fresh, &[]), Ok(a));
+        // v7: an extern `Uuid` value (extern-types X2) — version nibble 7, the sandbox epoch in
+        // the leading 48 bits.
+        let Ok(NativeOut::Extern(v7)) = dispatch("id", "uuid_v7", &mut h, &[]) else {
+            panic!("uuid_v7 should produce a Uuid");
+        };
+        let v7 = v7.display_string();
+        assert_eq!(&v7[14..15], "7");
+        let ms = u64::from_str_radix(&v7[..13].replace('-', ""), 16).unwrap();
+        assert_eq!(ms, crate::host::SANDBOX_EPOCH_MS);
+        // `id` left the virtual table — it is an ordinary registry module now.
+        assert!(!is_virtual_module("id"));
+        assert!(find_function("id", "uuid_v7").is_some());
+        // The `Uuid` extern type is registered with its method table, and `parse` round-trips
+        // (`none` on malformed input).
+        assert!(find_type("Uuid").is_some_and(|t| t.key_capable));
+        assert!(find_type_method("Uuid", "timestamp_ms").is_some());
+        let parsed = dispatch("id", "parse", &mut h, &[NativeValue::Str(v7.clone())]).unwrap();
+        let NativeOut::Some(inner) = parsed else {
+            panic!("parse of a canonical uuid should be some");
+        };
+        let NativeOut::Extern(u) = *inner else {
+            panic!("parse should yield a Uuid");
+        };
+        assert_eq!(u.display_string(), v7);
+        assert_eq!(
+            dispatch("id", "parse", &mut h, &[NativeValue::Str("nope".into())]),
+            Ok(NativeOut::None)
+        );
     }
 
     #[test]

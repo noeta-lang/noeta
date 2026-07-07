@@ -1,0 +1,43 @@
+// The first-class `Uuid` (extern-types X2): a registered extern type both backends host through
+// the one extern seam. `id.uuid()`/`id.uuid_v7()` return it; it annotates (`u: Uuid`), narrows
+// (`is Uuid`, incl. from `dyn`), compares by value, exposes `to_string`/`version`/`timestamp_ms`,
+// and `id.parse` round-trips the canonical string (`none` on malformed input). The v7 timestamp
+// is the fixed sandbox epoch (2026-01-01) at logical time 0 — deterministic, differential-pinned.
+// expect: stdout "true"
+// expect: stdout "4"
+// expect: stdout "none"
+// expect: stdout "7"
+// expect: stdout "some(1767225600000)"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "none"
+// expect: stdout "4"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+use std.{id}
+
+u = id.uuid();
+echo u is Uuid;
+echo u.version();
+echo u.timestamp_ms();
+
+v = id.uuid_v7();
+echo v.version();
+echo v.timestamp_ms();
+
+// Value equality: two distinct draws differ; a value equals itself; parse round-trips.
+echo u == v;
+echo u == u;
+echo id.parse(u.to_string()) == some(u);
+echo id.parse("not-a-uuid");
+
+// The type annotates a signature and dispatches its methods statically.
+fn version_of(x: Uuid): int { return x.version(); }
+echo version_of(u);
+
+// `dyn` narrows back to `Uuid` with `is` — a runtime type test on the extern value.
+d: dyn = u;
+echo d is Uuid;
+echo d is string;

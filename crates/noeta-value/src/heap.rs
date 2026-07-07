@@ -17,9 +17,9 @@ use std::rc::Rc;
 use noeta_ast::reflect::TypeRepr;
 use noeta_bytecode::Builtin;
 use noeta_object::{PackedSchema, Shape};
-use noeta_stdlib::FileHandle;
 
 use crate::Value;
+use noeta_stdlib::MapKey;
 
 // --- Live-heap accounting (the leak oracle, architecture §0/§5) ---
 //
@@ -247,10 +247,14 @@ impl std::hash::Hasher for FxHasher {
     }
 }
 
-/// The map store: a `HashMap` with the fast [`FxHasher`] (see above), so get/insert/remove are O(1)
-/// and cheap. Aliased so the type appears in exactly one place.
+/// The map store: a hashbrown `HashMap` with the fast [`FxHasher`] (see above), so
+/// get/insert/remove are O(1) and cheap. Keyed by the shared [`MapKey`] (extern-types X4):
+/// string keys keep their exact P-SSO representation and hash (content-only), and the bare
+/// `&str` probe still allocates nothing (hashbrown's `Equivalent` lookup); extern keys ride the
+/// same table. Aliased so the type appears in exactly one place. (hashbrown IS std's table —
+/// taken directly for the heterogeneous-lookup API std does not expose.)
 pub(crate) type MapStore =
-    HashMap<compact_str::CompactString, Value, std::hash::BuildHasherDefault<FxHasher>>;
+    hashbrown::HashMap<MapKey, Value, std::hash::BuildHasherDefault<FxHasher>>;
 
 /// The live-object registry set — a `HashSet<u64>` (NaN-boxed object words) with the fast
 /// [`FxHasher`] instead of SipHash, since it is touched on every alloc and free.
@@ -263,6 +267,12 @@ pub(crate) enum Payload {
     /// A raw immutable byte buffer (`bytes`, P-PACK 4.4) — a GC leaf like `Str`; owns no child
     /// references, freeing it just drops the `Vec<u8>`.
     Bytes(Vec<u8>),
+    /// A registered extern-type value (extern-types X1) — the ONE hosting variant every
+    /// registry-contributed type shares. A GC leaf: the contract is acyclic by design (no child
+    /// `Value`s), so freeing just drops the box. The payload is RC-shared like any other, so a
+    /// mutating method (through [`with_extern_mut`]) has reference semantics — the FileHandle
+    /// discipline, generalized.
+    Extern(noeta_stdlib::ExternBox),
     Int(i64),
     /// A function value: a prototype index plus the captured upvalue cells (empty for a
     /// top-level `fn`/closure, which captures only globals). The closure **owns one reference
@@ -317,7 +327,10 @@ pub(crate) enum Payload {
     /// value or called directly. A leaf (two owned `String`s, no child values); dispatched through
     /// the same `call_native_module` path as a `<module>.<func>` member call, so the two backends
     /// agree by construction.
-    ModuleFn { module: String, func: String },
+    ModuleFn {
+        module: String,
+        func: String,
+    },
     /// An unbound method handle (`Type.method` as a value). When called it dispatches by name — as
     /// an instance method on its first argument (`associated == false`), or as an associated call
     /// `ty.method(args)` (`associated == true`). A leaf (owned `String`s + a bool). Both backends
@@ -332,12 +345,10 @@ pub(crate) enum Payload {
     /// mutations are visible through the handle; for a value type a value-semantic copy). Calling it
     /// dispatches `method` on the captured receiver. NOT a leaf: `recv` is a child value (traversed
     /// by the cycle collector, released with the handle).
-    BoundMethod { recv: Value, method: String },
-    /// An `fs.open` file handle (M2.5): a mutable cursor over a content snapshot (read) or a
-    /// pending write buffer. The whole state machine lives in `noeta_stdlib::FileHandle` so it is
-    /// byte-identical to the tree-walker's. Holds no child `Value`s (only owned `String`s), so it
-    /// is a GC leaf like `Str`.
-    FileHandle(FileHandle),
+    BoundMethod {
+        recv: Value,
+        method: String,
+    },
     /// A lazy iterator (Track I): a reference-semantic pull cursor. The base (`iter()`) is a cursor
     /// over a list; adapters (`take`/`drop`/`chain`/…) wrap one or two **source** iterators and pull
     /// from them on demand, so a pipeline fuses with no intermediate list. It **owns one reference**
@@ -715,7 +726,7 @@ pub(crate) fn free(value: Value) {
         | Payload::ChannelRecv(_)
         | Payload::IsolateFuture(_)
         | Payload::Reactive(..)
-        | Payload::FileHandle(_) => {}
+        | Payload::Extern(_) => {}
     }
     drop(boxed);
 }
@@ -868,7 +879,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         // are immediates — e.g. every entry in an int-valued map — are excluded by `push`, so this
         // sort only runs for maps that actually hold destructor-reachable references).
         Payload::Map(entries) => {
-            let mut kv: Vec<(&compact_str::CompactString, &Value)> = entries.iter().collect();
+            let mut kv: Vec<(&MapKey, &Value)> = entries.iter().collect();
             kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
             kv.into_iter().for_each(|(_, &v)| push(v));
         }
@@ -900,7 +911,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::ChannelRecv(_)
         | Payload::IsolateFuture(_)
         | Payload::Reactive(..)
-        | Payload::FileHandle(_) => {}
+        | Payload::Extern(_) => {}
     }
     out
 }
@@ -930,25 +941,31 @@ pub(crate) fn free_shallow(value: Value) {
     drop(boxed);
 }
 
-/// Read a file handle under a closure (it borrows the handle, so no reference escapes). The
-/// caller must have checked the value is a `FileHandle`.
-pub(crate) fn with_file_handle<R>(value: Value, f: impl FnOnce(&FileHandle) -> R) -> R {
+/// Read an extern-type value under a closure (extern-types X1). The caller must have checked the
+/// value is an `Extern`.
+pub(crate) fn with_extern<R>(
+    value: Value,
+    f: impl FnOnce(&dyn noeta_stdlib::ExternValue) -> R,
+) -> R {
     let obj = unsafe { &*obj_ptr(value) };
-    let Payload::FileHandle(handle) = &obj.payload else {
-        panic!("with_file_handle on a non-handle value");
+    let Payload::Extern(e) = &obj.payload else {
+        panic!("with_extern on a non-extern value");
     };
-    f(handle)
+    f(&**e)
 }
 
-/// Mutate a file handle under a closure — the cursor-advancing primitive for `read_line`/`read`/
-/// `write`/`close`. Like [`set_slot`], this is single-threaded interior mutation of a heap object;
-/// the handle holds no child `Value`s, so no retain/release bookkeeping is needed.
-pub(crate) fn with_file_handle_mut<R>(value: Value, f: impl FnOnce(&mut FileHandle) -> R) -> R {
+/// Mutate an extern-type value under a closure — the receiver of a mutating method, generalizing
+/// [`with_file_handle_mut`]. Single-threaded interior mutation of a heap object; the contract is
+/// a GC leaf (no child `Value`s), so no retain/release bookkeeping is needed.
+pub(crate) fn with_extern_mut<R>(
+    value: Value,
+    f: impl FnOnce(&mut dyn noeta_stdlib::ExternValue) -> R,
+) -> R {
     let obj = unsafe { &mut *obj_ptr(value) };
-    let Payload::FileHandle(handle) = &mut obj.payload else {
-        panic!("with_file_handle_mut on a non-handle value");
+    let Payload::Extern(e) = &mut obj.payload else {
+        panic!("with_extern_mut on a non-extern value");
     };
-    f(handle)
+    f(&mut **e)
 }
 
 /// Read the value held in a cell, returning a borrowed (not retained) copy. The caller must
@@ -1046,7 +1063,7 @@ enum PromoteJob {
     List(Vec<Value>),
     Tuple(Vec<Value>),
     Set(Vec<Value>),
-    Map(Vec<(String, Value)>),
+    Map(Vec<(MapKey, Value)>),
     Object(Rc<Shape>, Vec<Value>),
     Enum(Rc<Shape>, Vec<Value>),
 }
@@ -1131,6 +1148,9 @@ impl SharedRegion {
             match &obj.payload {
                 Payload::Str(s) => PromoteJob::Leaf(Payload::Str(s.clone())),
                 Payload::Bytes(b) => PromoteJob::Leaf(Payload::Bytes(b.clone())),
+                // An extern value is `Send` by trait bound and a leaf; `ExternBox::clone`
+                // routes through `ExternValue::clone_box`.
+                Payload::Extern(e) => PromoteJob::Leaf(Payload::Extern(e.clone())),
                 Payload::Int(i) => PromoteJob::Leaf(Payload::Int(*i)),
                 Payload::PackedList { schema, bytes } => PromoteJob::Leaf(Payload::PackedList {
                     schema: Rc::clone(schema),
@@ -1139,12 +1159,9 @@ impl SharedRegion {
                 Payload::List(items) => PromoteJob::List(items.clone()),
                 Payload::Tuple(items) => PromoteJob::Tuple(items.clone()),
                 Payload::Set(items) => PromoteJob::Set(items.clone()),
-                Payload::Map(entries) => PromoteJob::Map(
-                    entries
-                        .iter()
-                        .map(|(k, &v)| (k.as_str().to_owned(), v))
-                        .collect(),
-                ),
+                Payload::Map(entries) => {
+                    PromoteJob::Map(entries.iter().map(|(k, &v)| (k.clone(), v)).collect())
+                }
                 Payload::Object { shape, slots } => {
                     PromoteJob::Object(Rc::clone(shape), slots.clone())
                 }
@@ -1163,7 +1180,7 @@ impl SharedRegion {
             PromoteJob::Map(entries) => Payload::Map(
                 entries
                     .into_iter()
-                    .map(|(k, v)| (k.into(), self.promote_value(v, memo)))
+                    .map(|(k, v)| (k, self.promote_value(v, memo)))
                     .collect(),
             ),
             PromoteJob::Object(shape, slots) => Payload::Object {

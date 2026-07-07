@@ -1,0 +1,5 @@
+// A registered extern type's name is reserved (extern-types X2, E0049): its method table
+// dispatches by name, so a same-name user type would be silently shadowed. The checker-native
+// names (`FileHandle`, `Iterator`, ...) are reserved by the same rule.
+// expect: error E0049 at 5:8
+struct Uuid { x: int }

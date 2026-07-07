@@ -728,6 +728,24 @@ impl Checker {
     /// shadow as a fresh local, so allowing a binding meant the backends diverged. Rejecting it
     /// statically closes that divergence by construction. Methods and enum variants are exempt —
     /// they are always receiver-/type-qualified, so a bare prelude name never resolves to them.
+    /// Reject a type declaration that binds a **reserved native type name** (extern-types X1,
+    /// E0049): a registered extern type (`Uuid`) or a checker-native type (`FileHandle`,
+    /// `Iterator`, …). Their method tables come from the registry/checker, so a same-name user
+    /// type would be silently shadowed by name-match dispatch — reserve the names instead.
+    fn check_reserved_type_name(&mut self, name: &str, span: Span) {
+        let native = stdlib::NATIVE_TYPE_NAMES.contains(&name);
+        if native || noeta_stdlib::registry::find_type(name).is_some() {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::ReservedTypeName,
+                    span,
+                    format!("cannot declare `{name}`: it is a reserved native type name"),
+                )
+                .with_help("rename the type — native type names cannot be shadowed"),
+            );
+        }
+    }
+
     fn check_reserved_name(&mut self, name: &str, span: Span) {
         const RESERVED_PRELUDE: &[&str] = &["Ok", "Err", "some", "none", "panic", "assert"];
         if RESERVED_PRELUDE.contains(&name) {
@@ -1347,18 +1365,13 @@ impl Checker {
                             self.modules.insert(name.name.clone());
                         } else if let Some(module) = &selective {
                             if noeta_stdlib::registry::is_module_function(module, &name.name) {
-                                self.imported_fns.insert(
-                                    name.name.clone(),
-                                    (module.clone(), name.name.clone()),
-                                );
+                                self.imported_fns
+                                    .insert(name.name.clone(), (module.clone(), name.name.clone()));
                             } else {
                                 self.error(
                                     DiagnosticCode::UnknownName,
                                     name.span,
-                                    format!(
-                                        "module `{module}` has no function `{}`",
-                                        name.name
-                                    ),
+                                    format!("module `{module}` has no function `{}`", name.name),
                                 );
                             }
                         } else {
@@ -1780,14 +1793,17 @@ impl Checker {
             }
             Stmt::Struct(r) => {
                 self.check_reserved_name(&r.name, r.name_span);
+                self.check_reserved_type_name(&r.name, r.name_span);
                 self.check_struct(r, env)
             }
             Stmt::Class(c) => {
                 self.check_reserved_name(&c.name, c.name_span);
+                self.check_reserved_type_name(&c.name, c.name_span);
                 self.check_class(c, env)
             }
             Stmt::Enum(e) => {
                 self.check_reserved_name(&e.name, e.name_span);
+                self.check_reserved_type_name(&e.name, e.name_span);
                 self.check_enum(e, env)
             }
             Stmt::Impl(decl) => self.check_standalone_impl(decl),
@@ -2462,6 +2478,8 @@ impl Checker {
                     && !PRELUDE_TYPES.contains(&name.as_str())
                     && !self.type_params.contains_key(name)
                     && !self.types.contains(name)
+                    // A registered extern type (`Uuid`, extern-types X1) is a valid annotation.
+                    && noeta_stdlib::registry::find_type(name).is_none()
                 {
                     self.error(
                         DiagnosticCode::UnknownType,
@@ -2472,6 +2490,34 @@ impl Checker {
                         "name a declared type, one imported with `use`, a generic parameter, \
                              or a built-in",
                     );
+                }
+                // Key-capability gate (extern-types X4): a `Map<K, _>` key / `Set<T>` element
+                // formed from an extern type requires it key-capable — a mutable handle's hash
+                // or order could go stale under a key, so `Map<FileHandle, _>` is a type error.
+                let key_position = match name.as_str() {
+                    "Map" => args.first(),
+                    "Set" => args.first(),
+                    _ => None,
+                };
+                if let Some(TypeRef::Named {
+                    name: key_name,
+                    span: key_span,
+                    ..
+                }) = key_position
+                    && let Some(ext) = noeta_stdlib::registry::find_type(key_name)
+                    && !ext.key_capable
+                {
+                    let role = if name == "Map" {
+                        "key a map"
+                    } else {
+                        "member a set"
+                    };
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        *key_span,
+                        format!("`{key_name}` cannot {role}: it is not a key-capable type"),
+                    )
+                    .help("key-capable types are immutable with a total order (e.g. `Uuid`)");
                 }
                 for arg in args {
                     self.check_type_ref(arg);
@@ -3205,6 +3251,19 @@ impl Checker {
                             "make the values one type, or annotate a `Map<string, dyn>` for a mixed map",
                         );
                     val_ty = Type::Dyn; // recover as a mixed map
+                }
+                // A literal keyed by a non-key-capable extern type is rejected statically
+                // (extern-types X4), matching the `Map<K, _>` formation gate.
+                if let Type::Named(key_name, _) = &key_ty
+                    && let Some(ext) = noeta_stdlib::registry::find_type(key_name)
+                    && !ext.key_capable
+                {
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!("`{key_name}` cannot key a map: it is not a key-capable type"),
+                    )
+                    .help("key-capable types are immutable with a total order (e.g. `Uuid`)");
                 }
                 let ty = Type::Map(Box::new(key_ty), Box::new(val_ty));
                 self.note_construction(&ty, *span);

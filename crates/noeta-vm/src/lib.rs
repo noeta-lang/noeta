@@ -526,8 +526,6 @@ struct Vm<'m> {
     /// are destroyed at program end in reverse binding order (the deterministic "program order" the
     /// spec requires) — the same order the pre-slot name-keyed `global_order` produced.
     global_order: Vec<u32>,
-    /// The deterministic `next_id()` counter, seeded at 1 (matching the M0 `IdGen`).
-    next_id: u64,
     /// All host-coupled effects (filesystem, seeded PRNG, logical clock) behind the M2.1
     /// [`noeta_stdlib::Host`] seam. The conformance harness constructs a deterministic
     /// [`noeta_stdlib::SandboxHost`]; a real host (later M2 slices) swaps in without touching
@@ -1422,7 +1420,14 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         NarrowTarget::Tuple => "tuple",
         NarrowTarget::Fn => "function",
         NarrowTarget::Dyn => return true,
-        NarrowTarget::Named(name) => return v.shape().is_some_and(|s| &s.name == name),
+        NarrowTarget::Named(name) => {
+            // An extern-type value matches its registered type name (`x is Uuid`, extern-types
+            // X1); user objects/enums match their shape name.
+            if v.is_extern() {
+                return v.with_extern(|e| e.type_name() == name);
+            }
+            return v.shape().is_some_and(|s| &s.name == name);
+        }
         NarrowTarget::AnyOf(members) => return members.iter().any(|m| narrow_matches(v, m)),
         // Abstract kind-types match any value of that declaration kind, by the value's shape kind.
         NarrowTarget::AnyEnum => {
@@ -1444,14 +1449,6 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         }
     };
     v.type_name() == kind
-}
-
-/// Build the [`noeta_stdlib::IoRequest`] for an `fs.*_async` call (Track A.4c/A.10), or `None` if
-/// `func` is not an async fs op. Marshals this backend's `Value`s to strings; the func→request
-/// mapping is shared in [`noeta_stdlib::IoRequest::from_fs_async`].
-fn vm_fs_async_request(func: &str, args: &[Value]) -> Option<noeta_stdlib::IoRequest> {
-    let strings: Vec<Option<String>> = args.iter().map(|v| v.as_string()).collect();
-    noeta_stdlib::IoRequest::from_fs_async(func, &strings)
 }
 
 /// Execute a compiled module, capturing stdout, exit code, and diagnostics. `jit` enables the
@@ -1567,7 +1564,6 @@ impl<'m> Vm<'m> {
             tojson_derives,
             globals: vec![Value::unbound(); module.global_names.len()],
             global_order: Vec::new(),
-            next_id: 1,
             host,
             executor,
             scopes: Vec::new(),
@@ -2939,20 +2935,31 @@ impl<'m> Vm<'m> {
                         entries,
                         reflect,
                     } => {
-                        let mut map = BTreeMap::new();
+                        let mut map: Vec<(noeta_stdlib::MapKey, Value)> =
+                            Vec::with_capacity(entries.len());
                         for (key_reg, value_reg) in entries.iter() {
-                            let key = regs[fbase + *key_reg as usize]
-                                .as_string()
-                                .expect("map keys are validated by RequireMapKey");
+                            // Validated by the preceding `RequireMapKey`: a string (its P-SSO
+                            // compact clone) or a key-capable extern value (a boxed snapshot).
+                            let key_value = regs[fbase + *key_reg as usize];
+                            let key = match key_value.as_compact_string() {
+                                Some(s) => noeta_stdlib::MapKey::Str(s),
+                                None => key_value.with_extern(|e| {
+                                    noeta_stdlib::MapKey::Extern(noeta_stdlib::ExternBox(
+                                        e.clone_box(),
+                                    ))
+                                }),
+                            };
                             let value = regs[fbase + *value_reg as usize];
                             retain(value);
                             // A duplicate key keeps the later value (M0 `BTreeMap` semantics); the
                             // displaced value loses its owner, so release it.
-                            if let Some(old) = map.insert(key, value) {
+                            if let Some(pos) = map.iter().position(|(k, _)| *k == key) {
+                                let (_, old) = map.remove(pos);
                                 release(old);
                             }
+                            map.push((key, value));
                         }
-                        let map = Value::map(map);
+                        let map = Value::map_keyed(map);
                         // Stamp the checker-resolved `Map(K, V)` type onto the map (R1) so `type_of`
                         // recovers it after a `dyn` launder — the same node-tag path `MakeList` uses.
                         if let Some(idx) = reflect {
@@ -2963,11 +2970,15 @@ impl<'m> Vm<'m> {
                     }
                     Op::RequireMapKey { reg, span } => {
                         let v = regs[fbase + *reg as usize];
-                        if v.as_string().is_none() {
+                        let ok = v.is_string()
+                            || (v.is_extern()
+                                && v.with_extern(noeta_stdlib::map_key::extern_key_capable));
+                        if !ok {
+                            let error = noeta_stdlib::map_key::map_key_error(v.type_name());
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
-                                format!("map keys must be strings, found {}", v.type_name()),
+                                error.message,
                             ));
                         }
                         pc += 1;
@@ -3509,6 +3520,27 @@ impl<'m> Vm<'m> {
                                     ));
                                 }
                                 None => {
+                                    // Not a string: a key-capable extern value probes through
+                                    // the contract (extern-types X4); anything else is the
+                                    // existing type error.
+                                    if idx.is_extern()
+                                        && idx
+                                            .with_extern(noeta_stdlib::map_key::extern_key_capable)
+                                    {
+                                        if let Some(element) =
+                                            idx.with_extern(|e| v.map_get_extern(e))
+                                        {
+                                            retain(element);
+                                            set_reg(regs, fbase, *dst, element);
+                                            pc += 1;
+                                            continue;
+                                        }
+                                        return Err(self.error(
+                                            DiagnosticCode::KeyNotFound,
+                                            *span,
+                                            format!("map has no key {}", idx.display()),
+                                        ));
+                                    }
                                     return Err(self.error(
                                         DiagnosticCode::TypeMismatch,
                                         *span,
@@ -4024,12 +4056,6 @@ impl<'m> Vm<'m> {
                                 },
                             ));
                         }
-                        pc += 1;
-                    }
-                    Op::NextId { dst } => {
-                        let id = self.next_id;
-                        self.next_id += 1;
-                        set_reg(regs, fbase, *dst, Value::int(id as i64));
                         pc += 1;
                     }
                     Op::Panic { msg, span } => {
@@ -5235,7 +5261,9 @@ impl<'m> Vm<'m> {
                 },
                 None => 0,
             };
-            return Ok(Value::int(noeta_stdlib::int_method(recv_int, int_method, arg)));
+            return Ok(Value::int(noeta_stdlib::int_method(
+                recv_int, int_method, arg,
+            )));
         }
         // Cross-domain numeric conversions (S0): `int→float/f32`, `float/f32→int`,
         // `float↔f32`. The `IntMethod` branch above handled `int→int` and returned; an
@@ -5269,12 +5297,10 @@ impl<'m> Vm<'m> {
         {
             return self.call_set_method(v, set_method, method, args, span);
         }
-        // File-handle methods (read_line/read/write/close) — the shared
-        // `FileHandleMethod` enum keeps the two backends in lockstep.
-        if hk == Some(HeapKind::FileHandle)
-            && let Some(handle_method) = noeta_stdlib::FileHandleMethod::from_name(method)
-        {
-            return self.call_file_handle_method(v, handle_method, method, args, span);
+        // Extern-type methods (extern-types X1): every registry-contributed type routes through
+        // its registered `ExtType`'s one shared dispatch.
+        if hk == Some(HeapKind::Extern) {
+            return self.call_extern_method(v, method, args, span);
         }
         // Channel endpoint methods (isolates I.1): `tx.send(v)`/`tx.close()` on a sender,
         // `rx.recv()` on a receiver. `send`/`recv` yield leaf futures (enqueue/dequeue when
@@ -5450,7 +5476,8 @@ impl<'m> Vm<'m> {
                 .or_else(|| v.as_string().map(|s| s.chars().count()))
                 .or_else(|| v.bytes_len())
                 .map(|n| Value::int(n as i64))
-        } else if method == "enumerate" && matches!(hk, Some(HeapKind::List | HeapKind::PackedList)) {
+        } else if method == "enumerate" && matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
+        {
             // A list of `(index, value)` **tuples** (object-model slice 4b), matching the
             // tree-walker's `Value::Tuple` pairs. A packed list is materialized to a
             // temporary boxed list first (then released).
@@ -5471,14 +5498,12 @@ impl<'m> Vm<'m> {
         };
         match result {
             Some(value) => Ok(value),
-            None if !args.is_empty() && (method == "len" || method == "enumerate") =>
-            {
-                Err(self.error(
+            None if !args.is_empty() && (method == "len" || method == "enumerate") => Err(self
+                .error(
                     DiagnosticCode::TypeMismatch,
                     span,
                     format!("method `{method}` takes no arguments"),
-                ))
-            }
+                )),
             None => Err(self.error(
                 DiagnosticCode::UnknownName,
                 span,
@@ -5993,14 +6018,6 @@ impl<'m> Vm<'m> {
         span: Span,
     ) -> Result<Value, Abort> {
         match builtin {
-            // `next_id()` as a first-class value (`use std.id.{next_id}`, P2c) — direct calls
-            // compile to the dedicated `Op::NextId`; an indirect call reads the same counter.
-            Builtin::NextId => {
-                self.check_arity(builtin, args, 0, span)?;
-                let id = self.next_id;
-                self.next_id += 1;
-                Ok(Value::int(id as i64))
-            }
             Builtin::Len => {
                 self.check_arity(builtin, args, 1, span)?;
                 let v = args[0];
@@ -8087,9 +8104,7 @@ mod tests {
 
     #[test]
     fn filter_map_sum_pipeline() {
-        let r = run(
-            "echo [1, 2, 3, 4].filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).sum();\n",
-        );
+        let r = run("echo [1, 2, 3, 4].filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).sum();\n");
         assert_eq!(r.stdout, "60\n");
         assert_eq!(r.exit_code, 0);
     }

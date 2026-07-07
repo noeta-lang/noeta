@@ -424,7 +424,6 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*obj);
             f.uses.push(*value);
         }
-        Op::NextId { dst } => f.def = Some(*dst),
         Op::Panic { msg, .. } => {
             f.uses.push(*msg);
             f.fallthrough = false; // aborts the program
@@ -906,7 +905,6 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(obj);
             m(value);
         }
-        Op::NextId { dst } => m(dst),
         Op::Panic { msg, .. } => m(msg),
         Op::TryUnwrap {
             dst, src, on_error, ..
