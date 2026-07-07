@@ -57,6 +57,8 @@ mod values;
 pub(crate) use values::*;
 mod methods;
 mod scheduler;
+mod session;
+pub use session::{HostFactory, SessionOutput, VmSession};
 
 /// A debugger observing tier-0 execution (the `noeta dap` server implements it). The VM consults it
 /// **before each instruction**, passing the executing prototype and program counter; the

@@ -321,6 +321,141 @@ fn compile_inner(
     })
 }
 
+/// A persistent, incremental compiler for a REPL session (REPL-on-VM). Where [`compile`] builds a
+/// fresh [`Module`] from a whole program and consumes its tables, this keeps the compile tables
+/// **alive across entries** so the proto indices, global slots, shapes, and method-table entries an
+/// entry assigns stay valid in the next — the *stable-id accumulation* the session's cross-entry
+/// object identity depends on (a closure holds a raw `proto`, an aggregate an `Rc<Shape>`; both would
+/// be corrupted by recompiling from scratch each entry).
+///
+/// **Checkerless**, matching the tree-walker REPL it replaces: no type errors surface at the prompt,
+/// drops are conservatively destructor-relevant (`insert_drops(_, None)`), and every declared type is
+/// treated as possibly destructor-bearing. Lowering is total over parsed programs, so a
+/// successfully-parsed entry always compiles.
+pub struct SessionCompiler {
+    mc: ModuleCompiler,
+}
+
+impl std::fmt::Debug for SessionCompiler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionCompiler")
+            .field("protos", &self.mc.protos.len())
+            .field("globals", &self.mc.global_names.len())
+            .field("types", &self.mc.types.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for SessionCompiler {
+    fn default() -> SessionCompiler {
+        SessionCompiler::new()
+    }
+}
+
+impl SessionCompiler {
+    /// A fresh session: an empty module with just the entry-`main` placeholder at proto 0.
+    pub fn new() -> SessionCompiler {
+        let mc = ModuleCompiler {
+            protos: vec![Chunk::placeholder()],
+            shapes: Vec::new(),
+            packed_schemas: Vec::new(),
+            methods: Vec::new(),
+            destructors: Vec::new(),
+            field_defaults: Vec::new(),
+            comparable_derives: Vec::new(),
+            tojson_derives: Vec::new(),
+            structural_eq_types: HashSet::new(),
+            types: HashMap::new(),
+            module_globals: HashMap::new(),
+            module_fns: HashSet::new(),
+            type_of_sites: HashMap::new(),
+            cache_slots: 0,
+            type_reprs: Vec::new(),
+            names: Vec::new(),
+            name_ids: HashMap::new(),
+            global_names: Vec::new(),
+            global_slots: HashMap::new(),
+            debug: false,
+        };
+        SessionCompiler { mc }
+    }
+
+    /// Compile one REPL entry, **appending** its declarations to the persistent tables and its
+    /// top-level statements into proto 0 — overwriting the previous entry's now-dead `main` (no live
+    /// value references proto 0). Returns a [`Module`] snapshot ready to run against the session's
+    /// persistent globals. New protos / shapes / global slots keep the indices they are assigned here
+    /// forever.
+    pub fn extend(&mut self, entry: &Program) -> Result<Module, Unsupported> {
+        // Checkerless lowering (matches the tree-walker `Session`): no checker site-maps, conservative
+        // drops. `insert_drops(_, None)` marks every value destructor-relevant; `thread_reuse` runs
+        // identically to the checked path (a pure function of the drop-annotated IR).
+        let ir = noeta_ir::lower(entry).map_err(|u| Unsupported {
+            reason: format!("not yet lowered to the Core IR: {}", u.feature),
+        })?;
+        let ir = noeta_ir_passes::insert_drops(&ir, None);
+        let ir = noeta_ir_passes::thread_reuse(&ir);
+
+        // Register this entry's globals/types/methods into the persistent tables (all additive:
+        // `HashMap`/`HashSet` inserts, and `register_types` reserves *new* protos at the current end).
+        self.mc.register_globals(entry);
+        self.mc.register_types(entry);
+        self.mc.compile_methods(&ir)?;
+
+        // Compile the entry's top-level statements into a fresh chunk and install it at proto 0.
+        let main = {
+            let mut fc = FnCompiler::new(&mut self.mc, true, None, Vec::new(), Vec::new());
+            fc.init_temps(ir.temp_count);
+            for stmt in &ir.top.stmts {
+                fc.stmt(stmt)?;
+            }
+            fc.code.push(Op::Halt);
+            fc.into_chunk(0, Vec::new(), Some("main".to_string()), Some(ir.span))
+        };
+        self.mc.protos[0] = main;
+
+        // Conservative destruct-reachability: the checker computes a precise fixpoint, but without it
+        // every declared type may own — or transitively contain — a `destruct`. Over-approximate to
+        // *all* type names so the VM walks every value container-first and no destructor is missed
+        // (correct; it only forgoes the plain-free fast path for a genuinely destructor-free type).
+        let destruct_reachable: Vec<String> = self.mc.types.keys().cloned().collect();
+
+        // Snapshot the persistent tables into a runnable module. Cloned (not moved) so the tables stay
+        // alive for the next entry; O(total bytecode) per entry, negligible at an interactive prompt.
+        // Reflection is rebuilt per entry (matching the tree-walker `Session`, which rebuilds it per
+        // batch) — cross-entry reflection is a documented follow-on, not a regression.
+        Ok(Module {
+            protos: self.mc.protos.clone(),
+            shapes: self.mc.shapes.clone(),
+            packed_schemas: self.mc.packed_schemas.clone(),
+            // Checkerless: no `map(...)`-result packed-layout sites (that fusion is a checker output).
+            map_packed_sites: Vec::new(),
+            methods: self.mc.methods.clone(),
+            destructors: self.mc.destructors.clone(),
+            field_defaults: self.mc.field_defaults.clone(),
+            comparable_derives: self.mc.comparable_derives.clone(),
+            tojson_derives: self.mc.tojson_derives.clone(),
+            destruct_reachable,
+            cache_slots: self.mc.cache_slots,
+            reflection: noeta_ast::reflect::build(entry),
+            type_reprs: self.mc.type_reprs.clone(),
+            names: self.mc.names.clone(),
+            global_names: self.mc.global_names.clone(),
+        })
+    }
+
+    /// The current global slot table (global name → dense slot index), for the REPL's `:drop` /
+    /// `:bindings` meta-commands. A binding re-declared across entries keeps the same slot.
+    pub fn global_slots(&self) -> &HashMap<String, u32> {
+        &self.mc.global_slots
+    }
+
+    /// The global slot names in slot order (`global_names[i]` is the name in slot `i`), for
+    /// `:bindings` to enumerate the live user bindings.
+    pub fn global_names(&self) -> &[String] {
+        &self.mc.global_names
+    }
+}
+
 /// What a top-level type name denotes, with the layout/dispatch data the compiler needs to
 /// lower object literals, member access, method calls, and enum construction.
 enum TypeInfo {
