@@ -7,16 +7,26 @@
 //! ([`print_program`]) and the canonical style it emits stay stable across that change.
 
 use noeta_ast::{Expr, FnDecl, Param, Program, Stmt};
+use noeta_lexer::Comment;
 
-use crate::{FmtConfig, FmtError};
+use crate::{FmtConfig, FmtError, trivia};
 
 const INDENT: &str = "    "; // 4 spaces — the house style.
 
-/// Render `program` to its canonical textual form (F0 subset).
-pub fn print_program(program: &Program, config: &FmtConfig) -> Result<String, FmtError> {
+/// Render `program` to its canonical textual form (F0 subset). `source` is the original text (for
+/// recovering author-choice trivia such as trailing `;`); `comments` are the collected comments,
+/// reattached and emitted in F4.
+pub fn print_program(
+    program: &Program,
+    source: &str,
+    comments: &[Comment],
+    config: &FmtConfig,
+) -> Result<String, FmtError> {
     let mut p = Printer {
         out: String::new(),
         indent: 0,
+        source,
+        _comments: comments,
         _config: config,
     };
     for (i, stmt) in program.stmts.iter().enumerate() {
@@ -35,6 +45,10 @@ pub fn print_program(program: &Program, config: &FmtConfig) -> Result<String, Fm
 struct Printer<'a> {
     out: String,
     indent: usize,
+    /// The original source, for recovering trailing-`;` trivia by span.
+    source: &'a str,
+    /// Collected comments — reattached and emitted in F4.
+    _comments: &'a [Comment],
     // Threaded now so F3's config-sensitive constructs (match arrows, wrapping) have it in hand.
     _config: &'a FmtConfig,
 }
@@ -48,27 +62,45 @@ impl Printer<'_> {
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), FmtError> {
         match stmt {
-            Stmt::Echo { value, .. } => {
+            Stmt::Echo { value, span } => {
                 self.line_indent();
                 self.out.push_str("echo ");
                 self.expr(value)?;
+                self.semicolon(value.span().end, span.end);
                 Ok(())
             }
-            Stmt::Return { value, .. } => {
+            Stmt::Return { value, span } => {
                 self.line_indent();
                 self.out.push_str("return");
-                if let Some(value) = value {
+                let content_end = if let Some(value) = value {
                     self.out.push(' ');
                     self.expr(value)?;
-                }
+                    value.span().end
+                } else {
+                    span.end
+                };
+                self.semicolon(content_end, span.end);
                 Ok(())
             }
-            Stmt::Expr { expr, .. } => {
+            Stmt::Expr { expr, span } => {
                 self.line_indent();
-                self.expr(expr)
+                self.expr(expr)?;
+                self.semicolon(expr.span().end, span.end);
+                Ok(())
             }
             Stmt::Fn(decl) => self.fn_decl(decl),
             other => Err(unsupported("statement", other.span())),
+        }
+    }
+
+    /// Re-emit a trailing `;` iff the author wrote one. `content_end` is just past the statement's
+    /// content (before any `;`); `stmt_end` is the statement span's end — we probe from whichever the
+    /// parser placed the span at, so the check is robust to either convention.
+    fn semicolon(&mut self, content_end: u32, stmt_end: u32) {
+        if trivia::has_trailing_semicolon(self.source, content_end)
+            || trivia::has_trailing_semicolon(self.source, stmt_end)
+        {
+            self.out.push(';');
         }
     }
 

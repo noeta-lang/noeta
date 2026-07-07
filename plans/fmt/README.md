@@ -251,9 +251,13 @@ gates re-run every slice.
   into `manifest.rs` (`resolve_fmt_config`, defaults + validation). `Command::Fmt` in the CLI:
   in-place, `--check` (exit 1 if unformatted), `--stdin`. Corpus harness stands (530 files: 4
   ok+idempotent, 517 unsupported, 9 parse-err; safety held on all). fmt+clippy clean.
-- **F1 — trivia collection.** `lex_with_trivia` / `Lexed.comments`; line + block + doc comments
-  captured with spans; `tokens` provably unchanged vs. `lex`; hot-path bench shows no regression.
-  Plus the print-time semicolon-presence lookup helper.
+- **F1 — trivia collection. ✅ DONE.** `noeta_lexer::lex_with_trivia` → `Lexed.comments`
+  (`Comment { span, kind: Line | Block }`); `//` is now a dropped `LineComment` token, block
+  comments recorded with their full span. Token stream **provably unchanged** vs. `lex` (property
+  test over mixed inputs incl. `//` inside strings); overhead timing shows no hot-path regression
+  (comment-heavy 36.6ms vs comment-free 41.3ms). `noeta-fmt` now lexes with trivia (comments threaded
+  to the printer, emitted in F4) and **preserves trailing `;` per statement** via
+  `trivia::has_trailing_semicolon`. Full workspace + conformance green.
 - **F2 — `Doc` algebra.** Wadler/Leijen `text|line|softline|hardline|nest|group|concat` + best-fit
   renderer + unit tests (fits/breaks, nesting, groups).
 - **F3 — AST→Doc printer, source-directed (`wrap = false`).** Full coverage of the surface: `Stmt`

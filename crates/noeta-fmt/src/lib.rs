@@ -42,9 +42,10 @@
 //!
 //! # Status
 //!
-//! **F0** (this commit): crate skeleton, [`FmtConfig`] seam, the [`format_source`] entry point with
-//! the safety gate, and a **minimal** printer (literals, `echo`, `return`, bare-expression
-//! statements, and top-level `fn` with untyped params). Every other construct returns
+//! **F0–F1** done: crate skeleton, [`FmtConfig`] seam, the [`format_source`] entry point with the
+//! safety gate, and a **minimal** printer (literals, `echo`, `return`, bare-expression statements,
+//! and top-level `fn` with untyped params). Comments are collected via `lex_with_trivia` (available
+//! for reattachment in F4) and trailing `;` is preserved per statement. Every other construct returns
 //! [`FmtError::Unsupported`] until the full printer lands in F3.
 
 use noeta_diagnostics::Diagnostic;
@@ -52,6 +53,7 @@ use noeta_span::{Source, SourceId, Span};
 
 mod print;
 mod safety;
+mod trivia;
 
 /// How `match` arms lay out their `=>` arrows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -125,9 +127,13 @@ impl std::error::Error for FmtError {}
 /// safety gate enforces this before returning `Ok`.
 pub fn format_source(name: &str, text: &str, config: &FmtConfig) -> Result<String, FmtError> {
     let source = Source::new(SourceId(0), name, text);
-    let program = parse_clean(&source)?;
 
-    let out = print::print_program(&program, config)?;
+    // Lex with trivia so comments are available to the printer (reattached in F4). The token stream
+    // is identical to a plain `lex`, so parsing is unaffected.
+    let lexed = noeta_lexer::lex_with_trivia(&source);
+    let program = parse_checked(&source, &lexed)?;
+
+    let out = print::print_program(&program, text, &lexed.comments, config)?;
 
     // Safety gate: the formatted text must parse, and parse to the same program modulo spans.
     let formatted = Source::new(SourceId(0), name, out.as_str());
@@ -143,17 +149,25 @@ pub fn format_source(name: &str, text: &str, config: &FmtConfig) -> Result<Strin
     Ok(out)
 }
 
-/// Lex + parse `source`, failing with [`FmtError::Parse`] if anything is not clean. The formatter
-/// only ever operates on programs that parse without diagnostics.
-fn parse_clean(source: &Source) -> Result<noeta_ast::Program, FmtError> {
-    let lexed = noeta_lexer::lex(source);
+/// Parse an already-lexed `source`, failing with [`FmtError::Parse`] if lexing or parsing produced
+/// any diagnostic. The formatter only ever operates on programs that parse cleanly.
+fn parse_checked(
+    source: &Source,
+    lexed: &noeta_lexer::Lexed,
+) -> Result<noeta_ast::Program, FmtError> {
     let parsed = noeta_parser::parse(source, &lexed.tokens);
-    let mut diagnostics = lexed.diagnostics;
+    let mut diagnostics = lexed.diagnostics.clone();
     diagnostics.extend(parsed.diagnostics);
     if !diagnostics.is_empty() {
         return Err(FmtError::Parse(diagnostics));
     }
     Ok(parsed.program)
+}
+
+/// Lex (no trivia) + parse `source` cleanly — the reparse arm of the safety gate, which only needs
+/// the AST.
+fn parse_clean(source: &Source) -> Result<noeta_ast::Program, FmtError> {
+    parse_checked(source, &noeta_lexer::lex(source))
 }
 
 #[cfg(test)]
@@ -181,6 +195,17 @@ mod tests {
     fn reindents_a_top_level_fn() {
         let src = "fn greet(name) {\n            echo name\n}";
         assert_eq!(fmt(src).unwrap(), "fn greet(name) {\n    echo name\n}\n");
+    }
+
+    #[test]
+    fn preserves_semicolons_as_written() {
+        // Kept where present, never added where absent (per-statement author choice).
+        assert_eq!(fmt("echo 1;").unwrap(), "echo 1;\n");
+        assert_eq!(fmt("echo 1").unwrap(), "echo 1\n");
+        assert_eq!(
+            fmt("fn f(a) {\n echo a;\n return a\n}").unwrap(),
+            "fn f(a) {\n    echo a;\n    return a\n}\n"
+        );
     }
 
     #[test]
