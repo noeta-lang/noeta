@@ -151,6 +151,14 @@ own; these are additive capabilities.
 | **HTTP library** — the first out-of-tree-shaped async client | extern-types X5 design | Its own arc: a network `Host` capability + a deterministic virtual network (the Vfs analog) + a real stack. The `ExternIo` seam is ready for it (`RealBody::Async`). |
 | **Async extern-type *methods*** | extern-types X5 | Falls out free (`TypeDispatch` returns `NativeOut`, so a method may return `Spawn`) — untested until a client needs one. |
 
+## Crypto (crypto arc — the module is COMPLETE, these are follow-ons)
+
+| Item | Source | Trigger to implement |
+|---|---|---|
+| **blake3** | crypto C0 scope cut | A user wanting fast tree hashing. The crate defaults to asm/SIMD builds (build-story review needed) — behind the same digest surface (`blake3(data)`, `blake3_hasher()`). |
+| **argon2 / scrypt** | crypto C4 scope cut | Password-hash *pluggability* design (an algorithm-tagged verify like bcrypt's modular-crypt, across algorithms). bcrypt covers the M2 story. |
+| **Encryption (AES-GCM / chacha20-poly1305)** | crypto C0 scope cut | A real use case arrives WITH a key-management story — an encrypt API without one invites hardcoded keys. |
+
 ## Backend divergences (latent — would fail the differential if a corpus case reached it)
 
 | Item | Source | Trigger / note |

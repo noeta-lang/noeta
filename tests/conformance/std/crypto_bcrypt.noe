@@ -1,0 +1,29 @@
+// bcrypt + crypto-grade randomness (crypto arc C4) — the module's Host-entropy corner. The salt
+// and the random bytes come from the `Entropy` capability: the sandbox stream is seeded, so the
+// hash string and byte values are EXACT here (the differential pins them), while the real host
+// draws OS entropy. Cost 4 = bcrypt's minimum, keeping the corpus fast.
+// expect: stdout "$2b$04$O3ZUBZ0DL49nh9EeMU9zSe07.DrcvAhfCj.4/S/TL28PS6N54lELS"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "12"
+// expect: stdout "true"
+// expect: stdout "fe0612e395ab3d91a2757f60"
+// expect: stdout "0"
+// expect: stdout "true"
+// expect: exit 0
+use std.{crypto}
+
+h = crypto.bcrypt_hash("hunter2", 4)
+echo h
+echo crypto.bcrypt_verify("hunter2", h)
+echo crypto.bcrypt_verify("wr0ng", h)
+
+r = crypto.random_bytes(12)
+echo r.len()
+echo r is bytes
+echo r.to_hex()
+echo crypto.random_bytes(0).len()
+
+// A published external vector (openwall's "U*U" case): the modular-crypt format is
+// self-describing, so verification is pure and works on hashes from anywhere (here a `$2a$`).
+echo crypto.bcrypt_verify("U*U", "$2a$05$CCCCCCCCCCCCCCCCCCCCC.E5YPO9kmyuRGyh0XouQYb4YMJKvyOeW")

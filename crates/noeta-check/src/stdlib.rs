@@ -71,6 +71,7 @@ fn sig_to_type(sig: &registry::SigType) -> Type {
         SigType::Map(k, v) => Type::Map(Box::new(sig_to_type(k)), Box::new(sig_to_type(v))),
         SigType::Future(t) => Type::Named(FUTURE.to_string(), vec![sig_to_type(t)]),
         SigType::Named(n) => Type::Named((*n).to_string(), vec![]),
+        SigType::Union(members) => Type::union(members.iter().map(sig_to_type)),
     }
 }
 
@@ -230,7 +231,8 @@ fn iterator_method(name: &str, elem: &Type) -> Option<Type> {
 
 fn bytes_method(name: &str) -> Option<Type> {
     Some(match name {
-        "len" => Type::Int, // the buffer length in bytes
+        "len" => Type::Int,       // the buffer length in bytes
+        "to_hex" => Type::String, // lowercase hex rendering (crypto arc C1)
         _ => return None,
     })
 }
@@ -365,7 +367,7 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         Type::List(elem) => list_params(name, elem),
         Type::Set(elem) => set_params(name, elem),
         Type::Map(key, val) => map_params(name, key, val),
-        Type::Bytes if name == "len" => Some(vec![]),
+        Type::Bytes if name == "len" || name == "to_hex" => Some(vec![]),
         Type::Named(n, args) if n == ITERATOR => {
             iterator_params(name, args.first().unwrap_or(&Type::Dyn))
         }

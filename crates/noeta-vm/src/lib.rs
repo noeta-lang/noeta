@@ -5476,6 +5476,11 @@ impl<'m> Vm<'m> {
                 .or_else(|| v.as_string().map(|s| s.chars().count()))
                 .or_else(|| v.bytes_len())
                 .map(|n| Value::int(n as i64))
+        } else if method == "to_hex" {
+            // Lowercase hex rendering of a `bytes` buffer (crypto arc C1) — the shared helper,
+            // so both backends print digests identically.
+            v.bytes_data()
+                .map(|b| Value::string(&noeta_stdlib::bytes_to_hex(&b)))
         } else if method == "enumerate" && matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
         {
             // A list of `(index, value)` **tuples** (object-model slice 4b), matching the

@@ -1,0 +1,5 @@
+// bcrypt cost outside 4..=31 is a runtime argument error (crypto C4) — out of range would
+// otherwise panic deep inside the blowfish key setup.
+// expect: error E0007 at 5:6
+use std.{crypto}
+echo crypto.bcrypt_hash("pw", 99)

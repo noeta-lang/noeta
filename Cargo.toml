@@ -94,6 +94,17 @@ compact_str = "0.9"
 # directly for that `Equivalent`-based lookup API.
 equivalent = "1"
 hashbrown = { version = "0.17", default-features = false, features = ["equivalent", "inline-more", "default-hasher"] }
+# std.crypto (crypto arc): RustCrypto digest family — never hand-roll primitives. sha1/md5 ship
+# for interop (uuid_v5, legacy checksums), documented as non-collision-resistant. `bcrypt` is the
+# password hasher; its salt comes through the Host `Entropy` capability, never self-generated.
+sha1 = { version = "0.10", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+md-5 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+# Constant-time equality for secret comparison (`crypto.constant_time_eq`, and the property the
+# hmac verify twins rely on) — already in-tree transitively via `hmac`; never hand-roll this.
+subtle = { version = "2", default-features = false }
+bcrypt = { version = "0.17", default-features = false, features = ["alloc"] }
 
 [workspace.lints.rust]
 # Quarantine unsafe: forbidden workspace-wide in M0. The first crates that may
