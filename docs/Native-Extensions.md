@@ -9,9 +9,23 @@ Native modules (like `math`, `json`, `fs`) are not hardcoded into the runtime �
 
 Hardcoding native modules created four parallel seams that could drift: a `NativeModule` enum, per-backend `call_vec`/`call_json`/… dispatch, and checker tables of known modules. The registry dismantles all four into one mechanism — and it makes differential agreement *structural*: one shared dispatch function per module, not two mirrored copies. The design test the work held itself to: *could `vec`/`quat` be deleted from core and re-added as a third-party crate with no API change?*
 
+## Two crates: `noeta-native` (the ABI) and `noeta-stdlib` (the batteries)
+
+The contract a native extension implements lives in its own lean crate, **`noeta-native`**: the
+[registry] vocabulary (`Extension`/`ExtModule`/`ExtType`/`ExtFn`/`SigType`/`RetTy`/`TypeRecipe`,
+`NativeValue`/`NativeOut`/`Scalar`), the `Host` capability seam and its traits, the `ExternValue`
+contract (`ExternBox`), `MapKey`, the async `ExternIo`/`Executor` seam, and the dep-free Ring 1
+primitives. Its only dependencies are `compact_str`/`equivalent`/`hashbrown` — none of core's
+batteries (no crypto, uuid, JSON, or HTTP client). **`noeta-stdlib`** depends on it, re-exports it
+(`pub use noeta_native::*` — the `core`/`std` relationship), and layers the concrete `std` modules
+and their heavy deps on top. So a third-party extension (and internal mid-end crates like
+`noeta-ir`) links the lean ABI, not the whole standard library. This is an *internal* boundary; the
+*published/frozen* ABI is still a package-manager-milestone concern (see Status).
+
 ## The seam
 
-The registry (`noeta-stdlib`, `registry.rs`) is built on a **neutral value-marshalling** layer:
+The registry vocabulary (`noeta-native`, `registry.rs`; the concrete `StdExtension` registration and
+dispatch router are in `noeta-stdlib`) is built on a **neutral value-marshalling** layer:
 
 - `NativeValue` — the argument view: `Scalar`, `Str`, `Bytes`, `Object { fields }`, `Packed { layout, bytes }`, `List`, and so on.
 - `NativeOut` — the result view.
@@ -54,7 +68,8 @@ The motivating consumer is a native function that builds a value of a type named
 - **Shipped (extern-types arc):** `ExtType`/`ExternValue` first-class types (`Uuid`, and `FileHandle` migrated off its hand-threaded hosting); extern map/set keys (`Map<Uuid, T>`); the `ExternIo` async seam (`fs.*_async` migrated off its per-backend intercepts, async metadata twins added with zero backend edits).
 - **Shipped (crypto arc):** `std.crypto` (digests, HMAC, bcrypt, `random_bytes`) and the incremental `Hasher` — the third extern type, landed with zero backend edits, proving the mutable + host-free corner; `SigType::Union` (`string|bytes` signature positions, mapped onto declared unions).
 - **Shipped (http arc):** the seventh `Host` capability (**Network**) — a pure sandbox responder + a real reqwest/rustls client; `std.http` (sync + async verbs, incl. QUERY) returning a `Response` extern type; the async path drives `RealBody::Async` with a real future; and **general optional-param support** (`SigType::Optional`) for registry functions and extern-type methods.
-- **Deferred:** columnar kernels via extensions (blocked on a raw-buffer ABI capability), Host-coupled finalizers (GC free cannot reach the Host — buffered types keep explicit `close()`), and the package/dependency manager that would let `vec`/`quat` physically leave core and third parties register their own crates. Extracting a stable `noeta-native` ABI crate is planned for the package-manager milestone.
+- **Shipped (P-NATIVE):** the ABI (registry vocabulary, `Host` seam, `ExternValue`, `MapKey`, the async `ExternIo`/`Executor` seam, and the Ring 1 primitives) extracted into the lean `noeta-native` crate; `noeta-stdlib` re-exports it and keeps only the concrete `std` modules + their heavy deps. `noeta-ir`/`noeta-bytecode` now build without the crypto/uuid tree. `Uuid` became a newtype in the process — the orphan-rule pattern any extension uses to expose a foreign type.
+- **Deferred:** columnar kernels via extensions (blocked on a raw-buffer ABI capability), Host-coupled finalizers (GC free cannot reach the Host — buffered types keep explicit `close()`), and the package/dependency manager that would let `vec`/`quat` physically leave core and third parties register their own crates. That milestone is where the ABI gets *frozen/versioned* (a published contract) and the static std-only registry becomes a dynamic multi-extension registry — the crate boundary already exists (P-NATIVE); freezing it does not.
 
 ## See also
 
