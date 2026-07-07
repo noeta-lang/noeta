@@ -244,10 +244,9 @@ impl VmSession {
         // A trailing bare expression is rewritten to `mut <sentinel> = expr;` so the IR path captures
         // its value in a global slot we read back below — pure AST surgery, backend-agnostic.
         let (lowerable, captures_value) = rewrite_trailing_expr(program);
-        let module = self
-            .compiler
-            .extend(&lowerable)
-            .expect("checkerless lowering is total over parsed programs (the REPL only feeds parsed input)");
+        let module = self.compiler.extend(&lowerable).expect(
+            "checkerless lowering is total over parsed programs (the REPL only feeds parsed input)",
+        );
 
         let mut state = self
             .state
@@ -342,10 +341,7 @@ impl VmSession {
             .enumerate()
             .filter(|(slot, name)| {
                 name.as_str() != SENTINEL
-                    && state
-                        .globals
-                        .get(*slot)
-                        .is_some_and(|v| !v.is_unbound())
+                    && state.globals.get(*slot).is_some_and(|v| !v.is_unbound())
             })
             .map(|(_, name)| name.clone())
             .collect()
@@ -477,7 +473,10 @@ mod tests {
         let before = noeta_value::live_count();
         let mut session = sandbox_session();
         assert_eq!(eval(&mut session, "mut x = 10;"), "");
-        assert_eq!(eval(&mut session, "fn double(n: int): int { return n * 2; }"), "");
+        assert_eq!(
+            eval(&mut session, "fn double(n: int): int { return n * 2; }"),
+            ""
+        );
         // A later entry sees the earlier binding and the earlier function.
         assert_eq!(eval(&mut session, "echo double(x);"), "20\n");
         // Rebinding a name in a later entry updates it (same slot).

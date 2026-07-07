@@ -15,13 +15,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
-use noeta_ast::{BinaryOp, Expr, Stmt};
+use noeta_ast::{Expr, Stmt};
 use noeta_bytecode::Module;
 use noeta_lexer::lex;
 use noeta_parser::parse;
 use noeta_span::{Source, SourceId, SourceMap};
-use noeta_value::{Value as RuntimeValue, apply_binary, apply_unary};
-use noeta_vm::{DebugAction, DebugFrame, DebugView, Debugger};
+use noeta_vm::{DebugAction, DebugEvalOutcome, DebugEvalRequest, DebugView, Debugger};
 use serde_json::{Value, json};
 
 use crate::MAIN_THREAD_ID;
@@ -36,45 +35,17 @@ pub enum Resume {
     /// Abandon the run (the client disconnected).
     Terminate,
     /// Evaluate `expr` against the paused frame at snapshot index `frame` (as the client numbers stack
-    /// frames, innermost first) and send the result back on `reply`. Handled **without leaving the
-    /// pause** — a watch/hover re-query must not resume the program — so the worker services it and
-    /// loops back to waiting. Read-only: variable paths, literals, and operators (D5/D5.1); a call
-    /// (which would run user code) is the D5.2 follow-on.
+    /// frames, innermost first) and send the rendered result back on `reply`. The debugger cannot run
+    /// this itself — resolving a call needs `&mut Vm` — so it hands the request to the VM (via
+    /// [`DebugAction::Evaluate`]); the program **stays paused** throughout, so a watch/hover re-query
+    /// never resumes it. `allow_calls` is `false` for a hover (side-effect-free): a call then errors
+    /// rather than running.
     Evaluate {
-        expr: String,
+        expr: Expr,
         frame: usize,
-        reply: Sender<EvalReply>,
+        allow_calls: bool,
+        reply: Sender<DebugEvalOutcome>,
     },
-}
-
-/// The outcome of an [`Resume::Evaluate`], sent from the run worker back to the adapter thread. Runtime
-/// [`RuntimeValue`]s are thread-local (`!Send`), so the value is resolved *and rendered* on the worker
-/// and only its strings cross back.
-pub struct EvalReply {
-    /// The rendered value on success, or the error message on failure.
-    pub text: String,
-    /// The value's type (surface spelling) on success; `None` on failure.
-    pub ty: Option<String>,
-    /// Whether `text` is a value (`true`) or an error message (`false`).
-    pub ok: bool,
-}
-
-impl EvalReply {
-    fn value(text: String, ty: String) -> EvalReply {
-        EvalReply {
-            text,
-            ty: Some(ty),
-            ok: true,
-        }
-    }
-
-    fn error(msg: impl Into<String>) -> EvalReply {
-        EvalReply {
-            text: msg.into(),
-            ty: None,
-            ok: false,
-        }
-    }
 }
 
 /// A source-line step, as the DAP `next` / `stepIn` / `stepOut` requests ask for it. Stepping is
@@ -212,6 +183,12 @@ pub struct DapDebugger {
     /// The step in progress, if the last resume was a step. `Some` between a `Resume::Step` and the
     /// instruction it lands on; `None` while running freely.
     step: Option<StepState>,
+    /// Whether we are already inside a stop, waiting for a resume. Set when a pause first announces
+    /// itself (captures the stack + emits `stopped`); it lets the VM re-consult the debugger after
+    /// servicing an evaluate (the D5.2 trampoline leaves and re-enters `before_op`) without
+    /// re-announcing the same stop. Cleared when a terminal resume (continue / step / terminate)
+    /// actually leaves the pause.
+    mid_pause: bool,
 }
 
 impl DapDebugger {
@@ -234,6 +211,7 @@ impl DapDebugger {
             events,
             resume,
             step: None,
+            mid_pause: false,
         }
     }
 
@@ -255,31 +233,52 @@ impl DapDebugger {
                 "allThreadsStopped": true,
             }),
         ));
-        // Loop rather than a single `recv`: an `Evaluate` (a watch/hover query) is answered in place
-        // and does *not* leave the pause, so several may arrive before the command that resumes.
-        let action = loop {
-            match self.resume.recv() {
-                // Ignore any step/continue that raced a termination request.
-                _ if self.terminate.load(Ordering::Relaxed) => break DebugAction::Terminate,
-                Ok(Resume::Continue) => break DebugAction::Continue,
-                // Arm the step relative to this pause point, then resume; `before_op` lands it.
-                Ok(Resume::Step(mode)) => {
-                    self.step = Some(StepState {
-                        mode,
-                        origin_depth: view.depth(),
-                        origin_line: top_line(view, &self.sources),
-                    });
-                    break DebugAction::Continue;
-                }
-                // A read-only evaluate: resolve against the live frames on this (the run) thread and
-                // reply, then keep waiting — the program stays paused.
-                Ok(Resume::Evaluate { expr, frame, reply }) => {
-                    let _ = reply.send(evaluate_readonly(view, frame, &expr));
-                }
-                // Terminate, or the adapter dropped the channel (session gone).
-                Ok(Resume::Terminate) | Err(_) => break DebugAction::Terminate,
+        self.mid_pause = true;
+        self.wait(view)
+    }
+
+    /// Block for one resume command. Continue / step / terminate leave the pause (via
+    /// [`DapDebugger::finish`]); an [`Resume::Evaluate`] is handed to the VM as
+    /// [`DebugAction::Evaluate`] — the VM services it with `&mut self`, then re-consults `before_op`,
+    /// which (seeing `mid_pause`) calls straight back here without re-announcing the stop. That
+    /// re-entry is how several watches/hovers get answered while the program stays parked at one
+    /// instruction — so this handles exactly one command and returns, no loop of its own.
+    fn wait(&mut self, view: &DebugView) -> DebugAction {
+        match self.resume.recv() {
+            // Ignore any step/continue that raced a termination request.
+            _ if self.terminate.load(Ordering::Relaxed) => self.finish(DebugAction::Terminate),
+            Ok(Resume::Continue) => self.finish(DebugAction::Continue),
+            // Arm the step relative to this pause point, then resume; `before_op` lands it.
+            Ok(Resume::Step(mode)) => {
+                self.step = Some(StepState {
+                    mode,
+                    origin_depth: view.depth(),
+                    origin_line: top_line(view, &self.sources),
+                });
+                self.finish(DebugAction::Continue)
             }
-        };
+            // Hand the evaluate to the VM (it may run a call). We stay paused: `mid_pause` remains set
+            // and the captured stack is left in place, so `before_op` resumes waiting after.
+            Ok(Resume::Evaluate {
+                expr,
+                frame,
+                allow_calls,
+                reply,
+            }) => DebugAction::Evaluate(DebugEvalRequest {
+                expr: Box::new(expr),
+                frame,
+                allow_calls,
+                reply,
+            }),
+            // Terminate, or the adapter dropped the channel (session gone).
+            Ok(Resume::Terminate) | Err(_) => self.finish(DebugAction::Terminate),
+        }
+    }
+
+    /// Leave the pause on a terminal resume: forget the in-flight capture and drop the `mid_pause`
+    /// latch so the next stop announces itself afresh.
+    fn finish(&mut self, action: DebugAction) -> DebugAction {
+        self.mid_pause = false;
         *self.paused.lock().unwrap() = None;
         action
     }
@@ -315,6 +314,11 @@ impl DapDebugger {
 
 impl Debugger for DapDebugger {
     fn before_op(&mut self, proto: u32, pc: usize, view: &DebugView) -> DebugAction {
+        // Re-entry after the VM serviced an evaluate (the D5.2 trampoline left and re-entered here):
+        // we are still parked at the same instruction, so resume waiting without re-announcing it.
+        if self.mid_pause {
+            return self.wait(view);
+        }
         if self.terminate.load(Ordering::Relaxed) {
             return DebugAction::Terminate;
         }
@@ -395,150 +399,11 @@ fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
     PausedState { frames }
 }
 
-/// Evaluate `expr` — a variable **path** — against the paused frame at snapshot index `frame`
-/// (innermost-first, matching how the client numbers stack frames), returning the value and its type.
-/// **Read-only**: it reads the live register window and walks fields/elements, never running user
-/// code — so it is safe as a hover query. A full expression (an operator, a call) returns a clear
-/// error pointing at D5.1 rather than pretending to evaluate it.
-///
-/// Runs on the run worker thread, where the paused `view`'s [`RuntimeValue`]s (and the heap they point
-/// into) are valid; only the rendered strings travel back to the adapter thread.
-fn evaluate_readonly(view: &DebugView, frame: usize, expr: &str) -> EvalReply {
-    // Snapshot frames are innermost-first; the `view` is bottom-first — invert the index.
-    let Some(view_idx) = view.depth().checked_sub(frame + 1) else {
-        return EvalReply::error(format!("no frame {frame} in the paused stack"));
-    };
-    let frame = view.frame(view_idx);
-    let Some(ast) = parse_expr(expr) else {
-        return EvalReply::error("could not parse the expression");
-    };
-    match resolve(&ast, &frame) {
-        Ok(value) => EvalReply::value(value.display(), render_type(value)),
-        Err(msg) => EvalReply::error(msg),
-    }
-}
-
-/// Evaluate a **read-only** expression against a frame's in-scope locals: a variable path (a name,
-/// chained `.field`, `[index]`), a literal, and arithmetic / comparison / logical / concat operators
-/// (via the VM's own [`apply_binary`] / [`apply_unary`], so the semantics match a real run). It never
-/// runs user code — no function or method *call* — so it is side-effect-free and safe even as a hover
-/// query; a call returns a clear error pointing at the follow-on that runs expressions in the paused
-/// VM (D5.2). This is the debugger-thread evaluator; the values it reads and builds live on this (the
-/// run) thread.
-fn resolve(expr: &Expr, frame: &DebugFrame) -> Result<RuntimeValue, String> {
-    match expr {
-        Expr::Ident { name, .. } => local(frame, name),
-        // Literal leaves. Primitives are word-sized (no heap); a string literal allocates a short-lived
-        // value — a negligible, non-checked leak on a debug run.
-        Expr::Int { value, .. } => Ok(RuntimeValue::int(*value)),
-        Expr::Float { value, .. } => Ok(RuntimeValue::float(*value)),
-        Expr::Bool { value, .. } => Ok(RuntimeValue::bool(*value)),
-        Expr::Str { value, .. } => Ok(RuntimeValue::string(value)),
-        Expr::Member { receiver, name, .. } => {
-            let recv = resolve(receiver, frame)?;
-            recv.field(name)
-                .ok_or_else(|| format!("value has no field `{name}`"))
-        }
-        Expr::Index {
-            receiver, index, ..
-        } => {
-            let recv = resolve(receiver, frame)?;
-            index_into(recv, index, frame)
-        }
-        // `&&` / `||` short-circuit — the right operand is evaluated only when needed, so an unreached
-        // side (`false && xs[99]`) never raises a spurious error. (`apply_binary` excludes these two.)
-        Expr::Binary {
-            op: BinaryOp::And,
-            lhs,
-            rhs,
-            ..
-        } => {
-            let l = resolve(lhs, frame)?;
-            if l.as_bool() == Some(false) {
-                Ok(RuntimeValue::bool(false))
-            } else {
-                resolve(rhs, frame)
-            }
-        }
-        Expr::Binary {
-            op: BinaryOp::Or,
-            lhs,
-            rhs,
-            ..
-        } => {
-            let l = resolve(lhs, frame)?;
-            if l.as_bool() == Some(true) {
-                Ok(RuntimeValue::bool(true))
-            } else {
-                resolve(rhs, frame)
-            }
-        }
-        Expr::Binary { op, lhs, rhs, .. } => {
-            let l = resolve(lhs, frame)?;
-            let r = resolve(rhs, frame)?;
-            apply_binary(*op, l, r).map_err(|e| e.text)
-        }
-        Expr::Unary { op, operand, .. } => {
-            let v = resolve(operand, frame)?;
-            apply_unary(*op, v).map_err(|e| e.text)
-        }
-        Expr::Call { .. } => Err(
-            "calling a function or method here would run user code — not yet \
-                                  supported (a debug-eval follow-on runs expressions in the paused \
-                                  VM, D5.2). Names, `.field`, `[index]`, and operators do work"
-                .to_string(),
-        ),
-        _ => Err(
-            "this expression form cannot be evaluated in a watch yet — supported: names, \
-                  `.field`, `[index]`, arithmetic / comparison / logical operators, and literals"
-                .to_string(),
-        ),
-    }
-}
-
-/// The current value of the in-scope local named `name` in `frame`.
-fn local(frame: &DebugFrame, name: &str) -> Result<RuntimeValue, String> {
-    frame
-        .locals()
-        .find(|(n, _, _)| *n == name)
-        .map(|(_, _, v)| v)
-        .ok_or_else(|| format!("no variable `{name}` in scope"))
-}
-
-/// Index into a list (by an integer) or a map (by a string key). The index is any read-only
-/// expression that evaluates to an int or a string — a literal, a variable, or a computed value
-/// (`xs[i + 1]`).
-fn index_into(
-    recv: RuntimeValue,
-    index: &Expr,
-    frame: &DebugFrame,
-) -> Result<RuntimeValue, String> {
-    let key = resolve(index, frame)?;
-    if let Some(i) = key.as_int() {
-        if i < 0 {
-            return Err(format!("negative index {i}"));
-        }
-        recv.list_get(i as usize)
-            .ok_or_else(|| format!("index {i} is out of bounds"))
-    } else if let Some(s) = key.as_string() {
-        recv.map_get(&s).ok_or_else(|| format!("no key `{s}`"))
-    } else {
-        Err("an index must evaluate to an int (list position) or a string (map key)".to_string())
-    }
-}
-
-/// A value's type as surface syntax (`List<int>`), from its reified tag, falling back to the coarse
-/// kind name for an untagged primitive — the same rendering the Variables view uses.
-fn render_type(value: RuntimeValue) -> String {
-    value
-        .reflect()
-        .map(|t| t.to_string())
-        .unwrap_or_else(|| value.type_name().to_string())
-}
-
 /// Parse a single expression string (appended with `;` so it parses as a trailing bare expression);
-/// `None` if it does not lex/parse cleanly.
-fn parse_expr(expr: &str) -> Option<Expr> {
+/// `None` if it does not lex/parse cleanly. The adapter parses a watch string here, then hands the
+/// [`Expr`] to the VM (via [`Resume::Evaluate`]) which walks it — evaluation lives on the VM so a call
+/// can run through the real call machinery (D5.2).
+pub fn parse_expr(expr: &str) -> Option<Expr> {
     let source = Source::new(SourceId::FIRST, "<eval>", format!("{expr};"));
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
