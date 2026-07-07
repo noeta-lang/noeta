@@ -56,7 +56,8 @@ use cranelift_codegen::ir::{
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{FuncId, Linkage, Module as _, default_libcall_names};
+use cranelift_module::{FuncId, Linkage, Module as ClifModule, default_libcall_names};
+use cranelift_object::{ObjectBuilder, ObjectModule};
 
 use noeta_ast::BinaryOp;
 use noeta_bytecode::{Const, Module, Op, Reg};
@@ -230,9 +231,14 @@ pub struct CompileBreakdown {
 /// The cache is indexed by prototype index (into [`noeta_bytecode::Module::protos`]) — the same key
 /// the interpreter dispatches on. `compiled[p]` is `Some` once prototype `p` has been JIT-compiled;
 /// the interpreter consults it at frame entry.
-pub struct Jit {
-    /// Owns every finalized machine-code page; must outlive every [`CompiledFn`] handed out.
-    module: JITModule,
+pub struct Jit<M: ClifModule = JITModule> {
+    /// The Cranelift module backend. Generic over `cranelift_module::Module` (P-AOT L3.0): the
+    /// runtime JIT uses `JITModule` (owns finalized machine-code pages — must outlive every
+    /// [`CompiledFn`] handed out), and the ahead-of-time path uses `cranelift_object::ObjectModule`
+    /// (accumulates the same bodies into a relocatable object file). Every emit routine drives this
+    /// through the `Module` trait alone, so the *same* IR construction targets both — monomorphized,
+    /// so the JIT path keeps zero dispatch overhead.
+    module: M,
     /// Finalized entry points, keyed by prototype index. `None` = not (yet) compiled → tier 0.
     compiled: Vec<Option<CompiledFn>>,
     /// Fast-convention entry points (P-JSSA S4.1), keyed by prototype index: the type-erased
@@ -278,7 +284,7 @@ pub struct Jit {
     fb_ctx: FunctionBuilderContext,
 }
 
-impl std::fmt::Debug for Jit {
+impl<M: ClifModule> std::fmt::Debug for Jit<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Jit")
             .field(
@@ -291,34 +297,29 @@ impl std::fmt::Debug for Jit {
     }
 }
 
-impl Jit {
-    /// Build a JIT engine, registering the runtime-helper symbols the generated code may call.
-    /// Each `(name, ptr)` is a `*const u8` cast of an `extern "C"` Rust function the VM owns;
-    /// Cranelift resolves calls to `name` against `ptr`. The VM passes at least [`OBSERVE_HELPER`].
+impl<M: ClifModule> Jit<M> {
+    /// Build the host target ISA under the JIT's codegen settings (P-AOT L3.0). Shared by every
+    /// backend, so the AOT object path compiles under the *same* flags as the runtime JIT.
     ///
-    /// Returns `Err` with a human-readable message if the host ISA is unavailable or Cranelift
-    /// rejects the flags — the VM treats that as "JIT unavailable, stay tier 0".
-    pub fn new(
-        helpers: &[(&str, *const u8)],
-        layout: FrameLayout,
-        frame_template: *const u8,
-    ) -> Result<Jit, String> {
-        if !layout.frame_size.is_multiple_of(8) {
-            return Err("Frame size must be word-aligned for the native frame push".to_string());
-        }
+    /// `NOETA_JIT_OPT` is a **dev measurement knob** (P-PAR S4): it lets the compile-time /
+    /// code-quality trade be A/B'd without a rebuild (`none` compiles far faster, `speed` runs
+    /// faster). Semantics are identical at every level, so the jit-differential is unaffected; the
+    /// shipped default stays `speed`. `NOETA_JIT_VERIFY=1|0` overrides the verifier (default: on
+    /// under `debug_assertions`, off in release — P-JCT C1).
+    fn make_isa(is_pic: bool) -> Result<cranelift_codegen::isa::OwnedTargetIsa, String> {
         let mut flags = settings::builder();
         flags
             .set("use_colocated_libcalls", "false")
             .map_err(|e| e.to_string())?;
-        flags.set("is_pic", "false").map_err(|e| e.to_string())?;
+        // The runtime JIT emits absolute-addressed code into its own W^X pages (`is_pic=false`); the
+        // AOT object path wants position-independent, relocatable code (`is_pic=true`) so the linker
+        // can place it. The JIT keeps `false` — its codegen is byte-identical to pre-L3.0.
+        flags
+            .set("is_pic", if is_pic { "true" } else { "false" })
+            .map_err(|e| e.to_string())?;
         // P-JSSA: the SSA promotion leans on Cranelift's mid-end (block-param coalescing, GVN,
         // dead-load removal of unused entry inits). The default `opt_level=none` was fine for the
         // memory-form codegen; with block params it is not.
-        //
-        // `NOETA_JIT_OPT` is a **dev measurement knob** (P-PAR S4): it lets the compile-time /
-        // code-quality trade be A/B'd without a rebuild (`none` compiles far faster, `speed` runs
-        // faster). Semantics are identical at every level, so the jit-differential is unaffected;
-        // the shipped default stays `speed`.
         let opt_level = std::env::var("NOETA_JIT_OPT").unwrap_or_else(|_| "speed".to_string());
         flags
             .set("opt_level", &opt_level)
@@ -326,7 +327,7 @@ impl Jit {
         // P-JCT C1: Cranelift's IR verifier defaults **on** and re-checks the function at every
         // pass boundary — a pure debug tool (it never changes codegen) that dominated compile
         // time. Debug builds (the test suites, the jit-differential oracle in CI) keep it as a
-        // safety net; release builds turn it off. `NOETA_JIT_VERIFY=1|0` overrides either way.
+        // safety net; release builds turn it off.
         let verify = match std::env::var("NOETA_JIT_VERIFY") {
             Ok(v) => v != "0",
             Err(_) => cfg!(debug_assertions),
@@ -335,14 +336,25 @@ impl Jit {
             .set("enable_verifier", if verify { "true" } else { "false" })
             .map_err(|e| e.to_string())?;
         let isa_builder = cranelift_native::builder().map_err(|m| m.to_string())?;
-        let isa = isa_builder
+        isa_builder
             .finish(settings::Flags::new(flags))
-            .map_err(|e| e.to_string())?;
-        let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
-        for (name, ptr) in helpers {
-            builder.symbol(*name, *ptr);
+            .map_err(|e| e.to_string())
+    }
+
+    /// Finish building a `Jit<M>` around an already-constructed `module`: declare the runtime-helper
+    /// imports and the codegen context (P-AOT L3.0). Everything here is `Module`-trait-only, so both
+    /// the runtime JIT (`JITModule`, via [`Jit::new`]) and the AOT object backend (`ObjectModule`,
+    /// via [`Jit::new_object`]) share it. The helper `FuncId`s it returns are `Linkage::Import`
+    /// symbols: the JIT resolves them to the registered Rust `extern "C"` pointers, the object path
+    /// leaves them as relocations for the final link against the runtime crate.
+    fn from_module(
+        mut module: M,
+        layout: FrameLayout,
+        frame_template: *const u8,
+    ) -> Result<Jit<M>, String> {
+        if !layout.frame_size.is_multiple_of(8) {
+            return Err("Frame size must be word-aligned for the native frame push".to_string());
         }
-        let mut module = JITModule::new(builder);
         let ptr_ty = module.target_config().pointer_type();
         // `noeta_jit_observe(vm: ptr)` and `noeta_jit_note_global_bound(vm: ptr, g: i32)`, declared once.
         let mut observe_sig = module.make_signature();
@@ -476,41 +488,6 @@ impl Jit {
         self.native_count
     }
 
-    /// Compile prototype `proto` of `module` and cache its entry point, returning it. A J1-eligible
-    /// prototype gets a native integer body; anything else gets a bail stub (→ interpreted).
-    /// Idempotent: a second call for an already-compiled prototype returns the cached entry point.
-    pub fn compile(&mut self, module: &Module, proto: usize) -> Result<CompiledFn, String> {
-        if proto >= self.compiled.len() {
-            let n = module.protos.len().max(proto + 1);
-            self.compiled.resize(n, None);
-            self.fast_compiled.resize(n, None);
-        }
-        if let Some(f) = self.compiled[proto] {
-            return Ok(f);
-        }
-        let compile_start = std::time::Instant::now();
-        let chunk = &module.protos[proto];
-        let f = if is_eligible(chunk) {
-            let f = self.emit_int_body(module, proto, false)?;
-            self.native_count += 1;
-            // S4.1: also compile the fast-convention body where the prototype supports the
-            // frameless-window contract; direct calls to it then skip the window fill, the
-            // argument copy, and the helper-side return protocol.
-            if fast_ok(chunk) {
-                let ff = self.emit_int_body(module, proto, true)?;
-                self.fast_compiled[proto] = Some(ff as usize);
-            }
-            f
-        } else {
-            self.emit_bail_stub(proto)?
-        };
-        self.compiled[proto] = Some(f);
-        let ns = compile_start.elapsed().as_nanos() as u64;
-        self.compile_ns_total += ns;
-        self.compile_ns_max = self.compile_ns_max.max(ns);
-        Ok(f)
-    }
-
     /// Total wall time spent compiling across the run, in nanoseconds (P-PAR S0c).
     pub fn compile_ns_total(&self) -> u64 {
         self.compile_ns_total
@@ -602,36 +579,10 @@ impl Jit {
         Ok(func_id)
     }
 
-    /// Finalize a defined `func_id` to its executable entry point — the JIT-only tail (relocations
-    /// + W^X page flip via `finalize_definitions`, then `get_finalized_function`). Split out of
-    /// body emission (P-AOT L3.0) so the shared codegen ([`define_body`](Self::define_body)) carries
-    /// no runtime-JIT dependency; the AOT path never calls this (it emits an object file instead).
-    fn finalize_ptr(&mut self, func_id: FuncId) -> Result<CompiledFn, String> {
-        let finalize_start = std::time::Instant::now();
-        self.module
-            .finalize_definitions()
-            .map_err(|e| e.to_string())?;
-        self.breakdown.finalize_ns += finalize_start.elapsed().as_nanos() as u64;
-        self.breakdown.bodies += 1;
-        let code = self.module.get_finalized_function(func_id);
-        // SAFETY: `code` is a finalized function whose Cranelift signature is exactly the
-        // `extern "C" fn(ptr, ptr, usize) -> u32` this transmutes to, and it stays valid for as long
-        // as `self.module` (which owns the code page) lives.
-        Ok(unsafe { std::mem::transmute::<*const u8, CompiledFn>(code) })
-    }
-
-    /// Define the current `self.ctx` under `name` and immediately finalize it to an entry point —
-    /// the runtime-JIT convenience that pairs [`define_body`](Self::define_body) with
-    /// [`finalize_ptr`](Self::finalize_ptr), reproducing the original single-step `finalize`.
-    fn finalize(&mut self, name: &str) -> Result<CompiledFn, String> {
-        let func_id = self.define_body(name)?;
-        self.finalize_ptr(func_id)
-    }
-
     /// Emit the bail stub for an ineligible prototype: call the `noeta_jit_observe` helper (proving
     /// the helper ABI links and the VM pointer round-trips) and return `0` — "interpret the whole
     /// frame".
-    fn emit_bail_stub(&mut self, proto: usize) -> Result<CompiledFn, String> {
+    fn emit_bail_stub(&mut self, proto: usize) -> Result<FuncId, String> {
         self.module.clear_context(&mut self.ctx);
         self.ctx.func.signature = self.abi_signature();
         {
@@ -647,7 +598,7 @@ impl Jit {
             b.ins().return_(&[zero]);
             b.finalize();
         }
-        self.finalize(&format!("noeta_jit_stub{proto}"))
+        self.define_body(&format!("noeta_jit_stub{proto}"))
     }
 
     /// Emit the native integer body for a J1-eligible prototype (see the module docs). One Cranelift
@@ -658,7 +609,7 @@ impl Jit {
         module: &Module,
         proto: usize,
         fast: bool,
-    ) -> Result<CompiledFn, String> {
+    ) -> Result<FuncId, String> {
         let chunk = &module.protos[proto];
         let n = chunk.code.len();
         // A fast body is entered only fresh at pc 0 (no seam resume, no OSR — the interpreter
@@ -988,7 +939,131 @@ impl Jit {
             b.finalize();
         }
         let tag = if fast { "fast" } else { "proto" };
-        self.finalize(&format!("noeta_jit_{tag}{proto}"))
+        self.define_body(&format!("noeta_jit_{tag}{proto}"))
+    }
+}
+
+impl Jit<JITModule> {
+    /// Build a runtime JIT engine, registering the runtime-helper symbols the generated code may
+    /// call. Each `(name, ptr)` is a `*const u8` cast of an `extern "C"` Rust function the VM owns;
+    /// Cranelift resolves calls to `name` against `ptr`. The VM passes at least [`OBSERVE_HELPER`].
+    ///
+    /// Returns `Err` with a human-readable message if the host ISA is unavailable or Cranelift
+    /// rejects the flags — the VM treats that as "JIT unavailable, stay tier 0".
+    pub fn new(
+        helpers: &[(&str, *const u8)],
+        layout: FrameLayout,
+        frame_template: *const u8,
+    ) -> Result<Jit<JITModule>, String> {
+        let isa = Self::make_isa(false)?;
+        let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
+        for (name, ptr) in helpers {
+            builder.symbol(*name, *ptr);
+        }
+        let module = JITModule::new(builder);
+        Self::from_module(module, layout, frame_template)
+    }
+
+    /// Compile prototype `proto` of `module` and cache its entry point, returning it. A J1-eligible
+    /// prototype gets a native integer body; anything else gets a bail stub (→ interpreted).
+    /// Idempotent: a second call for an already-compiled prototype returns the cached entry point.
+    ///
+    /// This is the runtime-JIT driver: each body is defined ([`emit_int_body`](Self::emit_int_body)
+    /// / [`emit_bail_stub`](Self::emit_bail_stub) → [`define_body`](Self::define_body)) and then
+    /// immediately finalized to a code pointer via [`finalize_ptr`](Self::finalize_ptr) — the same
+    /// per-body finalize order the pre-L3.0 `compile` used, so behaviour and the compile breakdown
+    /// are unchanged. The AOT path (L3.1) reuses the *same* `emit_*` routines but defers finalize,
+    /// emitting an object file instead.
+    pub fn compile(&mut self, module: &Module, proto: usize) -> Result<CompiledFn, String> {
+        if proto >= self.compiled.len() {
+            let n = module.protos.len().max(proto + 1);
+            self.compiled.resize(n, None);
+            self.fast_compiled.resize(n, None);
+        }
+        if let Some(f) = self.compiled[proto] {
+            return Ok(f);
+        }
+        let compile_start = std::time::Instant::now();
+        let chunk = &module.protos[proto];
+        let f = if is_eligible(chunk) {
+            let main_id = self.emit_int_body(module, proto, false)?;
+            let f = self.finalize_ptr(main_id)?;
+            self.native_count += 1;
+            // S4.1: also compile the fast-convention body where the prototype supports the
+            // frameless-window contract; direct calls to it then skip the window fill, the
+            // argument copy, and the helper-side return protocol.
+            if fast_ok(chunk) {
+                let fast_id = self.emit_int_body(module, proto, true)?;
+                let ff = self.finalize_ptr(fast_id)?;
+                self.fast_compiled[proto] = Some(ff as usize);
+            }
+            f
+        } else {
+            let stub_id = self.emit_bail_stub(proto)?;
+            self.finalize_ptr(stub_id)?
+        };
+        self.compiled[proto] = Some(f);
+        let ns = compile_start.elapsed().as_nanos() as u64;
+        self.compile_ns_total += ns;
+        self.compile_ns_max = self.compile_ns_max.max(ns);
+        Ok(f)
+    }
+
+    /// Finalize a defined `func_id` to its executable entry point — the JIT-only tail (relocations
+    /// and the W^X page flip via `finalize_definitions`, then `get_finalized_function`). Split out of
+    /// body emission (P-AOT L3.0) so the shared codegen ([`define_body`](Self::define_body)) carries
+    /// no runtime-JIT dependency; the AOT path never calls this (it emits an object file instead).
+    fn finalize_ptr(&mut self, func_id: FuncId) -> Result<CompiledFn, String> {
+        let finalize_start = std::time::Instant::now();
+        self.module
+            .finalize_definitions()
+            .map_err(|e| e.to_string())?;
+        self.breakdown.finalize_ns += finalize_start.elapsed().as_nanos() as u64;
+        self.breakdown.bodies += 1;
+        let code = self.module.get_finalized_function(func_id);
+        // SAFETY: `code` is a finalized function whose Cranelift signature is exactly the
+        // `extern "C" fn(ptr, ptr, usize) -> u32` this transmutes to, and it stays valid for as long
+        // as `self.module` (which owns the code page) lives.
+        Ok(unsafe { std::mem::transmute::<*const u8, CompiledFn>(code) })
+    }
+}
+
+impl Jit<ObjectModule> {
+    /// Build an ahead-of-time object-file compiler (P-AOT L3.0): the *same* codegen as the runtime
+    /// JIT, but bodies are accumulated into a relocatable object instead of finalized to executable
+    /// pages. Runtime-helper calls become `Linkage::Import` relocations, resolved when the object is
+    /// linked against the runtime crate (L3.2). `name` is the object's module name.
+    ///
+    /// NOTE (L3.1): a native body bakes the VM's `frame_template` as an *absolute* pointer for its
+    /// frame push — meaningless in a relocatable object. Emitting native AOT bodies that *run*
+    /// correctly is L3.1's job (relocation- or helper-based frame push); L3.0 only proves the shared
+    /// codegen targets `ObjectModule` and finishes to object bytes.
+    pub fn new_object(
+        name: &str,
+        layout: FrameLayout,
+        frame_template: *const u8,
+    ) -> Result<Jit<ObjectModule>, String> {
+        let isa = Self::make_isa(true)?;
+        let builder = ObjectBuilder::new(isa, name.to_string(), default_libcall_names())
+            .map_err(|e| e.to_string())?;
+        let module = ObjectModule::new(builder);
+        Self::from_module(module, layout, frame_template)
+    }
+
+    /// Define prototype `proto`'s body into the object (native if J1-eligible, else a bail stub),
+    /// returning its `FuncId`. Reuses the runtime JIT's `emit_*` routines verbatim — no finalize.
+    pub fn compile_object(&mut self, module: &Module, proto: usize) -> Result<FuncId, String> {
+        let chunk = &module.protos[proto];
+        if is_eligible(chunk) {
+            self.emit_int_body(module, proto, false)
+        } else {
+            self.emit_bail_stub(proto)
+        }
+    }
+
+    /// Consume the compiler and emit the finished object-file bytes (ELF/Mach-O/COFF for the host).
+    pub fn finish(self) -> Result<Vec<u8>, String> {
+        self.module.finish().emit().map_err(|e| e.to_string())
     }
 }
 
@@ -3378,6 +3453,58 @@ mod tests {
         c.num_params = num_params;
         c.num_registers = num_registers;
         c
+    }
+
+    /// P-AOT L3.0: the *same* codegen the runtime JIT uses now targets a `cranelift_object`
+    /// backend. Compile a real program's every prototype into a relocatable object via
+    /// `Jit::<ObjectModule>` — reusing the identical `emit_*` routines, no finalize — and prove it
+    /// finishes to a well-formed host object file. This is the generalization proof; it does *not*
+    /// run the emitted code (a native body bakes an absolute `frame_template` pointer meaningless in
+    /// a relocatable object — running AOT bodies correctly is L3.1).
+    #[test]
+    fn object_backend_compiles_the_same_bodies_into_an_object_file() {
+        use noeta_compiler::compile;
+        use noeta_lexer::lex;
+        use noeta_parser::parse;
+        use noeta_span::{Source, SourceId};
+
+        let src = "fn add(a: int, b: int): int { return a + b }\necho add(2, 3)\n";
+        let source = Source::new(SourceId::FIRST, "aot_smoke.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).expect("program is in the VM subset");
+        assert!(
+            !module.protos.is_empty(),
+            "program has prototypes to compile"
+        );
+
+        // A well-formed-but-dummy layout + template: only their shapes matter for *emission* (offsets
+        // become constants; the template address is baked as an immediate, never dereferenced here).
+        let template = [0u8; 64];
+        let layout = FrameLayout {
+            frame_size: 64,
+            frame_align: 8,
+            proto_offset: 0,
+            base_offset: 8,
+            pc_offset: 16,
+            ret_dst_offset: 24,
+            ret_transform_offset: 32,
+            upvalues_offset: 40,
+            vec_ptr_word: 0,
+            vec_len_word: 1,
+            vec_cap_word: 2,
+        };
+        let mut aot = Jit::<ObjectModule>::new_object("aot_smoke", layout, template.as_ptr())
+            .expect("object backend builds");
+        for proto in 0..module.protos.len() {
+            aot.compile_object(&module, proto)
+                .unwrap_or_else(|e| panic!("proto {proto} defines into the object: {e}"));
+        }
+        let obj = aot.finish().expect("object file emits");
+        assert!(!obj.is_empty(), "the object file has bytes");
+        // The host object carries a valid header (ELF on Linux).
+        #[cfg(target_os = "linux")]
+        assert_eq!(&obj[..4], b"\x7fELF", "emits a host ELF object");
     }
 
     /// The ownership-transfer peephole marks a `Move dst <- src` immediately followed by `Drop src`.
