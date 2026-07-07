@@ -25,7 +25,8 @@ pub mod executor;
 pub use executor::RealExecutor;
 
 use noeta_stdlib::{
-    Clock, Entropy, Env, ErrorKind, FileReader, FileSystem, Ids, ReadSource, Rng, StdError,
+    Clock, Entropy, Env, ErrorKind, ExternBox, ExternIo, FileReader, FileSystem, Ids, NativeOut,
+    NetRequest, NetResponse, Network, ReadSource, RealBody, Rng, StdError,
 };
 use std::collections::HashMap;
 use tokio::fs::File;
@@ -57,13 +58,20 @@ pub struct RealHost {
     readers: HashMap<u64, BufReader<File>>,
     /// Monotonic id source for `readers`.
     next_reader_id: u64,
+    /// The real HTTP client for the `Network` capability (http arc H1). Cheap to clone (an inner
+    /// `Arc`), holds the connection pool; built once per host. Requests are driven on `runtime`.
+    http: reqwest::Client,
 }
 
 impl RealHost {
     /// Build a real host with its own `current_thread` runtime. Fails only if the OS
     /// refuses to create the runtime.
     pub fn new() -> std::io::Result<RealHost> {
-        let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+        // `enable_all` (was time-free): reqwest/hyper need the IO driver, and request timeouts the
+        // time driver. `tokio::fs` is unaffected.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
         Ok(RealHost {
             runtime,
             rng: noeta_stdlib::random::DEFAULT_SEED,
@@ -71,6 +79,7 @@ impl RealHost {
             ids: 1,
             readers: HashMap::new(),
             next_reader_id: 0,
+            http: reqwest::Client::new(),
         })
     }
 
@@ -215,6 +224,100 @@ impl FileSystem for RealHost {
     }
 }
 
+/// Perform an HTTP request with reqwest, collecting the whole [`NetResponse`]. Shared by the sync
+/// path ([`RealHost::net_fetch`] via `block_on`) and the async path ([`HttpIo`] spawned on the
+/// executor's runtime), so both build the request and read the response identically.
+async fn reqwest_fetch(
+    client: &reqwest::Client,
+    request: NetRequest,
+) -> Result<NetResponse, StdError> {
+    let method = reqwest::Method::from_bytes(request.method.as_bytes())
+        .map_err(|_| io_error(format!("invalid HTTP method `{}`", request.method)))?;
+    let mut builder = client.request(method, &request.url);
+    for (name, value) in &request.headers {
+        builder = builder.header(name, value);
+    }
+    if !request.body.is_empty() {
+        builder = builder.body(request.body);
+    }
+    let url = request.url;
+    let response = builder
+        .send()
+        .await
+        .map_err(|e| io_error(format!("request to `{url}` failed: {e}")))?;
+    let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|e| {
+            io_error(format!(
+                "reading the response body from `{url}` failed: {e}"
+            ))
+        })?
+        .to_vec();
+    Ok(NetResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+/// The real host's async network descriptor (http arc H3): its real body is a genuine reqwest
+/// future driven on the executor's runtime, so `http.*_async` requests fan out concurrently.
+#[derive(Debug)]
+struct HttpIo {
+    request: NetRequest,
+    /// Cloned from `RealHost::http` — a reqwest `Client` is a cheap `Arc` handle, used across the
+    /// executor's runtime here (reqwest is runtime-agnostic; connections bind lazily to whichever
+    /// runtime drives the future).
+    client: reqwest::Client,
+}
+
+impl ExternIo for HttpIo {
+    fn run_sync(&mut self, _host: &mut dyn noeta_stdlib::Host) -> Result<NativeOut, StdError> {
+        // Only reached if some executor lacks a real body path; the real executor uses `run_real`
+        // and the sandbox uses the default `NetFetchIo`. Perform it on a throwaway runtime.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| io_error(format!("cannot start a runtime for the request: {e}")))?;
+        let response = rt.block_on(reqwest_fetch(&self.client, self.request.clone()))?;
+        Ok(NativeOut::Extern(ExternBox::new(response)))
+    }
+
+    fn run_real(&mut self) -> Option<RealBody> {
+        let client = self.client.clone();
+        let request = self.request.clone();
+        Some(RealBody::Async(Box::pin(async move {
+            let response = reqwest_fetch(&client, request).await?;
+            Ok(NativeOut::Extern(ExternBox::new(response)))
+        })))
+    }
+}
+
+impl Network for RealHost {
+    /// Perform the request over the real network, blocking on the host's runtime (the sync
+    /// `http.*` surface). A transport failure is an `ErrorKind::Io` error; an HTTP error *status*
+    /// comes back as an ordinary [`NetResponse`].
+    fn net_fetch(&mut self, request: NetRequest) -> Result<NetResponse, StdError> {
+        self.runtime.block_on(reqwest_fetch(&self.http, request))
+    }
+
+    /// The async `http.*_async` surface: hand out a reqwest-backed descriptor whose real body runs
+    /// concurrently on the executor's runtime (overriding the default serial-at-spawn descriptor).
+    fn net_spawn(&self, request: NetRequest) -> Box<dyn ExternIo> {
+        Box::new(HttpIo {
+            request,
+            client: self.http.clone(),
+        })
+    }
+}
+
 impl Rng for RealHost {
     fn rng_seed(&mut self, seed: i64) {
         self.rng = noeta_stdlib::random::seed_state(seed);
@@ -290,6 +393,26 @@ impl Env for RealHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real `Network` capability against a live endpoint. `#[ignore]` so CI stays hermetic —
+    /// run explicitly (`cargo test -p noeta-runtime -- --ignored real_host_fetches`) when network
+    /// is available. Locks the reqwest wiring: a real GET returns 200 with a body and headers.
+    #[test]
+    #[ignore = "hits the real network; run explicitly"]
+    fn real_host_fetches_over_the_real_network() {
+        let mut host = RealHost::new().unwrap();
+        let resp = host
+            .net_fetch(NetRequest {
+                method: "GET".to_string(),
+                url: "https://example.com/".to_string(),
+                headers: vec![],
+                body: vec![],
+            })
+            .expect("real fetch should succeed when online");
+        assert_eq!(resp.status, 200);
+        assert!(!resp.body.is_empty());
+        assert!(resp.headers.iter().any(|(k, _)| k == "content-type"));
+    }
 
     #[test]
     fn real_host_disk_round_trip() {

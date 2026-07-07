@@ -452,6 +452,27 @@ fn run_async_metadata_twins_on_the_real_executor() {
 }
 
 #[test]
+#[ignore = "hits the real network; run explicitly"]
+fn run_http_get_over_the_real_network() {
+    // http arc H2/H3 on the real host: `http.get` (sync) and `http.get_async(...).await`
+    // (RealBody::Async on the executor's runtime) both reach a live endpoint. `#[ignore]` so CI
+    // stays hermetic — run explicitly when online.
+    let src = "use std.{http}\n\
+               async fn run(): void {\n\
+               \x20   echo http.get(\"https://example.com/\").status()\n\
+               \x20   echo http.get_async(\"https://example.com/\").await.ok()\n\
+               }\n\
+               run().await\n";
+    let file = temp_program("run_http_real", src);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("200\ntrue\n");
+}
+
+#[test]
 fn run_bcrypt_round_trips_on_real_entropy() {
     // Crypto arc C4: on the RealHost the bcrypt salt comes from OS entropy, so the hash string
     // is unpredictable — but it must verify against the password that made it (and not against

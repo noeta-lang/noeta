@@ -33,8 +33,11 @@ The same deterministic/real split applies:
 | Seam | Deterministic (in-oracle) | Real (CLI-only) |
 |---|---|---|
 | Host IO | `SandboxHost` (VFS, logical clock) | `RealHost` (disk, tokio) |
+| Network | `SandboxHost` (pure request→response responder) | `RealHost` (reqwest/rustls) |
 | Async | `SandboxExecutor` (logical time) | `RealExecutor` (tokio) |
 | Isolates | `SandboxScheduler` (cooperative, deterministic interleave + FIFO channels) | `RealScheduler` (OS threads, one runtime per isolate) |
+
+`std.http` rides both the Host split (its `Network` capability) and the async split: a sync `http.get` performs the request through the Host, while `http.get_async` returns work the executor tickets — the real host handing over a genuine reqwest future (`RealBody::Async`), the sandbox resolving deterministically at spawn from the pure responder.
 
 A program using isolates type-checks and runs *identically in the sandbox* (deterministic, differential-covered) and with real parallelism on the CLI. The sandbox is observationally faithful because isolates are shared-nothing and communicate only by *copied* messages — a single-threaded cooperative simulation cannot differ from real threads for any well-typed program.
 

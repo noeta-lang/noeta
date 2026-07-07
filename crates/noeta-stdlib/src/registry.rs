@@ -154,6 +154,24 @@ pub enum SigType {
     /// checker maps it onto the language's declared-union `Type::union`, so a mismatched
     /// argument is a static error; the dispatch still validates the concrete kind it received.
     Union(&'static [SigType]),
+    /// A **trailing-optional** parameter (http arc H4) — `http.get(url, headers?)`. The wrapped
+    /// type is what the argument must be *when present*; a call may omit it (and every parameter
+    /// after it). The checker derives the required-argument count from the first `Optional`; the
+    /// dispatch reads the slot with `args.get(i)` and supplies its own default when absent, so no
+    /// backend change and no default-value machinery is needed. Convention: once a parameter is
+    /// `Optional`, every following parameter is too.
+    Optional(&'static SigType),
+}
+
+impl SigType {
+    /// The count of leading **required** parameters in `params` — everything up to the first
+    /// [`SigType::Optional`] (http arc H4). All-required signatures return `params.len()`.
+    pub fn required_count(params: &[SigType]) -> usize {
+        params
+            .iter()
+            .take_while(|p| !matches!(p, SigType::Optional(_)))
+            .count()
+    }
 }
 
 /// How a function's **return type** is determined. Most are [`RetTy::Concrete`]; the rest capture
@@ -309,6 +327,12 @@ const STD_TYPES: &[ExtType] = &[
         methods: HASHER_METHODS,
         dispatch: hasher_method_dispatch,
         key_capable: false, // `update` mutates — a hasher can never key a map
+    },
+    ExtType {
+        name: crate::net::RESPONSE_TYPE_NAME,
+        methods: RESPONSE_METHODS,
+        dispatch: response_method_dispatch,
+        key_capable: false, // a response is not a map key
     },
 ];
 
@@ -517,6 +541,22 @@ fn want_arity(func: &str, args: &[NativeValue], expected: usize) -> Result<(), S
         Ok(())
     } else {
         Err(arity_error(func, expected, args.len()))
+    }
+}
+
+/// Accept `min..=max` arguments (http arc H4) — for a dispatch with trailing-optional params. The
+/// checker already gates the arity, so this is the defensive twin of [`want_arity`]; on violation
+/// it reports the maximum as the "expected" count.
+fn want_arity_range(
+    func: &str,
+    args: &[NativeValue],
+    min: usize,
+    max: usize,
+) -> Result<(), StdError> {
+    if (min..=max).contains(&args.len()) {
+        Ok(())
+    } else {
+        Err(arity_error(func, max, args.len()))
     }
 }
 
@@ -979,6 +1019,255 @@ fn crypto_dispatch(
             Ok(NativeOut::Bytes(out))
         }
         _ => Err(no_function_error("crypto", func)),
+    }
+}
+
+// --- `http`: an HTTP client over the Network capability (http arc H2) ----------------------------
+
+/// The `Response` signature type, named once.
+const RESPONSE_SIG: SigType = SigType::Named(crate::net::RESPONSE_TYPE_NAME);
+
+/// A request-headers argument type — `Map<string, string>`, named once.
+const HEADERS: SigType = SigType::Map(&SigType::String, &SigType::String);
+/// The optional trailing `headers` parameter every verb accepts (http arc H5).
+const OPT_HEADERS: SigType = SigType::Optional(&HEADERS);
+
+/// The `http` surface. Bodyless verbs take a url; `post`/`put`/`query` take a `string|bytes` body;
+/// `request(method, url)` covers any other (bodyless) verb. **Every** verb accepts an optional
+/// trailing `headers: Map<string, string>` (H5, via the registry's optional-param support). All
+/// return a `Response`; the `*_async` twins return `Future<Response>` (H3) and drive a real
+/// reqwest future on the real host. `query` is the RFC-draft HTTP QUERY method — safe, idempotent,
+/// body-carrying. Each performs the request through the Host (deterministic sandbox, real under
+/// `noeta run`). Timeouts are a deferred follow-on.
+const HTTP_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "get",
+        params: &[Str, OPT_HEADERS],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    ExtFn {
+        name: "head",
+        params: &[Str, OPT_HEADERS],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    ExtFn {
+        name: "delete",
+        params: &[Str, OPT_HEADERS],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    ExtFn {
+        name: "post",
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    ExtFn {
+        name: "put",
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    ExtFn {
+        name: "query",
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    ExtFn {
+        name: "request",
+        params: &[Str, Str, OPT_HEADERS],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    ExtFn {
+        name: "get_async",
+        params: &[Str, OPT_HEADERS],
+        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+    },
+    ExtFn {
+        name: "head_async",
+        params: &[Str, OPT_HEADERS],
+        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+    },
+    ExtFn {
+        name: "delete_async",
+        params: &[Str, OPT_HEADERS],
+        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+    },
+    ExtFn {
+        name: "post_async",
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
+        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+    },
+    ExtFn {
+        name: "put_async",
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
+        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+    },
+    ExtFn {
+        name: "query_async",
+        params: &[Str, STR_OR_BYTES, OPT_HEADERS],
+        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+    },
+    ExtFn {
+        name: "request_async",
+        params: &[Str, Str, OPT_HEADERS],
+        ret: Concrete(SigType::Future(&RESPONSE_SIG)),
+    },
+];
+
+/// Read the optional `headers: Map<string, string>` argument at `index`, or an empty list if the
+/// call omitted it (http arc H5). The `http` module is `deep_marshal`, so the map arrives as a
+/// [`NativeValue::Map`]; the checker has already typed the values as strings.
+fn want_headers(
+    func: &str,
+    args: &[NativeValue],
+    index: usize,
+) -> Result<Vec<(String, String)>, StdError> {
+    match args.get(index) {
+        None => Ok(Vec::new()),
+        Some(NativeValue::Map(entries)) => entries
+            .iter()
+            .map(|(k, v)| match v {
+                NativeValue::Str(value) => Ok((k.clone(), value.clone())),
+                _ => Err(type_error(func, "map of string to string")),
+            })
+            .collect(),
+        Some(_) => Err(type_error(func, "map of string to string")),
+    }
+}
+
+/// Assemble the request the sync and async paths share.
+fn http_request(
+    method: &str,
+    url: &str,
+    body: Vec<u8>,
+    headers: Vec<(String, String)>,
+) -> crate::NetRequest {
+    crate::NetRequest {
+        method: method.to_string(),
+        url: url.to_string(),
+        headers,
+        body,
+    }
+}
+
+fn http_dispatch(
+    func: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    // Build the request from the call, per verb shape. Bodyless verbs put headers at index 1;
+    // body-carrying verbs and `request` put them at index 2. The method is uppercased so
+    // `request("get", …)` and any custom verb (QUERY) normalize.
+    let verb = func.trim_end_matches("_async");
+    let request = match verb {
+        "get" | "head" | "delete" => {
+            want_arity_range(func, args, 1, 2)?;
+            http_request(
+                &verb.to_ascii_uppercase(),
+                want_str(func, args, 0)?,
+                Vec::new(),
+                want_headers(func, args, 1)?,
+            )
+        }
+        "post" | "put" | "query" => {
+            want_arity_range(func, args, 2, 3)?;
+            let url = want_str(func, args, 0)?.to_string();
+            let body = want_data(func, args, 1)?.to_vec();
+            http_request(
+                &verb.to_ascii_uppercase(),
+                &url,
+                body,
+                want_headers(func, args, 2)?,
+            )
+        }
+        "request" => {
+            want_arity_range(func, args, 2, 3)?;
+            let method = want_str(func, args, 0)?.to_ascii_uppercase();
+            let url = want_str(func, args, 1)?.to_string();
+            http_request(&method, &url, Vec::new(), want_headers(func, args, 2)?)
+        }
+        _ => return Err(no_function_error("http", func)),
+    };
+    // Sync verbs fetch through the Host now; `*_async` hand the host its async descriptor to
+    // ticket on the executor (H3).
+    if func.ends_with("_async") {
+        Ok(NativeOut::Spawn(SpawnBox(host.net_spawn(request))))
+    } else {
+        let response = host.net_fetch(request)?;
+        Ok(NativeOut::Extern(crate::ExternBox::new(response)))
+    }
+}
+
+/// The `Response` instance methods (http arc H2): all pure reads over the wrapped response.
+const RESPONSE_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "status",
+        params: &[],
+        ret: Concrete(Int),
+    },
+    ExtFn {
+        name: "ok",
+        params: &[],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        name: "body",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "body_bytes",
+        params: &[],
+        ret: Concrete(SigType::Bytes),
+    },
+    ExtFn {
+        name: "header",
+        params: &[Str],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+];
+
+fn response_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(resp) = recv.as_any().downcast_ref::<crate::NetResponse>() else {
+        return Err(type_error(method, "Response"));
+    };
+    match method {
+        "status" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Int(i64::from(resp.status))))
+        }
+        "ok" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(
+                (200..=299).contains(&resp.status),
+            )))
+        }
+        "body" => {
+            want_arity(method, args, 0)?;
+            // Lossy UTF-8 is the friendly scripting default; `body_bytes` gives the raw buffer.
+            Ok(NativeOut::Str(
+                String::from_utf8_lossy(&resp.body).into_owned(),
+            ))
+        }
+        "body_bytes" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Bytes(resp.body.clone()))
+        }
+        "header" => {
+            want_arity(method, args, 1)?;
+            let name = want_str(method, args, 0)?;
+            Ok(match resp.header_value(name) {
+                Some(value) => NativeOut::Some(Box::new(NativeOut::Str(value.to_string()))),
+                None => NativeOut::None,
+            })
+        }
+        _ => Err(crate::no_method_error(
+            crate::net::RESPONSE_TYPE_NAME,
+            method,
+        )),
     }
 }
 
@@ -1886,6 +2175,14 @@ const STD_MODULES: &[ExtModule] = &[
         deep_marshal: false,
     },
     ExtModule {
+        name: "http",
+        functions: HTTP_FNS,
+        dispatch: http_dispatch,
+        // The optional `headers` argument is a `Map` — needs the deep marshalling that surfaces
+        // it as `NativeValue::Map` (http arc H5). url/body strings project fine either way.
+        deep_marshal: true,
+    },
+    ExtModule {
         name: "env",
         functions: ENV_FNS,
         dispatch: env_dispatch,
@@ -1931,6 +2228,23 @@ mod tests {
 
     fn host() -> SandboxHost {
         SandboxHost::new()
+    }
+
+    #[test]
+    fn required_count_stops_at_the_first_optional_param() {
+        // All-required.
+        assert_eq!(SigType::required_count(&[SigType::String, SigType::Int]), 2);
+        // Trailing optional.
+        assert_eq!(
+            SigType::required_count(&[SigType::String, SigType::Optional(&SigType::Int)]),
+            1
+        );
+        // Every param optional.
+        assert_eq!(
+            SigType::required_count(&[SigType::Optional(&SigType::String)]),
+            0
+        );
+        assert_eq!(SigType::required_count(&[]), 0);
     }
 
     #[test]

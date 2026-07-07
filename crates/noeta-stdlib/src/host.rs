@@ -96,6 +96,25 @@ pub trait Ids {
     fn id_next(&mut self) -> u64;
 }
 
+/// **Network** capability (http arc H1) — outbound HTTP. The sandbox answers every request with a
+/// deterministic [`crate::net::sandbox_respond`] (a pure function of the request, so the
+/// differential holds regardless of URL); the real host performs it over the network. A transport
+/// failure (DNS, connection, TLS) is an [`ErrorKind::Io`](crate::ErrorKind::Io) error; an HTTP
+/// error *status* is an ordinary response, not an error.
+pub trait Network {
+    fn net_fetch(&mut self, request: crate::NetRequest) -> Result<crate::NetResponse, StdError>;
+
+    /// Build the async work descriptor for `request` (http arc H3, the `http.*_async` surface).
+    /// The dispatch tickets the returned descriptor on the executor. The default is a
+    /// [`crate::net::NetFetchIo`] with no real body — it resolves through [`Self::net_fetch`] at
+    /// spawn (deterministic in the sandbox; serial-but-correct on any host). `RealHost` overrides
+    /// it to hand out a genuine reqwest future via [`crate::RealBody::Async`], for true
+    /// concurrent fan-out. Kept off [`Self::net_fetch`] so the sandbox never touches a real body.
+    fn net_spawn(&self, request: crate::NetRequest) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::net::NetFetchIo { request })
+    }
+}
+
 /// **Host introspection** capability (M2.2). `env_keys` is sorted. The sandbox presents a fixed
 /// fixture; a real host reads the real environment/args.
 pub trait Env {
@@ -105,17 +124,17 @@ pub trait Env {
 }
 
 /// Every host-coupled effect the interpreters perform, behind one swappable seam — the union of the
-/// six capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Entropy`], [`Ids`]).
-/// Backends hold a `Box<dyn Host>` and reach any capability through it; a consumer that needs only
-/// one (a read handle → [`FileReader`], the RNG dispatch → [`Rng`], …) depends on that trait
-/// instead, so a partial host (e.g. a read-only test double) implements exactly what it supports
-/// rather than stubbing the rest.
+/// seven capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Entropy`], [`Ids`],
+/// [`Network`]). Backends hold a `Box<dyn Host>` and reach any capability through it; a consumer
+/// that needs only one (a read handle → [`FileReader`], the RNG dispatch → [`Rng`], …) depends on
+/// that trait instead, so a partial host (e.g. a read-only test double) implements exactly what it
+/// supports rather than stubbing the rest.
 ///
 /// Object-safe on purpose (IO is never a hot path, so the dynamic dispatch is immaterial). The
-/// blanket impl means any type providing all six capabilities *is* a `Host` automatically — there is
-/// nothing extra to implement.
-pub trait Host: FileSystem + Rng + Clock + Env + Entropy + Ids {}
-impl<T: FileSystem + Rng + Clock + Env + Entropy + Ids> Host for T {}
+/// blanket impl means any type providing all seven capabilities *is* a `Host` automatically — there
+/// is nothing extra to implement.
+pub trait Host: FileSystem + Rng + Clock + Env + Entropy + Ids + Network {}
+impl<T: FileSystem + Rng + Clock + Env + Entropy + Ids + Network> Host for T {}
 
 /// The sandbox's fixed wall-clock epoch: 2026-01-01T00:00:00Z in unix milliseconds.
 /// `clock_unix_ms` on the sandbox is `SANDBOX_EPOCH_MS + logical clock`, so wall-time reads (and the
@@ -277,6 +296,13 @@ impl Ids for SandboxHost {
         let id = self.ids;
         self.ids += 1;
         id
+    }
+}
+
+impl Network for SandboxHost {
+    /// The whole network is the pure sandbox responder — deterministic, so both backends agree.
+    fn net_fetch(&mut self, request: crate::NetRequest) -> Result<crate::NetResponse, StdError> {
+        Ok(crate::net::sandbox_respond(&request))
     }
 }
 

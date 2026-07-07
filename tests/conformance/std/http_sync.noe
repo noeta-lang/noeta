@@ -1,0 +1,36 @@
+// std.http sync surface (http arc H2): get/post/head/delete/request return a first-class
+// `Response` (an extern type — narrows, compares, exposes accessors). Under the sandbox every
+// request is answered by the deterministic httpbin-style responder, so the differential pins exact
+// bytes; under `noeta run` these hit the real network.
+// expect: stdout "200"
+// expect: stdout "true"
+// expect: stdout "{"body":"","method":"GET","path":"/echo"}"
+// expect: stdout "some(application/json)"
+// expect: stdout "true"
+// expect: stdout "{"body":"hi","method":"POST","path":"/echo"}"
+// expect: stdout "404"
+// expect: stdout "false"
+// expect: stdout "noeta sandbox: GET /v1/data"
+// expect: stdout "204"
+// expect: stdout "none"
+// expect: exit 0
+use std.{http}
+
+r = http.get("https://svc.test/echo")
+echo r.status()
+echo r.ok()
+echo r.body()
+echo r.header("content-type")
+echo r is Response
+
+p = http.post("https://svc.test/echo", "hi")
+echo p.body()
+
+nf = http.get("https://svc.test/status/404")
+echo nf.status()
+echo nf.ok()
+
+echo http.get("https://api.example.com/v1/data").body()
+
+echo http.request("delete", "https://svc.test/status/204").status()
+echo http.head("https://svc.test/echo").header("x-missing")
