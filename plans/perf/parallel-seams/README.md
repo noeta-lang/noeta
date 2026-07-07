@@ -34,11 +34,11 @@ atomic RC on the value path, parallel dispatch, concurrent GC, parallel compile 
 
 | # | Tag | Slice | Impact | Effort | Independent? |
 |---|---|---|---|---|---|
-| S0 | P-PAR-BENCH | [Baseline benchmarks](s0-benchmarks.md): fan-out copy cost, stall latency, JIT pause | enables the rest | S | yes |
-| S1 | P-PAR-ARC | [`Rc<Shape>`/`Rc<PackedSchema>` → `Arc`](s1-arc-shape.md) — the Send prereq for borrow-share | prereq (gate: no hot-path regression) | M | yes |
-| S2 | P-PAR-SHARE | [Wire `SharedRegion` into the real spawn path](s2-shared-region-spawn.md): promote once, borrow N times | high (fan-out workloads) | M–L | needs S1 |
-| S3 | P-PAR-WAKE | [Park/wakeup instead of sleep-spin](s3-scheduler-wakeup.md) | medium (pipeline latency, idle CPU) | S | yes |
-| S4 | P-PAR-JITBG | [Off-thread JIT compilation](s4-offthread-jit.md) — measure-first, go/no-go | unknown until measured | M (if go) | yes |
+| S0 | P-PAR-BENCH | ✅ **DONE** (`d8c9200`) — [Baseline benchmarks](s0-benchmarks.md): fan-out copies ~50 MB+serial-marshal/worker; ping-pong 160 µs/round; JIT pauses 3.5–145 ms/compile (99% of wall) | enables the rest | S | yes |
+| S1 | P-PAR-ARC | ⚠️ **swap DONE (`ab505bc`), gate FAILED — user decision pending** — [`Rc<Shape>`/`Rc<PackedSchema>` → `Arc`](s1-arc-shape.md): field_assign +10–12%, broad +1–4%; accept vs shapes-by-index | prereq (gate: no hot-path regression) | M | yes |
+| S2 | P-PAR-SHARE | [Wire `SharedRegion` into the real spawn path](s2-shared-region-spawn.md): promote once, borrow N times | high (fan-out workloads) | M–L | needs S1 decision |
+| S3 | P-PAR-WAKE | ✅ **DONE** (`d0da088`) — [Park/wakeup eventcount](s3-scheduler-wakeup.md): ping-pong **319 → 15.5 ms (20.6×)**, ~1 ms above the coop floor | medium (pipeline latency, idle CPU) | S | yes |
+| S4 | P-PAR-JITBG | [Off-thread JIT compilation](s4-offthread-jit.md) — S0c says **go** (worst pause 194 ms; compile dominates wall); user sign-off pending, incl. an `opt_level` A/B first | unknown until measured | M (if go) | yes |
 
 ## Sequencing (value × independence, ascending risk — the sweep's spine)
 
