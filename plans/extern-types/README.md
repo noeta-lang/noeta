@@ -348,11 +348,16 @@ CLI test.
   hand-threaded hosting (payload/value variants, method twins, `FileHandleMethod`,
   `NativeOut::FileHandle`, checker tables — list above). Gate: existing fs/handle conformance
   corpus green through the swap (behavior pinned by oracle, zero expectation edits).
-- **X4 — extern map keys.** `MapKey` both backends (hashbrown + Equivalent in VM, Ord BTreeMap
-  in eval); checker key-capability rule (`key_capable`); `Map<Uuid, T>` + `Set<Uuid>`
-  conformance (insert/get/remove/iterate/display, exact sandbox values); `Map<FileHandle,_>`
-  negative test. Gate: dedicated map A/B vs pre-slice baseline (the P-SSO benches), plus full
-  suite.
+- **X4 — extern map keys. ✅ DONE (`af0ab27`, bench `7353dcc`).** Bench gate: no map bench
+  existed, so `benches/map_keys.rs` (get-heavy + set-churn over string keys, 10k/100k) was
+  added and A/B'd X3-vs-X4 twice (identical-code rerun as the noise probe): every delta inside
+  the box's ±15% noise floor except one CONSISTENT signal — X4 is ~8-11% FASTER on get/100k
+  (hashbrown taken directly + inline-more), in both runs. No regression; the string insert
+  move/clone fast paths are structurally intact. `MapKey` shared in noeta-stdlib
+  (ordering/display agreement by construction); checker key-capability rule; exact-value
+  `Map<Uuid,T>`/`Set<Uuid>` conformance; `Map<FileHandle,_>` static-rejection test. NOTE
+  (pre-existing, NOT this slice): the checker still accepts `Map<int,_>` and int-keyed literals
+  statically while runtimes reject at runtime — recorded for the deferred sweep.
 - **X5 — the async seam + fs migration.** `ExternIo` + `RealBody` + `NativeOut::Spawn`;
   `Executor::spawn_ext`/`poll_ext` (deleting `IoRequest`/`IoOutcome`/`from_fs_async` — fs
   becomes an `FsIo: ExternIo` with today's two bodies verbatim); `fs_dispatch` `*_async` arms
