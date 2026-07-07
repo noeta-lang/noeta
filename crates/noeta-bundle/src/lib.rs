@@ -25,8 +25,11 @@
 //! keystream, so `noeta dump`, a hex editor, and automated tooling all fail on the shipped file
 //! (`FLAG_COMPRESSED` marks it). This is **obfuscation, honestly labeled — not security**: the
 //! transform is fully reversible from this open-source runtime, and the module is recoverable from
-//! process memory at run time. It raises the bar against casual inspection, nothing more.
-//! `FLAG_ENCRYPTED` (bit 1) is reserved for the opt-in keyed layer (L1.5); a v1 reader rejects it.
+//! process memory at run time. It raises the bar against casual inspection, nothing more. Access
+//! control / encrypt-at-rest is deliberately **not** provided here — that is application *policy*,
+//! the developer's to build on the crypto/network primitives the language ships (`plans/aot`).
+//! `FLAG_ENCRYPTED` (bit 1) stays a reserved header bit for forward-compat; a reader rejects any
+//! bundle that sets it.
 
 use noeta_bytecode::Module;
 
@@ -44,7 +47,9 @@ pub const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `flags` bit 0: the payload is obfuscated (deflate-compressed + scrambled, P-AOT L1.4). Set on
 /// every bundle [`write`] emits.
 pub const FLAG_COMPRESSED: u8 = 1 << 0;
-/// `flags` bit 1: the payload is encrypted (P-AOT L1.5). Not yet emitted or accepted.
+/// `flags` bit 1: reserved for a future encrypted payload. Access control / encrypt-at-rest is
+/// intentionally out of scope for the build tool (application policy — see the module docs), so no
+/// writer sets this and a reader rejects any bundle that does.
 pub const FLAG_ENCRYPTED: u8 = 1 << 1;
 
 /// The fixed seed for the obfuscation keystream (P-AOT L1.4). Not a secret — obfuscation only; it
