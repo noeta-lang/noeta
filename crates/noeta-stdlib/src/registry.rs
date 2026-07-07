@@ -686,6 +686,29 @@ fn id_dispatch(
                 Err(_) => NativeOut::None,
             })
         }
+        "uuid_v5" => {
+            want_arity(func, args, 2)?;
+            let Some(NativeValue::Extern(ns_box)) = args.first() else {
+                return Err(type_error(func, "Uuid"));
+            };
+            let Some(ns) = ns_box.as_any().downcast_ref::<uuid::Uuid>() else {
+                return Err(type_error(func, "Uuid"));
+            };
+            let name = want_str(func, args, 1)?;
+            Ok(NativeOut::Extern(crate::ExternBox::new(crate::id::v5(
+                ns, name,
+            ))))
+        }
+        "namespace_dns" | "namespace_url" | "namespace_oid" | "namespace_x500" => {
+            want_arity(func, args, 0)?;
+            let ns = match func {
+                "namespace_dns" => uuid::Uuid::NAMESPACE_DNS,
+                "namespace_url" => uuid::Uuid::NAMESPACE_URL,
+                "namespace_oid" => uuid::Uuid::NAMESPACE_OID,
+                _ => uuid::Uuid::NAMESPACE_X500,
+            };
+            Ok(NativeOut::Extern(crate::ExternBox::new(ns)))
+        }
         _ => Err(no_function_error("id", func)),
     }
 }
@@ -1421,6 +1444,33 @@ const ID_FNS: &[ExtFn] = &[
         name: "parse",
         params: &[Str],
         ret: Concrete(SigType::Option(&UUID_SIG)),
+    },
+    // Name-based UUIDs (crypto arc C5): pure — same namespace + name = same UUID, everywhere.
+    ExtFn {
+        name: "uuid_v5",
+        params: &[UUID_SIG, Str],
+        ret: Concrete(UUID_SIG),
+    },
+    // The RFC 9562 well-known namespaces, as zero-arg constructors (a module has no constants).
+    ExtFn {
+        name: "namespace_dns",
+        params: &[],
+        ret: Concrete(UUID_SIG),
+    },
+    ExtFn {
+        name: "namespace_url",
+        params: &[],
+        ret: Concrete(UUID_SIG),
+    },
+    ExtFn {
+        name: "namespace_oid",
+        params: &[],
+        ret: Concrete(UUID_SIG),
+    },
+    ExtFn {
+        name: "namespace_x500",
+        params: &[],
+        ret: Concrete(UUID_SIG),
     },
 ];
 
