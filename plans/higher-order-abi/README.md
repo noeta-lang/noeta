@@ -154,10 +154,16 @@ flags) and dispatches unmatched names to registered commands (`cargo clippy` mod
 
 ## Phases
 
-- **H0** — `NativeCtx` + slots in `noeta-native`; both backend impls; `ctx_dispatch` routing in
-  both `call_native_module`s; a trivial dogfood fn proving the seam end-to-end (differential +
-  leak-0).
-- **H1** — `SigType::Fn`/`FutureOf`/`Var` + checker mapping/substitution.
+- **H0 ✅ DONE** — `NativeCtx` + slots in `noeta-native` (`ctx.rs`); both backend impls
+  (`native_ctx.rs` in each — the VM's slot table owns the RC discipline); `ctx_dispatch` routing
+  in both `call_native_module`s (per-function virtual intercept, ctx arm after the plain table);
+  `ExtModule::{ctx_functions, ctx_dispatch, DEFAULTS}`; checker/import gating via
+  `find_function_sig`. **Dogfood = `task.sleep` migrated end-to-end** (`SigType::Future` already
+  existed, so no typing prerequisite): `Builtin::Sleep` deleted everywhere, shared dispatch in
+  `noeta-stdlib/src/task.rs`. Full gate green (differential, leak-0, corpus, workspace suites,
+  real-host smoke).
+- **H1** — `SigType::Fn`/`Var` + checker mapping/substitution (`Future` already existed — H0
+  finding).
 - **H2** — migrate **std.task** (`sleep`/`all`/`race`/`map_bounded`): shared dispatch in
   `noeta-stdlib`; delete the four `Builtin`s, the task `VIRTUAL_MODULES` entry, both backend
   mirrors, the checker arms. Async corpus green.
