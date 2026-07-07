@@ -14,6 +14,11 @@ rust-version.workspace = true
 [lib]
 name = "noeta_aot"
 crate-type = ["staticlib"]
+# A staticlib exporting a C-ABI `main` cannot host a Rust test harness (two `main` symbols) —
+# `cargo test --workspace` fails to even build it otherwise. Its coverage lives in the
+# `noeta build --native` end-to-end differential, which links and runs the real archive.
+test = false
+doctest = false
 
 [dependencies]
 # `aot` turns on the JIT and exports the `noeta_jit_*` runtime helpers under their canonical C names,
