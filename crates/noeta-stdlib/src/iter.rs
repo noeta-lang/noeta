@@ -1,6 +1,6 @@
 //! The lazy-iterator method surface (Track I.1a).
 //!
-//! Like [`crate::FileHandleMethod`], this enum is shared so a `match` over it is exhaustive in both
+//! This enum is shared so a `match` over it is exhaustive in both
 //! backends — adding a method will not compile until both handle it. Iterators are reference values
 //! whose backing representation differs per backend (each wraps its own list value), so — unlike
 //! `FileHandle` — only the method *names* live here; the cursor logic is implemented per backend, with

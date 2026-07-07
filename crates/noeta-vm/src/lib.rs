@@ -5010,13 +5010,6 @@ impl<'m> Vm<'m> {
         {
             return self.call_set_method(v, set_method, method, args, span);
         }
-        // File-handle methods (read_line/read/write/close) — the shared
-        // `FileHandleMethod` enum keeps the two backends in lockstep.
-        if hk == Some(HeapKind::FileHandle)
-            && let Some(handle_method) = noeta_stdlib::FileHandleMethod::from_name(method)
-        {
-            return self.call_file_handle_method(v, handle_method, method, args, span);
-        }
         // Extern-type methods (extern-types X1): every registry-contributed type routes through
         // its registered `ExtType`'s one shared dispatch.
         if hk == Some(HeapKind::Extern) {

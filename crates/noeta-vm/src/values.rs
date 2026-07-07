@@ -129,7 +129,6 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
                 .map(|(k, v)| (k, materialize_native(v)))
                 .collect(),
         ),
-        NativeOut::FileHandle(handle) => Value::file_handle(handle),
         // An extern-type value: host the box in the VM's single extern payload (extern-types X1).
         NativeOut::Extern(e) => Value::extern_value(e),
         // Object results carry no shape, so they are built by `materialize_ext` (which has the
@@ -464,10 +463,10 @@ pub(crate) fn materialize_recipe(out: noeta_stdlib::NativeOut) -> Value {
                 .collect();
             Value::object(shape, values)
         }
-        // `Object` (shape-from-argument), `FileHandle`, and extern values are never produced by
-        // a recipe decode (a `TypeRecipe` names only JSON shapes).
-        NativeOut::Object(_) | NativeOut::FileHandle(_) | NativeOut::Extern(_) => {
-            unreachable!("json.parse recipe decode never yields an Object/FileHandle/Extern result")
+        // `Object` (shape-from-argument) and extern values are never produced by a recipe
+        // decode (a `TypeRecipe` names only JSON shapes).
+        NativeOut::Object(_) | NativeOut::Extern(_) => {
+            unreachable!("json.parse recipe decode never yields an Object/Extern result")
         }
     }
 }

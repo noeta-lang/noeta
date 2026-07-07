@@ -2173,14 +2173,6 @@ impl Interpreter {
         {
             return self.call_set_method(method, items, name, &args, span);
         }
-        // File-handle methods (read_line/read/write/close) — the shared `FileHandleMethod` enum
-        // keeps the two backends in lockstep, like the collection methods above.
-        if let Value::FileHandle(handle) = &receiver
-            && let Some(method) = noeta_stdlib::FileHandleMethod::from_name(name)
-        {
-            let handle = Rc::clone(handle);
-            return self.call_file_handle_method(method, &handle, name, &args, span);
-        }
         // Extern-type methods (extern-types X1): every registry-contributed type routes through
         // its registered `ExtType`'s one shared dispatch. Mirrors the VM's `call_extern_method`.
         if let Value::Extern(cell) = &receiver {
@@ -2915,76 +2907,6 @@ impl Interpreter {
                     value.type_name()
                 ),
             )),
-        }
-    }
-
-    /// Dispatch a file-handle method (`read_line`/`read`/`write`/`close`). Mirrors the VM's
-    /// `call_file_handle_method`: the cursor logic lives in the shared `FileHandle`, so the two
-    /// backends differ only in value glue (building `some`/`none`, routing the close flush through
-    /// `self.host`).
-    fn call_file_handle_method(
-        &mut self,
-        method: noeta_stdlib::FileHandleMethod,
-        handle: &Rc<RefCell<noeta_stdlib::FileHandle>>,
-        name: &str,
-        args: &[Value],
-        span: Span,
-    ) -> Eval<Value> {
-        use noeta_stdlib::FileHandleMethod as M;
-        match method {
-            M::ReadLine => {
-                self.expect_std_arity(name, args, 0, span)?;
-                // `handle` is an independent `Rc`, so borrowing it and `self.host` at once is fine;
-                // a lazy handle refills through the host mid-read.
-                match handle.borrow_mut().read_line(&mut *self.host) {
-                    Ok(Some(line)) => Ok(builtin_enum("Option", "some", vec![Value::Str(line)])),
-                    Ok(None) => Ok(builtin_enum("Option", "none", Vec::new())),
-                    Err(error) => {
-                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            M::Read => {
-                self.expect_std_arity(name, args, 1, span)?;
-                let count = self.expect_std_int(name, &args[0], span)?;
-                match handle.borrow_mut().read(count, &mut *self.host) {
-                    Ok(Some(chunk)) => Ok(builtin_enum("Option", "some", vec![Value::Str(chunk)])),
-                    Ok(None) => Ok(builtin_enum("Option", "none", Vec::new())),
-                    Err(error) => {
-                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            M::Write => {
-                self.expect_std_arity(name, args, 1, span)?;
-                let chunk = self.expect_std_string(name, &args[0], span)?.to_string();
-                match handle.borrow_mut().write(&chunk) {
-                    Ok(()) => Ok(Value::Unit),
-                    Err(error) => {
-                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            M::Close => {
-                self.expect_std_arity(name, args, 0, span)?;
-                // Take the flush instruction first (the borrow ends), then hit the host.
-                let flush = handle.borrow_mut().close();
-                let result = match flush {
-                    None => Ok(()),
-                    Some(noeta_stdlib::Flush::Write { path, content }) => {
-                        self.host.fs_write(&path, &content)
-                    }
-                    Some(noeta_stdlib::Flush::Append { path, content }) => {
-                        self.host.fs_append(&path, &content)
-                    }
-                };
-                match result {
-                    Ok(()) => Ok(Value::Unit),
-                    Err(error) => {
-                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
         }
     }
 
@@ -4646,11 +4568,10 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
         // An extern-type value reflects as its registered nominal type (`Uuid`), mirroring the
         // checker's `Type::Named` for it.
         Value::Extern(e) => TypeRepr::Named(e.borrow().type_name().to_string(), Vec::new()),
-        // A type value, module, file handle, iterator, or enum-type has no nameable lattice type → top.
+        // A type value, module, iterator, or enum-type has no nameable lattice type → top.
         Value::EnumType(_)
         | Value::Type(_)
         | Value::NativeModule(_)
-        | Value::FileHandle(_)
         | Value::Iter(_)
         | Value::Future(_)
         | Value::Timer(_)
@@ -4973,7 +4894,6 @@ fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
                 .map(|(k, v)| (k, materialize_native(v)))
                 .collect(),
         )),
-        NativeOut::FileHandle(handle) => Value::FileHandle(Rc::new(RefCell::new(handle))),
         // An extern-type value: host the box in the shared cell (extern-types X1).
         NativeOut::Extern(e) => Value::Extern(Rc::new(RefCell::new(e))),
         // Object results carry no shape, so they are built by `materialize_ext` (which has the
@@ -5126,7 +5046,6 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
         | Value::MethodHandle(..)
         | Value::BoundMethod(..) => NativeValue::Str("<fn>".to_string()),
         Value::NativeModule(module) => NativeValue::Str(format!("<module {module}>")),
-        Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
         // An extern-type value marshals as itself; the shared serializer renders its display
         // form as a JSON string (a `Uuid` is its canonical string).
         Value::Extern(e) => NativeValue::Extern(e.borrow().clone()),

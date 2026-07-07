@@ -270,8 +270,6 @@ fn values_equal(left: &Value, right: &Value) -> bool {
                 Rc::ptr_eq(a, b)
             }
         }
-        // File handles compare by their full shared state, matching the VM's `values_equal`.
-        (Value::FileHandle(a), Value::FileHandle(b)) => *a.borrow() == *b.borrow(),
         // Extern-type values compare through their contract (extern-types X1), matching the
         // VM's `values_equal` rung by construction.
         (Value::Extern(a), Value::Extern(b)) => a.borrow().eq_value(&**b.borrow()),

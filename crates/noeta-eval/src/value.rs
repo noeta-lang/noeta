@@ -18,7 +18,6 @@ use std::fmt;
 use std::rc::Rc;
 
 use noeta_ast::reflect::TypeRepr;
-use noeta_stdlib::FileHandle;
 
 use crate::{Builtin, Closure, EnumDef, EnumValue, ObjectValue, TypeDef};
 
@@ -86,10 +85,6 @@ pub enum Value {
     /// A **bound** method handle (`value.method`, EX.2b): the receiver captured at bind time.
     /// Calling it dispatches the method on the captured receiver. VM twin: `Payload::BoundMethod`.
     BoundMethod(Box<Value>, String),
-    /// An `fs.open` file handle (M2.5): a mutable cursor. `Rc<RefCell<…>>` gives the shared,
-    /// interior-mutable state the VM gets from its heap object; the `FileHandle` itself is the
-    /// same shared type both backends advance, so behavior is identical by construction.
-    FileHandle(Rc<RefCell<FileHandle>>),
     /// A registered extern-type value (extern-types X1) — the ONE hosting variant every
     /// registry-contributed type shares; the tree-walker twin of the VM's `Payload::Extern`.
     /// `Rc<RefCell<…>>` gives the shared, interior-mutable cell a mutating method needs
@@ -738,7 +733,6 @@ impl Value {
             Value::Object(object) => object.display(),
             Value::NativeModule(module) => format!("<module {module}>"),
             // `<file "path" (mode)>`, rendered by the shared handle so the VM matches exactly.
-            Value::FileHandle(handle) => handle.borrow().display(),
             // An extern-type value renders through its contract, identically on both backends.
             Value::Extern(e) => e.borrow().display_string(),
             Value::Iter(_) => "<iterator>".to_string(),
@@ -788,7 +782,6 @@ impl Value {
             Value::Type(_) => "type",
             Value::Object(_) => "object",
             Value::NativeModule(_) => "module",
-            Value::FileHandle(_) => "file handle",
             // The registered extern type's own name (`Uuid`), from the value contract.
             Value::Extern(e) => e.borrow().type_name(),
             Value::Iter(_) => "iterator",
@@ -836,7 +829,6 @@ impl fmt::Debug for Value {
             Value::Type(def) => write!(f, "Type({})", def.name()),
             Value::Object(object) => write!(f, "Object({})", object.display()),
             Value::NativeModule(module) => write!(f, "NativeModule({module})"),
-            Value::FileHandle(handle) => write!(f, "FileHandle({})", handle.borrow().display()),
             Value::Extern(e) => write!(f, "Extern({})", e.borrow().display_string()),
             Value::Iter(state) => write!(f, "Iter({:?})", state.borrow()),
             Value::Future(thunk) => write!(f, "Future({thunk:?})"),
@@ -880,8 +872,6 @@ impl PartialEq for Value {
             }
             // A bound handle compares by method name + receiver equality.
             (Value::BoundMethod(ra, ma), Value::BoundMethod(rb, mb)) => ma == mb && ra == rb,
-            // File handles compare by their full shared state, matching the VM by construction.
-            (Value::FileHandle(a), Value::FileHandle(b)) => *a.borrow() == *b.borrow(),
             // Extern-type values compare through their contract (extern-types X2). This impl is
             // the one enum/list/tuple/set *payload* comparisons route through, so a missing arm
             // here is the classic silent-wrong-`false` hole (`some(u) == some(u)` was false).

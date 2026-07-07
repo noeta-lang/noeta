@@ -1534,9 +1534,9 @@ impl Interpreter {
                 // recovered head-only from the shape; untagged.
                 self.construct_object(&name, span, field_values, None, None, span)
             }
-            // `Object` (shape-from-argument) and `FileHandle` are never produced by a recipe decode.
-            NativeOut::Object(_) | NativeOut::FileHandle(_) => {
-                unreachable!("json.parse recipe decode never yields an Object/FileHandle result")
+            // `Object` (shape-from-argument) is never produced by a recipe decode.
+            NativeOut::Object(_) => {
+                unreachable!("json.parse recipe decode never yields an Object result")
             }
         }
     }

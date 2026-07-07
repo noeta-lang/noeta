@@ -84,9 +84,6 @@ pub enum NativeOut {
     /// A homogeneous list (e.g. `env.keys()` → list of strings). The backend builds its native
     /// list; nested `NativeOut` keeps it general for later recursive modules.
     List(Vec<NativeOut>),
-    /// A file handle (`fs.open`). The shared dispatch builds the backend-agnostic
-    /// [`crate::FileHandle`]; each backend wraps it in its own mutable-handle value.
-    FileHandle(crate::FileHandle),
     /// A value-struct instance built by a call-site type recipe (`json.parse::<T>`): the type name
     /// and its `(field, value)` pairs **in the type's declared order**. Unlike [`NativeOut::Object`]
     /// — whose shape is supplied from an argument via [`RetTy::SameAsArg`] — a `Struct` names its own
@@ -103,9 +100,8 @@ pub enum NativeOut {
     None,
     /// `Option::Some(x)` — a present optional value.
     Some(Box<NativeOut>),
-    /// A registered extern-type value (extern-types X1) — the general form of what
-    /// [`NativeOut::FileHandle`] does for its one hardcoded type. Each backend wraps it in its
-    /// single extern hosting variant.
+    /// A registered extern-type value (extern-types X1) — `Uuid`, a `FileHandle`, … Each
+    /// backend wraps it in its single extern hosting variant.
     Extern(crate::ExternBox),
 }
 
@@ -266,14 +262,99 @@ impl Extension for StdExtension {
     }
 }
 
-/// Core's extern types (extern-types X2): `Uuid` — pure, byte-ordered (v7 = time order),
-/// key-capable.
-const STD_TYPES: &[ExtType] = &[ExtType {
-    name: crate::id::TYPE_NAME,
-    methods: UUID_METHODS,
-    dispatch: uuid_method_dispatch,
-    key_capable: true,
-}];
+/// Core's extern types: `Uuid` (X2 — pure, byte-ordered, key-capable) and `FileHandle` (X3 —
+/// mutable + effectful, the other corner of the matrix; NOT key-capable).
+const STD_TYPES: &[ExtType] = &[
+    ExtType {
+        name: crate::id::TYPE_NAME,
+        methods: UUID_METHODS,
+        dispatch: uuid_method_dispatch,
+        key_capable: true,
+    },
+    ExtType {
+        name: "FileHandle",
+        methods: FILE_HANDLE_METHODS,
+        dispatch: file_handle_dispatch,
+        key_capable: false,
+    },
+];
+
+/// The `FileHandle` instance methods (extern-types X3) — the signatures the checker's
+/// `file_handle_method`/`file_handle_params` tables used to hardcode.
+const FILE_HANDLE_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "read_line",
+        params: &[],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        name: "read",
+        params: &[Int],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        name: "write",
+        params: &[Str],
+        ret: Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "close",
+        params: &[],
+        ret: Concrete(SigType::Unit),
+    },
+];
+
+/// Method dispatch for `FileHandle` (extern-types X3): the cursor logic lives on the shared
+/// [`crate::FileHandle`] as before — this replaces the two per-backend `call_file_handle_method`
+/// twins with ONE body. The receiver mutates in place (reference semantics through the shared
+/// cell) and `close` flushes through the host — the whole effectful corner of the matrix.
+fn file_handle_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(handle) = recv.as_any_mut().downcast_mut::<crate::FileHandle>() else {
+        return Err(type_error(method, "FileHandle"));
+    };
+    let some_str = |s: Option<String>| match s {
+        Some(text) => NativeOut::Some(Box::new(NativeOut::Str(text))),
+        None => NativeOut::None,
+    };
+    match method {
+        "read_line" => {
+            want_arity(method, args, 0)?;
+            Ok(some_str(handle.read_line(host)?))
+        }
+        "read" => {
+            want_arity(method, args, 1)?;
+            let NativeValue::Scalar(Scalar::Int(count)) = args[0] else {
+                return Err(type_error(method, "int"));
+            };
+            Ok(some_str(handle.read(count, host)?))
+        }
+        "write" => {
+            want_arity(method, args, 1)?;
+            let NativeValue::Str(chunk) = &args[0] else {
+                return Err(type_error(method, "string"));
+            };
+            handle.write(chunk)?;
+            Ok(NativeOut::Unit)
+        }
+        "close" => {
+            want_arity(method, args, 0)?;
+            // Take the flush instruction first (ends the handle borrow's logical role), then
+            // hit the host — the same order both backend twins used.
+            match handle.close() {
+                None => {}
+                Some(crate::Flush::Write { path, content }) => host.fs_write(&path, &content)?,
+                Some(crate::Flush::Append { path, content }) => host.fs_append(&path, &content)?,
+            }
+            Ok(NativeOut::Unit)
+        }
+        _ => Err(crate::no_method_error("FileHandle", method)),
+    }
+}
 
 /// The in-process extension registry. A package manager will populate this from declared
 /// dependencies; for now it holds only core's std extension.
@@ -708,7 +789,7 @@ fn fs_dispatch(
                 crate::FileMode::Write => crate::FileHandle::open_write(path),
                 crate::FileMode::Append => crate::FileHandle::open_append(path),
             };
-            Ok(NativeOut::FileHandle(handle))
+            Ok(NativeOut::Extern(crate::ExternBox::new(handle)))
         }
         _ => Err(no_function_error("fs", func)),
     }

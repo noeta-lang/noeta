@@ -12,10 +12,6 @@
 use noeta_stdlib::registry;
 use noeta_types::Type;
 
-/// Reserved built-in type name for the value `fs.open` returns (the runtime `FileHandle`). A
-/// receiver of this `Named` type dispatches the file-handle methods.
-pub(super) const FILE_HANDLE: &str = "FileHandle";
-
 /// Reserved built-in type name for the value `iter()` returns (Track I.1a). `Iterator<T>` carries its
 /// element type as its single argument; a receiver of this `Named` type dispatches `next`/`collect`.
 pub(super) const ITERATOR: &str = "Iterator";
@@ -49,7 +45,7 @@ pub(super) const EFFECT: &str = "Effect";
 /// reactive graph. Together with the registry's extern types (`registry::find_type`) these form
 /// the E0049 reservation set — a user declaration of any of them is rejected.
 pub(super) const NATIVE_TYPE_NAMES: &[&str] = &[
-    FILE_HANDLE, ITERATOR, FUTURE, SENDER, RECEIVER, SIGNAL, COMPUTED, EFFECT,
+    ITERATOR, FUTURE, SENDER, RECEIVER, SIGNAL, COMPUTED, EFFECT,
 ];
 
 /// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. Every module — `json` included
@@ -122,7 +118,6 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         Type::Set(elem) => set_method(name, elem),
         Type::Map(_, val) => map_method(name, val),
         Type::Bytes => bytes_method(name),
-        Type::Named(n, _) if n == FILE_HANDLE => file_handle_method(name),
         Type::Named(n, args) if n == ITERATOR => {
             iterator_method(name, args.first().unwrap_or(&Type::Dyn))
         }
@@ -357,13 +352,6 @@ fn map_method(name: &str, val: &Type) -> Option<Type> {
     })
 }
 
-fn file_handle_method(name: &str) -> Option<Type> {
-    Some(match name {
-        "read_line" | "read" => opt(Type::String),
-        "write" | "close" => Type::Unit,
-        _ => return None,
-    })
-}
 
 /// The parameter types a **built-in** method expects (for arity + argument checking), given the
 /// receiver kind — or `None` if `name` is not a known built-in method on that kind.
@@ -378,7 +366,6 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         Type::Set(elem) => set_params(name, elem),
         Type::Map(_, val) => map_params(name, val),
         Type::Bytes if name == "len" => Some(vec![]),
-        Type::Named(n, _) if n == FILE_HANDLE => file_handle_params(name),
         Type::Named(n, args) if n == ITERATOR => {
             iterator_params(name, args.first().unwrap_or(&Type::Dyn))
         }
@@ -513,14 +500,6 @@ fn map_params(name: &str, val: &Type) -> Option<Vec<Type>> {
     })
 }
 
-fn file_handle_params(name: &str) -> Option<Vec<Type>> {
-    Some(match name {
-        "read_line" | "close" => vec![],
-        "read" => vec![Type::Int],
-        "write" => vec![Type::String],
-        _ => return None,
-    })
-}
 
 /// The parameter types a Ring 2 module function expects, or `None` if unknown. Numeric-polymorphic
 /// parameters (`math.abs`/`min`/`max`, and any numeric position) are typed `dyn` so an `int` or

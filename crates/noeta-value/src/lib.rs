@@ -40,7 +40,6 @@ use std::rc::Rc;
 use noeta_ast::reflect::TypeRepr;
 use noeta_bytecode::Builtin;
 use noeta_object::{PackedKind, PackedSchema, Shape};
-use noeta_stdlib::FileHandle;
 
 // The P-SSO string (24-byte, ≤24-byte content inline) inside `Payload::Str`. Re-exported so the
 // one hot producer outside this crate — the VM's `BuildString` — can assemble its output in the
@@ -89,7 +88,6 @@ pub enum HeapKind {
     MethodHandle,
     /// A bound method handle (`value.method`, receiver captured, prelude-redesign EX.2b).
     BoundMethod,
-    FileHandle,
     Iter,
     Future,
     Timer,
@@ -777,27 +775,9 @@ impl Value {
         out
     }
 
-    /// An `fs.open` file handle value (refcount 1). The handle owns only `String`s, so unlike a
-    /// collection it takes no child-value references.
-    pub fn file_handle(handle: FileHandle) -> Value {
-        heap::alloc(Payload::FileHandle(handle))
-    }
 
-    /// Whether this is a file handle.
-    pub fn is_file_handle(self) -> bool {
-        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::FileHandle(_)))
-    }
 
-    /// Read this file handle under a closure. The caller must have checked [`Value::is_file_handle`].
-    pub fn with_file_handle<R>(self, f: impl FnOnce(&FileHandle) -> R) -> R {
-        heap::with_file_handle(self, f)
-    }
 
-    /// Mutate this file handle under a closure (advance the cursor / buffer a write / close). The
-    /// caller must have checked [`Value::is_file_handle`].
-    pub fn with_file_handle_mut<R>(self, f: impl FnOnce(&mut FileHandle) -> R) -> R {
-        heap::with_file_handle_mut(self, f)
-    }
 
     /// A registered extern-type value (extern-types X1) — the general form of
     /// [`Value::file_handle`]. A GC leaf (the contract owns no child values).
@@ -2243,8 +2223,6 @@ impl Value {
                     }
                 }
                 Payload::NativeModule(name) => format!("<module {name}>"),
-                // `<file "path" (mode)>`, rendered by the shared handle so both backends match.
-                Payload::FileHandle(handle) => handle.display(),
                 // An extern-type value renders through its contract, identically on both backends.
                 Payload::Extern(e) => e.display_string(),
                 // An iterator is an opaque reference value (like a file handle).
@@ -2349,8 +2327,6 @@ impl Value {
                     NativeValue::Str(shape.variant.as_deref().unwrap_or(&shape.name).to_string())
                 }
                 Payload::NativeModule(name) => NativeValue::Str(format!("<module {name}>")),
-                // A handle has no JSON analog; its quoted display form, like a closure.
-                Payload::FileHandle(handle) => NativeValue::Str(handle.display()),
                 // An iterator has no JSON analog either — its opaque display form.
                 Payload::Iter { .. } => NativeValue::Str("<iterator>".to_string()),
                 // A future has no JSON analog — its opaque display form.
@@ -2416,7 +2392,6 @@ impl Value {
             Payload::BoundMethod { .. } => HeapKind::BoundMethod,
             Payload::NativeModule(_) => HeapKind::NativeModule,
             Payload::NativeFn(_) => HeapKind::NativeFn,
-            Payload::FileHandle(_) => HeapKind::FileHandle,
             Payload::Iter(_) => HeapKind::Iter,
             Payload::Future(_) => HeapKind::Future,
             Payload::Timer { .. } => HeapKind::Timer,
@@ -2466,8 +2441,6 @@ impl Value {
                 "enum"
             } else if self.native_module_name().is_some() {
                 "module"
-            } else if self.is_file_handle() {
-                "file handle"
             } else if self.is_iter() {
                 "iterator"
             } else if self.is_future() {

@@ -17,7 +17,6 @@ use std::rc::Rc;
 use noeta_ast::reflect::TypeRepr;
 use noeta_bytecode::Builtin;
 use noeta_object::{PackedSchema, Shape};
-use noeta_stdlib::FileHandle;
 
 use crate::Value;
 
@@ -339,11 +338,6 @@ pub(crate) enum Payload {
     /// dispatches `method` on the captured receiver. NOT a leaf: `recv` is a child value (traversed
     /// by the cycle collector, released with the handle).
     BoundMethod { recv: Value, method: String },
-    /// An `fs.open` file handle (M2.5): a mutable cursor over a content snapshot (read) or a
-    /// pending write buffer. The whole state machine lives in `noeta_stdlib::FileHandle` so it is
-    /// byte-identical to the tree-walker's. Holds no child `Value`s (only owned `String`s), so it
-    /// is a GC leaf like `Str`.
-    FileHandle(FileHandle),
     /// A lazy iterator (Track I): a reference-semantic pull cursor. The base (`iter()`) is a cursor
     /// over a list; adapters (`take`/`drop`/`chain`/…) wrap one or two **source** iterators and pull
     /// from them on demand, so a pipeline fuses with no intermediate list. It **owns one reference**
@@ -721,7 +715,6 @@ pub(crate) fn free(value: Value) {
         | Payload::ChannelRecv(_)
         | Payload::IsolateFuture(_)
         | Payload::Reactive(..)
-        | Payload::FileHandle(_)
         | Payload::Extern(_) => {}
     }
     drop(boxed);
@@ -907,7 +900,6 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::ChannelRecv(_)
         | Payload::IsolateFuture(_)
         | Payload::Reactive(..)
-        | Payload::FileHandle(_)
         | Payload::Extern(_) => {}
     }
     out
@@ -938,26 +930,7 @@ pub(crate) fn free_shallow(value: Value) {
     drop(boxed);
 }
 
-/// Read a file handle under a closure (it borrows the handle, so no reference escapes). The
-/// caller must have checked the value is a `FileHandle`.
-pub(crate) fn with_file_handle<R>(value: Value, f: impl FnOnce(&FileHandle) -> R) -> R {
-    let obj = unsafe { &*obj_ptr(value) };
-    let Payload::FileHandle(handle) = &obj.payload else {
-        panic!("with_file_handle on a non-handle value");
-    };
-    f(handle)
-}
 
-/// Mutate a file handle under a closure — the cursor-advancing primitive for `read_line`/`read`/
-/// `write`/`close`. Like [`set_slot`], this is single-threaded interior mutation of a heap object;
-/// the handle holds no child `Value`s, so no retain/release bookkeeping is needed.
-pub(crate) fn with_file_handle_mut<R>(value: Value, f: impl FnOnce(&mut FileHandle) -> R) -> R {
-    let obj = unsafe { &mut *obj_ptr(value) };
-    let Payload::FileHandle(handle) = &mut obj.payload else {
-        panic!("with_file_handle_mut on a non-handle value");
-    };
-    f(handle)
-}
 
 /// Read an extern-type value under a closure (extern-types X1). The caller must have checked the
 /// value is an `Extern`.
