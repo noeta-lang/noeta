@@ -6077,6 +6077,7 @@ impl<'m> Vm<'m> {
                 let n = list.list_len().expect("a list has a length");
                 let mut results: Vec<Option<Value>> = vec![None; n];
                 loop {
+                    let wake_gen = isolate::WAKE.generation();
                     let mut i = 0;
                     while i < n {
                         if results[i].is_none() {
@@ -6094,7 +6095,7 @@ impl<'m> Vm<'m> {
                     let progressed = self.poll_all_scopes_round(span)?;
                     if !progressed
                         && self.executor.advance().is_none()
-                        && !self.isolate_in_flight_wait()
+                        && !self.isolate_in_flight_wait(wake_gen)
                     {
                         for v in results.into_iter().flatten() {
                             release(v);
@@ -6133,6 +6134,7 @@ impl<'m> Vm<'m> {
                     ));
                 }
                 loop {
+                    let wake_gen = isolate::WAKE.generation();
                     for i in 0..n {
                         let h = list.list_get(i).expect("in bounds");
                         if let Poll::Ready(v) = self.poll_once(h, span)? {
@@ -6148,7 +6150,7 @@ impl<'m> Vm<'m> {
                     let progressed = self.poll_all_scopes_round(span)?;
                     if !progressed
                         && self.executor.advance().is_none()
-                        && !self.isolate_in_flight_wait()
+                        && !self.isolate_in_flight_wait(wake_gen)
                     {
                         return Err(self.error(
                             DiagnosticCode::Panic,
@@ -6205,6 +6207,7 @@ impl<'m> Vm<'m> {
                     }};
                 }
                 loop {
+                    let wake_gen = isolate::WAKE.generation();
                     while in_flight.len() < window && next < count {
                         let item = items.list_get(next).expect("in bounds");
                         retain(item);
@@ -6245,7 +6248,7 @@ impl<'m> Vm<'m> {
                     }
                     if !progressed
                         && self.executor.advance().is_none()
-                        && !self.isolate_in_flight_wait()
+                        && !self.isolate_in_flight_wait(wake_gen)
                     {
                         cleanup!(in_flight, results);
                         return Err(self.error(

@@ -30,8 +30,9 @@ use noeta_bytecode::Builtin;
 /// A `Mutex`-guarded FIFO of `Wire` messages reachable by `Arc` from every isolate holding an endpoint
 /// — the one place a message crosses a thread. Operations are **non-blocking** (`try_send`/`try_recv`
 /// under a short lock); the callers poll cooperatively (Pending on full/empty), so no thread ever
-/// blocks on the channel and a producer/consumer split across isolate threads makes progress by each
-/// thread's scheduler re-polling. No `Condvar` — the cooperative poll model replaces blocking.
+/// blocks *on the channel* and a producer/consumer split across isolate threads makes progress by
+/// each thread's scheduler re-polling. Successful ops bump the process-wide [`WAKE`] eventcount
+/// (P-PAR S3) so a scheduler parked at a stall re-polls immediately instead of sleeping a quantum.
 #[derive(Debug)]
 pub struct ChannelCore {
     inner: Mutex<ChannelInner>,
@@ -87,20 +88,27 @@ impl ChannelCore {
 
     /// Push a marshalled message if there is still room and the channel is open (re-checked under the
     /// lock, so a race after [`send_state`](Self::send_state) is safe); returns whether it was pushed.
+    /// A successful push is cross-thread progress, so it bumps [`WAKE`] — a consumer's scheduler
+    /// parked in `isolate_in_flight_wait` re-polls immediately instead of sleeping out its quantum.
     pub fn try_send(&self, msg: Wire) -> bool {
         let mut inner = self.inner.lock().expect("channel mutex poisoned");
         if !inner.closed && inner.queue.len() < self.capacity {
             inner.queue.push_back(msg);
+            drop(inner);
+            WAKE.notify();
             true
         } else {
             false
         }
     }
 
-    /// Dequeue the next message, or report the buffer empty / closed-and-drained.
+    /// Dequeue the next message, or report the buffer empty / closed-and-drained. A dequeue frees a
+    /// buffer slot — progress for a producer parked on send-full — so it bumps [`WAKE`].
     pub fn try_recv(&self) -> RecvState {
         let mut inner = self.inner.lock().expect("channel mutex poisoned");
         if let Some(msg) = inner.queue.pop_front() {
+            drop(inner);
+            WAKE.notify();
             RecvState::Got(msg)
         } else if inner.closed {
             RecvState::ClosedEmpty
@@ -110,14 +118,76 @@ impl ChannelCore {
     }
 
     /// Close the channel (idempotent): no further sends, and a drained receiver reads `none`.
+    /// Close is progress for a receiver parked on recv-empty (it now reads `none`), so bump [`WAKE`].
     pub fn close(&self) {
         self.inner.lock().expect("channel mutex poisoned").closed = true;
+        WAKE.notify();
     }
 
     /// Whether the channel is still open — a stalled scheduler keeps polling while any open shared
     /// channel could yet be fed/drained by another isolate thread (rather than declaring a deadlock).
     pub fn is_open(&self) -> bool {
         !self.inner.lock().expect("channel mutex poisoned").closed
+    }
+}
+
+/// Cross-thread progress wakeup (P-PAR S3): a process-wide eventcount replacing the stall wait's
+/// 100 µs sleep-spin. Every cross-thread progress event — a worker's result landing, a shared
+/// channel gaining a message, freeing a slot, or closing — bumps the generation and signals; a
+/// scheduler that finished an unproductive poll round parks in [`wait_past`](WakeSignal::wait_past)
+/// against the generation it read **before** the round, so progress made *during* the round returns
+/// immediately (no missed-wakeup window). Process-wide rather than per-VM because one event source
+/// (a shared `ChannelCore`) can unblock schedulers in several isolate trees; a spurious wake just
+/// re-polls, which the cooperative model already tolerates. The deterministic sandbox never parks
+/// (no real isolates, all channels `Local`), so in-oracle behaviour is untouched — its round loops
+/// only pay one relaxed-ish atomic load per round for the generation snapshot.
+pub struct WakeSignal {
+    generation: std::sync::atomic::AtomicU64,
+    lock: Mutex<()>,
+    cv: std::sync::Condvar,
+}
+
+/// The one process-wide wake signal (see [`WakeSignal`]).
+pub static WAKE: WakeSignal = WakeSignal::new();
+
+impl WakeSignal {
+    const fn new() -> WakeSignal {
+        WakeSignal {
+            generation: std::sync::atomic::AtomicU64::new(0),
+            lock: Mutex::new(()),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Snapshot the generation — read at the top of a poll round, before any polling.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Record cross-thread progress: bump the generation (under the lock, so a parked waiter's
+    /// re-check cannot miss it) and wake every parked scheduler.
+    pub fn notify(&self) {
+        {
+            let _guard = self.lock.lock().expect("wake mutex poisoned");
+            self.generation
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+        self.cv.notify_all();
+    }
+
+    /// Park until the generation moves past `seen` (progress since the caller's snapshot) or the
+    /// safety timeout elapses. Returns immediately if progress already happened; a timeout or a
+    /// spurious wake is harmless — the caller loops and re-polls either way, so the timeout exists
+    /// only to keep liveness under a missed-notify bug, never for correctness.
+    pub fn wait_past(&self, seen: u64, timeout: std::time::Duration) {
+        let guard = self.lock.lock().expect("wake mutex poisoned");
+        if self.generation.load(std::sync::atomic::Ordering::Acquire) != seen {
+            return;
+        }
+        let _ = self
+            .cv
+            .wait_timeout(guard, timeout)
+            .expect("wake mutex poisoned");
     }
 }
 

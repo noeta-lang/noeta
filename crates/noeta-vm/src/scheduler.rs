@@ -64,18 +64,22 @@ impl<'m> Vm<'m> {
 
     /// At a scheduler stall (no task completed, no channel op, no timer to advance): if another isolate
     /// thread could still make this VM progress — a real isolate worker (I.4b) is still running, or an
-    /// open *shared* channel (I.4c) could yet be fed/drained by a worker — briefly yield and report
-    /// `true` ("keep looping") rather than declaring a deadlock. `false` when no cross-thread work is
-    /// outstanding, so the caller raises the deterministic deadlock. Always `false` in the sandbox (no
-    /// real isolates, all channels `Local`), so cooperative deadlock detection is unchanged in-oracle.
-    pub(crate) fn isolate_in_flight_wait(&self) -> bool {
+    /// open *shared* channel (I.4c) could yet be fed/drained by a worker — park on the [`isolate::WAKE`]
+    /// eventcount (P-PAR S3) and report `true` ("keep looping") rather than declaring a deadlock.
+    /// `seen` is the generation snapshot the caller took **before** its poll round, so progress made
+    /// during the round returns immediately; the 5 ms timeout is a liveness backstop for a
+    /// missed-notify bug, not part of the protocol (S0b measured the old 100 µs sleep-spin at
+    /// ~160 µs/round on a cross-thread ping-pong). `false` when no cross-thread work is outstanding,
+    /// so the caller raises the deterministic deadlock. Always `false` in the sandbox (no real
+    /// isolates, all channels `Local`), so cooperative deadlock detection is unchanged in-oracle.
+    pub(crate) fn isolate_in_flight_wait(&self, seen: u64) -> bool {
         let cross_thread_pending = self.inflight_isolates > 0
             || self
                 .channels
                 .iter()
                 .any(|c| matches!(c, Channel::Shared(core) if core.is_open()));
         if cross_thread_pending {
-            std::thread::sleep(std::time::Duration::from_micros(100));
+            isolate::WAKE.wait_past(seen, std::time::Duration::from_millis(5));
             true
         } else {
             false
@@ -407,6 +411,9 @@ impl<'m> Vm<'m> {
         let thread_handle = std::thread::spawn(move || {
             let msg = run_isolate_worker(&module, &factory, proto, wire_args, wire_globals, span);
             let _ = tx.send(msg);
+            // The result landing is cross-thread progress: wake the parent's parked scheduler
+            // (P-PAR S3) so it harvests immediately instead of sleeping out its stall quantum.
+            isolate::WAKE.notify();
         });
         let id = self.isolates.len() as u32;
         self.isolates.push(IsolateSlot {
@@ -425,6 +432,9 @@ impl<'m> Vm<'m> {
     pub(crate) fn join_scope(&mut self, span: Span) -> Result<(), Abort> {
         let si = self.scopes.len() - 1;
         loop {
+            // Snapshot the wake generation before polling (P-PAR S3): progress a worker makes
+            // *during* this round then returns the stall wait immediately instead of parking.
+            let wake_gen = isolate::WAKE.generation();
             let before = self.channel_progress;
             let progressed = self.poll_all_scopes_round(span)?;
             if self.scopes[si]
@@ -436,7 +446,10 @@ impl<'m> Vm<'m> {
             // A channel op (a `send` unblocked, a `recv` drained) is progress even when no task
             // completed this round — otherwise a producer/consumer pair would look deadlocked.
             let progressed = progressed || self.channel_progress != before;
-            if !progressed && self.executor.advance().is_none() && !self.isolate_in_flight_wait() {
+            if !progressed
+                && self.executor.advance().is_none()
+                && !self.isolate_in_flight_wait(wake_gen)
+            {
                 return Err(self.error(
                     DiagnosticCode::Panic,
                     span,
@@ -454,6 +467,7 @@ impl<'m> Vm<'m> {
     /// advance. Returns the completion value (owned). The caller's register keeps owning the future.
     pub(crate) fn drive_future(&mut self, future: Value, span: Span) -> Result<Value, Abort> {
         loop {
+            let wake_gen = isolate::WAKE.generation();
             let before = self.channel_progress;
             if let Poll::Ready(value) = self.poll_once(future, span)? {
                 return Ok(value);
@@ -465,7 +479,10 @@ impl<'m> Vm<'m> {
             };
             // A channel op during any poll this iteration is progress (see `join_scope`).
             let progressed = progressed || self.channel_progress != before;
-            if !progressed && self.executor.advance().is_none() && !self.isolate_in_flight_wait() {
+            if !progressed
+                && self.executor.advance().is_none()
+                && !self.isolate_in_flight_wait(wake_gen)
+            {
                 return Err(self.error(
                     DiagnosticCode::Panic,
                     span,

@@ -41,6 +41,26 @@ channel):
 - No deadlock-detection regression: the deterministic deadlock conformance cases and the
   timeout fallback path both exercised.
 
+## Shipped design (differs from the sketch above in one way)
+
+A **process-wide eventcount** (`isolate::WAKE`: `AtomicU64` generation + `Mutex`/`Condvar`),
+not a per-parent signal — one event source (a shared `ChannelCore`) can unblock schedulers in
+several isolate trees, and registration plumbing isn't worth it when a spurious wake just
+re-polls. Every round loop (join_scope, drive_future, `all`/`race`/`map_bounded`) snapshots the
+generation **before** polling and parks in `wait_past(seen, 5ms)` only if it hasn't moved —
+check-then-wait under the condvar lock, so no missed-wakeup window. Notify points: worker
+result landing (`try_spawn_isolate_real` closure), `ChannelCore::{try_send, try_recv-Got,
+close}`. Sandbox: never parks (no cross-thread pending); pays one atomic load per round.
+
 ## Numbers
 
-_Before (S0b) / after table to be recorded here._
+2026-07-07, same harness as S0b (`tests/bench/parallel-seams/run.py`, median of 7).
+
+| Fixture | before (S0b) | after | Δ |
+|---|--:|--:|--:|
+| `pingpong` (2000 cross-thread rounds) | 319.3 ms | **15.5 ms** | **20.6× faster** (~160 → ~7.8 µs/round) |
+| `pingpong_coop` (floor) | 13.6 ms | 14.7 ms | unchanged (noise) |
+
+The cross-thread ping-pong now sits ~1 ms above the single-thread cooperative floor. CPU/run
+23 ms (vs 24 ms before): the old cost was pure sleep, and the wakeups add nothing measurable.
+Fan-out fixtures unchanged (marshal-dominated; S2's target).
