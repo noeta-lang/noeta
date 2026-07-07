@@ -15,9 +15,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+use noeta_ast::{Expr, Stmt};
 use noeta_bytecode::Module;
-use noeta_span::SourceMap;
-use noeta_vm::{DebugAction, DebugView, Debugger};
+use noeta_lexer::lex;
+use noeta_parser::parse;
+use noeta_span::{Source, SourceId, SourceMap};
+use noeta_value::Value as RuntimeValue;
+use noeta_vm::{DebugAction, DebugFrame, DebugView, Debugger};
 use serde_json::{Value, json};
 
 use crate::MAIN_THREAD_ID;
@@ -31,6 +35,45 @@ pub enum Resume {
     Step(StepMode),
     /// Abandon the run (the client disconnected).
     Terminate,
+    /// Evaluate `expr` against the paused frame at snapshot index `frame` (as the client numbers stack
+    /// frames, innermost first) and send the result back on `reply`. Handled **without leaving the
+    /// pause** — a watch/hover re-query must not resume the program — so the worker services it and
+    /// loops back to waiting. Read-only variable-path evaluation (D5); full expressions are D5.1.
+    Evaluate {
+        expr: String,
+        frame: usize,
+        reply: Sender<EvalReply>,
+    },
+}
+
+/// The outcome of an [`Resume::Evaluate`], sent from the run worker back to the adapter thread. Runtime
+/// [`RuntimeValue`]s are thread-local (`!Send`), so the value is resolved *and rendered* on the worker
+/// and only its strings cross back.
+pub struct EvalReply {
+    /// The rendered value on success, or the error message on failure.
+    pub text: String,
+    /// The value's type (surface spelling) on success; `None` on failure.
+    pub ty: Option<String>,
+    /// Whether `text` is a value (`true`) or an error message (`false`).
+    pub ok: bool,
+}
+
+impl EvalReply {
+    fn value(text: String, ty: String) -> EvalReply {
+        EvalReply {
+            text,
+            ty: Some(ty),
+            ok: true,
+        }
+    }
+
+    fn error(msg: impl Into<String>) -> EvalReply {
+        EvalReply {
+            text: msg.into(),
+            ty: None,
+            ok: false,
+        }
+    }
 }
 
 /// A source-line step, as the DAP `next` / `stepIn` / `stepOut` requests ask for it. Stepping is
@@ -211,21 +254,30 @@ impl DapDebugger {
                 "allThreadsStopped": true,
             }),
         ));
-        let action = match self.resume.recv() {
-            // Ignore any step/continue that raced a termination request.
-            _ if self.terminate.load(Ordering::Relaxed) => DebugAction::Terminate,
-            Ok(Resume::Continue) => DebugAction::Continue,
-            // Arm the step relative to this pause point, then resume; `before_op` lands it.
-            Ok(Resume::Step(mode)) => {
-                self.step = Some(StepState {
-                    mode,
-                    origin_depth: view.depth(),
-                    origin_line: top_line(view, &self.sources),
-                });
-                DebugAction::Continue
+        // Loop rather than a single `recv`: an `Evaluate` (a watch/hover query) is answered in place
+        // and does *not* leave the pause, so several may arrive before the command that resumes.
+        let action = loop {
+            match self.resume.recv() {
+                // Ignore any step/continue that raced a termination request.
+                _ if self.terminate.load(Ordering::Relaxed) => break DebugAction::Terminate,
+                Ok(Resume::Continue) => break DebugAction::Continue,
+                // Arm the step relative to this pause point, then resume; `before_op` lands it.
+                Ok(Resume::Step(mode)) => {
+                    self.step = Some(StepState {
+                        mode,
+                        origin_depth: view.depth(),
+                        origin_line: top_line(view, &self.sources),
+                    });
+                    break DebugAction::Continue;
+                }
+                // A read-only evaluate: resolve against the live frames on this (the run) thread and
+                // reply, then keep waiting — the program stays paused.
+                Ok(Resume::Evaluate { expr, frame, reply }) => {
+                    let _ = reply.send(evaluate_path(view, frame, &expr));
+                }
+                // Terminate, or the adapter dropped the channel (session gone).
+                Ok(Resume::Terminate) | Err(_) => break DebugAction::Terminate,
             }
-            // Terminate, or the adapter dropped the channel (session gone).
-            Ok(Resume::Terminate) | Err(_) => DebugAction::Terminate,
         };
         *self.paused.lock().unwrap() = None;
         action
@@ -340,4 +392,133 @@ fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
         });
     }
     PausedState { frames }
+}
+
+/// Evaluate `expr` — a variable **path** — against the paused frame at snapshot index `frame`
+/// (innermost-first, matching how the client numbers stack frames), returning the value and its type.
+/// **Read-only**: it reads the live register window and walks fields/elements, never running user
+/// code — so it is safe as a hover query. A full expression (an operator, a call) returns a clear
+/// error pointing at D5.1 rather than pretending to evaluate it.
+///
+/// Runs on the run worker thread, where the paused `view`'s [`RuntimeValue`]s (and the heap they point
+/// into) are valid; only the rendered strings travel back to the adapter thread.
+fn evaluate_path(view: &DebugView, frame: usize, expr: &str) -> EvalReply {
+    // Snapshot frames are innermost-first; the `view` is bottom-first — invert the index.
+    let Some(view_idx) = view.depth().checked_sub(frame + 1) else {
+        return EvalReply::error(format!("no frame {frame} in the paused stack"));
+    };
+    let frame = view.frame(view_idx);
+    let Some(ast) = parse_expr(expr) else {
+        return EvalReply::error("could not parse the expression");
+    };
+    // A bare literal renders directly — no path resolution, no heap allocation.
+    match &ast {
+        Expr::Int { value, .. } => return EvalReply::value(value.to_string(), "int".into()),
+        Expr::Bool { value, .. } => return EvalReply::value(value.to_string(), "bool".into()),
+        Expr::Str { value, .. } => return EvalReply::value(value.clone(), "string".into()),
+        _ => {}
+    }
+    match resolve(&ast, &frame) {
+        Ok(value) => EvalReply::value(value.display(), render_type(value)),
+        Err(msg) => EvalReply::error(msg),
+    }
+}
+
+/// Resolve a variable-path expression against a frame's in-scope locals, read-only: a bare name,
+/// chained `.field` access, or `[index]` list/map indexing. Anything else (an operator, a call) is
+/// deferred to D5.1 with a message the watch window can show.
+fn resolve(expr: &Expr, frame: &DebugFrame) -> Result<RuntimeValue, String> {
+    match expr {
+        Expr::Ident { name, .. } => local(frame, name),
+        Expr::Member { receiver, name, .. } => {
+            let recv = resolve(receiver, frame)?;
+            recv.field(name)
+                .ok_or_else(|| format!("value has no field `{name}`"))
+        }
+        Expr::Index {
+            receiver, index, ..
+        } => {
+            let recv = resolve(receiver, frame)?;
+            index_into(recv, index, frame)
+        }
+        _ => Err(
+            "only a variable path (a name, `.field`, or `[index]`) can be evaluated so far — \
+                  full expressions (arithmetic, calls) are planned as D5.1"
+                .to_string(),
+        ),
+    }
+}
+
+/// The current value of the in-scope local named `name` in `frame`.
+fn local(frame: &DebugFrame, name: &str) -> Result<RuntimeValue, String> {
+    frame
+        .locals()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, _, v)| v)
+        .ok_or_else(|| format!("no variable `{name}` in scope"))
+}
+
+/// Index into a list (by integer) or a map (by string key). The index may be a literal or an in-scope
+/// variable holding an int/string; a computed index is a D5.1 expression.
+fn index_into(
+    recv: RuntimeValue,
+    index: &Expr,
+    frame: &DebugFrame,
+) -> Result<RuntimeValue, String> {
+    enum Key {
+        Int(i64),
+        Str(String),
+    }
+    let key = match index {
+        Expr::Int { value, .. } => Key::Int(*value),
+        Expr::Str { value, .. } => Key::Str(value.clone()),
+        Expr::Ident { .. } => {
+            let v = resolve(index, frame)?;
+            if let Some(i) = v.as_int() {
+                Key::Int(i)
+            } else if let Some(s) = v.as_string() {
+                Key::Str(s)
+            } else {
+                return Err("an index variable must hold an int or a string".to_string());
+            }
+        }
+        _ => {
+            return Err(
+                "an index must be an integer, a string key, or a variable — a computed \
+                        index is a D5.1 expression"
+                    .to_string(),
+            );
+        }
+    };
+    match key {
+        Key::Int(i) if i >= 0 => recv
+            .list_get(i as usize)
+            .ok_or_else(|| format!("index {i} is out of bounds")),
+        Key::Int(i) => Err(format!("negative index {i}")),
+        Key::Str(s) => recv.map_get(&s).ok_or_else(|| format!("no key `{s}`")),
+    }
+}
+
+/// A value's type as surface syntax (`List<int>`), from its reified tag, falling back to the coarse
+/// kind name for an untagged primitive — the same rendering the Variables view uses.
+fn render_type(value: RuntimeValue) -> String {
+    value
+        .reflect()
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| value.type_name().to_string())
+}
+
+/// Parse a single expression string (appended with `;` so it parses as a trailing bare expression);
+/// `None` if it does not lex/parse cleanly.
+fn parse_expr(expr: &str) -> Option<Expr> {
+    let source = Source::new(SourceId::FIRST, "<eval>", format!("{expr};"));
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    if !lexed.diagnostics.is_empty() || !parsed.diagnostics.is_empty() {
+        return None;
+    }
+    match parsed.program.stmts.last() {
+        Some(Stmt::Expr { expr, .. }) => Some(expr.clone()),
+        _ => None,
+    }
 }

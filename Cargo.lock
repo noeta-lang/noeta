@@ -1324,10 +1324,13 @@ dependencies = [
  "noeta-check",
  "noeta-compiler",
  "noeta-diagnostics",
+ "noeta-lexer",
  "noeta-loader",
+ "noeta-parser",
  "noeta-runtime",
  "noeta-span",
  "noeta-stdlib",
+ "noeta-value",
  "noeta-vm",
  "serde_json",
 ]

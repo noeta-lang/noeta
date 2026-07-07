@@ -33,7 +33,7 @@ use std::thread::{self, JoinHandle};
 
 use serde_json::{Value, json};
 
-use debugger::{DapDebugger, FrameInfo, Paused, Resume, StepMode, resolve_breakpoints};
+use debugger::{DapDebugger, EvalReply, FrameInfo, Paused, Resume, StepMode, resolve_breakpoints};
 use protocol::{Writer, command_of, error_response, event, read_message, response};
 
 /// The debuggee is a single logical thread of execution; the DAP UI still needs a thread id to hang
@@ -172,6 +172,18 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
             "variables" => {
                 let _ = tx.send(response(&request, variables_body(&request, &paused)));
             }
+            // Evaluate an expression against a paused frame (a watch, a debug-console entry, or a
+            // hover). Read-only variable-path resolution for now; a failure (not paused, unknown name,
+            // or an unsupported expression) becomes an error response, so a hover over something
+            // unevaluable simply shows nothing.
+            "evaluate" => match evaluate(&request, &paused, resume_tx.as_ref()) {
+                Ok(body) => {
+                    let _ = tx.send(response(&request, body));
+                }
+                Err(message) => {
+                    let _ = tx.send(error_response(&request, &message));
+                }
+            },
             "disconnect" => {
                 signal_terminate(&terminate, &resume_tx);
                 let _ = tx.send(response(&request, json!({})));
@@ -261,6 +273,9 @@ fn signal_terminate(terminate: &Option<Arc<AtomicBool>>, resume_tx: &Option<Send
 fn capabilities() -> Value {
     json!({
         "supportsConfigurationDoneRequest": true,
+        // The editor may evaluate a hovered expression (VS Code's debug hover). We answer read-only
+        // variable paths (D5); hover is path-only by design (a hover must never run user code).
+        "supportsEvaluateForHovers": true,
     })
 }
 
@@ -417,6 +432,59 @@ fn variables_body(request: &Value, paused: &Option<Paused>) -> Value {
         })
         .unwrap_or_default();
     json!({ "variables": variables })
+}
+
+/// Answer a DAP `evaluate` request while paused: resolve the expression against the given frame on the
+/// run worker (where the values live) and return its rendered value + type. All `context`s
+/// (`hover` / `watch` / `repl`) resolve variable **paths** for now — a name, `.field`, `[index]`;
+/// hover is path-only *by design* (side-effect-free), while `watch`/`repl` will gain full read-only
+/// expressions in D5.1 (see `plans/debug-adapter`). This is the permanent request seam; D5.1 adds the
+/// evaluator behind it, not new plumbing.
+///
+/// Returns `Err` (→ a DAP error response) when the program isn't paused, the frame is gone, the name
+/// isn't in scope, or the expression is beyond a path — so a hover over something unevaluable shows
+/// nothing rather than a stale value.
+fn evaluate(
+    request: &Value,
+    paused: &Option<Paused>,
+    resume_tx: Option<&Sender<Resume>>,
+) -> Result<Value, String> {
+    let args = request.get("arguments");
+    let expression = args
+        .and_then(|a| a.get("expression"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if expression.is_empty() {
+        return Err("no expression to evaluate".to_string());
+    }
+    // The frame the client selected; defaults to the innermost (`frameId` 0) if omitted.
+    let frame = args
+        .and_then(|a| a.get("frameId"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    // Evaluation reads the paused frames on the run worker — there must be a paused program.
+    if with_paused(paused, |_| ()).is_none() {
+        return Err("can only evaluate while the program is paused".to_string());
+    }
+    let resume = resume_tx.ok_or("the program is not running")?;
+    let (reply_tx, reply_rx) = mpsc::channel::<EvalReply>();
+    resume
+        .send(Resume::Evaluate {
+            expr: expression.to_string(),
+            frame,
+            reply: reply_tx,
+        })
+        .map_err(|_| "the program is no longer running".to_string())?;
+    match reply_rx.recv() {
+        Ok(reply) if reply.ok => Ok(json!({
+            "result": reply.text,
+            "type": reply.ty,
+            "variablesReference": 0,
+        })),
+        Ok(reply) => Err(reply.text),
+        Err(_) => Err("evaluation did not complete".to_string()),
+    }
 }
 
 /// The final path component, for a `Source.name` alongside the full `path`.
@@ -733,6 +801,15 @@ mod tests {
                 .collect()
         }
 
+        /// Evaluate `expr` in the innermost paused frame (context `watch`), returning the response.
+        fn evaluate(&mut self, expr: &str) -> Value {
+            self.send(
+                "evaluate",
+                json!({ "expression": expr, "frameId": 0, "context": "watch" }),
+            );
+            self.response("evaluate")
+        }
+
         /// End the session: disconnect, then join the adapter thread so nothing outlives the test.
         fn disconnect_and_join(mut self) {
             self.send("disconnect", json!({}));
@@ -811,6 +888,68 @@ mod tests {
         assert_eq!(named("n")["type"], "int");
         assert_eq!(named("doubled")["value"], "40");
         assert_eq!(named("result")["value"], "41");
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    #[test]
+    fn evaluate_resolves_variable_paths_in_a_paused_frame() {
+        // At the breakpoint, `p` (a struct) and `xs` (a list) are in scope in `probe`.
+        let path = fixture(
+            "evaluate",
+            "struct Point { x: int; y: int }\n\
+             fn probe(): void {\n    \
+             mut p = Point { x: 3, y: 4 }\n    \
+             mut xs = [10, 20, 30]\n    \
+             echo \"here\"\n}\n\
+             probe()\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 5 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+
+        // A member access resolves and carries its type.
+        let px = session.evaluate("p.x");
+        assert_eq!(px["success"], true, "{px:#?}");
+        assert_eq!(px["body"]["result"], "3");
+        assert_eq!(px["body"]["type"], "int");
+        assert_eq!(session.evaluate("p.y")["body"]["result"], "4");
+        // Indexing a list; the whole list; a bare literal.
+        assert_eq!(session.evaluate("xs[1]")["body"]["result"], "20");
+        assert_eq!(session.evaluate("xs")["body"]["result"], "[10, 20, 30]");
+        assert_eq!(session.evaluate("42")["body"]["result"], "42");
+        // The whole struct renders (contains its field values).
+        let p = session.evaluate("p");
+        assert!(
+            p["body"]["result"].as_str().unwrap().contains('3'),
+            "struct render: {p:#?}"
+        );
+
+        // Beyond a variable path → a clean error pointing at the D5.1 follow-on (not a crash, not a
+        // wrong value), so a watch on `p.x + 1` shows the message rather than pretending.
+        let arith = session.evaluate("p.x + 1");
+        assert_eq!(arith["success"], false);
+        assert!(
+            arith["message"].as_str().unwrap().contains("D5.1"),
+            "arith error: {arith:#?}"
+        );
+        // An unknown name reports it by name.
+        let missing = session.evaluate("nope");
+        assert_eq!(missing["success"], false);
+        assert!(missing["message"].as_str().unwrap().contains("nope"));
 
         session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
         session.disconnect_and_join();
