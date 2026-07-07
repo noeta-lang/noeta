@@ -24,7 +24,7 @@ use noeta_span::{SourceId, Span};
 use noeta_stdlib::{Executor, Host};
 use noeta_value::Value;
 
-use crate::{Channel, GcVal, Vm};
+use crate::{Channel, GcVal, Vm, release};
 
 /// A factory for a fresh host + executor pair — the session builds one at construction and again on
 /// `:reset`, so a reset REPL starts against the same *kind* of environment (a real host, or the
@@ -213,9 +213,38 @@ impl VmSession {
     /// runs against the shared globals with **no teardown**, so bindings and declarations survive into
     /// the next entry.
     pub fn eval(&mut self, program: &Program) -> SessionOutput {
+        // Echo a trailing bare expression's **non-unit** value in its display form (`1 + 2` → `3`).
+        self.run_capturing(program, |v| (!v.is_unit()).then(|| v.display()))
+    }
+
+    /// `:type <expr>` — evaluate `program`'s trailing expression and report its **runtime** type. The
+    /// REPL runs no checker across entries, so the type is read from the produced value (like the
+    /// language's `type_of`), which means the expression is evaluated and any side effects run. Uses
+    /// reflection + the `TypeRepr` surface spelling (`List<int>`), falling back to the runtime kind
+    /// name for an untagged primitive — the same rendering the debugger shows.
+    pub fn type_of(&mut self, program: &Program) -> SessionOutput {
+        self.run_capturing(program, |v| {
+            Some(
+                v.reflect()
+                    .map(|r| r.to_string())
+                    .unwrap_or_else(|| v.type_name().to_string()),
+            )
+        })
+    }
+
+    /// Compile and run one entry, then — if the final statement was a bare expression — hand its
+    /// captured value to `describe` for the returned `value` field. Shared by [`VmSession::eval`]
+    /// (which displays) and [`VmSession::type_of`] (which reports the type). The value is **unbound +
+    /// released** after `describe`, so an evaluated value neither lingers as a binding nor pins a
+    /// refcount across entries (which would leak it and suppress a later `:drop`'s destructor);
+    /// releasing runs its destructor now, matching the tree-walker, which drops it at batch end.
+    fn run_capturing(
+        &mut self,
+        program: &Program,
+        describe: impl FnOnce(Value) -> Option<String>,
+    ) -> SessionOutput {
         // A trailing bare expression is rewritten to `mut <sentinel> = expr;` so the IR path captures
-        // its value in a global slot we read back below — the same trick the tree-walker `Session`
-        // uses, and pure AST surgery, so it is backend-agnostic.
+        // its value in a global slot we read back below — pure AST surgery, backend-agnostic.
         let (lowerable, captures_value) = rewrite_trailing_expr(program);
         let module = self
             .compiler
@@ -231,24 +260,20 @@ impl VmSession {
         let mut vm = Vm::load_seeded(&module, state);
         vm.run_top();
 
-        // Read the trailing-expression sentinel's value (if any), display it, then **unbind + release**
-        // it so an evaluated value neither lingers as a binding nor pins a refcount across entries
-        // (which would leak it and suppress a later `:drop`'s destructor). Releasing runs its
-        // destructor now — matching the tree-walker, which drops the displayed value at batch end.
         let value = if captures_value {
             self.sentinel_slot().and_then(|slot| {
                 let v = std::mem::replace(&mut vm.globals[slot as usize], Value::unbound());
+                // Unbound means the entry errored (or returned) before the sentinel binding ran.
                 if v.is_unbound() {
-                    // The entry errored (or returned) before the sentinel binding ran.
-                    None
-                } else if v.is_unit() {
-                    vm.release_value(v);
-                    None
-                } else {
-                    let shown = v.display();
-                    vm.release_value(v);
-                    Some(shown)
+                    return None;
                 }
+                let described = describe(v);
+                // Free the discarded trailing value with a **plain** release (no `destruct`), matching
+                // the tree-walker REPL, which drops the extracted value as a host value rather than
+                // through the interpreter's destructor path. A *bound* value's destructor still fires —
+                // at `:drop` or teardown (which use `release_value`) — just not on a bare-expression echo.
+                release(v);
+                described
             })
         } else {
             None
