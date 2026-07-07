@@ -32,6 +32,7 @@ pub mod iter;
 pub mod json;
 pub mod map_key;
 pub mod math;
+pub mod net;
 pub mod quat;
 pub mod random;
 pub mod registry;
@@ -40,9 +41,10 @@ pub mod vec3;
 pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};
 pub use handle::{FileHandle, FileMode, Flush, ReadSource};
-pub use host::{Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Rng, SandboxHost};
+pub use host::{Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Rng, SandboxHost};
 pub use iter::IterMethod;
 pub use map_key::{ExternKeyRef, MapKey};
+pub use net::{NetRequest, NetResponse};
 pub use registry::{
     ExtFn, ExtModule, ExtType, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType,
     StdExtension, TypeDispatch, TypeRecipe,
