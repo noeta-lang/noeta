@@ -7,6 +7,8 @@
 //! crate, while `noeta-stdlib` re-exports it (`pub use noeta_native::*`) and adds the concrete
 //! `std` modules on top (the `core`/`std` relationship). See `plans/native-abi/README.md`.
 
+use serde::{Deserialize, Serialize};
+
 pub mod executor;
 pub mod extern_value;
 pub mod host;
@@ -435,7 +437,7 @@ impl MapMethod {
 /// bitmask into an index/count. Enumerated (like [`ListMethod`]) so both backends' dispatch `match` is
 /// exhaustive; the actual computation is the shared [`int_method`] below, so the backends agree by
 /// construction. All operate on the full signed i64.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntMethod {
     /// `count_ones()` → the number of set bits (population count).
     CountOnes,

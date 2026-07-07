@@ -1,5 +1,5 @@
 [package]
-name = "noeta-native"
+name = "noeta-bundle"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,10 +7,8 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-serde = { workspace = true }
-compact_str = { workspace = true }
-equivalent = { workspace = true }
-hashbrown = { workspace = true }
+noeta-bytecode = { workspace = true }
+miniz_oxide = { workspace = true }
 
 [lints]
 workspace = true

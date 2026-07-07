@@ -5,9 +5,10 @@
 //! It carries no codegen or runtime meaning of its own; it is a read-only view of the program.
 
 use crate::{AttrArg, AttrValue, Attribute, Expr, FieldDecl, Program, Stmt, TypeRef, UnaryOp};
+use serde::{Deserialize, Serialize};
 
 /// Everything reflection needs about a program, derived purely from its AST.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct ReflectionInfo {
     /// Every `#[...]` data attribute, in source order, each keyed by the declaration it annotates.
     pub manifest: Vec<AttributeRecord>,
@@ -94,7 +95,7 @@ impl ReflectionInfo {
 
 /// One `#[Name(args)]` attached to a declaration. Semantically a struct instance attached as
 /// metadata; the runtime materializes it from the stored args (pass 2).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct AttributeRecord {
     /// The annotated declaration's name (a type name today; pass 2 extends attributes to methods).
     pub target: String,
@@ -108,7 +109,7 @@ pub struct AttributeRecord {
 /// the role an attribute it bears confers on it, identified by its `@semantic` enum and variant.
 /// `roles_of()` materializes each into a `RoleBinding { target: string, role: Enum }` whose `role`
 /// is the actual `enum_name.variant` enum value.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RoleRecord {
     /// The annotated declaration's name (the same target keying as the attribute manifest).
     pub target: String,
@@ -119,7 +120,7 @@ pub struct RoleRecord {
 }
 
 /// The kind of a declared type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeKind {
     Struct,
     Class,
@@ -129,7 +130,7 @@ pub enum TypeKind {
 /// A declared type's reflectable shape: name, kind, and member names (declaration order). Field and
 /// variant *types* are deliberately absent — they are erased at runtime, and reflection over a value
 /// recovers names, not the static field types (which are a compile-time `type_of` concern).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct TypeInfo {
     pub name: String,
     pub kind: TypeKind,
@@ -145,7 +146,7 @@ pub struct TypeInfo {
 }
 
 /// An enum variant's reflectable shape.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct VariantInfo {
     pub name: String,
     pub fields: Vec<String>,
@@ -339,7 +340,7 @@ pub fn attribute_shape(type_name: &str, info: &ReflectionInfo) -> AttributeShape
 
 /// An attribute type's materialization shape — its field names, their literal defaults (parallel),
 /// and whether it is a struct. Returned by [`attribute_shape`] so both backends build the same value.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct AttributeShape {
     pub fields: Vec<String>,
     pub defaults: Vec<Option<AttrValue>>,
@@ -394,7 +395,7 @@ pub fn materialize_args(
 /// At runtime fidelity (B) generics are erased, so a container's element types are [`TypeRepr::Dyn`]
 /// (`type_of([1])` is `List(Dyn)`); the compile-time full-fidelity path (P2.3) builds a precise
 /// `TypeRepr` from the checker's inferred type and reuses the same construction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum TypeRepr {
     Int,
     Float,
@@ -705,7 +706,7 @@ fn push_attrs(manifest: &mut Vec<AttributeRecord>, target: &str, attrs: &[Attrib
 /// storing field kinds in its own shape). Built by the checker (which knows field types and `@packed`
 /// membership) and keyed by the list-construction span, so both backends pack/unpack identically —
 /// the flat `List<packed>` representation stays invisible to `RunResult`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PackedLayout {
     /// The packed struct's type name — the nominal type of a materialized element.
     pub type_name: String,
@@ -718,14 +719,14 @@ pub struct PackedLayout {
 }
 
 /// One field of a [`PackedLayout`]: its name (for materializing the boxed value) and its kind.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PackedField {
     pub name: String,
     pub kind: PackedKind,
 }
 
 /// A packed field's kind: a primitive occupying one word, or a nested packed struct flattened inline.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum PackedKind {
     Int,
     Float,

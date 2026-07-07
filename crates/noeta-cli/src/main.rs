@@ -97,6 +97,29 @@ enum Command {
         #[arg(long)]
         profile: Option<String>,
     },
+    /// Compile a program to a self-contained `.noeb` bundle (P-AOT L1): the versioned bytecode a
+    /// `noeta run app.noeb` executes directly, so a program ships **without its `.noe` source**.
+    /// Uses the same compile pipeline as `run`; dev-tier blocks are stripped unless made live by
+    /// `--tier`/`--profile`, so a production build never carries `@test`/`@debug`/`@doc` content.
+    Build {
+        /// Path to the entry `.noe` file.
+        file: PathBuf,
+        /// Output path (default: the input path with a `.noeb` extension, or — with `--exe` — with
+        /// its extension stripped, e.g. `app.noe` → `app`).
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+        /// Emit a self-contained executable (P-AOT L2) instead of a `.noeb`: the bundle is stapled
+        /// onto a copy of this runtime binary, so the artifact runs the program on its own with no
+        /// separate `.noeb` or interpreter alongside it.
+        #[arg(long)]
+        exe: bool,
+        /// Activate a dev-tier for this build, e.g. `--tier debug`. Repeatable.
+        #[arg(long)]
+        tier: Vec<String>,
+        /// Activate the tiers a `noeta.toml` build profile makes live. Unioned with any `--tier`.
+        #[arg(long)]
+        profile: Option<String>,
+    },
     /// Disassemble a program to its VM bytecode (a debugging aid: shows the exact opcodes,
     /// constants, shapes, and method tables `noeta run` executes). Compiled with the same pipeline
     /// as `run`, so the output reflects what actually runs.
@@ -123,6 +146,13 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // P-AOT L2: if this executable is a `noeta build --exe` artifact (a bundle stapled onto a copy
+    // of the runtime), run the embedded program directly — the shipped app is not the toolchain, so
+    // its CLI verbs are irrelevant. A plain `noeta` binary has no trailer and falls through to the
+    // normal CLI. Detection reads only the tail of the file, not the whole binary.
+    if let Some(code) = try_run_stapled() {
+        return code;
+    }
     match Cli::parse().command {
         Command::Run {
             file,
@@ -142,6 +172,13 @@ fn main() -> ExitCode {
             profile,
         } => cmd_bench(&file, iterations, &profile),
         Command::Doc { file, profile } => cmd_doc(&file, &profile),
+        Command::Build {
+            file,
+            out,
+            exe,
+            tier,
+            profile,
+        } => cmd_build(&file, out.as_deref(), exe, &tier, &profile),
         Command::Dump {
             file,
             tier,
@@ -269,7 +306,17 @@ fn execute_real_host(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
 ) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), String> {
-    let module = std::sync::Arc::new(compile_real(program, checked)?);
+    Ok(run_module_real_host(std::sync::Arc::new(compile_real(
+        program, checked,
+    )?)))
+}
+
+/// Run an already-compiled [`Module`] against the real host — the shared execution core of
+/// [`execute_real_host`] (source path) and the `.noeb` bundle runner (P-AOT L1.2), which loads a
+/// module directly with no source to compile.
+fn run_module_real_host(
+    module: std::sync::Arc<noeta_bytecode::Module>,
+) -> (noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>) {
     // A factory that mints a fresh real host + wall-clock executor per isolate (isolates I.4b): the
     // main program gets one, and each real-thread `isolate f(args)` gets its own so a worker's disk /
     // clock / async state is independent. Injected here (not in `noeta-vm`) so the VM crate needs no
@@ -286,10 +333,34 @@ fn execute_real_host(
     let (host, executor) = factory();
     // Real isolates run on OS threads (out-of-oracle); channel-shipping isolates fall back to
     // cooperative tasks (cross-thread channels are I.4c). The differential keeps the sandbox pair.
-    Ok(
-        VmBackend::new()
-            .run_module_with_host_and_executor_parallel(module, host, executor, factory),
-    )
+    VmBackend::new().run_module_with_host_and_executor_parallel(module, host, executor, factory)
+}
+
+/// P-AOT L2: detect and run a bundle stapled onto this executable (a `noeta build --exe` artifact),
+/// returning its exit code — or `None` when this is the plain toolchain binary (no trailer), so the
+/// normal CLI runs. Reads only the trailer + embedded blob, seeking rather than slurping the whole
+/// binary, so the toolchain's own startup is not taxed on the common (no-bundle) path. Any IO/format
+/// hiccup is treated as "no bundle" (returns `None`): the toolchain must still start normally.
+fn try_run_stapled() -> Option<ExitCode> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let exe_path = std::env::current_exe().ok()?;
+    let mut file = std::fs::File::open(&exe_path).ok()?;
+    let size = file.seek(SeekFrom::End(0)).ok()?;
+    let trailer_len = noeta_bundle::TRAILER_LEN as u64;
+    if size < trailer_len {
+        return None;
+    }
+    // Read the fixed trailer at the tail; a missing sentinel means this is the plain binary.
+    file.seek(SeekFrom::End(-(trailer_len as i64))).ok()?;
+    let mut trailer = [0u8; noeta_bundle::TRAILER_LEN];
+    file.read_exact(&mut trailer).ok()?;
+    let blob_len = noeta_bundle::stapled_len(&trailer)?;
+    let blob_start = size.checked_sub(trailer_len + blob_len as u64)?;
+    file.seek(SeekFrom::Start(blob_start)).ok()?;
+    let mut blob = vec![0u8; blob_len];
+    file.read_exact(&mut blob).ok()?;
+    Some(cmd_run_bundle(&exe_path, &blob))
 }
 
 fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a Diagnostic>) {
@@ -314,6 +385,22 @@ fn emit_diagnostics_mapped<'a>(
 }
 
 fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -> ExitCode {
+    // P-AOT L1.2: a `.noeb` bundle runs directly — no source, no compile. Sniff the magic (cheap,
+    // and we need the bytes to load it anyway); anything else is source, handled below. Tiers are a
+    // *build*-time concern (they are already baked into the bundle), so `--tier`/`--profile` on a
+    // bundle run are meaningless — reject them rather than silently ignore.
+    if let Ok(bytes) = std::fs::read(file)
+        && noeta_bundle::is_bundle(&bytes)
+    {
+        if !tiers.is_empty() || profile.is_some() {
+            eprintln!(
+                "lang: --tier/--profile apply at build time; a .noeb bundle is already built"
+            );
+            return ExitCode::from(2);
+        }
+        return cmd_run_bundle(file, &bytes);
+    }
+
     // The active tier set is the union of any `--profile`'s live tiers (from `noeta.toml`) and any
     // explicit `--tier` flags, resolved before loading so a bad profile fails fast.
     let mut active: Vec<String> = match profile {
@@ -363,6 +450,34 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
             ExitCode::from(1)
         }
     }
+}
+
+/// Run a `.noeb` bundle (P-AOT L1.2): decode the module from the versioned container and execute it
+/// on the real host, exactly as a source run does after compiling — but with no source to compile
+/// or type-check (both happened at build time). A runtime abort's diagnostics/trace carry spans but
+/// the bundle ships no source text, so they render against a synthetic empty source (message + code
+/// + location show; no code snippet) — the honest cost of a source-free artifact.
+fn cmd_run_bundle(file: &std::path::Path, bytes: &[u8]) -> ExitCode {
+    let module = match noeta_bundle::read(bytes) {
+        Ok(module) => module,
+        Err(err) => {
+            eprintln!("lang: cannot load {}: {err}", file.display());
+            return ExitCode::from(2);
+        }
+    };
+    let sources = SourceMap::new(vec![Source::new(
+        SourceId::FIRST,
+        file.display().to_string(),
+        "",
+    )]);
+    let (result, trace) = run_module_real_host(std::sync::Arc::new(module));
+    print!("{}", result.stdout);
+    let _ = io::stdout().flush();
+    emit_diagnostics_mapped(&sources, result.diagnostics.iter());
+    if trace.len() >= 2 {
+        eprint!("{}", noeta_vm::render_trace(&trace, &sources));
+    }
+    exit_code(result.exit_code)
 }
 
 /// `noeta dump <FILE>` — disassemble the program to its VM bytecode and print it to stdout. Loads,
@@ -433,6 +548,165 @@ fn cmd_dump(file: &std::path::Path, tiers: &[String], profile: &Option<String>) 
             ExitCode::from(1)
         }
     }
+}
+
+/// `noeta build <FILE>` — compile a program to a self-contained artifact (P-AOT L1/L2). Loads +
+/// links, activates any `--tier`/`--profile`, type-checks, and compiles through the **same**
+/// `compile_real` pipeline as `run`/`dump`. The result is emitted either as a `.noeb` bundle
+/// (`noeta_bundle::write`, run by `noeta run app.noeb`) or — with `--exe` — as a self-contained
+/// executable that runs the program on its own (`emit_exe`). Either artifact carries no `.noe`
+/// source. A type error prints diagnostics and exits non-zero, like `run`.
+fn cmd_build(
+    file: &std::path::Path,
+    out: Option<&std::path::Path>,
+    exe: bool,
+    tiers: &[String],
+    profile: &Option<String>,
+) -> ExitCode {
+    let mut active: Vec<String> = match profile {
+        Some(name) => match manifest::resolve_active_tiers(file, name) {
+            Ok(tiers) => tiers,
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(1);
+            }
+        },
+        None => Vec::new(),
+    };
+    for tier in tiers {
+        if !active.contains(tier) {
+            active.push(tier.clone());
+        }
+    }
+
+    match noeta_loader::load(file) {
+        Err(err) => {
+            eprintln!("lang: cannot read {}: {err}", file.display());
+            ExitCode::from(2)
+        }
+        Ok(Ok(linked)) => {
+            // Check + compile a (possibly tier-activated) program and emit its artifact.
+            let build = |program: &Program| -> ExitCode {
+                let checked = noeta_check::check_all(program);
+                if !checked.diagnostics.is_empty() {
+                    emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+                    return ExitCode::from(1);
+                }
+                let module = match compile_real(program, &checked) {
+                    Ok(module) => module,
+                    Err(err) => {
+                        eprintln!("lang: {err}");
+                        return ExitCode::from(1);
+                    }
+                };
+                if exe {
+                    emit_exe(file, out, &module)
+                } else {
+                    emit_bundle(file, out, &module)
+                }
+            };
+            if active.is_empty() {
+                build(&linked.program)
+            } else {
+                let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
+                let activated = noeta_check::activate_tiers(&linked.program, &active_refs);
+                if !activated.diagnostics.is_empty() {
+                    emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
+                    ExitCode::from(1)
+                } else {
+                    build(&activated.program)
+                }
+            }
+        }
+        Ok(Err(load_diagnostics)) => {
+            let mut stderr = io::stderr();
+            for ld in &load_diagnostics {
+                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+            }
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Emit `module` as a standalone `.noeb` bundle (P-AOT L1.2) — the default `noeta build` output.
+/// Writes to `out` if given, else the input path with a `.noeb` extension.
+fn emit_bundle(
+    file: &std::path::Path,
+    out: Option<&std::path::Path>,
+    module: &noeta_bytecode::Module,
+) -> ExitCode {
+    let blob = noeta_bundle::write(module);
+    let out_path = out
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| file.with_extension("noeb"));
+    match std::fs::write(&out_path, &blob) {
+        Ok(()) => {
+            eprintln!("wrote {} ({} bytes)", out_path.display(), blob.len());
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("lang: cannot write {}: {err}", out_path.display());
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Emit `module` as a self-contained executable (P-AOT L2.1): staple its bundle onto a copy of this
+/// runtime binary, so the artifact runs the program with no separate `.noeb` or interpreter. Writes
+/// to `out` if given, else the input path with its extension stripped (`app.noe` → `app`, or `.exe`
+/// on Windows). The artifact is marked executable on Unix.
+fn emit_exe(
+    file: &std::path::Path,
+    out: Option<&std::path::Path>,
+    module: &noeta_bytecode::Module,
+) -> ExitCode {
+    // The runtime image to embed is *this* binary — the toolchain the user invoked. (A stapled exe
+    // never reaches `build`; it runs its bundle, so `current_exe` here is always the plain toolchain.)
+    let runtime = match std::env::current_exe().and_then(std::fs::read) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!("lang: cannot read the runtime binary to embed: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let blob = noeta_bundle::write(module);
+    let image = noeta_bundle::staple(&runtime, &blob);
+
+    let default_out = if cfg!(windows) {
+        file.with_extension("exe")
+    } else {
+        file.with_extension("")
+    };
+    let out_path = out.map(std::path::Path::to_path_buf).unwrap_or(default_out);
+    // Never clobber the source with the artifact (e.g. an extension-less entry building to itself).
+    if out_path == file {
+        eprintln!(
+            "lang: refusing to overwrite the source file {}; pass -o <path>",
+            file.display()
+        );
+        return ExitCode::from(2);
+    }
+    if let Err(err) = std::fs::write(&out_path, &image) {
+        eprintln!("lang: cannot write {}: {err}", out_path.display());
+        return ExitCode::from(2);
+    }
+    // Make the artifact runnable (Unix): rwxr-xr-x.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(err) =
+            std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(0o755))
+        {
+            eprintln!("lang: cannot mark {} executable: {err}", out_path.display());
+            return ExitCode::from(2);
+        }
+    }
+    eprintln!(
+        "wrote {} ({} bytes, self-contained)",
+        out_path.display(),
+        image.len()
+    );
+    ExitCode::SUCCESS
 }
 
 /// Gate a tier runner on `--profile`: if a profile was given and does not make `tier` live, print a
