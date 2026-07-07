@@ -1269,14 +1269,6 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
     v.type_name() == kind
 }
 
-/// Build the [`noeta_stdlib::IoRequest`] for an `fs.*_async` call (Track A.4c/A.10), or `None` if
-/// `func` is not an async fs op. Marshals this backend's `Value`s to strings; the func→request
-/// mapping is shared in [`noeta_stdlib::IoRequest::from_fs_async`].
-fn vm_fs_async_request(func: &str, args: &[Value]) -> Option<noeta_stdlib::IoRequest> {
-    let strings: Vec<Option<String>> = args.iter().map(|v| v.as_string()).collect();
-    noeta_stdlib::IoRequest::from_fs_async(func, &strings)
-}
-
 /// Execute a compiled module, capturing stdout, exit code, and diagnostics. `jit` enables the
 /// hot-counter tier-1 JIT (real-host production paths); the sandbox differential passes `false`.
 fn execute(module: &Module, host: Box<dyn noeta_stdlib::Host>, jit: bool) -> RunResult {

@@ -103,6 +103,29 @@ pub enum NativeOut {
     /// A registered extern-type value (extern-types X1) — `Uuid`, a `FileHandle`, … Each
     /// backend wraps it in its single extern hosting variant.
     Extern(crate::ExternBox),
+    /// Async WORK instead of a value (extern-types X5): the backend tickets the descriptor on
+    /// its executor (`spawn_ext`) and hands back a future — intercepted at the dispatch return,
+    /// never reaching `materialize`. This is how an extension implements an async function
+    /// without ever seeing the executor.
+    Spawn(SpawnBox),
+}
+
+/// A one-shot [`crate::ExternIo`] carrier inside [`NativeOut`] (which derives `Clone` +
+/// `PartialEq` for its value variants — meaningless for work): cloning panics (a descriptor is
+/// ticketed exactly once, on the dispatch return path), equality is always `false`.
+#[derive(Debug)]
+pub struct SpawnBox(pub Box<dyn crate::ExternIo>);
+
+impl Clone for SpawnBox {
+    fn clone(&self) -> SpawnBox {
+        unreachable!("a Spawn result is one-shot — ticketed at the dispatch return, never cloned")
+    }
+}
+
+impl PartialEq for SpawnBox {
+    fn eq(&self, _other: &SpawnBox) -> bool {
+        false
+    }
 }
 
 /// noeta-stdlib's small signature vocabulary. noeta-stdlib cannot depend on `noeta_types::Type` (that
@@ -790,6 +813,27 @@ fn fs_dispatch(
                 crate::FileMode::Append => crate::FileHandle::open_append(path),
             };
             Ok(NativeOut::Extern(crate::ExternBox::new(handle)))
+        }
+        // The async fs surface (Track A.4c/A.10, on the open seam since extern-types X5): each
+        // returns WORK (`NativeOut::Spawn`), which the backend tickets on its executor — the
+        // per-backend by-name intercepts are gone.
+        "read_async" => {
+            want_arity(func, args, 1)?;
+            let path = want_str(func, args, 0)?;
+            Ok(NativeOut::Spawn(SpawnBox(Box::new(crate::FsIo::Read(
+                path.to_string(),
+            )))))
+        }
+        "write_async" | "append_async" => {
+            want_arity(func, args, 2)?;
+            let path = want_str(func, args, 0)?.to_string();
+            let content = want_str(func, args, 1)?.to_string();
+            let io = if func == "write_async" {
+                crate::FsIo::Write(path, content)
+            } else {
+                crate::FsIo::Append(path, content)
+            };
+            Ok(NativeOut::Spawn(SpawnBox(Box::new(io))))
         }
         _ => Err(no_function_error("fs", func)),
     }

@@ -96,20 +96,6 @@ impl Backend for TreeWalkBackend {
     }
 }
 
-/// Build the [`noeta_stdlib::IoRequest`] for an `fs.*_async` call (Track A.4c/A.10), or `None` if
-/// `func` is not an async fs op. Marshals this backend's `Value`s to strings; the func→request
-/// mapping is shared in [`noeta_stdlib::IoRequest::from_fs_async`].
-fn eval_fs_async_request(func: &str, args: &[Value]) -> Option<noeta_stdlib::IoRequest> {
-    let strings: Vec<Option<String>> = args
-        .iter()
-        .map(|v| match v {
-            Value::Str(s) => Some(s.clone()),
-            _ => None,
-        })
-        .collect();
-    noeta_stdlib::IoRequest::from_fs_async(func, &strings)
-}
-
 /// The drop pass's relevance form, copied from the checker's (identical sets) — the noeta-eval
 /// counterpart to `noeta-conformance`'s `to_relevance` and the compiler's `passes_relevance`, so the
 /// `Backend::run` entry point annotates drops identically to the production reference and the VM.
@@ -2656,15 +2642,6 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
-        // `fs.*_async` (Track A.4c/A.10) are not synchronous dispatch: each produces a leaf async-IO
-        // *future* (ticketed in the executor) that `.await` later resolves. Intercepted here, ahead of
-        // the normal registry dispatch (which is synchronous, value-only).
-        if module == "fs"
-            && let Some(req) = eval_fs_async_request(func, args)
-        {
-            let id = self.executor.spawn_io(&mut *self.host, req);
-            return Ok(Value::AsyncIo(id));
-        }
         // A virtual module's functions (`reactive.signal(...)`, prelude-redesign P2) are builtins —
         // they need the executor/reactive graph the registry seam cannot reach — so a qualified call
         // intercepts here, ahead of registry dispatch, exactly like `fs.*_async`. Mirrors the VM.
@@ -2697,6 +2674,12 @@ impl Interpreter {
                 args.iter().map(marshal_native_arg).collect()
             };
             return match noeta_stdlib::registry::dispatch(name, func, &mut *self.host, &nargs) {
+                // Async WORK (extern-types X5): ticket the descriptor on the executor and hand
+                // back the leaf async-IO future — mirrors the VM.
+                Ok(noeta_stdlib::NativeOut::Spawn(spawn)) => {
+                    let id = self.executor.spawn_ext(&mut *self.host, spawn.0);
+                    Ok(Value::AsyncIo(id))
+                }
                 Ok(out) => Ok(materialize_ext(out, sig.ret, args)),
                 Err(error) => {
                     Err(self.runtime_error(std_error_code(error.kind), span, error.message))
@@ -3911,11 +3894,11 @@ impl Interpreter {
             // sandbox always resolves on the first poll).
             Value::AsyncIo(id) => {
                 let id = *id;
-                match self.executor.poll_io(id) {
-                    Some(Ok(noeta_stdlib::IoOutcome::Text(contents))) => {
-                        Ok(Some(Value::Str(contents)))
-                    }
-                    Some(Ok(noeta_stdlib::IoOutcome::Unit)) => Ok(Some(Value::Unit)),
+                match self.executor.poll_ext(id) {
+                    // Ready → materialize the descriptor's `NativeOut` exactly like a
+                    // synchronous dispatch result (extern-types X5); an IO failure aborts
+                    // (E0021) at the `.await`, matching the synchronous `fs.*`.
+                    Some(Ok(out)) => Ok(Some(materialize_native(out))),
                     Some(Err(error)) => {
                         Err(self.runtime_error(std_error_code(error.kind), span, error.message))
                     }
@@ -4948,9 +4931,10 @@ fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         NativeOut::None => builtin_enum("Option", "none", Vec::new()),
         NativeOut::Some(inner) => builtin_enum("Option", "some", vec![materialize_native(*inner)]),
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
-        // path (`materialize_recipe`, which has the interpreter's type registry), not here.
-        NativeOut::Struct { .. } => {
-            unreachable!("recipe results are materialized by the typed-call path")
+        // path (`materialize_recipe`, which has the interpreter's type registry), not here; async
+        // work is ticketed at the dispatch return (extern-types X5), never materialized.
+        NativeOut::Struct { .. } | NativeOut::Spawn(_) => {
+            unreachable!("recipe/spawn results never reach materialize_native")
         }
     }
 }

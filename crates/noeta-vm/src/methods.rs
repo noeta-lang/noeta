@@ -7,7 +7,7 @@
 
 use noeta_diagnostics::DiagnosticCode;
 use noeta_span::Span;
-use noeta_value::{CompactString, Value};
+use noeta_value::Value;
 
 use crate::*;
 
@@ -332,15 +332,6 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
-        // `fs.*_async` (Track A.4c/A.10) are not synchronous dispatch: each produces a leaf async-IO
-        // *future* (ticketed in the executor) that `.await` later resolves. Intercepted here, ahead of
-        // the normal registry dispatch (which is synchronous, value-only).
-        if module == "fs"
-            && let Some(req) = vm_fs_async_request(func, args)
-        {
-            let id = self.executor.spawn_io(&mut *self.host, req);
-            return Ok(Value::make_async_io(id));
-        }
         // A virtual module's functions (`reactive.signal(...)`, prelude-redesign P2) are builtins —
         // they need the executor/reactive graph the registry seam cannot reach — so a qualified call
         // intercepts here, ahead of registry dispatch, exactly like `fs.*_async`. The tree-walker
@@ -374,6 +365,13 @@ impl<'m> Vm<'m> {
                 args.iter().map(|a| marshal_native_arg(*a)).collect()
             };
             return match noeta_stdlib::registry::dispatch(module, func, &mut *self.host, &nargs) {
+                // Async WORK (extern-types X5): ticket the descriptor on the executor and hand
+                // back a leaf async-IO future `.await` later resolves — the same shape the old
+                // per-backend `fs.*_async` intercept produced, now reached by ordinary dispatch.
+                Ok(noeta_stdlib::NativeOut::Spawn(spawn)) => {
+                    let id = self.executor.spawn_ext(&mut *self.host, spawn.0);
+                    Ok(Value::make_async_io(id))
+                }
                 Ok(out) => Ok(materialize_ext(out, sig.ret, args)),
                 Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
             };
