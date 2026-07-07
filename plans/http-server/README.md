@@ -201,11 +201,21 @@ first-party router/middleware library is a follow-on arc or a documented example
   catching a failed handler → 500 (worker survives). Conformance: a handler (a small router branching
   on `path()`, echoing `body()`, setting a status) run against the sandbox script, differential-pinned
   by the response transcript, in both backends.
-- **S4** — the **`noeta serve` command** (CLI, real-host-only): the conventional `fetch` export
-  lookup, `--port`/`--host`/`--parallel`, the **Tier-2 worker-isolate pool** over `SO_REUSEPORT`,
-  graceful shutdown, and the hook where command-level ops middleware wraps the handler (tracing home,
-  stubbed for the OTEL arc). A `#[ignore]` real round-trip test binds an ephemeral port and drives a
-  real `http.get` against the served handler across isolates.
+- **S4 — done (lean, `<pending>`).** The **`noeta serve <file> [--port N]`** command (CLI,
+  real-host-only). Convention: the file defines a top-level `fn fetch(req: Request): Response` (sync
+  or async) + `use std.{http}`; the command loads it, synthesizes a trailing `http.serve(<port>,
+  fetch)` statement, and runs it on the real host — so the mechanism is the *exact same* `http.serve`
+  a program can call directly (a program calling `http.serve(...)` under `noeta run` already serves;
+  the command only supplies the entry convention + the port). Single worker, cooperatively concurrent.
+  `#[ignore]` integration test (`crates/noeta-cli/tests/serve.rs`) spawns the CLI, drives a real
+  loopback request, asserts the routed response. **Deliberately deferred (with the extension-command
+  follow-on, `plans/deferred.md`):** `--host`, graceful drain-on-SIGINT (Ctrl-C hard-stops for now),
+  and **multi-core**. Multi-core does **not** need `socket2`/`SO_REUSEPORT` — the isolate-native path
+  is an **acceptor isolate + fd-over-`Channel<int>` to worker isolates** (intra-process fds are shared
+  across threads, so a plain int crosses the existing copy-at-boundary channel; `SO_REUSEPORT` is only
+  an alternative that *would* need the dep). `noeta serve` itself is slated to become an
+  extension-provided command (the higher-order-ABI follow-on), so it is kept lean rather than
+  gold-plated in core.
 - **S5** — the **composability proof**: a conformance test building a tiny in-language router + a
   logging middleware over the primitive (sandbox script, differential), demonstrating the seam
   end-to-end without shipping a framework.
