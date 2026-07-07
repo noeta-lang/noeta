@@ -1,0 +1,29 @@
+// P-PAR S0a: one big corpus shipped to 1 real isolate — see fanout_n8.noe for the full story.
+struct Rec { name: string; a: int; b: int }
+
+fn build(sz: int): List<Rec> {
+    mut l: List<Rec> = []
+    for i in 0..sz {
+        l ~= [Rec { name: "record-${i}", a: i, b: i * 2 }]
+    }
+    return l
+}
+
+async fn score(corpus: List<Rec>): int {
+    mut s = 0
+    for r in corpus {
+        s = s + r.a + r.b
+    }
+    return s
+}
+
+async fn run(): int {
+    corpus = build(100000)
+    mut total = 0
+    concurrent {
+        h1 = isolate score(corpus)
+        total = h1.await
+    }
+    return total
+}
+echo run().await

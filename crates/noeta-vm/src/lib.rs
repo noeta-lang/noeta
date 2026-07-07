@@ -190,6 +190,8 @@ impl VmBackend {
             .map(|j| JitStats {
                 native: j.native_count(),
                 compiled: j.compiled_count(),
+                compile_ns_total: j.compile_ns_total(),
+                compile_ns_max: j.compile_ns_max(),
             })
             .unwrap_or_default();
         (result, stats)
@@ -222,6 +224,8 @@ impl VmBackend {
             .map(|j| JitStats {
                 native: j.native_count(),
                 compiled: j.compiled_count(),
+                compile_ns_total: j.compile_ns_total(),
+                compile_ns_max: j.compile_ns_max(),
             })
             .unwrap_or_default();
         (result, stats)
@@ -229,12 +233,16 @@ impl VmBackend {
 }
 
 /// JIT-coverage counts for one forced-JIT run: how many prototypes were compiled to real native code
-/// (`native`) out of the total that were compiled at all (`compiled`, native + bail stubs).
+/// (`native`) out of the total that were compiled at all (`compiled`, native + bail stubs), plus the
+/// compile-pause accounting (P-PAR S0c) — compilation runs synchronously on the mutator thread, so
+/// `compile_ns_max` is the worst single pause the program felt and `compile_ns_total` the sum.
 #[cfg(feature = "jit")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JitStats {
     pub native: usize,
     pub compiled: usize,
+    pub compile_ns_total: u64,
+    pub compile_ns_max: u64,
 }
 
 impl Backend for VmBackend {
