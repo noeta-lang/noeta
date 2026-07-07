@@ -1187,7 +1187,7 @@ fn repl_persists_state_and_prints_trailing_expressions() {
 fn repl_supports_multiline_blocks() {
     lang()
         .arg("repl")
-        .write_stdin("fn dbl(n) {\nreturn n * 2;\n}\ndbl(21)\n")
+        .write_stdin("fn dbl(n: int): int {\nreturn n * 2;\n}\ndbl(21)\n")
         .assert()
         .success()
         .stdout(predicate::str::contains("42"));
@@ -1392,7 +1392,6 @@ fn repl_check_skips_an_ill_typed_entry_and_keeps_the_session_usable() {
     // SKIPPED (x keeps its value); entry 3 still runs against the intact session.
     lang()
         .arg("repl")
-        .arg("--check")
         .write_stdin("mut x = 5\nx = \"s\"\necho x + 1;\n")
         .assert()
         .success()
@@ -1405,7 +1404,6 @@ fn repl_check_applies_static_rules_the_unchecked_repl_defers() {
     // A required-signature violation (E0022) is static-only: the unchecked REPL would run it.
     lang()
         .arg("repl")
-        .arg("--check")
         .write_stdin("fn f(n) { return n }\necho 1 + 1;\n")
         .assert()
         .success()
@@ -1415,13 +1413,44 @@ fn repl_check_applies_static_rules_the_unchecked_repl_defers() {
 
 #[test]
 fn repl_check_toggles_at_the_prompt() {
-    // Off by default: the retype runs (checkerless REPL semantics). After `:check on`, the same
-    // shape is rejected.
+    // ON by default: the retype is rejected (E0007). After `:check off`, the same shape runs
+    // (checkerless semantics — the pre-C2 behavior).
     lang()
         .arg("repl")
-        .write_stdin("mut a = 1\na = \"s\"\necho a ~ \"!\";\n:check on\nmut b = 2\nb = \"t\"\n")
+        .write_stdin("mut a = 1\na = \"s\"\n:check off\nmut b = 2\nb = \"t\"\necho b ~ \"!\";\n")
         .assert()
         .success()
-        .stdout(predicate::str::contains("s!"))
-        .stderr(predicate::str::contains("E0007"));
+        .stderr(predicate::str::contains("E0007"))
+        .stdout(predicate::str::contains("t!"));
+}
+
+#[test]
+fn repl_no_check_flag_restores_checkerless_sessions() {
+    lang()
+        .arg("repl")
+        .arg("--no-check")
+        .write_stdin("mut a = 1\na = \"s\"\necho a ~ \"!\";\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("s!"));
+}
+
+#[test]
+fn repl_checked_codegen_gives_type_of_full_fidelity() {
+    // C5: a fully-checked session compiles entries with the checker's site bundle — `type_of` on a
+    // list literal recovers the element type, exactly as `noeta run` does...
+    lang()
+        .arg("repl")
+        .write_stdin("echo type_of([1, 2]);\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Type.List(Type.Int)"));
+    // ...while a checkerless session stays on the conservative head-only codegen.
+    lang()
+        .arg("repl")
+        .arg("--no-check")
+        .write_stdin("echo type_of([1, 2]);\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Type.List(Type.Dyn)"));
 }

@@ -133,13 +133,13 @@ enum Command {
         #[arg(long)]
         profile: Option<String>,
     },
-    /// Start an interactive REPL.
+    /// Start an interactive REPL. Entries type-check before running (an entry with a type error
+    /// prints its `E0xxx` diagnostics and is skipped) — the default since session-checker C2/C5.
     Repl {
-        /// Type-check each entry before running it (session-checker C2): an entry with a type
-        /// error prints its `E0xxx` diagnostics and is skipped; clean entries run as usual.
-        /// Also toggleable at the prompt with `:check on` / `:check off`.
+        /// Skip per-entry type checking (the pre-C2 behavior: every well-parsed entry runs, type
+        /// errors surface at run time). Also toggleable at the prompt with `:check on` / `:check off`.
         #[arg(long)]
-        check: bool,
+        no_check: bool,
     },
     /// Run the Noeta language server over stdio (LSP). Started by an editor client (e.g. the
     /// VS Code extension); speaks JSON-RPC on stdin/stdout. Provides live diagnostics, hover
@@ -190,7 +190,7 @@ fn main() -> ExitCode {
             tier,
             profile,
         } => cmd_dump(&file, &tier, &profile),
-        Command::Repl { check } => cmd_repl(check),
+        Command::Repl { no_check } => cmd_repl(!no_check),
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),
     }
@@ -1480,6 +1480,12 @@ fn cmd_repl(check: bool) -> ExitCode {
     // skipped (and commits nothing — `check_entry` is transactional). Toggleable at the prompt.
     let mut checker: Option<noeta_check::SessionChecker> =
         check.then(noeta_check::SessionChecker::new);
+    // Whether SITE-DRIVEN codegen is still sound (session-checker C5): true only while the checker
+    // has seen every entry of the session. `:check off` clears it PERMANENTLY — precise destructor
+    // relevance derived from a registry that missed an unchecked entry's `destruct` class could
+    // skip a destructor, so once any entry runs unchecked the session stays on conservative
+    // codegen even if checking is turned back on (diagnostics return; the codegen upgrade doesn't).
+    let mut precise_codegen = check;
     let mut buffer = String::new();
     // Each evaluated entry is parsed with a **distinct** `SourceId` (its index here) and kept, so a
     // stack trace into a function defined in an *earlier* entry renders against that entry's real text
@@ -1491,9 +1497,6 @@ fn cmd_repl(check: bool) -> ExitCode {
     let _ = io::stderr().flush();
 
     eprintln!("type :help for commands");
-    if checker.is_some() {
-        eprintln!("(type checking on — entries are checked before running)");
-    }
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         // Skip blank lines when nothing is pending.
@@ -1505,7 +1508,14 @@ fn cmd_repl(check: bool) -> ExitCode {
         // A `:`-prefixed line (when nothing is pending) is a REPL meta-command — tooling that lives
         // outside the language grammar (`:type`, `:drop`, `:bindings`, `:reset`, `:help`, `:quit`).
         if buffer.is_empty() && line.trim_start().starts_with(':') {
-            if repl_meta(&mut session, &mut checker, line.trim(), &sources) == MetaOutcome::Quit {
+            if repl_meta(
+                &mut session,
+                &mut checker,
+                &mut precise_codegen,
+                line.trim(),
+                &sources,
+            ) == MetaOutcome::Quit
+            {
                 break;
             }
             eprint!("» ");
@@ -1517,7 +1527,13 @@ fn cmd_repl(check: bool) -> ExitCode {
         }
         buffer.push_str(&line);
 
-        match repl_step(&mut session, &mut checker, &buffer, &mut sources) {
+        match repl_step(
+            &mut session,
+            &mut checker,
+            precise_codegen,
+            &buffer,
+            &mut sources,
+        ) {
             ReplStep::Consumed => {
                 buffer.clear();
                 eprint!("» ");
@@ -1546,6 +1562,7 @@ enum MetaOutcome {
 fn repl_meta(
     session: &mut VmSession,
     checker: &mut Option<noeta_check::SessionChecker>,
+    precise_codegen: &mut bool,
     line: &str,
     sources: &[Source],
 ) -> MetaOutcome {
@@ -1559,9 +1576,11 @@ fn repl_meta(
         "reset" => {
             session.reset();
             // The checker's session must reset with the runtime's — its registries describe
-            // bindings/types that no longer exist.
+            // bindings/types that no longer exist. A reset session with checking on is fully
+            // checked again, so precise codegen is earned back.
             if checker.is_some() {
                 *checker = Some(noeta_check::SessionChecker::new());
+                *precise_codegen = true;
             }
             eprintln!("(session reset)");
         }
@@ -1574,10 +1593,12 @@ fn repl_meta(
                 if checker.is_none() {
                     *checker = Some(noeta_check::SessionChecker::new());
                 }
+                // Diagnostics return; the codegen upgrade does not — see `precise_codegen`.
                 eprintln!("(type checking on — entries are checked before running)");
             }
             "off" => {
                 *checker = None;
+                *precise_codegen = false;
                 eprintln!("(type checking off)");
             }
             _ => eprintln!(
@@ -1658,6 +1679,24 @@ fn print_repl_help() {
     eprintln!("  :quit          exit the REPL (or Ctrl-D)");
 }
 
+/// Evaluate one checked-clean entry: with the checker on AND every prior entry checked
+/// (`precise_codegen`), the entry compiles with the checker's accumulated site bundle — the same
+/// site-driven codegen the file pipeline runs (session-checker C5); otherwise the conservative
+/// checkerless codegen, which is always sound.
+fn eval_entry(
+    session: &mut VmSession,
+    checker: &Option<noeta_check::SessionChecker>,
+    precise_codegen: bool,
+    program: &noeta_ast::Program,
+) -> noeta_vm::SessionOutput {
+    match checker {
+        Some(checker) if precise_codegen => {
+            session.eval_checked(program, &checker.sites_snapshot())
+        }
+        _ => session.eval(program),
+    }
+}
+
 /// The `--check` gate (session-checker C2): type-check one parsed entry against the accumulated
 /// session. Returns whether the entry should RUN — `true` with no checker, or when the entry has
 /// no error-severity diagnostics (warnings print and the entry still runs). Errors render against
@@ -1695,6 +1734,7 @@ fn check_entry_gate(
 fn repl_step(
     session: &mut VmSession,
     checker: &mut Option<noeta_check::SessionChecker>,
+    precise_codegen: bool,
     buffer: &str,
     sources: &mut Vec<Source>,
 ) -> ReplStep {
@@ -1715,7 +1755,7 @@ fn repl_step(
             return ReplStep::Consumed;
         }
         sources.push(source);
-        let out = session.eval(&parsed.program);
+        let out = eval_entry(session, checker, precise_codegen, &parsed.program);
         emit_session(sources, out);
         return ReplStep::Consumed;
     }
@@ -1734,7 +1774,7 @@ fn repl_step(
             return ReplStep::Consumed;
         }
         sources.push(psource);
-        let out = session.eval(&pparsed.program);
+        let out = eval_entry(session, checker, precise_codegen, &pparsed.program);
         emit_session(sources, out);
         return ReplStep::Consumed;
     }

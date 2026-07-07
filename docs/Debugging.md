@@ -96,9 +96,11 @@ name") — the language forbids shadowing, and silently diverging from what the 
 would be worse. A `mut` nested *inside* the fragment (in a loop or closure body) stays
 fragment-local, as it would in any function.
 
-Console entries are **checkerless**, like the REPL: an ill-typed fragment surfaces as a console
-error message (the runtime's, e.g. an arity or unknown-name error), never as a crash, and a failed
-entry leaves no trace in the debugged program's own diagnostics.
+Console entries **type-check before running**, against everything the debugged program declared
+and bound: a retype, a wrong-arity call to a program function, a missing signature — each answers
+with its `E0xxx` diagnostics and never runs. Frame locals enter the check untyped (so expressions
+touching only locals are under-constrained rather than over-rejected), and a failed entry leaves no
+trace in the checker or the debugged program's diagnostics.
 
 ### One nuance about frame locals
 
@@ -138,8 +140,6 @@ console — those are allowed to run code.
 ## Current limitations
 
 - No conditional / hit-count / logpoint breakpoints, and no data or exception breakpoints.
-- Console entries are checkerless — type errors surface as runtime messages, not `E0xxx`
-  diagnostics at the prompt (an incremental session checker is planned).
 - Column-precise breakpoints are not supported; breakpoints are line-granular.
 - Debugging real OS-thread `isolate`s is out of scope for now: debug the main isolate; worker
   isolates run to completion undebugged.

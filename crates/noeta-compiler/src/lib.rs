@@ -62,6 +62,9 @@ use noeta_ir::{
 mod freevars;
 mod regalloc;
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
+// Re-exported so the VM session API can name the checker's compile-input bundle through its
+// existing compiler dependency (noeta-vm deliberately has no direct noeta-check dependency).
+pub use noeta_check::Sites;
 use noeta_object::{Shape, ShapeKind};
 use noeta_span::Span;
 
@@ -221,7 +224,14 @@ pub fn compile_with_sites_session(
         .collect();
     let reflection = noeta_ast::reflect::build(program);
     let (mc, map_packed_sites) = compile_to_mc(program, sites, relevance, real_isolates, debug)?;
-    let session = SessionCompiler { mc, reflection };
+    let session = SessionCompiler {
+        mc,
+        // The launch compile's own map-packed pairs join the session accumulation: a program
+        // function's `map(...)` resolves its span at run time, so every later snapshot must
+        // carry them (session-checker C5).
+        map_packed: map_packed_sites.clone(),
+        reflection,
+    };
     let module = session.snapshot(map_packed_sites, destruct_reachable);
     Ok((module, session))
 }
@@ -352,6 +362,11 @@ fn compile_to_mc(
 /// successfully-parsed entry always compiles.
 pub struct SessionCompiler {
     mc: ModuleCompiler,
+    /// Accumulated `map(...)`-result packed pairs (span → interned schema index), from the checked
+    /// launch compile and every checked entry (session-checker C5). Every snapshot carries the FULL
+    /// accumulation: an earlier entry's still-live function looks its call span up at run time, so
+    /// the pairs must survive into every later module.
+    map_packed: Vec<(Span, u32)>,
     /// Reflection accumulated across entries (REPL-on-VM follow-on): each entry's
     /// [`noeta_ast::reflect::build`] is merged in latest-wins, so `attributes_of` / `type_of` /
     /// `roles_of` on a type declared in an *earlier* entry resolve — where a per-entry rebuild would
@@ -403,6 +418,7 @@ impl SessionCompiler {
         };
         SessionCompiler {
             mc,
+            map_packed: Vec::new(),
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
         }
     }
@@ -413,14 +429,67 @@ impl SessionCompiler {
     /// persistent globals. New protos / shapes / global slots keep the indices they are assigned here
     /// forever.
     pub fn extend(&mut self, entry: &Program) -> Result<Module, Unsupported> {
-        // Checkerless lowering (matches the tree-walker `Session`): no checker site-maps, conservative
-        // drops. `insert_drops(_, None)` marks every value destructor-relevant; `thread_reuse` runs
-        // identically to the checked path (a pure function of the drop-annotated IR).
-        let ir = noeta_ir::lower(entry).map_err(|u| Unsupported {
+        self.extend_impl(entry, None)
+    }
+
+    /// [`SessionCompiler::extend`] with the checker's **accumulated [`Sites`]** (session-checker
+    /// C5): the entry lowers with its span-keyed codegen hints active — packed lists, `type_of`
+    /// full fidelity, method handles, streaming `for`s, width masking — and with PRECISE destructor
+    /// relevance/reachability instead of the conservative over-approximations. Only sound when the
+    /// checker has seen **every entry of the session** (the caller gates on that): precise
+    /// relevance derived from a registry that missed an unchecked entry's `destruct` class could
+    /// skip a destructor. Conservative is the always-safe direction; precise is the earned one.
+    pub fn extend_checked(
+        &mut self,
+        entry: &Program,
+        sites: &Sites,
+    ) -> Result<Module, Unsupported> {
+        self.extend_impl(entry, Some(sites))
+    }
+
+    fn extend_impl(
+        &mut self,
+        entry: &Program,
+        sites: Option<&Sites>,
+    ) -> Result<Module, Unsupported> {
+        // Checkerless lowering (matches the tree-walker `Session`) unless the caller supplied the
+        // checker's bundle: then the SAME lowering the file pipeline runs, sites and all. The
+        // conservative path's `insert_drops(_, None)` marks every value destructor-relevant;
+        // `thread_reuse` runs identically either way (a pure function of the drop-annotated IR).
+        let ir = match sites {
+            None => noeta_ir::lower(entry),
+            Some(sites) => noeta_ir::lower_with_sites_opts(
+                entry,
+                noeta_ir::LoweringSites {
+                    packed_list_sites: &sites.packed_list_sites,
+                    index_field_sites: &sites.index_field_sites,
+                    ext_call_sites: &sites.ext_call_sites,
+                    for_stream_sites: &sites.for_stream_sites,
+                    width_sites: &sites.width_sites,
+                    construction_sites: &sites.construction_sites,
+                    handle_sites: &sites.handle_sites,
+                    bound_handle_sites: &sites.bound_handle_sites,
+                    f32_literal_sites: &sites.f32_literal_sites,
+                },
+                // The REPL keeps cooperative isolates, exactly like the checkerless path.
+                false,
+            ),
+        }
+        .map_err(|u| Unsupported {
             reason: format!("not yet lowered to the Core IR: {}", u.feature),
         })?;
-        let ir = noeta_ir_passes::insert_drops(&ir, None);
+        let relevance = sites.map(|s| passes_relevance(&s.destructor_relevance));
+        let ir = noeta_ir_passes::insert_drops(&ir, relevance.as_ref());
         let ir = noeta_ir_passes::thread_reuse(&ir);
+
+        // The checker's `type_of` full-fidelity map merges into the persistent table the codegen
+        // reads (span-keyed by this entry's SourceId; re-merging the accumulated bundle is an
+        // idempotent overwrite). Must precede any FnCompiler run below.
+        if let Some(sites) = sites {
+            self.mc
+                .type_of_sites
+                .extend(sites.type_of_sites.iter().map(|(k, v)| (*k, v.clone())));
+        }
 
         // Register this entry's globals/types/methods into the persistent tables (all additive:
         // `HashMap`/`HashSet` inserts, and `register_types` reserves *new* protos at the current end).
@@ -440,11 +509,37 @@ impl SessionCompiler {
         };
         self.mc.protos[0] = main;
 
-        // Conservative destruct-reachability: the checker computes a precise fixpoint, but without it
-        // every declared type may own — or transitively contain — a `destruct`. Over-approximate to
-        // *all* type names so the VM walks every value container-first and no destructor is missed
-        // (correct; it only forgoes the plain-free fast path for a genuinely destructor-free type).
-        let destruct_reachable: Vec<String> = self.mc.types.keys().cloned().collect();
+        // Intern any NEW `map(...)`-result packed pairs into the accumulation (sorted by span for
+        // deterministic schema order, exactly like the whole-program compile; already-known spans
+        // re-arrive with each accumulated bundle and are skipped).
+        if let Some(sites) = sites {
+            let known: HashSet<Span> = self.map_packed.iter().map(|(s, _)| *s).collect();
+            let mut fresh: Vec<(Span, &noeta_ast::reflect::PackedLayout)> = sites
+                .map_packed_sites
+                .iter()
+                .filter(|(s, _)| !known.contains(s))
+                .map(|(s, l)| (*s, l))
+                .collect();
+            fresh.sort_by_key(|(s, _)| (s.source, s.start, s.end));
+            for (span, layout) in fresh {
+                let idx = self.mc.intern_packed_schema(layout);
+                self.map_packed.push((span, idx));
+            }
+        }
+
+        // Destruct-reachability: PRECISE from the checker's accumulated fixpoint when supplied;
+        // otherwise the conservative over-approximation to *all* type names, so the VM walks every
+        // value container-first and no destructor is missed (correct; it only forgoes the
+        // plain-free fast path for a genuinely destructor-free type).
+        let destruct_reachable: Vec<String> = match sites {
+            Some(sites) => sites
+                .destructor_relevance
+                .reachable_types
+                .iter()
+                .cloned()
+                .collect(),
+            None => self.mc.types.keys().cloned().collect(),
+        };
 
         // Accumulate this entry's reflection into the persistent set (latest-wins), so a query on a
         // type declared in an earlier entry resolves — the tree-walker `Session` accumulates the same
@@ -452,9 +547,9 @@ impl SessionCompiler {
         self.reflection.accumulate(noeta_ast::reflect::build(entry));
 
         // Snapshot the persistent tables into a runnable module (cloned, not moved, so the tables
-        // stay alive for the next entry). Checkerless, so no `map(...)`-result packed-layout sites
-        // (that fusion is a checker output).
-        Ok(self.snapshot(Vec::new(), destruct_reachable))
+        // stay alive for the next entry). The full map-packed accumulation rides every snapshot —
+        // an earlier checked entry's still-live `map(...)` resolves its span at run time.
+        Ok(self.snapshot(self.map_packed.clone(), destruct_reachable))
     }
 
     /// Snapshot the persistent tables into a runnable [`Module`]. Cloned (not moved) so the tables

@@ -253,7 +253,25 @@ impl VmSession {
     /// the next entry.
     pub fn eval(&mut self, program: &Program) -> SessionOutput {
         // Echo a trailing bare expression's **non-unit** value in its display form (`1 + 2` → `3`).
-        self.run_capturing(program, |v| (!v.is_unit()).then(|| v.display()))
+        self.run_capturing(program, None, |v| (!v.is_unit()).then(|| v.display()))
+    }
+
+    /// [`VmSession::eval`] with the checker's accumulated [`Sites`] bundle (session-checker C5):
+    /// the entry compiles through [`SessionCompiler::extend_checked`] — the same site-driven
+    /// codegen the file pipeline runs (packed lists, `type_of` full fidelity, method handles,
+    /// precise destructor relevance). The caller is responsible for the soundness gate: only a
+    /// session the checker has seen IN FULL may take this path (precise relevance from a registry
+    /// that missed an unchecked entry's destructor class could skip a destructor).
+    ///
+    /// [`Sites`]: noeta_compiler::Sites
+    pub fn eval_checked(
+        &mut self,
+        program: &Program,
+        sites: &noeta_compiler::Sites,
+    ) -> SessionOutput {
+        self.run_capturing(program, Some(sites), |v| {
+            (!v.is_unit()).then(|| v.display())
+        })
     }
 
     /// `:type <expr>` — evaluate `program`'s trailing expression and report its **runtime** type. The
@@ -262,7 +280,9 @@ impl VmSession {
     /// reflection + the `TypeRepr` surface spelling (`List<int>`), falling back to the runtime kind
     /// name for an untagged primitive — the same rendering the debugger shows.
     pub fn type_of(&mut self, program: &Program) -> SessionOutput {
-        self.run_capturing(program, |v| Some(v.type_display()))
+        // Conservative codegen deliberately: a `:type` query defines nothing worth optimizing, and
+        // the conservative path is always sound regardless of the session's checkedness.
+        self.run_capturing(program, None, |v| Some(v.type_display()))
     }
 
     /// Compile and run one entry, then — if the final statement was a bare expression — hand its
@@ -274,12 +294,17 @@ impl VmSession {
     fn run_capturing(
         &mut self,
         program: &Program,
+        sites: Option<&noeta_compiler::Sites>,
         describe: impl FnOnce(Value) -> Option<String>,
     ) -> SessionOutput {
         // A trailing bare expression is rewritten to `mut <sentinel> = expr;` so the IR path captures
         // its value in a global slot we read back below — pure AST surgery, backend-agnostic.
         let (lowerable, captures_value) = rewrite_trailing_expr(program);
-        let module = self.compiler.extend(&lowerable).expect(
+        let module = match sites {
+            None => self.compiler.extend(&lowerable),
+            Some(sites) => self.compiler.extend_checked(&lowerable, sites),
+        }
+        .expect(
             "checkerless lowering is total over parsed programs (the REPL only feeds parsed input)",
         );
 
