@@ -108,6 +108,14 @@ A value that the checker cannot pin down is an error at the boundary, not a sile
 
 This is the "inferred-static" contract: no holes at named boundaries, inference in the interior.
 
+## Stable bindings and explicit numeric conversion
+
+Two rules keep a binding's static type **trustworthy** — the type an editor shows for `mut x` is the type `x` actually has, from declaration onward:
+
+- **A `mut` binding has a fixed type.** It is set at declaration (annotated, or inferred from the initializer) and does not drift: a reassignment must be assignable to it, else E0007; the type is never silently changed by a later write. Reassigning an *immutable* binding at all is E0006, caught statically. For a binding that legitimately holds more than one type, declare a **union** (`mut x: int | string`) or `dyn` — the same explicit choices you make anywhere else. (One inferred type is still *completed* by its first write: `mut acc = []` resolves its element type from the accumulator's later writes; see [E0023](#where-inference-stops).)
+
+- **Numeric conversion is explicit at a boundary.** `int` is **not** a subtype of `float`: binding, passing, returning, or storing an `int` where a `float` is expected is E0007 — write `2.0`, not `2` (as Rust does, and unlike C/Java). Numbers still combine inside an **expression** — `int` and `float` promote in arithmetic (`x + 1` on a `float` `x` is a `float`) — and that result is then checked against its boundary like any other value, so a widened `float` can never reach an `int` binding implicitly.
+
 ## See also
 
 - [Error Handling](Error-Handling) — `Option`, `Result`, `?`, `??`.
