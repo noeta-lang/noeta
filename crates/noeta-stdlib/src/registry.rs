@@ -727,6 +727,14 @@ fn want_data<'a>(func: &str, args: &'a [NativeValue], index: usize) -> Result<&'
     }
 }
 
+/// An HMAC tag argument — `bytes` only (a tag is raw bytes; a "string tag" is a smell).
+fn want_tag<'a>(func: &str, args: &'a [NativeValue], index: usize) -> Result<&'a [u8], StdError> {
+    match args.get(index) {
+        Some(NativeValue::Bytes(b)) => Ok(b),
+        _ => Err(type_error(func, "bytes")),
+    }
+}
+
 const CRYPTO_FNS: &[ExtFn] = &[
     ExtFn {
         name: "sha256",
@@ -758,6 +766,22 @@ const CRYPTO_FNS: &[ExtFn] = &[
         name: "hmac_sha512",
         params: &[STR_OR_BYTES, STR_OR_BYTES],
         ret: Concrete(SigType::Bytes),
+    },
+    // Constant-time verification (C7): tag comparison must not short-circuit like `bytes ==`.
+    ExtFn {
+        name: "hmac_sha256_verify",
+        params: &[STR_OR_BYTES, STR_OR_BYTES, SigType::Bytes],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        name: "hmac_sha512_verify",
+        params: &[STR_OR_BYTES, STR_OR_BYTES, SigType::Bytes],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        name: "constant_time_eq",
+        params: &[STR_OR_BYTES, STR_OR_BYTES],
+        ret: Concrete(SigType::Bool),
     },
     // Incremental hashing (C3): per-algorithm constructors, one `Hasher` type.
     ExtFn {
@@ -875,6 +899,35 @@ fn crypto_dispatch(
             Ok(NativeOut::Bytes(crate::crypto::hmac_sha512(
                 want_data(func, args, 0)?,
                 want_data(func, args, 1)?,
+            )))
+        }
+        "hmac_sha256_verify" => {
+            want_arity(func, args, 3)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(
+                crate::crypto::hmac_sha256_verify(
+                    want_data(func, args, 0)?,
+                    want_data(func, args, 1)?,
+                    want_tag(func, args, 2)?,
+                ),
+            )))
+        }
+        "hmac_sha512_verify" => {
+            want_arity(func, args, 3)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(
+                crate::crypto::hmac_sha512_verify(
+                    want_data(func, args, 0)?,
+                    want_data(func, args, 1)?,
+                    want_tag(func, args, 2)?,
+                ),
+            )))
+        }
+        "constant_time_eq" => {
+            want_arity(func, args, 2)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(
+                crate::crypto::constant_time_eq(
+                    want_data(func, args, 0)?,
+                    want_data(func, args, 1)?,
+                ),
             )))
         }
         "sha256_hasher" => {

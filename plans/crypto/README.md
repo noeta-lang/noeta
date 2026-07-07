@@ -1,7 +1,10 @@
 # std.crypto — hashing, HMAC, bcrypt, and `id.uuid_v5` (the third seam client)
 
 **Status: ARC COMPLETE (2026-07-07).** C0 `4cbdafb`, C1 `6d5fd4e`, C2 `445cadf`, C3 `b128b63`,
-C4 `4557cf2`, C5 `aa11b98`, C6 docs+plan+memory. Branch `std-crypto` (off local main `6d069ca`).
+C4 `4557cf2`, C5 `aa11b98`, C6 docs+plan+memory, C7 constant-time verification
+(`hmac_sha256_verify`/`hmac_sha512_verify` on the hmac crate's `Mac::verify_slice`, plus
+`constant_time_eq` via `subtle` — the deferred hmac_verify row, pulled forward on user request).
+Branch `std-crypto` (off local main `6d069ca`).
 Gates: all published vectors pinned (NIST FIPS 180, RFC 4231, RFC 9562, openwall bcrypt —
 digest/HMAC values cross-checked against Python hashlib, v5 against Python uuid5); C2/C3/C5
 landed with **zero backend edits** (the registry seam carried a new module, a new extern type,

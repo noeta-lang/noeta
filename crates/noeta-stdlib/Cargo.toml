@@ -16,6 +16,7 @@ sha1 = { workspace = true }
 sha2 = { workspace = true }
 md-5 = { workspace = true }
 hmac = { workspace = true }
+subtle = { workspace = true }
 bcrypt = { workspace = true }
 
 [dev-dependencies]

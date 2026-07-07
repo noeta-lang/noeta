@@ -99,6 +99,9 @@ sha1 = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 md-5 = { version = "0.10", default-features = false }
 hmac = { version = "0.12", default-features = false }
+# Constant-time equality for secret comparison (`crypto.constant_time_eq`, and the property the
+# hmac verify twins rely on) — already in-tree transitively via `hmac`; never hand-roll this.
+subtle = { version = "2", default-features = false }
 bcrypt = { version = "0.17", default-features = false, features = ["alloc"] }
 
 [workspace.lints.rust]

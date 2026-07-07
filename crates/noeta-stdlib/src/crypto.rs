@@ -40,6 +40,32 @@ pub fn hmac_sha512(key: &[u8], data: &[u8]) -> Vec<u8> {
     mac.finalize().into_bytes().to_vec()
 }
 
+/// Verify an HMAC-SHA256 tag in constant time (crypto arc C7). `bytes ==` short-circuits on the
+/// first differing byte — fine for content digests, a timing oracle for auth tags — so tag
+/// comparison gets a purpose-named function on the `hmac` crate's own constant-time
+/// `Mac::verify_slice`. A truncated, tampered, or wrong-key tag is `false`, never an error.
+pub fn hmac_sha256_verify(key: &[u8], data: &[u8], tag: &[u8]) -> bool {
+    let mut mac = <Hmac<Sha256>>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(data);
+    mac.verify_slice(tag).is_ok()
+}
+
+/// The HMAC-SHA512 twin of [`hmac_sha256_verify`].
+pub fn hmac_sha512_verify(key: &[u8], data: &[u8], tag: &[u8]) -> bool {
+    let mut mac = <Hmac<Sha512>>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(data);
+    mac.verify_slice(tag).is_ok()
+}
+
+/// Constant-time equality for secrets that are NOT HMAC tags (session tokens, API keys, stored
+/// digests) — `subtle`'s `ct_eq`, which examines every byte regardless of where the first
+/// difference sits. Different lengths are `false` (length is not treated as secret, the
+/// standard contract).
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
+}
+
 /// bcrypt password hash (crypto arc C4). The 16-byte salt arrives as an ARGUMENT — drawn from
 /// the Host `Entropy` capability by the registry dispatch, never self-generated — so the sandbox
 /// stays deterministic (exact-string pinnable) and the real host gets OS entropy. The result is
@@ -200,6 +226,45 @@ mod tests {
         let other_algo = Hasher::Sha512(Default::default());
         assert!(!h.eq_value(&other_algo)); // different algorithm
         assert_eq!((&h as &dyn ExternValue).display_string(), "<sha256 hasher>");
+    }
+
+    /// The verify twins accept exactly the tag their hash side produced; tampered data, a wrong
+    /// key, and a truncated tag are all `false` (never an error).
+    #[test]
+    fn hmac_verify_twins_and_constant_time_eq() {
+        let tag = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        assert!(hmac_sha256_verify(
+            b"Jefe",
+            b"what do ya want for nothing?",
+            &tag
+        ));
+        assert!(!hmac_sha256_verify(b"Jefe", b"tampered", &tag));
+        assert!(!hmac_sha256_verify(
+            b"wrong",
+            b"what do ya want for nothing?",
+            &tag
+        ));
+        assert!(!hmac_sha256_verify(
+            b"Jefe",
+            b"what do ya want for nothing?",
+            &tag[..16]
+        ));
+        let tag512 = hmac_sha512(b"Jefe", b"what do ya want for nothing?");
+        assert!(hmac_sha512_verify(
+            b"Jefe",
+            b"what do ya want for nothing?",
+            &tag512
+        ));
+        assert!(!hmac_sha512_verify(
+            b"Jefe",
+            b"what do ya want for nothing?",
+            &tag
+        ));
+
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreT"));
+        assert!(!constant_time_eq(b"secret", b"secre"));
+        assert!(constant_time_eq(b"", b""));
     }
 
     /// bcrypt against a published vector (the openwall/John the Ripper "U*U" case) plus the

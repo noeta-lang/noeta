@@ -178,13 +178,16 @@ Everyday cryptographic primitives: content digests, keyed digests (HMAC), passwo
 | `sha256`, `sha512` | `sha256(data: string\|bytes) -> bytes` | Content digests. A string hashes as its UTF-8 bytes. |
 | `sha1`, `md5` | `sha1(data: string\|bytes) -> bytes` | **Interop only** (legacy checksums, UUID v5) — not collision-resistant; don't build integrity on them. |
 | `hmac_sha256`, `hmac_sha512` | `hmac_sha256(key: string\|bytes, data: string\|bytes) -> bytes` | Keyed digests (RFC 2104) — message authentication, API signatures. |
+| `hmac_sha256_verify`, `hmac_sha512_verify` | `hmac_sha256_verify(key: string\|bytes, data: string\|bytes, tag: bytes) -> bool` | **Constant-time** tag verification — always use this, never `tag == …` (which short-circuits and leaks timing). A tampered, truncated, or wrong-key tag is `false`, never an error. |
+| `constant_time_eq` | `constant_time_eq(a: string\|bytes, b: string\|bytes) -> bool` | Constant-time equality for other secrets (session tokens, API keys, stored digests). Unequal lengths are `false`. |
 | `sha256_hasher`, `sha512_hasher` | `sha256_hasher() -> Hasher` | An incremental hasher for streaming input. |
 | `bcrypt_hash` | `bcrypt_hash(password: string, cost: int) -> string` | Password hashing; the salt comes from host entropy. Cost is bcrypt's 4..=31 (12 is a sensible production default). Returns the self-describing `$2b$…` string. |
 | `bcrypt_verify` | `bcrypt_verify(password: string, hash: string) -> bool` | `false` on a wrong password; an **error** on a string that isn't a bcrypt hash. Accepts hashes from any bcrypt implementation. |
 | `random_bytes` | `random_bytes(n: int) -> bytes` | Crypto-grade random bytes (tokens, keys) from host entropy — distinct from `random`'s seeded stream, like `id.uuid`. |
 
 Digests are `bytes` — composable (hash a hash, key an HMAC with a digest) — and render with
-`bytes.to_hex()`. `Hasher` is a first-class value type: `update(data: string|bytes)` absorbs
+`bytes.to_hex()`. Comparing **content** digests with `==` is fine; comparing anything secret
+(auth tags, tokens) must go through the constant-time functions above. `Hasher` is a first-class value type: `update(data: string|bytes)` absorbs
 input (mutating the hasher in place, with reference semantics like a file handle), and
 `digest() -> bytes` reads the current digest *without* consuming the state, so interim digests
 keep flowing.
