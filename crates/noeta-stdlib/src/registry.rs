@@ -261,7 +261,19 @@ impl Extension for StdExtension {
     fn modules(&self) -> &'static [ExtModule] {
         STD_MODULES
     }
+    fn types(&self) -> &'static [ExtType] {
+        STD_TYPES
+    }
 }
+
+/// Core's extern types (extern-types X2): `Uuid` — pure, byte-ordered (v7 = time order),
+/// key-capable.
+const STD_TYPES: &[ExtType] = &[ExtType {
+    name: crate::id::TYPE_NAME,
+    methods: UUID_METHODS,
+    dispatch: uuid_method_dispatch,
+    key_capable: true,
+}];
 
 /// The in-process extension registry. A package manager will populate this from declared
 /// dependencies; for now it holds only core's std extension.
@@ -534,17 +546,27 @@ fn id_dispatch(
         }
         "uuid" => {
             want_arity(func, args, 0)?;
-            Ok(NativeOut::Str(crate::id::v4(
-                host.entropy_u64(),
-                host.entropy_u64(),
-            )))
+            let u = crate::id::v4(host.entropy_u64(), host.entropy_u64());
+            Ok(NativeOut::Extern(crate::ExternBox::new(u)))
         }
         "uuid_v7" => {
             want_arity(func, args, 0)?;
             let ms = host.clock_unix_ms();
             let ra = host.entropy_u64();
             let rb = host.entropy_u64();
-            Ok(NativeOut::Str(crate::id::v7(ms, ra, rb)))
+            Ok(NativeOut::Extern(crate::ExternBox::new(crate::id::v7(ms, ra, rb))))
+        }
+        // `parse(s) -> Uuid?`: any RFC form the crate accepts; `none` on malformed input (the
+        // Option is the error channel — parse failure is an ordinary outcome, not a panic).
+        "parse" => {
+            want_arity(func, args, 1)?;
+            let NativeValue::Str(s) = &args[0] else {
+                return Err(type_error(func, "string"));
+            };
+            Ok(match uuid::Uuid::parse_str(s) {
+                Ok(u) => NativeOut::Some(Box::new(NativeOut::Extern(crate::ExternBox::new(u)))),
+                Err(_) => NativeOut::None,
+            })
         }
         _ => Err(no_function_error("id", func)),
     }
@@ -1008,18 +1030,79 @@ const ID_FNS: &[ExtFn] = &[
         ret: Concrete(Int),
     },
     // `uuid()` is v4 — the "just give me a UUID" default; `uuid_v7()` (time-ordered keys) is the
-    // explicit opt-in. Both render canonical hyphenated lowercase.
+    // explicit opt-in. Both return the first-class `Uuid` (extern-types X2), which displays in
+    // canonical hyphenated lowercase.
     ExtFn {
         name: "uuid",
         params: &[],
-        ret: Concrete(Str),
+        ret: Concrete(UUID_SIG),
     },
     ExtFn {
         name: "uuid_v7",
         params: &[],
-        ret: Concrete(Str),
+        ret: Concrete(UUID_SIG),
+    },
+    ExtFn {
+        name: "parse",
+        params: &[Str],
+        ret: Concrete(SigType::Option(&UUID_SIG)),
     },
 ];
+
+/// The `Uuid` signature type, named once (`SigType::Option` borrows a static).
+const UUID_SIG: SigType = SigType::Named(crate::id::TYPE_NAME);
+
+/// The `Uuid` instance methods (extern-types X2): all pure (`key_capable` demands it).
+/// `version()` reads the version nibble back; `timestamp_ms()` is `some(ms)` iff the version
+/// carries a timestamp (v7) — the Option IS the version distinction.
+const UUID_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "to_string",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "version",
+        params: &[],
+        ret: Concrete(Int),
+    },
+    ExtFn {
+        name: "timestamp_ms",
+        params: &[],
+        ret: Concrete(SigType::Option(&SigType::Int)),
+    },
+];
+
+/// Method dispatch for `Uuid` — downcast the receiver, run the pure accessor. No mutation, no
+/// host (the whole point of `key_capable`).
+fn uuid_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(u) = recv.as_any().downcast_ref::<uuid::Uuid>() else {
+        return Err(type_error(method, "Uuid"));
+    };
+    match method {
+        "to_string" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Str(u.to_string()))
+        }
+        "version" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Int(u.get_version_num() as i64)))
+        }
+        "timestamp_ms" => {
+            want_arity(method, args, 0)?;
+            Ok(match crate::id::timestamp_ms(u) {
+                Some(ms) => NativeOut::Some(Box::new(NativeOut::Scalar(Scalar::Int(ms as i64)))),
+                None => NativeOut::None,
+            })
+        }
+        _ => Err(crate::no_method_error(crate::id::TYPE_NAME, method)),
+    }
+}
 
 const ENV_FNS: &[ExtFn] = &[
     ExtFn {
@@ -1465,16 +1548,34 @@ mod tests {
         assert_ne!(a, b);
         let mut fresh = host();
         assert_eq!(dispatch("id", "uuid", &mut fresh, &[]), Ok(a));
-        // v7: version nibble 7, and the sandbox epoch in the leading 48 bits.
-        let Ok(NativeOut::Str(v7)) = dispatch("id", "uuid_v7", &mut h, &[]) else {
-            panic!("uuid_v7 should produce a string");
+        // v7: an extern `Uuid` value (extern-types X2) — version nibble 7, the sandbox epoch in
+        // the leading 48 bits.
+        let Ok(NativeOut::Extern(v7)) = dispatch("id", "uuid_v7", &mut h, &[]) else {
+            panic!("uuid_v7 should produce a Uuid");
         };
+        let v7 = v7.display_string();
         assert_eq!(&v7[14..15], "7");
         let ms = u64::from_str_radix(&v7[..13].replace('-', ""), 16).unwrap();
         assert_eq!(ms, crate::host::SANDBOX_EPOCH_MS);
         // `id` left the virtual table — it is an ordinary registry module now.
         assert!(!is_virtual_module("id"));
         assert!(find_function("id", "uuid_v7").is_some());
+        // The `Uuid` extern type is registered with its method table, and `parse` round-trips
+        // (`none` on malformed input).
+        assert!(find_type("Uuid").is_some_and(|t| t.key_capable));
+        assert!(find_type_method("Uuid", "timestamp_ms").is_some());
+        let parsed = dispatch("id", "parse", &mut h, &[NativeValue::Str(v7.clone())]).unwrap();
+        let NativeOut::Some(inner) = parsed else {
+            panic!("parse of a canonical uuid should be some");
+        };
+        let NativeOut::Extern(u) = *inner else {
+            panic!("parse should yield a Uuid");
+        };
+        assert_eq!(u.display_string(), v7);
+        assert_eq!(
+            dispatch("id", "parse", &mut h, &[NativeValue::Str("nope".into())]),
+            Ok(NativeOut::None)
+        );
     }
 
     #[test]

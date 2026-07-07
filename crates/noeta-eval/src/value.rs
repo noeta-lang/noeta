@@ -882,6 +882,10 @@ impl PartialEq for Value {
             (Value::BoundMethod(ra, ma), Value::BoundMethod(rb, mb)) => ma == mb && ra == rb,
             // File handles compare by their full shared state, matching the VM by construction.
             (Value::FileHandle(a), Value::FileHandle(b)) => *a.borrow() == *b.borrow(),
+            // Extern-type values compare through their contract (extern-types X2). This impl is
+            // the one enum/list/tuple/set *payload* comparisons route through, so a missing arm
+            // here is the classic silent-wrong-`false` hole (`some(u) == some(u)` was false).
+            (Value::Extern(a), Value::Extern(b)) => a.borrow().eq_value(&**b.borrow()),
             // Functions and types are not structurally comparable.
             _ => false,
         }

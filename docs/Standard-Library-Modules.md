@@ -142,15 +142,21 @@ Identity generation — sequential ids and UUIDs.
 | Function | Signature | Notes |
 |---|---|---|
 | `next_id` | `next_id() -> int` | A deterministic counter: 1, 2, 3, …. |
-| `uuid` | `uuid() -> string` | A UUID (version 4, random) — the default choice. |
-| `uuid_v7` | `uuid_v7() -> string` | A time-ordered UUID (version 7, unix-ms + random) — for ids that should sort by creation time. |
+| `uuid` | `uuid() -> Uuid` | A UUID (version 4, random) — the default choice. |
+| `uuid_v7` | `uuid_v7() -> Uuid` | A time-ordered UUID (version 7, unix-ms + random) — for ids that should sort by creation time. |
+| `parse` | `parse(s: string) -> Uuid?` | Any RFC form; `none` on malformed input. |
+
+`Uuid` is a first-class value type: it compares by value, orders by its bytes (so v7 ids sort by creation time), and displays in the canonical hyphenated lowercase form. Instance methods: `to_string() -> string`, `version() -> int`, and `timestamp_ms() -> int?` — `some(ms)` exactly when the version carries a timestamp (v7), `none` otherwise.
 
 ```noeta
 use std.{id}
-echo id.next_id()          // 1
-key = id.uuid()            // e.g. 4396d60d-bd85-47af-a98f-f1a0396ff552
-ordered = id.uuid_v7()     // sorts by creation time
-echo key.len()             // 36 — canonical hyphenated lowercase
+echo id.next_id()            // 1
+key = id.uuid()              // e.g. 4396d60d-bd85-47af-a98f-f1a0396ff552
+ordered = id.uuid_v7()       // sorts by creation time
+echo key.version()           // 4
+echo ordered.version()       // 7
+echo key is Uuid             // true
+echo id.parse(key.to_string()) == some(key)   // true — canonical round-trip
 ```
 
 UUIDs flow through the host seam: in the deterministic sandbox (tests, the differential oracle) they are exactly reproducible — drawn from an entropy stream **independent of `random`** (generating an id never perturbs a seeded sequence, and `random.seed` never rewinds ids), with v7 timestamps built on a fixed epoch plus the logical clock (so `time.sleep` advances them). Under `noeta run`, `uuid()` uses real OS entropy and `uuid_v7()` real wall time.

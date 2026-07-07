@@ -279,6 +279,15 @@ pub fn no_function_error(module: &str, func: &str) -> StdError {
     }
 }
 
+/// Build the canonical "no such method on an extern type" error (→ `E0005`), the type-shaped
+/// sibling of [`no_function_error`] (extern-types X2).
+pub fn no_method_error(type_name: &str, method: &str) -> StdError {
+    StdError {
+        kind: ErrorKind::UnknownName,
+        message: format!("type `{type_name}` has no method `{method}`"),
+    }
+}
+
 /// Build the canonical "invalid JSON" error for `json.parse` (→ `E0007`).
 pub fn invalid_json_error(detail: &str) -> StdError {
     StdError {

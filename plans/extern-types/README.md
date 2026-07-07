@@ -322,7 +322,13 @@ CLI test.
 
 ## Slices
 
-- **X1 — the seam.** `ExternValue` + `ExtType` + `Extension::types()` + E0049 reserved names
+- **X1 — the seam. ✅ DONE (`727b603`).** Bench gate: back-to-back A/B vs the parent commit
+  (`fib`, `loop_sum`, `iter_pipeline`) — all flat within a ±15% machine-noise floor (the box
+  runs concurrent builds; the noise floor was established by impossible "improvements" on
+  untouched paths, and the one flagged size, eager/8000 "+16%", re-read 24% *below* baseline
+  on the confirmation run). Mechanistically consistent: list receivers match their ladder rung
+  before the extern rung; equality/ordering rungs are appended after all existing paths.
+  `ExternValue` + `ExtType` + `Extension::types()` + E0049 reserved names
   (registered extern types + the checker-only native names); `NativeOut::Extern`/arg
   projection; `Payload::Extern` + `with_extern{,_mut}` + `Value::Extern(Rc<RefCell<…>>)` +
   equality/ordering/display/narrowing rungs in both backends; checker admit + table-driven

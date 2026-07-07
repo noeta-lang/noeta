@@ -137,9 +137,13 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         NativeOut::Object(_) => {
             unreachable!("object results are materialized by `materialize_ext`")
         }
+        // Option results from ordinary dispatch (`id.parse`, extern-type methods like
+        // `timestamp_ms` — extern-types X2).
+        NativeOut::None => make_none(),
+        NativeOut::Some(inner) => make_some(materialize_native(*inner)),
         // The typed `json.parse::<T>` results that name their own types are built by the typed-call
         // path (`materialize_recipe`, which has the VM's shape table), not here.
-        NativeOut::Struct { .. } | NativeOut::None | NativeOut::Some(_) => {
+        NativeOut::Struct { .. } => {
             unreachable!("recipe results are materialized by the typed-call path")
         }
     }
