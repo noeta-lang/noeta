@@ -1612,3 +1612,115 @@ fn repl_load_fails_fast_on_a_broken_bootstrap() {
         .failure()
         .stderr(predicate::str::contains("boom"));
 }
+
+// --- `check` (static analysis, no run/build) ---------------------------------------
+
+/// Create a private temp *directory* holding several named `.noe` files and return the directory.
+/// Directory isolation matters for the same reason as `temp_program`: the loader treats every
+/// sibling `.noe` file as a candidate module, so a shared temp dir would cross-contaminate.
+fn temp_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("noeta_cli_test_{name}"));
+    // Start from a clean directory so a rerun does not see a previous run's stray files.
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    for (rel, src) in files {
+        let path = dir.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create nested dir");
+        }
+        std::fs::write(&path, src).expect("write temp file");
+    }
+    dir
+}
+
+#[test]
+fn check_clean_file_succeeds() {
+    let file = temp_program("check_clean", "fn add(a: int, b: int): int { return a + b }\necho add(2, 3)\n");
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("0 error(s)"));
+}
+
+#[test]
+fn check_type_error_exits_1() {
+    let file = temp_program("check_type_err", "echo 1 + true\n");
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0007"))
+        .stderr(predicate::str::contains("1 error(s)"));
+}
+
+#[test]
+fn check_syntax_error_exits_1() {
+    let file = temp_program("check_syntax_err", "echo $;\n");
+    lang()
+        .arg("check")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0001"));
+}
+
+#[test]
+fn check_directory_is_recursive_and_attributes_errors_to_files() {
+    // A clean file at the root and an erroring file in a subdirectory: the recursive walk finds both,
+    // the directory check fails, and the error renders against the nested file.
+    let dir = temp_dir(
+        "check_tree",
+        &[
+            ("a.noe", "fn ok(): int { return 1 }\n"),
+            ("sub/bad.noe", "echo 1 + true\n"),
+        ],
+    );
+    lang()
+        .arg("check")
+        .arg(&dir)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0007"))
+        .stderr(predicate::str::contains("bad.noe"))
+        .stderr(predicate::str::contains("2 files"));
+}
+
+#[test]
+fn check_shared_erroring_module_is_reported_once() {
+    // `m.noe` has one error and is imported by two entries (and is itself an entry in the walk), so it
+    // is linked/checked three times — but global dedup means the diagnostic is rendered exactly once.
+    let dir = temp_dir(
+        "check_shared",
+        &[
+            ("m.noe", "namespace App.M;\npub fn boom(): int { return 1 + true }\n"),
+            ("main1.noe", "use App.M.{boom}\necho boom()\n"),
+            ("main2.noe", "use App.M.{boom}\necho boom()\n"),
+        ],
+    );
+    let out = lang().arg("check").arg(&dir).assert().failure().code(1);
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert_eq!(
+        stderr.matches("E0007").count(),
+        1,
+        "the shared module's error is deduplicated to a single rendering:\n{stderr}"
+    );
+    assert!(stderr.contains("1 error(s)"), "{stderr}");
+}
+
+#[test]
+fn check_empty_directory_exits_2() {
+    let dir = temp_dir("check_empty", &[]);
+    lang()
+        .arg("check")
+        .arg(&dir)
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("no `.noe` files"));
+}
