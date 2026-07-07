@@ -162,8 +162,16 @@ flags) and dispatches unmatched names to registered commands (`cargo clippy` mod
   existed, so no typing prerequisite): `Builtin::Sleep` deleted everywhere, shared dispatch in
   `noeta-stdlib/src/task.rs`. Full gate green (differential, leak-0, corpus, workspace suites,
   real-host smoke).
-- **H1** — `SigType::Fn`/`Var` + checker mapping/substitution (`Future` already existed — H0
-  finding).
+- **H1 ✅ DONE** — `SigType::Fn(params, ret)` + `SigType::Var(u8)` (`Future` already existed —
+  H0 finding); checker bind-and-substitute: `bind_params` walks declared params structurally
+  against the call's argument types (through `List`/`Option`/`Map`/`Future`/`Fn`/`Optional`),
+  binding each variable at its **first determined occurrence** (holes never bind);
+  `sig_to_type_bound` substitutes into the remaining params (a repeated variable becomes a
+  concrete expectation the ordinary argument check enforces) and the `Concrete` return. Unbound
+  variable ⇒ gradual hole, never a wrong type. `module_params` now takes the arg types.
+  Behavior-neutral for every var-free signature; semantics pinned by unit tests in
+  `noeta-check/src/stdlib.rs` (first-occurrence-wins on a mismatched closure; empty-list-literal
+  hole defers to a later concrete occurrence). Workspace green, clippy silent.
 - **H2** — migrate **std.task** (`sleep`/`all`/`race`/`map_bounded`): shared dispatch in
   `noeta-stdlib`; delete the four `Builtin`s, the task `VIRTUAL_MODULES` entry, both backend
   mirrors, the checker arms. Async corpus green.
