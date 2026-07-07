@@ -835,6 +835,26 @@ fn fs_dispatch(
             };
             Ok(NativeOut::Spawn(SpawnBox(Box::new(io))))
         }
+        // The async metadata twins (extern-types X6).
+        "exists_async" | "remove_async" => {
+            want_arity(func, args, 1)?;
+            let path = want_str(func, args, 0)?.to_string();
+            let io = if func == "exists_async" {
+                crate::FsIo::Exists(path)
+            } else {
+                crate::FsIo::Remove(path)
+            };
+            Ok(NativeOut::Spawn(SpawnBox(Box::new(io))))
+        }
+        "list_async" => {
+            // 0-or-1 args, mirroring the sync `list` (whole sandbox vs one directory).
+            let dir = match args.len() {
+                0 => None,
+                1 => Some(want_str(func, args, 0)?.to_string()),
+                n => return Err(arity_error(func, 1, n)),
+            };
+            Ok(NativeOut::Spawn(SpawnBox(Box::new(crate::FsIo::List(dir)))))
+        }
         _ => Err(no_function_error("fs", func)),
     }
 }
@@ -1291,6 +1311,23 @@ const FS_FNS: &[ExtFn] = &[
         name: "append_async",
         params: &[Str, Str],
         ret: Concrete(SigType::Future(&SigType::Unit)),
+    },
+    // The async metadata twins (extern-types X6) — pure `FsIo` additions: no backend code
+    // changed to add these, which is the point of the open seam.
+    ExtFn {
+        name: "exists_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&SigType::Bool)),
+    },
+    ExtFn {
+        name: "remove_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&SigType::Bool)),
+    },
+    ExtFn {
+        name: "list_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&SigType::List(&Str))),
     },
     ExtFn {
         name: "read_lines",

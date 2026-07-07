@@ -1,0 +1,21 @@
+// The async metadata twins (extern-types X6): `fs.exists_async`/`remove_async`/`list_async`
+// were added as pure `FsIo` descriptors + signature rows — NO backend code changed, which is
+// the open-seam guarantee. On the sandbox VFS they resolve deterministically at spawn
+// (in-oracle, both backends agree), exactly like the content twins.
+// expect: stdout "exists=true"
+// expect: stdout "listing=[\"a.txt\", \"b.txt\"]"
+// expect: stdout "removed=true"
+// expect: stdout "exists-after=false"
+// expect: stdout "removed-again=false"
+// expect: exit 0
+use std.{fs}
+async fn run(): void {
+    fs.write_async("a.txt", "alpha").await
+    fs.write_async("b.txt", "beta").await
+    echo "exists=" ~ fs.exists_async("a.txt").await
+    echo "listing=" ~ fs.list_async().await
+    echo "removed=" ~ fs.remove_async("a.txt").await
+    echo "exists-after=" ~ fs.exists_async("a.txt").await
+    echo "removed-again=" ~ fs.remove_async("a.txt").await
+}
+run().await

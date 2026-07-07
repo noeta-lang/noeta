@@ -74,6 +74,12 @@ pub enum FsIo {
     Write(String, String),
     /// `fs.append_async(path, content)` → unit.
     Append(String, String),
+    /// `fs.exists_async(path)` → bool (extern-types X6).
+    Exists(String),
+    /// `fs.remove_async(path)` → whether anything was removed (extern-types X6).
+    Remove(String),
+    /// `fs.list_async()` / `fs.list_async(dir)` → the listing (extern-types X6).
+    List(Option<String>),
 }
 
 impl ExternIo for FsIo {
@@ -86,10 +92,30 @@ impl ExternIo for FsIo {
             FsIo::Append(path, content) => {
                 host.fs_append(path, content).map(|()| crate::NativeOut::Unit)
             }
+            FsIo::Exists(path) => Ok(crate::NativeOut::Scalar(crate::Scalar::Bool(
+                host.fs_exists(path),
+            ))),
+            FsIo::Remove(path) => host
+                .fs_remove(path)
+                .map(|removed| crate::NativeOut::Scalar(crate::Scalar::Bool(removed))),
+            FsIo::List(dir) => match dir {
+                None => host.fs_list(),
+                Some(dir) => host.fs_list_dir(dir),
+            }
+            .map(|paths| {
+                crate::NativeOut::List(paths.into_iter().map(crate::NativeOut::Str).collect())
+            }),
         }
     }
 
     fn run_real(&mut self) -> Option<RealBody> {
+        // The metadata twins (X6) deliberately have NO real body: the real executor's None
+        // fallback runs `run_sync` against the RealHost at spawn — exact sync semantics by
+        // construction (these are cheap point ops), and the degradation path every extension
+        // gets for free stays exercised. Content IO below keeps its concurrent bodies.
+        if matches!(self, FsIo::Exists(_) | FsIo::Remove(_) | FsIo::List(_)) {
+            return None;
+        }
         let io_error = |message: String| StdError {
             kind: crate::ErrorKind::Io,
             message,
@@ -115,6 +141,9 @@ impl ExternIo for FsIo {
                             .map_err(|e| io_error(format!("cannot append to `{path}`: {e}")))
                     })
                     .map(|()| crate::NativeOut::Unit)
+            }
+            FsIo::Exists(_) | FsIo::Remove(_) | FsIo::List(_) => {
+                unreachable!("metadata twins returned None above")
             }
         })))
     }

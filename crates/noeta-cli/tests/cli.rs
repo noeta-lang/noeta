@@ -356,6 +356,36 @@ fn run_reads_files_asynchronously_on_the_real_executor() {
 }
 
 #[test]
+fn run_async_metadata_twins_on_the_real_executor() {
+    // Extern-types X6: `fs.exists_async`/`remove_async`/`list_async` have NO real body — the
+    // real executor's None fallback runs their sync body against the RealHost at spawn. This
+    // exercises that degradation path end-to-end on real disk.
+    let dir = std::env::temp_dir().join("noeta_cli_async_meta_dir");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create work dir");
+    std::fs::write(dir.join("keep.txt"), "k").expect("write keep");
+    std::fs::write(dir.join("gone.txt"), "g").expect("write gone");
+    let src = "use std.{fs}\n\
+               async fn run(): void {\n\
+               \x20   echo \"exists=\" ~ fs.exists_async(\"keep.txt\").await\n\
+               \x20   echo \"removed=\" ~ fs.remove_async(\"gone.txt\").await\n\
+               \x20   echo \"exists-after=\" ~ fs.exists_async(\"gone.txt\").await\n\
+               }\n\
+               run().await\n";
+    let file = temp_program("run_async_meta", src);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .current_dir(&dir)
+        .assert()
+        .success()
+        .stdout("exists=true\nremoved=true\nexists-after=false\n");
+    // The removal really happened on disk.
+    assert!(!dir.join("gone.txt").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn run_writes_files_asynchronously_on_the_real_executor() {
     // Track A.10: `fs.write_async`/`append_async` hit the REAL disk via the real executor's tokio
     // runtime, awaited like any future. A write/append/read round-trip lands on disk.

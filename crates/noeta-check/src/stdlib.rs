@@ -508,9 +508,10 @@ fn map_params(name: &str, key: &Type, val: &Type) -> Option<Vec<Type>> {
 /// parameters (`math.abs`/`min`/`max`, and any numeric position) are typed `dyn` so an `int` or
 /// `float` argument is accepted without a spurious mismatch.
 pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
-    // `fs.list` takes an optional dir argument (0 or 1) — not arity-checked. (It is registered with
-    // a fixed signature for dispatch, so this skip must precede the registry lookup.)
-    if module == "fs" && name == "list" {
+    // `fs.list` (and its async twin, extern-types X6) takes an optional dir argument (0 or 1) —
+    // not arity-checked. (Both are registered with a fixed signature for dispatch, so this skip
+    // must precede the registry lookup.)
+    if module == "fs" && (name == "list" || name == "list_async") {
         return None;
     }
     // Migrated modules: parameter types come from the native-extension registry.
