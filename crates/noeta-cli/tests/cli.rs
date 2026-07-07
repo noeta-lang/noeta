@@ -1724,3 +1724,45 @@ fn check_empty_directory_exits_2() {
         .code(2)
         .stderr(predicate::str::contains("no `.noe` files"));
 }
+
+#[test]
+fn check_json_emits_a_machine_readable_report_on_stdout() {
+    let file = temp_program("check_json_err", "echo 1 + true\n");
+    let out = lang()
+        .arg("check")
+        .arg("--format")
+        .arg("json")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        // The report goes to stdout; stderr carries no human diagnostics in JSON mode.
+        .stderr(predicate::str::is_empty());
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON report");
+    assert_eq!(report["files_checked"], 1);
+    assert_eq!(report["errors"], 1);
+    assert_eq!(report["warnings"], 0);
+    let diags = report["diagnostics"].as_array().unwrap();
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0]["code"], "E0007");
+    assert_eq!(diags[0]["severity"], "error");
+    assert_eq!(diags[0]["line"], 1);
+    assert!(diags[0]["file"].as_str().unwrap().ends_with("main.noe"));
+}
+
+#[test]
+fn check_json_clean_is_an_empty_diagnostics_array() {
+    let file = temp_program("check_json_ok", "fn id(n: int): int { return n }\necho id(1)\n");
+    let out = lang()
+        .arg("check")
+        .arg("--format")
+        .arg("json")
+        .arg(&file)
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON report");
+    assert_eq!(report["errors"], 0);
+    assert!(report["diagnostics"].as_array().unwrap().is_empty());
+}

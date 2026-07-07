@@ -41,6 +41,13 @@ struct Cli {
     command: Command,
 }
 
+/// How `noeta check` renders its result: for a human terminal or as a machine-readable report.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputFormat {
+    Human,
+    Json,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Run a program file.
@@ -156,6 +163,10 @@ enum Command {
         /// Activate the tiers a `noeta.toml` build profile makes live. Unioned with any `--tier`.
         #[arg(long)]
         profile: Option<String>,
+        /// Output format. `human` (default) renders diagnostics for a terminal; `json` emits a
+        /// single machine-readable report on stdout for tools (CI, editors, the MCP server).
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
     },
     /// Start an interactive REPL. Entries type-check before running (an entry with a type error
     /// prints its `E0xxx` diagnostics and is skipped) — the default since session-checker C2/C5.
@@ -238,7 +249,8 @@ fn main() -> ExitCode {
             path,
             tier,
             profile,
-        } => cmd_check(&path, &tier, &profile),
+            format,
+        } => cmd_check(&path, &tier, &profile, format),
         Command::Repl { no_check, load } => cmd_repl(!no_check, load),
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),
@@ -492,6 +504,19 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
     }
 }
 
+/// The `--format json` report: the whole outcome of a `noeta check` run in one serializable object.
+#[derive(serde::Serialize)]
+struct CheckReport {
+    /// The number of `.noe` files checked (entries walked).
+    files_checked: usize,
+    /// The number of unique error-severity diagnostics.
+    errors: usize,
+    /// The number of unique warning-severity diagnostics.
+    warnings: usize,
+    /// Every unique diagnostic, resolved to files + line/column (see [`noeta_diagnostics::to_json`]).
+    diagnostics: Vec<noeta_diagnostics::JsonDiagnostic>,
+}
+
 /// `noeta check [PATH]` — statically validate source without running or building it: parse every
 /// `.noe` file and verify it type-checks, printing all diagnostics and exiting non-zero if any is an
 /// error. This is `cmd_run`'s front half — load → (activate tiers) → `check_all` — stopping before
@@ -503,7 +528,16 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
 /// guarantees a library module no single entry imports is still parsed and type-checked. A module
 /// shared by several entries is therefore linked (and its diagnostics produced) once per importer;
 /// diagnostics are deduplicated globally by their source file + span + code so each is reported once.
-fn cmd_check(path: &std::path::Path, tiers: &[String], profile: &Option<String>) -> ExitCode {
+///
+/// With `--format json` the whole result is emitted as one machine-readable object on stdout (for
+/// CI, editors, and the MCP server) instead of human-rendered diagnostics on stderr; the exit code
+/// is identical in both modes.
+fn cmd_check(
+    path: &std::path::Path,
+    tiers: &[String],
+    profile: &Option<String>,
+    format: OutputFormat,
+) -> ExitCode {
     use noeta_diagnostics::Severity;
 
     // The active tier set — resolved once and applied to every file — is the union of a `--profile`'s
@@ -540,20 +574,22 @@ fn cmd_check(path: &std::path::Path, tiers: &[String], profile: &Option<String>)
     // Deduplicate diagnostics across every entry's workspace. `SourceId`s are workspace-local (each
     // load restarts them at 0), so the key is the *file name* the diagnostic renders against plus its
     // byte span and code — never the id. The map's key order (name, then offset, then code) is also
-    // the render order, so output is deterministic. Value keeps the owning `Source` so each renders
-    // against the right file with the single-source renderer.
-    let mut diags: std::collections::BTreeMap<(String, u32, u32, &'static str), (Source, Diagnostic)> =
+    // the render order, so output is deterministic. Each value keeps the workspace's `SourceMap`
+    // (shared via `Rc` so a workspace's diagnostics don't each clone it) so a diagnostic — and any of
+    // its cross-file labels — resolves against the right source in both the human and JSON paths.
+    type MapDiag = (std::rc::Rc<SourceMap>, Diagnostic);
+    let mut diags: std::collections::BTreeMap<(String, u32, u32, &'static str), MapDiag> =
         std::collections::BTreeMap::new();
-    let mut fold = |source: &Source, diag: &Diagnostic| {
+    let mut fold = |sources: &std::rc::Rc<SourceMap>, diag: &Diagnostic| {
         let key = (
-            source.name().to_string(),
+            sources.source(diag.span.source).name().to_string(),
             diag.span.start,
             diag.span.end,
             diag.code.code(),
         );
         diags
             .entry(key)
-            .or_insert_with(|| (source.clone(), diag.clone()));
+            .or_insert_with(|| (std::rc::Rc::clone(sources), diag.clone()));
     };
 
     let mut unreadable = false;
@@ -566,48 +602,77 @@ fn cmd_check(path: &std::path::Path, tiers: &[String], profile: &Option<String>)
                 unreadable = true;
             }
             Ok(Err(load_diagnostics)) => {
-                // Lex/parse errors — each already carries the source it renders against.
+                // Lex/parse errors — each carries the single source it renders against. Wrap it in a
+                // one-element `SourceMap` (any `SourceId` resolves back to that source), matching how
+                // `cmd_run` renders load diagnostics single-source.
                 for ld in &load_diagnostics {
-                    fold(&ld.source, &ld.diagnostic);
+                    let sources = std::rc::Rc::new(SourceMap::new(vec![ld.source.clone()]));
+                    fold(&sources, &ld.diagnostic);
                 }
             }
             Ok(Ok(linked)) => {
                 // Activate the resolved dev-tiers before checking, as `run`/`build`/`dump` do; with no
                 // active tiers the program is checked as-is. Tier-activation diagnostics resolve
                 // against the same workspace sources.
-                if active_refs.is_empty() {
-                    for d in &noeta_check::check_all(&linked.program).diagnostics {
-                        fold(linked.sources.source(d.span.source), d);
-                    }
+                let sources = std::rc::Rc::new(linked.sources);
+                let program_diags = if active_refs.is_empty() {
+                    noeta_check::check_all(&linked.program).diagnostics
                 } else {
                     let activated = noeta_check::activate_tiers(&linked.program, &active_refs);
-                    for d in &activated.diagnostics {
-                        fold(linked.sources.source(d.span.source), d);
-                    }
-                    for d in &noeta_check::check_all(&activated.program).diagnostics {
-                        fold(linked.sources.source(d.span.source), d);
-                    }
+                    let mut ds = activated.diagnostics;
+                    ds.extend(noeta_check::check_all(&activated.program).diagnostics);
+                    ds
+                };
+                for d in &program_diags {
+                    fold(&sources, d);
                 }
             }
         }
     }
 
-    // Render every unique diagnostic against its own source (single-source renderer, color disabled),
-    // then a summary line. Errors gate the exit code; warnings/notes print but pass.
-    let mut stderr = io::stderr();
+    // Count severities once (independent of output format): errors gate the exit code, warnings print
+    // but pass.
     let mut errors = 0usize;
     let mut warnings = 0usize;
-    for (source, diag) in diags.values() {
+    for (_, diag) in diags.values() {
         match diag.severity {
             Severity::Error => errors += 1,
             Severity::Warning => warnings += 1,
             Severity::Note => {}
         }
-        let _ = stderr.write_all(render(source, diag).as_bytes());
     }
     let n = entries.len();
-    let files = if n == 1 { "file" } else { "files" };
-    eprintln!("checked {n} {files}: {errors} error(s), {warnings} warning(s)");
+
+    match format {
+        OutputFormat::Human => {
+            // Render each unique diagnostic against its workspace sources (color disabled), then a
+            // summary line — all to stderr, as the other commands do.
+            let mut stderr = io::stderr();
+            for (sources, diag) in diags.values() {
+                let _ = stderr.write_all(render_mapped(sources, std::iter::once(diag)).as_bytes());
+            }
+            let files = if n == 1 { "file" } else { "files" };
+            eprintln!("checked {n} {files}: {errors} error(s), {warnings} warning(s)");
+        }
+        OutputFormat::Json => {
+            // A single machine-readable report on stdout, so a tool can pipe `noeta check --format
+            // json` and parse it. Operational `cannot read` errors stay on stderr; the exit code
+            // still reflects them.
+            let report = CheckReport {
+                files_checked: n,
+                errors,
+                warnings,
+                diagnostics: diags
+                    .values()
+                    .map(|(sources, diag)| noeta_diagnostics::to_json(sources, diag))
+                    .collect(),
+            };
+            match serde_json::to_string_pretty(&report) {
+                Ok(json) => println!("{json}"),
+                Err(err) => eprintln!("lang: cannot serialize check report: {err}"),
+            }
+        }
+    }
 
     if errors > 0 {
         ExitCode::from(1)
