@@ -40,7 +40,7 @@ What it does today:
 | **Signature help** | Parameter hints while typing a call — free functions and methods. |
 | **Document outline** | Types, functions, methods for the breadcrumb/symbol views. |
 | **Semantic tokens** | Compiler-accurate token coloring layered over the static grammar. |
-| **Inlay type hints** | The inferred type of every un-annotated binding, inline after its name (`mut xs`&nbsp;`: List<int>`&nbsp;`= …`) — rust-analyzer style, same spelling as hover. Annotated bindings and reassignments show nothing. Toggle with VS Code's `editor.inlayHints.enabled`. |
+| **Inlay hints** | rust-analyzer style, same spelling as hover: the inferred type of every un-annotated binding (`mut xs`&nbsp;`: List<int>`&nbsp;`= …`) and of inference-typed closure parameters; parameter **names** at call sites (`scale(`&nbsp;`factor:`&nbsp;`2, …)`). Annotated bindings, reassignments, same-named identifier arguments, and uninferred (`dyn`) params show nothing. Toggle with VS Code's `editor.inlayHints.enabled`. |
 
 The same salsa graph powers the [debugger](Debugging)'s launch compile and the conformance
 harness, so all three tools read one source of truth.

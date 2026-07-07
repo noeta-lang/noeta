@@ -12,6 +12,14 @@
 //! A hint appears only when the checker resolved the value to a **concrete** type: `expr_types`
 //! omits `dyn`/union/unresolved sites, so those show nothing rather than a guess. An *annotated*
 //! binding shows nothing either — the type is already on screen.
+//!
+//! Two further hint families complete the coverage:
+//! - **closure parameter types** — closure params are inference-typed (the other place types are
+//!   invisible in source): when the checker resolved the closure to a concrete `Fn` type, each
+//!   un-annotated parameter shows its type (`fn(x⟨: int⟩) => …`);
+//! - **call-site parameter names** — `f(⟨n:⟩ 42)`, resolved through the same free-function /
+//!   method lookup signature-help uses; an argument that is already an identifier with the
+//!   parameter's own name shows nothing (it would repeat the code).
 
 use std::collections::{HashMap, HashSet};
 
@@ -21,11 +29,20 @@ use noeta_span::{SourceId, Span};
 
 use crate::resolve::DefUse;
 
-/// One computed hint: attach `label` at byte `offset` (the end of the binding's name) in the
-/// requested file.
+/// What a hint labels — the LSP `InlayHintKind` the adapter maps to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HintKind {
+    /// An inferred type (`: List<int>`), after a binding or closure-parameter name.
+    Type,
+    /// A parameter name (`n:`), before a call argument.
+    Parameter,
+}
+
+/// One computed hint: attach `label` at byte `offset` in the requested file.
 pub struct TypeHint {
     pub offset: u32,
     pub label: String,
+    pub kind: HintKind,
 }
 
 /// Every binding type hint for `source` in `program` (the merged workspace program; the filter
@@ -39,6 +56,7 @@ pub fn type_hints(
     let mut hints = Vec::new();
     let mut walker = Walker {
         source,
+        program,
         declarations: &declarations,
         expr_types,
         hints: &mut hints,
@@ -52,6 +70,8 @@ pub fn type_hints(
 
 struct Walker<'a> {
     source: SourceId,
+    /// The merged program, for resolving a call's callee to its declaration (parameter names).
+    program: &'a Program,
     declarations: &'a HashSet<Span>,
     expr_types: &'a HashMap<Span, TypeRepr>,
     hints: &'a mut Vec<TypeHint>,
@@ -74,6 +94,7 @@ impl Walker<'_> {
                     self.hints.push(TypeHint {
                         offset: name_span.end,
                         label: format!(": {repr}"),
+                        kind: HintKind::Type,
                     });
                 }
                 self.expr(value);
@@ -147,16 +168,39 @@ impl Walker<'_> {
     /// hint-less region.
     fn expr(&mut self, expr: &Expr) {
         match expr {
-            Expr::Closure { body, .. } => match body {
-                ClosureBody::Expr(inner) => self.expr(inner),
-                ClosureBody::Block(stmts) => self.stmts(stmts),
-            },
+            Expr::Closure {
+                params, body, span, ..
+            } => {
+                // Closure parameters are inference-typed — when the checker resolved this closure
+                // to a concrete `Fn` type, each un-annotated parameter shows its inferred type.
+                if let Some(TypeRepr::Fn(param_types, _)) = self.expr_types.get(span) {
+                    for (param, ty) in params.iter().zip(param_types) {
+                        // An UNINFERRED parameter records as `dyn` (a standalone closure has no
+                        // context to infer from) — that label says nothing; show only real types.
+                        if param.ty.is_none()
+                            && param.name_span.source == self.source
+                            && !matches!(ty, TypeRepr::Dyn)
+                        {
+                            self.hints.push(TypeHint {
+                                offset: param.name_span.end,
+                                label: format!(": {ty}"),
+                                kind: HintKind::Type,
+                            });
+                        }
+                    }
+                }
+                match body {
+                    ClosureBody::Expr(inner) => self.expr(inner),
+                    ClosureBody::Block(stmts) => self.stmts(stmts),
+                }
+            }
             Expr::Unary { operand, .. } => self.expr(operand),
             Expr::Binary { lhs, rhs, .. } => {
                 self.expr(lhs);
                 self.expr(rhs);
             }
             Expr::Call { callee, args, .. } => {
+                self.param_name_hints(callee, args);
                 self.expr(callee);
                 self.exprs(args);
             }
@@ -250,6 +294,40 @@ impl Walker<'_> {
     fn exprs(&mut self, exprs: &[Expr]) {
         for expr in exprs {
             self.expr(expr);
+        }
+    }
+
+    /// Parameter-NAME hints at a call site (`f(⟨n:⟩ 42)`): the callee resolves through the same
+    /// lookups signature-help uses — a bare identifier to a top-level function, a member call to
+    /// the receiver-type's method (methods carry an implicit receiver, so declared params zip
+    /// against the arguments directly). An argument that is already an identifier with the
+    /// parameter's own name shows nothing — the hint would repeat the code.
+    fn param_name_hints(&mut self, callee: &Expr, args: &[Expr]) {
+        let decl = match callee {
+            Expr::Ident { name, .. } => crate::top_level_fn(self.program, name),
+            Expr::Member { receiver, name, .. } => self
+                .expr_types
+                .get(&receiver.span())
+                .and_then(crate::nominal_name)
+                .and_then(|ty| crate::type_method(self.program, ty, name)),
+            _ => None,
+        };
+        let Some(decl) = decl else { return };
+        for (param, arg) in decl.params.iter().zip(args) {
+            if let Expr::Ident { name, .. } = arg
+                && *name == param.name
+            {
+                continue;
+            }
+            let arg_span = arg.span();
+            if arg_span.source != self.source {
+                continue;
+            }
+            self.hints.push(TypeHint {
+                offset: arg_span.start,
+                label: format!("{}:", param.name),
+                kind: HintKind::Parameter,
+            });
         }
     }
 }

@@ -267,7 +267,7 @@ impl DocumentStore {
         uri: &str,
         range: Range,
         encoding: Encoding,
-    ) -> Option<Vec<(Position, String)>> {
+    ) -> Option<Vec<(Position, String, inlay::HintKind)>> {
         let cache = self.workspaces.get(uri)?;
         let db = &self.db;
         let entry = cache.entry();
@@ -286,7 +286,7 @@ impl DocumentStore {
             inlay::type_hints(program, &ide.expr_types, SourceId::FIRST)
                 .into_iter()
                 .filter(|hint| start <= hint.offset && hint.offset <= end)
-                .map(|hint| (index.position(hint.offset, encoding), hint.label))
+                .map(|hint| (index.position(hint.offset, encoding), hint.label, hint.kind))
                 .collect(),
         )
     }
@@ -1092,13 +1092,18 @@ impl LanguageServer for Backend {
         Ok(hints.map(|hints| {
             hints
                 .into_iter()
-                .map(|(position, label)| InlayHint {
+                .map(|(position, label, kind)| InlayHint {
                     position,
                     label: InlayHintLabel::String(label),
-                    kind: Some(InlayHintKind::TYPE),
+                    kind: Some(match kind {
+                        inlay::HintKind::Type => InlayHintKind::TYPE,
+                        inlay::HintKind::Parameter => InlayHintKind::PARAMETER,
+                    }),
                     text_edits: None,
                     tooltip: None,
-                    // The label starts with `: `, glued to the binding name — no padding.
+                    // A type label starts `: ` glued to the name it follows; a parameter label
+                    // `n:` precedes its argument. Neither wants leading padding; both want a
+                    // space on the right.
                     padding_left: Some(false),
                     padding_right: Some(true),
                     data: None,
@@ -1401,7 +1406,7 @@ mod tests {
             )
             .expect("document is open")
             .into_iter()
-            .map(|(position, label)| (position.line, label))
+            .map(|(position, label, _)| (position.line, label))
             .collect()
     }
 
@@ -1474,10 +1479,60 @@ mod tests {
             )
             .expect("document is open");
         assert!(
-            first_line_only.iter().all(|(p, _)| p.line == 0),
+            first_line_only.iter().all(|(p, _, _)| p.line == 0),
             "range filter: {first_line_only:?}"
         );
         assert!(!first_line_only.is_empty());
+    }
+
+    #[test]
+    fn inlay_hints_type_closure_parameters_and_name_call_arguments() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///params.noe",
+            "fn scale(factor: int, offset: int): int { return factor + offset }\n\
+             mut r = scale(2, 3)\n\
+             mut offset = 1\n\
+             mut s = scale(4, offset)\n\
+             fn apply(op: (int) -> int, n: int): int { return op(n) }\n\
+             mut applied = apply(fn(x) => x + 1, 3)\n\
+             mut f = fn(x) => x + 1\n"
+                .to_string(),
+        );
+        let hints = hints_of(&store, "file:///params.noe");
+        // Call arguments carry the parameter's name...
+        assert!(
+            hints.contains(&(1, "factor:".to_string())),
+            "first arg names its param: {hints:?}"
+        );
+        assert!(
+            hints.contains(&(1, "offset:".to_string())),
+            "second arg names its param: {hints:?}"
+        );
+        // ...except an argument that IS an identifier with the parameter's own name.
+        assert!(
+            hints
+                .iter()
+                .filter(|(line, label)| *line == 3 && label == "offset:")
+                .count()
+                == 0,
+            "same-named identifier arg shows nothing: {hints:?}"
+        );
+        assert!(
+            hints.contains(&(3, "factor:".to_string())),
+            "the other arg on that line still hints: {hints:?}"
+        );
+        // A context-typed closure's parameter shows its inferred type (the expected fn type of
+        // the user function's parameter, flowed bidirectionally into the literal)...
+        assert!(
+            hints.contains(&(5, ": int".to_string())),
+            "closure parameter type: {hints:?}"
+        );
+        // ...while a standalone closure's UNINFERRED parameter (`dyn`) shows nothing.
+        assert!(
+            !hints.contains(&(6, ": dyn".to_string())),
+            "uninferred closure param must not hint: {hints:?}"
+        );
     }
 
     /// Create a fresh temp directory with the given `(filename, content)` files on disk, for the
