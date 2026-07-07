@@ -180,6 +180,29 @@ pub fn request_path(url: &str) -> &str {
     &from_path[..end]
 }
 
+/// The value of query parameter `name` in `url`'s query string (`?k=v&k2=v2`), or `None` — the
+/// dependency-free backing for a `Request`'s `query(name)` accessor (S2). First match wins;
+/// percent-decoding is a follow-on (values arrive raw), matching the minimal parse the sandbox
+/// uses elsewhere.
+pub fn query_value(url: &str, name: &str) -> Option<String> {
+    let query = url.split_once('?').map(|(_, q)| q)?;
+    let query = query.split_once('#').map_or(query, |(q, _)| q);
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (key == name).then(|| value.to_string())
+    })
+}
+
+/// The value of request header `name`, matched case-insensitively (HTTP header names are), or
+/// `None` — the inbound counterpart of [`NetResponse::header_value`].
+pub fn request_header<'a>(request: &'a NetRequest, name: &str) -> Option<&'a str> {
+    request
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+}
+
 /// The default async accept descriptor (http-server S1): it resolves synchronously through the Host
 /// at spawn (the sandbox pops its request script; any host degrades serially) and has no real body.
 /// `RealHost` overrides [`crate::Network::net_accept`] with a genuine `TcpListener::accept().await`
