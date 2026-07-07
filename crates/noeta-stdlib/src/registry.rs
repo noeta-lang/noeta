@@ -246,13 +246,11 @@ pub fn dispatch_method(
 /// (`id` was virtual at P2c; the id-entropy arc de-virtualized it — the counter moved into the
 /// Host's [`crate::host::Ids`] capability, so `next_id`/`uuid`/`uuid_v7` are ordinary registry
 /// functions and both backends share one dispatch.)
-/// (`sleep` was virtual here until higher-order-abi H0 — it migrated to `task`'s **ctx** table,
-/// dispatched through the `NativeCtx` seam; the remaining names follow in later phases, and this
-/// mechanism dies with the last of them.)
-pub const VIRTUAL_MODULES: &[(&str, &[&str])] = &[
-    ("reactive", &["signal", "computed", "effect"]),
-    ("task", &["all", "race", "map_bounded"]),
-];
+/// (`sleep` was virtual here until higher-order-abi H0, and `all`/`race`/`map_bounded` until H2 —
+/// the whole `task` module now lives in its registry **ctx** table, dispatched through the
+/// `NativeCtx` seam. `reactive` follows in H5, and this mechanism dies with it.)
+pub const VIRTUAL_MODULES: &[(&str, &[&str])] =
+    &[("reactive", &["signal", "computed", "effect"])];
 
 /// Whether `name` is a virtual std module (importable, but not registry-backed).
 pub fn is_virtual_module(name: &str) -> bool {

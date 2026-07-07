@@ -66,6 +66,10 @@ pub enum ErrorKind {
     UnknownName,
     /// A Ring 2 IO operation failed (e.g. reading a path absent from the sandbox).
     Io,
+    /// An unrecoverable runtime condition a dispatch raises deliberately (higher-order-abi H2) —
+    /// an async deadlock, an empty `race`. Maps onto the language's panic diagnostic, exactly as
+    /// the hand-written `Builtin` arms it replaces reported.
+    Panic,
 }
 
 /// A stdlib misuse error. The `message` is rendered here so both backends report it
@@ -259,6 +263,16 @@ pub fn no_function_error(module: &str, func: &str) -> StdError {
     StdError {
         kind: ErrorKind::UnknownName,
         message: format!("module `{module}` has no function `{func}`"),
+    }
+}
+
+/// Build a deliberate panic (→ the language's panic diagnostic) with a message the dispatch
+/// renders in full — deadlocks, an empty `race`, and the other unrecoverable conditions the
+/// migrated `Builtin` arms reported as panics (higher-order-abi H2).
+pub fn panic_error(message: impl Into<String>) -> StdError {
+    StdError {
+        kind: ErrorKind::Panic,
+        message: message.into(),
     }
 }
 

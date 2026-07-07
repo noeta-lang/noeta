@@ -347,17 +347,8 @@ pub enum Builtin {
     /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
     /// The assertion primitive `@test` blocks rest on (object-model slice 6).
     Assert,
-    /// (`sleep` was the `Sleep` variant here until higher-order-abi H0 — migrated onto the
-    /// registry's `NativeCtx` dispatch, `noeta-stdlib/src/task.rs`.)
-    /// `all(list)` — await every future concurrently, returning their results as a `List<T>` in
-    /// order (Track A.9).
-    All,
-    /// `race(list)` — await concurrently, returning the first result and cancelling the losers
-    /// (Track A.9 + cooperative cancellation A.8).
-    Race,
-    /// `map_bounded(items, n, f)` — apply async `f` to each item, at most `n` concurrently, results
-    /// as a `List<B>` in item order (Track A.9).
-    MapBounded,
+    /// (The whole `task` module — `sleep` at higher-order-abi H0, `all`/`race`/`map_bounded` at
+    /// H2 — migrated onto the registry's `NativeCtx` dispatch, `noeta-stdlib/src/task.rs`.)
     /// `http.serve(port, handler)` — bind an inbound listener and run the accept→handle→reply loop
     /// (http-server S3), calling `handler(request)` per connection and replying with its `Response`.
     /// Under the sandbox the loop drives a finite request script and terminates; on the real host it
@@ -388,9 +379,6 @@ impl Builtin {
             Builtin::MakeSome => "some",
             Builtin::Panic => "panic",
             Builtin::Assert => "assert",
-            Builtin::All => "all",
-            Builtin::Race => "race",
-            Builtin::MapBounded => "map_bounded",
             Builtin::Serve => "serve",
             Builtin::Signal => "signal",
             Builtin::Computed => "computed",
@@ -406,9 +394,6 @@ impl Builtin {
             "signal" => Some(Builtin::Signal),
             "computed" => Some(Builtin::Computed),
             "effect" => Some(Builtin::Effect),
-            "all" => Some(Builtin::All),
-            "race" => Some(Builtin::Race),
-            "map_bounded" => Some(Builtin::MapBounded),
             _ => None,
         }
     }
@@ -3702,167 +3687,10 @@ impl Interpreter {
                     Err(self.runtime_error(DiagnosticCode::Panic, span, message))
                 }
             }
-            // (`sleep` migrated to the registry's `NativeCtx` dispatch — higher-order-abi H0,
-            // `noeta-stdlib/src/task.rs`, reached via `call_ctx_function`.)
-            // `all(list)` — await every future concurrently, results as a `List<T>` in order (A.9).
-            Builtin::All => {
-                self.expect_arity(builtin, &args, 1, span)?;
-                let Value::List(repr) = &args[0] else {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`all` expects a list of futures, found {}",
-                            args[0].type_name()
-                        ),
-                    ));
-                };
-                let handles: Vec<Value> = (0..repr.len())
-                    .map(|i| repr.get(i).expect("in bounds"))
-                    .collect();
-                let n = handles.len();
-                let mut results: Vec<Option<Value>> = vec![None; n];
-                loop {
-                    for i in 0..n {
-                        if results[i].is_none()
-                            && let Some(v) = self.poll_once(&handles[i], span)?
-                        {
-                            results[i] = Some(v);
-                        }
-                    }
-                    if results.iter().all(Option::is_some) {
-                        let items: Vec<Value> =
-                            results.into_iter().map(|r| r.expect("all ready")).collect();
-                        return Ok(Value::list(items));
-                    }
-                    let progressed = self.poll_all_scopes_round(span)?;
-                    if !progressed && self.executor.advance().is_none() {
-                        return Err(self.runtime_error(
-                            DiagnosticCode::Panic,
-                            span,
-                            "async deadlock: `all` awaited futures with no pending timers"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-            // `race(list)` — await concurrently, first result wins, losers cancelled (A.9 + A.8).
-            Builtin::Race => {
-                self.expect_arity(builtin, &args, 1, span)?;
-                let Value::List(repr) = &args[0] else {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`race` expects a list of futures, found {}",
-                            args[0].type_name()
-                        ),
-                    ));
-                };
-                let handles: Vec<Value> = (0..repr.len())
-                    .map(|i| repr.get(i).expect("in bounds"))
-                    .collect();
-                let n = handles.len();
-                if n == 0 {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::Panic,
-                        span,
-                        "`race` requires at least one future".to_string(),
-                    ));
-                }
-                loop {
-                    for i in 0..n {
-                        if let Some(v) = self.poll_once(&handles[i], span)? {
-                            for (j, hj) in handles.iter().enumerate() {
-                                if j != i {
-                                    self.cancel_task(hj);
-                                }
-                            }
-                            return Ok(v);
-                        }
-                    }
-                    let progressed = self.poll_all_scopes_round(span)?;
-                    if !progressed && self.executor.advance().is_none() {
-                        return Err(self.runtime_error(
-                            DiagnosticCode::Panic,
-                            span,
-                            "async deadlock: `race` awaited futures with no pending timers"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-            // `map_bounded(items, n, f)` — apply async `f` to each item, at most `n` in flight, results
-            // in item order (Track A.9). The tree-walker mirror of the VM's sliding window.
-            Builtin::MapBounded => {
-                self.expect_arity(builtin, &args, 3, span)?;
-                let Value::List(repr) = &args[0] else {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`map_bounded` expects a list, found {}",
-                            args[0].type_name()
-                        ),
-                    ));
-                };
-                let Value::Int(limit) = args[1] else {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`map_bounded` expects an int concurrency limit, found {}",
-                            args[1].type_name()
-                        ),
-                    ));
-                };
-                let items: Vec<Value> = (0..repr.len())
-                    .map(|i| repr.get(i).expect("in bounds"))
-                    .collect();
-                let f = args[2].clone();
-                let window = limit.max(1) as usize;
-                let count = items.len();
-                let mut results: Vec<Option<Value>> = vec![None; count];
-                let mut in_flight: Vec<(usize, Value)> = Vec::new();
-                let mut next = 0usize;
-                let mut done = 0usize;
-                loop {
-                    while in_flight.len() < window && next < count {
-                        let fut = self.call(f.clone(), vec![items[next].clone()], span)?;
-                        in_flight.push((next, fut));
-                        next += 1;
-                    }
-                    if done == count {
-                        let out: Vec<Value> =
-                            results.into_iter().map(|r| r.expect("all done")).collect();
-                        return Ok(Value::list(out));
-                    }
-                    let mut progressed = false;
-                    let mut k = 0;
-                    while k < in_flight.len() {
-                        let (idx, fut) = (in_flight[k].0, in_flight[k].1.clone());
-                        if let Some(v) = self.poll_once(&fut, span)? {
-                            results[idx] = Some(v);
-                            in_flight.remove(k);
-                            done += 1;
-                            progressed = true;
-                        } else {
-                            k += 1;
-                        }
-                    }
-                    if !self.scopes.is_empty() {
-                        progressed |= self.poll_all_scopes_round(span)?;
-                    }
-                    if !progressed && self.executor.advance().is_none() {
-                        return Err(self.runtime_error(
-                            DiagnosticCode::Panic,
-                            span,
-                            "async deadlock: `map_bounded` stalled with no pending timers"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
+            // (The whole `task` module — `sleep` at higher-order-abi H0, `all`/`race`/
+            // `map_bounded` at H2 — migrated to the registry's `NativeCtx` dispatch:
+            // `noeta-stdlib/src/task.rs`, reached via `call_ctx_function`; the drive loops there
+            // are shared with the VM.)
             // `http.serve(port, handler)` — the inbound accept→dispatch→reply loop (http-server S3).
             // **Concurrent (S3b):** each accepted connection's `handler(request)` is a task in a
             // server-owned in-flight set the loop reaps; a slow (async) handler yields at its awaits
@@ -5177,6 +5005,7 @@ fn std_error_code(kind: noeta_stdlib::ErrorKind) -> DiagnosticCode {
         noeta_stdlib::ErrorKind::Bounds => DiagnosticCode::IndexOutOfBounds,
         noeta_stdlib::ErrorKind::UnknownName => DiagnosticCode::UnknownName,
         noeta_stdlib::ErrorKind::Io => DiagnosticCode::IoError,
+        noeta_stdlib::ErrorKind::Panic => DiagnosticCode::Panic,
     }
 }
 

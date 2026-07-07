@@ -69,17 +69,8 @@ pub enum Builtin {
     /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
     /// The assertion primitive the test runner's `@test` blocks (object-model slice 6) rest on.
     Assert,
-    /// (`sleep` was the `Sleep` variant here until higher-order-abi H0 — the first builtin
-    /// migrated onto the registry's `NativeCtx` dispatch, `noeta-stdlib/src/task.rs`.)
-    /// `all(list)` — await every future in `list` concurrently, returning a `List<T>` of their
-    /// results in order (Track A.9). Drives the scheduler until all are ready.
-    All,
-    /// `race(list)` — await the futures in `list` concurrently, returning the first result and
-    /// **cancelling** the losing tasks (Track A.9 + cooperative cancellation A.8).
-    Race,
-    /// `map_bounded(items, n, f)` — apply the async `f` to each item, at most `n` in flight at once,
-    /// returning the results as a `List<B>` in item order (Track A.9, bounded-parallelism map).
-    MapBounded,
+    /// (The whole `task` module — `sleep` at higher-order-abi H0, `all`/`race`/`map_bounded` at
+    /// H2 — migrated onto the registry's `NativeCtx` dispatch, `noeta-stdlib/src/task.rs`.)
     /// `signal(v)` — create a reactive cell holding `v` (reactivity S1). Returns a `Signal<T>` handle
     /// whose `.get()`/`.set(v)` read and update it through the VM's reactive graph.
     Signal,
@@ -107,9 +98,6 @@ impl Builtin {
             Builtin::Filter => "filter",
             Builtin::Sum => "sum",
             Builtin::Assert => "assert",
-            Builtin::All => "all",
-            Builtin::Race => "race",
-            Builtin::MapBounded => "map_bounded",
             Builtin::Signal => "signal",
             Builtin::Computed => "computed",
             Builtin::Effect => "effect",
@@ -125,9 +113,6 @@ impl Builtin {
             "filter" => Some(Builtin::Filter),
             "sum" => Some(Builtin::Sum),
             "assert" => Some(Builtin::Assert),
-            "all" => Some(Builtin::All),
-            "race" => Some(Builtin::Race),
-            "map_bounded" => Some(Builtin::MapBounded),
             "signal" => Some(Builtin::Signal),
             "computed" => Some(Builtin::Computed),
             "effect" => Some(Builtin::Effect),

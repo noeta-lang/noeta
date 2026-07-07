@@ -122,6 +122,12 @@ pub trait NativeCtx {
     /// future slot itself stays valid (free it after it resolves).
     fn poll(&mut self, future: Slot) -> CtxResult<Option<Slot>>;
 
+    /// Cancel the task a future slot references (a `race` loser, H2): the scheduler stops polling
+    /// it and its join treats it as done; a task that already completed keeps its result.
+    /// Cooperative — the task never resumes past its last suspension. A non-task future is a
+    /// no-op.
+    fn cancel(&mut self, future: Slot) -> CtxResult<()>;
+
     /// Give the program's own `concurrent`-scope tasks one scheduling round; `true` if any task
     /// progressed (what `http.serve` interleaves with its accept loop).
     fn advance_tasks(&mut self) -> CtxResult<bool>;
@@ -129,4 +135,24 @@ pub trait NativeCtx {
     /// Advance the executor clock to the next pending timer deadline (`None` if there is none) —
     /// the stall escape valve of every drive loop.
     fn advance_clock(&mut self) -> Option<u64>;
+
+    /// Snapshot the backend's **external wake generation** before a drive round (H2). Work can
+    /// arrive from outside the cooperative loop — a real OS-thread isolate finishing a channel
+    /// send — and bump this counter. A backend with no external wake sources returns a constant.
+    fn wake_generation(&mut self) -> u64;
+
+    /// Last resort of a stalled drive loop (H2): no task progressed and no timer is pending.
+    /// Block until an external wake newer than the snapshot arrives (`true` — retry the round),
+    /// or report `false` when none can ever arrive — the genuine deadlock. The tree-walker
+    /// (sandbox-only, no external sources) always reports `false`.
+    fn wait_external_wake(&mut self, generation: u64) -> bool;
+
+    /// Whether a slot's value is a list ([`NativeCtx::list_len`]/[`NativeCtx::list_get`] would
+    /// succeed) — for a dispatch's own argument validation with its own message.
+    fn is_list(&mut self, slot: Slot) -> CtxResult<bool>;
+
+    /// The slot value's runtime type name, exactly as the backend's diagnostics render it
+    /// (`"int"`, `"list"`, `"future"`, …) — for "found {…}" message parity with the migrated
+    /// builtins.
+    fn type_name(&mut self, slot: Slot) -> CtxResult<&'static str>;
 }

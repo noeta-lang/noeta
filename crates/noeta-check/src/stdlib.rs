@@ -161,19 +161,6 @@ fn opt(t: Type) -> Type {
     Type::Option(Box::new(t))
 }
 
-/// Given the type of an `all`/`race` argument — expected to be `List<Future<T>>` — extract `T`
-/// (Track A.9). A hole for anything that is not a list of futures (the prelude stays permissive; a
-/// genuine misuse surfaces at runtime, as with the other prelude builtins).
-fn future_elem(arg: Option<&Type>) -> Type {
-    match arg {
-        Some(Type::List(elem)) => match elem.as_ref() {
-            Type::Named(n, targs) if n == FUTURE => targs.first().cloned().unwrap_or(Type::Unknown),
-            _ => Type::Unknown,
-        },
-        _ => Type::Unknown,
-    }
-}
-
 /// The return type of a method call on a **built-in** receiver kind (`receiver.name(args)`), or
 /// `None` if `name` is not a known built-in method on that kind. User-defined method returns are
 /// resolved by the checker itself (it owns the class→method table).
@@ -693,33 +680,9 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
             _ => None,
         };
     }
-    // (`id` was virtual here until the id-entropy arc de-virtualized it — `next_id`/`uuid`/
-    // `uuid_v7` now type through the registry fallback below like any migrated module.)
-    // The still-virtual `task` combinators (prelude-redesign P2b):
-    // `all(List<Future<T>>) -> List<T>` (results in order);
-    // `race(List<Future<T>>) -> T` (first result, losers cancelled);
-    // `map_bounded(List<A>, int, Fn(A) -> Future<B>) -> List<B>` (≤n in flight). (Track A.9.)
-    // (`sleep` migrated to `task`'s registry ctx table — higher-order-abi H0 — and types through
-    // the registry fallback below; an unmatched name falls through the same way.)
-    if module == "task" {
-        let t = match name {
-            "all" => Some(list(future_elem(args.first()))),
-            "race" => Some(future_elem(args.first())),
-            "map_bounded" => Some(match args.get(2) {
-                Some(Type::Fn { ret, .. }) => match ret.as_ref() {
-                    Type::Named(n, targs) if n == FUTURE => {
-                        list(targs.first().cloned().unwrap_or(Type::Unknown))
-                    }
-                    _ => list(Type::Unknown),
-                },
-                _ => list(Type::Unknown),
-            }),
-            _ => None,
-        };
-        if t.is_some() {
-            return t;
-        }
-    }
+    // (`id` was virtual here until the id-entropy arc de-virtualized it, and `task` until
+    // higher-order-abi H0/H2 — the whole module now types through the registry fallback below,
+    // its combinators' `T`s recovered by the `SigType::Var` bind-and-substitute.)
     // `http.serve(port, handler)` (http-server S3): a builtin (the handler is a closure the registry
     // seam cannot carry), so it is typed here rather than via an `ExtFn`. It runs the accept loop and
     // yields nothing. Like the `task`/`reactive` builtins, its arguments are not strictly validated

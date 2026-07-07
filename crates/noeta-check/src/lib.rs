@@ -3087,9 +3087,15 @@ impl Checker {
                 Type::String
             }
             Expr::Ident { name, span } => match lookup(env, name)
+                // A bare user-function reference is a first-class value of its **full** signature
+                // type — parameters included, so passing it where a `Fn(A) -> B` is declared
+                // (`map_bounded(items, n, dbl)`, `xs.map(inc)`) checks like the equivalent
+                // closure. A generic function's erased params are `dyn`, which defers per
+                // position. (Was params-erased until higher-order-abi H2 made module signatures
+                // carry declared `Fn` params, which an erased handle could never satisfy.)
                 .or_else(|| {
                     self.functions.get(name).map(|sig| Type::Fn {
-                        params: Vec::new(),
+                        params: sig.params.clone(),
                         ret: Box::new(sig.ret.clone()),
                     })
                 })

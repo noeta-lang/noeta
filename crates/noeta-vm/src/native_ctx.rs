@@ -15,7 +15,7 @@ use noeta_gc::retain;
 use noeta_value::Value;
 
 use crate::values::{materialize_ext, materialize_native};
-use crate::{stdlib_error_code, Abort, Poll, Vm};
+use crate::{isolate, stdlib_error_code, Abort, Poll, Vm};
 
 pub(crate) struct VmCtx<'c, 'm> {
     vm: &'c mut Vm<'m>,
@@ -183,6 +183,12 @@ impl NativeCtx for VmCtx<'_, '_> {
         }
     }
 
+    fn cancel(&mut self, future: Slot) -> CtxResult<()> {
+        let future = self.get(future)?;
+        self.vm.cancel_task(future);
+        Ok(())
+    }
+
     fn advance_tasks(&mut self) -> CtxResult<bool> {
         self.vm
             .poll_all_scopes_round(self.span)
@@ -191,6 +197,22 @@ impl NativeCtx for VmCtx<'_, '_> {
 
     fn advance_clock(&mut self) -> Option<u64> {
         self.vm.executor.advance()
+    }
+
+    fn wake_generation(&mut self) -> u64 {
+        isolate::WAKE.generation()
+    }
+
+    fn wait_external_wake(&mut self, generation: u64) -> bool {
+        self.vm.isolate_in_flight_wait(generation)
+    }
+
+    fn is_list(&mut self, slot: Slot) -> CtxResult<bool> {
+        Ok(self.get(slot)?.is_list())
+    }
+
+    fn type_name(&mut self, slot: Slot) -> CtxResult<&'static str> {
+        Ok(self.get(slot)?.type_name())
     }
 }
 

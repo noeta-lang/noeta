@@ -161,6 +161,12 @@ impl NativeCtx for EvalCtx<'_> {
         }
     }
 
+    fn cancel(&mut self, future: Slot) -> CtxResult<()> {
+        let future = self.get(future)?.clone();
+        self.interp.cancel_task(&future);
+        Ok(())
+    }
+
     fn advance_tasks(&mut self) -> CtxResult<bool> {
         self.interp
             .poll_all_scopes_round(self.span)
@@ -169,6 +175,25 @@ impl NativeCtx for EvalCtx<'_> {
 
     fn advance_clock(&mut self) -> Option<u64> {
         self.interp.executor.advance()
+    }
+
+    // The tree-walker has no OS-thread isolates, hence no external wake source: the generation is
+    // constant and a stalled drive loop is a genuine deadlock immediately — exactly the deadlock
+    // condition its hand-written `all`/`race`/`map_bounded` arms used (no isolate term).
+    fn wake_generation(&mut self) -> u64 {
+        0
+    }
+
+    fn wait_external_wake(&mut self, _generation: u64) -> bool {
+        false
+    }
+
+    fn is_list(&mut self, slot: Slot) -> CtxResult<bool> {
+        Ok(matches!(self.get(slot)?, Value::List(_)))
+    }
+
+    fn type_name(&mut self, slot: Slot) -> CtxResult<&'static str> {
+        Ok(self.get(slot)?.type_name())
     }
 }
 
