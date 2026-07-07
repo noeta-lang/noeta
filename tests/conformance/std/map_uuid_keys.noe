@@ -1,0 +1,50 @@
+// Extern-type map keys (extern-types X4): a key-capable extern type (`Uuid`) keys a `Map` and
+// members a `Set` — same table as string keys, probed through the extern contract. Keys are
+// snapshots (key_capable forbids mutation); order-observing accessors sort by the shared
+// `MapKey` order (Uuid = byte order, so v4 hex order here). Extern keys render UNQUOTED.
+// expect: stdout "first"
+// expect: stdout "second"
+// expect: stdout "true"
+// expect: stdout "2"
+// expect: stdout "[4396d60d-bd85-47af-a98f-f1a0396ff552, fe0612e3-95ab-4d91-a275-7f60ebe1e246]"
+// expect: stdout "{4396d60d-bd85-47af-a98f-f1a0396ff552: \"first\", fe0612e3-95ab-4d91-a275-7f60ebe1e246: \"second\"}"
+// expect: stdout "first"
+// expect: stdout "second"
+// expect: stdout "1"
+// expect: stdout "false"
+// expect: stdout "first"
+// expect: stdout "2"
+// expect: stdout "true"
+// expect: stdout "2"
+// expect: stdout "{4396d60d-bd85-47af-a98f-f1a0396ff552, fe0612e3-95ab-4d91-a275-7f60ebe1e246}"
+// expect: stdout "true"
+// expect: exit 0
+use std.{id}
+
+u1 = id.uuid();
+u2 = id.uuid();
+
+mut m: Map<Uuid, string> = {};
+m = m.set(u1, "first");
+m = m.set(u2, "second");
+echo m[u1];
+echo m.get_or(u2, "?");
+echo m.has(u1);
+echo m.len();
+echo m.keys();
+echo m;
+for v in m { echo v; }
+
+m2 = m.remove(u1);
+echo m2.len();
+echo m2.has(u1);
+echo m[u1];
+
+lit = {u1: 1, u2: 2};
+echo lit[u2];
+echo lit == {u2: 2, u1: 1};
+
+s = [u2, u1, u1].to_set();
+echo s.len();
+echo s;
+echo s.contains(u1);

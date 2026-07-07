@@ -29,6 +29,7 @@ pub mod host;
 pub mod id;
 pub mod iter;
 pub mod json;
+pub mod map_key;
 pub mod math;
 pub mod quat;
 pub mod random;
@@ -40,6 +41,7 @@ pub use extern_value::{ExternBox, ExternValue};
 pub use handle::{FileHandle, FileMode, Flush, ReadSource};
 pub use host::{Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Rng, SandboxHost};
 pub use iter::IterMethod;
+pub use map_key::{ExternKeyRef, MapKey};
 pub use registry::{
     ExtFn, ExtModule, ExtType, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType,
     StdExtension, TypeDispatch, TypeRecipe,

@@ -56,7 +56,7 @@ pub enum Value {
     /// R1), set at literal construction so `type_of` recovers it after a `dyn` launder; `None` for a
     /// derived/mutated map. Invisible to value semantics — equality compares only the entries — the
     /// tree-walker twin of the VM's node tag.
-    Map(Rc<BTreeMap<String, Value>>, Option<Rc<TypeRepr>>),
+    Map(Rc<BTreeMap<noeta_stdlib::MapKey, Value>>, Option<Rc<TypeRepr>>),
     /// A user-defined function or closure.
     Function(Rc<Closure>),
     /// A built-in (native) function from the prelude.
@@ -629,14 +629,14 @@ impl Value {
     /// map-producing path uses. A literal that carries a reflected `Map(K, V)` type stamps it via
     /// [`Value::map_value_tagged`]; every other map (derived, mutated) stays untagged and reflects
     /// head-only.
-    pub(crate) fn map_value(entries: Rc<BTreeMap<String, Value>>) -> Value {
+    pub(crate) fn map_value(entries: Rc<BTreeMap<noeta_stdlib::MapKey, Value>>) -> Value {
         Value::Map(entries, None)
     }
 
     /// As [`Value::map_value`], but carrying the reflected `Map(K, V)` type (R1) — used only at map
     /// literal construction.
     pub(crate) fn map_value_tagged(
-        entries: Rc<BTreeMap<String, Value>>,
+        entries: Rc<BTreeMap<noeta_stdlib::MapKey, Value>>,
         reflect: Option<Rc<TypeRepr>>,
     ) -> Value {
         Value::Map(entries, reflect)
@@ -718,7 +718,7 @@ impl Value {
             Value::Map(entries, _) => {
                 let parts: Vec<String> = entries
                     .iter()
-                    .map(|(k, v)| format!("{k:?}: {}", v.repr()))
+                    .map(|(k, v)| format!("{}: {}", k.render(), v.repr()))
                     .collect();
                 format!("{{{}}}", parts.join(", "))
             }
@@ -907,7 +907,7 @@ mod tests {
         Value::map_value(Rc::new(
             pairs
                 .iter()
-                .map(|(k, v)| (k.to_string(), v.clone()))
+                .map(|(k, v)| (noeta_stdlib::MapKey::from(*k), v.clone()))
                 .collect(),
         ))
     }

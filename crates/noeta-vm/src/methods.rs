@@ -862,7 +862,16 @@ impl<'m> Vm<'m> {
             noeta_stdlib::MapMethod::Keys => {
                 self.stdlib_arity(name, args, 0, span)?;
                 let keys = map.map_keys().expect("map receiver");
-                Ok(Value::list(keys.iter().map(|k| Value::string(k)).collect()))
+                // A string key becomes a fresh string value; an extern key a fresh extern value
+                // (its box cloned — a key is a snapshot).
+                Ok(Value::list(
+                    keys.into_iter()
+                        .map(|k| match k {
+                            noeta_stdlib::MapKey::Str(s) => Value::string(s.as_str()),
+                            noeta_stdlib::MapKey::Extern(e) => Value::extern_value(e),
+                        })
+                        .collect(),
+                ))
             }
             noeta_stdlib::MapMethod::Values => {
                 self.stdlib_arity(name, args, 0, span)?;
@@ -874,49 +883,38 @@ impl<'m> Vm<'m> {
             }
             noeta_stdlib::MapMethod::Has => {
                 self.stdlib_arity(name, args, 1, span)?;
-                // Borrow the key's `&str` for the lookup — no clone.
-                let present = match args[0].with_str(|key| map.map_get(key).is_some()) {
-                    Some(p) => p,
-                    None => {
-                        self.stdlib_string(name, args[0], span)?; // non-string key → the type error
-                        false
-                    }
-                };
+                // Borrow the key's `&str` (or probe through the extern contract) — no clone.
+                let present = self.map_probe(map, args[0], name, span)?.is_some();
                 Ok(Value::bool(present))
             }
             noeta_stdlib::MapMethod::Set => {
                 self.stdlib_arity(name, args, 2, span)?;
-                let key = self.stdlib_string(name, args[0], span)?;
-                let mut new = map.map_entries().expect("map receiver");
-                new.insert(key, args[1]);
+                let key = self.map_update_key(false, args[0], name, span)?;
+                let mut new = map.map_entries_keyed().expect("map receiver");
+                new.retain(|(k, _)| *k != key);
+                new.push((key, args[1]));
                 // The receiver is borrowed (untouched); the new map is a fresh owner, so retain each
                 // value it ends up holding exactly once. A displaced/absent value is simply not in
                 // `new`, so it keeps only the receiver's reference — no leak, no double-free.
-                for &value in new.values() {
+                for &(_, value) in &new {
                     retain(value);
                 }
-                Ok(Value::map(new))
+                Ok(Value::map_keyed(new))
             }
             noeta_stdlib::MapMethod::Remove => {
                 self.stdlib_arity(name, args, 1, span)?;
-                let key = self.stdlib_string(name, args[0], span)?;
-                let mut new = map.map_entries().expect("map receiver");
-                new.remove(&key);
-                for &value in new.values() {
+                let key = self.map_update_key(false, args[0], name, span)?;
+                let mut new = map.map_entries_keyed().expect("map receiver");
+                new.retain(|(k, _)| *k != key);
+                for &(_, value) in &new {
                     retain(value);
                 }
-                Ok(Value::map(new))
+                Ok(Value::map_keyed(new))
             }
             noeta_stdlib::MapMethod::GetOr => {
                 self.stdlib_arity(name, args, 2, span)?;
-                // Borrow the key's `&str` for the single probe — no clone.
-                let found = match args[0].with_str(|key| map.map_get(key)) {
-                    Some(found) => found,
-                    None => {
-                        self.stdlib_string(name, args[0], span)?; // non-string key → the type error
-                        None
-                    }
-                };
+                // Borrow the key's `&str` (or probe through the extern contract) — no clone.
+                let found = self.map_probe(map, args[0], name, span)?;
                 // Hit: the value is borrowed from the map. Miss: `default` is borrowed from the
                 // caller's argument register. Either way the result register is a new owner.
                 let out = found.unwrap_or(args[1]);
@@ -1007,7 +1005,11 @@ impl<'m> Vm<'m> {
             noeta_stdlib::MapMethod::Remove => {
                 self.stdlib_arity(name, args, 1, span)?;
                 let key = self.map_update_key(consume_key, args[0], name, span)?;
-                if let Some(old) = map.map_remove(&key) {
+                let removed = match &key {
+                    noeta_stdlib::MapKey::Str(k) => map.map_remove(k.as_str()),
+                    noeta_stdlib::MapKey::Extern(e) => map.map_remove_extern(&**e),
+                };
+                if let Some(old) = removed {
                     self.release_value(old);
                 }
                 Ok(map)
@@ -1017,30 +1019,51 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Extract the owned key for an in-place map `set`/`remove`, in the map's own
-    /// [`CompactString`] representation. When `consume_key` is set (the compiler proved the key
-    /// is a single-use temporary) and the key value is a sole-owned string, **move** its buffer
-    /// out instead of cloning it — the register still holds the value (now an empty string,
-    /// freed later), and a single-use temp is never read again. Otherwise clone — allocation-free
-    /// for inline (≤ 24-byte) content, which map keys overwhelmingly are (P-SSO). A non-string
-    /// key raises the type error through `stdlib_string`, exactly as before.
+    /// Extract the owned [`noeta_stdlib::MapKey`] for a map `set`/`remove`. A string key keeps
+    /// its P-SSO paths exactly: when `consume_key` is set (the compiler proved the key a
+    /// single-use temporary) and the value is a sole-owned string, **move** its buffer out; else
+    /// clone (allocation-free for inline ≤ 24-byte content). A key-capable extern value snapshots
+    /// via `clone_box` (extern-types X4). Anything else raises the shared map-key error.
     fn map_update_key(
         &mut self,
         consume_key: bool,
         key: Value,
-        name: &str,
+        _name: &str,
         span: Span,
-    ) -> Result<CompactString, Abort> {
+    ) -> Result<noeta_stdlib::MapKey, Abort> {
         if consume_key && key.is_string() && key.refcount() == 1 {
-            Ok(key.take_string_in_place())
+            Ok(noeta_stdlib::MapKey::Str(key.take_string_in_place()))
         } else if let Some(k) = key.as_compact_string() {
-            Ok(k)
+            Ok(noeta_stdlib::MapKey::Str(k))
+        } else if key.is_extern()
+            && key.with_extern(noeta_stdlib::map_key::extern_key_capable)
+        {
+            Ok(key.with_extern(|e| {
+                noeta_stdlib::MapKey::Extern(noeta_stdlib::ExternBox(e.clone_box()))
+            }))
         } else {
-            // Not a string: surface the same type error the clone path always raised.
-            Err(self
-                .stdlib_string(name, key, span)
-                .expect_err("non-string key must be a type error"))
+            let error = noeta_stdlib::map_key::map_key_error(key.type_name());
+            Err(self.error(stdlib_error_code(error.kind), span, error.message))
         }
+    }
+
+    /// Probe a map by a key argument — a borrowed `&str` (no clone) or the extern contract
+    /// (no boxing). A non-key value raises the shared map-key error.
+    fn map_probe(
+        &mut self,
+        map: Value,
+        key: Value,
+        _name: &str,
+        span: Span,
+    ) -> Result<Option<Value>, Abort> {
+        if let Some(found) = key.with_str(|k| map.map_get(k)) {
+            return Ok(found);
+        }
+        if key.is_extern() && key.with_extern(noeta_stdlib::map_key::extern_key_capable) {
+            return Ok(key.with_extern(|e| map.map_get_extern(e)));
+        }
+        let error = noeta_stdlib::map_key::map_key_error(key.type_name());
+        Err(self.error(stdlib_error_code(error.kind), span, error.message))
     }
 
     /// In-place `add`/`remove` for a reuse-marked set self-update (`s = s.add(x)` / `s = s.remove(x)`).

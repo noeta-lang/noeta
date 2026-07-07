@@ -2470,6 +2470,26 @@ impl Checker {
                              or a built-in",
                     );
                 }
+                // Key-capability gate (extern-types X4): a `Map<K, _>` key / `Set<T>` element
+                // formed from an extern type requires it key-capable — a mutable handle's hash
+                // or order could go stale under a key, so `Map<FileHandle, _>` is a type error.
+                let key_position = match name.as_str() {
+                    "Map" => args.first(),
+                    "Set" => args.first(),
+                    _ => None,
+                };
+                if let Some(TypeRef::Named { name: key_name, span: key_span, .. }) = key_position
+                    && let Some(ext) = noeta_stdlib::registry::find_type(key_name)
+                    && !ext.key_capable
+                {
+                    let role = if name == "Map" { "key a map" } else { "member a set" };
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        *key_span,
+                        format!("`{key_name}` cannot {role}: it is not a key-capable type"),
+                    )
+                    .help("key-capable types are immutable with a total order (e.g. `Uuid`)");
+                }
                 for arg in args {
                     self.check_type_ref(arg);
                 }
@@ -3202,6 +3222,19 @@ impl Checker {
                             "make the values one type, or annotate a `Map<string, dyn>` for a mixed map",
                         );
                     val_ty = Type::Dyn; // recover as a mixed map
+                }
+                // A literal keyed by a non-key-capable extern type is rejected statically
+                // (extern-types X4), matching the `Map<K, _>` formation gate.
+                if let Type::Named(key_name, _) = &key_ty
+                    && let Some(ext) = noeta_stdlib::registry::find_type(key_name)
+                    && !ext.key_capable
+                {
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!("`{key_name}` cannot key a map: it is not a key-capable type"),
+                    )
+                    .help("key-capable types are immutable with a total order (e.g. `Uuid`)");
                 }
                 let ty = Type::Map(Box::new(key_ty), Box::new(val_ty));
                 self.note_construction(&ty, *span);

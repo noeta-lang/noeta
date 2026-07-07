@@ -222,6 +222,12 @@ Design — generalize the key, not the map:
 - **Eval**: `BTreeMap<MapKey, Value>` with `Ord` = Str by string order, Extern by `cmp_value`
   (kinds never mix in a typed map). Deterministic iteration preserved; matches the VM's
   sorted-by-key display because extern ordering is the same `cmp_value` both sides.
+- **The shared key contract** (must be identical in both backends, byte-for-byte observable):
+  ordering is Str-by-content, Extern-by-`cmp_value`, and cross-kind Str < Extern (arbitrary but
+  fixed; a typed map never mixes, `dyn` paths stay deterministic). Display: a Str key keeps its
+  quoted `{k:?}` form; an extern key renders its display form UNQUOTED (it is not a string —
+  `{019b76da-…: 1}`). `json.stringify` of an extern-keyed map uses the display form as the JSON
+  object key (JSON keys are strings by definition).
 - **Checker**: the string-key assertions become a key-capability rule: `K` is `string` OR an
   extern type with `key_capable: true` (enforced at `Map<K,_>`/`Set<T>` formation — a
   `Map<FileHandle,_>` is a type error). `keys()` returns `List<K>` (not hardcoded

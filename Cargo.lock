@@ -1367,7 +1367,9 @@ name = "noeta-stdlib"
 version = "0.0.0"
 dependencies = [
  "bytemuck",
+ "compact_str",
  "criterion",
+ "equivalent",
  "serde_json",
  "uuid",
 ]
@@ -1385,6 +1387,7 @@ name = "noeta-value"
 version = "0.0.0"
 dependencies = [
  "compact_str",
+ "hashbrown 0.17.1",
  "itoa",
  "noeta-ast",
  "noeta-bytecode",

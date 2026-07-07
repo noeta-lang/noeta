@@ -973,15 +973,15 @@ impl Interpreter {
             } => {
                 let mut map = BTreeMap::new();
                 for (key_atom, value_atom) in entries {
-                    let key = match self.eval_ir_atom(key_atom, frame)? {
-                        Value::Str(s) => s,
-                        other => {
-                            return Err(self.runtime_error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!("map keys must be strings, found {}", other.type_name()),
-                            ));
-                        }
+                    let key_value = self.eval_ir_atom(key_atom, frame)?;
+                    // A string, or a key-capable extern value (extern-types X4).
+                    let Some(key) = crate::value_map_key(&key_value) else {
+                        let error = noeta_stdlib::map_key::map_key_error(key_value.type_name());
+                        return Err(self.runtime_error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            error.message,
+                        ));
                     };
                     let value = self.eval_ir_atom(value_atom, frame)?;
                     map.insert(key, value);
@@ -1520,7 +1520,7 @@ impl Interpreter {
                 let mut map = std::collections::BTreeMap::new();
                 for (key, value) in entries {
                     let value = self.materialize_recipe(value, span)?;
-                    map.insert(key, value);
+                    map.insert(noeta_stdlib::MapKey::from(key), value);
                 }
                 Ok(Value::map_value(Rc::new(map)))
             }
@@ -1605,8 +1605,8 @@ impl Interpreter {
         };
         let new_value = values.pop().expect("set takes two args");
         let key_value = values.pop().expect("set takes two args");
-        let Value::Str(key) = key_value else {
-            // Defensive: a non-string key cannot occur for a checked map `set`; rebuild via the
+        let Some(key) = crate::value_map_key(&key_value) else {
+            // Defensive: a non-key value cannot occur for a checked map `set`; rebuild via the
             // ordinary path so the error (if any) matches.
             return self.call_method(
                 Value::map_value(rc),
@@ -1642,7 +1642,7 @@ impl Interpreter {
             unreachable!("caller checked the receiver is a map")
         };
         let key_value = values.pop().expect("remove takes one arg");
-        let Value::Str(key) = key_value else {
+        let Some(key) = crate::value_map_key(&key_value) else {
             return self.call_method(Value::map_value(rc), "remove", vec![key_value], span);
         };
         match Rc::get_mut(&mut rc) {

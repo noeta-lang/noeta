@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hashbrown = { workspace = true }
 noeta-ast = { workspace = true }
 # A first-class prelude builtin value (`Payload::NativeFn`) stores the `Builtin` id it dispatches
 # on. noeta-bytecode does not depend on noeta-value, so this adds no dependency cycle.

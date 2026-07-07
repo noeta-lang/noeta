@@ -2686,20 +2686,31 @@ impl<'m> Vm<'m> {
                         entries,
                         reflect,
                     } => {
-                        let mut map = BTreeMap::new();
+                        let mut map: Vec<(noeta_stdlib::MapKey, Value)> =
+                            Vec::with_capacity(entries.len());
                         for (key_reg, value_reg) in entries.iter() {
-                            let key = regs[fbase + *key_reg as usize]
-                                .as_string()
-                                .expect("map keys are validated by RequireMapKey");
+                            // Validated by the preceding `RequireMapKey`: a string (its P-SSO
+                            // compact clone) or a key-capable extern value (a boxed snapshot).
+                            let key_value = regs[fbase + *key_reg as usize];
+                            let key = match key_value.as_compact_string() {
+                                Some(s) => noeta_stdlib::MapKey::Str(s),
+                                None => key_value.with_extern(|e| {
+                                    noeta_stdlib::MapKey::Extern(noeta_stdlib::ExternBox(
+                                        e.clone_box(),
+                                    ))
+                                }),
+                            };
                             let value = regs[fbase + *value_reg as usize];
                             retain(value);
                             // A duplicate key keeps the later value (M0 `BTreeMap` semantics); the
                             // displaced value loses its owner, so release it.
-                            if let Some(old) = map.insert(key, value) {
+                            if let Some(pos) = map.iter().position(|(k, _)| *k == key) {
+                                let (_, old) = map.remove(pos);
                                 release(old);
                             }
+                            map.push((key, value));
                         }
-                        let map = Value::map(map);
+                        let map = Value::map_keyed(map);
                         // Stamp the checker-resolved `Map(K, V)` type onto the map (R1) so `type_of`
                         // recovers it after a `dyn` launder — the same node-tag path `MakeList` uses.
                         if let Some(idx) = reflect {
@@ -2710,11 +2721,15 @@ impl<'m> Vm<'m> {
                     }
                     Op::RequireMapKey { reg, span } => {
                         let v = regs[fbase + *reg as usize];
-                        if v.as_string().is_none() {
+                        let ok = v.is_string()
+                            || (v.is_extern()
+                                && v.with_extern(noeta_stdlib::map_key::extern_key_capable));
+                        if !ok {
+                            let error = noeta_stdlib::map_key::map_key_error(v.type_name());
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
-                                format!("map keys must be strings, found {}", v.type_name()),
+                                error.message,
                             ));
                         }
                         pc += 1;
@@ -3256,6 +3271,28 @@ impl<'m> Vm<'m> {
                                     ));
                                 }
                                 None => {
+                                    // Not a string: a key-capable extern value probes through
+                                    // the contract (extern-types X4); anything else is the
+                                    // existing type error.
+                                    if idx.is_extern()
+                                        && idx.with_extern(
+                                            noeta_stdlib::map_key::extern_key_capable,
+                                        )
+                                    {
+                                        if let Some(element) =
+                                            idx.with_extern(|e| v.map_get_extern(e))
+                                        {
+                                            retain(element);
+                                            set_reg(regs, fbase, *dst, element);
+                                            pc += 1;
+                                            continue;
+                                        }
+                                        return Err(self.error(
+                                            DiagnosticCode::KeyNotFound,
+                                            *span,
+                                            format!("map has no key {}", idx.display()),
+                                        ));
+                                    }
                                     return Err(self.error(
                                         DiagnosticCode::TypeMismatch,
                                         *span,

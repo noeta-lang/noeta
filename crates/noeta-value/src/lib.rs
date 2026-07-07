@@ -1426,9 +1426,15 @@ impl Value {
         heap::alloc(Payload::Map(
             entries
                 .into_iter()
-                .map(|(k, v)| (CompactString::from(k), v))
+                .map(|(k, v)| (noeta_stdlib::MapKey::from(k), v))
                 .collect(),
         ))
+    }
+
+    /// A heap map from already-built keys (extern-types X4) — the `MakeMap`/extern-key path.
+    /// Later duplicates win (insertion order), matching the string builder's BTreeMap semantics.
+    pub fn map_keyed(entries: Vec<(noeta_stdlib::MapKey, Value)>) -> Value {
+        heap::alloc(Payload::Map(entries.into_iter().collect()))
     }
 
     /// A heap object (refcount 1): a struct/class/opaque instance laying out `slots` in the
@@ -1774,6 +1780,22 @@ impl Value {
         }
     }
 
+    /// The value for an extern-type `key`, if this is a map containing it (extern-types X4).
+    /// Probes through the extern contract with no key allocation. Same sharing contract as
+    /// [`Value::map_get`].
+    pub fn map_get_extern(self, key: &dyn noeta_stdlib::ExternValue) -> Option<Value> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Map(entries) => {
+                    entries.get(&noeta_stdlib::ExternKeyRef(key)).copied()
+                }
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     /// The element at `index`, if this is a list and the index is in bounds. The returned
     /// value shares the list's reference (it is *not* retained); the caller must retain it
     /// before storing it as an independent owner.
@@ -1911,8 +1933,9 @@ impl Value {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Map(entries) => {
-                    // Sorted-key order (the map is a HashMap internally).
-                    let mut kv: Vec<(&CompactString, &Value)> = entries.iter().collect();
+                    // Sorted-key order (the map is a HashMap internally); the shared `MapKey`
+                    // order, identical to the tree-walker's BTreeMap iteration.
+                    let mut kv: Vec<(&noeta_stdlib::MapKey, &Value)> = entries.iter().collect();
                     kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
                     Some(kv.into_iter().map(|(_, v)| *v).collect())
                 }
@@ -1923,14 +1946,13 @@ impl Value {
         }
     }
 
-    /// A map's keys in sorted order, if this is a map. Keys are plain owned strings (not heap
-    /// values), so no refcounting is involved.
-    pub fn map_keys(self) -> Option<Vec<String>> {
+    /// A map's keys in sorted order, if this is a map. Keys are plain owned [`MapKey`]s (never
+    /// heap values — an extern key owns its box inline), so no refcounting is involved.
+    pub fn map_keys(self) -> Option<Vec<noeta_stdlib::MapKey>> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Map(entries) => {
-                    let mut keys: Vec<String> =
-                        entries.keys().map(|k| k.as_str().to_owned()).collect();
+                    let mut keys: Vec<noeta_stdlib::MapKey> = entries.keys().cloned().collect();
                     keys.sort_unstable();
                     Some(keys)
                 }
@@ -1947,7 +1969,7 @@ impl Value {
     /// buffer is sound only when no other owner can observe it. The map takes ownership of `value`
     /// (the caller transfers a reference); the returned displaced value's reference is handed back to
     /// the caller to release. Returns `None` (a no-op) if this is not a map.
-    pub fn map_insert(self, key: CompactString, value: Value) -> Option<Value> {
+    pub fn map_insert(self, key: noeta_stdlib::MapKey, value: Value) -> Option<Value> {
         debug_assert!(
             !self.is_map() || heap::refcount(self) == 1,
             "map_insert requires a uniquely-owned map (the COW invariant)"
@@ -1985,6 +2007,25 @@ impl Value {
         }
     }
 
+    /// Remove an extern-type `key` **in place** (extern-types X4) — the extern twin of
+    /// [`Value::map_remove`], same uniqueness requirement and handback contract.
+    pub fn map_remove_extern(self, key: &dyn noeta_stdlib::ExternValue) -> Option<Value> {
+        debug_assert!(
+            !self.is_map() || heap::refcount(self) == 1,
+            "map_remove_extern requires a uniquely-owned map (the COW invariant)"
+        );
+        if self.is_map() {
+            let removed = heap::with_payload_mut(self, |p| match p {
+                Payload::Map(entries) => entries.remove(&noeta_stdlib::ExternKeyRef(key)),
+                _ => None,
+            });
+            heap::set_reflect(self, None);
+            removed
+        } else {
+            None
+        }
+    }
+
     /// A shallow clone of a map's `key → value` entries, if this is a map. As with
     /// [`Value::map_values`], the copied values **share** the map's references and are *not*
     /// retained; the caller decides whether to retain (e.g. when building a derived map with
@@ -1992,14 +2033,36 @@ impl Value {
     pub fn map_entries(self) -> Option<BTreeMap<String, Value>> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                // Collect the internal HashMap into a sorted BTreeMap (the return type callers rely
-                // on for deterministic, sorted iteration).
+                // Collect the internal HashMap into a sorted BTreeMap (the return type callers
+                // rely on for deterministic, sorted iteration). STRING view: an extern-keyed
+                // entry presents its key's canonical display form (isolate marshalling is gated
+                // to string-keyed maps by E0042 anyway; JSON keys are strings by definition).
                 Payload::Map(entries) => Some(
                     entries
                         .iter()
-                        .map(|(k, v)| (k.as_str().to_owned(), *v))
+                        .map(|(k, v)| (k.as_native_str(), *v))
                         .collect(),
                 ),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// A shallow clone of a map's full `MapKey → value` entries in sorted-key order
+    /// (extern-types X4) — the keyed twin of [`Value::map_entries`], for derived-map rebuilds
+    /// that must preserve extern keys. Values share references (not retained), like
+    /// [`Value::map_entries`].
+    pub fn map_entries_keyed(self) -> Option<Vec<(noeta_stdlib::MapKey, Value)>> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Map(entries) => {
+                    let mut kv: Vec<(noeta_stdlib::MapKey, Value)> =
+                        entries.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                    kv.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                    Some(kv)
+                }
                 _ => None,
             })
         } else {
@@ -2184,11 +2247,13 @@ impl Value {
                     format!("{{{}}}", parts.join(", "))
                 }
                 Payload::Map(entries) => {
-                    let mut kv: Vec<(&CompactString, &Value)> = entries.iter().collect();
+                    let mut kv: Vec<(&noeta_stdlib::MapKey, &Value)> = entries.iter().collect();
                     kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                    // A string key keeps its quoted `{k:?}` form; an extern key renders its
+                    // display form unquoted (`MapKey::render` — the shared contract).
                     let parts: Vec<String> = kv
                         .iter()
-                        .map(|(k, v)| format!("{k:?}: {}", v.repr()))
+                        .map(|(k, v)| format!("{}: {}", k.render(), v.repr()))
                         .collect();
                     format!("{{{}}}", parts.join(", "))
                 }
@@ -2300,12 +2365,13 @@ impl Value {
                     NativeValue::List(items.iter().map(|v| v.to_native_deep()).collect())
                 }
                 Payload::Map(entries) => {
-                    // NativeValue::Map is an ordered Vec; present in sorted-key order.
-                    let mut kv: Vec<(&CompactString, &Value)> = entries.iter().collect();
+                    // NativeValue::Map is an ordered Vec; present in sorted-key order. An extern
+                    // key marshals as its canonical display form (JSON keys are strings).
+                    let mut kv: Vec<(&noeta_stdlib::MapKey, &Value)> = entries.iter().collect();
                     kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
                     NativeValue::Map(
                         kv.into_iter()
-                            .map(|(k, v)| (k.as_str().to_owned(), v.to_native_deep()))
+                            .map(|(k, v)| (k.as_native_str(), v.to_native_deep()))
                             .collect(),
                     )
                 }

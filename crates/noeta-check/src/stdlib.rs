@@ -116,7 +116,7 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         Type::String => string_method(name),
         Type::List(elem) => list_method(name, elem),
         Type::Set(elem) => set_method(name, elem),
-        Type::Map(_, val) => map_method(name, val),
+        Type::Map(key, val) => map_method(name, key, val),
         Type::Bytes => bytes_method(name),
         Type::Named(n, args) if n == ITERATOR => {
             iterator_method(name, args.first().unwrap_or(&Type::Dyn))
@@ -336,16 +336,18 @@ fn set_method(name: &str, elem: &Type) -> Option<Type> {
     })
 }
 
-fn map_method(name: &str, val: &Type) -> Option<Type> {
+fn map_method(name: &str, key: &Type, val: &Type) -> Option<Type> {
     Some(match name {
-        "keys" => list(Type::String), // runtime map keys are always strings
+        // The receiver's own key type `K` (extern-types X4): `string`, or a key-capable extern
+        // type (`Uuid`). A bare `map` receiver defaults its key to `string`.
+        "keys" => list(key.clone()),
         "values" => list(val.clone()),
         "has" => Type::Bool,
         "len" => Type::Int,
         // `get_or(key, default)` — the value at `key`, or `default`. Both are `V`.
         "get_or" => val.clone(),
-        // `set`/`remove` return a new map of the same type (keys are always strings).
-        "set" | "remove" => Type::Map(Box::new(Type::String), Box::new(val.clone())),
+        // `set`/`remove` return a new map of the same `Map<K, V>` type.
+        "set" | "remove" => Type::Map(Box::new(key.clone()), Box::new(val.clone())),
         // `iter()` yields the map's **values** (the iteration order `for` uses).
         "iter" => iterable_iter(val.clone()),
         _ => return None,
@@ -364,7 +366,7 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         Type::String => string_params(name),
         Type::List(elem) => list_params(name, elem),
         Type::Set(elem) => set_params(name, elem),
-        Type::Map(_, val) => map_params(name, val),
+        Type::Map(key, val) => map_params(name, key, val),
         Type::Bytes if name == "len" => Some(vec![]),
         Type::Named(n, args) if n == ITERATOR => {
             iterator_params(name, args.first().unwrap_or(&Type::Dyn))
@@ -490,12 +492,13 @@ fn set_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     })
 }
 
-fn map_params(name: &str, val: &Type) -> Option<Vec<Type>> {
+fn map_params(name: &str, key: &Type, val: &Type) -> Option<Vec<Type>> {
     Some(match name {
         "keys" | "values" | "len" | "iter" => vec![],
-        "has" | "remove" => vec![Type::String], // runtime map keys are strings
-        "set" => vec![Type::String, val.clone()], // `set(key, value)`
-        "get_or" => vec![Type::String, val.clone()], // `get_or(key, default)`
+        // Key positions take the receiver's own key type `K` (extern-types X4).
+        "has" | "remove" => vec![key.clone()],
+        "set" => vec![key.clone(), val.clone()], // `set(key, value)`
+        "get_or" => vec![key.clone(), val.clone()], // `get_or(key, default)`
         _ => return None,
     })
 }

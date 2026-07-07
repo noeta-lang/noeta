@@ -1438,7 +1438,7 @@ impl Interpreter {
 
     /// Destroy a map's values in sorted-key order (its keys are strings — no destructors). Only at
     /// the last reference.
-    fn destroy_map(&mut self, entries: Rc<BTreeMap<String, Value>>) {
+    fn destroy_map(&mut self, entries: Rc<BTreeMap<noeta_stdlib::MapKey, Value>>) {
         if let Ok(entries) = Rc::try_unwrap(entries) {
             for (_, value) in entries {
                 self.destroy_value(value);
@@ -3061,7 +3061,7 @@ impl Interpreter {
     fn call_map_method(
         &mut self,
         method: noeta_stdlib::MapMethod,
-        entries: &BTreeMap<String, Value>,
+        entries: &BTreeMap<noeta_stdlib::MapKey, Value>,
         name: &str,
         args: &[Value],
         span: Span,
@@ -3069,7 +3069,16 @@ impl Interpreter {
         match method {
             noeta_stdlib::MapMethod::Keys => {
                 self.expect_std_arity(name, args, 0, span)?;
-                let keys = entries.keys().map(|k| Value::Str(k.clone())).collect();
+                // A string key becomes a fresh string value; an extern key a fresh extern value.
+                let keys = entries
+                    .keys()
+                    .map(|k| match k {
+                        noeta_stdlib::MapKey::Str(s) => Value::Str(s.as_str().to_owned()),
+                        noeta_stdlib::MapKey::Extern(e) => {
+                            Value::Extern(Rc::new(RefCell::new(e.clone())))
+                        }
+                    })
+                    .collect();
                 Ok(Value::list(keys))
             }
             noeta_stdlib::MapMethod::Values => {
@@ -3078,27 +3087,44 @@ impl Interpreter {
             }
             noeta_stdlib::MapMethod::Has => {
                 self.expect_std_arity(name, args, 1, span)?;
-                let key = self.expect_std_string(name, &args[0], span)?;
-                Ok(Value::Bool(entries.contains_key(key)))
+                let key = self.expect_map_key(name, &args[0], span)?;
+                Ok(Value::Bool(entries.contains_key(&key)))
             }
             noeta_stdlib::MapMethod::Set => {
                 self.expect_std_arity(name, args, 2, span)?;
-                let key = self.expect_std_string(name, &args[0], span)?.to_string();
+                let key = self.expect_map_key(name, &args[0], span)?;
                 let mut new = entries.clone();
                 new.insert(key, args[1].clone());
                 Ok(Value::map_value(Rc::new(new)))
             }
             noeta_stdlib::MapMethod::Remove => {
                 self.expect_std_arity(name, args, 1, span)?;
-                let key = self.expect_std_string(name, &args[0], span)?;
+                let key = self.expect_map_key(name, &args[0], span)?;
                 let mut new = entries.clone();
-                new.remove(key);
+                new.remove(&key);
                 Ok(Value::map_value(Rc::new(new)))
             }
             noeta_stdlib::MapMethod::GetOr => {
                 self.expect_std_arity(name, args, 2, span)?;
-                let key = self.expect_std_string(name, &args[0], span)?;
-                Ok(entries.get(key).cloned().unwrap_or_else(|| args[1].clone()))
+                let key = self.expect_map_key(name, &args[0], span)?;
+                Ok(entries.get(&key).cloned().unwrap_or_else(|| args[1].clone()))
+            }
+        }
+    }
+
+    /// Read a map-key argument (string or key-capable extern), raising the shared map-key error
+    /// otherwise. Mirrors the VM's `map_update_key`/`map_probe` gate.
+    fn expect_map_key(
+        &mut self,
+        _name: &str,
+        value: &Value,
+        span: Span,
+    ) -> Eval<noeta_stdlib::MapKey> {
+        match value_map_key(value) {
+            Some(key) => Ok(key),
+            None => {
+                let error = noeta_stdlib::map_key::map_key_error(value.type_name());
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
             }
         }
     }
@@ -3216,21 +3242,22 @@ impl Interpreter {
                 }
                 Ok(items.get(i as usize).expect("bounds checked above"))
             }
-            // `m[k]` on a map looks the value up by its string key; a missing key is `E0018`.
+            // `m[k]` on a map looks the value up by its key — a string, or a key-capable
+            // extern value (extern-types X4); a missing key is `E0018`.
             Value::Map(entries, _) => {
-                let Value::Str(key) = &index else {
+                let Some(key) = value_map_key(&index) else {
                     return Err(self.runtime_error(
                         DiagnosticCode::TypeMismatch,
                         span,
                         format!("map index must be a string, found {}", index.type_name()),
                     ));
                 };
-                match entries.get(key) {
+                match entries.get(&key) {
                     Some(value) => Ok(value.clone()),
                     None => Err(self.runtime_error(
                         DiagnosticCode::KeyNotFound,
                         span,
-                        format!("map has no key {key:?}"),
+                        format!("map has no key {}", key.render()),
                     )),
                 }
             }
@@ -4699,7 +4726,7 @@ fn attr_value_to_eval(
         A::Map(entries) => {
             let mut map = BTreeMap::new();
             for (k, v) in entries {
-                map.insert(k.clone(), recur(v));
+                map.insert(noeta_stdlib::MapKey::from(k.as_str()), recur(v));
             }
             Value::map_value(Rc::new(map))
         }
@@ -4785,6 +4812,21 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
                 head_ok
             }
         }
+    }
+}
+
+/// Extract the owned [`noeta_stdlib::MapKey`] a map operation keys by: a string, or a
+/// key-capable extern value (a boxed snapshot — extern-types X4). `None` for anything else;
+/// the caller raises the shared map-key error. Mirrors the VM's key extraction.
+pub(crate) fn value_map_key(value: &Value) -> Option<noeta_stdlib::MapKey> {
+    match value {
+        Value::Str(s) => Some(noeta_stdlib::MapKey::from(s.as_str())),
+        Value::Extern(e)
+            if noeta_stdlib::map_key::extern_key_capable(&**e.borrow()) =>
+        {
+            Some(noeta_stdlib::MapKey::Extern(e.borrow().clone()))
+        }
+        _ => None,
     }
 }
 
@@ -4891,7 +4933,7 @@ fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         NativeOut::Map(entries) => Value::map_value(Rc::new(
             entries
                 .into_iter()
-                .map(|(k, v)| (k, materialize_native(v)))
+                .map(|(k, v)| (noeta_stdlib::MapKey::from(k), materialize_native(v)))
                 .collect(),
         )),
         // An extern-type value: host the box in the shared cell (extern-types X1).
@@ -5019,10 +5061,11 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
         Value::Tuple(items) | Value::Set(items, _) => {
             NativeValue::List(items.iter().map(value_to_native_deep).collect())
         }
+        // An extern key marshals as its canonical display form (JSON keys are strings).
         Value::Map(entries, _) => NativeValue::Map(
             entries
                 .iter()
-                .map(|(k, v)| (k.clone(), value_to_native_deep(v)))
+                .map(|(k, v)| (k.as_native_str(), value_to_native_deep(v)))
                 .collect(),
         ),
         Value::Object(object) => {

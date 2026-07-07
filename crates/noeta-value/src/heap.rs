@@ -19,6 +19,7 @@ use noeta_bytecode::Builtin;
 use noeta_object::{PackedSchema, Shape};
 
 use crate::Value;
+use noeta_stdlib::MapKey;
 
 // --- Live-heap accounting (the leak oracle, architecture §0/§5) ---
 //
@@ -246,10 +247,14 @@ impl std::hash::Hasher for FxHasher {
     }
 }
 
-/// The map store: a `HashMap` with the fast [`FxHasher`] (see above), so get/insert/remove are O(1)
-/// and cheap. Aliased so the type appears in exactly one place.
+/// The map store: a hashbrown `HashMap` with the fast [`FxHasher`] (see above), so
+/// get/insert/remove are O(1) and cheap. Keyed by the shared [`MapKey`] (extern-types X4):
+/// string keys keep their exact P-SSO representation and hash (content-only), and the bare
+/// `&str` probe still allocates nothing (hashbrown's `Equivalent` lookup); extern keys ride the
+/// same table. Aliased so the type appears in exactly one place. (hashbrown IS std's table —
+/// taken directly for the heterogeneous-lookup API std does not expose.)
 pub(crate) type MapStore =
-    HashMap<compact_str::CompactString, Value, std::hash::BuildHasherDefault<FxHasher>>;
+    hashbrown::HashMap<MapKey, Value, std::hash::BuildHasherDefault<FxHasher>>;
 
 /// The live-object registry set — a `HashSet<u64>` (NaN-boxed object words) with the fast
 /// [`FxHasher`] instead of SipHash, since it is touched on every alloc and free.
@@ -868,7 +873,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         // are immediates — e.g. every entry in an int-valued map — are excluded by `push`, so this
         // sort only runs for maps that actually hold destructor-reachable references).
         Payload::Map(entries) => {
-            let mut kv: Vec<(&compact_str::CompactString, &Value)> = entries.iter().collect();
+            let mut kv: Vec<(&MapKey, &Value)> = entries.iter().collect();
             kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
             kv.into_iter().for_each(|(_, &v)| push(v));
         }
@@ -1051,7 +1056,7 @@ enum PromoteJob {
     List(Vec<Value>),
     Tuple(Vec<Value>),
     Set(Vec<Value>),
-    Map(Vec<(String, Value)>),
+    Map(Vec<(MapKey, Value)>),
     Object(Rc<Shape>, Vec<Value>),
     Enum(Rc<Shape>, Vec<Value>),
 }
@@ -1148,10 +1153,7 @@ impl SharedRegion {
                 Payload::Tuple(items) => PromoteJob::Tuple(items.clone()),
                 Payload::Set(items) => PromoteJob::Set(items.clone()),
                 Payload::Map(entries) => PromoteJob::Map(
-                    entries
-                        .iter()
-                        .map(|(k, &v)| (k.as_str().to_owned(), v))
-                        .collect(),
+                    entries.iter().map(|(k, &v)| (k.clone(), v)).collect(),
                 ),
                 Payload::Object { shape, slots } => {
                     PromoteJob::Object(Rc::clone(shape), slots.clone())
@@ -1171,7 +1173,7 @@ impl SharedRegion {
             PromoteJob::Map(entries) => Payload::Map(
                 entries
                     .into_iter()
-                    .map(|(k, v)| (k.into(), self.promote_value(v, memo)))
+                    .map(|(k, v)| (k, self.promote_value(v, memo)))
                     .collect(),
             ),
             PromoteJob::Object(shape, slots) => Payload::Object {

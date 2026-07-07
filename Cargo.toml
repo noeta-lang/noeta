@@ -85,6 +85,13 @@ itoa = "1"
 # content lives inline in the payload — a short-lived string costs one allocation (the Obj),
 # not two. Heap spill keeps capacity, so in-place append stays amortized O(n).
 compact_str = "0.9"
+# Extern map keys (extern-types X4): `MapKey` lives ONCE in noeta-stdlib so both backends share
+# the ordering/display contract by construction. `equivalent` is the shared heterogeneous-lookup
+# trait (hashbrown re-exports it), letting the VM probe a `HashMap<MapKey, _>` by bare `&str`
+# with no key allocation — the P-SSO hot path unchanged. hashbrown = std's own table, taken
+# directly for that `Equivalent`-based lookup API.
+equivalent = "1"
+hashbrown = { version = "0.17", default-features = false, features = ["equivalent", "inline-more", "default-hasher"] }
 
 [workspace.lints.rust]
 # Quarantine unsafe: forbidden workspace-wide in M0. The first crates that may
