@@ -310,6 +310,12 @@ const STD_TYPES: &[ExtType] = &[
         dispatch: hasher_method_dispatch,
         key_capable: false, // `update` mutates — a hasher can never key a map
     },
+    ExtType {
+        name: crate::net::RESPONSE_TYPE_NAME,
+        methods: RESPONSE_METHODS,
+        dispatch: response_method_dispatch,
+        key_capable: false, // a response is not a map key
+    },
 ];
 
 /// The `FileHandle` instance methods (extern-types X3) — the signatures the checker's
@@ -979,6 +985,168 @@ fn crypto_dispatch(
             Ok(NativeOut::Bytes(out))
         }
         _ => Err(no_function_error("crypto", func)),
+    }
+}
+
+// --- `http`: an HTTP client over the Network capability (http arc H2) ----------------------------
+
+/// The `Response` signature type, named once.
+const RESPONSE_SIG: SigType = SigType::Named(crate::net::RESPONSE_TYPE_NAME);
+
+/// The sync `http` surface. Bodyless verbs take just a url; `post`/`put` take a `string|bytes`
+/// body; `request(method, url)` covers any other (bodyless) verb. All return a `Response`. Headers
+/// / timeouts / body-carrying custom verbs are the H4 options pass. Each performs the request
+/// synchronously through the Host (deterministic in the sandbox, real under `noeta run`).
+const HTTP_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "get",
+        params: &[Str],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    ExtFn {
+        name: "head",
+        params: &[Str],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    ExtFn {
+        name: "delete",
+        params: &[Str],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    ExtFn {
+        name: "post",
+        params: &[Str, STR_OR_BYTES],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    ExtFn {
+        name: "put",
+        params: &[Str, STR_OR_BYTES],
+        ret: Concrete(RESPONSE_SIG),
+    },
+    ExtFn {
+        name: "request",
+        params: &[Str, Str],
+        ret: Concrete(RESPONSE_SIG),
+    },
+];
+
+/// Perform an HTTP request through the Host and wrap the response as the `Response` extern value.
+fn http_perform(
+    host: &mut dyn Host,
+    method: &str,
+    url: &str,
+    body: Vec<u8>,
+) -> Result<NativeOut, StdError> {
+    let response = host.net_fetch(crate::NetRequest {
+        method: method.to_string(),
+        url: url.to_string(),
+        headers: Vec::new(),
+        body,
+    })?;
+    Ok(NativeOut::Extern(crate::ExternBox::new(response)))
+}
+
+fn http_dispatch(
+    func: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match func {
+        "get" | "head" | "delete" => {
+            want_arity(func, args, 1)?;
+            let method = func.to_ascii_uppercase();
+            http_perform(host, &method, want_str(func, args, 0)?, Vec::new())
+        }
+        "post" | "put" => {
+            want_arity(func, args, 2)?;
+            let method = func.to_ascii_uppercase();
+            let url = want_str(func, args, 0)?.to_string();
+            let body = want_data(func, args, 1)?.to_vec();
+            http_perform(host, &method, &url, body)
+        }
+        // Any other (bodyless) verb; the method is uppercased so `request("get", …)` works.
+        "request" => {
+            want_arity(func, args, 2)?;
+            let method = want_str(func, args, 0)?.to_ascii_uppercase();
+            let url = want_str(func, args, 1)?.to_string();
+            http_perform(host, &method, &url, Vec::new())
+        }
+        _ => Err(no_function_error("http", func)),
+    }
+}
+
+/// The `Response` instance methods (http arc H2): all pure reads over the wrapped response.
+const RESPONSE_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "status",
+        params: &[],
+        ret: Concrete(Int),
+    },
+    ExtFn {
+        name: "ok",
+        params: &[],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        name: "body",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "body_bytes",
+        params: &[],
+        ret: Concrete(SigType::Bytes),
+    },
+    ExtFn {
+        name: "header",
+        params: &[Str],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+];
+
+fn response_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(resp) = recv.as_any().downcast_ref::<crate::NetResponse>() else {
+        return Err(type_error(method, "Response"));
+    };
+    match method {
+        "status" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Int(i64::from(resp.status))))
+        }
+        "ok" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(
+                (200..=299).contains(&resp.status),
+            )))
+        }
+        "body" => {
+            want_arity(method, args, 0)?;
+            // Lossy UTF-8 is the friendly scripting default; `body_bytes` gives the raw buffer.
+            Ok(NativeOut::Str(
+                String::from_utf8_lossy(&resp.body).into_owned(),
+            ))
+        }
+        "body_bytes" => {
+            want_arity(method, args, 0)?;
+            Ok(NativeOut::Bytes(resp.body.clone()))
+        }
+        "header" => {
+            want_arity(method, args, 1)?;
+            let name = want_str(method, args, 0)?;
+            Ok(match resp.header_value(name) {
+                Some(value) => NativeOut::Some(Box::new(NativeOut::Str(value.to_string()))),
+                None => NativeOut::None,
+            })
+        }
+        _ => Err(crate::no_method_error(
+            crate::net::RESPONSE_TYPE_NAME,
+            method,
+        )),
     }
 }
 
@@ -1883,6 +2051,12 @@ const STD_MODULES: &[ExtModule] = &[
         name: "crypto",
         functions: CRYPTO_FNS,
         dispatch: crypto_dispatch,
+        deep_marshal: false,
+    },
+    ExtModule {
+        name: "http",
+        functions: HTTP_FNS,
+        dispatch: http_dispatch,
         deep_marshal: false,
     },
     ExtModule {
