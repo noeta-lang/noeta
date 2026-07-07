@@ -561,8 +561,16 @@ impl Jit {
         sig
     }
 
-    /// Finalize the current `self.ctx` under `name` and return its entry point.
-    fn finalize(&mut self, name: &str) -> Result<CompiledFn, String> {
+    /// Declare + define the current `self.ctx` under `name` into the module, returning its
+    /// [`FuncId`] — **without** finalizing it to an executable pointer. This is the
+    /// backend-agnostic tail of body emission (P-AOT L3.0): it uses only `cranelift_module::Module`
+    /// operations (`declare_function`/`define_function`/`clear_context`), so the *same* IR
+    /// construction feeds both the runtime JIT (which then [`finalize_ptr`](Self::finalize_ptr)s to
+    /// a code pointer) and an ahead-of-time [`cranelift_object::ObjectModule`] (which accumulates
+    /// the defined body into an object file). The clif/define/code-byte accounting lives here; the
+    /// finalize accounting lives in `finalize_ptr`, so a JIT compile (define + finalize) reproduces
+    /// the exact per-phase breakdown the single `finalize` method used to record.
+    fn define_body(&mut self, name: &str) -> Result<FuncId, String> {
         // Debug tool: `NOETA_JIT_DISASM=1` dumps each compiled prototype's final machine code
         // (vcode form: post-regalloc, real machine instructions) to stderr — the native analogue
         // of `noeta dump`, for inspecting what the JIT actually emits.
@@ -591,6 +599,14 @@ impl Jit {
             }
         }
         self.module.clear_context(&mut self.ctx);
+        Ok(func_id)
+    }
+
+    /// Finalize a defined `func_id` to its executable entry point — the JIT-only tail (relocations
+    /// + W^X page flip via `finalize_definitions`, then `get_finalized_function`). Split out of
+    /// body emission (P-AOT L3.0) so the shared codegen ([`define_body`](Self::define_body)) carries
+    /// no runtime-JIT dependency; the AOT path never calls this (it emits an object file instead).
+    fn finalize_ptr(&mut self, func_id: FuncId) -> Result<CompiledFn, String> {
         let finalize_start = std::time::Instant::now();
         self.module
             .finalize_definitions()
@@ -602,6 +618,14 @@ impl Jit {
         // `extern "C" fn(ptr, ptr, usize) -> u32` this transmutes to, and it stays valid for as long
         // as `self.module` (which owns the code page) lives.
         Ok(unsafe { std::mem::transmute::<*const u8, CompiledFn>(code) })
+    }
+
+    /// Define the current `self.ctx` under `name` and immediately finalize it to an entry point —
+    /// the runtime-JIT convenience that pairs [`define_body`](Self::define_body) with
+    /// [`finalize_ptr`](Self::finalize_ptr), reproducing the original single-step `finalize`.
+    fn finalize(&mut self, name: &str) -> Result<CompiledFn, String> {
+        let func_id = self.define_body(name)?;
+        self.finalize_ptr(func_id)
     }
 
     /// Emit the bail stub for an ineligible prototype: call the `noeta_jit_observe` helper (proving
