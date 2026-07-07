@@ -6,6 +6,7 @@
 //! the VM (`noeta-vm`) interprets one. The disassembler renders a [`Chunk`] to a stable text
 //! form for snapshot tests (raw bytes are never asserted).
 
+use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 
 use noeta_ast::{BinaryOp, UnaryOp};
@@ -24,7 +25,7 @@ pub type Reg = u16;
 /// (method / field resolution, which then hit a hashmap or field scan anyway); the
 /// disassembler resolves it for readable output. Distinct newtype (not a bare `u32`) so it can't be
 /// confused with the other u32 indices an op carries (shape, proto, cache slot).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NameId(pub u32);
 
 /// A global-variable **slot index** into the VM's per-run globals vector (P-VMT-GSLOT). Top-level
@@ -33,12 +34,12 @@ pub struct NameId(pub u32);
 /// now assigns each global a dense slot at emit time, so `LoadGlobal`/`StoreGlobal`/`TakeGlobal`
 /// index a `Vec` directly, with no hashing (PHP's compiled-variable model). [`Module::global_names`]
 /// maps a slot back to its name for diagnostics and disassembly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlobalId(pub u32);
 
 /// Which operand of a logical operator is being checked, for the "expects a bool on the
 /// left/right" diagnostic (matching the M0 tree-walker's `eval_logical`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoolSide {
     Left,
     Right,
@@ -47,7 +48,7 @@ pub enum BoolSide {
 /// Where a closure's upvalue cell comes from, in the frame that builds the closure
 /// (`MakeClosure`): either a celled local in one of the building frame's registers, or one of
 /// the building frame's own upvalues (forwarding a capture down another level).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureFrom {
     /// The cell currently in register `0` (the field is the register index).
     Local(Reg),
@@ -59,7 +60,7 @@ pub enum CaptureFrom {
 /// are never first-class values in the M1.3 subset — a program that passes one around
 /// (rather than calling it) is left unsupported — so they ride in a dedicated `CallBuiltin`
 /// op rather than being materialized into a register.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtin {
     Len,
     Map,
@@ -139,7 +140,7 @@ impl Builtin {
 }
 
 /// A compile-time constant, materialized into a runtime value on `LoadConst`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum Const {
     Unit,
     Bool(bool),
@@ -172,7 +173,7 @@ pub enum Const {
 /// `Display` object was already routed through its `to_string` by the preceding `Stringify`, so by
 /// this point the register holds a plain value). Replaces the old `LoadConst "" + N×(Stringify +
 /// Concat)` left-fold, which allocated an intermediate `String` per part.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum StrPart {
     /// Index into the prototype's constant pool; the referenced `Const` is always a `Str`.
     Literal(u16),
@@ -185,7 +186,7 @@ pub enum StrPart {
 /// "is a list", trusting the element type from the static annotation. `Named` covers user
 /// records/classes/enums and the built-in `Option`/`Result` (matched by their shape name); `Dyn`
 /// always matches (narrowing to the open top is a no-op).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum NarrowTarget {
     Int,
     Float,
@@ -227,7 +228,7 @@ pub enum NarrowTarget {
 /// This is the compile-time half of reuse analysis: the compiler always knows the construct is a
 /// *self-update* (`acc = Type { ...acc, f: v }`, so `base` is consumed), but whether the in-place
 /// mutation is sound depends on `base` being uniquely owned **and** already the target shape.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReuseCheck {
     /// Decide at execution: reuse in place only when `base.refcount() == 1` and `base`'s shape is
     /// the target shape; otherwise fall back to a fresh copying allocation (always correct). This
@@ -241,7 +242,7 @@ pub enum ReuseCheck {
 }
 
 /// One register-machine instruction.
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Op {
     /// `dst = consts[k]`
     LoadConst {
@@ -1015,7 +1016,7 @@ pub enum Op {
 /// diagnostics, the parameter count, and the number of registers the frame needs. The
 /// top-level program is just the prototype at index 0 (`num_params == 0`); every `fn` and
 /// closure is another prototype.
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Chunk {
     pub code: Vec<Op>,
     pub consts: Vec<Const>,
@@ -1065,7 +1066,7 @@ pub struct Chunk {
 
 /// One source variable's debug record: its name, the register it lives in for this frame, and the
 /// span where it was declared. See [`Chunk::debug_locals`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LocalDebug {
     pub name: String,
     pub reg: u16,
@@ -1074,7 +1075,7 @@ pub struct LocalDebug {
 
 /// One line-table entry: the first instruction (`pc`) of a source statement and that statement's
 /// `span`. See [`Chunk::line_table`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct LineEntry {
     pub pc: u32,
     pub span: Span,
@@ -1149,7 +1150,7 @@ impl Chunk {
 
 /// One entry in a module's instance-method dispatch table: a class's method, keyed by the
 /// `(type_name, method)` pair the VM looks it up by, resolving to the method's prototype.
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct MethodEntry {
     pub type_name: String,
     pub method: String,
@@ -1160,7 +1161,7 @@ pub struct MethodEntry {
 /// `noeta_object::PackedSchema`, referenced by index from [`Op::PackedListNew`]. Shapes and nested
 /// schemas are held by **index** (into [`Module::shapes`] / [`Module::packed_schemas`]) so the
 /// module stays plain data; the VM resolves these to `Rc`-handles once at load.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PackedSchemaDef {
     /// The element type's shape, an index into [`Module::shapes`] — the same entry `MakeStruct`
     /// uses for that type, so a materialized element shares shape identity with a constructed one.
@@ -1177,7 +1178,7 @@ pub struct PackedSchemaDef {
 
 /// A compiled packed field's kind — the pure-data form of a `noeta_object::PackedKind`. A nested
 /// packed struct refers to its own schema by index into [`Module::packed_schemas`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum PackedFieldDef {
     Int,
     Float,
@@ -1192,7 +1193,7 @@ pub enum PackedFieldDef {
 /// `MakeClosure`/`Call`/the method table via their index. `shapes` is the layout table
 /// (referenced by index from `MakeStruct`/`MakeEnum`); `methods` is the instance-method
 /// dispatch table.
-#[derive(Debug, Clone)]
+#[derive(Default, Serialize, Deserialize, Debug, Clone)]
 pub struct Module {
     pub protos: Vec<Chunk>,
     pub shapes: Vec<Shape>,
@@ -1356,6 +1357,20 @@ impl Module {
             out.push_str(&proto.disassemble(&self.names, &self.global_names));
         }
         out
+    }
+
+    /// Serialize this module to a compact binary blob (P-AOT L1.0). The interned runtime `Shape`
+    /// handles are *not* stored here — the module carries owned `Vec<Shape>` (see [`Self::shapes`]),
+    /// and the VM re-interns them on load, so a decoded module loads through the exact same path as
+    /// a freshly compiled one. Raw payload only: the versioned `.noeb` header (magic + runtime
+    /// version) is added by the bundle layer (L1.1).
+    pub fn encode(&self) -> Vec<u8> {
+        postcard::to_allocvec(self).expect("Module is plain owned data — postcard cannot fail")
+    }
+
+    /// Deserialize a module from [`Self::encode`]'s output. `Err` on a truncated or malformed blob.
+    pub fn decode(bytes: &[u8]) -> Result<Module, postcard::Error> {
+        postcard::from_bytes(bytes)
     }
 }
 

@@ -14,6 +14,7 @@
 //! router `find_module`/`dispatch`/…) lives in `noeta-stdlib`, which reads these types.
 
 use crate::{Host, StdError};
+use serde::{Deserialize, Serialize};
 
 /// A primitive scalar, backend-agnostic and `Copy`. The hot path (a scalar argument) marshals
 /// with no allocation.
@@ -187,7 +188,7 @@ pub enum RetTy {
 /// bytecode op can carry and the dispatch can walk without any type-system dependency. A struct
 /// records its fields **in declared order**, with field names, so the decoder both matches input
 /// keys and emits fields in the order the backend's registered type expects.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum TypeRecipe {
     Int,
     Float,

@@ -97,11 +97,29 @@ pub struct Checked {
     /// Every diagnostic found, in source order. Empty ⇒ well-typed (modulo the documented
     /// interior-hole tolerance).
     pub diagnostics: Vec<Diagnostic>,
-    /// The full-fidelity `type_of` site map (see [`resolve_type_of_sites`]).
-    pub type_of_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// Every expression's inferred static type, keyed by span — the hover index. Empty unless the
     /// checker ran via [`check_all_with_types`] (the IDE path); the compile path leaves it empty.
+    /// An IDE read-side index, not a compile input — which is why it lives beside [`Sites`], not
+    /// inside it.
     pub expr_types: HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    /// The compile-input bundle both backends consume — see [`Sites`].
+    pub sites: Sites,
+}
+
+/// The checker's **compile-input bundle**: every span-keyed codegen hint plus destructor relevance,
+/// produced by one checker run and consumed as a unit by both backends
+/// (`noeta_compiler::compile_with_sites` and the conformance reference). Each field is a *pure
+/// function of the program* and invisible to `RunResult`, so both backends derive identical
+/// behavior from the same bundle by construction. Bundling makes adding a site map one field here
+/// plus the producers/consumers that care — not an arity bump across every pipeline driver. The
+/// flip side: a consumer no longer *fails to compile* when a map is added, so a consumer that
+/// deliberately ignores a field says so at its definition (the reference stays boxed for
+/// [`Sites::map_packed_sites`]), and the differential oracle is what catches a forgotten
+/// semantically-relevant map.
+#[derive(Debug, Clone, Default)]
+pub struct Sites {
+    /// The full-fidelity `type_of` site map (see [`resolve_type_of_sites`]).
+    pub type_of_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// Runtime type-argument reflection (`plans/reflection/runtime-type-args.md`, slice A): the
     /// resolved `TypeRepr` at each collection/object **construction** site (list/map/set/object/enum
     /// literal), so a value can be tagged with the type it was built as and `type_of`/`is` recover its
@@ -176,19 +194,21 @@ fn check_all_impl(program: &Program, record_expr_types: bool) -> Checked {
     checker.check_program(program);
     Checked {
         diagnostics: checker.diags,
-        type_of_sites: checker.sites.type_of_sites,
         expr_types: checker.sites.expr_types,
-        construction_sites: checker.sites.construction_sites,
-        packed_list_sites: checker.sites.packed_list_sites,
-        ext_call_sites: checker.sites.ext_call_sites,
-        map_packed_sites: checker.sites.map_packed_sites,
-        index_field_sites: checker.sites.index_field_sites,
-        for_stream_sites: checker.sites.for_stream_sites,
-        width_sites: checker.sites.width_sites,
-        handle_sites: checker.sites.handle_sites,
-        bound_handle_sites: checker.sites.bound_handle_sites,
-        f32_literal_sites: checker.sites.f32_literal_sites,
-        destructor_relevance: checker.relevance,
+        sites: Sites {
+            type_of_sites: checker.sites.type_of_sites,
+            construction_sites: checker.sites.construction_sites,
+            packed_list_sites: checker.sites.packed_list_sites,
+            ext_call_sites: checker.sites.ext_call_sites,
+            map_packed_sites: checker.sites.map_packed_sites,
+            index_field_sites: checker.sites.index_field_sites,
+            for_stream_sites: checker.sites.for_stream_sites,
+            width_sites: checker.sites.width_sites,
+            handle_sites: checker.sites.handle_sites,
+            bound_handle_sites: checker.sites.bound_handle_sites,
+            f32_literal_sites: checker.sites.f32_literal_sites,
+            destructor_relevance: checker.relevance,
+        },
     }
 }
 
@@ -211,7 +231,7 @@ pub fn check(program: &Program) -> Vec<Diagnostic> {
 /// no precomputed map to thread; orchestrators that already gate with [`check_all`] reuse its
 /// `type_of_sites` instead of calling this.
 pub fn resolve_type_of_sites(program: &Program) -> HashMap<Span, noeta_ast::reflect::TypeRepr> {
-    check_all(program).type_of_sites
+    check_all(program).sites.type_of_sites
 }
 
 /// Resolve every list-construction site whose element type is a `@packed` struct, keyed by the
@@ -224,7 +244,7 @@ pub fn resolve_type_of_sites(program: &Program) -> HashMap<Span, noeta_ast::refl
 pub fn resolve_packed_list_sites(
     program: &Program,
 ) -> HashMap<Span, noeta_ast::reflect::PackedLayout> {
-    check_all(program).packed_list_sites
+    check_all(program).sites.packed_list_sites
 }
 
 /// Project a checker [`Type`] onto the reflection [`TypeRepr`] for a **concrete** `type_of` operand,

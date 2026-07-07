@@ -369,6 +369,16 @@ impl Value {
         }
     }
 
+    /// The value's type as **surface syntax** (`List<int>`, `Point`): the reflected tag rendered with
+    /// the same spelling the checker's types display with, falling back to the coarse kind name
+    /// (`int`, `string`) for an untagged value. The one type spelling every tool shows the user —
+    /// REPL `:type`, the debugger's Variables view, watch results — so they cannot drift apart.
+    pub fn type_display(self) -> String {
+        self.reflect()
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| self.type_name().to_string())
+    }
+
     /// Stamp (or clear) this value's reflected type tag (R1). Used at list-literal construction to
     /// record the checker-resolved element type. A no-op on a non-pointer value (an immediate carries
     /// no tag). The tag is invisible to value semantics — it lives beside the payload, never inside it.

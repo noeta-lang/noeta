@@ -24,6 +24,7 @@ noeta-object = { path = "crates/noeta-object" }
 noeta-value = { path = "crates/noeta-value" }
 noeta-gc = { path = "crates/noeta-gc" }
 noeta-bytecode = { path = "crates/noeta-bytecode" }
+noeta-bundle = { path = "crates/noeta-bundle" }
 noeta-compiler = { path = "crates/noeta-compiler" }
 noeta-vm = { path = "crates/noeta-vm" }
 # JIT backend (milestone P-JIT): Cranelift tier-1 compiler, behind noeta-vm's `jit` feature.
@@ -78,9 +79,15 @@ clap = { version = "4", features = ["derive"] }
 # tower-lsp — async LanguageServer trait + JSON-RPC transport, composes with our tokio.
 tower-lsp-server = "0.23"
 serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+miniz_oxide = "0.8"
 serde_json = "1"
 insta = "1"
 proptest = "1"
+# Append-only module storage for the debug console (tooling-unification T4): a fragment install
+# swaps the running Vm's `&Module` to an extended snapshot, and the arena keeps every snapshot
+# alive (stable addresses, `alloc(&self)`) for the rest of the run. Zero-dependency classic.
+typed-arena = "2"
 assert_cmd = "2"
 predicates = "3"
 criterion = { version = "0.5", default-features = false }

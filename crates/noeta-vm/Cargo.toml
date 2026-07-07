@@ -18,6 +18,9 @@ noeta-gc = { workspace = true }
 noeta-span = { workspace = true }
 noeta-object = { workspace = true }
 noeta-stdlib = { workspace = true }
+# Debug-console module arena (tooling-unification T4): fragment installs swap the running Vm's
+# `&Module` to an extended snapshot; the arena keeps each snapshot alive to end of run.
+typed-arena = { workspace = true }
 # Tier-1 JIT (milestone P-JIT), optional — only pulled in under the `jit` feature.
 noeta-jit = { workspace = true, optional = true }
 
@@ -30,6 +33,9 @@ jit = ["dep:noeta-jit"]
 [dev-dependencies]
 noeta-lexer = { workspace = true }
 noeta-parser = { workspace = true }
+# The adopted-session test compiles a *checked* program (`compile_with_sites_session`), the same
+# dance the debug adapter's launch path runs. Test-only — the VM itself stays checker-free.
+noeta-check = { workspace = true }
 insta = { workspace = true }
 criterion = { workspace = true }
 

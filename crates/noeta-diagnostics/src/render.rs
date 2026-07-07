@@ -5,7 +5,7 @@
 
 use crate::{Diagnostic, Severity};
 use ariadne::{Config, Label as AriadneLabel, Report, ReportKind, Source as AriadneSource};
-use noeta_span::Source;
+use noeta_span::{Source, SourceMap};
 
 fn report_kind(severity: Severity) -> ReportKind<'static> {
     match severity {
@@ -29,6 +29,22 @@ fn byte_to_char(text: &str, byte: usize) -> usize {
 /// was always byte-correct; only this rendered form drifted.)
 fn char_range(text: &str, span: noeta_span::Span) -> std::ops::Range<usize> {
     byte_to_char(text, span.start as usize)..byte_to_char(text, span.end as usize)
+}
+
+/// Render each diagnostic against the source its span belongs to (resolved through the
+/// [`SourceMap`]), concatenated — so a diagnostic on a declaration merged in from a sibling module
+/// renders against that module's file and text rather than the entry's. The one cross-module
+/// rendering loop, shared by the CLI (printed to stderr) and the debug adapter (forwarded as
+/// output events).
+pub fn render_mapped<'a>(
+    sources: &SourceMap,
+    diagnostics: impl Iterator<Item = &'a Diagnostic>,
+) -> String {
+    let mut text = String::new();
+    for diagnostic in diagnostics {
+        text.push_str(&render(sources.source(diagnostic.span.source), diagnostic));
+    }
+    text
 }
 
 /// Render `diagnostic` against `source` into a plain-text, color-free string.

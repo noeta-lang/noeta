@@ -1,9 +1,12 @@
 # AOT & bundling arc — source-free binaries (P-AOT)
 
-**Status: PLANNED (not started).** Goal: ship a runnable artifact that does **not** include the
-`.noe` source. Three levels of increasing ambition and cost — bytecode bundle → self-contained
-executable → native AOT + DCE. Levels 1–2 deliver the source-hiding goal cheaply and hand Level 3
-its interpreter-fallback substrate for free; Level 3 is the performance/opacity milestone.
+**Status: Levels 1 & 2 COMPLETE (branch `aot-bundling`, unmerged); Level 3 not started.** Goal:
+ship a runnable artifact that does **not** include the `.noe` source. Three levels of increasing
+ambition and cost — bytecode bundle → self-contained executable → native AOT + DCE. Levels 1–2
+deliver the source-hiding goal cheaply and hand Level 3 its interpreter-fallback substrate for free;
+Level 3 is the performance/opacity milestone. **Delivered: `noeta build` → obfuscated `.noeb`
+(`noeta run app.noeb`), and `noeta build --exe` → a single self-contained executable — both source-
+free, differential-proven identical to a source run.**
 
 Provenance: design conversation 2026-07-07 (after the P-JCT JIT compile-throughput arc). The user
 confirmed **JIT op-coverage expansion is deferred to a separate later track** — AOT ships at
@@ -56,53 +59,52 @@ Serialize the compiled `Module`; ship the blob; run it directly, skipping the fr
 
 | # | Slice | Depends | Notes |
 |---|---|---|---|
-| L1.0 | serde the bytecode graph | — | `#[derive(Serialize, Deserialize)]` sweep over `Op`/`Chunk`/`Const`/`Module` (noeta-bytecode), `Shape` + packed schemas (noeta-object), `ReflectionInfo`/`TypeRepr` (noeta-ast::reflect). `Span` is already done. Round-trip prop-test: `Module == deserialize(serialize(Module))` over the corpus. Risk: shallow-but-wide; the only unknowns are any nested enum in `ReflectionInfo` (verify each has no non-serde field). |
-| L1.1 | versioned `.noeb` artifact format | L1.0 | Header = magic bytes + a **runtime-version** word + payload. Loader rejects a version mismatch with a clear diagnostic (simplest correct policy: artifacts are pinned to the runtime that built them — no cross-version compat guarantee in v1). Serializer lib = **decision point** (see below). |
-| L1.2 | `noeta build <file> -o app.noeb` | L1.1 | Runs `compile_real` honoring the resolved `noeta.toml` build profile (so tier blocks strip), then serializes. `noeta run app.noeb` sniffs the magic and loads the `Module` straight onto the VM, bypassing lex/parse/check/compile. Source is never read at run time. |
-| L1.3 | bundle differential oracle | L1.2 | For every corpus program: assert `run-from-source` `RunResult` ≡ `run-from-.noeb`. Add to `noeta-conformance` alongside the backend differential; keeps `0 skipped`. Runs the obfuscated (L1.4) and, if built, the encrypted (L1.5) paths too, so both are proven transparent. |
-| L1.4 | **obfuscation (default, no key)** | L1.1 + L1.3 | The default `.noeb` is not plaintext bytecode: **compress** the serialized `Module` (size win + defeats `strings`/`grep`) and apply a light reversible transform, so `noeta dump` / casual inspection / automated tooling fail on the shipped file. No key, no env, no distribution friction — it just works like any binary. Honestly labeled as obfuscation, not security (see below). |
-| L1.5 | **optional keyed encryption** | L1.4 | Opt-in (`--encrypt`, off by default) authenticated-encryption layer keyed by a secret from the environment, for the *untrusted-distribution* case only. The one mode with real leaked-artifact protection; adds key-distribution cost. Transparent to semantics: decrypt → deserialize → identical `Module`. |
+| L1.0 | serde the bytecode graph | — | ✅ **DONE** (`2a3ed41`). Serde sweep over the whole graph (Op/Chunk/Const/Module, Shape/ShapeKind, ReflectionInfo/TypeRepr/AttrArg/AttrValue/BinaryOp/UnaryOp, IntMethod/TypeRecipe) — all plain owned data; `Module` keeps owned `Vec<Shape>`, the interned `&'static` runtime types (`noeta_object::PackedSchema`/`PackedKind`) are *not* reachable and stay non-serde. `Module::encode`/`decode` via postcard. Corpus round-trip oracle: 494 modules byte-stable, 0 skipped. |
+| L1.1 | versioned `.noeb` artifact format | L1.0 | ✅ **DONE** (`92091bd`). New `noeta-bundle` crate (isolated from the mid-end so future compression/crypto stays out of core): `[magic NOEB | fmt_ver | flags | rt_len | rt_ver | payload]`; `rt_ver` pins artifacts to their builder (mismatch = clear error); `flags` reserves compressed/encrypted bits (a set bit is rejected in v1). `write`/`read`/`is_bundle`. |
+| L1.2 | `noeta build <file> -o app.noeb` | L1.1 | ✅ **DONE** (`57ec769`). `noeta build` compiles via `compile_real` (tiers stripped unless `--tier`/`--profile`), serializes. `noeta run app.noeb` sniffs the magic and runs the module directly — no source, no compile/check; build-time flags rejected. Aborts render against a synthetic empty source (message/code/trace show, no snippet). 2 CLI integration tests. |
+| L1.3 | bundle differential oracle | L1.2 | ✅ **DONE** (`f7047a1`). Beyond L1.0's byte round-trip, the *decoded* module runs byte-identically to the source-compiled one on the sandbox (stdout/exit/diagnostics). 494 modules round-trip AND run identically; 0 skipped. |
+| L1.4 | **obfuscation (default, no key)** | L1.1 + L1.3 | ✅ **DONE** (`795d7ab`). Default payload = deflate (miniz_oxide, pure-Rust) + fixed-seed SplitMix64 XOR scramble (`FLAG_COMPRESSED`). Not plaintext, string constants absent, `noeta dump` can't read it; no key, zero distribution friction. Honestly obfuscation, not security. Chose deflate over zstd for the pure-Rust posture (one-line swap later). |
+| ~~L1.5~~ | ~~optional keyed encryption~~ | — | **CUT (user, 2026-07-07), on principle — see below.** Access control / licensing is *policy*, which belongs to the developer's application, not the build tool. Encryption's only non-redundant capability (protect the artifact *at rest* before execution) is marginal, fragile, and itself buildable by a developer on the crypto/network primitives the language already ships. The tooling provides **mechanism** (obfuscation, native-AOT opacity, crypto/network stdlib); the developer builds **policy**. |
 
 **Outcome of Level 1:** a `.noeb` you ship instead of `.noe`. By default it is **obfuscated**
 (compressed + scrambled — not human-readable, not `noeta dump`-able, no key to manage);
-`--encrypt` optionally adds a keyed layer for untrusted distribution. Also a startup-cache win:
-skips the whole front-end.
+Also a startup-cache win: skips the whole front-end.
 
-## Security model — obfuscation by default, keyed encryption optional
+## Security model — obfuscation by default; access control is the developer's, not the tool's
 
-**Decision (user, 2026-07-07): the goal is obfuscation without a required key** — key-based
-encryption complicates distribution (the key must reach every run environment), and the honest
-reality is that *any* scheme where the runtime decrypts-and-runs on its own has the key effectively
-embedded, so it is obfuscation regardless. So:
+**Decision (user, 2026-07-07): the tool provides *mechanism*; the developer provides *policy*.**
+The build tool obfuscates by default (no key, no friction) and — via native AOT (Level 3) — makes
+the covered code opaque. It does **not** ship an access-control / licensing / encrypt-at-rest layer,
+because:
 
-- **Default (L1.4) — obfuscation, no key.** The shipped artifact is compressed + lightly scrambled:
-  not plaintext, not `strings`-able, not `noeta dump`-able, defeats casual inspection and automated
-  tooling. **Zero distribution friction.** Deliberately *not* built on the crypto stack — dressing a
-  baked-in key up as AEAD would be security theater (looks like encryption, provides
-  obfuscation-level protection). What it does **not** stop: a determined reverser (the
-  de-obfuscation algorithm is in the open-source runtime, and the `Module` is recoverable from
-  process memory at run time). That is the accepted, stated bar for the default.
-- **Optional (L1.5) — keyed encryption, external key.** Earns its complexity in exactly one
-  scenario: **distributing the artifact to untrusted third parties** (customers / on-prem clients)
-  where a leaked copy should be inert. Build-time draws a random salt + nonce, derives an AEAD key
-  from an env-provided secret, encrypts the serialized `Module`; header carries `[magic | version |
-  flags | salt | nonce | AEAD(ciphertext‖tag)]` — salt/nonce are not secret, the **key is never in
-  the artifact**. Run-time re-derives from the same env secret and decrypts+verifies (wrong key /
-  tamper → clean `E00xx`, never arbitrary execution). Real protection **only** when the key is
-  deploy-provisioned and kept out of the artifact — if the `.env` ships alongside, it collapses back
-  to obfuscation. And a run-host-controlling attacker can still dump the decrypted `Module` from
-  memory; no local-execution scheme escapes that.
+- **Obfuscation (L1.4, shipped) is the right default.** The artifact is deflate-compressed +
+  scrambled: not plaintext, not `strings`-able, not `noeta dump`-able, defeats casual inspection and
+  automated tooling. **Zero distribution friction.** Honestly labeled obfuscation, not security —
+  the de-obfuscation algorithm is in this open-source runtime, and the `Module` is recoverable from
+  process memory at run time. That is the accepted, stated bar for the default. Native AOT raises the
+  opacity bar further for the covered subset.
+- **Keyed encryption was considered and cut.** Its *only* capability that obfuscation/AOT don't
+  already provide is protecting the artifact **at rest, before execution** ("a leaked copy is inert
+  without an external key") — an **access-control** property, not an anti-reverse-engineering one.
+  That is application *policy*: licensing, entitlement, distribution control. It belongs in the
+  developer's program, built on the crypto/network primitives the language already ships (HMAC /
+  signatures / verify / network). A developer who genuinely needs encrypt-at-rest can wrap the
+  bundle themselves on those primitives; the build tool baking in one opinionated scheme — with its
+  crypto deps and key-distribution burden — for a capability that is marginal (narrow deploy shape),
+  fragile (a host-controlling attacker dumps the decrypted image), and mostly app-level, does not
+  earn its place. So `FLAG_ENCRYPTED` stays a reserved header bit (a v1 reader rejects it), but no
+  encryption layer ships here.
 
-**Rule of thumb:** deploying to *your own* servers → obfuscation (default) is the right call, no key
-management. Shipping to *someone else's* machines and a leaked artifact matters → `--encrypt` with a
-deploy-provisioned key.
+**Rule of thumb:** hide source / deter casual RE → obfuscation (default) + native AOT (Level 3).
+Control *who may run or hold* the artifact → the developer builds that in their app; not a
+`noeta build` concern.
 
 ## Level 2 — self-contained executable (one file, no separate interpreter)
 
 | # | Slice | Depends | Notes |
 |---|---|---|---|
-| L2.0 | embedded-blob bootstrap | L1.2 | At startup the runtime checks for an embedded `.noeb` (trailer with `[magic][offset]` appended to its own executable, read via `std::env::current_exe`); if present, run it; else behave as the normal CLI. Trailer-append is the portable approach (no per-OS section surgery). |
-| L2.1 | `noeta build --exe -o app` | L2.0 | Concatenate a copy of the runtime binary + the blob + trailer → a single executable. No `.noe`, no separate `noeta` install. Still bytecode under the hood. The embedded blob is obfuscated by default (L1.4); with `--encrypt` (L1.5) it is the encrypted one, so a leaked `app` is inert without the deploy key (read from the environment at launch, never embedded). |
+| L2.0 ✅ | embedded-blob bootstrap | L1.2 | **DONE** (`64c9f9d`). At startup `main` reads only the tail of its own executable (`current_exe` + seek, not a slurp): a fixed 16-byte trailer `[bundle_len u64 LE | "NOEBEXE\0"]`. Sentinel present → run the embedded bundle via `cmd_run_bundle`; absent → normal CLI. Any IO/format hiccup ⇒ "no bundle" (toolchain must still start). Trailer-append, no per-OS section surgery. |
+| L2.1 ✅ | `noeta build --exe -o app` | L2.0 | **DONE** (`64c9f9d`). `noeta_bundle::staple(runtime, bundle)` = `[runtime image | bundle | trailer]`; the OS still sees a valid exe. `noeta build --exe` embeds *this* binary + the obfuscated bundle (default out = input with extension stripped, `.exe` on Windows; `chmod 0o755` on Unix; refuses to clobber the source). Still bytecode under the hood (obfuscated, L1.4). 2 bundle unit + 2 CLI e2e tests. |
 
 **Cross-compilation** (building an `app` for a different target triple) is **out of Level 2 v1** —
 it ships the host-target runtime. Flagged as a later extension (needs prebuilt per-target runtime
@@ -122,12 +124,11 @@ from Levels 1–2** (the same hybrid the JIT uses at runtime).
 | L3.3 | AOT differential oracle | L3.2 | AOT-binary `RunResult` ≡ source-run, over the corpus. |
 | L3.4 | DCE / tree-shaking | L3.2 | **Own sub-milestone, optional for shipping L3.** Whole-program reachability drops unused functions + stdlib. Hard part = dynamic dispatch (trait method tables, `invoke`, reflection `attributes_of`/`type_of`, the stdlib registry): needs conservative roots (`@reflectable`) and closes the deferred "reflection-metadata elimination" row (`deferred.md`, gated on exactly this). Aggressiveness = decision point. |
 
-**Obfuscation/encryption × Level 3:** an AOT binary's **native machine code** is inherently opaque
-(not bytecode — `noeta dump` can't read it), so Level 3 raises the default bar for free. The
-embedded **bytecode-fallback blob** (the ~75% of ops the JIT doesn't lower natively) is obfuscated
-by default (L1.4) and optionally encrypted (L1.5). So a Level-3 binary is "opaque native + obfuscated
-(or encrypted) bytecode fallback." The same honest threat model holds — the process must run the
-code, so a host-controlling attacker can still observe it.
+**Obfuscation × Level 3:** an AOT binary's **native machine code** is inherently opaque (not
+bytecode — `noeta dump` can't read it), so Level 3 raises the opacity bar for free. The embedded
+**bytecode-fallback blob** (the ~75% of ops the JIT doesn't lower natively) stays obfuscated (L1.4).
+So a Level-3 binary is "opaque native + obfuscated bytecode fallback." The same honest threat model
+holds — the process must run the code, so a host-controlling attacker can still observe it.
 
 ## Sequencing (value × independence, ascending risk)
 
@@ -142,24 +143,15 @@ code, so a host-controlling attacker can still observe it.
 
 ## Decision points (surface before committing the affected slice — do not silently pick)
 
-- **Serialization library** (L1.1): `bincode` (fast, compact, ubiquitous), `postcard` (no_std-lean,
-  stable wire format), or hand-rolled. *Recommendation: `postcard` for a stable, versioned wire
-  format; revisit if a Module-specific format buys meaningful size.*
-- ~~**Threat model**~~ **RESOLVED (user, 2026-07-07):** **obfuscation by default, no key** (L1.4);
-  keyed encryption is **optional** (L1.5) for untrusted distribution only. Sub-decisions:
-  - **Obfuscation transform (L1.4, the default path):** compression choice — `zstd` (best ratio +
-    speed) or `flate2`/deflate (lighter dep). *Recommend `zstd`* (size win doubles as the scramble;
-    add a light reversible byte transform so it isn't literally "unzip it"). No crypto deps on this
-    path — keeping it honestly labeled as obfuscation.
-  - **AEAD cipher (L1.5, only if keyed encryption ships):** `chacha20poly1305` (pure-Rust,
-    constant-time, no AES-NI dependency; matches the rustls posture). *Recommended over `aes-gcm`.*
-  - **KDF (L1.5):** `argon2` (argon2id) for a passphrase, `hkdf`-SHA256 (over in-tree `sha2`) for a
-    raw 32-byte key; `zeroize` the derived key. Secret from a `NOETA_BUNDLE_KEY` env var (primary),
-    optional project `.env` via `dotenvy`. New deps land **only if L1.5 is built.**
-  - **New diagnostic (L1.5):** decrypt-failed / wrong-key `E00xx` (next free code at implementation
-    time).
-- **Artifact/version compat** (L1.1): pin artifacts to the building runtime and reject mismatches
-  (simplest, recommended v1), or invest in a stable cross-version wire format now?
+- ~~**Serialization library**~~ **RESOLVED:** `postcard` (shipped in L1.0/L1.1).
+- ~~**Threat model / encryption**~~ **RESOLVED (user, 2026-07-07):** obfuscation by default (L1.4,
+  shipped); **keyed encryption cut on principle** — access control is the developer's *policy*, not
+  the build tool's *mechanism* (see the Security model section). No crypto deps enter this arc.
+- ~~**Obfuscation transform**~~ **RESOLVED:** deflate (`miniz_oxide`, pure-Rust) + fixed-seed
+  scramble (shipped in L1.4). Deflate over zstd to keep the pure-Rust posture; one-line swap if
+  zstd's ratio is later wanted.
+- ~~**Artifact/version compat**~~ **RESOLVED:** artifacts pinned to the building runtime, mismatch
+  rejected (shipped in L1.1).
 - **DCE aggressiveness + reflection root policy** (L3.4): how much to strip under dynamic dispatch;
   `@reflectable` as the opt-in root set.
 - **Cross-compilation** (L2/L3): host-target only in v1, or prebuilt per-target runtimes now?

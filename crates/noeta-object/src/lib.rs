@@ -17,13 +17,14 @@
 //! performance layer over this representation — invisible in observable output — and are
 //! deferred to a later optimization pass; field/slot resolution here is a direct lookup.
 
+use serde::{Deserialize, Serialize};
 /// What kind of aggregate a [`Shape`] describes. Structs and classes differ only in whether
 /// they carry methods (tracked by the compiler, not the shape); both lay out flat field
 /// slots in declared order. `Opaque` is a `use`-imported stub whose real field set is unknown
 /// until a literal supplies it (its slots are the literal's fields in sorted-key order, so its
 /// display matches the M0 tree-walker's `BTreeMap`-ordered field bag). `Enum` describes one
 /// `(enum, variant)` pair; its slots are the variant's positional data fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShapeKind {
     Struct,
     Class,
@@ -34,7 +35,7 @@ pub enum ShapeKind {
 /// The layout of one aggregate kind: its type name, the ordered slot names, and — for an
 /// enum — the variant name and whether it is a built-in `Result`/`Option` (which display with
 /// their bare constructor, `Ok(x)`/`none`, rather than `Type.Variant`).
-#[derive(Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Shape {
     pub kind: ShapeKind,
     /// The type name for an object, or the enum name for an enum value.
