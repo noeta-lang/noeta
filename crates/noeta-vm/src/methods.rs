@@ -950,7 +950,7 @@ impl<'m> Vm<'m> {
         // copied into the buffer, P-PACK 2.6) or O(1) pointer-swap for a boxed one. An aliased list
         // (or a packed element that does not pack) copies via `call_list_method` (still flat for a
         // packed receiver) and then drops the consumed reference.
-        if list.refcount() == 1 {
+        if list.is_uniquely_owned() {
             if list.is_packed_list() {
                 if list.packed_set_in_place(i as usize, args[1]) {
                     return Ok(list);
@@ -1027,7 +1027,7 @@ impl<'m> Vm<'m> {
         _name: &str,
         span: Span,
     ) -> Result<noeta_stdlib::MapKey, Abort> {
-        if consume_key && key.is_string() && key.refcount() == 1 {
+        if consume_key && key.is_string() && key.is_uniquely_owned() {
             Ok(noeta_stdlib::MapKey::Str(key.take_string_in_place()))
         } else if let Some(k) = key.as_compact_string() {
             Ok(noeta_stdlib::MapKey::Str(k))

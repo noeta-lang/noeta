@@ -191,6 +191,17 @@ impl WakeSignal {
     }
 }
 
+/// One isolate argument as shipped to a worker thread (P-PAR S2): either a [`Wire`] deep copy
+/// (the I.4b path — kept for immediates, channel endpoints, function values, and any graph that
+/// is not [promotable](noeta_value::Value::is_promotable_graph)), or a **borrowed** root into the
+/// parent's [`noeta_value::SharedRegion`] — promoted once, read zero-copy by every worker.
+pub enum IsoArg {
+    Copied(Wire),
+    Borrowed(SharedRoot),
+}
+
+pub use noeta_value::SharedRoot;
+
 /// A `Send`, self-contained serialization of a value graph crossing an isolate boundary by copy. No
 /// `Value`/heap pointer or `Rc` is inside it, so it moves freely between threads; the worker rebuilds
 /// its own heap objects from it. Shapes are the `Module.shapes` index (stable across VMs sharing the

@@ -61,12 +61,28 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Join a finished isolate's worker thread and drop it from the in-flight count.
+    /// Join a finished isolate's worker thread and drop it from the in-flight count. When the
+    /// last in-flight isolate is joined, no thread can be borrowing the shared region any more,
+    /// so the promoted argument graphs are freed wholesale (P-PAR S2).
     fn finish_isolate(&mut self, id: u32) {
         if let Some(handle) = self.isolates[id as usize].handle.take() {
             let _ = handle.join();
         }
         self.inflight_isolates = self.inflight_isolates.saturating_sub(1);
+        if self.inflight_isolates == 0 {
+            self.free_shared_region();
+        }
+    }
+
+    /// Free the borrow-share region and its promote-once memo (P-PAR S2). Sound only when no
+    /// worker thread can still borrow it: every in-flight isolate joined (`finish_isolate` at
+    /// count 0) or VM teardown after the defensive join loop. Idempotent (everything drains).
+    pub(crate) fn free_shared_region(&mut self) {
+        std::mem::take(&mut self.shared_region).free_all();
+        self.promote_memo.clear();
+        for source in std::mem::take(&mut self.promote_sources) {
+            release(source);
+        }
     }
 
     /// At a scheduler stall (no task completed, no channel op, no timer to advance): if another isolate
@@ -384,10 +400,26 @@ impl<'m> Vm<'m> {
         let Some(proto) = callee.as_closure() else {
             return Ok(None); // not a plain function value — cooperative fallback
         };
-        let mut wire_args = Vec::with_capacity(args.len());
+        let mut iso_args = Vec::with_capacity(args.len());
         for &v in args {
+            // Borrow-share a promotable data graph (P-PAR S2): promote it into the VM's shared
+            // region once — the memo makes the same corpus fanned to N workers a single
+            // promotion — and hand the worker a zero-copy borrowed root. Immediates, channel
+            // endpoints, function values, and anything else non-promotable keep the `Wire` copy.
+            if v.is_pointer() && v.is_promotable_graph() {
+                // The memo keys on the source's address: on first promotion, retain the source
+                // into the region's lifetime so the entry can never alias a freed-and-reallocated
+                // object. (Children get their own memo entries but stay alive through the root.)
+                if !self.promote_memo.contains_key(&v.bits()) {
+                    retain(v);
+                    self.promote_sources.push(v);
+                }
+                let root = self.shared_region.promote_with(v, &mut self.promote_memo);
+                iso_args.push(isolate::IsoArg::Borrowed(isolate::SharedRoot::new(root)));
+                continue;
+            }
             match isolate::marshal(v, &self.shapes, &self.channels) {
-                Ok(w) => wire_args.push(w),
+                Ok(w) => iso_args.push(isolate::IsoArg::Copied(w)),
                 Err(_) => return Ok(None), // unshippable arg — cooperative fallback
             }
         }
@@ -416,7 +448,7 @@ impl<'m> Vm<'m> {
             .clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let thread_handle = std::thread::spawn(move || {
-            let msg = run_isolate_worker(&module, &factory, proto, wire_args, wire_globals, span);
+            let msg = run_isolate_worker(&module, &factory, proto, iso_args, wire_globals, span);
             let _ = tx.send(msg);
             // The result landing is cross-thread progress: wake the parent's parked scheduler
             // (P-PAR S3) so it harvests immediately instead of sleeping out its stall quantum.

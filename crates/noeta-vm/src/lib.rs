@@ -578,6 +578,15 @@ struct Vm<'m> {
     isolate_factory: Option<IsolateFactory>,
     isolates: Vec<IsolateSlot>,
     inflight_isolates: usize,
+    /// The borrow-share region for real-isolate arguments (P-PAR S2): promotable argument graphs
+    /// are deep-copied into it **once** and every worker borrows zero-copy. `promote_memo` maps a
+    /// source object's bits → its promoted root across spawns (the fan-out promote-once memo);
+    /// each memoized source is retained into `promote_sources` so its address stays valid for the
+    /// memo's lifetime. All three are freed/cleared together when the last in-flight isolate is
+    /// joined (`finish_isolate`) and defensively at teardown. Always empty in the sandbox.
+    shared_region: noeta_value::SharedRegion,
+    promote_memo: HashMap<u64, Value>,
+    promote_sources: Vec<Value>,
     stdout: String,
     diagnostics: Vec<Diagnostic>,
     /// The tier-1 JIT engine (milestone P-JIT), present only when the `jit` feature is on *and* the
@@ -1588,6 +1597,9 @@ impl<'m> Vm<'m> {
             isolate_factory: None,
             isolates: Vec::new(),
             inflight_isolates: 0,
+            shared_region: noeta_value::SharedRegion::new(),
+            promote_memo: HashMap::new(),
+            promote_sources: Vec::new(),
             stdout: String::new(),
             diagnostics: Vec::new(),
             #[cfg(feature = "jit")]
@@ -1919,6 +1931,11 @@ impl<'m> Vm<'m> {
                 let _ = h.join();
             }
         }
+        // Every worker is joined, so nothing borrows the shared region: free any promoted
+        // argument graphs (P-PAR S2) — normally already emptied by `finish_isolate` at in-flight
+        // count 0; defensive here so the leak oracle's zero-residency balance holds on early
+        // exits too.
+        self.free_shared_region();
 
         let exit_code = if self.diagnostics.is_empty() { 0 } else { 1 };
         RunResult {
@@ -1939,7 +1956,7 @@ fn run_isolate_worker(
     module: &Arc<Module>,
     factory: &IsolateFactory,
     proto: u32,
-    wire_args: Vec<isolate::Wire>,
+    iso_args: Vec<isolate::IsoArg>,
     wire_globals: Vec<(u32, isolate::Wire)>,
     span: Span,
 ) -> Result<isolate::Wire, IsolateFailure> {
@@ -1957,9 +1974,16 @@ fn run_isolate_worker(
         wvm.globals[*slot as usize] = value;
         wvm.global_order.push(*slot);
     }
-    let arg_vals: Vec<Value> = wire_args
+    let arg_vals: Vec<Value> = iso_args
         .iter()
-        .map(|w| isolate::rebuild(w, &wvm.shapes, &mut wvm.channels))
+        .map(|a| match a {
+            isolate::IsoArg::Copied(w) => isolate::rebuild(w, &wvm.shapes, &mut wvm.channels),
+            // A borrowed shared-region root (P-PAR S2): usable as-is — no rebuild, no retain.
+            // The worker's ordinary retain/release discipline no-ops on it (shared tag), its
+            // COW gates copy instead of mutating (`is_uniquely_owned` is false), and the
+            // parent's region outlives this thread (freed only after the join).
+            isolate::IsoArg::Borrowed(root) => root.value(),
+        })
         .collect();
     let callee = Value::closure(proto, Vec::new());
     let outcome = match wvm.call_value(callee, arg_vals, span) {
@@ -2249,7 +2273,7 @@ impl<'m> Vm<'m> {
             // map/struct in-place paths), so the `refcount == 1` check below sees the accumulator's
             // reference and a `dst == obj` store is safe.
             regs[base + obj as usize] = Value::unit();
-            if v.refcount() == 1 {
+            if v.is_uniquely_owned() {
                 // Unique: overwrite the slot in place (`replace_slot` retains the new value); the
                 // displaced old value's `destruct` fires now (spec §5).
                 let old = v.replace_slot(slot, val);
@@ -2592,7 +2616,7 @@ impl<'m> Vm<'m> {
                         let result = if l.is_list() && r.is_list() {
                             if l.is_packed_list()
                                 && r.is_packed_list()
-                                && l.refcount() == 1
+                                && l.is_uniquely_owned()
                                 && l.packed_extend_in_place(r)
                             {
                                 // Sole owner, both flat, same layout: append `rhs`'s words to `lhs`'s
@@ -2600,7 +2624,7 @@ impl<'m> Vm<'m> {
                                 l
                             } else if !l.is_packed_list()
                                 && !r.is_packed_list()
-                                && l.refcount() == 1
+                                && l.is_uniquely_owned()
                             {
                                 // Sole owner, both boxed: extend the backing buffer in place (O(1)
                                 // amortized). The single reference moves from `lhs` into the result.
@@ -2628,7 +2652,7 @@ impl<'m> Vm<'m> {
                                 release(l);
                                 Value::list(items)
                             }
-                        } else if l.is_string() && l.refcount() == 1 {
+                        } else if l.is_string() && l.is_uniquely_owned() {
                             // Sole owner of a string accumulator: append `rhs`'s display form to its
                             // buffer in place (amortized O(1)), mirroring the list path — the single
                             // reference moves into the result. This is what makes `s = s ~ x` in a loop
@@ -3800,12 +3824,12 @@ impl<'m> Vm<'m> {
                                 // well-typed self-update always matches, but a mismatch must fall back to
                                 // copy rather than corrupt the object at the wrong slot layout).
                                 debug_assert!(
-                                    base_val.refcount() == 1,
+                                    base_val.is_uniquely_owned(),
                                     "static record reuse requires a uniquely-owned base"
                                 );
                                 same_shape
                             }
-                            ReuseCheck::Runtime => same_shape && base_val.refcount() == 1,
+                            ReuseCheck::Runtime => same_shape && base_val.is_uniquely_owned(),
                         };
                         if reuse {
                             // Reuse the allocation: overwrite only the changed slots. Every unchanged

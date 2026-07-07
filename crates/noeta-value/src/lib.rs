@@ -25,8 +25,8 @@ mod ids;
 mod ops;
 
 pub use heap::{
-    CollectorMode, Color, SharedRegion, collector_mode, live_count, live_objects, live_peak,
-    note_refcount_anomalies, refcount_anomalies, reset_peak, reset_refcount_anomalies,
+    CollectorMode, Color, SharedRegion, SharedRoot, collector_mode, live_count, live_objects,
+    live_peak, note_refcount_anomalies, refcount_anomalies, reset_peak, reset_refcount_anomalies,
     set_collector_mode, take_candidates,
 };
 pub use ids::{ChannelId, ScopeId, TaskId};
@@ -449,7 +449,7 @@ impl Value {
     #[must_use]
     pub fn packed_push(self, element: Value) -> bool {
         debug_assert!(
-            self.is_packed_list() && heap::refcount(self) == 1,
+            self.is_packed_list() && heap::refcount(self) == 1 && !heap::is_shared(self),
             "packed_push requires a uniquely-owned packed list"
         );
         heap::with_payload_mut(self, |p| match p {
@@ -665,7 +665,7 @@ impl Value {
     #[must_use]
     pub fn packed_set_in_place(self, index: usize, element: Value) -> bool {
         debug_assert!(
-            self.is_packed_list() && heap::refcount(self) == 1,
+            self.is_packed_list() && heap::refcount(self) == 1 && !heap::is_shared(self),
             "packed_set_in_place requires a uniquely-owned packed list"
         );
         heap::with_payload_mut(self, |p| match p {
@@ -722,7 +722,7 @@ impl Value {
     #[must_use]
     pub fn packed_extend_in_place(self, other: Value) -> bool {
         debug_assert!(
-            self.is_packed_list() && heap::refcount(self) == 1,
+            self.is_packed_list() && heap::refcount(self) == 1 && !heap::is_shared(self),
             "packed_extend_in_place requires a uniquely-owned packed list"
         );
         if !other.is_packed_list() {
@@ -1681,7 +1681,7 @@ impl Value {
     /// not a set.
     pub fn set_insert_sorted(self, value: Value) -> bool {
         debug_assert!(
-            !self.is_set() || heap::refcount(self) == 1,
+            !self.is_set() || heap::refcount(self) == 1 && !heap::is_shared(self),
             "set_insert_sorted requires a uniquely-owned set (the COW invariant)"
         );
         if self.is_set() {
@@ -1711,7 +1711,7 @@ impl Value {
     /// contract as [`Value::set_insert_sorted`]; the copy-on-write `set.remove(x)` fast path.
     pub fn set_remove_sorted(self, target: Value) -> Option<Value> {
         debug_assert!(
-            !self.is_set() || heap::refcount(self) == 1,
+            !self.is_set() || heap::refcount(self) == 1 && !heap::is_shared(self),
             "set_remove_sorted requires a uniquely-owned set (the COW invariant)"
         );
         if self.is_set() {
@@ -1808,7 +1808,7 @@ impl Value {
     /// borrowed (untouched). No-op if either value is not a list.
     pub fn list_extend(self, other: Value) {
         debug_assert!(
-            self.is_list() && heap::refcount(self) == 1,
+            self.is_list() && heap::refcount(self) == 1 && !heap::is_shared(self),
             "list_extend requires a uniquely-owned list (the COW invariant)"
         );
         if let Some(others) = other.list_items() {
@@ -1834,7 +1834,7 @@ impl Value {
     /// valid, cheap-to-free object, so the caller's later `Drop`/overwrite of the register is sound.
     pub fn take_string_in_place(self) -> CompactString {
         debug_assert!(
-            self.is_string() && heap::refcount(self) == 1,
+            self.is_string() && heap::refcount(self) == 1 && !heap::is_shared(self),
             "take_string_in_place requires a uniquely-owned string"
         );
         heap::with_payload_mut(self, |p| {
@@ -1852,7 +1852,7 @@ impl Value {
     /// [`Self::list_extend`] for lists.
     pub fn str_push_in_place(self, s: &str) {
         debug_assert!(
-            self.is_string() && heap::refcount(self) == 1,
+            self.is_string() && heap::refcount(self) == 1 && !heap::is_shared(self),
             "str_push_in_place requires a uniquely-owned string (the COW invariant)"
         );
         heap::with_payload_mut(self, |p| {
@@ -1868,7 +1868,7 @@ impl Value {
     /// (P-PACK 2.5). No-op if this is not a boxed list.
     pub fn list_push(self, element: Value) {
         debug_assert!(
-            self.is_list() && heap::refcount(self) == 1,
+            self.is_list() && heap::refcount(self) == 1 && !heap::is_shared(self),
             "list_push requires a uniquely-owned list (the COW invariant)"
         );
         heap::with_payload_mut(self, |p| {
@@ -1887,7 +1887,7 @@ impl Value {
     /// `unit` (a no-op) if this is not a list or `index` is out of range.
     pub fn list_replace_slot(self, index: usize, value: Value) -> Value {
         debug_assert!(
-            !self.is_list() || heap::refcount(self) == 1,
+            !self.is_list() || heap::refcount(self) == 1 && !heap::is_shared(self),
             "list_replace_slot requires a uniquely-owned list (the COW invariant)"
         );
         if self.is_pointer() {
@@ -1962,7 +1962,7 @@ impl Value {
     /// the caller to release. Returns `None` (a no-op) if this is not a map.
     pub fn map_insert(self, key: noeta_stdlib::MapKey, value: Value) -> Option<Value> {
         debug_assert!(
-            !self.is_map() || heap::refcount(self) == 1,
+            !self.is_map() || heap::refcount(self) == 1 && !heap::is_shared(self),
             "map_insert requires a uniquely-owned map (the COW invariant)"
         );
         if self.is_map() {
@@ -1982,7 +1982,7 @@ impl Value {
     /// present). Same uniqueness requirement and reference-handback contract as [`Value::map_insert`].
     pub fn map_remove(self, key: &str) -> Option<Value> {
         debug_assert!(
-            !self.is_map() || heap::refcount(self) == 1,
+            !self.is_map() || heap::refcount(self) == 1 && !heap::is_shared(self),
             "map_remove requires a uniquely-owned map (the COW invariant)"
         );
         if self.is_map() {
@@ -2002,7 +2002,7 @@ impl Value {
     /// [`Value::map_remove`], same uniqueness requirement and handback contract.
     pub fn map_remove_extern(self, key: &dyn noeta_stdlib::ExternValue) -> Option<Value> {
         debug_assert!(
-            !self.is_map() || heap::refcount(self) == 1,
+            !self.is_map() || heap::refcount(self) == 1 && !heap::is_shared(self),
             "map_remove_extern requires a uniquely-owned map (the COW invariant)"
         );
         if self.is_map() {
@@ -2543,6 +2543,23 @@ impl Value {
     /// no-op. `false` for immediates and ordinary (local) objects.
     pub fn is_shared(self) -> bool {
         self.is_pointer() && heap::is_shared(self)
+    }
+
+    /// Whether this heap value may be **mutated in place** under the COW invariant: the caller
+    /// holds the only reference (`refcount == 1`) *and* the object is not borrow-shared (P-PAR
+    /// S2). A shared object's refcount is frozen at 1 (retain/release no-op), so a bare
+    /// `refcount() == 1` test would wrongly treat a corpus borrowed from a [`SharedRegion`] as
+    /// uniquely owned and mutate a buffer other isolate threads are reading — every in-place
+    /// fast path must gate on this, never on `refcount()` alone.
+    pub fn is_uniquely_owned(self) -> bool {
+        self.is_pointer() && heap::refcount(self) == 1 && !heap::is_shared(self)
+    }
+
+    /// Whether this value's whole graph can be promoted into a [`SharedRegion`] (P-PAR S2) —
+    /// `Send` **data** kinds only. A function value, bound method, or channel endpoint is
+    /// `Wire`-shippable but not promotable, so an argument containing one keeps the copy path.
+    pub fn is_promotable_graph(self) -> bool {
+        heap::promotable_graph(self)
     }
 
     /// Increment the refcount (no-op for immediates, and for a borrow-shared object).
@@ -3350,6 +3367,69 @@ mod tests {
         assert!(!promoted.is_shared());
         assert!(region.is_empty());
         region.free_all();
+    }
+
+    #[test]
+    fn promote_with_memo_dedups_across_calls() {
+        // P-PAR S2: the spawn path keeps one memo across every `isolate f(corpus)` in flight, so
+        // fanning one corpus to N workers promotes once — the second call returns the same
+        // promoted root and the region grows by nothing.
+        let base = live_count();
+        let corpus = Value::list(vec![Value::string("a"), Value::string("b")]);
+        let mut region = SharedRegion::new();
+        let mut memo = std::collections::HashMap::new();
+        let first = region.promote_with(corpus, &mut memo);
+        let after_first = region.len();
+        let second = region.promote_with(corpus, &mut memo);
+        assert_eq!(
+            first.bits(),
+            second.bits(),
+            "memo hit returns the same root"
+        );
+        assert_eq!(region.len(), after_first, "a memo hit adds nothing");
+        corpus.release();
+        region.free_all();
+        assert_eq!(live_count(), base);
+    }
+
+    #[test]
+    fn shared_values_are_never_uniquely_owned() {
+        // P-PAR S2 (the COW gate): a shared object's refcount is frozen at 1, so the in-place
+        // mutation fast paths must consult `is_uniquely_owned`, which excludes it — a worker
+        // "mutating" a borrowed corpus copies instead of touching the shared buffer.
+        let base = live_count();
+        let local = Value::list(vec![Value::int(1)]);
+        assert!(local.is_uniquely_owned());
+        let mut region = SharedRegion::new();
+        let shared = region.promote(local);
+        assert_eq!(
+            shared.refcount(),
+            1,
+            "a shared object's count is frozen at 1"
+        );
+        assert!(
+            !shared.is_uniquely_owned(),
+            "shared must never pass the COW uniqueness gate"
+        );
+        local.release();
+        region.free_all();
+        assert_eq!(live_count(), base);
+    }
+
+    #[test]
+    fn promotable_graph_accepts_data_and_rejects_functions() {
+        // P-PAR S2: promotability = Send *data* kinds. A closure is Wire-shippable but has no
+        // promoted form, so a graph containing one falls back to the copy path.
+        let list = Value::list(vec![Value::int(1), Value::string("x")]);
+        assert!(list.is_promotable_graph());
+        let f = Value::closure(0, Vec::new());
+        assert!(!f.is_promotable_graph());
+        let holding = Value::list(vec![f]);
+        f.inc_ref(); // the list owns one reference; keep ours for the assert below
+        assert!(!holding.is_promotable_graph());
+        holding.release();
+        f.release();
+        list.release();
     }
 
     #[test]
