@@ -10,6 +10,7 @@
 - [Benchmarking](Benchmarking)
 - [Documentation & Dev Tiers](Documentation-and-Tiers)
 - [Editor & AI Tooling](Editor-and-AI-Tooling)
+- [Debugging](Debugging)
 
 **Language reference**
 - [Syntax Basics](Syntax-Basics)

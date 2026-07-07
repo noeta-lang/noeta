@@ -1,6 +1,6 @@
 # The `noeta` CLI
 
-The `noeta` binary is the whole toolchain. It has six subcommands:
+The `noeta` binary is the whole toolchain. It has eight subcommands:
 
 | Command | Purpose |
 |---|---|
@@ -10,11 +10,13 @@ The `noeta` binary is the whole toolchain. It has six subcommands:
 | [`noeta test`](Testing) | Discover and run `@test` blocks. |
 | [`noeta bench`](Benchmarking) | Discover and measure `@bench` blocks. |
 | [`noeta doc`](Documentation-and-Tiers) | Extract `@doc { … }` prose to stdout. |
+| [`noeta lsp`](Editor-and-AI-Tooling) | The language server, over stdio (started by your editor, not by hand). |
+| [`noeta dap`](Debugging) | The debug adapter, over stdio (started by your editor's debug UI, not by hand). |
 
 Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
 > [!NOTE]
-> There is intentionally no `build`, `fmt`, `check`, `lsp`, or `serve` subcommand yet. The language-conformance/differential harness that developers use is a *separate* dev binary (`noeta-conformance`), deliberately kept out of the shipped CLI so the `test` verb stays free for your program's own tests. Editor and AI tooling status is on [Editor & AI Tooling](Editor-and-AI-Tooling).
+> There is intentionally no `build`, `fmt`, or `check` subcommand yet. The language-conformance/differential harness that developers use is a *separate* dev binary (`noeta-conformance`), deliberately kept out of the shipped CLI so the `test` verb stays free for your program's own tests. Editor tooling is on [Editor & AI Tooling](Editor-and-AI-Tooling); the debugger on [Debugging](Debugging).
 
 ---
 
