@@ -1,8 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
-The language server gained, since 0.2.0 (all served automatically by `noeta lsp` — no client change):
+Adds **debugging** via the `noeta dap` Debug Adapter Protocol server:
+
+- Press **F5** on a `.noe` file to run it under the production bytecode VM (JIT off) through VS Code's
+  debug UI — no `launch.json` required. New `noeta` debug type with a `program`/`stopOnEntry` launch
+  configuration.
+- **Breakpoints** on any executable line (including bare `return` lines), **step over/into/out**, the
+  **call stack**, and a **Variables** view with each frame's locals, values, and types — read live
+  from the VM. Program `echo` output goes to the Debug Console.
+- The debugger uses the existing `noeta.server.path` setting (the same `noeta` binary serves `lsp` and
+  `dap`).
+
+Language-server changes since 0.2.0 (all served automatically by `noeta lsp` — no client change):
 
 - **Find references** and **rename** for value *and* member symbols (type-aware, cross-module), with
   `prepareRename` validation.

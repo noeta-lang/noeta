@@ -205,6 +205,7 @@ fn rewrite_func(func: &Func, cx: &Cx) -> Func {
         false,
     );
     Func {
+        name: func.name.clone(),
         params: func.params.clone(),
         // Default thunks run in the definition scope; this slice leaves them undropped (conservative).
         defaults: func.defaults.clone(),

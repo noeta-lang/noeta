@@ -173,6 +173,12 @@ pub fn hoist_loop_invariant_consts(chunk: &mut Chunk) {
     for op in &mut new_code {
         for_each_target_mut(op, |t| *t = remap[*t as usize]);
     }
+    // The debug line table is pc-keyed, so it moves with the code (empty in a non-debug compile, so
+    // this is then a no-op). Every original pc is retained — a hoisted load keeps its entry, now at
+    // its pre-header position — so remapping each entry through `remap` keeps the table accurate.
+    for entry in &mut chunk.line_table {
+        entry.pc = remap[entry.pc as usize];
+    }
     chunk.code = new_code;
 }
 
@@ -217,6 +223,13 @@ pub fn coalesce(chunk: &mut Chunk) {
             true
         }
     });
+    // Remap the debugger's `reg → name` records through the same colouring (also metadata). In a
+    // debug compile every named local's register is in `frame_locals`, hence pinned to its own
+    // colour above, so the map stays a clean 1:1 — no two names collapse onto one register. In a
+    // non-debug compile `debug_locals` is empty and this is a no-op.
+    for local in &mut chunk.debug_locals {
+        local.reg = colors[local.reg as usize] as u16;
+    }
     chunk.num_registers = new_count as u16;
 }
 
@@ -1085,6 +1098,10 @@ mod tests {
             num_registers,
             defaults: Vec::new(),
             frame_locals: Vec::new(),
+            name: None,
+            def_span: None,
+            debug_locals: Vec::new(),
+            line_table: Vec::new(),
         }
     }
 

@@ -18,7 +18,6 @@ noeta-backend = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-lexer = { workspace = true }
 noeta-parser = { workspace = true }
-noeta-eval = { workspace = true }
 noeta-vm = { workspace = true }
 noeta-compiler = { workspace = true }
 noeta-bytecode = { workspace = true }
@@ -27,6 +26,7 @@ noeta-loader = { workspace = true }
 noeta-runtime = { workspace = true }
 noeta-stdlib = { workspace = true }
 noeta-lsp = { workspace = true }
+noeta-dap = { workspace = true }
 clap = { workspace = true }
 toml = { workspace = true }
 

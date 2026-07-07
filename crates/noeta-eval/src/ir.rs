@@ -106,6 +106,17 @@ impl TreeWalkBackend {
         Interpreter::new().run_ir(ast, ir, type_of_sites)
     }
 
+    /// As [`TreeWalkBackend::run_ir`], plus the abort traceback (empty for a clean run) — the
+    /// oracle's twin of the VM's traced entries, letting the two backends' tracebacks be compared.
+    pub fn run_ir_traced(
+        &self,
+        ast: &Program,
+        ir: &noeta_ir::Program,
+        type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    ) -> (RunResult, Vec<noeta_backend::TraceFrame>) {
+        Interpreter::new().run_ir_traced(ast, ir, type_of_sites)
+    }
+
     /// As [`TreeWalkBackend::run_ir`], but against a caller-provided [`noeta_stdlib::Host`]
     /// (the real host) instead of the deterministic sandbox. `lang run` uses this so its
     /// user-facing execution goes through the same Core-IR reference (with last-use destruction)
@@ -142,11 +153,22 @@ impl Interpreter {
     /// run the top-level statements in the global scope, then destroy the global bindings in reverse
     /// declaration order.
     fn run_ir(
-        mut self,
+        self,
         ast: &Program,
         ir: &noeta_ir::Program,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
     ) -> RunResult {
+        self.run_ir_traced(ast, ir, type_of_sites).0
+    }
+
+    /// [`Interpreter::run_ir`] plus the abort traceback (empty for a clean run) — the tree-walker
+    /// twin of the VM's traced entries, so the two backends' tracebacks can be compared.
+    fn run_ir_traced(
+        mut self,
+        ast: &Program,
+        ir: &noeta_ir::Program,
+        type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    ) -> (RunResult, Vec<noeta_backend::TraceFrame>) {
         self.reflection = noeta_ast::reflect::build(ast);
         self.type_of_sites = type_of_sites;
         let mut frame = Frame::new(ir.temp_count);
@@ -166,11 +188,14 @@ impl Interpreter {
         self.reap_captured_scope_cycles();
         self.reap_object_cycles();
         let exit_code = if self.diagnostics.is_empty() { 0 } else { 1 };
-        RunResult {
-            stdout: self.stdout,
-            exit_code,
-            diagnostics: self.diagnostics,
-        }
+        (
+            RunResult {
+                stdout: self.stdout,
+                exit_code,
+                diagnostics: self.diagnostics,
+            },
+            self.abort_trace,
+        )
     }
 
     /// Execute one REPL batch of lowered top-level statements **in the persistent global scope**,
@@ -431,13 +456,17 @@ impl Interpreter {
     }
 
     /// Build a closure value from a lowered IR function template, capturing the current
-    /// lexical scope — the IR analogue of `declare_fn`'s/`Expr::Closure`'s construction.
+    /// lexical scope — the IR analogue of `declare_fn`'s/`Expr::Closure`'s construction. The trace
+    /// name comes from the IR itself (`Func::name`, set at lowering: `"f"`, `"Type.method"`, an
+    /// async/generator step under its enclosing function's name, `None` for a user's anonymous
+    /// closure) — the same single source the VM's synthesized-closure prototypes read.
     fn make_ir_closure(&self, func: &Rc<noeta_ir::Func>) -> Closure {
         Closure::new(
             func.params.clone(),
             func.defaults.clone(),
             Rc::clone(func),
             Rc::clone(&self.scope),
+            func.name.clone(),
         )
     }
 
@@ -726,6 +755,7 @@ impl Interpreter {
                     // Not a local. A bare name inside a method NEVER resolves to a field
                     // (prelude-redesign EX.1 — member access is explicit: `self.field`), so a miss
                     // here is a plain unknown name, exactly as the VM reports it.
+                    self.record_abort_trace(*span);
                     self.diagnostics.push(Diagnostic::error(
                         DiagnosticCode::UnknownName,
                         *span,

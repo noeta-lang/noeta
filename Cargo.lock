@@ -1205,6 +1205,7 @@ version = "0.0.0"
 dependencies = [
  "noeta-ast",
  "noeta-diagnostics",
+ "noeta-span",
 ]
 
 [[package]]
@@ -1252,8 +1253,8 @@ dependencies = [
  "noeta-bytecode",
  "noeta-check",
  "noeta-compiler",
+ "noeta-dap",
  "noeta-diagnostics",
- "noeta-eval",
  "noeta-lexer",
  "noeta-loader",
  "noeta-lsp",
@@ -1311,6 +1312,23 @@ dependencies = [
  "noeta-vm",
  "predicates",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "noeta-dap"
+version = "0.0.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-bytecode",
+ "noeta-check",
+ "noeta-compiler",
+ "noeta-diagnostics",
+ "noeta-loader",
+ "noeta-runtime",
+ "noeta-span",
+ "noeta-stdlib",
+ "noeta-vm",
  "serde_json",
 ]
 

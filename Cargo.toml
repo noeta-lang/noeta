@@ -48,6 +48,8 @@ noeta-runtime = { path = "crates/noeta-runtime" }
 noeta-reactive = { path = "crates/noeta-reactive" }
 # M2 editor tooling: the `noeta lsp` language server over the noeta-db salsa query graph
 noeta-lsp = { path = "crates/noeta-lsp" }
+# M2 editor tooling: the `noeta dap` Debug Adapter Protocol server over the production VM
+noeta-dap = { path = "crates/noeta-dap" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
 logos = "0.16"

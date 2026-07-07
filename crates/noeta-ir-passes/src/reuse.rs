@@ -554,6 +554,7 @@ fn rewrite_rvalue(rvalue: &Rvalue, od: &HashSet<String>) -> Rvalue {
 fn rewrite_func(func: &Func, od: &HashSet<String>) -> Func {
     let params: HashSet<String> = func.params.iter().cloned().collect();
     Func {
+        name: func.name.clone(),
         params: func.params.clone(),
         defaults: func.defaults.clone(),
         body: rewrite_block(&func.body, od, &params),

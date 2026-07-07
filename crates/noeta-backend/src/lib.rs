@@ -33,3 +33,50 @@ impl RunResult {
 pub trait Backend {
     fn run(&self, program: &Program) -> RunResult;
 }
+
+/// One frame of an abort traceback: the function's name (`None` for an anonymous closure/thunk) and
+/// the source location it was at — the failing instruction for the innermost frame, the call site
+/// for each caller. `span` is `None` where no location is known (e.g. a caller that re-entered the
+/// VM through a native call). Produced by both backends, innermost frame first; rides **beside**
+/// [`RunResult`] (not inside it) so the differential's compared unit is unchanged while the two
+/// tracebacks converge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceFrame {
+    pub name: Option<String>,
+    pub span: Option<noeta_span::Span>,
+}
+
+/// Render an abort traceback for human consumption, resolving each frame's span against `sources` —
+/// the rendering the CLI prints after a panic diagnostic and the debug adapter forwards as error
+/// output. Innermost frame first. Deep stacks (runaway recursion) are capped, with the elided count
+/// noted.
+pub fn render_trace(trace: &[TraceFrame], sources: &noeta_span::SourceMap) -> String {
+    use std::fmt::Write as _;
+    /// The most frames a rendered traceback shows — enough for any legitimate stack, while a
+    /// stack-overflow abort with thousands of identical frames stays readable.
+    const MAX_FRAMES: usize = 64;
+    let mut out = String::from("stack trace (most recent call first):\n");
+    for frame in trace.iter().take(MAX_FRAMES) {
+        let name = frame.name.as_deref().unwrap_or("<anonymous>");
+        // A span that does not fit its resolved source renders name-only rather than panicking the
+        // renderer — the REPL reuses one `SourceId` across entries, so a frame from a function
+        // defined in an *earlier* entry carries a span into text the current entry no longer has.
+        let located = frame.span.and_then(|span| {
+            let source = sources.source(span.source);
+            (span.start as usize <= source.text().len())
+                .then(|| (source.name(), source.line_col(span.start).line))
+        });
+        match located {
+            Some((file, line)) => {
+                let _ = writeln!(out, "  at {name} ({file}:{line})");
+            }
+            None => {
+                let _ = writeln!(out, "  at {name}");
+            }
+        }
+    }
+    if trace.len() > MAX_FRAMES {
+        let _ = writeln!(out, "  … and {} more frames", trace.len() - MAX_FRAMES);
+    }
+    out
+}

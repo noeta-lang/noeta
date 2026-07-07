@@ -161,6 +161,7 @@ pub fn lower_with_sites_opts(
         temps: 0,
         sites,
         real_isolates,
+        synth_step_name: None,
     };
     let top = lowerer.lower_body(&program.stmts)?;
     Ok(Program {
@@ -183,6 +184,11 @@ struct Lowerer<'a> {
     /// than a plain [`Rvalue::Spawn`] of a pre-built future. Only the CLI's real (VM) execution path
     /// sets this; every in-oracle path leaves it false, so the differential never sees the new rvalue.
     real_isolates: bool,
+    /// The name the **next** lowered closure should carry — set (to the enclosing function's name)
+    /// just before an async/generator desugar lowers its synthesized step closure, and `take()`n by
+    /// the first `Expr::Closure` the lowering meets (the step itself, which lowers before anything
+    /// nested inside it). A user's own closure therefore always finds `None` and stays anonymous.
+    synth_step_name: Option<String>,
 }
 
 impl Lowerer<'_> {
@@ -402,6 +408,7 @@ impl Lowerer<'_> {
                     decl.span,
                     true,
                     decl.is_async,
+                    Some(decl.name.clone()),
                 )?;
                 out.push(Stmt::Decl(Decl::Fn {
                     name: decl.name.clone(),
@@ -419,6 +426,8 @@ impl Lowerer<'_> {
                         m.span,
                         true,
                         m.is_async,
+                        // Methods trace as `Type.method` (the VM's chunk naming).
+                        Some(format!("{}.{}", decl.name, m.name)),
                     )?;
                     methods.push((m.name.clone(), Rc::new(func)));
                 }
@@ -431,6 +440,8 @@ impl Lowerer<'_> {
                         decl.span,
                         false,
                         false,
+                        // The VM's destructor-prototype naming.
+                        Some(format!("{}::destruct", decl.name)),
                     )?)),
                     None => None,
                 };
@@ -456,6 +467,8 @@ impl Lowerer<'_> {
                         m.span,
                         true,
                         m.is_async,
+                        // Methods trace as `Type.method` (the VM's chunk naming).
+                        Some(format!("{}.{}", decl.name, m.name)),
                     )?;
                     methods.push((m.name.clone(), Rc::new(func)));
                 }
@@ -478,6 +491,8 @@ impl Lowerer<'_> {
                         m.span,
                         true,
                         m.is_async,
+                        // Methods trace as `Type.method` (the VM's chunk naming).
+                        Some(format!("{}.{}", decl.name, m.name)),
                     )?;
                     methods.push((m.name.clone(), Rc::new(func)));
                 }
@@ -532,6 +547,7 @@ impl Lowerer<'_> {
         span: Span,
         generator: bool,
         is_async: bool,
+        name: Option<String>,
     ) -> Result<Func, Unsupported> {
         let outer = self.temps;
         self.temps = 0;
@@ -553,18 +569,26 @@ impl Lowerer<'_> {
             // set only at the call sites where a generator is legal (named `fn`/methods), never for a
             // closure or the synthesized step closure itself, so the desugar applies exactly once.
             BodyKind::Block(stmts) if generator && body_has_yield(stmts) => {
+                // The desugar's synthesized step closure executes this function's body, so it
+                // traces under this function's name (see `synth_step_name`).
+                self.synth_step_name = name.clone();
                 self.lower_generator(stmts, span)?
             }
             // An `async fn` (Track A) lowers to a lazy `Future` over its body — `make_future(thunk)` —
             // not the body's statements directly (like a generator, but a single deferred computation
             // rather than a per-element state machine). `is_async` is set only at named-`fn`/method
             // sites, never a closure or the synthesized thunk, so the wrap applies exactly once.
-            BodyKind::Block(stmts) if is_async => self.lower_async(stmts, span)?,
+            BodyKind::Block(stmts) if is_async => {
+                // As for a generator: the future's step closure is this function's body.
+                self.synth_step_name = name.clone();
+                self.lower_async(stmts, span)?
+            }
             BodyKind::Block(stmts) => self.lower_body(stmts)?,
         };
         let temp_count = self.temps;
         self.temps = outer;
         Ok(Func {
+            name,
             params: param_names,
             defaults,
             body,
@@ -1356,7 +1380,10 @@ impl Lowerer<'_> {
                 // A closure is never a generator or an async fn: `yield`/`.await` reset at a callable
                 // boundary (the checker rejects them inside a closure), and the generator/async
                 // desugar's own thunk must not be re-desugared. So both flags are `false` here.
-                let func = self.lower_func(params, body_kind, *span, false, false)?;
+                // The name is the armed synthesized-step name if this closure IS such a step (taken,
+                // so anything nested inside the step's body finds `None`); a user closure is anonymous.
+                let name = self.synth_step_name.take();
+                let func = self.lower_func(params, body_kind, *span, false, false, name)?;
                 Ok(self.emit(
                     out,
                     Rvalue::Closure {

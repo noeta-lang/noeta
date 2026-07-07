@@ -22,6 +22,14 @@ features backed by the compiler itself.
   - **Document outline** — the symbol tree for breadcrumbs and `@`-symbol search.
   - **Completion** — keywords, in-scope names, a receiver type's members after `.`, and type names in
     annotation position.
+- **Debugging** (`noeta dap`) — run a `.noe` file under the compiler's own bytecode VM (JIT off, so
+  every frame is inspectable) through VS Code's debug UI:
+  - **Breakpoints** — click the gutter of any executable line; **stepping** — step over / into / out,
+    line by line.
+  - **Call stack, scopes, and variables** — each paused frame's locals with their values and types,
+    read straight from the live VM.
+  - Press **F5** on a `.noe` file to debug it (no `launch.json` needed); output appears in the Debug
+    Console. See **Debugging** below.
 - **Syntax highlighting** for the full Noeta surface:
   - keywords — control flow, declarations (`fn`/`struct`/`class`/`enum`/`impl`), concurrency (`async`/`spawn`/`isolate`/`channel`), and the operator words `as`/`is`
   - the three string forms — `"…"`, `'…'`, and backtick templates — with `${…}` interpolation holes highlighted as embedded expressions and `\${` recognized as an escape
@@ -56,13 +64,39 @@ npm install                    # fetches vscode-languageclient
 
 # then either: open this folder in VS Code and press F5 (Run Noeta Extension), or
 # symlink it into your extensions directory and reload:
-ln -s "$PWD" ~/.vscode/extensions/noeta-0.2.0
+ln -s "$PWD" ~/.vscode/extensions/noeta-0.3.0
 ```
 
 Any `.noe` file then picks up the `noeta` language mode and the server starts automatically. Run
 **Noeta: Restart Language Server** from the command palette after rebuilding the server. To package a
 `.vsix`, install [`vsce`](https://github.com/microsoft/vscode-vsce), run `npm install --omit=dev`
 (so only the runtime dependency is packaged), then `vsce package`.
+
+## Debugging
+
+The extension registers a **`noeta` debug type** backed by the `noeta dap` subcommand (the Debug
+Adapter Protocol server that ships with the toolchain, launched via the same `noeta.server.path`).
+
+To debug the file you're editing, just press **F5** and pick **Noeta** if prompted — with no
+`launch.json`, the extension runs the active `.noe` file. For a saved configuration, add this to
+`.vscode/launch.json`:
+
+```json
+{
+  "type": "noeta",
+  "request": "launch",
+  "name": "Debug Noeta file",
+  "program": "${file}",
+  "stopOnEntry": false
+}
+```
+
+- `program` — the `.noe` file to run (defaults to the active file).
+- `stopOnEntry` — pause before the first instruction instead of running to the first breakpoint.
+
+Set breakpoints in the gutter, then step with the debug toolbar; the **Variables** view shows each
+frame's locals. The program's `echo` output goes to the Debug Console. Debugging runs the same
+production VM as `noeta run`, only with the JIT unarmed so every frame stays inspectable.
 
 ## Testing the grammar
 

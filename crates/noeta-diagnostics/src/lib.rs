@@ -196,6 +196,11 @@ pub enum DiagnosticCode {
     /// function (never touches `self`) called on a value (`x.new(...)`). The distinction is DERIVED
     /// from the body — zero runtime cost — and enforced statically.
     InvalidReceiver,
+    /// A function with a non-`void` declared return type can reach the end of its body without
+    /// returning a value (it falls off the end, or an `if` without an `else` leaves a path open). Only
+    /// a `void` function may fall through; any other declared type must be produced on every path, or
+    /// the caller binds the promised type to a `unit` value. Enforced statically at the definition.
+    MissingReturn,
     /// A declaration binds a **reserved native type name** (extern-types X1) — a registered
     /// extern type (`Uuid`) or a checker-native type (`FileHandle`, `Iterator`, `Future`,
     /// `Sender`, `Receiver`, `Signal`, `Computed`, `Effect`). Shadowing one would make the
@@ -254,6 +259,7 @@ impl DiagnosticCode {
         DiagnosticCode::ReactiveCycle,
         DiagnosticCode::ReservedName,
         DiagnosticCode::InvalidReceiver,
+        DiagnosticCode::MissingReturn,
         DiagnosticCode::ReservedTypeName,
     ];
 
@@ -308,8 +314,7 @@ impl DiagnosticCode {
             DiagnosticCode::ReactiveCycle => "E0045",
             DiagnosticCode::ReservedName => "E0046",
             DiagnosticCode::InvalidReceiver => "E0047",
-            // E0048 is claimed by the debug-adapter branch's `MissingReturn` (unmerged); this
-            // arc deliberately skips to E0049 so the two merge cleanly.
+            DiagnosticCode::MissingReturn => "E0048",
             DiagnosticCode::ReservedTypeName => "E0049",
         }
     }

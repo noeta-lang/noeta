@@ -38,7 +38,8 @@ use std::sync::Arc;
 use noeta_ast::{BinaryOp, Program};
 use noeta_backend::{Backend, RunResult};
 use noeta_bytecode::{
-    BoolSide, Builtin, CaptureFrom, Const, Module, NarrowTarget, Op, Reg, ReuseCheck, StrPart,
+    BoolSide, Builtin, CaptureFrom, Chunk, Const, Module, NarrowTarget, Op, Reg, ReuseCheck,
+    StrPart,
 };
 use noeta_compiler::{Unsupported, compile};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
@@ -56,6 +57,108 @@ mod values;
 pub(crate) use values::*;
 mod methods;
 mod scheduler;
+mod session;
+pub use session::{HostFactory, SessionOutput, VmSession};
+
+/// A debugger observing tier-0 execution (the `noeta dap` server implements it). The VM consults it
+/// **before each instruction**, passing the executing prototype and program counter; the
+/// implementation maps that to a source line, decides whether to pause (breakpoint / step / entry),
+/// and — when it pauses — blocks the run thread until the user resumes. Returning
+/// [`DebugAction::Terminate`] unwinds the run cleanly (as an abort), which is how a `disconnect` while
+/// paused stops the program. Only installed on the debug run path (JIT unarmed), so it never sees a
+/// JIT'd frame; a production/differential run leaves it `None` and pays one predicted branch per op.
+pub trait Debugger: Send {
+    /// Called with the instruction about to execute (`proto` is its prototype index, `pc` its offset
+    /// in that prototype's code) and a [`DebugView`] of the paused stack — the live frames and their
+    /// register windows — so a pause can build a stack trace and read locals. May block until the
+    /// user resumes.
+    fn before_op(&mut self, proto: u32, pc: usize, view: &DebugView) -> DebugAction;
+}
+
+/// What the VM does after consulting the [`Debugger`] for an instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugAction {
+    /// Execute the instruction and continue.
+    Continue,
+    /// Abandon the run (clean teardown, as an abort) — e.g. the client disconnected while paused.
+    Terminate,
+}
+
+/// A read-only view of the paused VM handed to [`Debugger::before_op`]: the live frame stack and each
+/// frame's register window. It exists so a debugger can render a stack trace and inspect locals
+/// *without* the VM's private `Frame`/`Module`/`Chunk` types leaking across the crate boundary — the
+/// accessors hand back only public types (`&str`, [`Span`], [`Value`]). The innermost (currently
+/// executing) frame is index `depth() - 1`; index `0` is the bottom (`main`).
+#[derive(Debug)]
+pub struct DebugView<'a> {
+    module: &'a Module,
+    frames: &'a [Frame],
+    regs: &'a [Value],
+}
+
+impl<'a> DebugView<'a> {
+    /// Number of live frames on the call stack.
+    pub fn depth(&self) -> usize {
+        self.frames.len()
+    }
+
+    /// The frame at call-stack index `i` (`0` = bottom `main`, `depth()-1` = innermost).
+    ///
+    /// The reported [`DebugFrame::op_span`] is the frame's *current source line*. For the innermost
+    /// frame that is the instruction about to run (`pc`, synced by the debugger consult). For a caller
+    /// frame, `pc` is the **resume** point — the instruction *after* the call (a call saves `pc + 1`)
+    /// — so we back up one to the call op itself, which carries the call-site span the user expects to
+    /// see for a frame that is waiting on a callee.
+    pub fn frame(&self, i: usize) -> DebugFrame<'a> {
+        let frame = &self.frames[i];
+        let chunk = &self.module.protos[frame.proto as usize];
+        let window = &self.regs[frame.base..frame.base + chunk.num_registers as usize];
+        let is_innermost = i + 1 == self.frames.len();
+        let pc = if is_innermost {
+            frame.pc
+        } else {
+            frame.pc.saturating_sub(1)
+        };
+        DebugFrame { chunk, pc, window }
+    }
+}
+
+/// One frame of a [`DebugView`]: its prototype's debug info (name, per-register local names) joined to
+/// the frame's live register window, so a debugger can read each named local's current value.
+#[derive(Debug)]
+pub struct DebugFrame<'a> {
+    chunk: &'a Chunk,
+    pc: usize,
+    window: &'a [Value],
+}
+
+impl<'a> DebugFrame<'a> {
+    /// The function's name (`"main"`, `"Point.mag"`, …). `None` for an anonymous closure/thunk.
+    pub fn name(&self) -> Option<&'a str> {
+        self.chunk.name.as_deref()
+    }
+
+    /// The source span whose line is this frame's current line: the instruction about to execute for
+    /// the innermost frame, or the call op for a caller frame (see [`DebugView::frame`]).
+    ///
+    /// Resolved through the **line table** ([`Chunk::line_table`]), so *every* instruction maps to a
+    /// line — including one whose own op is spanless (a bare `return x`, a post-call store) — by
+    /// taking the span of the statement covering this pc. `None` before the first statement (a
+    /// spanless prologue).
+    pub fn line_span(&self) -> Option<Span> {
+        self.chunk.line_span(self.pc)
+    }
+
+    /// Each named local in declaration order: its name, the span of its binding, and its current
+    /// register value. Pinned through coalescing (debug compiles), so each named local keeps a
+    /// dedicated register for the whole frame — the value read here is exactly that local's.
+    pub fn locals(&self) -> impl Iterator<Item = (&'a str, Span, Value)> + '_ {
+        self.chunk
+            .debug_locals
+            .iter()
+            .map(move |ld| (ld.name.as_str(), ld.def_span, self.window[ld.reg as usize]))
+    }
+}
 
 /// The bytecode-VM backend.
 #[derive(Debug, Clone, Default)]
@@ -86,6 +189,21 @@ impl VmBackend {
         // The sandbox path is the `--jit-differential` oracle's pure tier-0 baseline, so it never
         // auto-JITs (the oracle's tier-1 tier is `run_module_jit`'s explicit `force_jit`).
         execute(module, Box::new(noeta_stdlib::SandboxHost::new()), false)
+    }
+
+    /// [`VmBackend::run_module`] plus the abort traceback (empty for a clean run) — the sandboxed,
+    /// deterministic entry the traceback's own tests drive.
+    pub fn run_module_traced(&self, module: &Module) -> (RunResult, Vec<TraceFrame>) {
+        let mode = noeta_value::CollectorMode::Trace;
+        noeta_value::set_collector_mode(mode);
+        let mut vm = Vm::load(
+            module,
+            Box::new(noeta_stdlib::SandboxHost::new()),
+            Box::new(noeta_stdlib::SandboxExecutor::new()),
+        );
+        let result = run_and_teardown(&mut vm, mode);
+        let trace = std::mem::take(&mut vm.abort_trace);
+        (result, trace)
     }
 
     /// Execute a module against a caller-provided [`noeta_stdlib::Host`] (M2.3). The CLI/REPL pass
@@ -120,6 +238,41 @@ impl VmBackend {
         )
     }
 
+    /// Execute a module against a real host + executor **with the JIT unarmed** — the debugger's run
+    /// path (`noeta dap`). A debug session pins tier-0 so every frame stays interpreter-executed and
+    /// therefore observable (a JIT'd region has no readable pc or register file mid-execution); tier-0
+    /// is held observably identical to tier-1 by the JIT's bail-before-mutate contract, so turning the
+    /// perf tier off changes speed, not behavior. Single-isolate/cooperative (real OS-thread isolate
+    /// debugging is a later milestone); the differential never calls this, so it is out-of-oracle.
+    pub fn run_module_with_host_and_executor_no_jit(
+        &self,
+        module: &Module,
+        host: Box<dyn noeta_stdlib::Host>,
+        executor: Box<dyn noeta_stdlib::Executor>,
+    ) -> RunResult {
+        self.run_module_debug(module, host, executor, None).0
+    }
+
+    /// Like [`VmBackend::run_module_with_host_and_executor_no_jit`], but with a [`Debugger`] attached
+    /// (the `noeta dap` run path). Tier-0 throughout so every frame is interpreter-executed and the
+    /// debugger's `before_op` sees a real pc; the JIT is never armed. `debugger = None` is exactly the
+    /// plain no-JIT run.
+    pub fn run_module_debug(
+        &self,
+        module: &Module,
+        host: Box<dyn noeta_stdlib::Host>,
+        executor: Box<dyn noeta_stdlib::Executor>,
+        debugger: Option<Box<dyn Debugger>>,
+    ) -> (RunResult, Vec<TraceFrame>) {
+        let mode = noeta_value::CollectorMode::Trace;
+        noeta_value::set_collector_mode(mode);
+        let mut vm = Vm::load(module, host, executor);
+        vm.debugger = debugger;
+        let result = run_and_teardown(&mut vm, mode);
+        let trace = std::mem::take(&mut vm.abort_trace);
+        (result, trace)
+    }
+
     /// Execute a module with **real OS-thread isolates** (isolates I.4b), CLI-only / out-of-oracle.
     /// `module` is an `Arc` (the compiled module is `Send + Sync`) so worker threads can own it; each
     /// `isolate f(args)` with `Send`, channel-free arguments runs on its own thread with a fresh VM +
@@ -132,7 +285,7 @@ impl VmBackend {
         host: Box<dyn noeta_stdlib::Host>,
         executor: Box<dyn noeta_stdlib::Executor>,
         factory: IsolateFactory,
-    ) -> RunResult {
+    ) -> (RunResult, Vec<TraceFrame>) {
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
         let mut vm = Vm::load(&module, host, executor);
         vm.parallel_isolates = true;
@@ -142,7 +295,12 @@ impl VmBackend {
         // isolates load through `Vm::load` and stay tier-0 (Cranelift's `JITModule` is `!Send`).
         #[cfg(feature = "jit")]
         vm.init_jit();
-        run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace)
+        let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
+        // The abort traceback (empty for a clean run) rides beside the result — `RunResult` itself
+        // stays the differential's compared unit, which the trace is deliberately not part of (yet):
+        // the oracle grows its own traceback first.
+        let trace = std::mem::take(&mut vm.abort_trace);
+        (result, trace)
     }
 
     /// Execute under an explicit cycle-collector mode (Phase 6.4 benchmark seam). Production paths
@@ -257,6 +415,7 @@ impl Backend for VmBackend {
 /// One activation record: a prototype index, its register file, the program counter, the caller
 /// register the return value flows into (irrelevant for the bottom/top-level frame), and an
 /// optional transform applied to the return value as it lands in the caller.
+#[derive(Debug)]
 struct Frame {
     proto: u32,
     /// This frame's register file occupies `regs[base .. base + proto.num_registers]` in the
@@ -458,7 +617,20 @@ struct Vm<'m> {
     /// `Vm`'s lifetime; the `Jit` and its generated code are dropped with the same `Vm`).
     #[cfg(feature = "jit")]
     jit_frame_template: Option<Box<Frame>>,
+    /// The attached debugger (`noeta dap`), consulted before every instruction. `None` on every
+    /// non-debug run (production, differential, salsa), where it costs one predicted branch per op.
+    debugger: Option<Box<dyn Debugger>>,
+    /// The **abort traceback**: the call stack captured as a fatal abort unwinds, innermost frame
+    /// first. Appended by [`Vm::run`]'s error path — each (possibly re-entrant) run contributes its
+    /// own frame stack as the abort climbs — and handed out by the host-facing entry points for the
+    /// CLI / debug adapter to render. Written **only after** an abort, so it costs the hot path
+    /// nothing; empty for a run that completes.
+    abort_trace: Vec<TraceFrame>,
 }
+
+/// The traceback vocabulary is shared with the tree-walker oracle through the backend contract
+/// crate, so both backends produce the same `TraceFrame` shape (and can eventually be compared).
+pub use noeta_backend::{TraceFrame, render_trace};
 
 /// Tier-1 promotion threshold: a prototype interprets until it has been entered this many times,
 /// then the JIT compiles it (P-JIT). The `--jit-differential` oracle bypasses this via `force_jit`.
@@ -1094,10 +1266,20 @@ pub type IsolateFactory =
     Arc<dyn Fn() -> (Box<dyn noeta_stdlib::Host>, Box<dyn noeta_stdlib::Executor>) + Send + Sync>;
 
 /// A spawned worker isolate (isolates I.4b): the channel its result (a marshalled [`isolate::Wire`], or
-/// an abort message) arrives on, and the thread's join handle (taken to join at teardown).
+/// a failure) arrives on, and the thread's join handle (taken to join at teardown).
 struct IsolateSlot {
-    result: std::sync::mpsc::Receiver<Result<isolate::Wire, String>>,
+    result: std::sync::mpsc::Receiver<Result<isolate::Wire, IsolateFailure>>,
     handle: Option<std::thread::JoinHandle<()>>,
+}
+
+/// A worker isolate's failure, shipped back across the thread boundary: the abort's message and the
+/// worker's own stack trace (empty for a non-abort failure, e.g. an unshippable result). Plain data
+/// (`String`s + `Span`s), so it crosses threads like the [`isolate::Wire`] values do. The parent
+/// installs the trace before re-raising at the `.await`, so the rendered traceback tells the whole
+/// story — the worker's frames innermost, the awaiting parent's frames beneath them.
+struct IsolateFailure {
+    message: String,
+    trace: Vec<TraceFrame>,
 }
 
 /// An owned reference to a VM [`Value`], with RAII refcounting — the element type the reactive graph
@@ -1422,6 +1604,8 @@ impl<'m> Vm<'m> {
             jit_cache_pins: Vec::new(),
             #[cfg(feature = "jit")]
             jit_frame_template: None,
+            debugger: None,
+            abort_trace: Vec::new(),
         }
     }
 
@@ -1613,114 +1797,135 @@ impl<'m> Vm<'m> {
 
 /// Run `main` and tear the VM down (globals, cycle collection, channel drain), returning the program's
 /// [`RunResult`]. Split from [`Vm::load`] so a worker isolate can load the module without running
-/// `main` (isolates I.4b). The teardown is unchanged from the original single-function entry.
+/// `main` (isolates I.4b). Two phases — [`Vm::run_top`] then [`Vm::teardown`] — so a persistent
+/// session (REPL-on-VM) can run one entry's `main` against the shared globals *without* the teardown a
+/// later entry's bindings still depend on; the single-shot path just runs them back to back.
 fn run_and_teardown(vm: &mut Vm, mode: noeta_value::CollectorMode) -> RunResult {
-    let module = vm.module;
-    let regs = vec![Value::unit(); module.main().num_registers as usize];
-    let top = Frame {
-        proto: 0,
-        base: 0,
-        pc: 0,
-        ret_dst: 0,
-        ret_transform: RetTransform::None,
-        upvalues: Vec::new(),
-    };
-    // The top-level frame's `Return`/`Halt` yields the program's (discarded) value; release
-    // it. On abort `run` has already released every frame register.
-    if let Ok(v) = vm.run(vec![top], regs) {
-        release(v);
-    }
-    // An abort (e.g. a detected deadlock, E0010) can leave open `concurrent` scopes whose tasks
-    // were never joined — each scope still owns its tasks' futures (and any parked results).
-    // Release them exactly as `ScopeEnd` would, so an aborted program's teardown stays
-    // refcount-exact (the anomaly oracle checks) and destructors on captured locals still run.
-    for scope in std::mem::take(&mut vm.scopes) {
-        for task in scope {
-            vm.release_value(task.future);
-            if let Some(result) = task.result {
-                vm.release_value(result);
-            }
-        }
-    }
-    // Release the JIT inline caches' closure pins (S4.2) before any collector accounting: a
-    // pinned closure the program itself dropped must read as garbage now, not as an anomaly.
-    // Native code can no longer run (the run above is over), so the caches are dead.
-    #[cfg(feature = "jit")]
-    for v in std::mem::take(&mut vm.jit_cache_pins) {
-        release(v);
-    }
-    // Reap reference cycles the program may have tied through `mut` fields / cells / closures that
-    // refcounting alone cannot reclaim (e.g. a self-recursive nested `fn`). The two collectors run at
-    // different points: the **trace** marks from the live globals *before* teardown (the frame stack
-    // is unwound, so the globals are the whole root set) and sweeps everything unreachable; the
-    // **trial-deletion** path instead reaps its buffered candidates *after* teardown, once every frame
-    // and global release has had a chance to buffer the cycle's roots.
-    if mode == noeta_value::CollectorMode::Trace {
-        let mut roots: Vec<Value> = vm
-            .globals
-            .iter()
-            .copied()
-            .filter(|v| !v.is_unbound())
-            .collect();
-        // The reactive graph (reactivity S1) holds a `+1` reference to every signal's content and
-        // every computed/effect body, but a value reachable *only* through the graph is invisible to
-        // this mark-from-roots sweep. Feed those held values in as roots so the collector does not
-        // reclaim a still-referenced value out from under the graph (which `reactive.clear()` below
-        // would then double-free). The reactive analogue of scanning the channel buffers.
-        vm.reactive.for_each_value(|gv| roots.push(gv.get()));
-        let garbage = collect_trace(&roots);
-        vm.reclaim_cycle_garbage(garbage);
-    }
-    // Release any messages still buffered in channels at program end (isolates I.1) — undrained
-    // `send`s. Draining here keeps residency at zero; `release_value` runs any message destructor. A
-    // `Shared` channel (I.4c) holds `Wire` copies, not heap `Value`s, so dropping it frees cleanly.
-    for chan in std::mem::take(&mut vm.channels) {
-        if let Channel::Local { buffer, .. } = chan {
-            for msg in buffer {
-                vm.release_value(msg);
-            }
-        }
-    }
-    // Release every value held by the reactive graph (reactivity S1): signals never disposed by the
-    // program still own their content until here. Dropping the nodes fires each `GcVal`'s `Drop`, so
-    // residency returns to zero — the leak oracle's proof that the graph's refcounting is exact.
-    vm.reactive.clear();
-    // Destroy the globals at program end in reverse declaration order, running each
-    // destructor on its last reference — the deterministic destruction the spec requires.
-    for slot in vm.global_order.clone().into_iter().rev() {
-        let v = std::mem::replace(&mut vm.globals[slot as usize], Value::unbound());
-        if !v.is_unbound() {
-            vm.release_value(v);
-        }
-    }
-    // Backup collection (object-model slice 2c): a reference `class` cycle rooted in the globals
-    // (`a.next = b; b.next = a`) survives the teardown above — each member still holds the other, so
-    // refcounting never reaches zero. With the globals now gone there are **no roots left**, so every
-    // still-live object is unreachable garbage; trace-collect from an empty root set to reclaim it,
-    // running each member's `destruct` exactly once. (The pre-teardown trace above only catches
-    // cycles already unreachable mid-run.)
-    if mode == noeta_value::CollectorMode::Trace {
-        let garbage = collect_trace(&[]);
-        vm.reclaim_cycle_garbage(garbage);
-    }
-    if mode == noeta_value::CollectorMode::TrialDeletion {
-        let garbage = noeta_gc::collect_trial_deletion();
-        vm.reclaim_cycle_garbage(garbage);
-    }
+    vm.run_top();
+    vm.teardown(mode)
+}
 
-    // Join any isolate worker threads not already harvested (a structured scope harvests + joins its
-    // isolates at `}`, so this is normally empty — defensive against an early exit).
-    for slot in std::mem::take(&mut vm.isolates) {
-        if let Some(h) = slot.handle {
-            let _ = h.join();
+impl<'m> Vm<'m> {
+    /// Run the module's entry chunk (proto 0 = `main`) to completion and release the frame-local state
+    /// it leaves behind — the returned top value, any open `concurrent` scopes, and the JIT
+    /// inline-cache closure pins. **Does not** touch the globals, channels, reactive graph, or run any
+    /// collector: those are [`Vm::teardown`]'s job, deferred so a session can run many entries between
+    /// one load and one teardown (REPL-on-VM R0).
+    fn run_top(&mut self) {
+        let regs = vec![Value::unit(); self.module.main().num_registers as usize];
+        let top = Frame {
+            proto: 0,
+            base: 0,
+            pc: 0,
+            ret_dst: 0,
+            ret_transform: RetTransform::None,
+            upvalues: Vec::new(),
+        };
+        // The top-level frame's `Return`/`Halt` yields the program's (discarded) value; release
+        // it. On abort `run` has already released every frame register.
+        if let Ok(v) = self.run(vec![top], regs) {
+            release(v);
+        }
+        // An abort (e.g. a detected deadlock, E0010) can leave open `concurrent` scopes whose tasks
+        // were never joined — each scope still owns its tasks' futures (and any parked results).
+        // Release them exactly as `ScopeEnd` would, so an aborted program's teardown stays
+        // refcount-exact (the anomaly oracle checks) and destructors on captured locals still run.
+        for scope in std::mem::take(&mut self.scopes) {
+            for task in scope {
+                self.release_value(task.future);
+                if let Some(result) = task.result {
+                    self.release_value(result);
+                }
+            }
+        }
+        // Release the JIT inline caches' closure pins (S4.2) before any collector accounting: a
+        // pinned closure the program itself dropped must read as garbage now, not as an anomaly.
+        // Native code can no longer run (the run above is over), so the caches are dead.
+        #[cfg(feature = "jit")]
+        for v in std::mem::take(&mut self.jit_cache_pins) {
+            release(v);
         }
     }
 
-    let exit_code = if vm.diagnostics.is_empty() { 0 } else { 1 };
-    RunResult {
-        stdout: std::mem::take(&mut vm.stdout),
-        exit_code,
-        diagnostics: std::mem::take(&mut vm.diagnostics),
+    /// Tear the VM down after its entry chunk(s) ran and drain the [`RunResult`]: reap reference
+    /// cycles, drain channel buffers, clear the reactive graph, destroy the globals in reverse binding
+    /// order (running each destructor), reap any remaining cycle garbage, and join outstanding isolate
+    /// workers. Split from [`Vm::run_top`] so a session runs this **once** at the end rather than after
+    /// every entry (REPL-on-VM R0); leak residency must reach zero here.
+    fn teardown(&mut self, mode: noeta_value::CollectorMode) -> RunResult {
+        // Reap reference cycles the program may have tied through `mut` fields / cells / closures that
+        // refcounting alone cannot reclaim (e.g. a self-recursive nested `fn`). The two collectors run at
+        // different points: the **trace** marks from the live globals *before* teardown (the frame stack
+        // is unwound, so the globals are the whole root set) and sweeps everything unreachable; the
+        // **trial-deletion** path instead reaps its buffered candidates *after* teardown, once every frame
+        // and global release has had a chance to buffer the cycle's roots.
+        if mode == noeta_value::CollectorMode::Trace {
+            let mut roots: Vec<Value> = self
+                .globals
+                .iter()
+                .copied()
+                .filter(|v| !v.is_unbound())
+                .collect();
+            // The reactive graph (reactivity S1) holds a `+1` reference to every signal's content and
+            // every computed/effect body, but a value reachable *only* through the graph is invisible to
+            // this mark-from-roots sweep. Feed those held values in as roots so the collector does not
+            // reclaim a still-referenced value out from under the graph (which `reactive.clear()` below
+            // would then double-free). The reactive analogue of scanning the channel buffers.
+            self.reactive.for_each_value(|gv| roots.push(gv.get()));
+            let garbage = collect_trace(&roots);
+            self.reclaim_cycle_garbage(garbage);
+        }
+        // Release any messages still buffered in channels at program end (isolates I.1) — undrained
+        // `send`s. Draining here keeps residency at zero; `release_value` runs any message destructor. A
+        // `Shared` channel (I.4c) holds `Wire` copies, not heap `Value`s, so dropping it frees cleanly.
+        for chan in std::mem::take(&mut self.channels) {
+            if let Channel::Local { buffer, .. } = chan {
+                for msg in buffer {
+                    self.release_value(msg);
+                }
+            }
+        }
+        // Release every value held by the reactive graph (reactivity S1): signals never disposed by the
+        // program still own their content until here. Dropping the nodes fires each `GcVal`'s `Drop`, so
+        // residency returns to zero — the leak oracle's proof that the graph's refcounting is exact.
+        self.reactive.clear();
+        // Destroy the globals at program end in reverse declaration order, running each
+        // destructor on its last reference — the deterministic destruction the spec requires.
+        for slot in self.global_order.clone().into_iter().rev() {
+            let v = std::mem::replace(&mut self.globals[slot as usize], Value::unbound());
+            if !v.is_unbound() {
+                self.release_value(v);
+            }
+        }
+        // Backup collection (object-model slice 2c): a reference `class` cycle rooted in the globals
+        // (`a.next = b; b.next = a`) survives the teardown above — each member still holds the other, so
+        // refcounting never reaches zero. With the globals now gone there are **no roots left**, so every
+        // still-live object is unreachable garbage; trace-collect from an empty root set to reclaim it,
+        // running each member's `destruct` exactly once. (The pre-teardown trace above only catches
+        // cycles already unreachable mid-run.)
+        if mode == noeta_value::CollectorMode::Trace {
+            let garbage = collect_trace(&[]);
+            self.reclaim_cycle_garbage(garbage);
+        }
+        if mode == noeta_value::CollectorMode::TrialDeletion {
+            let garbage = noeta_gc::collect_trial_deletion();
+            self.reclaim_cycle_garbage(garbage);
+        }
+
+        // Join any isolate worker threads not already harvested (a structured scope harvests + joins its
+        // isolates at `}`, so this is normally empty — defensive against an early exit).
+        for slot in std::mem::take(&mut self.isolates) {
+            if let Some(h) = slot.handle {
+                let _ = h.join();
+            }
+        }
+
+        let exit_code = if self.diagnostics.is_empty() { 0 } else { 1 };
+        RunResult {
+            stdout: std::mem::take(&mut self.stdout),
+            exit_code,
+            diagnostics: std::mem::take(&mut self.diagnostics),
+        }
     }
 }
 
@@ -1737,7 +1942,7 @@ fn run_isolate_worker(
     wire_args: Vec<isolate::Wire>,
     wire_globals: Vec<(u32, isolate::Wire)>,
     span: Span,
-) -> Result<isolate::Wire, String> {
+) -> Result<isolate::Wire, IsolateFailure> {
     noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
     let (host, executor) = factory();
     let mut wvm = Vm::load(module, host, executor);
@@ -1768,16 +1973,26 @@ fn run_isolate_worker(
     release(callee);
     let message = match outcome {
         Ok(result) => {
-            let marshalled = isolate::marshal(result, &wvm.shapes, &wvm.channels)
-                .map_err(|e| format!("isolate result is not shippable: {e}"));
+            let marshalled = isolate::marshal(result, &wvm.shapes, &wvm.channels).map_err(|e| {
+                // The body completed; only the result failed to ship — there is no abort stack.
+                IsolateFailure {
+                    message: format!("isolate result is not shippable: {e}"),
+                    trace: Vec::new(),
+                }
+            });
             wvm.release_value(result);
             marshalled
         }
-        Err(_abort) => Err(wvm
-            .diagnostics
-            .last()
-            .map(|d| d.message.clone())
-            .unwrap_or_else(|| "isolate aborted".to_string())),
+        // Ship the worker's own abort traceback home with the message (plain data — it crosses the
+        // boundary like any `Wire`), so the parent's rendered trace includes the worker's frames.
+        Err(_abort) => Err(IsolateFailure {
+            message: wvm
+                .diagnostics
+                .last()
+                .map(|d| d.message.clone())
+                .unwrap_or_else(|| "isolate aborted".to_string()),
+            trace: std::mem::take(&mut wvm.abort_trace),
+        }),
     };
     // Tear the worker down so its thread-local heap returns to zero residency: release the JIT
     // inline caches' closure pins (S4.2), destroy globals in reverse declaration order, then
@@ -2121,6 +2336,32 @@ impl<'m> Vm<'m> {
         regs.reserve(8192usize.saturating_sub(regs.len()));
         let result = self.dispatch(&mut frames, &mut regs);
         if result.is_err() {
+            // Capture this stack segment for the abort traceback, innermost frame first, before the
+            // teardown below reclaims anything. Costs nothing until an abort actually happens.
+            //
+            // Locations: a **caller** frame's saved `pc` is its resume point (a call saves `pc + 1`),
+            // so `pc - 1` is the call op and the line table resolves it to the call site. The
+            // **innermost** frame's saved `pc` is stale (it is only synced at calls), so its location
+            // comes from the abort's just-recorded diagnostic — but only for the *first* captured
+            // segment: when the abort climbs out of a re-entrant run (a closure called from inside a
+            // builtin), the outer segment's top frame has no known abort site, and a stale line would
+            // mislead; it gets `None` (name only).
+            let first_segment = self.abort_trace.is_empty();
+            for (fi, frame) in frames.iter().enumerate().rev() {
+                let chunk = &self.module.protos[frame.proto as usize];
+                let innermost = fi + 1 == frames.len();
+                let span = if innermost {
+                    first_segment
+                        .then(|| self.diagnostics.last().map(|d| d.span))
+                        .flatten()
+                } else {
+                    chunk.line_span(frame.pc.saturating_sub(1))
+                };
+                self.abort_trace.push(TraceFrame {
+                    name: chunk.name.clone(),
+                    span,
+                });
+            }
             // Phase 4.2c-ii: a panic unwinds the live frames. Before reclaiming their memory, fire
             // the `destruct` of every live destructor-bearing frame local — innermost frame first,
             // reverse-construction within each (the `frame_locals` list reversed) — so an aborting
@@ -2237,6 +2478,22 @@ impl<'m> Vm<'m> {
                 };
             }
             loop {
+                // Debugger seam (`noeta dap`): before each instruction, let the attached debugger map
+                // `(proto, pc)` to a source line and pause if a breakpoint/step/entry condition holds.
+                // `None` on every non-debug run — one predicted branch. The frame's `pc` is synced
+                // first so a paused stack trace reads the instruction about to run. `Terminate` (a
+                // disconnect while paused) unwinds cleanly, releasing the stack like any abort.
+                if let Some(debugger) = self.debugger.as_deref_mut() {
+                    frames[top].pc = pc;
+                    let view = DebugView {
+                        module,
+                        frames: &frames[..],
+                        regs: &regs[..],
+                    };
+                    if debugger.before_op(proto as u32, pc, &view) == DebugAction::Terminate {
+                        return Err(Abort);
+                    }
+                }
                 // Every prototype ends with `Halt`, so `pc` never runs off the end — index directly
                 // instead of the `.get()` guard the pre-S3 loop used. A call keeps `fbase` on the
                 // *caller* until `continue 'reload`, so a call op reads its arguments first.
@@ -6411,6 +6668,88 @@ mod tests {
         VmBackend::new()
             .try_run(&parsed.program)
             .expect("program should be in the M1.0 subset")
+    }
+
+    /// Run a source program through the sandboxed traced entry, returning the result + traceback.
+    fn run_traced(src: &str) -> (RunResult, Vec<TraceFrame>) {
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).expect("program should compile");
+        VmBackend::new().run_module_traced(&module)
+    }
+
+    /// R0 (REPL-on-VM): [`Vm::run_top`] runs the entry chunk against globals that **persist between
+    /// calls**, and a single [`Vm::teardown`] afterwards brings heap residency back to zero. This is
+    /// the mechanism the session rides on — a first entry's global bindings survive into the next, and
+    /// cleanup is deferred to one final teardown rather than run after every entry.
+    #[test]
+    fn run_top_persists_globals_across_entries_then_one_teardown_zeroes_residency() {
+        let src = "mut xs = [1, 2, 3];\necho xs.len();\n";
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).expect("compiles");
+
+        let before = noeta_value::live_count();
+        let mode = noeta_value::CollectorMode::Trace;
+        noeta_value::set_collector_mode(mode);
+        let mut vm = Vm::load(
+            &module,
+            Box::new(noeta_stdlib::SandboxHost::new()),
+            Box::new(noeta_stdlib::SandboxExecutor::new()),
+        );
+
+        // Entry 1 binds the global `xs` (a heap list) and leaves it live between entries.
+        vm.run_top();
+        assert!(
+            vm.globals.iter().any(|v| !v.is_unbound()),
+            "a global bound by the first entry survives into the next"
+        );
+        assert!(
+            noeta_value::live_count() > before,
+            "the bound list is resident between entries (no per-entry teardown ran)"
+        );
+
+        // Entry 2 re-runs the entry chunk against the *same* globals (rebinding `xs`, which releases
+        // the first list and builds a new one) — no teardown in between.
+        vm.run_top();
+
+        // One teardown drains both entries' output and returns residency to the pre-run baseline.
+        let result = vm.teardown(mode);
+        assert_eq!(result.stdout, "3\n3\n");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            noeta_value::live_count(),
+            before,
+            "a single teardown after many entries brings residency to zero"
+        );
+    }
+
+    #[test]
+    fn an_abort_captures_a_stack_trace_and_a_clean_run_captures_none() {
+        // A panic three calls deep: the trace walks inner ← outer ← main, innermost first, with the
+        // failing line on the innermost frame and each caller at its call site.
+        let (result, trace) = run_traced(
+            "fn inner(): int {\n  panic(\"boom\");\n}\nfn outer(): int {\n  return inner();\n}\nouter();\n",
+        );
+        assert_eq!(result.exit_code, 1);
+        let names: Vec<Option<&str>> = trace.iter().map(|f| f.name.as_deref()).collect();
+        assert_eq!(
+            names,
+            vec![Some("inner"), Some("outer"), Some("main")],
+            "trace should be innermost-first: {trace:?}"
+        );
+        // Every frame resolved a source location (top-level programs have full line tables).
+        assert!(
+            trace.iter().all(|f| f.span.is_some()),
+            "all frames should carry spans: {trace:?}"
+        );
+
+        // A clean run leaves no trace behind.
+        let (result, trace) = run_traced("fn f(): int {\n  return 1;\n}\necho f();\n");
+        assert_eq!(result.exit_code, 0);
+        assert!(trace.is_empty(), "clean run must not trace: {trace:?}");
     }
 
     /// Compile a source program to a [`Module`] (or panic if it's outside the VM subset), for the

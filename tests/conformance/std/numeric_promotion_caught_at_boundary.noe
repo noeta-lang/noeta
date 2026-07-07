@@ -1,0 +1,9 @@
+// Numbers widen inside an expression — `int + float` is a `float` — but that result is checked
+// against its boundary like any other value, so a widened `float` cannot silently reach an `int`
+// binding. `total` is `int`; `total + 1.5` is `float`; the reassignment is E0007. (The widening is
+// confined to expressions; assignability stays strict.) The reassigned value is on line 8, column 9.
+// expect: error E0007 at 8:9
+// expect: exit 1
+mut total = 0;
+total = total + 1.5;
+echo total;

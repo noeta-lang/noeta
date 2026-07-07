@@ -152,6 +152,10 @@ impl Session {
     pub fn eval(&mut self, program: &Program) -> SessionOutput {
         self.interp.stdout.clear();
         self.interp.diagnostics.clear();
+        // Per-entry trace state: the interpreter persists across entries, and the trace's
+        // first-abort-wins rule would otherwise let entry 1's panic mask entry 2's.
+        self.interp.abort_trace.clear();
+        self.interp.call_sites.clear();
 
         let value = self
             .run_batch(program)
@@ -217,11 +221,15 @@ impl Session {
         let ir = noeta_ir::lower(&lowerable)
             .expect("Core-IR lowering is total over the parsed language (the REPL only feeds parsed programs)");
         // Mirror the bytecode pipeline: precise-RC drops (no checker in the REPL, so drops are
-        // conservatively destructor-relevant) then reuse tokens. Reflection is rebuilt from this
-        // batch so within-entry `attributes_of`/`roles_of`/type queries resolve.
+        // conservatively destructor-relevant) then reuse tokens. This entry's reflection is
+        // **accumulated** into the persistent set (latest-wins), so `attributes_of`/`roles_of`/type
+        // queries resolve for types declared in *earlier* entries too — the VM's `SessionCompiler`
+        // accumulates identically, so the session differential stays green.
         let ir = noeta_ir_passes::insert_drops(&ir, None);
         let ir = noeta_ir_passes::thread_reuse(&ir);
-        self.interp.reflection = noeta_ast::reflect::build(&lowerable);
+        self.interp
+            .reflection
+            .accumulate(noeta_ast::reflect::build(&lowerable));
         let flow = self.interp.run_ir_batch(&ir);
         // **Remove** (not clone) the sentinel so an evaluated trailing value never lingers in scope.
         // Keeping it bound would hold a reference to the value across entries, which would both leak
@@ -241,6 +249,7 @@ impl Session {
             stdout: std::mem::take(&mut self.interp.stdout),
             diagnostics: std::mem::take(&mut self.interp.diagnostics),
             value,
+            trace: std::mem::take(&mut self.interp.abort_trace),
         }
     }
 }
@@ -305,6 +314,10 @@ pub struct SessionOutput {
     pub stdout: String,
     pub diagnostics: Vec<Diagnostic>,
     pub value: Option<String>,
+    /// The abort traceback if this entry panicked (empty otherwise) — innermost frame first. A frame
+    /// from a function defined in an *earlier* entry carries a span into that entry's (gone) text;
+    /// the renderer degrades it to name-only.
+    pub trace: Vec<noeta_backend::TraceFrame>,
 }
 
 // --- Functions and scopes ---
@@ -722,6 +735,9 @@ pub struct Closure {
     defaults: Vec<Option<noeta_ir::Thunk>>,
     body: Rc<noeta_ir::Func>,
     captured: Rc<Scope>,
+    /// The declared name (`"f"`, `"Type.method"`) for the abort traceback — the eval twin of the
+    /// VM's `Chunk::name`. `None` for an anonymous closure value.
+    name: Option<String>,
 }
 
 impl Closure {
@@ -735,6 +751,7 @@ impl Closure {
         defaults: Vec<Option<noeta_ir::Thunk>>,
         body: Rc<noeta_ir::Func>,
         captured: Rc<Scope>,
+        name: Option<String>,
     ) -> Closure {
         leak::inc();
         register_captured_scope(&captured);
@@ -743,6 +760,7 @@ impl Closure {
             defaults,
             body,
             captured,
+            name,
         }
     }
 }
@@ -1109,6 +1127,17 @@ struct Interpreter {
     /// program the VM harvests — so both backends bake identical full-fidelity `Type` constants
     /// (`type_of` fidelity A, P2.3). A site absent here uses the runtime head-constructor path.
     type_of_sites: std::collections::HashMap<noeta_span::Span, noeta_ast::reflect::TypeRepr>,
+    /// The live **call-site shadow stack**: one `(callee name, call-site span)` per function/method
+    /// activation currently on the Rust call stack, pushed at each call boundary and popped on the
+    /// way out (abort included). Only read when an abort snapshots [`Self::abort_trace`], so it
+    /// costs a push/pop per call — fine for the reference interpreter, whose mandate is clarity and
+    /// exactness, not speed (the VM gets the same information for free from its saved resume pcs).
+    call_sites: Vec<(Option<String>, Span)>,
+    /// The abort traceback, innermost frame first — the tree-walker twin of the VM's. Snapshotted
+    /// from `call_sites` at the moment the **first** abort's diagnostic is recorded (later teardown
+    /// aborts do not overwrite it), so unwinding and swallowed destructor aborts can never leave a
+    /// stale trace.
+    abort_trace: Vec<noeta_backend::TraceFrame>,
 }
 
 impl Interpreter {
@@ -1171,6 +1200,8 @@ impl Interpreter {
             reactive: std::rc::Rc::new(noeta_reactive::ReactiveGraph::new()),
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
+            call_sites: Vec::new(),
+            abort_trace: Vec::new(),
         }
     }
 
@@ -1933,6 +1964,7 @@ impl Interpreter {
                 Ok(())
             }
             AssignOutcome::Immutable => {
+                self.record_abort_trace(name_span);
                 self.diagnostics.push(
                     Diagnostic::error(
                         DiagnosticCode::ImmutableAssignment,
@@ -3406,9 +3438,13 @@ impl Interpreter {
             let value = self.eval_default(closure, i)?;
             call_scope.declare(closure.params[i].clone(), value, false);
         }
+        // Shadow the call for the abort traceback: (callee name, call-site span). Popped on every
+        // exit — an abort's trace is snapshotted deeper, at the diagnostic (see `record_abort_trace`).
+        self.call_sites.push((closure.name.clone(), span));
         let saved = std::mem::replace(&mut self.scope, call_scope);
         let result = self.exec_ir_fn_body(&closure.body);
         self.scope = saved;
+        self.call_sites.pop();
         catch_return(result)
     }
 
@@ -3448,9 +3484,12 @@ impl Interpreter {
             let value = self.eval_default(method, i)?;
             call_scope.declare(method.params[i].clone(), value, false);
         }
+        // Shadowed for the abort traceback, exactly as `call_closure` (popped on every exit).
+        self.call_sites.push((method.name.clone(), span));
         let saved = std::mem::replace(&mut self.scope, call_scope);
         let result = self.exec_ir_fn_body(&method.body);
         self.scope = saved;
+        self.call_sites.pop();
         catch_return(result)
     }
 
@@ -3483,9 +3522,12 @@ impl Interpreter {
             let value = self.eval_default(method, i)?;
             call_scope.declare(method.params[i].clone(), value, false);
         }
+        // Shadowed for the abort traceback, exactly as `call_closure` (popped on every exit).
+        self.call_sites.push((method.name.clone(), span));
         let saved = std::mem::replace(&mut self.scope, call_scope);
         let result = self.exec_ir_fn_body(&method.body);
         self.scope = saved;
+        self.call_sites.pop();
         catch_return(result)
     }
 
@@ -4250,9 +4292,34 @@ impl Interpreter {
 
     /// Record a runtime diagnostic and produce the abort sentinel.
     fn runtime_error(&mut self, code: DiagnosticCode, span: Span, message: String) -> Unwind {
+        self.record_abort_trace(span);
         self.diagnostics
             .push(Diagnostic::error(code, span, message));
         Unwind::Abort
+    }
+
+    /// Snapshot the abort traceback from the call-site shadow stack, innermost frame first — the
+    /// tree-walker twin of the VM's frame-stack walk. Taken at the moment the abort's diagnostic is
+    /// recorded (`span` is the failing location), pairing each shadowed activation's *name* with the
+    /// location it is paused at: the innermost function at the failing span, each caller at the call
+    /// site it entered its callee from, and the top level as `main`. First abort wins: a later abort
+    /// (e.g. from teardown) never overwrites the trace of the one actually unwinding the program.
+    fn record_abort_trace(&mut self, span: Span) {
+        if !self.abort_trace.is_empty() {
+            return;
+        }
+        let mut at = span;
+        for (name, call_site) in self.call_sites.iter().rev() {
+            self.abort_trace.push(noeta_backend::TraceFrame {
+                name: name.clone(),
+                span: Some(at),
+            });
+            at = *call_site;
+        }
+        self.abort_trace.push(noeta_backend::TraceFrame {
+            name: Some("main".to_string()),
+            span: Some(at),
+        });
     }
 }
 

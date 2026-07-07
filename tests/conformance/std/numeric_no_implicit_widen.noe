@@ -1,0 +1,7 @@
+// No implicit numeric widening at a call, matching every other typed boundary (a binding, a return,
+// a list element) and Rust: an `int` is not accepted where a `float` is expected. Write `sqrt(4.0)`,
+// not `sqrt(4)`. The rejected call is on line 7, column 6.
+// expect: error E0007 at 7:6
+// expect: exit 1
+use std.{math};
+echo math.sqrt(4);

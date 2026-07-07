@@ -1122,3 +1122,82 @@ fn repl_recovers_from_a_bad_entry() {
         .stdout(predicate::str::contains("ok"))
         .stderr(predicate::str::contains("E0003"));
 }
+
+// --- abort stack traces -----------------------------------------------------------
+
+#[test]
+fn a_nested_panic_prints_a_stack_trace() {
+    let file = temp_program(
+        "trace_nested",
+        "fn inner(): int {\n    panic(\"boom\")\n}\nfn outer(): int {\n    return inner()\n}\nmut r = outer()\necho r\n",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "stack trace (most recent call first):",
+        ))
+        .stderr(predicate::str::contains("at inner (").and(predicate::str::contains(":2)")))
+        .stderr(predicate::str::contains("at outer (").and(predicate::str::contains(":5)")))
+        .stderr(predicate::str::contains("at main (").and(predicate::str::contains(":7)")));
+}
+
+#[test]
+fn a_top_level_panic_prints_no_stack_trace() {
+    // A single-frame abort's trace would only repeat the diagnostic's own location — omitted.
+    let file = temp_program("trace_top", "echo \"before\"\npanic(\"top\")\n");
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("panic: top"))
+        .stderr(predicate::str::contains("stack trace").not());
+}
+
+#[test]
+fn a_panicking_isolate_ships_its_stack_trace_home() {
+    // The worker's own frames (explode ← the async body) cross the thread boundary and render
+    // innermost, above the awaiting parent.
+    let file = temp_program(
+        "trace_isolate",
+        "fn explode(n: int): int {\n    panic(\"worker exploded\")\n}\nasync fn work(n: int): int {\n    return explode(n)\n}\nconcurrent {\n    h = isolate work(5)\n    echo h.await\n}\n",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "isolate panicked: panic: worker exploded",
+        ))
+        .stderr(predicate::str::contains(
+            "stack trace (most recent call first):",
+        ))
+        .stderr(predicate::str::contains("at explode (").and(predicate::str::contains(":2)")))
+        // The async body's synthesized step closure inherits the fn's name (`Func::name`).
+        .stderr(predicate::str::contains("at work ("));
+}
+
+#[test]
+fn a_repl_panic_prints_a_stack_trace_and_the_session_continues() {
+    lang()
+        .arg("repl")
+        .write_stdin(
+            "fn boom(): int {\n    panic(\"repl boom\")\n}\nfn mid(): int {\n    return boom()\n}\nmid()\necho \"still alive\"\n",
+        )
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "stack trace (most recent call first):",
+        ))
+        // Each entry is parsed with its own SourceId and kept, so a frame from a function defined in an
+        // *earlier* entry resolves to that entry's real file and line — not the name-only degradation
+        // the single-SourceId REPL produced. `boom` is entry 0 (panics on its line 2), `mid` entry 1.
+        .stderr(predicate::str::contains("at boom (<repl:0>:2)"))
+        .stderr(predicate::str::contains("at mid (<repl:1>:2)"))
+        // The session survives the panic and evaluates the next entry.
+        .stdout(predicate::str::contains("still alive"));
+}

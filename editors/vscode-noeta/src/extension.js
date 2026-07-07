@@ -1,4 +1,4 @@
-// The Noeta VS Code language client.
+// The Noeta VS Code language client + debug client.
 //
 // Grammar-based highlighting works with no compiler (the TextMate grammar in `syntaxes/`); this file
 // adds the *semantic* half by launching the `noeta lsp` language server and connecting to it over
@@ -6,11 +6,21 @@
 // document outline, and completion — every feature is served by the compiler's own salsa query graph,
 // so what the editor shows always matches what the compiler sees.
 //
+// It also wires the **debugger**: pressing F5 on a `.noe` file launches `noeta dap` (the Debug Adapter
+// Protocol server) and drives it through VS Code's generic debug UI — breakpoints, stepping, the call
+// stack, and variables. The same `noeta` binary serves both roles, so one `noeta.server.path` setting
+// points at both.
+//
 // Plain JavaScript on purpose: the extension runs directly after `npm install`, with no build step to
 // get out of sync with the source.
 
-const { workspace, window, commands } = require("vscode");
+const { workspace, window, commands, debug, DebugAdapterExecutable } = require("vscode");
 const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
+
+/** The configured path to the `noeta` executable (on `PATH` by default). Shared by the LSP and DAP. */
+function noetaCommand() {
+  return workspace.getConfiguration("noeta").get("server.path", "noeta");
+}
 
 /** @type {import("vscode-languageclient/node").LanguageClient | undefined} */
 let client;
@@ -21,9 +31,47 @@ let client;
  * runs — the server has no separate debug mode.
  */
 function buildServerOptions() {
-  const command = workspace.getConfiguration("noeta").get("server.path", "noeta");
-  const run = { command, args: ["lsp"], transport: TransportKind.stdio };
+  const run = { command: noetaCommand(), args: ["lsp"], transport: TransportKind.stdio };
   return { run, debug: run };
+}
+
+/**
+ * Register the debugger: a descriptor factory that launches `noeta dap` as the debug adapter, and a
+ * configuration provider that lets F5 debug the active `.noe` file with no `launch.json` present.
+ */
+function registerDebugging(context) {
+  // Spawn `noeta dap` (stdio DAP) as the adapter for every `noeta` debug session.
+  const factory = {
+    createDebugAdapterDescriptor() {
+      return new DebugAdapterExecutable(noetaCommand(), ["dap"]);
+    },
+  };
+  context.subscriptions.push(
+    debug.registerDebugAdapterDescriptorFactory("noeta", factory),
+  );
+
+  // Fill in a runnable config: F5 with no `launch.json` synthesizes one for the active editor, and any
+  // config missing `program` defaults to the file being edited.
+  const provider = {
+    resolveDebugConfiguration(_folder, config) {
+      if (!config.type && !config.request && !config.name) {
+        const editor = window.activeTextEditor;
+        if (editor && editor.document.languageId === "noeta") {
+          config.type = "noeta";
+          config.request = "launch";
+          config.name = "Debug Noeta file";
+          config.program = editor.document.uri.fsPath;
+        }
+      }
+      if (config.type === "noeta" && !config.program) {
+        config.program = "${file}";
+      }
+      return config;
+    },
+  };
+  context.subscriptions.push(
+    debug.registerDebugConfigurationProvider("noeta", provider),
+  );
 }
 
 function activate(context) {
@@ -55,6 +103,10 @@ function activate(context) {
       window.showInformationMessage("Noeta language server restarted.");
     }),
   );
+
+  // Wire the debugger (independent of the language client — breakpoints work even if the server fails
+  // to launch).
+  registerDebugging(context);
 
   // Starting the client spawns the server; a failure to launch (e.g. `noeta` not on `PATH`) surfaces
   // in the "Noeta Language Server" output channel.

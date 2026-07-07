@@ -27,11 +27,10 @@ use clap::{Parser, Subcommand};
 use noeta_ast::{AttrArg, AttrValue, Expr, Program, Stmt};
 use noeta_check::TierFn;
 use noeta_diagnostics::{Diagnostic, DiagnosticCode, render};
-use noeta_eval::{Session, SessionOutput};
 use noeta_lexer::{TokenKind, lex};
 use noeta_parser::parse;
 use noeta_span::{Source, SourceId, SourceMap, Span};
-use noeta_vm::VmBackend;
+use noeta_vm::{SessionOutput, VmBackend, VmSession};
 
 mod manifest;
 
@@ -117,6 +116,10 @@ enum Command {
     /// VS Code extension); speaks JSON-RPC on stdin/stdout. Provides live diagnostics, hover
     /// types, and navigation over the compiler's incremental query graph.
     Lsp,
+    /// Run the Noeta debug adapter over stdio (DAP). Started by an editor's debug UI; speaks the
+    /// Debug Adapter Protocol on stdin/stdout. Runs a program under the production VM (JIT unarmed
+    /// for full introspection) with breakpoints, stepping, and variable inspection.
+    Dap,
 }
 
 fn main() -> ExitCode {
@@ -146,12 +149,19 @@ fn main() -> ExitCode {
         } => cmd_dump(&file, &tier, &profile),
         Command::Repl => cmd_repl(),
         Command::Lsp => cmd_lsp(),
+        Command::Dap => cmd_dap(),
     }
 }
 
 /// Start the Noeta language server over stdio, blocking until the editor client disconnects.
 fn cmd_lsp() -> ExitCode {
     noeta_lsp::run_stdio();
+    ExitCode::SUCCESS
+}
+
+/// Start the Noeta debug adapter over stdio, blocking until the editor client disconnects.
+fn cmd_dap() -> ExitCode {
+    noeta_dap::run_stdio();
     ExitCode::SUCCESS
 }
 
@@ -186,10 +196,15 @@ fn run_program(program: &noeta_ast::Program, sources: &SourceMap) -> i32 {
     }
 
     match execute_real_host(program, &checked) {
-        Ok(result) => {
+        Ok((result, trace)) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();
             emit_diagnostics_mapped(sources, result.diagnostics.iter());
+            // An abort's stack trace, after the diagnostic it belongs to. Only when there is a call
+            // chain to show — a single-frame trace repeats what the diagnostic's span already says.
+            if trace.len() >= 2 {
+                eprint!("{}", noeta_vm::render_trace(&trace, sources));
+            }
             result.exit_code
         }
         Err(err) => {
@@ -229,6 +244,9 @@ fn compile_real(
         // Real execution runs isolates on OS threads (I.4b): lower `isolate f(args)` to `SpawnIsolate`.
         // The differential/salsa paths pass false (byte-identical cooperative sandbox).
         true,
+        // `noeta run` is a production compile — no debug info (the debugger's `noeta dap` compiles
+        // the same program with debug = true).
+        false,
     )
     .map_err(|u| {
         format!(
@@ -250,7 +268,7 @@ fn compile_real(
 fn execute_real_host(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
-) -> Result<noeta_backend::RunResult, String> {
+) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), String> {
     let module = std::sync::Arc::new(compile_real(program, checked)?);
     // A factory that mints a fresh real host + wall-clock executor per isolate (isolates I.4b): the
     // main program gets one, and each real-thread `isolate f(args)` gets its own so a worker's disk /
@@ -823,7 +841,8 @@ fn run_one_test(setup: &[Stmt], case: &TestCase, span: Span) -> TestOutcome {
     }
 
     match execute_real_host(&program, &checked) {
-        Ok(result) => {
+        // The `@test` runner reports the failing diagnostic; the trace is a `noeta run` affordance.
+        Ok((result, _trace)) => {
             let passed = result.exit_code == 0 && result.diagnostics.is_empty();
             let message = (!passed).then(|| {
                 result
@@ -1173,11 +1192,32 @@ enum ReplStep {
     Incomplete,
 }
 
+/// The environment the REPL runs against: a **real** host + wall-clock executor, so `fs`, `time`,
+/// `env`, and `uuid()` work at the prompt against the real machine — exactly as `noeta run` does. Built
+/// fresh on `:reset`. (The deterministic sandbox exists only to make the differential oracle
+/// reproducible; it is not what an interactive prompt wants.) A real-thread `isolate f(args)` falls
+/// back to a cooperative task here, since the session does not arm the parallel-isolate path.
+fn real_repl_env() -> noeta_vm::HostFactory {
+    Box::new(|| {
+        let host: Box<dyn noeta_stdlib::Host> =
+            Box::new(noeta_runtime::RealHost::new().expect("cannot start the REPL's runtime"));
+        let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
+            noeta_runtime::RealExecutor::new().expect("cannot start the REPL's async executor"),
+        );
+        (host, executor)
+    })
+}
+
 fn cmd_repl() -> ExitCode {
     let stdin = io::stdin();
-    let mut session = Session::new();
+    let mut session = VmSession::new(real_repl_env());
     let mut buffer = String::new();
-    let mut entry_no: u32 = 0;
+    // Each evaluated entry is parsed with a **distinct** `SourceId` (its index here) and kept, so a
+    // stack trace into a function defined in an *earlier* entry renders against that entry's real text
+    // and line — rather than degrading to name-only, as it did when every entry reused
+    // `SourceId::FIRST` (REPL-on-VM follow-on). Only entries that actually run are kept; a syntax-error
+    // entry compiles nothing, so no future trace can reference it.
+    let mut sources: Vec<Source> = Vec::new();
     eprint!("lang repl — type a statement, Ctrl-D to exit\n» ");
     let _ = io::stderr().flush();
 
@@ -1193,7 +1233,7 @@ fn cmd_repl() -> ExitCode {
         // A `:`-prefixed line (when nothing is pending) is a REPL meta-command — tooling that lives
         // outside the language grammar (`:type`, `:drop`, `:bindings`, `:reset`, `:help`, `:quit`).
         if buffer.is_empty() && line.trim_start().starts_with(':') {
-            if repl_meta(&mut session, line.trim()) == MetaOutcome::Quit {
+            if repl_meta(&mut session, line.trim(), &sources) == MetaOutcome::Quit {
                 break;
             }
             eprint!("» ");
@@ -1205,7 +1245,7 @@ fn cmd_repl() -> ExitCode {
         }
         buffer.push_str(&line);
 
-        match repl_step(&mut session, &buffer, &mut entry_no) {
+        match repl_step(&mut session, &buffer, &mut sources) {
             ReplStep::Consumed => {
                 buffer.clear();
                 eprint!("» ");
@@ -1231,7 +1271,7 @@ enum MetaOutcome {
 /// top-level bindings alive across entries — extended lifetime, unlike compiled code's last-use
 /// destruction — so `:drop` is how a destructor is observed or an object reclaimed interactively,
 /// and `:type` reports a value's runtime type in a session that runs no checker.
-fn repl_meta(session: &mut Session, line: &str) -> MetaOutcome {
+fn repl_meta(session: &mut VmSession, line: &str, sources: &[Source]) -> MetaOutcome {
     let body = line.strip_prefix(':').unwrap_or(line);
     let mut parts = body.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap_or("");
@@ -1270,7 +1310,7 @@ fn repl_meta(session: &mut Session, line: &str) -> MetaOutcome {
             if arg.is_empty() {
                 eprintln!("usage: :type <expr>");
             } else {
-                repl_type(session, arg);
+                repl_type(session, arg, sources);
             }
         }
         other => eprintln!("unknown command `:{other}` — try :help"),
@@ -1278,9 +1318,13 @@ fn repl_meta(session: &mut Session, line: &str) -> MetaOutcome {
     MetaOutcome::Continue
 }
 
-/// `:type <expr>` — parse `expr`, evaluate it in the session, and print its runtime type.
-fn repl_type(session: &mut Session, expr: &str) {
-    let source = Source::new(SourceId::FIRST, "<repl-type>", format!("{expr};"));
+/// `:type <expr>` — parse `expr`, evaluate it in the session, and print its runtime type. Evaluating
+/// the expression may abort (`:type boom()`); the trace then resolves against every entry's source, so
+/// a `:type` id (the next index) is added to the render map without being *persisted* — a `:type`
+/// query defines nothing, so no later trace can reference it.
+fn repl_type(session: &mut VmSession, expr: &str, sources: &[Source]) {
+    let id = SourceId(sources.len() as u32);
+    let source = Source::new(id, "<repl-type>", format!("{expr};"));
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     let diags: Vec<Diagnostic> = lexed
@@ -1296,8 +1340,13 @@ fn repl_type(session: &mut Session, expr: &str) {
     let out = session.type_of(&parsed.program);
     print!("{}", out.stdout);
     let _ = io::stdout().flush();
+    // Render diagnostics / any abort trace against all entries plus this `:type` source.
+    let mut map_sources = sources.to_vec();
+    map_sources.push(source);
+    let map = SourceMap::new(map_sources);
     if !out.diagnostics.is_empty() {
-        emit_diagnostics(&source, out.diagnostics.iter());
+        emit_diagnostics_mapped(&map, out.diagnostics.iter());
+        emit_trace(&out.trace, &map);
     } else if let Some(ty) = out.value {
         println!("{ty}");
         let _ = io::stdout().flush();
@@ -1319,12 +1368,10 @@ fn print_repl_help() {
 /// printed. If the only parse problem is hitting end-of-input, the entry is treated as
 /// incomplete and more input is requested (multiline). Any other error is reported, and the
 /// buffer is reset so one bad entry cannot wedge the session.
-fn repl_step(session: &mut Session, buffer: &str, entry_no: &mut u32) -> ReplStep {
-    let source = Source::new(
-        SourceId::FIRST,
-        format!("<repl:{entry_no}>"),
-        buffer.to_string(),
-    );
+fn repl_step(session: &mut VmSession, buffer: &str, sources: &mut Vec<Source>) -> ReplStep {
+    // The next evaluated entry's `SourceId` is its index in the persistent `sources` vector.
+    let id = SourceId(sources.len() as u32);
+    let source = Source::new(id, format!("<repl:{}>", sources.len()), buffer.to_string());
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     let diags: Vec<Diagnostic> = lexed
@@ -1335,19 +1382,25 @@ fn repl_step(session: &mut Session, buffer: &str, entry_no: &mut u32) -> ReplSte
         .collect();
 
     if diags.is_empty() {
-        *entry_no += 1;
-        emit_session(&source, session.eval(&parsed.program));
+        sources.push(source);
+        let out = session.eval(&parsed.program);
+        emit_session(sources, out);
         return ReplStep::Consumed;
     }
 
-    // A bare expression needs a terminating `;`; retry with one appended.
-    let patched = format!("{buffer};");
-    let psource = Source::new(SourceId::FIRST, format!("<repl:{entry_no}>"), patched);
+    // A bare expression needs a terminating `;`; retry with one appended (same id — only one of the
+    // two sources is ever kept, whichever compiled).
+    let psource = Source::new(
+        id,
+        format!("<repl:{}>", sources.len()),
+        format!("{buffer};"),
+    );
     let plexed = lex(&psource);
     let pparsed = parse(&psource, &plexed.tokens);
     if plexed.diagnostics.is_empty() && pparsed.diagnostics.is_empty() {
-        *entry_no += 1;
-        emit_session(&psource, session.eval(&pparsed.program));
+        sources.push(psource);
+        let out = session.eval(&pparsed.program);
+        emit_session(sources, out);
         return ReplStep::Consumed;
     }
 
@@ -1369,8 +1422,8 @@ fn repl_step(session: &mut Session, buffer: &str, entry_no: &mut u32) -> ReplSte
         return ReplStep::Incomplete;
     }
 
-    // A genuine syntax error: report it against the original buffer and reset.
-    *entry_no += 1;
+    // A genuine syntax error: report it against the original buffer and reset. The entry compiled
+    // nothing, so its source is *not* kept — its id is reused by the next entry.
     emit_diagnostics(&source, diags.iter());
     ReplStep::Consumed
 }
@@ -1391,15 +1444,29 @@ fn unclosed_delimiters(tokens: &[noeta_lexer::Token]) -> bool {
     depth > 0
 }
 
-/// Print a session evaluation's stdout, the value of a trailing bare expression (if any),
-/// then any diagnostics.
-fn emit_session(source: &Source, out: SessionOutput) {
+/// Print a session evaluation's stdout, the value of a trailing bare expression (if any), then any
+/// diagnostics and abort trace. `sources` holds every evaluated entry keyed by `SourceId`, so a
+/// diagnostic or trace frame from a function defined in an earlier entry renders against that entry's
+/// real file and line.
+fn emit_session(sources: &[Source], out: SessionOutput) {
     print!("{}", out.stdout);
     if let Some(value) = out.value {
         println!("{value}");
     }
     let _ = io::stdout().flush();
-    emit_diagnostics(source, out.diagnostics.iter());
+    let map = SourceMap::new(sources.to_vec());
+    emit_diagnostics_mapped(&map, out.diagnostics.iter());
+    emit_trace(&out.trace, &map);
+}
+
+/// Render a session entry's abort trace to stderr, resolving each frame against `map` — the same
+/// rendering and "only when there is a real call chain (≥2 frames)" rule `noeta run` uses (a single
+/// frame just repeats the diagnostic's own location). With per-entry sources in `map`, a frame from a
+/// function defined in an earlier entry now shows that entry's real file and line.
+fn emit_trace(trace: &[noeta_vm::TraceFrame], map: &SourceMap) {
+    if trace.len() >= 2 {
+        eprint!("{}", noeta_vm::render_trace(trace, map));
+    }
 }
 
 fn exit_code(code: i32) -> ExitCode {

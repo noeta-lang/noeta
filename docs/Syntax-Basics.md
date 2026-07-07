@@ -53,12 +53,44 @@ echo [1, 2, 3]  // [1, 2, 3]
 
 ## Bindings and mutability
 
-`name = expr` binds immutably; `mut name = expr` binds mutably. Reassigning an immutable binding is an error (E0006).
+`name = expr` binds immutably; `mut name = expr` binds mutably. Reassigning an immutable binding is a **compile-time** error (E0006) — caught statically, even on a branch that never runs.
 
 ```noeta
 x = 10               // immutable
 mut total = 0        // mutable
 total = total + 5    // ok
+```
+
+A `mut` binding has a **fixed type**. It is set when the binding is declared — from an annotation, or inferred from the initializer — and a reassignment must be assignable to that type. The type you see is the type it keeps; a later write never silently retypes it:
+
+```noeta
+mut x = 1
+x = 2          // ok — still an int
+echo x         // 2
+```
+
+Assigning an incompatible value is E0007 — the shown type is a promise, not a starting point:
+
+```noeta error
+mut x = 1
+x = "hi"       // E0007: `string` is not assignable to `int`
+```
+
+For a binding that must hold more than one type, say so explicitly with a **union** or `dyn`:
+
+```noeta
+mut u: int | string = 1
+u = "hi"       // ok — string is a member of the union
+mut d: dyn = 1
+d = "hi"       // ok — dyn opts out of a fixed type
+echo u         // hi
+```
+
+A value outside the declared set is still rejected (that is the point of a union over `dyn`):
+
+```noeta error
+mut u: int | string = 1
+u = true       // E0007: bool is not a member of `int | string`
 ```
 
 A binding may carry a type annotation, which is a **checked boundary** (mismatch is E0007), erased at runtime:
@@ -114,9 +146,12 @@ echo 2e-2        // 0.02
 echo 3.141_592   // 3.141592
 ```
 
+> [!NOTE]
+> **Numeric conversions are explicit at a boundary.** An `int` is not implicitly a `float`: a binding, argument, return, or element of type `float` rejects an `int` — write the literal in the target type (`sqrt(4.0)`, not `sqrt(4)`). Widening happens only *inside an expression* — `int` and `float` combine in **arithmetic** (`x + 1` where `x` is a `float` is a `float`) — and that result is then checked against its boundary like any other value, so a widened `float` can never slip into an `int` binding.
+
 ### `f32` — 32-bit float
 
-Written with an `f32` suffix. The widening lattice is `int < f32 < float`: `f32 op int → f32`, `f32 op float → float`. It is observably lower-precision than `float`:
+Written with an `f32` suffix. In **arithmetic**, the widening lattice is `int < f32 < float`: `f32 op int → f32`, `f32 op float → float` (this is expression-result widening, not an implicit conversion at a binding or argument — see the note above). It is observably lower-precision than `float`:
 
 ```noeta
 x = 1.5f32

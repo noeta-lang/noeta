@@ -1584,13 +1584,68 @@ impl Checker {
                                      whose later writes determine the type",
                             );
                         }
-                        // `mut x = …` is a fresh declaration (innermost frame, even if it shadows);
-                        // a bare `x = …` reassigns an existing binding in its declaring scope so a
-                        // refinement persists past a nested scope, else introduces a fresh binding.
+                        // `mut x = …` is a fresh declaration (innermost frame, even if it shadows).
                         if *mut_decl {
                             bind_mut(env, name, vty);
-                        } else {
+                        } else if matches!(value, Expr::FieldSet { .. } | Expr::Coalesce { .. }) {
+                            // Two desugars of compound assignment carry an *intended* type change and
+                            // so bypass the plain-variable reassignment checks below:
+                            //  - `x.f = v` → `x = FieldSet{…}`: a receiver rebind whose mutability is
+                            //    class-aware (a value `struct` rebinds and needs `mut x`, E0006; a
+                            //    reference `class` mutates in place) and whose type is checked, both
+                            //    inside `synth_field_set` — so the checks below would double-report on
+                            //    a struct and false-positive on a class.
+                            //  - `x ??= y` → `x = x ?? y`: the coalesce **unwraps** an optional, so it
+                            //    deliberately narrows the binding (`Option<int>` → `int`). This is the
+                            //    one place a bare reassignment legitimately changes a *resolved* type.
+                            // Update the binding's type as before; each desugar's own checks ran.
                             assign(env, name, vty);
+                        } else {
+                            // A bare `x = …` reassigns an existing binding, or introduces a fresh
+                            // immutable one. Reassignment is now enforced **statically** — the
+                            // tree-walker deferred both of these to the runtime:
+                            match lookup(env, name) {
+                                Some(existing) => {
+                                    if !lookup_mutable(env, name) {
+                                        // (1) Mutability: an immutable binding cannot be reassigned.
+                                        self.error(
+                                            DiagnosticCode::ImmutableAssignment,
+                                            *name_span,
+                                            format!(
+                                                "cannot assign to `{name}`, which is immutable"
+                                            ),
+                                        )
+                                        .help(format!(
+                                            "declare it `mut {name} = …` to allow reassignment"
+                                        ));
+                                    } else if existing.contains_unknown() {
+                                        // (2) A still-unresolved inferred type (`mut acc = []`) — this
+                                        // write completes / refines it (the accumulator pattern).
+                                        assign(env, name, vty);
+                                    } else if !self.assignable(&vty, &existing) {
+                                        // (3) Type stability: a resolved `mut` binding keeps its type;
+                                        // a value that is not assignable to it — a different type, or a
+                                        // widening of a resolved type — is rejected. Use a declared
+                                        // union or `dyn` for a genuinely multi-type binding.
+                                        self.error(
+                                            DiagnosticCode::TypeMismatch,
+                                            value.span(),
+                                            format!(
+                                                "cannot assign `{vty}` to `{name}`, which has type `{existing}`"
+                                            ),
+                                        )
+                                        .help(format!(
+                                            "a reassignment must match the binding's type — declare \
+                                             `mut {name}: {existing} | {vty}` for a union, or \
+                                             `mut {name}: dyn` to opt out of a fixed type"
+                                        ));
+                                    }
+                                    // else: assignable (subtype / same / union member) — the binding
+                                    // keeps its established type, so its shown type stays stable.
+                                }
+                                // Not in scope — a fresh immutable binding in the innermost frame.
+                                None => bind(env, name, vty),
+                            }
                         }
                     }
                 }
@@ -1899,6 +1954,14 @@ impl Checker {
         } else {
             None
         };
+        // E0048 inputs, captured before `ret` is moved into `current_ret` below. A function must
+        // produce its declared return on every path; only a type that *admits* `unit` — `void`
+        // itself, `dyn`, or a union containing `void` — may fall off the end (falling through returns
+        // `unit`). A generator produces its `Iterator<T>` through `yield`s and exhaustion, not a value
+        // return, so it is exempt; an unannotated return is already `E0022`, so `Unknown` is skipped.
+        let must_return_value =
+            !is_generator && !matches!(ret, Type::Unknown) && !Type::subtype(&Type::Unit, &ret);
+        let declared_ret = ret.clone();
         let saved_yield = std::mem::replace(&mut self.current_yield, yield_elem);
         // An `async fn` body is an async context: its `.await`s are legal (Track A). `current_ret`
         // stays the *inner* declared type `T` (the body writes `return t`); a call site sees the
@@ -1923,6 +1986,24 @@ impl Checker {
         }
         for stmt in &decl.body {
             self.check_stmt(stmt, env);
+        }
+        // E0048: a non-`void` function must return a value on every path. If control can reach the end
+        // of the body — it falls off the end, or an `if` without an `else` leaves a path open — the
+        // function would implicitly return `unit` where its signature promised another type, and a
+        // caller would silently bind that type to `unit`. (`return`s inside are already checked
+        // against the declared type above; this is the complementary "did every path return" check.)
+        if must_return_value && !block_diverges(&decl.body) {
+            self.error(
+                DiagnosticCode::MissingReturn,
+                decl.name_span,
+                format!(
+                    "function `{}` can reach the end of its body without returning `{declared_ret}`",
+                    decl.name
+                ),
+            )
+            .help(
+                "every path must `return` a value; only a `void` function may fall off the end",
+            );
         }
         // An `async fn` body compiles to the async state machine (Track A.3a), which supports `.await`
         // only in statement position. Reject an `.await` buried in a sub-expression (E0040) rather than
@@ -2927,13 +3008,14 @@ impl Checker {
     }
 
     /// Whether an argument of type `arg` may be passed where `param` is expected — the kind-aware
-    /// counterpart of the free [`arg_compatible`], adding the two call-site leniencies (a `dyn`/hole
-    /// on either side defers; a numeric argument widens to a numeric parameter).
+    /// counterpart of the free [`arg_compatible`]. A `dyn`/hole on either side defers to the runtime;
+    /// otherwise the argument must be assignable to the parameter under the strict subtype lattice.
+    /// There is **no** numeric-widening leniency: an `int` is not accepted where a `float` is expected
+    /// (write `f(2.0)`, not `f(2)`), matching every other typed boundary — a binding, a return, a list
+    /// element — where `int → float` is already rejected, and so an inlay-hinted parameter type is a
+    /// promise the caller must meet.
     fn arg_assignable(&self, arg: &Type, param: &Type) -> bool {
-        self.assignable(arg, param)
-            || arg.defers_to_runtime()
-            || param.defers_to_runtime()
-            || (arg.is_numeric() && param.is_numeric())
+        self.assignable(arg, param) || arg.defers_to_runtime() || param.defers_to_runtime()
     }
 
     fn subsume(&mut self, actual: &Type, expected: &Type, span: Span) {
@@ -5564,6 +5646,78 @@ fn join_closure_returns(stmts: &[Stmt], mut types: Vec<Type>) -> Type {
         }
     }
     acc
+}
+
+/// Whether a block of statements **definitely diverges** — every path through it returns from the
+/// enclosing function, panics, or loops forever, so control cannot fall off the block's end. Drives
+/// the non-`void` "must return a value" check (E0048). Conservative in the sound direction: any
+/// construct not recognized as diverging is treated as *falling through*, so the analysis can only
+/// ever *miss* a diverging path (a false negative), never invent one — it cannot reject a valid
+/// function. A block diverges as soon as *one* of its statements does: everything after an
+/// unconditional divergence is unreachable, so the block's end is too.
+fn block_diverges(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_diverges)
+}
+
+/// Whether a single statement unconditionally transfers control away and never falls through to the
+/// statement after it.
+fn stmt_diverges(stmt: &Stmt) -> bool {
+    match stmt {
+        // `return` leaves the function. (`yield` does not — a generator resumes after it.)
+        Stmt::Return { .. } => true,
+        // An `if` diverges only with an `else` where *both* arms diverge; a missing or falling-through
+        // arm reaches the end.
+        Stmt::If {
+            then_body,
+            else_body: Some(else_body),
+            ..
+        } => block_diverges(then_body) && block_diverges(else_body),
+        // `while true { … }` with no `break` targeting this loop never exits normally.
+        Stmt::While { cond, body, .. } => {
+            matches!(cond, Expr::Bool { value: true, .. }) && !body_breaks(body)
+        }
+        // A structured-concurrency scope is a transparent block for control flow: a `return` inside it
+        // still leaves the function.
+        Stmt::Concurrent { body, .. } => block_diverges(body),
+        // A bare `panic(...)` (or a `match` all of whose arms diverge) never returns.
+        Stmt::Expr { expr, .. } => expr_diverges(expr),
+        _ => false,
+    }
+}
+
+/// Whether an expression in statement position unconditionally diverges: a `panic(...)` call, or a
+/// `match` whose (non-empty) arms *all* diverge — an arm body is an expression, so it diverges only by
+/// itself being a `panic`/all-diverging `match`, never by a `return` (a statement can't sit there).
+fn expr_diverges(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call { callee, .. } => {
+            matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "panic")
+        }
+        Expr::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| expr_diverges(&a.body)),
+        _ => false,
+    }
+}
+
+/// Whether a loop body contains a `break` that targets *this* loop — a `break` not nested inside an
+/// inner `for`/`while` (which it would target instead). Distinguishes an infinite `while true` that
+/// diverges from one that can exit.
+fn body_breaks(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_breaks)
+}
+
+fn stmt_breaks(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Break { .. } => true,
+        // A `break` inside a nested loop targets *that* loop, not ours — do not descend.
+        Stmt::For { .. } | Stmt::While { .. } => false,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => body_breaks(then_body) || else_body.as_ref().is_some_and(|b| body_breaks(b)),
+        Stmt::Concurrent { body, .. } => body_breaks(body),
+        _ => false,
+    }
 }
 
 fn unify_element(acc: &Type, next: &Type) -> Option<Type> {

@@ -18,7 +18,7 @@ count += 1          // compound assignment: count = count + 1
 echo count          // 2
 ```
 
-Reassigning an immutable binding is a compile error. You can annotate a binding's type — it is checked, then erased at runtime:
+Reassigning an immutable binding is a compile error. A `mut` binding also keeps a **fixed type** — a reassignment must match it (`count = "two"` is an error); declare a union or `dyn` for a multi-type binding. You can annotate a binding's type — it is checked, then erased at runtime:
 
 ```noeta
 xs: List<int> = [1, 2, 3]
