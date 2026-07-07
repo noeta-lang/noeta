@@ -33,7 +33,9 @@ use std::thread::{self, JoinHandle};
 
 use serde_json::{Value, json};
 
-use debugger::{DapDebugger, FrameInfo, Paused, Resume, StepMode, parse_expr, resolve_breakpoints};
+use debugger::{
+    DapDebugger, FrameInfo, Paused, Resume, StepMode, parse_console_fragment, resolve_breakpoints,
+};
 use noeta_vm::DebugEvalOutcome;
 use protocol::{Writer, command_of, error_response, event, read_message, response};
 
@@ -185,6 +187,16 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
                     let _ = tx.send(error_response(&request, &message));
                 }
             },
+            // Edit a paused frame's local from the Variables panel (U1): the value string
+            // evaluates as a console fragment, and the frame's register is written in place.
+            "setVariable" => match set_variable(&request, &paused, resume_tx.as_ref()) {
+                Ok(body) => {
+                    let _ = tx.send(response(&request, body));
+                }
+                Err(message) => {
+                    let _ = tx.send(error_response(&request, &message));
+                }
+            },
             "disconnect" => {
                 signal_terminate(&terminate, &resume_tx);
                 let _ = tx.send(response(&request, json!({})));
@@ -241,7 +253,7 @@ fn spawn_run(
                     out.clone(),
                     resume,
                 ));
-                session::run_compiled(&compiled, Some(hook))
+                session::run_compiled(compiled, Some(hook))
             }
             // A load/check/compile failure never started the VM — replay it as a stderr chunk.
             Err(failure) => failure,
@@ -277,6 +289,9 @@ fn capabilities() -> Value {
         // The editor may evaluate a hovered expression (VS Code's debug hover). We answer read-only
         // variable paths (D5); hover is path-only by design (a hover must never run user code).
         "supportsEvaluateForHovers": true,
+        // The Variables-panel edit (U1): a local's value can be replaced while paused; the new
+        // value is any console-evaluable expression (frame locals visible).
+        "supportsSetVariable": true,
     })
 }
 
@@ -466,7 +481,7 @@ fn evaluate(
         .unwrap_or(0) as usize;
     // A hover must not run code (VS Code fires it on mouse-over); a watch / debug console may.
     let allow_calls = args.and_then(|a| a.get("context")).and_then(Value::as_str) != Some("hover");
-    let expr = parse_expr(expression).ok_or("could not parse the expression")?;
+    let program = parse_console_fragment(expression).ok_or("could not parse the expression")?;
     // Evaluation reads the paused frames on the run worker — there must be a paused program.
     if with_paused(paused, |_| ()).is_none() {
         return Err("can only evaluate while the program is paused".to_string());
@@ -475,7 +490,8 @@ fn evaluate(
     let (reply_tx, reply_rx) = mpsc::channel::<DebugEvalOutcome>();
     resume
         .send(Resume::Evaluate {
-            expr,
+            program,
+            text: expression.to_string(),
             frame,
             allow_calls,
             reply: reply_tx,
@@ -489,6 +505,65 @@ fn evaluate(
         })),
         Ok(DebugEvalOutcome::Error(message)) => Err(message),
         Err(_) => Err("evaluation did not complete".to_string()),
+    }
+}
+
+/// Answer a DAP `setVariable` request while paused (U1): the `variablesReference` names the frame
+/// (`frame + 1`, as `scopes` handed it out), `name` the local, and `value` an expression evaluated
+/// as a console fragment (frame locals visible) whose result replaces the local's register. Returns
+/// the new value rendered, exactly as the Variables panel expects; `Err` when the program isn't
+/// paused, the name isn't an in-scope local (or is `self`), or the value doesn't evaluate — the
+/// frame is untouched then.
+fn set_variable(
+    request: &Value,
+    paused: &Option<Paused>,
+    resume_tx: Option<&Sender<Resume>>,
+) -> Result<Value, String> {
+    let args = request.get("arguments");
+    let name = args
+        .and_then(|a| a.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let value_text = args
+        .and_then(|a| a.get("value"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if name.is_empty() || value_text.is_empty() {
+        return Err("setVariable needs a variable name and a value".to_string());
+    }
+    // `scopes` hands out `variablesReference = frame + 1` (0 is DAP's "not expandable" sentinel).
+    let reference = args
+        .and_then(|a| a.get("variablesReference"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if reference == 0 {
+        return Err("setVariable needs the frame's variablesReference".to_string());
+    }
+    let frame = (reference - 1) as usize;
+    let value = parse_console_fragment(value_text).ok_or("could not parse the value")?;
+    if with_paused(paused, |_| ()).is_none() {
+        return Err("can only set a variable while the program is paused".to_string());
+    }
+    let resume = resume_tx.ok_or("the program is not running")?;
+    let (reply_tx, reply_rx) = mpsc::channel::<DebugEvalOutcome>();
+    resume
+        .send(Resume::SetVariable {
+            name,
+            value,
+            frame,
+            reply: reply_tx,
+        })
+        .map_err(|_| "the program is no longer running".to_string())?;
+    match reply_rx.recv() {
+        Ok(DebugEvalOutcome::Value { text, ty }) => Ok(json!({
+            "value": text,
+            "type": ty,
+            "variablesReference": 0,
+        })),
+        Ok(DebugEvalOutcome::Error(message)) => Err(message),
+        Err(_) => Err("the write did not complete".to_string()),
     }
 }
 
@@ -904,6 +979,145 @@ mod tests {
         session.disconnect_and_join();
     }
 
+    /// U2 (tooling-unification): a console `mut` binding persists across console entries — it is a
+    /// SESSION global, not a closure-local — and a name colliding with a frame local is refused.
+    #[test]
+    fn console_mut_bindings_persist_across_entries() {
+        let path = fixture(
+            "console_bindings",
+            "fn twice(n: int): int { return n * 2 }\n\
+             fn probe(): void {\n    \
+             mut xs = [10, 20, 30]\n    \
+             echo \"here\"\n}\n\
+             probe()\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 4 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+
+        // A console `mut` binding reads frame locals AND survives into later entries.
+        let bind = session.evaluate("mut total = xs.len() * 10");
+        assert_eq!(bind["success"], true, "{bind:#?}");
+        assert_eq!(session.evaluate("total + 2")["body"]["result"], "32");
+        // Rebinding works, composing with program functions.
+        session.evaluate("total = twice(total)");
+        assert_eq!(session.evaluate("total")["body"]["result"], "60");
+        // A bare assignment to a brand-new name persists too (REPL parity).
+        session.evaluate("label = \"n=\" ~ total");
+        assert_eq!(session.evaluate("label")["body"]["result"], "n=60");
+        // A closure bound at the console reads the session binding at call time.
+        session.evaluate("mut bump = fn(n: int) => n + total");
+        assert_eq!(session.evaluate("bump(1)")["body"]["result"], "61");
+
+        // A `mut` colliding with a frame local is a hard error — no silent shadowing.
+        let collision = session.evaluate("mut xs = [1]");
+        assert_eq!(collision["success"], false, "{collision:#?}");
+        assert!(
+            collision["message"]
+                .as_str()
+                .unwrap()
+                .contains("frame local"),
+            "collision error names the rule: {collision:#?}"
+        );
+        // ...and the frame local is untouched.
+        assert_eq!(session.evaluate("xs.len()")["body"]["result"], "3");
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    /// U1 (tooling-unification): `setVariable` writes a paused frame's local — the response carries
+    /// the new value, a `variables` re-read shows it (the snapshot refreshes), and the RESUMED
+    /// program actually uses the written register.
+    #[test]
+    fn set_variable_writes_a_frame_local_the_resumed_program_uses() {
+        let path = fixture(
+            "set_variable",
+            "fn probe(): void {\n    \
+             mut n = 10\n    \
+             mut label = \"hi\"\n    \
+             echo n\n}\n\
+             probe()\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 4 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+
+        session.send("scopes", json!({ "frameId": 0 }));
+        let scopes = session.response("scopes");
+        let var_ref = scopes["body"]["scopes"][0]["variablesReference"]
+            .as_i64()
+            .unwrap();
+
+        // The replacement value is a full console expression — frame locals visible.
+        session.send(
+            "setVariable",
+            json!({ "variablesReference": var_ref, "name": "n", "value": "n * 4 + label.len()" }),
+        );
+        let set = session.response("setVariable");
+        assert_eq!(set["success"], true, "{set:#?}");
+        assert_eq!(set["body"]["value"], "42");
+        assert_eq!(set["body"]["type"], "int");
+
+        // A `variables` re-read sees the write (the pause snapshot refreshed).
+        session.send("variables", json!({ "variablesReference": var_ref }));
+        let variables = session.response("variables");
+        let vars = variables["body"]["variables"].as_array().unwrap();
+        let n = vars.iter().find(|v| v["name"] == "n").unwrap();
+        assert_eq!(n["value"], "42");
+
+        // An unknown name (or a bad value) leaves the frame untouched and errors cleanly.
+        session.send(
+            "setVariable",
+            json!({ "variablesReference": var_ref, "name": "nope", "value": "1" }),
+        );
+        let missing = session.response("setVariable");
+        assert_eq!(missing["success"], false);
+
+        // The resumed program executes `echo n` against the WRITTEN register.
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        let mut stdout = String::new();
+        loop {
+            let message = session.recv_until(|m| {
+                (m["type"] == "event" && (m["event"] == "output" || m["event"] == "terminated"))
+                    || m["type"] == "response"
+            });
+            if message["type"] == "event" && message["event"] == "output" {
+                if message["body"]["category"] == "stdout" {
+                    stdout.push_str(message["body"]["output"].as_str().unwrap_or(""));
+                }
+            } else if message["type"] == "event" && message["event"] == "terminated" {
+                break;
+            }
+        }
+        assert_eq!(stdout, "42\n");
+        session.disconnect_and_join();
+    }
+
     #[test]
     fn evaluate_resolves_paths_and_operators_in_a_paused_frame() {
         // At the breakpoint, `p` (a struct) and `xs` (a list) are in scope in `probe`.
@@ -1034,6 +1248,140 @@ mod tests {
         assert_eq!(hover_path["body"]["result"], "4");
         let hover_call = session.evaluate_in("p.mag2()", "hover");
         assert_eq!(hover_call["success"], false, "{hover_call:#?}");
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    /// T5 (tooling-unification): the debug console is a REPL over the paused program — fragments
+    /// compile through the adopted session, so **closures** work, statements execute, and a value
+    /// that ESCAPES into program state (a fragment closure rebound into a program global) is still
+    /// live after `continue`, called by the program's own resumed code.
+    #[test]
+    fn evaluate_compiles_fragments_with_closures_and_escape_survives_resume() {
+        let path = fixture(
+            "evaluate_fragments",
+            "fn twice(n: int): int { return n * 2 }\n\
+             mut cb = fn(n: int) => n\n\
+             fn probe(): void {\n    \
+             mut xs = [10, 20, 30]\n    \
+             echo \"here\"\n}\n\
+             probe()\n\
+             echo cb(7)\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        // Break on the `echo "here"` line, inside `probe`, with `xs` in scope.
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 5 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+
+        // A closure ARGUMENT — new code, compiled into a new proto and run through the real
+        // `filter` machinery against the frame-local list.
+        let filtered = session.evaluate("xs.filter(fn(x) => x > 15)");
+        assert_eq!(filtered["success"], true, "{filtered:#?}");
+        assert_eq!(filtered["body"]["result"], "[20, 30]");
+        // A closure that composes a frame local with a program function.
+        assert_eq!(
+            session.evaluate("xs.map(fn(x) => twice(x))")["body"]["result"],
+            "[20, 40, 60]"
+        );
+        // Statements execute; a trailing bare expression is the fragment's value. The `mut` local
+        // lives only inside the fragment (persistent console bindings are a deferred follow-on).
+        assert_eq!(
+            session.evaluate("mut y = xs.len() * 10; y + 1")["body"]["result"],
+            "31"
+        );
+
+        // ESCAPE: rebind the program's `cb` global to a fragment closure that captures the frame
+        // local `xs` and calls the program's `twice` — a proto index that exists only in the
+        // extended module.
+        let escape = session.evaluate("cb = fn(n: int) => twice(n) + xs.len();");
+        assert_eq!(escape["success"], true, "{escape:#?}");
+        // The escaped closure is callable from a later fragment while still paused.
+        assert_eq!(session.evaluate("cb(1)")["body"]["result"], "5");
+
+        // Resume: the program's own `echo cb(7)` now calls the escaped fragment closure through
+        // the swapped module — twice(7) + xs.len() = 17.
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        let mut stdout = String::new();
+        loop {
+            let message = session.recv_until(|m| {
+                (m["type"] == "event" && (m["event"] == "output" || m["event"] == "terminated"))
+                    || m["type"] == "response"
+            });
+            if message["type"] == "event" && message["event"] == "output" {
+                if message["body"]["category"] == "stdout" {
+                    stdout.push_str(message["body"]["output"].as_str().unwrap_or(""));
+                }
+            } else if message["type"] == "event" && message["event"] == "terminated" {
+                break;
+            }
+        }
+        assert_eq!(stdout, "here\n17\n");
+        session.disconnect_and_join();
+    }
+
+    /// T6 (tooling-unification): hover purity has two layers — the AST gate (a call is refused
+    /// before compiling) and the RUNTIME backstop for receiver-dependent dispatches the AST cannot
+    /// decide: `b[0]` on a value whose type has an `Index` impl would push a `get` frame, refused
+    /// under hover but allowed in a watch. One evaluator serves both, gated.
+    #[test]
+    fn hover_refuses_an_object_index_that_would_run_code() {
+        let path = fixture(
+            "hover_purity",
+            "struct Boxy {\n    \
+             xs: List<int>\n    \
+             fn get(i: int): int { return self.xs[i] }\n\
+             }\n\
+             fn probe(): void {\n    \
+             mut b = Boxy { xs: [7, 8] }\n    \
+             echo \"here\"\n}\n\
+             probe()\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 7 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+
+        // The watch runs the `Index` impl (user code — allowed there).
+        let watch = session.evaluate("b[0]");
+        assert_eq!(watch["success"], true, "{watch:#?}");
+        assert_eq!(watch["body"]["result"], "7");
+        // The hover refuses it at run time (the AST gate allows `[index]`; the frame-push backstop
+        // catches the object receiver).
+        let hover = session.evaluate_in("b[0]", "hover");
+        assert_eq!(hover["success"], false, "{hover:#?}");
+        assert!(
+            hover["message"].as_str().unwrap().contains("read-only"),
+            "hover error names the purity rule: {hover:#?}"
+        );
+        // A plain path still hovers fine.
+        assert_eq!(
+            session.evaluate_in("b.xs[1]", "hover")["body"]["result"],
+            "8"
+        );
 
         session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
         session.disconnect_and_join();

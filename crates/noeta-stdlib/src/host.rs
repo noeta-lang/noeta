@@ -39,6 +39,20 @@ pub struct SandboxHost {
     clock: u64,
     env: BTreeMap<String, String>,
     args: Vec<String>,
+    /// The inbound server state (http-server S1), armed by `net_listen`. A sandbox run serves at
+    /// most one listener — a differential program calls `http.serve` once — so a single slot
+    /// suffices; a second `net_listen` re-arms it.
+    inbound: Option<InboundState>,
+}
+
+/// The sandbox's inbound-server state: the fixed request script (see
+/// [`crate::net::sandbox_request_script`]), a cursor into it, and a transcript of the replies the
+/// handler produced (for test introspection — the differential observes the handler's own output).
+#[derive(Debug, Clone)]
+struct InboundState {
+    script: Vec<crate::NetRequest>,
+    cursor: usize,
+    transcript: Vec<(u64, crate::NetResponse)>,
 }
 
 impl SandboxHost {
@@ -54,6 +68,7 @@ impl SandboxHost {
             clock: 0,
             env: env::sandbox_vars(),
             args: env::sandbox_args(),
+            inbound: None,
         }
     }
 }
@@ -179,9 +194,52 @@ impl Ids for SandboxHost {
 }
 
 impl Network for SandboxHost {
-    /// The whole network is the pure sandbox responder — deterministic, so both backends agree.
+    /// The whole outbound network is the pure sandbox responder — deterministic, so both backends
+    /// agree.
     fn net_fetch(&mut self, request: crate::NetRequest) -> Result<crate::NetResponse, StdError> {
         Ok(crate::net::sandbox_respond(&request))
+    }
+
+    /// Arm the fixed inbound request script (http-server S1); `addr` is ignored (the sandbox binds
+    /// no socket). One listener per run — always id `1`.
+    fn net_listen(&mut self, _addr: &str) -> Result<u64, StdError> {
+        self.inbound = Some(InboundState {
+            script: crate::net::sandbox_request_script(),
+            cursor: 0,
+            transcript: Vec::new(),
+        });
+        Ok(1)
+    }
+
+    /// Pop the next scripted request (conn id = its position), or `None` once the script is
+    /// exhausted — which is what lets a served program terminate under the differential.
+    fn net_accept_next(
+        &mut self,
+        _listener: u64,
+    ) -> Result<Option<(u64, crate::NetRequest)>, StdError> {
+        let state = self
+            .inbound
+            .as_mut()
+            .expect("net_accept_next before net_listen");
+        match state.script.get(state.cursor) {
+            Some(request) => {
+                let conn = state.cursor as u64;
+                state.cursor += 1;
+                Ok(Some((conn, request.clone())))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Record the handler's reply. The differential observes the handler's own output, so this only
+    /// backs test introspection — but recording it keeps the reply path honestly exercised.
+    fn net_reply_now(&mut self, conn: u64, response: crate::NetResponse) -> Result<(), StdError> {
+        self.inbound
+            .as_mut()
+            .expect("net_reply_now before net_listen")
+            .transcript
+            .push((conn, response));
+        Ok(())
     }
 }
 
@@ -232,5 +290,37 @@ mod tests {
         // `sleep` advances it like every other clock view (v7 ids order across sleeps).
         host.clock_sleep(250);
         assert_eq!(host.clock_unix_ms(), SANDBOX_EPOCH_MS + 251); // 250 slept + 1 monotonic read
+    }
+
+    #[test]
+    fn inbound_drives_the_fixed_script_then_signals_close() {
+        let mut host = SandboxHost::new();
+        let listener = host.net_listen("127.0.0.1:0").unwrap();
+
+        // Every scripted request comes back in order, with a sequential conn id, then `None`.
+        let script = crate::net::sandbox_request_script();
+        for (i, expected) in script.iter().enumerate() {
+            let (conn, request) = host.net_accept_next(listener).unwrap().unwrap();
+            assert_eq!(conn, i as u64);
+            assert_eq!(&request, expected);
+            // Reply on that connection — recorded for introspection.
+            host.net_reply_now(
+                conn,
+                crate::NetResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: format!("re:{}", request.method).into_bytes(),
+                },
+            )
+            .unwrap();
+        }
+        // Script exhausted → the serve loop's stop signal.
+        assert!(host.net_accept_next(listener).unwrap().is_none());
+
+        // The transcript captured one reply per scripted request, in order.
+        let transcript = &host.inbound.as_ref().unwrap().transcript;
+        assert_eq!(transcript.len(), script.len());
+        assert_eq!(transcript[0].0, 0);
+        assert_eq!(transcript[2].1.body, b"re:POST");
     }
 }

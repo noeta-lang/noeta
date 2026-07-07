@@ -1,0 +1,31 @@
+// The server-side `http.response(status, body?, headers?)` builder + `Response` accessors and the
+// copy-modify `with_header` (http-server S2): what a handler uses to construct its reply. No server
+// is running here — the builder and the extern-type methods are exercised directly, in both
+// backends, so the surface is pinned before the serve loop drives it (S3).
+// expect: stdout "200"
+// expect: stdout "true"
+// expect: stdout "hello"
+// expect: stdout "text/plain"
+// expect: stdout "204"
+// expect: stdout "true"
+// expect: stdout "1"
+// expect: stdout "unset"
+// expect: exit 0
+use std.{http}
+
+// Status + body + a header, all read back.
+r = http.response(200, "hello", {"content-type": "text/plain"})
+echo r.status()
+echo r.ok()
+echo r.body()
+echo r.header("content-type") ?? "none"
+
+// Status only: empty body, no headers (the optional params).
+empty = http.response(204)
+echo empty.status()
+echo empty.body() == ""
+
+// Copy-modify: `with_header` returns a new response; the original is untouched.
+tagged = r.with_header("x-tag", "1")
+echo tagged.header("x-tag") ?? "none"
+echo r.header("x-tag") ?? "unset"

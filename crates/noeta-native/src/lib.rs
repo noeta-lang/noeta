@@ -20,7 +20,7 @@ pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};
 pub use host::{Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, ReadSource, Rng};
 pub use map_key::{ExternKeyRef, MapKey};
-pub use net::{NetFetchIo, NetRequest, NetResponse};
+pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
 pub use registry::{
     ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut, NativeValue, RetTy, Scalar,
     SigType, TypeDispatch, TypeRecipe,

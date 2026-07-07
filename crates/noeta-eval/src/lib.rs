@@ -77,22 +77,24 @@ impl Backend for TreeWalkBackend {
         let ir = noeta_ir::lower_with_sites(
             program,
             noeta_ir::LoweringSites {
-                packed_list_sites: &checked.packed_list_sites,
-                index_field_sites: &checked.index_field_sites,
-                ext_call_sites: &checked.ext_call_sites,
-                for_stream_sites: &checked.for_stream_sites,
-                width_sites: &checked.width_sites,
-                construction_sites: &checked.construction_sites,
-                handle_sites: &checked.handle_sites,
-                bound_handle_sites: &checked.bound_handle_sites,
-                f32_literal_sites: &checked.f32_literal_sites,
+                packed_list_sites: &checked.sites.packed_list_sites,
+                index_field_sites: &checked.sites.index_field_sites,
+                ext_call_sites: &checked.sites.ext_call_sites,
+                for_stream_sites: &checked.sites.for_stream_sites,
+                width_sites: &checked.sites.width_sites,
+                construction_sites: &checked.sites.construction_sites,
+                handle_sites: &checked.sites.handle_sites,
+                bound_handle_sites: &checked.sites.bound_handle_sites,
+                f32_literal_sites: &checked.sites.f32_literal_sites,
             },
         )
         .expect("Core-IR lowering is total over the parsed language");
-        let ir =
-            noeta_ir_passes::insert_drops(&ir, Some(&relevance_of(&checked.destructor_relevance)));
+        let ir = noeta_ir_passes::insert_drops(
+            &ir,
+            Some(&relevance_of(&checked.sites.destructor_relevance)),
+        );
         let ir = noeta_ir_passes::thread_reuse(&ir);
-        self.run_ir(program, &ir, checked.type_of_sites)
+        self.run_ir(program, &ir, checked.sites.type_of_sites)
     }
 }
 
@@ -356,6 +358,12 @@ pub enum Builtin {
     /// `map_bounded(items, n, f)` — apply async `f` to each item, at most `n` concurrently, results
     /// as a `List<B>` in item order (Track A.9).
     MapBounded,
+    /// `http.serve(port, handler)` — bind an inbound listener and run the accept→handle→reply loop
+    /// (http-server S3), calling `handler(request)` per connection and replying with its `Response`.
+    /// Under the sandbox the loop drives a finite request script and terminates; on the real host it
+    /// serves until the listener closes. A handler error becomes a 500. Reaches the Host's inbound
+    /// Network capability + the executor, which registry dispatch cannot.
+    Serve,
     /// `signal(v)` — create a reactive cell holding `v` (reactivity S1); the tree-walker twin of the
     /// VM's `Builtin::Signal`. Returns a `Signal<T>` handle read/updated via the interpreter's graph.
     Signal,
@@ -384,6 +392,7 @@ impl Builtin {
             Builtin::All => "all",
             Builtin::Race => "race",
             Builtin::MapBounded => "map_bounded",
+            Builtin::Serve => "serve",
             Builtin::Signal => "signal",
             Builtin::Computed => "computed",
             Builtin::Effect => "effect",
@@ -2690,6 +2699,13 @@ impl Interpreter {
             };
             return self.call_builtin(builtin, args.to_vec(), span);
         }
+        // `http.serve(port, handler)` (http-server S3) — a builtin, not a registry function: the
+        // handler is a closure (which the `NativeValue` seam cannot carry) and the loop needs the
+        // executor + inbound Network capability. Intercept it here, ahead of `http`'s registry
+        // functions (which stay registry-dispatched). Mirrors the VM.
+        if module == "http" && func == "serve" {
+            return self.call_builtin(Builtin::Serve, args.to_vec(), span);
+        }
         // A function registered in the native-extension registry dispatches through the shared
         // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host
         // threaded in), and materialize the `NativeOut` result (the result shape supplied from the
@@ -3864,6 +3880,143 @@ impl Interpreter {
                         ));
                     }
                 }
+            }
+            // `http.serve(port, handler)` — the inbound accept→dispatch→reply loop (http-server S3).
+            // **Concurrent (S3b):** each accepted connection's `handler(request)` is a task in a
+            // server-owned in-flight set the loop reaps; a slow (async) handler yields at its awaits
+            // while the next connection is accepted and other handlers advance — the cooperative Tier-1
+            // model (the accept future is polled alongside the handler futures each round, never
+            // drive-to-completion). Under the sandbox the accept leaf drives a finite request script
+            // and reports the listener closed, so the loop terminates in-oracle; on the real host it
+            // serves until the socket closes. The tree-walker mirror of the VM's `Builtin::Serve`;
+            // both poll in the identical order, so the interleaving is deterministic and agrees.
+            Builtin::Serve => {
+                self.expect_arity(builtin, &args, 2, span)?;
+                let Value::Int(port) = args[0] else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`http.serve` expects an int port, found {}",
+                            args[0].type_name()
+                        ),
+                    ));
+                };
+                let handler = args[1].clone();
+                let addr = format!("0.0.0.0:{port}");
+                let listener = self
+                    .host
+                    .net_listen(&addr)
+                    .map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?;
+                // The reply for a handler that errors or returns a non-`Response`.
+                let server_error = || noeta_stdlib::NetResponse {
+                    status: 500,
+                    headers: Vec::new(),
+                    body: b"Internal Server Error".to_vec(),
+                };
+                // Reply on `conn` (an async leaf, driven to completion — a write is quick).
+                let reply = |me: &mut Self, conn: u64, response: noeta_stdlib::NetResponse| {
+                    let reply_io = me.host.net_reply(conn, response);
+                    let reply_id = me.executor.spawn_ext(&mut *me.host, reply_io);
+                    me.drive_future(Value::AsyncIo(reply_id), span).map(|_| ())
+                };
+                let mut in_flight: Vec<(u64, Value)> = Vec::new();
+                let mut accept_future: Option<Value> = None;
+                let mut closing = false;
+                loop {
+                    // Keep one accept in flight while the listener is open.
+                    if !closing && accept_future.is_none() {
+                        let accept_io = self.host.net_accept(listener);
+                        let id = self.executor.spawn_ext(&mut *self.host, accept_io);
+                        accept_future = Some(Value::AsyncIo(id));
+                    }
+                    let mut progressed = false;
+                    // Poll the pending accept; on a connection, spawn its handler task.
+                    if let Some(af) = accept_future.take() {
+                        match self.poll_once(&af, span)? {
+                            Some(accepted) => {
+                                progressed = true;
+                                match &accepted {
+                                    Value::Enum(e)
+                                        if e.enum_name == "Option" && e.variant == "some" =>
+                                    {
+                                        let request = e
+                                            .data
+                                            .first()
+                                            .cloned()
+                                            .expect("some carries the request");
+                                        let conn = match &request {
+                                            Value::Extern(cell) => cell
+                                                .borrow()
+                                                .as_any()
+                                                .downcast_ref::<noeta_stdlib::net::Request>()
+                                                .map(|r| r.conn),
+                                            _ => None,
+                                        }
+                                        .expect("accept yields a Request extern value");
+                                        // Spawn the handler. A sync handler returns the `Response`
+                                        // immediately; an async one a `Future` polled below. A call-time
+                                        // error → 500 now.
+                                        match self.call(handler.clone(), vec![request], span) {
+                                            Ok(fut) => in_flight.push((conn, fut)),
+                                            Err(_) => reply(self, conn, server_error())?,
+                                        }
+                                    }
+                                    // `none` → the listener closed; stop accepting and drain.
+                                    _ => closing = true,
+                                }
+                            }
+                            None => accept_future = Some(af),
+                        }
+                    }
+                    // Reap: poll each in-flight handler; reply on completion, 500 on error.
+                    let mut k = 0;
+                    while k < in_flight.len() {
+                        let (conn, fut) = (in_flight[k].0, in_flight[k].1.clone());
+                        let done = match self.poll_once(&fut, span) {
+                            Ok(Some(value)) => {
+                                let response = match &value {
+                                    Value::Extern(cell) => cell
+                                        .borrow()
+                                        .as_any()
+                                        .downcast_ref::<noeta_stdlib::NetResponse>()
+                                        .cloned()
+                                        .unwrap_or_else(server_error),
+                                    _ => server_error(),
+                                };
+                                reply(self, conn, response)?;
+                                true
+                            }
+                            Ok(None) => false,
+                            Err(_) => {
+                                reply(self, conn, server_error())?;
+                                true
+                            }
+                        };
+                        if done {
+                            in_flight.remove(k);
+                            progressed = true;
+                        } else {
+                            k += 1;
+                        }
+                    }
+                    // Done when the listener closed and every handler has replied.
+                    if closing && in_flight.is_empty() && accept_future.is_none() {
+                        break;
+                    }
+                    // Let a handler's own `concurrent` tasks advance, then advance the clock if stalled.
+                    if !self.scopes.is_empty() {
+                        progressed |= self.poll_all_scopes_round(span)?;
+                    }
+                    if !progressed && self.executor.advance().is_none() {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::Panic,
+                            span,
+                            "async deadlock: `http.serve` stalled with no pending work".to_string(),
+                        ));
+                    }
+                }
+                Ok(Value::Unit)
             }
             Builtin::Signal => {
                 self.expect_arity(builtin, &args, 1, span)?;

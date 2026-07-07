@@ -204,6 +204,46 @@ impl VmSession {
         }
     }
 
+    /// A session **adopted from a checked compile** (tooling-unification T3): run `module` — the
+    /// snapshot [`noeta_compiler::compile_with_sites_session`] returned alongside `compiler` — to
+    /// completion as entry 0, then continue the session incrementally from its final state. A
+    /// fragment evaluated afterwards resolves the checked program's globals, functions, types, and
+    /// methods by their **original ids** (the compiler's tables are the module's own id-spaces), and
+    /// values entry 0 created keep full `Rc<Shape>` identity in later entries. The initial run is
+    /// fully checked; fragments are checkerless, exactly like REPL entries.
+    ///
+    /// Returns the session plus entry 0's output (its stdout/diagnostics/trace — a debug console or
+    /// a future `repl --load` replays these before the first prompt).
+    pub fn adopted(
+        module: &Module,
+        compiler: SessionCompiler,
+        factory: HostFactory,
+    ) -> (VmSession, SessionOutput) {
+        let (host, executor) = factory();
+        let mut state = SessionState::fresh(host, executor);
+        state.sync_to(module);
+        noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+        let mut vm = Vm::load_seeded(module, state);
+        vm.run_top();
+        let stdout = std::mem::take(&mut vm.stdout);
+        let diagnostics = std::mem::take(&mut vm.diagnostics);
+        let trace = std::mem::take(&mut vm.abort_trace);
+        let session = VmSession {
+            compiler,
+            factory,
+            state: Some(vm.into_state()),
+        };
+        (
+            session,
+            SessionOutput {
+                stdout,
+                diagnostics,
+                value: None,
+                trace,
+            },
+        )
+    }
+
     /// Evaluate one REPL entry against the persistent scope. Returns this entry's stdout, diagnostics,
     /// and — when the final statement is a bare expression — the display form of its non-unit value.
     ///
@@ -222,13 +262,7 @@ impl VmSession {
     /// reflection + the `TypeRepr` surface spelling (`List<int>`), falling back to the runtime kind
     /// name for an untagged primitive — the same rendering the debugger shows.
     pub fn type_of(&mut self, program: &Program) -> SessionOutput {
-        self.run_capturing(program, |v| {
-            Some(
-                v.reflect()
-                    .map(|r| r.to_string())
-                    .unwrap_or_else(|| v.type_name().to_string()),
-            )
-        })
+        self.run_capturing(program, |v| Some(v.type_display()))
     }
 
     /// Compile and run one entry, then — if the final statement was a bare expression — hand its
@@ -467,6 +501,105 @@ mod tests {
     /// Evaluate `src` as one entry and return its stdout.
     fn eval(session: &mut VmSession, src: &str) -> String {
         session.eval(&program(src)).stdout
+    }
+
+    /// Compile `src` as a **checked** program keeping the compiler alive — the dance the debug
+    /// adapter's launch path runs (T3). Panics on any parse/check/compile failure.
+    fn checked_session(src: &str) -> (noeta_bytecode::Module, noeta_compiler::SessionCompiler) {
+        let source = Source::new(SourceId::FIRST, "<file>", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        assert!(
+            lexed.diagnostics.is_empty() && parsed.diagnostics.is_empty(),
+            "test source should parse cleanly: {src:?}"
+        );
+        let checked = noeta_check::check_all(&parsed.program);
+        assert!(
+            checked.diagnostics.is_empty(),
+            "test source should check cleanly: {:?}",
+            checked.diagnostics
+        );
+        noeta_compiler::compile_with_sites_session(&parsed.program, checked.sites, false, true)
+            .expect("a checked program compiles")
+    }
+
+    #[test]
+    fn an_adopted_session_extends_a_checked_program_with_stable_ids() {
+        let before = noeta_value::live_count();
+        let (module, compiler) = checked_session(
+            "struct P { x: int }\n\
+             fn twice(n: int): int { return n * 2 }\n\
+             mut base = 10\n\
+             mut p0 = P { x: 3 }\n\
+             echo twice(base)\n",
+        );
+        // Entry 0: the checked program runs to completion under the session.
+        let (mut session, out0) = VmSession::adopted(
+            &module,
+            compiler,
+            Box::new(|| {
+                (
+                    Box::new(noeta_stdlib::SandboxHost::new()),
+                    Box::new(noeta_stdlib::SandboxExecutor::new()),
+                )
+            }),
+        );
+        assert_eq!(out0.stdout, "20\n");
+        assert!(out0.diagnostics.is_empty(), "{:?}", out0.diagnostics);
+
+        // A fragment calls the checked program's function and reads its global — resolved by the
+        // ORIGINAL proto index / global slot (stable-prefix accumulation).
+        assert_eq!(eval(&mut session, "echo twice(base + 1);"), "22\n");
+        // A fragment constructs the checked program's type; structural equality against a value
+        // entry 0 built proves the `Rc<Shape>` is the SAME shape (pointer identity), not a re-wrap.
+        assert_eq!(eval(&mut session, "echo p0 == P { x: 3 };"), "true\n");
+        // A fragment-defined closure captures a checked-program global and calls a checked-program
+        // function — new code (a new proto) composed with original ids.
+        assert_eq!(
+            eval(&mut session, "mut f = fn(n: int) => twice(n) + base;"),
+            ""
+        );
+        assert_eq!(eval(&mut session, "echo f(5);"), "20\n");
+        // Rebinding the checked program's global reuses its slot.
+        assert_eq!(eval(&mut session, "base = 1; echo twice(base);"), "2\n");
+
+        session.teardown();
+        assert_eq!(
+            noeta_value::live_count(),
+            before,
+            "teardown returns residency to the pre-session baseline"
+        );
+    }
+
+    #[test]
+    fn an_adopted_sessions_module_snapshots_keep_a_stable_prefix() {
+        let (module, mut compiler) = checked_session(
+            "fn twice(n: int): int { return n * 2 }\n\
+             mut base = 10\n\
+             echo twice(base)\n",
+        );
+        let entry = {
+            let source = Source::new(SourceId::FIRST, "<fragment>", "echo twice(base);");
+            let lexed = lex(&source);
+            parse(&source, &lexed.tokens).program
+        };
+        let extended = compiler.extend(&entry).expect("fragment compiles");
+        // Ids are append-only: everything the checked module assigned keeps its index.
+        assert!(extended.protos.len() >= module.protos.len());
+        assert_eq!(
+            &extended.global_names[..module.global_names.len()],
+            &module.global_names[..],
+            "global slots are a stable prefix"
+        );
+        assert_eq!(
+            &extended.names[..module.names.len()],
+            &module.names[..],
+            "interned names are a stable prefix"
+        );
+        assert!(
+            extended.shapes.len() >= module.shapes.len(),
+            "shapes only append"
+        );
     }
 
     #[test]

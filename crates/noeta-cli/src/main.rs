@@ -26,9 +26,9 @@ use std::time::Instant;
 use clap::{Parser, Subcommand};
 use noeta_ast::{AttrArg, AttrValue, Expr, Program, Stmt};
 use noeta_check::TierFn;
-use noeta_diagnostics::{Diagnostic, DiagnosticCode, render};
+use noeta_diagnostics::{Diagnostic, DiagnosticCode, render, render_mapped};
 use noeta_lexer::{TokenKind, lex};
-use noeta_parser::parse;
+use noeta_parser::{parse, parse_fragment};
 use noeta_span::{Source, SourceId, SourceMap, Span};
 use noeta_vm::{SessionOutput, VmBackend, VmSession};
 
@@ -149,6 +149,19 @@ enum Command {
     /// Debug Adapter Protocol on stdin/stdout. Runs a program under the production VM (JIT unarmed
     /// for full introspection) with breakpoints, stepping, and variable inspection.
     Dap,
+    /// Serve a program's HTTP handler. The file defines a top-level `fn fetch(req: Request):
+    /// Response` (sync or async) and `use std.{http}`; `noeta serve` runs the file's top-level
+    /// setup, then binds a listener and drives the handler — the ergonomic entry point over an
+    /// explicit `http.serve(...)` call. Runs until interrupted (Ctrl-C). Single worker,
+    /// cooperatively concurrent (a slow async handler yields while others progress); multi-core
+    /// worker isolates are a follow-on.
+    Serve {
+        /// Path to a `.noe` file exporting a `fetch` handler.
+        file: PathBuf,
+        /// The TCP port to bind (default 8080); the listener binds all interfaces (`0.0.0.0`).
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
 }
 
 fn main() -> ExitCode {
@@ -194,6 +207,7 @@ fn main() -> ExitCode {
         Command::Repl => cmd_repl(),
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),
+        Command::Serve { file, port } => cmd_serve(&file, port),
     }
 }
 
@@ -273,18 +287,7 @@ fn compile_real(
 ) -> Result<noeta_bytecode::Module, String> {
     noeta_compiler::compile_with_sites(
         program,
-        checked.type_of_sites.clone(),
-        checked.packed_list_sites.clone(),
-        checked.map_packed_sites.clone(),
-        checked.index_field_sites.clone(),
-        checked.ext_call_sites.clone(),
-        checked.for_stream_sites.clone(),
-        checked.width_sites.clone(),
-        checked.f32_literal_sites.clone(),
-        checked.construction_sites.clone(),
-        checked.handle_sites.clone(),
-        checked.bound_handle_sites.clone(),
-        &checked.destructor_relevance,
+        checked.sites.clone(),
         // Real execution runs isolates on OS threads (I.4b): lower `isolate f(args)` to `SpawnIsolate`.
         // The differential/salsa paths pass false (byte-identical cooperative sandbox).
         true,
@@ -377,18 +380,13 @@ fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a D
     }
 }
 
-/// Render each diagnostic against the source it belongs to (resolved by its span's `SourceId`
-/// through the [`SourceMap`]), so a diagnostic on a declaration merged in from a sibling module
-/// renders against that module's file and text rather than the entry's.
+/// Print [`noeta_diagnostics::render_mapped`]'s cross-module rendering to stderr — each diagnostic
+/// resolved against the source its span belongs to.
 fn emit_diagnostics_mapped<'a>(
     sources: &SourceMap,
     diagnostics: impl Iterator<Item = &'a Diagnostic>,
 ) {
-    let mut stderr = io::stderr();
-    for diagnostic in diagnostics {
-        let source = sources.source(diagnostic.span.source);
-        let _ = stderr.write_all(render(source, diagnostic).as_bytes());
-    }
+    let _ = io::stderr().write_all(render_mapped(sources, diagnostics).as_bytes());
 }
 
 fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -> ExitCode {
@@ -457,6 +455,69 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
             ExitCode::from(1)
         }
     }
+}
+
+/// `noeta serve <FILE> [--port N]` — the ergonomic HTTP-server entry point (http-server S4). The
+/// file exports a top-level `fn fetch(req: Request): Response` (sync or async) and `use std.{http}`;
+/// this runs the file's top-level setup, then synthesizes and runs `http.serve(<port>, fetch)`,
+/// which binds `0.0.0.0:<port>` and drives the handler over the real host until interrupted
+/// (Ctrl-C). Single worker, cooperatively concurrent — a slow async handler yields while others
+/// progress. (Multi-core worker isolates are a follow-on; see `plans/http-server`.) Layering the
+/// serve call on top of the loaded program means the mechanism is the exact same `http.serve` a
+/// program can call directly — the command only supplies the entry convention and the port.
+fn cmd_serve(file: &std::path::Path, port: u16) -> ExitCode {
+    use noeta_ast::{Expr, Stmt};
+    use noeta_span::Span;
+
+    let mut linked = match noeta_loader::load(file) {
+        Err(err) => {
+            eprintln!("lang: cannot read {}: {err}", file.display());
+            return ExitCode::from(2);
+        }
+        Ok(Err(load_diagnostics)) => {
+            let mut stderr = io::stderr();
+            for ld in &load_diagnostics {
+                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+            }
+            return ExitCode::from(1);
+        }
+        Ok(Ok(linked)) => linked,
+    };
+
+    // Synthesize `http.serve(<port>, fetch)` as a trailing top-level statement. The program supplies
+    // `fetch` and `use std.{http}` (any handler builds responses with `http.response`, so `http` is
+    // already imported); a missing `fetch`/`http` surfaces as an ordinary check error. A synthetic
+    // span (offset 0) is fine — this node is compiler-generated, never the subject of a diagnostic
+    // the user needs to locate.
+    let sp = Span::empty_at(0);
+    let ident = |name: &str| Expr::Ident {
+        name: name.to_string(),
+        span: sp,
+    };
+    let serve = Expr::Member {
+        receiver: Box::new(ident("http")),
+        name: "serve".to_string(),
+        name_span: sp,
+        span: sp,
+    };
+    let call = Expr::Call {
+        callee: Box::new(serve),
+        args: vec![
+            Expr::Int {
+                value: i64::from(port),
+                span: sp,
+            },
+            ident("fetch"),
+        ],
+        span: sp,
+    };
+    linked.program.stmts.push(Stmt::Expr {
+        expr: call,
+        span: sp,
+    });
+
+    eprintln!("noeta serve: listening on http://0.0.0.0:{port} (Ctrl-C to stop)");
+    exit_code(run_program(&linked.program, &linked.sources))
 }
 
 /// Run a `.noeb` bundle (P-AOT L1.2): decode the module from the versioned container and execute it
@@ -1861,25 +1922,17 @@ fn repl_meta(session: &mut VmSession, line: &str, sources: &[Source]) -> MetaOut
 /// query defines nothing, so no later trace can reference it.
 fn repl_type(session: &mut VmSession, expr: &str, sources: &[Source]) {
     let id = SourceId(sources.len() as u32);
-    let source = Source::new(id, "<repl-type>", format!("{expr};"));
-    let lexed = lex(&source);
-    let parsed = parse(&source, &lexed.tokens);
-    let diags: Vec<Diagnostic> = lexed
-        .diagnostics
-        .iter()
-        .chain(parsed.diagnostics.iter())
-        .cloned()
-        .collect();
-    if !diags.is_empty() {
-        emit_diagnostics(&source, diags.iter());
+    let fragment = parse_fragment(id, "<repl-type>", expr);
+    if !fragment.diagnostics.is_empty() {
+        emit_diagnostics(&fragment.source, fragment.diagnostics.iter());
         return;
     }
-    let out = session.type_of(&parsed.program);
+    let out = session.type_of(&fragment.program);
     print!("{}", out.stdout);
     let _ = io::stdout().flush();
     // Render diagnostics / any abort trace against all entries plus this `:type` source.
     let mut map_sources = sources.to_vec();
-    map_sources.push(source);
+    map_sources.push(fragment.source);
     let map = SourceMap::new(map_sources);
     if !out.diagnostics.is_empty() {
         emit_diagnostics_mapped(&map, out.diagnostics.iter());

@@ -1,37 +1,65 @@
-# Editor & AI Tooling (LSP / MCP)
+# Editor & AI Tooling
 
-This page describes where editor integration and the agentic tooling surface stand today, honestly.
+Noeta's editor story ships in three layers, all in-tree: **static syntax highlighting** (TextMate +
+tree-sitter grammars), a **language server** (`noeta lsp`), and a **debugger** (`noeta dap`, on its
+own page: [Debugging](Debugging)). The planned **agentic MCP surface** is the one piece still on the
+roadmap.
 
-> [!IMPORTANT]
-> **Neither an LSP server nor an MCP endpoint ships yet.** Both are on the roadmap (milestone M2/M3), not in the current toolchain. There is no `noeta-lsp`, `noeta-server`, or `noeta-mcp` crate, and no `lsp`/`serve` subcommand. Today's tooling is the CLI — [`run`](The-CLI), [`repl`](The-CLI), [`test`](Testing), [`bench`](Benchmarking), [`doc`](Documentation-and-Tiers) — plus a **static syntax-highlighting extension** for VS Code (see below).
+## Syntax highlighting
 
-## Syntax highlighting (ships now)
+A TextMate grammar and VS Code extension live in
+[`editors/vscode-noeta/`](https://github.com/noeta-lang/noeta/tree/main/editors/vscode-noeta). The
+grammar is **static** — it colorizes without running the compiler, instantly and offline — and
+covers the whole surface: keywords, the three string forms with `${…}` interpolation, every numeric
+literal form, primitive and container types, PascalCase user types, `@directive`/tier blocks,
+`#[attribute]`s, and the full operator set. Install by symlinking the folder into
+`~/.vscode/extensions/` (VSCodium works identically); the extension's README has details and a
+`sample.noe` exercising every construct.
 
-A TextMate grammar and VS Code extension live in [`editors/vscode-noeta/`](https://github.com/noeta-lang/noeta/tree/main/editors/vscode-noeta). It is **static** — it colorizes source without running the compiler, so it works instantly and offline — and covers the whole surface: keywords, the three string forms with `${…}` interpolation, every numeric literal form, primitive and container types, PascalCase user types, `@directive`/tier blocks, `#[attribute]`s, and the full operator set. Install it by symlinking the folder into `~/.vscode/extensions/`; `editors/vscode-noeta/README.md` has the details and a `sample.noe` that exercises every construct. This is the first editor-tooling slice; the extension is structured to host the `noeta lsp` client when it lands, at which point highlighting and semantics share one extension.
+For **Neovim / Helix / Zed**, a
+[tree-sitter grammar](https://github.com/noeta-lang/noeta/tree/main/editors/tree-sitter-noeta)
+parses ≈99% of the conformance corpus and models Noeta's newline-terminated statements and
+case-insensitive identifiers faithfully (run `tree-sitter generate` there first; see its README).
 
-## What exists today
+## The language server (`noeta lsp`)
 
-While there is no protocol server, a surprising amount of the *infrastructure* an LSP and an MCP surface would build on is already in place:
+`noeta lsp` speaks LSP over stdio, and the VS Code extension starts it automatically for `.noe`
+files. It is a thin adapter over the compiler's incremental [salsa query graph](Architecture-and-Pipeline)
+(`tokens → ast → checked → bytecode`, plus the module graph), so an edit re-checks only what
+changed — the diagnostics you see are the *actual compiler's* diagnostics, live.
 
-- **An incremental query graph.** The whole compiler is a [salsa](Architecture-and-Pipeline) query graph (`tokens → ast → checked → bytecode`), and the module graph is salsa-queried too, so editing one module recomputes only its dependents. This is the same machinery that powers a responsive language server — it exists so that an LSP can be layered on without re-architecting the compiler.
-- **Precise, typed diagnostics.** Every error is a typed variant with a stable `E0xxx` code and a source span, rendered in one place. These are exactly the diagnostics a server would forward to an editor.
-- **A reflection manifest.** The compiler builds a queryable manifest of a program's declarations, their `#[…]` attributes, and their `@role(…)` semantic tags (see [Attributes & Reflection](Attributes-and-Reflection)). This is the intended backbone of the agentic MCP surface — the plan is for agents to query a labeled architectural graph (roles, boundaries, data flows) through MCP tools.
+What it does today:
 
-## The vision (roadmap)
+| Feature | Notes |
+|---|---|
+| **Live diagnostics** | Every `E0xxx` with its span, on every keystroke (incremental `didChange`). |
+| **Hover types** | The inferred static type of the expression under the cursor, in surface syntax (`List<int>`, `Result<Order, OrderError>`). |
+| **Go to definition** | Cross-module: a name defined in an imported module resolves to that file. |
+| **Find references / rename** | Including struct/class **members**; rename is prepare-checked so you can't rename what isn't renameable. |
+| **Completion** | Identifiers in scope, members after `.` (including the bare-dot and mid-whitespace trigger positions), and **type positions** (annotations, signatures). |
+| **Signature help** | Parameter hints while typing a call — free functions and methods. |
+| **Document outline** | Types, functions, methods for the breadcrumb/symbol views. |
+| **Semantic tokens** | Compiler-accurate token coloring layered over the static grammar. |
 
-The design intent, not yet shipped:
+The same salsa graph powers the [debugger](Debugging)'s launch compile and the conformance
+harness, so all three tools read one source of truth.
 
-- **Embedded LSP** — completion, go-to-definition, hover types, and live diagnostics driven by the salsa graph, so an edit re-checks only what changed.
-- **Agentic MCP surface** — tools that let an AI agent query the program's semantic-role graph (`@role`/`@semantic` tags): which declarations are entry points, trust boundaries, persistence boundaries, sinks, or layers, and how data flows between them. The reflection manifest and the semantic-role vocabulary already exist; what is missing is the server that exposes them over the protocol.
-- **Editor grammars and a VS Code extension** — the VS Code (TextMate) grammar and a [tree-sitter grammar](https://github.com/noeta-lang/noeta/tree/main/editors/tree-sitter-noeta) (for Neovim/Zed/Helix) now both exist; still to come is folding the LSP client into the VS Code extension (M3). The tree-sitter grammar parses ≈99% of the conformance corpus and models Noeta's newline-terminated statements and case-insensitive identifiers faithfully (see its README).
+## Debugging
 
-When the remaining pieces land, this page will document them. Until then, treat any mention of "the LSP" or "MCP tools" in the design documents as forward-looking.
+`noeta dap` is a full DAP server: breakpoints, line-granular stepping, stack/scopes/variables, and
+a debug console that is effectively a REPL over the paused program (closures included). It debugs
+the **production VM** — same bytecode, JIT unarmed. See [Debugging](Debugging).
 
-## Using `noeta` with an editor now
+## The agentic MCP surface (roadmap)
 
-In the meantime:
+The remaining planned piece. The compiler already builds a queryable **reflection manifest** of a
+program's declarations, their `#[…]` attributes, and their `@role(…)` semantic tags (see
+[Attributes & Reflection](Attributes-and-Reflection)); the intent is an MCP server exposing that
+labeled architectural graph to AI agents — which declarations are entry points, trust boundaries,
+persistence boundaries, sinks, or layers, and how data flows between them. The manifest and the
+semantic-role vocabulary exist; the protocol server does not yet. Until it lands, treat mentions of
+"MCP tools" in design documents as forward-looking.
 
-- Point your editor's build/run task at `noeta run <file>`; diagnostics print with source spans and stable codes.
-- `noeta doc` extracts your `@doc { … }` prose as Markdown — usable in a docs pipeline today.
-- `noeta dump <file>` prints the VM bytecode a program compiles to — useful for an agent (or human) reasoning about *what actually runs*: which opcodes a construct lowers to, whether a reuse/in-place fast path fired, how names and constants are laid out. See [The CLI](The-CLI#noeta-dump).
-- For **VS Code**, install the bundled extension in `editors/vscode-noeta/` for proper `.noe` highlighting. For **Neovim / Helix / Zed**, point the editor at the tree-sitter grammar in `editors/tree-sitter-noeta/` (run `tree-sitter generate` there first).
+Also useful to an agent (or a human) today: `noeta dump <file>` prints the exact VM bytecode a
+program compiles to — what actually runs, which fast paths fired, how names and constants are laid
+out. See [The CLI](The-CLI#noeta-dump).

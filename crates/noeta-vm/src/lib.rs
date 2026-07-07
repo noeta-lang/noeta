@@ -36,7 +36,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
-use noeta_ast::{BinaryOp, Expr, Program};
+use noeta_ast::{BinaryOp, ClosureBody, Expr, Param, Program, Stmt};
+// `RunResult` is re-exported below (`pub use noeta_backend::{RunResult, …}`), so it is not imported
+// privately here (that would be a duplicate binding).
 use noeta_backend::Backend;
 use noeta_bytecode::{
     BoolSide, Builtin, CaptureFrom, Chunk, Const, Module, NarrowTarget, Op, Reg, ReuseCheck,
@@ -94,18 +96,28 @@ pub enum DebugAction {
     /// This is the D5.2 trampoline: it is the one path on which a paused program runs code (a call in a
     /// watch), and it stays off the `Debugger` trait so no VM internals leak.
     Evaluate(DebugEvalRequest),
+    /// The paused debugger asked to **write a frame local** (the Variables-panel edit, U1). Same
+    /// trampoline shape as [`DebugAction::Evaluate`]; the dispatch loop additionally holds the
+    /// mutable register stack, so it can store the evaluated value into the frame's register.
+    SetVariable(DebugSetRequest),
 }
 
 /// A paused-frame `evaluate` request handed from the [`Debugger`] to the VM (see
-/// [`DebugAction::Evaluate`]). Owns everything the VM needs to run the expression and reply.
+/// [`DebugAction::Evaluate`]). Owns everything the VM needs to run the fragment and reply.
 #[derive(Debug)]
 pub struct DebugEvalRequest {
-    /// The parsed expression to evaluate (the adapter parses the watch string; the VM walks the AST).
-    pub expr: Box<Expr>,
+    /// The parsed fragment (the adapter parses the console string; statements are allowed — a
+    /// trailing bare expression is the fragment's value). On a session run with `allow_calls` the
+    /// VM compiles it through the adopted session (closures included, tooling-unification T5);
+    /// hover walks its trailing expression read-only.
+    pub program: Program,
+    /// The raw console string `program` was parsed from — the memo key (U3): a re-evaluated watch
+    /// (same text, same scope shape) reuses its compiled wrapper instead of appending a new one.
+    pub text: String,
     /// Which paused frame's scope to evaluate against, as the client numbers frames (innermost first).
     pub frame: usize,
-    /// Whether a **call** may run. `false` for a hover (a hover must stay side-effect-free): a call
-    /// then errors instead of executing. `true` for a watch / debug console.
+    /// Whether the fragment may run **code** (calls, closures, statements). `false` for a hover — a
+    /// hover must stay side-effect-free, so it evaluates paths/operators only and refuses a call.
     pub allow_calls: bool,
     /// Where the rendered outcome is sent back. Only strings cross this channel — the runtime values
     /// are thread-local, so they are rendered on the run worker before the reply travels back.
@@ -121,6 +133,23 @@ pub enum DebugEvalOutcome {
     /// The expression could not be evaluated (unknown name, out of bounds, a call disabled in a hover,
     /// a runtime error while running a call, …).
     Error(String),
+}
+
+/// A paused-frame **`setVariable`** request (tooling-unification U1): evaluate `value` (a console
+/// fragment, frame locals visible) and write the result into the named local's register in the
+/// selected frame — the DAP Variables-panel edit. Replies with the written value rendered, or an
+/// error (unknown/out-of-scope name, `self`, or an evaluation failure — the frame is untouched
+/// then).
+#[derive(Debug)]
+pub struct DebugSetRequest {
+    /// The local to write, by its source name.
+    pub name: String,
+    /// The parsed replacement-value fragment (evaluated exactly like a console entry).
+    pub value: Program,
+    /// Which paused frame, as the client numbers frames (innermost first).
+    pub frame: usize,
+    /// The rendered outcome (the new value on success), back to the adapter thread.
+    pub reply: Sender<DebugEvalOutcome>,
 }
 
 /// A read-only view of the paused VM handed to [`Debugger::before_op`]: the live frame stack and each
@@ -307,6 +336,36 @@ impl VmBackend {
         noeta_value::set_collector_mode(mode);
         let mut vm = Vm::load(module, host, executor);
         vm.debugger = debugger;
+        let result = run_and_teardown(&mut vm, mode);
+        let trace = std::mem::take(&mut vm.abort_trace);
+        (result, trace)
+    }
+
+    /// Like [`VmBackend::run_module_debug`], but with the **debug console armed** (tooling-
+    /// unification T5): `session` is the live compiler
+    /// [`noeta_compiler::compile_with_sites_session`] returned alongside `module`, and every
+    /// console fragment the debugger sends compiles through it and installs into the running Vm —
+    /// full language, closures included. The arena owning each extended module snapshot lives
+    /// here, for exactly the run's duration; an escaped fragment value stays resolvable until the
+    /// program exits.
+    pub fn run_module_debug_session(
+        &self,
+        module: &Module,
+        session: noeta_compiler::SessionCompiler,
+        host: Box<dyn noeta_stdlib::Host>,
+        executor: Box<dyn noeta_stdlib::Executor>,
+        debugger: Option<Box<dyn Debugger>>,
+    ) -> (RunResult, Vec<TraceFrame>) {
+        let mode = noeta_value::CollectorMode::Trace;
+        noeta_value::set_collector_mode(mode);
+        let arena = typed_arena::Arena::new();
+        let mut vm = Vm::load(module, host, executor);
+        vm.debugger = debugger;
+        vm.debug_session = Some(DebugSession {
+            compiler: session,
+            arena: &arena,
+            memo: HashMap::new(),
+        });
         let result = run_and_teardown(&mut vm, mode);
         let trace = std::mem::take(&mut vm.abort_trace);
         (result, trace)
@@ -555,11 +614,81 @@ impl RetTransform {
 /// itself lives on [`Vm::diagnostics`]; this is just the propagation token.
 struct Abort;
 
+/// The debug console's session machinery (tooling-unification T4), present only on a debug run
+/// launched with an adopted session: the live incremental compiler (seeded from the launch's
+/// *checked* compile, so fragment ids append onto the program's own id-spaces) and the arena that
+/// keeps every extended module snapshot alive for the rest of the run. A fragment install
+/// ([`Vm::install_fragment`]) compiles through the session and swaps [`Vm::module`] to the arena'd
+/// snapshot — old frames keep executing their (prefix-identical) code, new frames resolve
+/// fragment protos/names through the newest module, and an escaped fragment closure stays callable
+/// after the program resumes.
+struct DebugSession<'m> {
+    compiler: noeta_compiler::SessionCompiler,
+    arena: &'m typed_arena::Arena<Module>,
+    /// Compiled-wrapper memo (tooling-unification U3): `(fragment text, in-scope local names)` →
+    /// the installed entry proto. A watch panel re-evaluates its expressions on **every step**;
+    /// without this each re-eval would append a fresh proto + global slot to the session for the
+    /// rest of the run. A hit skips compile + install entirely and re-runs the existing entry with
+    /// fresh values (indices stay valid forever — the module only grows). Only successful compiles
+    /// are memoized, and the param names are part of the key, so a hit is exactly a replay.
+    memo: HashMap<(String, Vec<String>), u32>,
+}
+
+/// The unforgeable global a wrapped console fragment binds its closure to (see
+/// [`Vm::debug_eval_fragment`]) — a NUL-prefixed name no user identifier can collide with, taken
+/// back out of its slot immediately after the entry runs (the same trick as the REPL's
+/// trailing-expression sentinel).
+const FRAGMENT_SENTINEL: &str = "\0debug-fragment";
+
+/// Whether `expr` belongs to the hover-safe **read-only surface** (T6): names, `.field` chains,
+/// `[index]`, arithmetic / comparison / logical operators, and plain literals. Everything else —
+/// a call, a construction, a closure, an interpolated string (its holes hide expressions), a
+/// `match`/`if` form — is refused: a hover fires on mouse-over and must never run code. This is
+/// the static gate; the receiver-dependent dispatches it cannot decide (an object's `Index` impl,
+/// a user ordering method — both frame pushes) are backstopped at run time by `Vm::pure_eval`.
+fn is_pure_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::Ident { .. }
+        | Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Bool { .. }
+        | Expr::Str { .. } => true,
+        Expr::Member { receiver, .. } => is_pure_expr(receiver),
+        Expr::Index {
+            receiver, index, ..
+        } => is_pure_expr(receiver) && is_pure_expr(index),
+        Expr::Binary { lhs, rhs, .. } => is_pure_expr(lhs) && is_pure_expr(rhs),
+        Expr::Unary { operand, .. } => is_pure_expr(operand),
+        _ => false,
+    }
+}
+
+impl std::fmt::Debug for DebugSession<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DebugSession")
+            .field("compiler", &self.compiler)
+            .finish_non_exhaustive()
+    }
+}
+
 /// One program's worth of execution state, shared across every (possibly re-entrant) frame
 /// stack: the compiled module, the shared shape handles and instance-method table, the by-name
 /// global environment, captured stdout, and the diagnostics recorded so far.
 struct Vm<'m> {
+    /// The compiled program. On a plain run this is the caller's module for the whole run; on a
+    /// **debug run with a console session** it is swapped (through [`Vm::install_fragment`]) to
+    /// each successive extended snapshot — always a stable-prefix superset, so an index minted
+    /// under any earlier module resolves identically under every later one.
     module: &'m Module,
+    /// See [`DebugSession`]; `None` on every non-debug run.
+    debug_session: Option<DebugSession<'m>>,
+    /// Set while a **hover** fragment runs (tooling-unification T6): a hover must stay
+    /// side-effect-free, so the dispatch loop refuses any frame push beyond the fragment wrapper's
+    /// own frame — the one chokepoint every way of running user code (a call, an object's `Index`
+    /// impl, a user ordering method) passes through. The fragment's AST is pre-gated to the
+    /// read-only surface (names / members / indexing / operators / literals); this flag is the
+    /// runtime backstop for the receiver-dependent dispatches the gate cannot decide.
+    pure_eval: bool,
     /// One shared `&'static Shape` per shape-table entry — cloned into every value of that shape,
     /// so equal-built aggregates point at one shape (identity is a pointer comparison).
     shapes: Vec<&'static Shape>,
@@ -1750,6 +1879,8 @@ impl<'m> Vm<'m> {
             module.type_reprs.iter().cloned().map(Rc::new).collect();
         Vm {
             module,
+            debug_session: None,
+            pure_eval: false,
             shapes,
             packed_schemas,
             type_reprs,
@@ -2818,9 +2949,6 @@ impl<'m> Vm<'m> {
     /// The dispatch loop. Returns `Ok(value)` once the bottom frame returns (the stack is
     /// then empty), or `Err(Abort)` with the stack left intact for [`Vm::run`] to release.
     fn dispatch(&mut self, frames: &mut Vec<Frame>, regs: &mut Vec<Value>) -> Result<Value, Abort> {
-        // Copy the shared module reference out so the loop can index prototypes without
-        // borrowing `self` — leaving `self.stdout`/`globals`/`diagnostics` free to mutate.
-        let module = self.module;
         // Per-run inline caches, one slot per cacheable call site (`LoadField`/`CallMethod`),
         // indexed by the op's `cache` field. Each entry memoizes the last receiver shape and the
         // resolved field-slot / method prototype; a hit is a pointer compare against the cached
@@ -2828,7 +2956,7 @@ impl<'m> Vm<'m> {
         // `self` field) so it neither borrows `self` in the loop nor leaks across runs; holding the
         // `&'static Shape` keeps the cached shape alive, so the pointer key can never alias a freed shape.
         let mut caches: Vec<Option<(&'static Shape, u32)>> =
-            vec![None; module.cache_slots as usize];
+            vec![None; self.module.cache_slots as usize];
         // S3 dispatch window (P-VMT-DISP). The interpreter is two nested loops. The OUTER `'reload`
         // loop re-derives the active frame's register window — its base, prototype (`chunk`), and
         // starting `pc` — and is re-entered ONLY when control transfers to a *different* frame: a
@@ -2843,6 +2971,36 @@ impl<'m> Vm<'m> {
         // with ops that carry their own `base` field). `chunk` borrows `*module` (an `&'m Module`
         // copied out of `self`), so it is independent of the `&mut self` the arms use.
         'reload: loop {
+            // Re-read the module each frame transfer, NOT once per dispatch: a debug-console
+            // fragment install ([`Vm::install_fragment`], tooling-unification T4) swaps
+            // `self.module` to an extended snapshot mid-run, and the next frame must resolve
+            // against the newest module — an escaped fragment closure's proto index only exists
+            // there. Every snapshot is a stable-prefix superset, so a frame that started under an
+            // older module re-derives byte-identical code here. One field load per call/return
+            // (A/B-benched: noise); the copied-out `&'m Module` keeps `chunk` independent of the
+            // `&mut self` the arms use, exactly as before.
+            let module = self.module;
+            // Fragment code can carry inline-cache slots past the base module's count — grow on
+            // demand (never shrinks; a fresh slot starts cold). A no-op compare on non-debug runs.
+            if caches.len() < module.cache_slots as usize {
+                caches.resize(module.cache_slots as usize, None);
+            }
+            // Hover purity chokepoint (T6): a hover fragment runs as a single wrapper frame; every
+            // way of running user code — a call, an object's `Index` impl, a user ordering method —
+            // pushes a second frame, which re-enters `'reload` here. Refuse it instead of running.
+            // `pure_eval` is false on every non-hover run (one predicted branch per frame transfer).
+            if self.pure_eval && frames.len() > 1 {
+                let span = module.protos[frames[frames.len() - 1].proto as usize]
+                    .line_span(0)
+                    .unwrap_or_else(|| Span::empty_at(0));
+                return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    "hover stays read-only — evaluating this expression would run code \
+                     (use a watch or the debug console)"
+                        .to_string(),
+                ));
+            }
             let top = frames.len() - 1;
             let fbase = frames[top].base;
             let proto = frames[top].proto as usize;
@@ -2933,18 +3091,58 @@ impl<'m> Vm<'m> {
                             // `&mut self`, reply, then loop: `before_op` re-enters its wait silently.
                             DebugAction::Evaluate(req) => {
                                 let DebugEvalRequest {
-                                    expr,
+                                    program,
+                                    text,
                                     frame,
                                     allow_calls,
                                     reply,
                                 } = req;
-                                let outcome = self.debug_eval_request(
-                                    &expr,
+                                // Every evaluate compiles through the adopted session (T5): full
+                                // language for a watch/console, and for a hover
+                                // (`allow_calls = false`) the same engine gated to the read-only
+                                // surface (T6) — one evaluator, not two.
+                                let outcome = if self.debug_session.is_some() {
+                                    self.debug_eval_fragment(
+                                        &program,
+                                        frame,
+                                        !allow_calls,
+                                        &text,
+                                        &frames[..],
+                                        &regs[..],
+                                    )
+                                } else {
+                                    DebugEvalOutcome::Error(
+                                        "this debug run has no console session — evaluate needs a \
+                                         session launch"
+                                            .to_string(),
+                                    )
+                                };
+                                let _ = reply.send(outcome);
+                            }
+                            // A Variables-panel edit (U1): evaluate the replacement value as a
+                            // console fragment and write the frame's register in place.
+                            DebugAction::SetVariable(req) => {
+                                let DebugSetRequest {
+                                    name,
+                                    value,
                                     frame,
-                                    allow_calls,
-                                    &frames[..],
-                                    &regs[..],
-                                );
+                                    reply,
+                                } = req;
+                                let outcome = if self.debug_session.is_some() {
+                                    self.debug_set_variable(
+                                        &name,
+                                        &value,
+                                        frame,
+                                        &frames[..],
+                                        &mut regs[..],
+                                    )
+                                } else {
+                                    DebugEvalOutcome::Error(
+                                        "this debug run has no console session — setVariable needs \
+                                         a session launch"
+                                            .to_string(),
+                                    )
+                                };
                                 let _ = reply.send(outcome);
                             }
                         }
@@ -5517,240 +5715,398 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Service a paused-frame `evaluate` (the D5.2 trampoline — see [`DebugAction::Evaluate`]). Runs on
-    /// the VM with `&mut self`, so a call in the expression can execute; the caller (the dispatch loop)
-    /// has already lifted the debugger out of `self`, so a call's own body does not re-break. Reads the
-    /// target frame's in-scope locals out of the paused register window, evaluates the expression, and
-    /// renders the result — only the strings travel back to the adapter thread.
+    /// Install a debug-console **fragment** into this running Vm (tooling-unification T4). The
+    /// fragment compiles through the adopted session compiler — checkerless, stable-prefix id
+    /// accumulation, exactly a REPL entry — and the Vm then:
     ///
-    /// Running a call can push a diagnostic (an arity/type/`panic` error surfaces as the watch error)
-    /// and grow the abort trace; both are rolled back afterwards so a failed watch never pollutes the
-    /// program's own diagnostics or a later real traceback.
-    fn debug_eval_request(
+    /// 1. **Relocates the fragment's entry chunk** to a fresh proto index at the end of the table.
+    ///    `SessionCompiler::extend` rewrites proto 0 per entry, but proto 0 of the *running* module
+    ///    is the program's `main`, which live frame 0 is still executing — so the snapshot's proto 0
+    ///    is restored to `main` and the fragment's statements get their own index. (Entry chunks
+    ///    never self-reference index 0; every callee/closure index inside is absolute and new.)
+    /// 2. **Grows the derived tables** the fragment introduced — the same appends `Vm::load` /
+    ///    `SessionState::sync_to` perform: interned shapes and packed schemas (global interning
+    ///    makes identity hold by construction), shared `TypeRepr`s, method / destructor /
+    ///    field-default entries, derive sets, destruct-reachability, and the globals vector (new
+    ///    slots start unbound).
+    /// 3. **Swaps `self.module` to the extended snapshot**, kept alive in the session's arena for
+    ///    the rest of the run. Every snapshot is a stable-prefix superset of every earlier one, so
+    ///    old frames keep executing identical code and an escaped fragment value (a closure's raw
+    ///    proto index) stays resolvable after the program resumes — the dispatch loop re-reads the
+    ///    module at each frame transfer.
+    ///
+    /// Returns the relocated entry's proto index; the caller runs it via [`Vm::run_thunk`]. Debug
+    /// runs keep the JIT unarmed (asserted): tier-1 mirror tables never see a swapped module.
+    fn install_fragment(&mut self, fragment: &Program) -> Result<u32, String> {
+        #[cfg(feature = "jit")]
+        assert!(
+            self.jit.is_none() && self.jit_service.is_none(),
+            "debug fragments require the JIT unarmed"
+        );
+        let Some(session) = self.debug_session.as_mut() else {
+            return Err("this run has no debug session (fragments need a session launch)".into());
+        };
+        let arena = session.arena;
+        let mut extended = session
+            .compiler
+            .extend(fragment)
+            .map_err(|u| u.reason.clone())?;
+        // (1) Relocate the entry; proto 0 stays the program's `main`.
+        let entry = std::mem::replace(&mut extended.protos[0], self.module.protos[0].clone());
+        extended.protos.push(entry);
+        let entry_idx = (extended.protos.len() - 1) as u32;
+        // The checkerless snapshot carries no `map(...)`-packed pairs; keep the base compile's
+        // precise ones so the swapped module stays self-consistent (`vm.map_packed` already holds
+        // the resolved schemas either way).
+        extended.map_packed_sites = self.module.map_packed_sites.clone();
+
+        // (2) Grow the derived tables from the snapshot's tails (all appends are prefix-stable).
+        for shape in &extended.shapes[self.shapes.len()..] {
+            self.shapes.push(noeta_object::intern_shape(shape.clone()));
+        }
+        for def in &extended.packed_schemas[self.packed_schemas.len()..] {
+            let fields = def
+                .fields
+                .iter()
+                .map(|f| match f {
+                    noeta_bytecode::PackedFieldDef::Int => noeta_object::PackedKind::Int,
+                    noeta_bytecode::PackedFieldDef::Float => noeta_object::PackedKind::Float,
+                    noeta_bytecode::PackedFieldDef::F32 => noeta_object::PackedKind::F32,
+                    noeta_bytecode::PackedFieldDef::Bool => noeta_object::PackedKind::Bool,
+                    noeta_bytecode::PackedFieldDef::Struct(idx) => {
+                        noeta_object::PackedKind::Struct(self.packed_schemas[*idx as usize])
+                    }
+                })
+                .collect();
+            self.packed_schemas
+                .push(noeta_object::intern_schema(noeta_object::PackedSchema {
+                    shape: self.shapes[def.shape as usize],
+                    fields,
+                    byte_size: def.byte_size as usize,
+                    column: def.column,
+                }));
+        }
+        for repr in &extended.type_reprs[self.type_reprs.len()..] {
+            self.type_reprs.push(Rc::new(repr.clone()));
+        }
+        for m in &extended.methods[self.module.methods.len()..] {
+            self.methods
+                .insert((m.type_name.clone(), m.method.clone()), m.proto);
+        }
+        for (ty, proto) in &extended.destructors[self.module.destructors.len()..] {
+            self.destructors.insert(ty.clone(), *proto);
+        }
+        for (ty, field, proto) in &extended.field_defaults[self.module.field_defaults.len()..] {
+            self.field_defaults
+                .insert((ty.clone(), field.clone()), *proto);
+        }
+        self.comparable_derives
+            .extend(extended.comparable_derives.iter().cloned());
+        self.tojson_derives
+            .extend(extended.tojson_derives.iter().cloned());
+        self.destruct_reachable
+            .extend(extended.destruct_reachable.iter().cloned());
+        self.globals
+            .resize(extended.global_names.len(), Value::unbound());
+
+        // (3) Swap to the arena'd snapshot; the dispatch loop picks it up at the next frame transfer.
+        self.module = arena.alloc(extended);
+        Ok(entry_idx)
+    }
+
+    /// Evaluate a debug-console **fragment** against a paused frame by *compiling* it — the T5
+    /// evaluator: the console is a REPL over the paused program. The fragment is wrapped as a
+    /// closure whose parameters are the frame's in-scope locals (frame-scope binding via the
+    /// ordinary call protocol — the REPL's sentinel idea in frame scope), its trailing bare
+    /// expression rewritten to a `return`; the wrapper is bound to an unforgeable sentinel global
+    /// by [`Vm::install_fragment`] + one entry run, then called with the values read straight from
+    /// the paused register window. Everything the language can do works — calls, closures
+    /// (`xs.filter(fn(x) => x > 15)`), statements, assignment to program globals — with semantics
+    /// that are the compiler's by construction. An escaped value (a closure stored into program
+    /// state) stays callable after resume because the installed module lives for the rest of the
+    /// run.
+    ///
+    /// A fragment's transient diagnostics/abort-trace are rolled back afterwards, so a failed
+    /// console entry never pollutes the debugged run.
+    ///
+    /// With `pure` set (a **hover** — T6), the same engine runs gated to the read-only surface:
+    /// the fragment must be a single expression built from names / members / indexing / operators /
+    /// literals ([`is_pure_expr`]), and [`Vm::pure_eval`] backstops the receiver-dependent
+    /// dispatches the AST cannot decide (an object's `Index` impl, a user ordering method) by
+    /// refusing any frame push during the run. One evaluator for hover, watch, and console.
+    fn debug_eval_fragment(
         &mut self,
-        expr: &Expr,
+        program: &Program,
         frame: usize,
-        allow_calls: bool,
+        pure: bool,
+        text: &str,
         frames: &[Frame],
         regs: &[Value],
     ) -> DebugEvalOutcome {
-        // Snapshot the frame's locals as (name, borrowed-handle) pairs, then drop the view so the
-        // evaluator can borrow `self` mutably for calls. The handles stay valid: the paused frame keeps
-        // its references, and no collection runs on this thread between here and use.
-        let locals: Vec<(String, Value)> = {
+        match self.eval_fragment_owned(program, frame, pure, Some(text), frames, regs) {
+            Ok(v) => {
+                let text = v.display();
+                let ty = v.type_display();
+                release(v);
+                DebugEvalOutcome::Value { text, ty }
+            }
+            Err(msg) => DebugEvalOutcome::Error(msg),
+        }
+    }
+
+    /// The value-returning core of [`Vm::debug_eval_fragment`]: evaluate the fragment and hand back
+    /// the resulting **owned** [`Value`] (one reference the caller must consume — render + release
+    /// for an `evaluate`, store into a register for a `setVariable`).
+    fn eval_fragment_owned(
+        &mut self,
+        program: &Program,
+        frame: usize,
+        pure: bool,
+        text: Option<&str>,
+        frames: &[Frame],
+        regs: &[Value],
+    ) -> Result<Value, String> {
+        if pure {
+            // Hover: exactly one expression, from the side-effect-free surface.
+            let gated = match &program.stmts[..] {
+                [Stmt::Expr { expr, .. }] => is_pure_expr(expr),
+                _ => false,
+            };
+            if !gated {
+                return Err(
+                    "hover stays read-only — supported: names, `.field`, `[index]`, operators, \
+                     and literals (use a watch or the debug console to run code)"
+                        .to_string(),
+                );
+            }
+        }
+        // Resolve the target frame (snapshot indices are innermost-first, the view bottom-first)
+        // and collect its in-scope locals — the same declared-before-the-paused-instruction filter
+        // the Variables view applies, so the console sees exactly what the panel shows.
+        let (params, args): (Vec<String>, Vec<Value>) = {
             let view = DebugView {
                 module: self.module,
                 frames,
                 regs,
             };
             let Some(view_idx) = view.depth().checked_sub(frame + 1) else {
-                return DebugEvalOutcome::Error(format!("no frame {frame} in the paused stack"));
+                return Err(format!("no frame {frame} in the paused stack"));
             };
-            view.frame(view_idx)
-                .locals()
-                .map(|(n, _, v)| (n.to_string(), v))
-                .collect()
+            let f = view.frame(view_idx);
+            let here = f.line_span();
+            f.locals()
+                .filter(|(_, def_span, _)| match here {
+                    Some(h) => def_span.start < h.start,
+                    None => true,
+                })
+                .map(|(name, _, value)| (name.to_string(), value))
+                .unzip()
+        };
+        let span = program.span;
+        // Compiled-wrapper memo (U3): a watch panel re-evaluates its expressions on every step —
+        // key on (raw text, in-scope local names) and reuse the installed entry on a hit, so a
+        // repeated watch appends nothing to the session. Values stay fresh (they are call
+        // arguments). Only a successful compile is memoized, and the param names are part of the
+        // key, so a hit is exactly a replay of a compile that succeeded in this same scope shape.
+        let memo_key = text.map(|t| (t.to_string(), params.clone()));
+        let cached = memo_key.as_ref().and_then(|k| {
+            self.debug_session
+                .as_ref()
+                .and_then(|s| s.memo.get(k).copied())
+        });
+        let entry = if let Some(entry) = cached {
+            entry
+        } else {
+            self.compile_fragment_entry(program, pure, &params, memo_key, span)?
         };
         let diag_mark = self.diagnostics.len();
         let trace_mark = self.abort_trace.len();
-        let outcome = match self.debug_eval(expr, &locals, allow_calls) {
-            Ok(value) => {
-                let text = value.display();
-                let ty = value
-                    .reflect()
-                    .map(|t| t.to_string())
-                    .unwrap_or_else(|| value.type_name().to_string());
-                // The evaluator returns an owned reference; render it, then drop it.
-                release(value);
-                DebugEvalOutcome::Value { text, ty }
-            }
-            Err(msg) => DebugEvalOutcome::Error(msg),
-        };
-        // A watch is a side query — its errors must not leak into the run being debugged.
+        self.pure_eval = pure;
+        let outcome = self.run_installed_fragment(entry, args, span);
+        self.pure_eval = false;
+        // A console entry is a side query — its errors must not leak into the run being debugged.
         self.diagnostics.truncate(diag_mark);
         self.abort_trace.truncate(trace_mark);
         outcome
     }
 
-    /// Evaluate a debug-watch expression against a frame's `locals`, returning a freshly **owned**
-    /// [`Value`] (one reference the caller must release) or an error message. Every rung follows the
-    /// precise-RC discipline — retain what it reads, release what it consumes — because unlike the
-    /// hover-safe read-only resolver (in `noeta-dap`, borrow-and-display) this runs against the *live*
-    /// heap of a paused program: a stray release would corrupt it. Paths and operators mirror that
-    /// resolver's semantics; a **call** (`allow_calls`) additionally runs code through the ordinary VM
-    /// call machinery ([`Vm::run_method_handle`] / [`Vm::call_value`]), so a watch and a real run agree.
-    fn debug_eval(
+    /// Compile-and-install one fragment wrapper (the memo-miss path of
+    /// [`Vm::eval_fragment_owned`]): apply the U2 binding promotion, rewrite the trailing bare
+    /// expression to a `return`, wrap as the sentinel-bound closure whose parameters are `params`,
+    /// install through the session, and memoize the entry under `memo_key`.
+    fn compile_fragment_entry(
         &mut self,
-        expr: &Expr,
-        locals: &[(String, Value)],
-        allow_calls: bool,
-    ) -> Result<Value, String> {
-        match expr {
-            // A name: a frame local shadows a module global. Either way retain it so the caller owns
-            // the returned reference.
-            Expr::Ident { name, .. } => {
-                if let Some((_, v)) = locals.iter().find(|(n, _)| n == name) {
-                    retain(*v);
-                    Ok(*v)
-                } else if let Some(slot) =
-                    self.module.global_names.iter().position(|g| g == name)
-                {
-                    let v = self.globals[slot];
-                    if v.is_unbound() {
-                        return Err(format!("no variable `{name}` in scope"));
+        program: &Program,
+        pure: bool,
+        params: &[String],
+        memo_key: Option<(String, Vec<String>)>,
+        span: Span,
+    ) -> Result<u32, String> {
+        // Wrap: `mut <sentinel> = fn(<locals>) { <fragment>; return <trailing expr> };`
+        let mut body = program.stmts.clone();
+        // Persistent console bindings (U2): a fragment's top-level `mut x = e` — and a bare
+        // `x = e` introducing a NEW name — binds a SESSION GLOBAL, the console analogue of a REPL
+        // binding, not a closure-local that dies with the entry. Each such name is pre-registered
+        // in the session compiler (so the assignment inside the wrapper resolves globally) and the
+        // `mut` declaration is rewritten to a plain assignment. A name that is a frame local here
+        // is refused: the language forbids shadowing, and silently diverging from what the
+        // Variables panel shows would be worse. (Hover never reaches this — the purity gate above
+        // admits only a single expression.) Nested `mut`s — inside a loop or closure in the
+        // fragment — stay fragment-local, as they would in any function body.
+        if !pure {
+            for stmt in body.iter_mut() {
+                let Stmt::Binding { mut_decl, name, .. } = stmt else {
+                    continue;
+                };
+                if *mut_decl {
+                    if params.iter().any(|p| p == name) {
+                        return Err(format!(
+                            "`{name}` is a frame local here — pick another name to bind at the \
+                             console"
+                        ));
                     }
-                    retain(v);
-                    Ok(v)
-                } else {
-                    Err(format!("no variable `{name}` in scope"))
-                }
-            }
-            // Literal leaves. A string allocates a fresh owned value; primitives are word-sized.
-            Expr::Int { value, .. } => Ok(Value::int(*value)),
-            Expr::Float { value, .. } => Ok(Value::float(*value)),
-            Expr::Bool { value, .. } => Ok(Value::bool(*value)),
-            Expr::Str { value, .. } => Ok(Value::string(value)),
-            // A field read. Retain the field before releasing the receiver, in case the receiver was
-            // the field's last owner (a chained `a.b.c`).
-            Expr::Member { receiver, name, .. } => {
-                let recv = self.debug_eval(receiver, locals, allow_calls)?;
-                match recv.field(name) {
-                    Some(field) => {
-                        retain(field);
-                        release(recv);
-                        Ok(field)
+                    if let Some(session) = self.debug_session.as_mut() {
+                        session.compiler.declare_global(name, true, true);
                     }
-                    None => {
-                        release(recv);
-                        Err(format!("value has no field `{name}`"))
+                    *mut_decl = false;
+                } else if !params.iter().any(|p| p == name) {
+                    // A bare `x = e` on a brand-new name: register it (re-assignable, like a REPL
+                    // binding) so it persists too — an existing global's declared mutability stands.
+                    if let Some(session) = self.debug_session.as_mut() {
+                        session.compiler.declare_global(name, true, false);
                     }
                 }
             }
-            Expr::Index {
-                receiver, index, ..
-            } => {
-                let recv = self.debug_eval(receiver, locals, allow_calls)?;
-                let key = self.debug_eval(index, locals, allow_calls)?;
-                Self::debug_index(recv, key)
-            }
-            // `&&` / `||` short-circuit: the right side is evaluated (and can error) only if reached.
-            Expr::Binary {
-                op: BinaryOp::And,
-                lhs,
-                rhs,
-                ..
-            } => {
-                let l = self.debug_eval(lhs, locals, allow_calls)?;
-                let short = l.as_bool() == Some(false);
-                release(l);
-                if short {
-                    Ok(Value::bool(false))
-                } else {
-                    self.debug_eval(rhs, locals, allow_calls)
-                }
-            }
-            Expr::Binary {
-                op: BinaryOp::Or,
-                lhs,
-                rhs,
-                ..
-            } => {
-                let l = self.debug_eval(lhs, locals, allow_calls)?;
-                let short = l.as_bool() == Some(true);
-                release(l);
-                if short {
-                    Ok(Value::bool(true))
-                } else {
-                    self.debug_eval(rhs, locals, allow_calls)
-                }
-            }
-            // Every other operator via the VM's own value ops (so `+`, `==`, `~`, … match a real run).
-            // `apply_binary`/`apply_unary` borrow their operands and return a fresh owned value, so the
-            // operands are released after.
-            Expr::Binary { op, lhs, rhs, .. } => {
-                let l = self.debug_eval(lhs, locals, allow_calls)?;
-                let r = self.debug_eval(rhs, locals, allow_calls)?;
-                let out = apply_binary(*op, l, r).map_err(|e| e.text);
-                release(l);
-                release(r);
-                out
-            }
-            Expr::Unary { op, operand, .. } => {
-                let v = self.debug_eval(operand, locals, allow_calls)?;
-                let out = apply_unary(*op, v).map_err(|e| e.text);
-                release(v);
-                out
-            }
-            // A call runs user code, so it is refused in a hover (which must stay side-effect-free); a
-            // watch / debug console allows it.
-            Expr::Call { callee, args, span } => {
-                if !allow_calls {
-                    return Err(
-                        "evaluating a call here would run code — a hover stays read-only; \
-                         use a watch or the debug console"
-                            .to_string(),
-                    );
-                }
-                self.debug_eval_call(callee, args, *span, locals)
-            }
-            _ => Err(
-                "this expression form cannot be evaluated in a watch — supported: names, `.field`, \
-                 `[index]`, operators, literals, and function / method calls"
-                    .to_string(),
-            ),
         }
+        if let Some(Stmt::Expr { expr, span }) = body.last() {
+            let (expr, span) = (expr.clone(), *span);
+            *body.last_mut().expect("non-empty: matched last") = Stmt::Return {
+                value: Some(expr),
+                span,
+            };
+        }
+        let wrapper = Program {
+            stmts: vec![Stmt::Binding {
+                mut_decl: true,
+                name: FRAGMENT_SENTINEL.to_string(),
+                name_span: span,
+                ty: None,
+                value: Expr::Closure {
+                    params: params
+                        .iter()
+                        .map(|name| Param {
+                            name: name.clone(),
+                            name_span: span,
+                            ty: None,
+                            default: None,
+                            span,
+                        })
+                        .collect(),
+                    ret: None,
+                    body: ClosureBody::Block(body),
+                    span,
+                },
+                span,
+            }],
+            span,
+        };
+        let entry = self.install_fragment(&wrapper)?;
+        if let (Some(key), Some(session)) = (memo_key, self.debug_session.as_mut()) {
+            session.memo.insert(key, entry);
+        }
+        Ok(entry)
     }
 
-    /// Evaluate a **call** in a debug watch: a method call `recv.m(args)` (user method, or a built-in
-    /// like `xs.len()`) via [`Vm::run_method_handle`], or a bare `f(args)` where `f` is a local or
-    /// global closure via [`Vm::call_value`]. Both dispatch by the same name/type resolution a real
-    /// call uses and consume their owned arguments; an abort is surfaced as the recorded diagnostic's
-    /// message (the caller rolls the diagnostic back).
-    fn debug_eval_call(
+    /// Run one **installed** fragment entry: the entry run binds the sentinel closure, which is
+    /// then taken out of its slot (one-shot — the sentinel never lingers) and called with the
+    /// paused frame's local values. `args` are borrowed from the paused register window; they are
+    /// retained only at the call (which consumes one reference each). Returns the fragment's
+    /// **owned** result value.
+    fn run_installed_fragment(
         &mut self,
-        callee: &Expr,
-        args: &[Expr],
+        entry: u32,
+        args: Vec<Value>,
         span: Span,
-        locals: &[(String, Value)],
     ) -> Result<Value, String> {
-        // `recv.method(args)` — dispatch on the receiver's runtime type (falls back to a built-in
-        // method for a non-object receiver, exactly as an unbound method handle does).
-        if let Expr::Member { receiver, name, .. } = callee {
-            let recv = self.debug_eval(receiver, locals, true)?;
-            let mut owned = Vec::with_capacity(args.len() + 1);
-            owned.push(recv);
-            for arg in args {
-                match self.debug_eval(arg, locals, true) {
-                    Ok(v) => owned.push(v),
-                    Err(e) => {
-                        for o in owned {
-                            release(o);
-                        }
-                        return Err(e);
-                    }
-                }
-            }
-            return self
-                .run_method_handle("", name, false, owned, span)
-                .map_err(|_| self.last_diag_message());
+        match self.run_thunk(entry, &[]) {
+            Ok(v) => release(v),
+            Err(Abort) => return Err(self.last_diag_message()),
         }
-        // `f(args)` — resolve the callee to a value, then run it (a closure, a method handle, …).
-        let func = self.debug_eval(callee, locals, true)?;
-        let mut owned = Vec::with_capacity(args.len());
-        for arg in args {
-            match self.debug_eval(arg, locals, true) {
-                Ok(v) => owned.push(v),
-                Err(e) => {
-                    release(func);
-                    for o in owned {
-                        release(o);
-                    }
-                    return Err(e);
-                }
-            }
+        let Some(slot) = self
+            .module
+            .global_names
+            .iter()
+            .position(|n| n == FRAGMENT_SENTINEL)
+        else {
+            return Err("internal error: fragment sentinel not bound".into());
+        };
+        let closure = std::mem::replace(&mut self.globals[slot], Value::unbound());
+        if closure.is_unbound() {
+            return Err("the fragment did not produce a value".into());
         }
-        self.call_value(func, owned, span)
-            .map_err(|_| self.last_diag_message())
+        for a in &args {
+            retain(*a);
+        }
+        let result = self.call_value(closure, args, span);
+        release(closure);
+        result.map_err(|Abort| self.last_diag_message())
+    }
+
+    /// Service a paused-frame **`setVariable`** (U1): evaluate `value` as a console fragment (frame
+    /// locals visible), then overwrite the named in-scope local's register in the selected frame.
+    /// The old value is released with destructor semantics (this is a reassignment); on any error
+    /// the frame is untouched. `self` is refused — replacing a method's receiver mid-body is a
+    /// footgun, not a feature.
+    fn debug_set_variable(
+        &mut self,
+        name: &str,
+        value: &Program,
+        frame: usize,
+        frames: &[Frame],
+        regs: &mut [Value],
+    ) -> DebugEvalOutcome {
+        if name == "self" {
+            return DebugEvalOutcome::Error("`self` cannot be reassigned".to_string());
+        }
+        // Resolve the target register first, so an unknown name fails before the value evaluates.
+        let Some(view_idx) = frames.len().checked_sub(frame + 1) else {
+            return DebugEvalOutcome::Error(format!("no frame {frame} in the paused stack"));
+        };
+        let target = &frames[view_idx];
+        let chunk = &self.module.protos[target.proto as usize];
+        // The frame's current line, with the same innermost/caller pc adjustment `DebugView::frame`
+        // makes — the in-scope filter must match what the Variables panel showed.
+        let pc = if view_idx + 1 == frames.len() {
+            target.pc
+        } else {
+            target.pc.saturating_sub(1)
+        };
+        let here = chunk.line_span(pc);
+        let Some(reg) = chunk
+            .debug_locals
+            .iter()
+            .find(|ld| {
+                ld.name == name
+                    && match here {
+                        Some(h) => ld.def_span.start < h.start,
+                        None => true,
+                    }
+            })
+            .map(|ld| ld.reg as usize)
+        else {
+            return DebugEvalOutcome::Error(format!("no variable `{name}` in scope"));
+        };
+        let slot = target.base + reg;
+        match self.eval_fragment_owned(value, frame, false, None, frames, regs) {
+            Ok(v) => {
+                let text = v.display();
+                let ty = v.type_display();
+                let old = std::mem::replace(&mut regs[slot], v);
+                self.release_value(old);
+                DebugEvalOutcome::Value { text, ty }
+            }
+            Err(msg) => DebugEvalOutcome::Error(msg),
+        }
     }
 
     /// The message of the most recently recorded diagnostic, to surface a watch call's abort as text.
@@ -5759,33 +6115,6 @@ impl<'m> Vm<'m> {
             .last()
             .map(|d| d.message.clone())
             .unwrap_or_else(|| "the call could not be evaluated".to_string())
-    }
-
-    /// Index a debug-watch receiver by an already-evaluated key: an int selects a list element, a
-    /// string a map value. Both `recv` and `key` are owned (consumed here); the element is retained
-    /// into a fresh owned reference before they are released, so it survives even if `recv` was its
-    /// last owner.
-    fn debug_index(recv: Value, key: Value) -> Result<Value, String> {
-        let result = if let Some(i) = key.as_int() {
-            if i < 0 {
-                Err(format!("negative index {i}"))
-            } else {
-                recv.list_get(i as usize)
-                    .ok_or_else(|| format!("index {i} is out of bounds"))
-            }
-        } else if let Some(s) = key.as_string() {
-            recv.map_get(&s).ok_or_else(|| format!("no key `{s}`"))
-        } else {
-            Err(
-                "an index must evaluate to an int (list position) or a string (map key)"
-                    .to_string(),
-            )
-        };
-        // Retain the shared element into a fresh owned reference before dropping recv/key.
-        let owned = result.inspect(|&element| retain(element));
-        release(recv);
-        release(key);
-        owned
     }
 
     /// Call a value with already-owned arguments (each carrying one reference transferred to
@@ -7262,6 +7591,168 @@ impl<'m> Vm<'m> {
                     }
                 }
             }
+            // `http.serve(port, handler)` — the inbound accept→dispatch→reply loop (http-server S3).
+            // **Concurrent (S3b):** each accepted connection's `handler(request)` is a task in a
+            // server-owned in-flight set the loop reaps; a slow (async) handler yields at its awaits
+            // while the next connection is accepted and other handlers advance — the cooperative Tier-1
+            // model (the accept future is polled alongside the handler futures each round, never
+            // drive-to-completion). Under the sandbox the accept leaf drives a finite request script
+            // and reports the listener closed, so the loop terminates in-oracle. The tree-walker mirror
+            // is its own `Builtin::Serve`; both poll in the identical order, so the interleaving is
+            // deterministic and agrees. RC: `make_async_io` allocates a heap ticket and `poll_once`
+            // retains a non-future pass-through, so every future is released after it resolves, exactly
+            // as `Op::RunFuture` does.
+            Builtin::Serve => {
+                self.check_arity(builtin, args, 2, span)?;
+                let Some(port) = args[0].as_int() else {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`http.serve` expects an int port, found {}",
+                            args[0].type_name()
+                        ),
+                    ));
+                };
+                let handler = args[1];
+                let addr = format!("0.0.0.0:{port}");
+                let listener = self
+                    .host
+                    .net_listen(&addr)
+                    .map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
+                let server_error = || noeta_stdlib::NetResponse {
+                    status: 500,
+                    headers: Vec::new(),
+                    body: b"Internal Server Error".to_vec(),
+                };
+                // Reply on `conn` — an async leaf, driven to completion (a write is quick).
+                macro_rules! reply {
+                    ($conn:expr, $resp:expr) => {{
+                        let reply_io = self.host.net_reply($conn, $resp);
+                        let reply_id = self.executor.spawn_ext(&mut *self.host, reply_io);
+                        let reply_future = Value::make_async_io(reply_id);
+                        let unit = self.drive_future(reply_future, span)?;
+                        self.release_value(reply_future);
+                        release(unit);
+                    }};
+                }
+                let mut in_flight: Vec<(u64, Value)> = Vec::new();
+                let mut accept_future: Option<Value> = None;
+                let mut closing = false;
+                loop {
+                    // Keep one accept in flight while the listener is open.
+                    if !closing && accept_future.is_none() {
+                        let accept_io = self.host.net_accept(listener);
+                        let id = self.executor.spawn_ext(&mut *self.host, accept_io);
+                        accept_future = Some(Value::make_async_io(id));
+                    }
+                    let mut progressed = false;
+                    // Poll the pending accept; on a connection, spawn its handler task.
+                    if let Some(af) = accept_future.take() {
+                        match self.poll_once(af, span) {
+                            Ok(Poll::Ready(accepted)) => {
+                                self.release_value(af);
+                                progressed = true;
+                                let is_some = accepted
+                                    .shape()
+                                    .map(|s| {
+                                        s.name == "Option" && s.variant.as_deref() == Some("some")
+                                    })
+                                    .unwrap_or(false);
+                                if is_some {
+                                    // `Request` payload is shared by `enum_data`; keep it past
+                                    // releasing the `Option` enum that carried it.
+                                    let request = accepted
+                                        .enum_data()
+                                        .and_then(|d| d.into_iter().next())
+                                        .expect("some carries the request");
+                                    retain(request);
+                                    release(accepted);
+                                    let conn = if request.is_extern() {
+                                        request.with_extern(|e| {
+                                            e.as_any()
+                                                .downcast_ref::<noeta_stdlib::net::Request>()
+                                                .map(|r| r.conn)
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                    .expect("accept yields a Request extern value");
+                                    // Spawn the handler (consumes the request reference). A sync handler
+                                    // returns the `Response`; an async one a `Future` polled below. A
+                                    // call-time error → 500 now.
+                                    match self.call_value(handler, vec![request], span) {
+                                        Ok(fut) => in_flight.push((conn, fut)),
+                                        Err(_) => reply!(conn, server_error()),
+                                    }
+                                } else {
+                                    // `none` → the listener closed; stop accepting and drain.
+                                    release(accepted);
+                                    closing = true;
+                                }
+                            }
+                            Ok(Poll::Pending) => accept_future = Some(af),
+                            Err(abort) => {
+                                self.release_value(af);
+                                return Err(abort);
+                            }
+                        }
+                    }
+                    // Reap: poll each in-flight handler; reply on completion, 500 on error.
+                    let mut k = 0;
+                    while k < in_flight.len() {
+                        let (conn, fut) = in_flight[k];
+                        let done = match self.poll_once(fut, span) {
+                            Ok(Poll::Ready(value)) => {
+                                // The future is spent; release it (as `Op::RunFuture` does).
+                                self.release_value(fut);
+                                let response = if value.is_extern() {
+                                    value
+                                        .with_extern(|e| {
+                                            e.as_any()
+                                                .downcast_ref::<noeta_stdlib::NetResponse>()
+                                                .cloned()
+                                        })
+                                        .unwrap_or_else(server_error)
+                                } else {
+                                    server_error()
+                                };
+                                release(value);
+                                reply!(conn, response);
+                                true
+                            }
+                            Ok(Poll::Pending) => false,
+                            Err(_) => {
+                                self.release_value(fut);
+                                reply!(conn, server_error());
+                                true
+                            }
+                        };
+                        if done {
+                            in_flight.remove(k);
+                            progressed = true;
+                        } else {
+                            k += 1;
+                        }
+                    }
+                    // Done when the listener closed and every handler has replied.
+                    if closing && in_flight.is_empty() && accept_future.is_none() {
+                        break;
+                    }
+                    // Let a handler's own `concurrent` tasks advance, then advance the clock if stalled.
+                    if !self.scopes.is_empty() {
+                        progressed |= self.poll_all_scopes_round(span)?;
+                    }
+                    if !progressed && self.executor.advance().is_none() {
+                        return Err(self.error(
+                            DiagnosticCode::Panic,
+                            span,
+                            "async deadlock: `http.serve` stalled with no pending work".to_string(),
+                        ));
+                    }
+                }
+                Ok(Value::unit())
+            }
             Builtin::Signal => {
                 self.check_arity(builtin, args, 1, span)?;
                 // `signal(v)` — allocate a reactive cell holding `v`. The graph keeps its own
@@ -7512,6 +8003,197 @@ mod tests {
         let parsed = parse(&source, &lexed.tokens);
         let module = compile(&parsed.program).expect("program should compile");
         VmBackend::new().run_module_traced(&module)
+    }
+
+    /// Parse a fragment the way a debug console would (statements allowed; no checker).
+    fn fragment(src: &str) -> Program {
+        let source = Source::new(SourceId(1), "<console>", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        assert!(
+            lexed.diagnostics.is_empty() && parsed.diagnostics.is_empty(),
+            "fragment should parse cleanly: {src:?}"
+        );
+        parsed.program
+    }
+
+    /// Build a **session-adopted debug Vm**: the checked program compiled with the compiler kept
+    /// alive (T3), the module arena'd, and the [`DebugSession`] installed — the debug console's
+    /// launch shape. Returns the Vm ready to `run_top` entry 0.
+    fn debug_session_vm<'a>(arena: &'a typed_arena::Arena<Module>, src: &str) -> Vm<'a> {
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        assert!(
+            lexed.diagnostics.is_empty() && parsed.diagnostics.is_empty(),
+            "program should parse cleanly"
+        );
+        let checked = noeta_check::check_all(&parsed.program);
+        assert!(
+            checked.diagnostics.is_empty(),
+            "program should check cleanly: {:?}",
+            checked.diagnostics
+        );
+        let (module, compiler) =
+            noeta_compiler::compile_with_sites_session(&parsed.program, checked.sites, false, true)
+                .expect("a checked program compiles");
+        let module: &Module = arena.alloc(module);
+        noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+        let mut vm = Vm::load(
+            module,
+            Box::new(noeta_stdlib::SandboxHost::new()),
+            Box::new(noeta_stdlib::SandboxExecutor::new()),
+        );
+        vm.debug_session = Some(DebugSession {
+            compiler,
+            arena,
+            memo: HashMap::new(),
+        });
+        vm
+    }
+
+    /// T4 (tooling-unification): a fragment installed into a *running* Vm executes against the
+    /// swapped extended module — calling the program's functions and reading its globals by their
+    /// original ids — and code the fragment defines (a closure bound into a global) stays callable
+    /// by LATER code, including the program's own functions, after further installs.
+    #[test]
+    fn installed_fragments_extend_a_running_debug_vm() {
+        let before = noeta_value::live_count();
+        let arena = typed_arena::Arena::new();
+        let mut vm = debug_session_vm(
+            &arena,
+            "struct P { x: int }\n\
+             fn twice(n: int): int { return n * 2 }\n\
+             fn callcb(n: int): int { return cb(n) }\n\
+             mut cb = fn(n: int) => n\n\
+             mut base = 10\n\
+             mut p0 = P { x: 3 }\n\
+             echo twice(base)\n",
+        );
+        vm.run_top();
+        assert_eq!(vm.stdout, "20\n");
+
+        // Fragment 1: calls the program's fn + global by their original ids.
+        let entry = vm
+            .install_fragment(&fragment("echo twice(base + 1);"))
+            .expect("fragment compiles");
+        let Ok(v) = vm.run_thunk(entry, &[]) else {
+            panic!("fragment runs: {:?}", vm.diagnostics);
+        };
+        release(v);
+        assert_eq!(vm.stdout, "20\n22\n");
+
+        // Fragment 2: constructs the program's struct; interned-shape identity makes it equal to
+        // the value entry 0 built.
+        let entry = vm
+            .install_fragment(&fragment("echo p0 == P { x: 3 };"))
+            .expect("fragment compiles");
+        let Ok(v) = vm.run_thunk(entry, &[]) else {
+            panic!("fragment runs: {:?}", vm.diagnostics);
+        };
+        release(v);
+        assert_eq!(vm.stdout, "20\n22\ntrue\n");
+
+        // Fragment 3: ESCAPE — rebind the program's callback global to a fragment-defined closure
+        // (a proto index that only exists in the extended module).
+        let entry = vm
+            .install_fragment(&fragment("cb = fn(n: int) => twice(n) + base;"))
+            .expect("fragment compiles");
+        let Ok(v) = vm.run_thunk(entry, &[]) else {
+            panic!("fragment runs: {:?}", vm.diagnostics);
+        };
+        release(v);
+
+        // Fragment 4: the PROGRAM's own function (old-module code) calls the escaped closure — the
+        // dispatch resolves its fragment proto through the newest module at the frame transfer.
+        let entry = vm
+            .install_fragment(&fragment("echo callcb(4);"))
+            .expect("fragment compiles");
+        let Ok(v) = vm.run_thunk(entry, &[]) else {
+            panic!("fragment runs: {:?}", vm.diagnostics);
+        };
+        release(v);
+        assert_eq!(vm.stdout, "20\n22\ntrue\n18\n");
+
+        // A fragment that ABORTS unwinds cleanly through the swapped module (the release loops
+        // resolve every frame's proto against the newest snapshot) and pollutes nothing.
+        let entry = vm
+            .install_fragment(&fragment("echo [1][5];"))
+            .expect("fragment compiles");
+        assert!(vm.run_thunk(entry, &[]).is_err(), "out of bounds aborts");
+        vm.diagnostics.clear();
+        vm.abort_trace.clear();
+
+        // Teardown drains everything; residency returns to the baseline (no leaked fragment values).
+        let result = vm.teardown(noeta_value::CollectorMode::Trace);
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            noeta_value::live_count(),
+            before,
+            "teardown after fragment installs returns residency to baseline"
+        );
+    }
+
+    /// U3 (tooling-unification): a re-evaluated watch — same text, same scope shape — reuses its
+    /// compiled wrapper instead of appending a fresh proto + slot to the session per step.
+    #[test]
+    fn watch_fragments_are_memoized_by_text_and_scope() {
+        let arena = typed_arena::Arena::new();
+        let mut vm = debug_session_vm(
+            &arena,
+            "fn twice(n: int): int { return n * 2 }\nmut base = 10\necho twice(base)\n",
+        );
+        vm.run_top();
+        // Fabricate the paused shape the trampoline sees: main's frame at its entry (no in-scope
+        // locals yet), over a scratch register window.
+        let frames = vec![Frame {
+            proto: 0,
+            base: 0,
+            pc: 0,
+            ret_dst: 0,
+            ret_transform: RetTransform::None,
+            upvalues: Vec::new(),
+        }];
+        let regs = vec![Value::unit(); vm.module.protos[0].num_registers as usize];
+
+        let text = "twice(base) + 1";
+        let program = fragment(text);
+        let DebugEvalOutcome::Value { text: v1, .. } =
+            vm.debug_eval_fragment(&program, 0, false, text, &frames, &regs)
+        else {
+            panic!("first eval should succeed");
+        };
+        assert_eq!(v1, "21");
+        let protos = vm.module.protos.len();
+        let globals = vm.module.global_names.len();
+
+        // Same text, same scope shape → memo hit: nothing appends, the value is fresh.
+        let DebugEvalOutcome::Value { text: v2, .. } =
+            vm.debug_eval_fragment(&program, 0, false, text, &frames, &regs)
+        else {
+            panic!("second eval should succeed");
+        };
+        assert_eq!(v2, "21");
+        assert_eq!(
+            vm.module.protos.len(),
+            protos,
+            "a repeated watch appends no protos"
+        );
+        assert_eq!(
+            vm.module.global_names.len(),
+            globals,
+            "a repeated watch appends no global slots"
+        );
+
+        // Different text → a fresh compile (the memo is per-expression, not a single slot).
+        let other = fragment("twice(base) + 2");
+        let DebugEvalOutcome::Value { text: v3, .. } =
+            vm.debug_eval_fragment(&other, 0, false, "twice(base) + 2", &frames, &regs)
+        else {
+            panic!("third eval should succeed");
+        };
+        assert_eq!(v3, "22");
+        assert!(vm.module.protos.len() > protos, "new text compiles fresh");
     }
 
     /// R0 (REPL-on-VM): [`Vm::run_top`] runs the entry chunk against globals that **persist between

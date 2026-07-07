@@ -92,55 +92,24 @@ pub struct Tokens(pub Lexed);
 #[derive(Debug, Clone)]
 pub struct Ast(pub Parsed);
 
-/// Type-checker output: the checker's diagnostics (empty ⇒ well-typed) **and** the `type_of`
-/// site map, both produced by one `noeta_check::check_all` run. Carrying the map here lets the
-/// [`bytecode`] query and the eval path read it from this memoized query instead of each
-/// re-running the checker (the redundant-passes dedup — the map is a pure function of the AST).
+/// Type-checker output: the checker's diagnostics (empty ⇒ well-typed) **and** its compile-input
+/// [`Sites`] bundle, both produced by one `noeta_check::check_all` run. Carrying the bundle here
+/// lets the [`bytecode`] query and the eval path read it from this memoized query instead of each
+/// re-running the checker (the redundant-passes dedup — the bundle is a pure function of the AST).
+///
+/// [`Sites`]: noeta_check::Sites
 #[derive(Debug, Clone)]
 pub struct Checked {
     pub diagnostics: Vec<Diagnostic>,
-    pub type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// Every expression's inferred type, keyed by span — the IDE hover index. Empty except in the
     /// result of the [`checked_ide`] query (the LSP path); the compile-path [`checked`] query leaves
     /// it empty so `noeta run`/differential pay nothing for it.
     pub expr_types: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
-    /// The `List<packed>` construction-site layout map (P-PACK 2.1), carried here for the same
-    /// reason as `type_of_sites`: the eval reference reads it to lay flat lists out identically to
-    /// the VM, computed once per check.
-    pub packed_list_sites: std::collections::HashMap<Span, noeta_ast::reflect::PackedLayout>,
-    /// Call-site-typed native-call recipes (`json.parse::<T>`), carried here for the same reason as
-    /// `packed_list_sites`: the lowering bakes them into `Rvalue::ExtCall`, computed once per check.
-    pub ext_call_sites: std::collections::HashMap<Span, noeta_native::TypeRecipe>,
-    /// `map(...)` call sites whose result element type is packed (P-PACK 2.6 category B), carried here
-    /// for the same reason as `packed_list_sites`: the VM builds a flat `map` result at these spans.
-    pub map_packed_sites: std::collections::HashMap<Span, noeta_ast::reflect::PackedLayout>,
-    /// The fusable `list[i].field` set (P-PACK 2.5+), carried here for the same reason as
-    /// `packed_list_sites`: both backends read it to fuse indexed field reads identically.
-    pub index_field_sites: std::collections::HashSet<Span>,
-    /// Streaming-`for` site set (Track I.2), carried here for the same reason as the other site
-    /// maps: the lowering sets `Stmt::For.stream` from it so both backends stream the same loops.
-    pub for_stream_sites: std::collections::HashSet<Span>,
-    /// Fixed-width arithmetic sites (Tier W), carried here for the same reason as the other site
-    /// maps: lowering wraps `+ - *`/unary `-` on an `IntN` in `Rvalue::MaskWidth` from it, so both
-    /// backends wrap the erased result identically.
-    pub width_sites: std::collections::HashMap<Span, (bool, u8)>,
-    /// Bare float-literal spans adapted into an `f32` context (P-NUM-SYM), carried here for the same
-    /// reason as the other site maps: lowering narrows the literal to a `Const::F32` from it.
-    pub f32_literal_sites: std::collections::HashSet<Span>,
-    /// Collection-construction-site → element `TypeRepr` map (runtime type-argument reflection, R1),
-    /// carried here for the same reason as the other site maps: lowering bakes it onto `Rvalue::List`
-    /// so `type_of` recovers a list's element type after a `dyn` launder, identically on both backends.
-    pub construction_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
-    /// Unbound method-handle sites (`Type.method` in value position) → the resolved
-    /// `(ty, method, associated)`, carried here for the same reason as the other site maps: lowering
-    /// emits an `Rvalue::MethodHandle` at these spans on both backends.
-    pub handle_sites: std::collections::HashMap<Span, (String, String, bool)>,
-    /// Bound-handle sites (`value.method`, EX.2b), carried like the other site maps.
-    pub bound_handle_sites: std::collections::HashSet<Span>,
-    /// Per-binding destructor-relevance (Phase 3.2b), threaded into the compiler so the drop pass
-    /// annotates each `DropVar` — carried here for the same reason as `type_of_sites` (compute the
-    /// checker's result once, reuse it without a second run).
-    pub destructor_relevance: noeta_check::DestructorRelevance,
+    /// The checker's compile-input bundle (every span-keyed codegen hint + destructor relevance),
+    /// consumed as a unit by the compiler and the eval reference. (The T2 `Sites` bundling subsumed
+    /// main's flat per-map fields, including the noeta-native `TypeRecipe` rename — the bundle's
+    /// field types live in `noeta_check::Sites` and follow that rename through the re-export.)
+    pub sites: noeta_check::Sites,
 }
 
 /// Compiler output: a [`Module`], or the first construct outside the VM's subset.
@@ -231,50 +200,25 @@ pub fn checked_ide(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
 fn from_check_output(out: noeta_check::Checked) -> Checked {
     Checked {
         diagnostics: out.diagnostics,
-        type_of_sites: out.type_of_sites,
         expr_types: out.expr_types,
-        packed_list_sites: out.packed_list_sites,
-        ext_call_sites: out.ext_call_sites,
-        map_packed_sites: out.map_packed_sites,
-        index_field_sites: out.index_field_sites,
-        for_stream_sites: out.for_stream_sites,
-        width_sites: out.width_sites,
-        f32_literal_sites: out.f32_literal_sites,
-        construction_sites: out.construction_sites,
-        handle_sites: out.handle_sites,
-        bound_handle_sites: out.bound_handle_sites,
-        destructor_relevance: out.destructor_relevance,
+        sites: out.sites,
     }
 }
 
 /// Compile the AST to a [`Module`], or report the first unsupported construct. Depends on [`ast`]
-/// and [`checked`] — the latter only to reuse its `type_of_sites` map (which the compiler needs
+/// and [`checked`] — the latter only to reuse its [`Sites`] bundle (which the compiler needs, e.g.
 /// to bake full-fidelity `type_of` constants) rather than re-deriving it. Execution is still
-/// gated on `checked`'s diagnostics by the caller; reading the map here does not couple them
+/// gated on `checked`'s diagnostics by the caller; reading the bundle here does not couple them
 /// semantically, it only avoids a second checker run.
+///
+/// [`Sites`]: noeta_check::Sites
 #[salsa::tracked(returns(ref))]
 pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
     let parsed = ast(db, src);
     let checked = checked(db, src);
-    let sites = checked.type_of_sites.clone();
-    let packed = checked.packed_list_sites.clone();
-    let map_packed = checked.map_packed_sites.clone();
-    let index_fields = checked.index_field_sites.clone();
-    let ext = checked.ext_call_sites.clone();
     Bytecode(noeta_compiler::compile_with_sites(
         &parsed.0.program,
-        sites,
-        packed,
-        map_packed,
-        index_fields,
-        ext,
-        checked.for_stream_sites.clone(),
-        checked.width_sites.clone(),
-        checked.f32_literal_sites.clone(),
-        checked.construction_sites.clone(),
-        checked.handle_sites.clone(),
-        checked.bound_handle_sites.clone(),
-        &checked.destructor_relevance,
+        checked.sites.clone(),
         false,
         // No debug info on the salsa/IDE bytecode path (the debugger uses its own direct compile).
         false,
@@ -374,19 +318,8 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
         Ok(program) => from_check_output(noeta_check::check_all(program)),
         Err(diags) => Checked {
             diagnostics: diags.clone(),
-            type_of_sites: std::collections::HashMap::new(),
             expr_types: std::collections::HashMap::new(),
-            packed_list_sites: std::collections::HashMap::new(),
-            ext_call_sites: std::collections::HashMap::new(),
-            map_packed_sites: std::collections::HashMap::new(),
-            index_field_sites: std::collections::HashSet::new(),
-            for_stream_sites: std::collections::HashSet::new(),
-            width_sites: std::collections::HashMap::new(),
-            f32_literal_sites: std::collections::HashSet::new(),
-            construction_sites: std::collections::HashMap::new(),
-            handle_sites: std::collections::HashMap::new(),
-            bound_handle_sites: std::collections::HashSet::new(),
-            destructor_relevance: noeta_check::DestructorRelevance::default(),
+            sites: noeta_check::Sites::default(),
         },
     }
 }
@@ -401,19 +334,8 @@ pub fn linked_checked_ide(db: &dyn salsa::Database, ws: Workspace) -> Checked {
         Ok(program) => from_check_output(noeta_check::check_all_with_types(program)),
         Err(diags) => Checked {
             diagnostics: diags.clone(),
-            type_of_sites: std::collections::HashMap::new(),
             expr_types: std::collections::HashMap::new(),
-            packed_list_sites: std::collections::HashMap::new(),
-            ext_call_sites: std::collections::HashMap::new(),
-            map_packed_sites: std::collections::HashMap::new(),
-            index_field_sites: std::collections::HashSet::new(),
-            for_stream_sites: std::collections::HashSet::new(),
-            width_sites: std::collections::HashMap::new(),
-            f32_literal_sites: std::collections::HashSet::new(),
-            construction_sites: std::collections::HashMap::new(),
-            handle_sites: std::collections::HashMap::new(),
-            bound_handle_sites: std::collections::HashSet::new(),
-            destructor_relevance: noeta_check::DestructorRelevance::default(),
+            sites: noeta_check::Sites::default(),
         },
     }
 }
@@ -427,25 +349,9 @@ pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> Bytecode {
     match &linked(db, ws).0 {
         Ok(program) => {
             let checked = linked_checked(db, ws);
-            let sites = checked.type_of_sites.clone();
-            let packed = checked.packed_list_sites.clone();
-            let map_packed = checked.map_packed_sites.clone();
-            let index_fields = checked.index_field_sites.clone();
-            let ext = checked.ext_call_sites.clone();
             Bytecode(noeta_compiler::compile_with_sites(
                 program,
-                sites,
-                packed,
-                map_packed,
-                index_fields,
-                ext,
-                checked.for_stream_sites.clone(),
-                checked.width_sites.clone(),
-                checked.f32_literal_sites.clone(),
-                checked.construction_sites.clone(),
-                checked.handle_sites.clone(),
-                checked.bound_handle_sites.clone(),
-                &checked.destructor_relevance,
+                checked.sites.clone(),
                 false,
                 // No debug info on the salsa/IDE bytecode path.
                 false,

@@ -37,7 +37,7 @@ use noeta_ast::{
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_lexer::{Token, TokenKind as T};
-use noeta_span::{Source, Span};
+use noeta_span::{Source, SourceId, Span};
 
 mod literals;
 use literals::{
@@ -629,6 +629,45 @@ pub(crate) fn to_simple(s: Span) -> SimpleSpan {
 pub struct Parsed {
     pub program: Program,
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// A parsed one-off **fragment** — a string typed at a prompt (the REPL's `:type`, a debugger
+/// watch/hover) rather than loaded from a file. Bundles the synthesized [`Source`] (kept so
+/// diagnostics and traces can render against the fragment's own text) with the parse outcome.
+#[derive(Debug, Clone)]
+pub struct Fragment {
+    pub source: Source,
+    pub program: Program,
+    /// Lex diagnostics, then parse diagnostics. Empty means the fragment parsed cleanly.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl Fragment {
+    /// The fragment's trailing bare expression, if its last statement is one — the shape a watch
+    /// expression or `:type` query has after [`parse_fragment`]'s `;` wrap.
+    pub fn trailing_expr(&self) -> Option<&Expr> {
+        match self.program.stmts.last() {
+            Some(Stmt::Expr { expr, .. }) => Some(expr),
+            _ => None,
+        }
+    }
+}
+
+/// Parse `text` as an interactive **expression fragment**: the text is wrapped with a trailing `;`
+/// so a bare expression parses as a trailing expression statement (a statement passes through
+/// unchanged). The one entry point for every tool that parses a typed-in string — the REPL's
+/// `:type` and the debug adapter's watch/hover — so their acceptance behavior cannot drift.
+pub fn parse_fragment(id: SourceId, name: &str, text: &str) -> Fragment {
+    let source = Source::new(id, name, format!("{text};"));
+    let lexed = noeta_lexer::lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    let mut diagnostics = lexed.diagnostics;
+    diagnostics.extend(parsed.diagnostics);
+    Fragment {
+        source,
+        program: parsed.program,
+        diagnostics,
+    }
 }
 
 /// Parse a token stream into a [`Program`].

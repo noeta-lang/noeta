@@ -265,6 +265,49 @@ the request, `…/headers` echoes the request headers — so tests are reproduci
 server. A program that needs real data runs on the real host. (Examples above are `ignore`d in the
 doc-test gate precisely because they would otherwise reach the network.)
 
+### Serving: `http.serve`
+
+`http.serve(port, handler)` binds a listener on `port` and drives an inbound HTTP server: for each
+connection it calls `handler(request)` and writes back the `Response` the handler returns. The
+handler is a `(Request) -> Response`, **sync or async** — an `async` handler `await`s freely, and the
+server dispatches connections **concurrently** (a slow handler yields while others make progress),
+all on Noeta's own async runtime. A handler that errors becomes a `500`; the server keeps running.
+
+| Type / function | Signature | Notes |
+|---|---|---|
+| `http.serve` | `serve(port: int, handler: (Request) -> Response) -> void` | Binds `0.0.0.0:port`; serves until the process stops. |
+| `http.response` | `response(status: int, body?: string\|bytes, headers?: Map<string, string>) -> Response` | The reply builder a handler uses. |
+| `Request` methods | `method() -> string`, `path() -> string`, `query(name) -> string?`, `header(name) -> string?` (case-insensitive), `body() -> string`, `body_bytes() -> bytes` | Read the inbound request. |
+| `Response.with_header` | `with_header(name, value) -> Response` | Copy-modify — returns a new response (a `Response` is immutable). |
+
+```noeta ignore
+use std.{http}
+
+fn fetch(req: Request): Response {
+    if req.path() == "/health" {
+        return http.response(200, "ok")
+    }
+    return http.response(404, "not found")
+}
+
+http.serve(8080, fetch)
+```
+
+**`noeta serve`.** Rather than call `http.serve` yourself, run `noeta serve app.noe --port 8080`: the
+file defines a top-level `fn fetch(req: Request): Response` (and `use std.{http}`), and the command
+runs its top-level setup, then serves that handler until interrupted (Ctrl-C). It is the ergonomic
+entry point over an explicit `http.serve(...)` call — the same mechanism underneath.
+
+**Routers and middleware are ordinary code.** Because a handler is a first-class `(Request) ->
+Response`, a router is just a handler that dispatches on `req.path()`, and middleware is a function
+`(Request) -> Response -> (Request) -> Response` that wraps one — no framework or runtime hook
+needed; you compose them into the single handler you serve.
+
+**Sandbox vs. real.** Under `noeta run` / `noeta serve` the server binds a real socket. Under the
+deterministic sandbox (tests) `http.serve` instead drives a fixed, documented **request script**
+through the handler and returns — so a served program is reproducible and terminates in-oracle,
+the inbound mirror of the client's pure responder.
+
 ## `vec` & `quat`
 
 Scalar 3D vector and quaternion math over any struct with the right shape — a `Vec3` is any struct with three `f32` fields, a `Quat` any struct with four. Result-shape operations return the *same* struct type as the input.

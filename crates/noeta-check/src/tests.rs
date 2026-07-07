@@ -1565,7 +1565,7 @@ fn relevance(text: &str) -> super::DestructorRelevance {
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     assert!(parsed.diagnostics.is_empty(), "must parse cleanly");
-    super::check_all(&parsed.program).destructor_relevance
+    super::check_all(&parsed.program).sites.destructor_relevance
 }
 
 #[test]
@@ -1736,7 +1736,10 @@ fn index_field_count(text: &str) -> usize {
         "test program must parse cleanly: {:?}",
         parsed.diagnostics
     );
-    super::check_all(&parsed.program).index_field_sites.len()
+    super::check_all(&parsed.program)
+        .sites
+        .index_field_sites
+        .len()
 }
 
 #[test]
@@ -1797,7 +1800,10 @@ fn map_packed_count(text: &str) -> usize {
         "test program must parse cleanly: {:?}",
         parsed.diagnostics
     );
-    super::check_all(&parsed.program).map_packed_sites.len()
+    super::check_all(&parsed.program)
+        .sites
+        .map_packed_sites
+        .len()
 }
 
 #[test]

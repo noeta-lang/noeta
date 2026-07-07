@@ -147,20 +147,7 @@ fn run(program: &noeta_ast::Program, checked: &noeta_db::Checked, report: &mut I
     // (a fallback to the AST walker would hide an unlowered program).
     match noeta_ir::lower(program) {
         Ok(_) => {
-            let _ = reference_run(
-                program,
-                checked.type_of_sites.clone(),
-                checked.packed_list_sites.clone(),
-                checked.index_field_sites.clone(),
-                checked.ext_call_sites.clone(),
-                checked.for_stream_sites.clone(),
-                checked.width_sites.clone(),
-                checked.f32_literal_sites.clone(),
-                checked.construction_sites.clone(),
-                checked.handle_sites.clone(),
-                checked.bound_handle_sites.clone(),
-                &checked.destructor_relevance,
-            );
+            let _ = reference_run(program, checked.sites.clone());
             report.ran += 1;
         }
         Err(_) => report.skipped += 1,

@@ -33,7 +33,8 @@ Everything the `noeta` binary does beyond running code.
 - [Testing](Testing)
 - [Benchmarking](Benchmarking)
 - [Documentation & Dev Tiers](Documentation-and-Tiers)
-- [Editor & AI Tooling (LSP / MCP)](Editor-and-AI-Tooling)
+- [Editor & AI Tooling (highlighting / LSP)](Editor-and-AI-Tooling)
+- [Debugging (`noeta dap`)](Debugging)
 
 ### 3 · Language & standard-library reference
 The exhaustive reference for syntax, semantics, and the stdlib.
