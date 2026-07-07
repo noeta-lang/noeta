@@ -262,6 +262,12 @@ pub struct Jit<M: ClifModule = JITModule> {
     site_slots: Vec<Box<CallSiteCache>>,
     /// How many prototypes were compiled to *real* native code (vs a bail stub) — the coverage stat.
     native_count: usize,
+    /// P-AOT L3.1 **dev oracle knob** (`NOETA_JIT_AOT=1`): make the *runtime* JIT emit its bodies in
+    /// AOT mode (inline caches off, null call sites) instead of the production IC-on form. Semantics
+    /// are identical — the IC-off path is the always-correct helper slow path — so the jit-differential
+    /// run under this knob proves the ahead-of-time codegen is byte-identical in behaviour across the
+    /// whole corpus, before any object-linking work exists. Default `false` (production JIT unchanged).
+    aot_bodies: bool,
     /// Total / worst-case wall time spent inside [`Jit::compile`] (P-PAR S0c): every compile runs
     /// synchronously on the mutator thread today, so these are the pauses the program felt. Cache
     /// hits don't count — only actual codegen work.
@@ -450,6 +456,9 @@ impl<M: ClifModule> Jit<M> {
             compile_ns_total: 0,
             compile_ns_max: 0,
             breakdown: CompileBreakdown::default(),
+            // Dev oracle knob (L3.1): make the runtime JIT emit AOT-form (IC-off) bodies so the
+            // jit-differential can prove the ahead-of-time codegen byte-identical across the corpus.
+            aot_bodies: std::env::var_os("NOETA_JIT_AOT").is_some(),
             observe_id,
             note_bound_id,
             retain_id,
@@ -609,6 +618,7 @@ impl<M: ClifModule> Jit<M> {
         module: &Module,
         proto: usize,
         fast: bool,
+        aot: bool,
     ) -> Result<FuncId, String> {
         let chunk = &module.protos[proto];
         let n = chunk.code.len();
@@ -622,13 +632,17 @@ impl<M: ClifModule> Jit<M> {
 
         self.module.clear_context(&mut self.ctx);
         // S4.2 inline caches: one slot per call site in this body, allocated up front so their
-        // (stable, boxed) addresses can be baked into the code below.
+        // (stable, boxed) addresses can be baked into the code below. An AOT body emits no
+        // inline-cache path (those absolute addresses don't survive into a relocatable object —
+        // L3.1), so it allocates no slots and leaves `site_addrs` zeroed.
         let mut site_addrs: Vec<u64> = vec![0; n];
-        for (pc, op) in chunk.code.iter().enumerate() {
-            if matches!(op, Op::Call { .. } | Op::CallGlobal { .. }) {
-                let slot: Box<CallSiteCache> = Box::new([SITE_EMPTY, 0, 0, 0]);
-                site_addrs[pc] = slot.as_ref() as *const CallSiteCache as u64;
-                self.site_slots.push(slot);
+        if !aot {
+            for (pc, op) in chunk.code.iter().enumerate() {
+                if matches!(op, Op::Call { .. } | Op::CallGlobal { .. }) {
+                    let slot: Box<CallSiteCache> = Box::new([SITE_EMPTY, 0, 0, 0]);
+                    site_addrs[pc] = slot.as_ref() as *const CallSiteCache as u64;
+                    self.site_slots.push(slot);
+                }
             }
         }
         let frame_template_addr = self.frame_template as u64;
@@ -773,6 +787,7 @@ impl<M: ClifModule> Jit<M> {
                 layout,
                 site_addrs,
                 frame_template_addr,
+                aot,
                 note_bound_ref,
                 retain_ref,
                 release_ref,
@@ -985,15 +1000,18 @@ impl Jit<JITModule> {
         }
         let compile_start = std::time::Instant::now();
         let chunk = &module.protos[proto];
+        // The dev oracle knob makes the runtime JIT emit AOT-form (IC-off) bodies — identical
+        // semantics, so the differential run under `NOETA_JIT_AOT=1` validates the AOT codegen.
+        let aot = self.aot_bodies;
         let f = if is_eligible(chunk) {
-            let main_id = self.emit_int_body(module, proto, false)?;
+            let main_id = self.emit_int_body(module, proto, false, aot)?;
             let f = self.finalize_ptr(main_id)?;
             self.native_count += 1;
             // S4.1: also compile the fast-convention body where the prototype supports the
             // frameless-window contract; direct calls to it then skip the window fill, the
             // argument copy, and the helper-side return protocol.
             if fast_ok(chunk) {
-                let fast_id = self.emit_int_body(module, proto, true)?;
+                let fast_id = self.emit_int_body(module, proto, true, aot)?;
                 let ff = self.finalize_ptr(fast_id)?;
                 self.fast_compiled[proto] = Some(ff as usize);
             }
@@ -1055,7 +1073,7 @@ impl Jit<ObjectModule> {
     pub fn compile_object(&mut self, module: &Module, proto: usize) -> Result<FuncId, String> {
         let chunk = &module.protos[proto];
         if is_eligible(chunk) {
-            self.emit_int_body(module, proto, false)
+            self.emit_int_body(module, proto, false, true)
         } else {
             self.emit_bail_stub(proto)
         }
@@ -2036,6 +2054,14 @@ struct Codegen<'a, 'b> {
     /// The empty-`Frame` template's address (S4.2) — the native push copies it, then patches
     /// `proto`/`base`/`ret_dst`.
     frame_template_addr: u64,
+    /// P-AOT L3.1: emit for an ahead-of-time object (`true`) instead of the runtime JIT (`false`).
+    /// The only codegen difference is at call sites: the JIT bakes each site's inline-cache slot as
+    /// an absolute address (`site_addrs`), which is meaningless in a relocatable object. An AOT body
+    /// therefore emits **no** inline-cache hit path and passes a null slot to `prepare_call` — the
+    /// always-correct helper slow path (calls just skip the per-site cache). Everything else — the
+    /// frame-template copy (position-independent immediate words) and helper calls (`Linkage::Import`
+    /// relocations) — is already object-safe, so this is the whole seam.
+    aot: bool,
     note_bound_ref: FuncRef,
     retain_ref: FuncRef,
     release_ref: FuncRef,
@@ -2710,109 +2736,123 @@ fn emit_call(
     // helper, which can grow them), extend the register stack's length over the (uninitialized —
     // S4.1's contract) callee window, copy the empty-`Frame` template, patch
     // `proto`/`base`/`ret_dst`, bump the frame count, and record the caller's resume pc.
-    let site_addr = cg.site_addrs[pc];
-    let site = cg.b.ins().iconst(types::I64, site_addr as i64);
-    let callee_v = match callee_src {
-        CalleeSrc::Reg(r) => cg.read_reg(r),
-        CalleeSrc::Global(g) => cg.load_global(g),
+    // In an AOT body the per-site inline-cache slot is a per-process heap address that cannot be
+    // baked into a relocatable object (P-AOT L3.1), so `site` is null and the inline-cache hit path
+    // below is not emitted at all — calls go straight to the always-correct `prepare_call` helper,
+    // which treats a null slot as "no site cache".
+    let site = if cg.aot {
+        cg.b.ins().iconst(types::I64, 0)
+    } else {
+        let site_addr = cg.site_addrs[pc];
+        cg.b.ins().iconst(types::I64, site_addr as i64)
     };
-    let key =
-        cg.b.ins()
-            .load(types::I64, MemFlagsData::trusted(), site, 0);
-    let is_hit = cg.b.ins().icmp(IntCC::Equal, callee_v, key);
-    let hit_blk = cg.b.create_block();
-    cg.b.ins().brif(is_hit, hit_blk, &[], slow_blk, &[]);
+    if !cg.aot {
+        let callee_v = match callee_src {
+            CalleeSrc::Reg(r) => cg.read_reg(r),
+            CalleeSrc::Global(g) => cg.load_global(g),
+        };
+        let key =
+            cg.b.ins()
+                .load(types::I64, MemFlagsData::trusted(), site, 0);
+        let is_hit = cg.b.ins().icmp(IntCC::Equal, callee_v, key);
+        let hit_blk = cg.b.create_block();
+        cg.b.ins().brif(is_hit, hit_blk, &[], slow_blk, &[]);
 
-    cg.b.switch_to_block(hit_blk);
-    let regs_len =
-        cg.b.ins()
-            .load(types::I64, MemFlagsData::trusted(), regs_vec, len_off);
-    let regs_cap =
-        cg.b.ins()
-            .load(types::I64, MemFlagsData::trusted(), regs_vec, cap_off);
-    let nregs =
-        cg.b.ins()
-            .load(types::I64, MemFlagsData::trusted(), site, 16);
-    let need = cg.b.ins().iadd(regs_len, nregs);
-    let fits =
-        cg.b.ins()
-            .icmp(IntCC::UnsignedLessThanOrEqual, need, regs_cap);
-    let frames_len =
-        cg.b.ins()
-            .load(types::I64, MemFlagsData::trusted(), frames, len_off);
-    let frames_cap =
-        cg.b.ins()
-            .load(types::I64, MemFlagsData::trusted(), frames, cap_off);
-    let froom =
-        cg.b.ins()
-            .icmp(IntCC::UnsignedLessThan, frames_len, frames_cap);
-    let room = cg.b.ins().band(fits, froom);
-    let push_blk = cg.b.create_block();
-    cg.b.ins().brif(room, push_blk, &[], slow_blk, &[]);
+        cg.b.switch_to_block(hit_blk);
+        let regs_len =
+            cg.b.ins()
+                .load(types::I64, MemFlagsData::trusted(), regs_vec, len_off);
+        let regs_cap =
+            cg.b.ins()
+                .load(types::I64, MemFlagsData::trusted(), regs_vec, cap_off);
+        let nregs =
+            cg.b.ins()
+                .load(types::I64, MemFlagsData::trusted(), site, 16);
+        let need = cg.b.ins().iadd(regs_len, nregs);
+        let fits =
+            cg.b.ins()
+                .icmp(IntCC::UnsignedLessThanOrEqual, need, regs_cap);
+        let frames_len =
+            cg.b.ins()
+                .load(types::I64, MemFlagsData::trusted(), frames, len_off);
+        let frames_cap =
+            cg.b.ins()
+                .load(types::I64, MemFlagsData::trusted(), frames, cap_off);
+        let froom =
+            cg.b.ins()
+                .icmp(IntCC::UnsignedLessThan, frames_len, frames_cap);
+        let room = cg.b.ins().band(fits, froom);
+        let push_blk = cg.b.create_block();
+        cg.b.ins().brif(room, push_blk, &[], slow_blk, &[]);
 
-    cg.b.switch_to_block(push_blk);
-    // regs.set_len(len + nregs) — the callee window, uninitialized by contract.
-    cg.b.ins()
-        .store(MemFlagsData::trusted(), need, regs_vec, len_off);
-    let fdata =
+        cg.b.switch_to_block(push_blk);
+        // regs.set_len(len + nregs) — the callee window, uninitialized by contract.
         cg.b.ins()
-            .load(types::I64, MemFlagsData::trusted(), frames, ptr_off);
-    let foff = cg.b.ins().imul_imm(frames_len, l.frame_size as i64);
-    let faddr = cg.b.ins().iadd(fdata, foff);
-    // frames.push(template) — write the empty frame's (emission-time-constant) words, then
-    // patch the per-call fields. The template is fully built before compilation, so its words
-    // are baked as immediates: no loads on the hot path.
-    // SAFETY: `frame_template_addr` is the VM-owned template `Frame`'s address (alive for the
-    // `Vm`'s — and thus this `Jit`'s — lifetime), word-aligned and a multiple-of-8 size
-    // (`Jit::new` checked).
-    let template_words: Vec<u64> = unsafe {
-        std::slice::from_raw_parts(cg.frame_template_addr as *const u64, l.frame_size / 8).to_vec()
-    };
-    for (w, &word) in template_words.iter().enumerate() {
-        let c = cg.b.ins().iconst(types::I64, word as i64);
+            .store(MemFlagsData::trusted(), need, regs_vec, len_off);
+        let fdata =
+            cg.b.ins()
+                .load(types::I64, MemFlagsData::trusted(), frames, ptr_off);
+        let foff = cg.b.ins().imul_imm(frames_len, l.frame_size as i64);
+        let faddr = cg.b.ins().iadd(fdata, foff);
+        // frames.push(template) — write the empty frame's (emission-time-constant) words, then
+        // patch the per-call fields. The template is fully built before compilation, so its words
+        // are baked as immediates: no loads on the hot path.
+        // SAFETY: `frame_template_addr` is the VM-owned template `Frame`'s address (alive for the
+        // `Vm`'s — and thus this `Jit`'s — lifetime), word-aligned and a multiple-of-8 size
+        // (`Jit::new` checked).
+        let template_words: Vec<u64> = unsafe {
+            std::slice::from_raw_parts(cg.frame_template_addr as *const u64, l.frame_size / 8)
+                .to_vec()
+        };
+        for (w, &word) in template_words.iter().enumerate() {
+            let c = cg.b.ins().iconst(types::I64, word as i64);
+            cg.b.ins()
+                .store(MemFlagsData::trusted(), c, faddr, (w * 8) as i32);
+        }
+        let proto32 =
+            cg.b.ins()
+                .load(types::I32, MemFlagsData::trusted(), site, 24);
+        cg.b.ins().store(
+            MemFlagsData::trusted(),
+            proto32,
+            faddr,
+            l.proto_offset as i32,
+        );
+        cg.b.ins().store(
+            MemFlagsData::trusted(),
+            regs_len,
+            faddr,
+            l.base_offset as i32,
+        );
+        let dst16 = cg.b.ins().iconst(types::I16, dst as i64);
+        cg.b.ins().store(
+            MemFlagsData::trusted(),
+            dst16,
+            faddr,
+            l.ret_dst_offset as i32,
+        );
+        let new_flen = cg.b.ins().iadd_imm(frames_len, 1);
         cg.b.ins()
-            .store(MemFlagsData::trusted(), c, faddr, (w * 8) as i32);
+            .store(MemFlagsData::trusted(), new_flen, frames, len_off);
+        // The caller (the current top frame, just below the pushed one) resumes at pc + 1 if the
+        // callee deopts — same eager update the helper performs.
+        let caller_faddr = cg.b.ins().iadd_imm(faddr, -(l.frame_size as i64));
+        let resume = cg.b.ins().iconst(types::I64, pc as i64 + 1);
+        cg.b.ins().store(
+            MemFlagsData::trusted(),
+            resume,
+            caller_faddr,
+            l.pc_offset as i32,
+        );
+        let cached_fp =
+            cg.b.ins()
+                .load(types::I64, MemFlagsData::trusted(), site, 8);
+        cg.b.ins()
+            .jump(fast_blk, &[cached_fp.into(), regs_len.into()]);
+    } else {
+        // AOT: no inline cache — jump straight to the helper slow path.
+        cg.b.ins().jump(slow_blk, &[]);
     }
-    let proto32 =
-        cg.b.ins()
-            .load(types::I32, MemFlagsData::trusted(), site, 24);
-    cg.b.ins().store(
-        MemFlagsData::trusted(),
-        proto32,
-        faddr,
-        l.proto_offset as i32,
-    );
-    cg.b.ins().store(
-        MemFlagsData::trusted(),
-        regs_len,
-        faddr,
-        l.base_offset as i32,
-    );
-    let dst16 = cg.b.ins().iconst(types::I16, dst as i64);
-    cg.b.ins().store(
-        MemFlagsData::trusted(),
-        dst16,
-        faddr,
-        l.ret_dst_offset as i32,
-    );
-    let new_flen = cg.b.ins().iadd_imm(frames_len, 1);
-    cg.b.ins()
-        .store(MemFlagsData::trusted(), new_flen, frames, len_off);
-    // The caller (the current top frame, just below the pushed one) resumes at pc + 1 if the
-    // callee deopts — same eager update the helper performs.
-    let caller_faddr = cg.b.ins().iadd_imm(faddr, -(l.frame_size as i64));
-    let resume = cg.b.ins().iconst(types::I64, pc as i64 + 1);
-    cg.b.ins().store(
-        MemFlagsData::trusted(),
-        resume,
-        caller_faddr,
-        l.pc_offset as i32,
-    );
-    let cached_fp =
-        cg.b.ins()
-            .load(types::I64, MemFlagsData::trusted(), site, 8);
-    cg.b.ins()
-        .jump(fast_blk, &[cached_fp.into(), regs_len.into()]);
 
     // ---- Slow path: the prepare helper (which also fills or poisons the site cache). ----
     cg.b.switch_to_block(slow_blk);
