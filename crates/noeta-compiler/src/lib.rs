@@ -486,6 +486,21 @@ impl SessionCompiler {
         }
     }
 
+    /// Register `name` as a module-global binding **without compiling a declaration** — the debug
+    /// console promotes a fragment's top-level bindings to session globals (tooling-unification
+    /// U2), so the assignment inside the fragment's closure wrapper resolves to a global slot
+    /// instead of declaring a closure-local that dies with the entry. `mutable` marks the binding
+    /// re-assignable (console bindings are, like REPL bindings). With `overwrite` (a console `mut`
+    /// redeclaration) an existing registration is replaced — the same latest-wins a REPL entry's
+    /// `register_globals` applies; without it an existing binding — e.g. the program's own global,
+    /// whose declared mutability must stand — is left untouched. The slot itself is interned when
+    /// the first store compiles.
+    pub fn declare_global(&mut self, name: &str, mutable: bool, overwrite: bool) {
+        if overwrite || !self.mc.module_globals.contains_key(name) {
+            self.mc.module_globals.insert(name.to_string(), mutable);
+        }
+    }
+
     /// The current global slot table (global name → dense slot index), for the REPL's `:drop` /
     /// `:bindings` meta-commands. A binding re-declared across entries keeps the same slot.
     pub fn global_slots(&self) -> &HashMap<String, u32> {

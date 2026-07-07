@@ -5769,6 +5769,40 @@ impl<'m> Vm<'m> {
         // Wrap: `mut <sentinel> = fn(<locals>) { <fragment>; return <trailing expr> };`
         let span = program.span;
         let mut body = program.stmts.clone();
+        // Persistent console bindings (U2): a fragment's top-level `mut x = e` — and a bare
+        // `x = e` introducing a NEW name — binds a SESSION GLOBAL, the console analogue of a REPL
+        // binding, not a closure-local that dies with the entry. Each such name is pre-registered
+        // in the session compiler (so the assignment inside the wrapper resolves globally) and the
+        // `mut` declaration is rewritten to a plain assignment. A name that is a frame local here
+        // is refused: the language forbids shadowing, and silently diverging from what the
+        // Variables panel shows would be worse. (Hover never reaches this — the purity gate above
+        // admits only a single expression.) Nested `mut`s — inside a loop or closure in the
+        // fragment — stay fragment-local, as they would in any function body.
+        if !pure {
+            for stmt in body.iter_mut() {
+                let Stmt::Binding { mut_decl, name, .. } = stmt else {
+                    continue;
+                };
+                if *mut_decl {
+                    if params.iter().any(|p| p == name) {
+                        return Err(format!(
+                            "`{name}` is a frame local here — pick another name to bind at the \
+                             console"
+                        ));
+                    }
+                    if let Some(session) = self.debug_session.as_mut() {
+                        session.compiler.declare_global(name, true, true);
+                    }
+                    *mut_decl = false;
+                } else if !params.iter().any(|p| p == name) {
+                    // A bare `x = e` on a brand-new name: register it (re-assignable, like a REPL
+                    // binding) so it persists too — an existing global's declared mutability stands.
+                    if let Some(session) = self.debug_session.as_mut() {
+                        session.compiler.declare_global(name, true, false);
+                    }
+                }
+            }
+        }
         if let Some(Stmt::Expr { expr, span }) = body.last() {
             let (expr, span) = (expr.clone(), *span);
             *body.last_mut().expect("non-empty: matched last") = Stmt::Return {

@@ -978,6 +978,65 @@ mod tests {
         session.disconnect_and_join();
     }
 
+    /// U2 (tooling-unification): a console `mut` binding persists across console entries — it is a
+    /// SESSION global, not a closure-local — and a name colliding with a frame local is refused.
+    #[test]
+    fn console_mut_bindings_persist_across_entries() {
+        let path = fixture(
+            "console_bindings",
+            "fn twice(n: int): int { return n * 2 }\n\
+             fn probe(): void {\n    \
+             mut xs = [10, 20, 30]\n    \
+             echo \"here\"\n}\n\
+             probe()\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 4 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+
+        // A console `mut` binding reads frame locals AND survives into later entries.
+        let bind = session.evaluate("mut total = xs.len() * 10");
+        assert_eq!(bind["success"], true, "{bind:#?}");
+        assert_eq!(session.evaluate("total + 2")["body"]["result"], "32");
+        // Rebinding works, composing with program functions.
+        session.evaluate("total = twice(total)");
+        assert_eq!(session.evaluate("total")["body"]["result"], "60");
+        // A bare assignment to a brand-new name persists too (REPL parity).
+        session.evaluate("label = \"n=\" ~ total");
+        assert_eq!(session.evaluate("label")["body"]["result"], "n=60");
+        // A closure bound at the console reads the session binding at call time.
+        session.evaluate("mut bump = fn(n: int) => n + total");
+        assert_eq!(session.evaluate("bump(1)")["body"]["result"], "61");
+
+        // A `mut` colliding with a frame local is a hard error — no silent shadowing.
+        let collision = session.evaluate("mut xs = [1]");
+        assert_eq!(collision["success"], false, "{collision:#?}");
+        assert!(
+            collision["message"]
+                .as_str()
+                .unwrap()
+                .contains("frame local"),
+            "collision error names the rule: {collision:#?}"
+        );
+        // ...and the frame local is untouched.
+        assert_eq!(session.evaluate("xs.len()")["body"]["result"], "3");
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
     /// U1 (tooling-unification): `setVariable` writes a paused frame's local — the response carries
     /// the new value, a `variables` re-read shows it (the snapshot refreshes), and the RESUMED
     /// program actually uses the written register.
