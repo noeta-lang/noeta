@@ -32,6 +32,7 @@
 //! Positions are converted encoding-aware (see [`offsets`]).
 
 mod completion;
+mod inlay;
 mod offsets;
 mod resolve;
 mod semtokens;
@@ -254,6 +255,40 @@ impl DocumentStore {
             .cloned()
             .collect();
         Some((diags, cache.entry().text(db).clone()))
+    }
+
+    /// Inlay **type hints** for the visible `range` of `uri`: the inferred type of every
+    /// un-annotated binding *declaration*, positioned right after the binding's name — rendered
+    /// with the same `expr_types` spelling hover shows, so the inline text and the hover can never
+    /// disagree. `None` if the document is unknown; an unlinkable workspace degrades to the entry's
+    /// own AST (hints for within-file bindings keep working while a sibling is broken).
+    fn inlay_hints(
+        &self,
+        uri: &str,
+        range: Range,
+        encoding: Encoding,
+    ) -> Option<Vec<(Position, String)>> {
+        let cache = self.workspaces.get(uri)?;
+        let db = &self.db;
+        let entry = cache.entry();
+        let index = LineIndex::new(entry.text(db));
+        let start = index.offset(range.start, encoding);
+        let end = index.offset(range.end, encoding);
+
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, entry);
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        let ide = noeta_db::linked_checked_ide(db, cache.workspace);
+        Some(
+            inlay::type_hints(program, &ide.expr_types, SourceId::FIRST)
+                .into_iter()
+                .filter(|hint| start <= hint.offset && hint.offset <= end)
+                .map(|hint| (index.position(hint.offset, encoding), hint.label))
+                .collect(),
+        )
     }
 
     /// The type at `position` for hover: the **smallest** `expr_types` span in the entry file that
@@ -989,6 +1024,9 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                // Inlay type hints (rust-analyzer style): inferred types after un-annotated
+                // binding names. Labels are complete at production — no resolve round-trip.
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 signature_help_provider: Some(SignatureHelpOptions {
                     // `(` opens a call, `,` moves to the next argument.
                     trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
@@ -1042,6 +1080,31 @@ impl LanguageServer for Backend {
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let hints = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.inlay_hints(uri.as_str(), params.range, encoding)
+        };
+        Ok(hints.map(|hints| {
+            hints
+                .into_iter()
+                .map(|(position, label)| InlayHint {
+                    position,
+                    label: InlayHintLabel::String(label),
+                    kind: Some(InlayHintKind::TYPE),
+                    text_edits: None,
+                    tooltip: None,
+                    // The label starts with `: `, glued to the binding name — no padding.
+                    padding_left: Some(false),
+                    padding_right: Some(true),
+                    data: None,
+                })
+                .collect()
+        }))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
@@ -1326,6 +1389,95 @@ mod tests {
         store.close("file:///a.noe");
         assert!(store.buffers.is_empty());
         assert!(store.workspaces.is_empty());
+    }
+
+    /// All inlay hints for a document as `(line, label)` pairs, whole-file range, UTF-16.
+    fn hints_of(store: &DocumentStore, uri: &str) -> Vec<(u32, String)> {
+        store
+            .inlay_hints(
+                uri,
+                Range::new(Position::new(0, 0), Position::new(9999, 0)),
+                Encoding::Utf16,
+            )
+            .expect("document is open")
+            .into_iter()
+            .map(|(position, label)| (position.line, label))
+            .collect()
+    }
+
+    #[test]
+    fn inlay_hints_show_inferred_types_for_unannotated_declarations_only() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///hints.noe",
+            "mut xs = [1, 2, 3]\n\
+             count: int = 3\n\
+             mut s = \"hi\"\n\
+             xs = [4]\n\
+             fn f(n: int): int {\n    \
+             mut doubled = n * 2\n    \
+             return doubled\n}\n"
+                .to_string(),
+        );
+        let hints = hints_of(&store, "file:///hints.noe");
+        // Un-annotated declarations get their inferred type — top level and inside fn bodies.
+        assert!(
+            hints.contains(&(0, ": List<int>".to_string())),
+            "list binding: {hints:?}"
+        );
+        assert!(
+            hints.contains(&(2, ": string".to_string())),
+            "string binding: {hints:?}"
+        );
+        assert!(
+            hints.contains(&(5, ": int".to_string())),
+            "fn-body binding: {hints:?}"
+        );
+        // An ANNOTATED binding shows nothing (the type is already on screen), and a REASSIGNMENT
+        // is a use, not a declaration.
+        assert!(
+            !hints.iter().any(|(line, _)| *line == 1),
+            "annotated binding must not hint: {hints:?}"
+        );
+        assert!(
+            !hints.iter().any(|(line, _)| *line == 3),
+            "reassignment must not hint: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn inlay_hints_cover_closure_bodies_and_respect_the_range() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///closure.noe",
+            "mut total = 0\n\
+             [1, 2, 3].map(fn(x: int) {\n    \
+             mut bumped = x + 1;\n    \
+             return bumped;\n})\n"
+                .to_string(),
+        );
+        let all = hints_of(&store, "file:///closure.noe");
+        assert!(
+            all.contains(&(0, ": int".to_string())),
+            "top-level binding: {all:?}"
+        );
+        assert!(
+            all.contains(&(2, ": int".to_string())),
+            "closure-body binding: {all:?}"
+        );
+        // The range filter: asking only for line 0 drops the closure-body hint.
+        let first_line_only = store
+            .inlay_hints(
+                "file:///closure.noe",
+                Range::new(Position::new(0, 0), Position::new(0, 99)),
+                Encoding::Utf16,
+            )
+            .expect("document is open");
+        assert!(
+            first_line_only.iter().all(|(p, _)| p.line == 0),
+            "range filter: {first_line_only:?}"
+        );
+        assert!(!first_line_only.is_empty());
     }
 
     /// Create a fresh temp directory with the given `(filename, content)` files on disk, for the
