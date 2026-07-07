@@ -14,6 +14,25 @@
 use std::path::{Path, PathBuf};
 
 use noeta_fmt::{FmtConfig, FmtError, format_source};
+use noeta_span::{Source, SourceId};
+
+/// The sorted comment texts of a source (whitespace-trimmed), for the completeness comparison. A
+/// block comment's interior may be reflowed by neither side, so exact text is compared.
+fn comment_texts(src: &str) -> Vec<String> {
+    let source = Source::new(SourceId(0), "cmp", src);
+    let lexed = noeta_lexer::lex_with_trivia(&source);
+    let mut texts: Vec<String> = lexed
+        .comments
+        .iter()
+        .map(|c| {
+            src[c.span.start as usize..c.span.end as usize]
+                .trim_end()
+                .to_string()
+        })
+        .collect();
+    texts.sort();
+    texts
+}
 
 /// Collect every `.noe` file under the repository's source corpus.
 fn corpus_files() -> Vec<PathBuf> {
@@ -63,6 +82,12 @@ fn corpus_is_safe_and_idempotent() {
                 let twice = format_source(&name, &once, &config)
                     .unwrap_or_else(|e| panic!("{name}: re-format failed: {e}"));
                 assert_eq!(once, twice, "{name}: formatting is not idempotent");
+                // Completeness: every comment in the input survives to the output.
+                assert_eq!(
+                    comment_texts(&text),
+                    comment_texts(&once),
+                    "{name}: comments were lost or duplicated"
+                );
             }
             // Intentional error-case corpus files do not parse; the formatter declines them.
             Err(FmtError::Parse(_)) => parse_err += 1,

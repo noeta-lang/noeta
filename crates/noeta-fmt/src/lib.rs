@@ -42,12 +42,12 @@
 //!
 //! # Status
 //!
-//! **F0–F3** done: crate skeleton, [`FmtConfig`] seam, the [`format_source`] entry point with the
-//! safety gate, and the **full source-directed printer** ([`print`], on the [`doc`] algebra) —
-//! total over every parseable program (precedence-minimal parentheses, restricted-head handling,
-//! list-spread re-sugaring, per-statement `;`, config-driven match-arm alignment). Comments are
-//! collected via `lex_with_trivia` and reattached/emitted in F4; width-driven wrapping (`wrap`) is
-//! F5.
+//! **F0–F4** done: crate skeleton, [`FmtConfig`] seam, the [`format_source`] entry point with the
+//! safety gate, the **full source-directed printer** ([`print`], on the [`doc`] algebra) — total
+//! over every parseable program (precedence-minimal parentheses, restricted-head handling,
+//! list-spread re-sugaring, per-member `;`, config-driven match-arm alignment) — and **comment
+//! reattachment** (leading / trailing / dangling, interleaved through statement blocks, struct/class
+//! and enum bodies, and match arms; every comment preserved). Width-driven wrapping (`wrap`) is F5.
 
 use noeta_diagnostics::Diagnostic;
 use noeta_span::{Source, SourceId};
@@ -209,6 +209,38 @@ mod tests {
     }
 
     #[test]
+    fn places_leading_trailing_and_dangling_comments() {
+        let src = "fn main() {\n    // leading\n    echo 1 // trailing\n    // dangling\n}";
+        assert_eq!(
+            fmt(src).unwrap(),
+            "fn main() {\n    // leading\n    echo 1 // trailing\n    // dangling\n}\n"
+        );
+    }
+
+    #[test]
+    fn places_comments_inside_class_and_match() {
+        assert_eq!(
+            fmt("class C {\n    // c\n    x: int\n}").unwrap(),
+            "class C {\n    // c\n    x: int\n}\n"
+        );
+        assert_eq!(
+            fmt("fn f(s: int): int {\n    return match s {\n        // arm\n        1 => 2,\n        _ => 0,\n    }\n}")
+                .unwrap(),
+            "fn f(s: int): int {\n    return match s {\n        // arm\n        1 => 2,\n        _ => 0,\n    }\n}\n"
+        );
+    }
+
+    #[test]
+    fn no_comment_is_ever_dropped() {
+        // Every comment in the input must survive to the output (completeness).
+        let src = "// a\nx = 1 // b\n/* c */\nfn f() { // d\n    echo 2\n}";
+        let out = fmt(src).unwrap();
+        for c in ["// a", "// b", "/* c */", "// d"] {
+            assert!(out.contains(c), "lost comment {c:?} in:\n{out}");
+        }
+    }
+
+    #[test]
     fn is_idempotent_on_the_subset() {
         for src in [
             "echo 1",
@@ -223,8 +255,14 @@ mod tests {
 
     #[test]
     fn formats_a_class() {
+        // Blank lines are source-directed (wrap = false): the input has none between members, so the
+        // output has none; a blank the author writes is preserved.
         assert_eq!(
             fmt("class C{mut x:int\nfn get():int{return self.x}}").unwrap(),
+            "class C {\n    mut x: int\n    fn get(): int {\n        return self.x\n    }\n}\n"
+        );
+        assert_eq!(
+            fmt("class C {\n    mut x: int\n\n    fn get(): int { return self.x }\n}").unwrap(),
             "class C {\n    mut x: int\n\n    fn get(): int {\n        return self.x\n    }\n}\n"
         );
     }

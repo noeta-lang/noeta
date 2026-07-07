@@ -275,8 +275,14 @@ gates re-run every slice.
   `compact`/`align` both verified. Also: the safety-gate comparator was hardened (drop fragile
   quote-tracking). **Corpus: 521/530 ok+idempotent, 0 unsupported, 9 intentional parse-errors; safety
   held on all.** `examples/orders.noe` formats and runs byte-identically. fmt+clippy clean.
-- **F4 — comment reattachment.** Leading/trailing/dangling model + placement in the `Doc`; comment
-  completeness property green over the **full** corpus; safety + idempotency now full-corpus.
+- **F4 — comment reattachment. ✅ DONE.** A global source-ordered comment cursor + an
+  `interleave_comments` helper places leading (own-line above), trailing (same-line after), and
+  dangling (before a close / EOF) comments, interleaved through statement blocks, struct/class bodies,
+  enum bodies, and match arms (heterogeneous members unified via `Member`/`EnumMember`, printed in
+  source order so author blank lines are preserved too). Block/struct/enum member layout is now
+  source-directed (no forced blanks). **Completeness gate added to the corpus harness** (input vs
+  output comment multiset) — green over all 521 files, still safe + idempotent. Also fixed a
+  gate-invisible fidelity bug: enum-variant/field `;` (whose span *covers* the `;`) is now preserved.
 - **F5 — width-driven wrapping (`wrap = true`).** Add the width-driven fits-test policy to the renderer
   (the group-break decision described in *The printer*): arg-list / method+pipeline-chain / long-union
   wrapping, trailing commas on broken lists, `line_width` respected. No structural change to the

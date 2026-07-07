@@ -14,6 +14,8 @@ use noeta_ast::{
     FieldDecl, FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, ObjectLit, Param, Pattern,
     Program, RoleTag, Stmt, StrPart, StructDecl, TypeParam, TypeRef, VariantDecl,
 };
+use std::cell::Cell;
+
 use noeta_lexer::Comment;
 use noeta_span::Span;
 
@@ -21,6 +23,48 @@ use crate::doc::{Doc, render};
 use crate::{ArrowStyle, FmtConfig, FmtError, trivia};
 
 const INDENT: isize = 4; // 4 spaces — the house style.
+
+/// A struct/class body member, unified so comments interleave across them in source order.
+enum Member<'a> {
+    Field(&'a FieldDecl),
+    Method(&'a FnDecl),
+    Impl(&'a ImplBlock),
+    Destructor(&'a [Stmt]),
+}
+
+/// An enum body member, unified so comments interleave across variants, methods, and `impl` blocks.
+enum EnumMember<'a> {
+    Variant(&'a VariantDecl),
+    Method(&'a FnDecl),
+    Impl(&'a ImplBlock),
+}
+
+impl EnumMember<'_> {
+    fn span(&self) -> Span {
+        match self {
+            EnumMember::Variant(v) => v.span,
+            EnumMember::Method(m) => m.span,
+            EnumMember::Impl(b) => b.span,
+        }
+    }
+}
+
+impl Member<'_> {
+    /// A span for source-ordering and comment attachment. The `destruct` block stores no span, so it
+    /// is approximated from its statements (it always trails the other members), falling back to the
+    /// enclosing type's end when empty.
+    fn sort_key(&self, enclosing: Span) -> Span {
+        match self {
+            Member::Field(f) => f.span,
+            Member::Method(m) => m.span,
+            Member::Impl(b) => b.span,
+            Member::Destructor(body) => match (body.first(), body.last()) {
+                (Some(first), Some(last)) => Span::new(first.span().start, last.span().end),
+                _ => Span::new(enclosing.end, enclosing.end),
+            },
+        }
+    }
+}
 
 /// Render `program` to canonical text.
 pub fn print_program(
@@ -31,7 +75,8 @@ pub fn print_program(
 ) -> Result<String, FmtError> {
     let p = Printer {
         source,
-        _comments: comments,
+        comments,
+        cursor: Cell::new(0),
         config,
     };
     let doc = p.stmt_seq(&program.stmts, program.span.start, program.span.end)?;
@@ -54,12 +99,107 @@ pub fn print_program(
 
 struct Printer<'a> {
     source: &'a str,
-    /// Collected comments — reattached and emitted in F4.
-    _comments: &'a [Comment],
+    /// Every comment, in source order (from `lex_with_trivia`).
+    comments: &'a [Comment],
+    /// Index of the next un-emitted comment. Advanced as the walk passes each comment's position, so
+    /// every comment is emitted exactly once (the completeness invariant).
+    cursor: Cell<usize>,
     config: &'a FmtConfig,
 }
 
 impl Printer<'_> {
+    // ---- comment reattachment ----------------------------------------------------------------
+
+    /// A comment rendered as a `Doc` — [`Doc::raw_text`] when it is a multiline block comment (its
+    /// interior lines are kept verbatim), otherwise plain text.
+    fn comment_doc(&self, c: &Comment) -> Doc {
+        let text = &self.source[c.span.start as usize..c.span.end as usize];
+        if text.contains('\n') {
+            Doc::raw_text(text)
+        } else {
+            Doc::text(text)
+        }
+    }
+
+    /// Take every not-yet-emitted comment whose span starts before `pos` (own-line comments leading
+    /// up to the node at `pos`), advancing the cursor past them.
+    fn take_before(&self, pos: u32) -> Vec<&Comment> {
+        let mut out = Vec::new();
+        let mut i = self.cursor.get();
+        while i < self.comments.len() && self.comments[i].span.start < pos {
+            out.push(&self.comments[i]);
+            i += 1;
+        }
+        self.cursor.set(i);
+        out
+    }
+
+    /// If the next comment sits on the same source line as `end` (a trailing `// …` after a
+    /// statement), take it; otherwise leave it for the next node's leading set.
+    fn take_trailing(&self, end: u32) -> Option<&Comment> {
+        let i = self.cursor.get();
+        let c = self.comments.get(i)?;
+        if c.span.start >= end && !self.broke_between(end, c.span.start) {
+            self.cursor.set(i + 1);
+            Some(c)
+        } else {
+            None
+        }
+    }
+
+    /// Interleave leading/trailing/dangling comments through an ordered sequence of items spanning
+    /// `[region_start, region_end)`. `item_span` yields each item's span; `render_item` prints it.
+    /// Every comment positioned within the region is emitted exactly once — leading comments on their
+    /// own line above an item, a same-line comment trailing its item, and any remaining ("dangling")
+    /// comments before `region_end`.
+    fn interleave_comments<T>(
+        &self,
+        items: &[T],
+        region_start: u32,
+        region_end: u32,
+        item_span: impl Fn(&T) -> Span,
+        render_item: impl Fn(&T) -> Result<Doc, FmtError>,
+    ) -> Result<Doc, FmtError> {
+        // (doc, blank_line_before) in output order.
+        let mut lines: Vec<(Doc, bool)> = Vec::new();
+        let mut last_end = region_start;
+
+        for item in items {
+            let span = item_span(item);
+            for c in self.take_before(span.start) {
+                let blank = !lines.is_empty() && self.blank_between(last_end, c.span.start);
+                lines.push((self.comment_doc(c), blank));
+                last_end = c.span.end;
+            }
+            let blank = !lines.is_empty() && self.blank_between(last_end, span.start);
+            let mut doc = render_item(item)?;
+            last_end = span.end;
+            if let Some(tc) = self.take_trailing(span.end) {
+                doc = Doc::concat([doc, Doc::text(" "), self.comment_doc(tc)]);
+                last_end = tc.span.end;
+            }
+            lines.push((doc, blank));
+        }
+        // Dangling comments before the region's close (e.g. before a `}` or at end of file).
+        for c in self.take_before(region_end) {
+            let blank = !lines.is_empty() && self.blank_between(last_end, c.span.start);
+            lines.push((self.comment_doc(c), blank));
+            last_end = c.span.end;
+        }
+
+        let mut parts = Vec::new();
+        for (i, (doc, blank)) in lines.into_iter().enumerate() {
+            if i > 0 {
+                parts.push(Doc::hardline());
+                if blank {
+                    parts.push(Doc::hardline());
+                }
+            }
+            parts.push(doc);
+        }
+        Ok(Doc::concat(parts))
+    }
+
     // ---- source-directed break helpers -------------------------------------------------------
 
     /// Whether the source between byte offsets `a` and `b` contains a line break (the author broke
@@ -113,20 +253,11 @@ impl Printer<'_> {
         ]))
     }
 
-    /// A sequence of statements separated by hardlines, preserving one blank line where the author
-    /// left one. `start`/`end` bound the enclosing region (for blank detection at the edges).
-    fn stmt_seq(&self, stmts: &[Stmt], _start: u32, _end: u32) -> Result<Doc, FmtError> {
-        let mut parts = Vec::new();
-        for (i, stmt) in stmts.iter().enumerate() {
-            if i > 0 {
-                parts.push(Doc::hardline());
-                if self.blank_between(stmts[i - 1].span().end, stmt.span().start) {
-                    parts.push(Doc::hardline());
-                }
-            }
-            parts.push(self.stmt(stmt)?);
-        }
-        Ok(Doc::concat(parts))
+    /// A sequence of statements, one per line, preserving one blank line where the author left one
+    /// and interleaving their comments. `start`/`end` bound the enclosing region so leading and
+    /// dangling comments attach correctly.
+    fn stmt_seq(&self, stmts: &[Stmt], start: u32, end: u32) -> Result<Doc, FmtError> {
+        self.interleave_comments(stmts, start, end, |s| s.span(), |s| self.stmt(s))
     }
 
     fn stmt(&self, stmt: &Stmt) -> Result<Doc, FmtError> {
@@ -308,10 +439,18 @@ impl Printer<'_> {
         }
     }
 
-    /// Attach a trailing `;` to a leaf statement iff the author wrote one (per-statement trivia).
+    /// Attach a trailing `;` to a leaf iff the author wrote one (per-statement/-member trivia). Probed
+    /// three ways because a span may end before the `;` (statements: content span) or already include
+    /// it (enum variants / fields): just past `content_end`, just past `stmt_end`, or as the last
+    /// non-space char the span already covers.
     fn leaf(&self, doc: Doc, content_end: u32, stmt_end: u32) -> Doc {
+        let covered_semicolon = self
+            .source
+            .get(..stmt_end as usize)
+            .is_some_and(|s| s.trim_end().ends_with(';'));
         if trivia::has_trailing_semicolon(self.source, content_end)
             || trivia::has_trailing_semicolon(self.source, stmt_end)
+            || covered_semicolon
         {
             Doc::concat([doc, Doc::text(";")])
         } else {
@@ -485,35 +624,35 @@ impl Printer<'_> {
             .filter(|m| !impl_method_names.contains(&m.name.as_str()))
             .collect();
 
-        let mut groups: Vec<Doc> = Vec::new();
-        if !fields.is_empty() {
-            let mut fs = Vec::new();
-            for (i, f) in fields.iter().enumerate() {
-                if i > 0 {
-                    fs.push(Doc::hardline());
-                }
-                fs.push(self.field(f)?);
-            }
-            groups.push(Doc::concat(fs));
-        }
-        for m in &free_methods {
-            groups.push(self.fn_decl(m)?);
-        }
-        for b in impls {
-            groups.push(self.impl_block(b)?);
-        }
+        // Collect every member in source order so comments interleave and author blank lines are
+        // preserved (fields, then free methods and `impl` blocks, and a trailing `destruct`).
+        let mut members: Vec<Member> = Vec::new();
+        members.extend(fields.iter().map(Member::Field));
+        members.extend(free_methods.iter().map(|m| Member::Method(m)));
+        members.extend(impls.iter().map(Member::Impl));
         if let Some(body) = destructor {
-            groups.push(Doc::concat([
-                Doc::text("destruct "),
-                self.block(body, span.start, span.end)?,
-            ]));
+            members.push(Member::Destructor(body));
         }
+        members.sort_by_key(|m| m.sort_key(span).start);
 
-        if groups.is_empty() {
+        if members.is_empty() {
             return Ok(Doc::text("{}"));
         }
-        // Blank line between groups; single lines within the field group already handled above.
-        let inner = Doc::join(groups, Doc::concat([Doc::hardline(), Doc::hardline()]));
+        let inner = self.interleave_comments(
+            &members,
+            span.start,
+            span.end,
+            |m| m.sort_key(span),
+            |m| match m {
+                Member::Field(f) => self.field(f),
+                Member::Method(m) => self.fn_decl(m),
+                Member::Impl(b) => self.impl_block(b),
+                Member::Destructor(body) => Ok(Doc::concat([
+                    Doc::text("destruct "),
+                    self.block(body, span.start, span.end)?,
+                ])),
+            },
+        )?;
         Ok(Doc::concat([
             Doc::text("{"),
             Doc::concat([Doc::hardline(), inner]).nest(INDENT),
@@ -604,35 +743,36 @@ impl Printer<'_> {
         }
         parts.push(Doc::text(" "));
 
-        // Body: variants (one per line, `;`-terminated as written), then methods/impls.
-        let mut groups: Vec<Doc> = Vec::new();
-        if !d.variants.is_empty() {
-            let mut vs = Vec::new();
-            for (i, v) in d.variants.iter().enumerate() {
-                if i > 0 {
-                    vs.push(Doc::hardline());
-                }
-                vs.push(self.variant(v)?);
-            }
-            groups.push(Doc::concat(vs));
-        }
+        // Body: variants (one per line, `;`-terminated as written), then methods/impls — all in
+        // source order so comments interleave and blank lines are preserved.
+        let mut members: Vec<EnumMember> = Vec::new();
+        members.extend(d.variants.iter().map(EnumMember::Variant));
         for m in &d.methods {
             let in_impl = d
                 .impls
                 .iter()
                 .any(|b| b.methods.iter().any(|im| im.name == m.name));
             if !in_impl {
-                groups.push(self.fn_decl(m)?);
+                members.push(EnumMember::Method(m));
             }
         }
-        for b in &d.impls {
-            groups.push(self.impl_block(b)?);
-        }
+        members.extend(d.impls.iter().map(EnumMember::Impl));
+        members.sort_by_key(|m| m.span().start);
 
-        let body = if groups.is_empty() {
+        let body = if members.is_empty() {
             Doc::text("{}")
         } else {
-            let inner = Doc::join(groups, Doc::concat([Doc::hardline(), Doc::hardline()]));
+            let inner = self.interleave_comments(
+                &members,
+                d.span.start,
+                d.span.end,
+                |m| m.span(),
+                |m| match m {
+                    EnumMember::Variant(v) => self.variant(v),
+                    EnumMember::Method(m) => self.fn_decl(m),
+                    EnumMember::Impl(b) => self.impl_block(b),
+                },
+            )?;
             Doc::concat([
                 Doc::text("{"),
                 Doc::concat([Doc::hardline(), inner]).nest(INDENT),
@@ -1091,8 +1231,10 @@ impl Printer<'_> {
                 params, ret, body, ..
             } => self.closure(params, ret.as_ref(), body)?,
             Expr::Match {
-                scrutinee, arms, ..
-            } => self.match_expr(scrutinee, arms)?,
+                scrutinee,
+                arms,
+                span,
+            } => self.match_expr(scrutinee, arms, *span)?,
             Expr::Object(obj) => self.object(obj)?,
             Expr::Try { expr, .. } => Doc::concat([self.receiver(expr)?, Doc::text("?")]),
             Expr::Await { expr, .. } => Doc::concat([self.receiver(expr)?, Doc::text(".await")]),
@@ -1244,15 +1386,12 @@ impl Printer<'_> {
         Ok(Doc::concat(parts))
     }
 
-    fn match_expr(&self, scrutinee: &Expr, arms: &[MatchArm]) -> Result<Doc, FmtError> {
+    fn match_expr(&self, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Result<Doc, FmtError> {
+        let head = Doc::concat([Doc::text("match "), self.restricted_head(scrutinee)?]);
         if arms.is_empty() {
-            return Ok(Doc::concat([
-                Doc::text("match "),
-                self.restricted_head(scrutinee)?,
-                Doc::text(" {}"),
-            ]));
+            return Ok(Doc::concat([head, Doc::text(" {}")]));
         }
-        // Optional column alignment of the `=>` arrows (config).
+        // Optional column alignment of the `=>` arrows (config): pad each pattern to the widest.
         let arrow_col = if self.config.match_arm_arrows == ArrowStyle::Align {
             let mut widths = Vec::new();
             for a in arms {
@@ -1262,30 +1401,24 @@ impl Printer<'_> {
         } else {
             0
         };
-
-        let mut rows = Vec::new();
-        for (i, a) in arms.iter().enumerate() {
-            if i > 0 {
-                rows.push(Doc::hardline());
-            }
+        let render_arm = |a: &MatchArm| -> Result<Doc, FmtError> {
             let pat = self.pattern(&a.pattern)?;
             let pad = if self.config.match_arm_arrows == ArrowStyle::Align {
-                let w = pattern_width_ref(&pat);
-                " ".repeat(arrow_col.saturating_sub(w))
+                " ".repeat(arrow_col.saturating_sub(pattern_width_ref(&pat)))
             } else {
                 String::new()
             };
-            rows.push(Doc::concat([
+            Ok(Doc::concat([
                 pat,
                 Doc::text(format!("{pad} => ")),
                 self.expr(&a.body)?,
                 Doc::text(","),
-            ]));
-        }
-        let inner = Doc::concat(rows);
+            ]))
+        };
+        let inner =
+            self.interleave_comments(arms, scrutinee.span().end, span.end, |a| a.span, render_arm)?;
         Ok(Doc::concat([
-            Doc::text("match "),
-            self.restricted_head(scrutinee)?,
+            head,
             Doc::text(" {"),
             Doc::concat([Doc::hardline(), inner]).nest(INDENT),
             Doc::hardline(),
