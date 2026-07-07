@@ -1,7 +1,10 @@
 # Debugger — `noeta dap` Debug Adapter Protocol server
 
-**Status: planning (proposal for sign-off — no code written).** This is the next milestone after the
-`noeta lsp` language server shipped and merged to `main`. It mirrors that arc: a new `noeta-dap` crate
+**Status: D0–D5.2 COMPLETE — the milestone is done.** `noeta dap` runs over stdio, the VS Code/VSCodium
+client launches on F5, and breakpoints, stepping, stack/scopes/variables, and `evaluate` — variable
+paths, operators, **and calls** (`xs.len()`, `f(x)`, `p.mag()`) — all work; a hover stays
+side-effect-free (paths/operators only, calls refused). This is the next
+milestone after the `noeta lsp` language server shipped and merged to `main`. It mirrors that arc: a new `noeta-dap` crate
 plus a `noeta dap` CLI subcommand, speaking a stdio wire protocol to any DAP-capable editor (VS Code /
 VSCodium's built-in debug UI, Neovim `nvim-dap`, etc.). Where the LSP was a thin *read* adapter over the
 compiler's salsa graph, the DAP is a *control* adapter over the running program — so the load-bearing work
@@ -224,7 +227,58 @@ the `reg→name` / `proto→name` tables).
 | **D2** | Call stack + scopes + variables | The paused state is inspectable | `stackTrace` from the live VM `Frame` stack + `proto→{name,def_span}` (name + file:line per frame); `scopes` (Locals; `self`/fields when in a method); `variables` reads each frame's register window through the `reg→name` table → DAP `Variable{name, value, type}` (value via the VM's value display; type from the runtime value or checker). |
 | **D3** | Stepping | Step over / into / out | Extend `DebugHook` with a step-mode over the frame stack: `next` (stop at next line, same frame depth), `stepIn` (any deeper), `stepOut` (shallower), using pc→span line-change + `frames.len()` depth. Each emits `stopped(reason: step)`. |
 | **D4** | Wire the VS Code / VSCodium client | F5 launches the debugger | Add a `DebugAdapterDescriptorFactory` + `launch.json` contribution to `editors/vscode-noeta/` spawning `noeta dap`. Mirrors the existing LSP client wiring. Works in VSCodium (built-in DAP UI, no Marketplace dep). |
-| **D5** | Evaluate (watch / REPL / hover-eval) *(stretch)* | Type an expression against a paused frame | `evaluate(expr, frameId)`: compile the expression against the frame's register/name environment and run it read-only in the paused VM. Scoped tightly; may split into a follow-on (assignment/side-effects are a later refinement). |
+| **D5** ✅ | Evaluate — **variable paths** (watch / hover / repl) | A name, `.field`, `[index]` against a paused frame | `evaluate(expr, frameId, context)`: parse the expression and resolve it read-only against the paused frame's live register window (a `Resume::Evaluate` serviced inside the pause loop on the run worker, where the values live). `supportsEvaluateForHovers` advertised. A resolution failure (unknown name, out of bounds) returns a clean error, so a hover shows nothing rather than a wrong value. |
+| **D5.1** ✅ | Evaluate — **operators** (arithmetic / comparison / logical) | `x + 1`, `p.x > p.y`, `xs[i] + 1`, `a && b` | Extend the resolver with `Binary` / `Unary` via the VM's own `apply_binary` / `apply_unary` (so the semantics match a real run), literal leaves, computed indices, and `&&`/`||` short-circuit. Still **side-effect-free** (no calls), so it is safe for hover too — no VM run-loop change. A **call** (`xs.len()`, `f(x)`) returns a clean error pointing at D5.2. |
+| **D5.2** ✅ | Evaluate — **calls** (user functions/methods) | `xs.len()`, `f(x)`, `p.mag()`, and compositions | The debugger returns the parsed expression to the dispatch loop as `DebugAction::Evaluate` (the trampoline); the loop, holding `&mut Vm` with the debugger lifted *out* of `self` (so a call never re-breaks), runs `Vm::debug_eval` — an owned-RC AST walker that dispatches methods via `run_method_handle` and functions via `call_value`, the *same* machinery a real call uses. Hover refuses calls (`allow_calls=false`); watch/repl allow them. |
+
+---
+
+## D5.2 — evaluating **calls** (as shipped)
+
+D5/D5.1 answered variable paths and operators by reading the live register window and applying the VM's own
+`apply_binary`/`apply_unary` on the run worker — side-effect-free, correct for hover, and needing no VM
+run-loop change. Calls (`xs.len()`, `f(x)`, `p.mag()`) had to *run* code in the program's context, which
+the pause point could not do, because the debugger is consulted **inside** the dispatch loop, holding a
+read-only `DebugView`, not `&mut Vm`. The shipped design is two pieces — and it turned out **simpler than
+the original sketch**, which is preserved after it for the record.
+
+1. **The `DebugAction::Evaluate` trampoline.** `DebugAction` gained an `Evaluate(DebugEvalRequest)` variant
+   carrying the parsed expression, the target frame, an `allow_calls` flag (false for a hover), and a
+   reply channel. On an evaluate the paused debugger *returns* it instead of handling it in place. The
+   dispatch loop, at the consult site, **holds the debugger `Box` out of `self` for the whole pause** —
+   which both frees `&mut self` for the evaluator *and* auto-disarms the nested run's own debug consults
+   (`self.debugger` is `None` while paused, so `f(x)` never breaks inside `f`). It runs
+   `Vm::debug_eval_request`, sends the reply, and loops; `before_op` sees a `mid_pause` latch and resumes
+   waiting without re-announcing the stop. One match arm, no frame-stack surgery, no `unsafe`.
+
+2. **A direct owned-RC AST walker — no fragment compilation.** `Vm::debug_eval` walks the `Expr` on the
+   live heap, returning a freshly *owned* value at each rung (retain what it reads, release what it
+   consumes — the discipline the interpreter uses everywhere, needed because this runs against a paused
+   program's real heap). Names resolve against the frame's captured locals then `Module::global_names`;
+   a **method** call dispatches through `run_method_handle("", name, …)` (which already handles both user
+   methods *and* built-ins like `len`); a **function** call through `call_value`. Both are the exact
+   primitives a real call uses, so a watch and a run agree by construction. A watch's transient
+   diagnostics/abort-trace are rolled back so a failed watch never pollutes the debugged run.
+
+**Why no `SessionCompiler` / module extension (the sketch's hard part) was needed.** The sketch assumed the
+expression had to be *compiled* into a synthetic prototype and the running module *extended* with it —
+which drags in checkerless stable-id accumulation to resolve globals/methods against the running module's
+id spaces. But a watch expression only ever *calls things that already exist*: dispatching **by name at
+runtime** (`global_names` lookup, the `(type, method)` method table) sidesteps compilation entirely. So the
+deliverable is met by a ~120-line evaluator and one trampoline arm, with zero new compiler machinery. The
+limit of this approach is that an expression needing *new* code — e.g. a closure literal argument
+`xs.map(fn(x) => x*2)` — is not supported (it returns a clean "cannot evaluate this form" error); that, and
+assignment / side-effecting statements, stay deferred. The by-name approach covers the D5.2 targets
+(`xs.len()`, `f(x)`, `p.mag()`) and their compositions (`twice(p.mag2()) + 1`).
+
+### Original sketch (superseded — kept for the record)
+
+> Bind the frame's locals via the ordinary call protocol: compile the expression as a synthetic function
+> whose *parameters* are the in-scope local names, and call it with the register-window values. The hard
+> part is **module extension** — the fragment must resolve globals/functions/method tables against the
+> *running* module's id spaces (a one-shot checked `compile()`), so compile debug-eval fragments
+> *checkerless*, reusing the REPL's `SessionCompiler`-style accumulation seeded from the running module.
+> — Not built: runtime by-name dispatch made compilation unnecessary.
 
 ---
 
@@ -242,8 +296,9 @@ the `reg→name` / `proto→name` tables).
 - **Sub-expression / sub-statement stepping** — statement/line granularity first.
 - **Debugging inside JIT'd regions** — out of scope by construction; debug sessions pin tier-0. (A far-future
   option is JIT-emitted debug info, but tier-0 is the right answer for a debugger.)
-- **Stripping the tree-walker from the production binary** — it is linked only for `noeta repl`; feature-gating
-  or moving the REPL to the VM is an orthogonal cleanup, noted here since the question arose.
+- ~~**Stripping the tree-walker from the production binary**~~ — ✅ done: the REPL moved onto the VM and
+  `noeta-eval` is out of `noeta-cli` (the REPL-on-VM arc, merged to `main`). The tree-walker now lives only
+  in `noeta-conformance` as the differential oracle.
 - **Reverse debugging / time-travel**, **post-mortem / core-dump inspection**, **Marketplace publishing**.
 
 ---

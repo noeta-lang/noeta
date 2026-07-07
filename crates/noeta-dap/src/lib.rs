@@ -33,7 +33,8 @@ use std::thread::{self, JoinHandle};
 
 use serde_json::{Value, json};
 
-use debugger::{DapDebugger, FrameInfo, Paused, Resume, StepMode, resolve_breakpoints};
+use debugger::{DapDebugger, FrameInfo, Paused, Resume, StepMode, parse_expr, resolve_breakpoints};
+use noeta_vm::DebugEvalOutcome;
 use protocol::{Writer, command_of, error_response, event, read_message, response};
 
 /// The debuggee is a single logical thread of execution; the DAP UI still needs a thread id to hang
@@ -172,6 +173,18 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
             "variables" => {
                 let _ = tx.send(response(&request, variables_body(&request, &paused)));
             }
+            // Evaluate an expression against a paused frame (a watch, a debug-console entry, or a
+            // hover). Read-only variable-path resolution for now; a failure (not paused, unknown name,
+            // or an unsupported expression) becomes an error response, so a hover over something
+            // unevaluable simply shows nothing.
+            "evaluate" => match evaluate(&request, &paused, resume_tx.as_ref()) {
+                Ok(body) => {
+                    let _ = tx.send(response(&request, body));
+                }
+                Err(message) => {
+                    let _ = tx.send(error_response(&request, &message));
+                }
+            },
             "disconnect" => {
                 signal_terminate(&terminate, &resume_tx);
                 let _ = tx.send(response(&request, json!({})));
@@ -261,6 +274,9 @@ fn signal_terminate(terminate: &Option<Arc<AtomicBool>>, resume_tx: &Option<Send
 fn capabilities() -> Value {
     json!({
         "supportsConfigurationDoneRequest": true,
+        // The editor may evaluate a hovered expression (VS Code's debug hover). We answer read-only
+        // variable paths (D5); hover is path-only by design (a hover must never run user code).
+        "supportsEvaluateForHovers": true,
     })
 }
 
@@ -417,6 +433,63 @@ fn variables_body(request: &Value, paused: &Option<Paused>) -> Value {
         })
         .unwrap_or_default();
     json!({ "variables": variables })
+}
+
+/// Answer a DAP `evaluate` request while paused: parse the expression here, then evaluate it against
+/// the selected frame **on the run worker** (where the values live and, for a call, the VM can run
+/// code) and return its rendered value + type. Names, `.field`, `[index]`, operators, literals, and
+/// **calls** (`xs.len()`, `f(x)`, `p.mag()`) are all supported — a call runs the same function/method
+/// a real call would (D5.2). A **hover** (`context: "hover"`) stays side-effect-free: it evaluates
+/// paths and operators but refuses a call, so hovering never runs code.
+///
+/// Returns `Err` (→ a DAP error response) when the program isn't paused, the frame is gone, the name
+/// isn't in scope, a call errors, or the expression is unevaluable — so a hover over something
+/// unevaluable shows nothing rather than a stale value.
+fn evaluate(
+    request: &Value,
+    paused: &Option<Paused>,
+    resume_tx: Option<&Sender<Resume>>,
+) -> Result<Value, String> {
+    let args = request.get("arguments");
+    let expression = args
+        .and_then(|a| a.get("expression"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if expression.is_empty() {
+        return Err("no expression to evaluate".to_string());
+    }
+    // The frame the client selected; defaults to the innermost (`frameId` 0) if omitted.
+    let frame = args
+        .and_then(|a| a.get("frameId"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    // A hover must not run code (VS Code fires it on mouse-over); a watch / debug console may.
+    let allow_calls = args.and_then(|a| a.get("context")).and_then(Value::as_str) != Some("hover");
+    let expr = parse_expr(expression).ok_or("could not parse the expression")?;
+    // Evaluation reads the paused frames on the run worker — there must be a paused program.
+    if with_paused(paused, |_| ()).is_none() {
+        return Err("can only evaluate while the program is paused".to_string());
+    }
+    let resume = resume_tx.ok_or("the program is not running")?;
+    let (reply_tx, reply_rx) = mpsc::channel::<DebugEvalOutcome>();
+    resume
+        .send(Resume::Evaluate {
+            expr,
+            frame,
+            allow_calls,
+            reply: reply_tx,
+        })
+        .map_err(|_| "the program is no longer running".to_string())?;
+    match reply_rx.recv() {
+        Ok(DebugEvalOutcome::Value { text, ty }) => Ok(json!({
+            "result": text,
+            "type": ty,
+            "variablesReference": 0,
+        })),
+        Ok(DebugEvalOutcome::Error(message)) => Err(message),
+        Err(_) => Err("evaluation did not complete".to_string()),
+    }
 }
 
 /// The final path component, for a `Source.name` alongside the full `path`.
@@ -733,6 +806,21 @@ mod tests {
                 .collect()
         }
 
+        /// Evaluate `expr` in the innermost paused frame (context `watch`), returning the response.
+        fn evaluate(&mut self, expr: &str) -> Value {
+            self.evaluate_in(expr, "watch")
+        }
+
+        /// Evaluate `expr` in the innermost paused frame under a given DAP `context` (`watch` / `repl`
+        /// allow calls; `hover` refuses them).
+        fn evaluate_in(&mut self, expr: &str, context: &str) -> Value {
+            self.send(
+                "evaluate",
+                json!({ "expression": expr, "frameId": 0, "context": context }),
+            );
+            self.response("evaluate")
+        }
+
         /// End the session: disconnect, then join the adapter thread so nothing outlives the test.
         fn disconnect_and_join(mut self) {
             self.send("disconnect", json!({}));
@@ -811,6 +899,141 @@ mod tests {
         assert_eq!(named("n")["type"], "int");
         assert_eq!(named("doubled")["value"], "40");
         assert_eq!(named("result")["value"], "41");
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    #[test]
+    fn evaluate_resolves_paths_and_operators_in_a_paused_frame() {
+        // At the breakpoint, `p` (a struct) and `xs` (a list) are in scope in `probe`.
+        let path = fixture(
+            "evaluate",
+            "struct Point { x: int; y: int }\n\
+             fn probe(): void {\n    \
+             mut p = Point { x: 3, y: 4 }\n    \
+             mut xs = [10, 20, 30]\n    \
+             echo \"here\"\n}\n\
+             probe()\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 5 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+
+        // A member access resolves and carries its type.
+        let px = session.evaluate("p.x");
+        assert_eq!(px["success"], true, "{px:#?}");
+        assert_eq!(px["body"]["result"], "3");
+        assert_eq!(px["body"]["type"], "int");
+        assert_eq!(session.evaluate("p.y")["body"]["result"], "4");
+        // Indexing a list; the whole list; a bare literal.
+        assert_eq!(session.evaluate("xs[1]")["body"]["result"], "20");
+        assert_eq!(session.evaluate("xs")["body"]["result"], "[10, 20, 30]");
+        assert_eq!(session.evaluate("42")["body"]["result"], "42");
+        // The whole struct renders (contains its field values).
+        let p = session.evaluate("p");
+        assert!(
+            p["body"]["result"].as_str().unwrap().contains('3'),
+            "struct render: {p:#?}"
+        );
+
+        // Operators evaluate with the VM's own arithmetic / comparison semantics (read-only).
+        assert_eq!(session.evaluate("p.x + 1")["body"]["result"], "4");
+        assert_eq!(session.evaluate("p.x + p.y")["body"]["result"], "7");
+        assert_eq!(session.evaluate("p.x * 2")["body"]["result"], "6");
+        assert_eq!(session.evaluate("p.x > p.y")["body"]["result"], "false");
+        assert_eq!(session.evaluate("xs[0] + xs[1]")["body"]["result"], "30");
+        // A computed index works (it is itself an expression).
+        assert_eq!(session.evaluate("xs[p.x - 3]")["body"]["result"], "10");
+
+        // A built-in method call runs (D5.2) — `xs.len()` dispatches through the real call machinery.
+        let call = session.evaluate("xs.len()");
+        assert_eq!(call["success"], true, "{call:#?}");
+        assert_eq!(call["body"]["result"], "3");
+        // An unknown name reports it by name.
+        let missing = session.evaluate("nope");
+        assert_eq!(missing["success"], false);
+        assert!(missing["message"].as_str().unwrap().contains("nope"));
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    #[test]
+    fn evaluate_runs_calls_in_a_paused_frame() {
+        // At the breakpoint, `p` (a struct with a `mag2` method), `xs`, and `label` are in scope; the
+        // module also has a free function `twice` and a built-in method (`xs.len()`).
+        let path = fixture(
+            "evaluate_calls",
+            "struct Point {\n    \
+             x: int\n    \
+             y: int\n    \
+             fn mag2(): int { return self.x * self.x + self.y * self.y }\n\
+             }\n\
+             fn twice(n: int): int { return n * 2 }\n\
+             fn probe(): void {\n    \
+             mut p = Point { x: 3, y: 4 }\n    \
+             mut xs = [10, 20, 30]\n    \
+             mut label = \"hi\"\n    \
+             echo \"here\"\n}\n\
+             probe()\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        // The `echo "here"` line the breakpoint lands on.
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 11 } ] }),
+        );
+        session.response("setBreakpoints");
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+
+        // A user method on a class receiver runs its body: 3*3 + 4*4 = 25.
+        let mag = session.evaluate("p.mag2()");
+        assert_eq!(mag["success"], true, "{mag:#?}");
+        assert_eq!(mag["body"]["result"], "25");
+        // A built-in method on a list, and one on a string.
+        assert_eq!(session.evaluate("xs.len()")["body"]["result"], "3");
+        assert_eq!(session.evaluate("label.upper()")["body"]["result"], "HI");
+        // A bare free-function call, resolved against the module globals.
+        assert_eq!(session.evaluate("twice(21)")["body"]["result"], "42");
+        // Calls compose with arguments, operators, and each other.
+        assert_eq!(session.evaluate("twice(p.mag2())")["body"]["result"], "50");
+        assert_eq!(
+            session.evaluate("twice(xs.len()) + 1")["body"]["result"],
+            "7"
+        );
+
+        // A call whose argument errors surfaces the inner error, not a crash.
+        let bad = session.evaluate("twice(nope)");
+        assert_eq!(bad["success"], false);
+        assert!(bad["message"].as_str().unwrap().contains("nope"));
+
+        // A hover must stay side-effect-free: it evaluates paths/operators but refuses a call.
+        let hover_path = session.evaluate_in("p.x + 1", "hover");
+        assert_eq!(hover_path["success"], true, "{hover_path:#?}");
+        assert_eq!(hover_path["body"]["result"], "4");
+        let hover_call = session.evaluate_in("p.mag2()", "hover");
+        assert_eq!(hover_call["success"], false, "{hover_call:#?}");
 
         session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
         session.disconnect_and_join();

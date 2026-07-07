@@ -15,9 +15,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+use noeta_ast::{Expr, Stmt};
 use noeta_bytecode::Module;
-use noeta_span::SourceMap;
-use noeta_vm::{DebugAction, DebugView, Debugger};
+use noeta_lexer::lex;
+use noeta_parser::parse;
+use noeta_span::{Source, SourceId, SourceMap};
+use noeta_vm::{DebugAction, DebugEvalOutcome, DebugEvalRequest, DebugView, Debugger};
 use serde_json::{Value, json};
 
 use crate::MAIN_THREAD_ID;
@@ -31,6 +34,18 @@ pub enum Resume {
     Step(StepMode),
     /// Abandon the run (the client disconnected).
     Terminate,
+    /// Evaluate `expr` against the paused frame at snapshot index `frame` (as the client numbers stack
+    /// frames, innermost first) and send the rendered result back on `reply`. The debugger cannot run
+    /// this itself — resolving a call needs `&mut Vm` — so it hands the request to the VM (via
+    /// [`DebugAction::Evaluate`]); the program **stays paused** throughout, so a watch/hover re-query
+    /// never resumes it. `allow_calls` is `false` for a hover (side-effect-free): a call then errors
+    /// rather than running.
+    Evaluate {
+        expr: Expr,
+        frame: usize,
+        allow_calls: bool,
+        reply: Sender<DebugEvalOutcome>,
+    },
 }
 
 /// A source-line step, as the DAP `next` / `stepIn` / `stepOut` requests ask for it. Stepping is
@@ -168,6 +183,12 @@ pub struct DapDebugger {
     /// The step in progress, if the last resume was a step. `Some` between a `Resume::Step` and the
     /// instruction it lands on; `None` while running freely.
     step: Option<StepState>,
+    /// Whether we are already inside a stop, waiting for a resume. Set when a pause first announces
+    /// itself (captures the stack + emits `stopped`); it lets the VM re-consult the debugger after
+    /// servicing an evaluate (the D5.2 trampoline leaves and re-enters `before_op`) without
+    /// re-announcing the same stop. Cleared when a terminal resume (continue / step / terminate)
+    /// actually leaves the pause.
+    mid_pause: bool,
 }
 
 impl DapDebugger {
@@ -190,6 +211,7 @@ impl DapDebugger {
             events,
             resume,
             step: None,
+            mid_pause: false,
         }
     }
 
@@ -211,10 +233,21 @@ impl DapDebugger {
                 "allThreadsStopped": true,
             }),
         ));
-        let action = match self.resume.recv() {
+        self.mid_pause = true;
+        self.wait(view)
+    }
+
+    /// Block for one resume command. Continue / step / terminate leave the pause (via
+    /// [`DapDebugger::finish`]); an [`Resume::Evaluate`] is handed to the VM as
+    /// [`DebugAction::Evaluate`] — the VM services it with `&mut self`, then re-consults `before_op`,
+    /// which (seeing `mid_pause`) calls straight back here without re-announcing the stop. That
+    /// re-entry is how several watches/hovers get answered while the program stays parked at one
+    /// instruction — so this handles exactly one command and returns, no loop of its own.
+    fn wait(&mut self, view: &DebugView) -> DebugAction {
+        match self.resume.recv() {
             // Ignore any step/continue that raced a termination request.
-            _ if self.terminate.load(Ordering::Relaxed) => DebugAction::Terminate,
-            Ok(Resume::Continue) => DebugAction::Continue,
+            _ if self.terminate.load(Ordering::Relaxed) => self.finish(DebugAction::Terminate),
+            Ok(Resume::Continue) => self.finish(DebugAction::Continue),
             // Arm the step relative to this pause point, then resume; `before_op` lands it.
             Ok(Resume::Step(mode)) => {
                 self.step = Some(StepState {
@@ -222,11 +255,30 @@ impl DapDebugger {
                     origin_depth: view.depth(),
                     origin_line: top_line(view, &self.sources),
                 });
-                DebugAction::Continue
+                self.finish(DebugAction::Continue)
             }
+            // Hand the evaluate to the VM (it may run a call). We stay paused: `mid_pause` remains set
+            // and the captured stack is left in place, so `before_op` resumes waiting after.
+            Ok(Resume::Evaluate {
+                expr,
+                frame,
+                allow_calls,
+                reply,
+            }) => DebugAction::Evaluate(DebugEvalRequest {
+                expr: Box::new(expr),
+                frame,
+                allow_calls,
+                reply,
+            }),
             // Terminate, or the adapter dropped the channel (session gone).
-            Ok(Resume::Terminate) | Err(_) => DebugAction::Terminate,
-        };
+            Ok(Resume::Terminate) | Err(_) => self.finish(DebugAction::Terminate),
+        }
+    }
+
+    /// Leave the pause on a terminal resume: forget the in-flight capture and drop the `mid_pause`
+    /// latch so the next stop announces itself afresh.
+    fn finish(&mut self, action: DebugAction) -> DebugAction {
+        self.mid_pause = false;
         *self.paused.lock().unwrap() = None;
         action
     }
@@ -262,6 +314,11 @@ impl DapDebugger {
 
 impl Debugger for DapDebugger {
     fn before_op(&mut self, proto: u32, pc: usize, view: &DebugView) -> DebugAction {
+        // Re-entry after the VM serviced an evaluate (the D5.2 trampoline left and re-entered here):
+        // we are still parked at the same instruction, so resume waiting without re-announcing it.
+        if self.mid_pause {
+            return self.wait(view);
+        }
         if self.terminate.load(Ordering::Relaxed) {
             return DebugAction::Terminate;
         }
@@ -340,4 +397,21 @@ fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
         });
     }
     PausedState { frames }
+}
+
+/// Parse a single expression string (appended with `;` so it parses as a trailing bare expression);
+/// `None` if it does not lex/parse cleanly. The adapter parses a watch string here, then hands the
+/// [`Expr`] to the VM (via [`Resume::Evaluate`]) which walks it — evaluation lives on the VM so a call
+/// can run through the real call machinery (D5.2).
+pub fn parse_expr(expr: &str) -> Option<Expr> {
+    let source = Source::new(SourceId::FIRST, "<eval>", format!("{expr};"));
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    if !lexed.diagnostics.is_empty() || !parsed.diagnostics.is_empty() {
+        return None;
+    }
+    match parsed.program.stmts.last() {
+        Some(Stmt::Expr { expr, .. }) => Some(expr.clone()),
+        _ => None,
+    }
 }

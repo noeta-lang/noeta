@@ -34,8 +34,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::mpsc::Sender;
 
-use noeta_ast::{BinaryOp, Program};
+use noeta_ast::{BinaryOp, Expr, Program};
 use noeta_backend::{Backend, RunResult};
 use noeta_bytecode::{
     BoolSide, Builtin, CaptureFrom, Chunk, Const, Module, NarrowTarget, Op, Reg, ReuseCheck,
@@ -78,12 +79,48 @@ pub trait Debugger: Send {
 }
 
 /// What the VM does after consulting the [`Debugger`] for an instruction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum DebugAction {
     /// Execute the instruction and continue.
     Continue,
     /// Abandon the run (clean teardown, as an abort) — e.g. the client disconnected while paused.
     Terminate,
+    /// The paused debugger asked to **evaluate an expression** against a frame (a watch / hover /
+    /// debug-console entry). The debugger cannot run it itself — a call would need `&mut Vm`, which the
+    /// [`Debugger`] trait deliberately does not hand across the crate boundary — so it returns the
+    /// request here and the dispatch loop, which *has* `&mut self`, services it via
+    /// [`Vm::debug_eval_request`], sends the rendered result back on the request's `reply`, and
+    /// re-consults the debugger (which stays paused, resuming its wait without re-announcing the stop).
+    /// This is the D5.2 trampoline: it is the one path on which a paused program runs code (a call in a
+    /// watch), and it stays off the `Debugger` trait so no VM internals leak.
+    Evaluate(DebugEvalRequest),
+}
+
+/// A paused-frame `evaluate` request handed from the [`Debugger`] to the VM (see
+/// [`DebugAction::Evaluate`]). Owns everything the VM needs to run the expression and reply.
+#[derive(Debug)]
+pub struct DebugEvalRequest {
+    /// The parsed expression to evaluate (the adapter parses the watch string; the VM walks the AST).
+    pub expr: Box<Expr>,
+    /// Which paused frame's scope to evaluate against, as the client numbers frames (innermost first).
+    pub frame: usize,
+    /// Whether a **call** may run. `false` for a hover (a hover must stay side-effect-free): a call
+    /// then errors instead of executing. `true` for a watch / debug console.
+    pub allow_calls: bool,
+    /// Where the rendered outcome is sent back. Only strings cross this channel — the runtime values
+    /// are thread-local, so they are rendered on the run worker before the reply travels back.
+    pub reply: Sender<DebugEvalOutcome>,
+}
+
+/// The result of a [`DebugEvalRequest`]: the rendered value + type, or an error message. Strings only,
+/// because a [`Value`] is `!Send` — it never leaves the run worker.
+#[derive(Debug)]
+pub enum DebugEvalOutcome {
+    /// A successful evaluation: `text` is the value's display form, `ty` its surface-syntax type.
+    Value { text: String, ty: String },
+    /// The expression could not be evaluated (unknown name, out of bounds, a call disabled in a hover,
+    /// a runtime error while running a call, …).
+    Error(String),
 }
 
 /// A read-only view of the paused VM handed to [`Debugger::before_op`]: the live frame stack and each
@@ -353,6 +390,7 @@ impl VmBackend {
                 compiled: j.compiled_count(),
                 compile_ns_total: j.compile_ns_total(),
                 compile_ns_max: j.compile_ns_max(),
+                breakdown: j.compile_breakdown(),
             })
             .unwrap_or_default();
         (result, stats)
@@ -400,6 +438,8 @@ pub struct JitStats {
     pub compiled: usize,
     pub compile_ns_total: u64,
     pub compile_ns_max: u64,
+    /// Where `compile_ns_total` goes + compiled volume (P-JCT C0).
+    pub breakdown: noeta_jit::CompileBreakdown,
 }
 
 impl Backend for VmBackend {
@@ -2747,16 +2787,50 @@ impl<'m> Vm<'m> {
                 // `None` on every non-debug run — one predicted branch. The frame's `pc` is synced
                 // first so a paused stack trace reads the instruction about to run. `Terminate` (a
                 // disconnect while paused) unwinds cleanly, releasing the stack like any abort.
-                if let Some(debugger) = self.debugger.as_deref_mut() {
+                if self.debugger.is_some() {
                     frames[top].pc = pc;
-                    let view = DebugView {
-                        module,
-                        frames: &frames[..],
-                        regs: &regs[..],
-                    };
-                    if debugger.before_op(proto as u32, pc, &view) == DebugAction::Terminate {
-                        return Err(Abort);
+                    // Hold the debugger *out* of `self` for the whole pause. This frees `&mut self` so a
+                    // watch expression that calls a function can actually run it (`debug_eval_request`
+                    // re-enters the VM), and it auto-disarms that nested run's own debug consults —
+                    // `self.debugger` is `None` while paused, so evaluating `f(x)` never breaks inside
+                    // `f`. The debugger is restored before we resume normal dispatch.
+                    let mut dbg = self.debugger.take().unwrap();
+                    loop {
+                        let action = {
+                            let view = DebugView {
+                                module,
+                                frames: &frames[..],
+                                regs: &regs[..],
+                            };
+                            dbg.before_op(proto as u32, pc, &view)
+                        };
+                        match action {
+                            DebugAction::Continue => break,
+                            DebugAction::Terminate => {
+                                self.debugger = Some(dbg);
+                                return Err(Abort);
+                            }
+                            // A watch/console evaluate that needs the VM (a call). Run it here with
+                            // `&mut self`, reply, then loop: `before_op` re-enters its wait silently.
+                            DebugAction::Evaluate(req) => {
+                                let DebugEvalRequest {
+                                    expr,
+                                    frame,
+                                    allow_calls,
+                                    reply,
+                                } = req;
+                                let outcome = self.debug_eval_request(
+                                    &expr,
+                                    frame,
+                                    allow_calls,
+                                    &frames[..],
+                                    &regs[..],
+                                );
+                                let _ = reply.send(outcome);
+                            }
+                        }
                     }
+                    self.debugger = Some(dbg);
                 }
                 // Every prototype ends with `Halt`, so `pc` never runs off the end — index directly
                 // instead of the `.get()` guard the pre-S3 loop used. A call keeps `fbase` on the
@@ -5322,6 +5396,277 @@ impl<'m> Vm<'m> {
                 }
             }
         }
+    }
+
+    /// Service a paused-frame `evaluate` (the D5.2 trampoline — see [`DebugAction::Evaluate`]). Runs on
+    /// the VM with `&mut self`, so a call in the expression can execute; the caller (the dispatch loop)
+    /// has already lifted the debugger out of `self`, so a call's own body does not re-break. Reads the
+    /// target frame's in-scope locals out of the paused register window, evaluates the expression, and
+    /// renders the result — only the strings travel back to the adapter thread.
+    ///
+    /// Running a call can push a diagnostic (an arity/type/`panic` error surfaces as the watch error)
+    /// and grow the abort trace; both are rolled back afterwards so a failed watch never pollutes the
+    /// program's own diagnostics or a later real traceback.
+    fn debug_eval_request(
+        &mut self,
+        expr: &Expr,
+        frame: usize,
+        allow_calls: bool,
+        frames: &[Frame],
+        regs: &[Value],
+    ) -> DebugEvalOutcome {
+        // Snapshot the frame's locals as (name, borrowed-handle) pairs, then drop the view so the
+        // evaluator can borrow `self` mutably for calls. The handles stay valid: the paused frame keeps
+        // its references, and no collection runs on this thread between here and use.
+        let locals: Vec<(String, Value)> = {
+            let view = DebugView {
+                module: self.module,
+                frames,
+                regs,
+            };
+            let Some(view_idx) = view.depth().checked_sub(frame + 1) else {
+                return DebugEvalOutcome::Error(format!("no frame {frame} in the paused stack"));
+            };
+            view.frame(view_idx)
+                .locals()
+                .map(|(n, _, v)| (n.to_string(), v))
+                .collect()
+        };
+        let diag_mark = self.diagnostics.len();
+        let trace_mark = self.abort_trace.len();
+        let outcome = match self.debug_eval(expr, &locals, allow_calls) {
+            Ok(value) => {
+                let text = value.display();
+                let ty = value
+                    .reflect()
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| value.type_name().to_string());
+                // The evaluator returns an owned reference; render it, then drop it.
+                release(value);
+                DebugEvalOutcome::Value { text, ty }
+            }
+            Err(msg) => DebugEvalOutcome::Error(msg),
+        };
+        // A watch is a side query — its errors must not leak into the run being debugged.
+        self.diagnostics.truncate(diag_mark);
+        self.abort_trace.truncate(trace_mark);
+        outcome
+    }
+
+    /// Evaluate a debug-watch expression against a frame's `locals`, returning a freshly **owned**
+    /// [`Value`] (one reference the caller must release) or an error message. Every rung follows the
+    /// precise-RC discipline — retain what it reads, release what it consumes — because unlike the
+    /// hover-safe read-only resolver (in `noeta-dap`, borrow-and-display) this runs against the *live*
+    /// heap of a paused program: a stray release would corrupt it. Paths and operators mirror that
+    /// resolver's semantics; a **call** (`allow_calls`) additionally runs code through the ordinary VM
+    /// call machinery ([`Vm::run_method_handle`] / [`Vm::call_value`]), so a watch and a real run agree.
+    fn debug_eval(
+        &mut self,
+        expr: &Expr,
+        locals: &[(String, Value)],
+        allow_calls: bool,
+    ) -> Result<Value, String> {
+        match expr {
+            // A name: a frame local shadows a module global. Either way retain it so the caller owns
+            // the returned reference.
+            Expr::Ident { name, .. } => {
+                if let Some((_, v)) = locals.iter().find(|(n, _)| n == name) {
+                    retain(*v);
+                    Ok(*v)
+                } else if let Some(slot) =
+                    self.module.global_names.iter().position(|g| g == name)
+                {
+                    let v = self.globals[slot];
+                    if v.is_unbound() {
+                        return Err(format!("no variable `{name}` in scope"));
+                    }
+                    retain(v);
+                    Ok(v)
+                } else {
+                    Err(format!("no variable `{name}` in scope"))
+                }
+            }
+            // Literal leaves. A string allocates a fresh owned value; primitives are word-sized.
+            Expr::Int { value, .. } => Ok(Value::int(*value)),
+            Expr::Float { value, .. } => Ok(Value::float(*value)),
+            Expr::Bool { value, .. } => Ok(Value::bool(*value)),
+            Expr::Str { value, .. } => Ok(Value::string(value)),
+            // A field read. Retain the field before releasing the receiver, in case the receiver was
+            // the field's last owner (a chained `a.b.c`).
+            Expr::Member { receiver, name, .. } => {
+                let recv = self.debug_eval(receiver, locals, allow_calls)?;
+                match recv.field(name) {
+                    Some(field) => {
+                        retain(field);
+                        release(recv);
+                        Ok(field)
+                    }
+                    None => {
+                        release(recv);
+                        Err(format!("value has no field `{name}`"))
+                    }
+                }
+            }
+            Expr::Index {
+                receiver, index, ..
+            } => {
+                let recv = self.debug_eval(receiver, locals, allow_calls)?;
+                let key = self.debug_eval(index, locals, allow_calls)?;
+                Self::debug_index(recv, key)
+            }
+            // `&&` / `||` short-circuit: the right side is evaluated (and can error) only if reached.
+            Expr::Binary {
+                op: BinaryOp::And,
+                lhs,
+                rhs,
+                ..
+            } => {
+                let l = self.debug_eval(lhs, locals, allow_calls)?;
+                let short = l.as_bool() == Some(false);
+                release(l);
+                if short {
+                    Ok(Value::bool(false))
+                } else {
+                    self.debug_eval(rhs, locals, allow_calls)
+                }
+            }
+            Expr::Binary {
+                op: BinaryOp::Or,
+                lhs,
+                rhs,
+                ..
+            } => {
+                let l = self.debug_eval(lhs, locals, allow_calls)?;
+                let short = l.as_bool() == Some(true);
+                release(l);
+                if short {
+                    Ok(Value::bool(true))
+                } else {
+                    self.debug_eval(rhs, locals, allow_calls)
+                }
+            }
+            // Every other operator via the VM's own value ops (so `+`, `==`, `~`, … match a real run).
+            // `apply_binary`/`apply_unary` borrow their operands and return a fresh owned value, so the
+            // operands are released after.
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let l = self.debug_eval(lhs, locals, allow_calls)?;
+                let r = self.debug_eval(rhs, locals, allow_calls)?;
+                let out = apply_binary(*op, l, r).map_err(|e| e.text);
+                release(l);
+                release(r);
+                out
+            }
+            Expr::Unary { op, operand, .. } => {
+                let v = self.debug_eval(operand, locals, allow_calls)?;
+                let out = apply_unary(*op, v).map_err(|e| e.text);
+                release(v);
+                out
+            }
+            // A call runs user code, so it is refused in a hover (which must stay side-effect-free); a
+            // watch / debug console allows it.
+            Expr::Call { callee, args, span } => {
+                if !allow_calls {
+                    return Err(
+                        "evaluating a call here would run code — a hover stays read-only; \
+                         use a watch or the debug console"
+                            .to_string(),
+                    );
+                }
+                self.debug_eval_call(callee, args, *span, locals)
+            }
+            _ => Err(
+                "this expression form cannot be evaluated in a watch — supported: names, `.field`, \
+                 `[index]`, operators, literals, and function / method calls"
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// Evaluate a **call** in a debug watch: a method call `recv.m(args)` (user method, or a built-in
+    /// like `xs.len()`) via [`Vm::run_method_handle`], or a bare `f(args)` where `f` is a local or
+    /// global closure via [`Vm::call_value`]. Both dispatch by the same name/type resolution a real
+    /// call uses and consume their owned arguments; an abort is surfaced as the recorded diagnostic's
+    /// message (the caller rolls the diagnostic back).
+    fn debug_eval_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        span: Span,
+        locals: &[(String, Value)],
+    ) -> Result<Value, String> {
+        // `recv.method(args)` — dispatch on the receiver's runtime type (falls back to a built-in
+        // method for a non-object receiver, exactly as an unbound method handle does).
+        if let Expr::Member { receiver, name, .. } = callee {
+            let recv = self.debug_eval(receiver, locals, true)?;
+            let mut owned = Vec::with_capacity(args.len() + 1);
+            owned.push(recv);
+            for arg in args {
+                match self.debug_eval(arg, locals, true) {
+                    Ok(v) => owned.push(v),
+                    Err(e) => {
+                        for o in owned {
+                            release(o);
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+            return self
+                .run_method_handle("", name, false, owned, span)
+                .map_err(|_| self.last_diag_message());
+        }
+        // `f(args)` — resolve the callee to a value, then run it (a closure, a method handle, …).
+        let func = self.debug_eval(callee, locals, true)?;
+        let mut owned = Vec::with_capacity(args.len());
+        for arg in args {
+            match self.debug_eval(arg, locals, true) {
+                Ok(v) => owned.push(v),
+                Err(e) => {
+                    release(func);
+                    for o in owned {
+                        release(o);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        self.call_value(func, owned, span)
+            .map_err(|_| self.last_diag_message())
+    }
+
+    /// The message of the most recently recorded diagnostic, to surface a watch call's abort as text.
+    fn last_diag_message(&self) -> String {
+        self.diagnostics
+            .last()
+            .map(|d| d.message.clone())
+            .unwrap_or_else(|| "the call could not be evaluated".to_string())
+    }
+
+    /// Index a debug-watch receiver by an already-evaluated key: an int selects a list element, a
+    /// string a map value. Both `recv` and `key` are owned (consumed here); the element is retained
+    /// into a fresh owned reference before they are released, so it survives even if `recv` was its
+    /// last owner.
+    fn debug_index(recv: Value, key: Value) -> Result<Value, String> {
+        let result = if let Some(i) = key.as_int() {
+            if i < 0 {
+                Err(format!("negative index {i}"))
+            } else {
+                recv.list_get(i as usize)
+                    .ok_or_else(|| format!("index {i} is out of bounds"))
+            }
+        } else if let Some(s) = key.as_string() {
+            recv.map_get(&s).ok_or_else(|| format!("no key `{s}`"))
+        } else {
+            Err(
+                "an index must evaluate to an int (list position) or a string (map key)"
+                    .to_string(),
+            )
+        };
+        // Retain the shared element into a fresh owned reference before dropping recv/key.
+        let owned = result.inspect(|&element| retain(element));
+        release(recv);
+        release(key);
+        owned
     }
 
     /// Call a value with already-owned arguments (each carrying one reference transferred to
