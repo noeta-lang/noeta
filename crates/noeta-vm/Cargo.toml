@@ -18,6 +18,9 @@ noeta-gc = { workspace = true }
 noeta-span = { workspace = true }
 noeta-object = { workspace = true }
 noeta-stdlib = { workspace = true }
+# Debug-console module arena (tooling-unification T4): fragment installs swap the running Vm's
+# `&Module` to an extended snapshot; the arena keeps each snapshot alive to end of run.
+typed-arena = { workspace = true }
 # Tier-1 JIT (milestone P-JIT), optional — only pulled in under the `jit` feature.
 noeta-jit = { workspace = true, optional = true }
 

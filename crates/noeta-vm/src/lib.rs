@@ -521,11 +521,41 @@ impl RetTransform {
 /// itself lives on [`Vm::diagnostics`]; this is just the propagation token.
 struct Abort;
 
+/// The debug console's session machinery (tooling-unification T4), present only on a debug run
+/// launched with an adopted session: the live incremental compiler (seeded from the launch's
+/// *checked* compile, so fragment ids append onto the program's own id-spaces) and the arena that
+/// keeps every extended module snapshot alive for the rest of the run. A fragment install
+/// ([`Vm::install_fragment`]) compiles through the session and swaps [`Vm::module`] to the arena'd
+/// snapshot — old frames keep executing their (prefix-identical) code, new frames resolve
+/// fragment protos/names through the newest module, and an escaped fragment closure stays callable
+/// after the program resumes.
+// TODO(tooling-unification T5): the `allow` comes off when the debugger trampoline's fragment path
+// lands — until then only the tests construct a session.
+#[allow(dead_code)]
+struct DebugSession<'m> {
+    compiler: noeta_compiler::SessionCompiler,
+    arena: &'m typed_arena::Arena<Module>,
+}
+
+impl std::fmt::Debug for DebugSession<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DebugSession")
+            .field("compiler", &self.compiler)
+            .finish_non_exhaustive()
+    }
+}
+
 /// One program's worth of execution state, shared across every (possibly re-entrant) frame
 /// stack: the compiled module, the shared shape handles and instance-method table, the by-name
 /// global environment, captured stdout, and the diagnostics recorded so far.
 struct Vm<'m> {
+    /// The compiled program. On a plain run this is the caller's module for the whole run; on a
+    /// **debug run with a console session** it is swapped (through [`Vm::install_fragment`]) to
+    /// each successive extended snapshot — always a stable-prefix superset, so an index minted
+    /// under any earlier module resolves identically under every later one.
     module: &'m Module,
+    /// See [`DebugSession`]; `None` on every non-debug run.
+    debug_session: Option<DebugSession<'m>>,
     /// One shared `&'static Shape` per shape-table entry — cloned into every value of that shape,
     /// so equal-built aggregates point at one shape (identity is a pointer comparison).
     shapes: Vec<&'static Shape>,
@@ -1649,6 +1679,7 @@ impl<'m> Vm<'m> {
             module.type_reprs.iter().cloned().map(Rc::new).collect();
         Vm {
             module,
+            debug_session: None,
             shapes,
             packed_schemas,
             type_reprs,
@@ -2699,9 +2730,6 @@ impl<'m> Vm<'m> {
     /// The dispatch loop. Returns `Ok(value)` once the bottom frame returns (the stack is
     /// then empty), or `Err(Abort)` with the stack left intact for [`Vm::run`] to release.
     fn dispatch(&mut self, frames: &mut Vec<Frame>, regs: &mut Vec<Value>) -> Result<Value, Abort> {
-        // Copy the shared module reference out so the loop can index prototypes without
-        // borrowing `self` — leaving `self.stdout`/`globals`/`diagnostics` free to mutate.
-        let module = self.module;
         // Per-run inline caches, one slot per cacheable call site (`LoadField`/`CallMethod`),
         // indexed by the op's `cache` field. Each entry memoizes the last receiver shape and the
         // resolved field-slot / method prototype; a hit is a pointer compare against the cached
@@ -2709,7 +2737,7 @@ impl<'m> Vm<'m> {
         // `self` field) so it neither borrows `self` in the loop nor leaks across runs; holding the
         // `&'static Shape` keeps the cached shape alive, so the pointer key can never alias a freed shape.
         let mut caches: Vec<Option<(&'static Shape, u32)>> =
-            vec![None; module.cache_slots as usize];
+            vec![None; self.module.cache_slots as usize];
         // S3 dispatch window (P-VMT-DISP). The interpreter is two nested loops. The OUTER `'reload`
         // loop re-derives the active frame's register window — its base, prototype (`chunk`), and
         // starting `pc` — and is re-entered ONLY when control transfers to a *different* frame: a
@@ -2724,6 +2752,20 @@ impl<'m> Vm<'m> {
         // with ops that carry their own `base` field). `chunk` borrows `*module` (an `&'m Module`
         // copied out of `self`), so it is independent of the `&mut self` the arms use.
         'reload: loop {
+            // Re-read the module each frame transfer, NOT once per dispatch: a debug-console
+            // fragment install ([`Vm::install_fragment`], tooling-unification T4) swaps
+            // `self.module` to an extended snapshot mid-run, and the next frame must resolve
+            // against the newest module — an escaped fragment closure's proto index only exists
+            // there. Every snapshot is a stable-prefix superset, so a frame that started under an
+            // older module re-derives byte-identical code here. One field load per call/return
+            // (A/B-benched: noise); the copied-out `&'m Module` keeps `chunk` independent of the
+            // `&mut self` the arms use, exactly as before.
+            let module = self.module;
+            // Fragment code can carry inline-cache slots past the base module's count — grow on
+            // demand (never shrinks; a fresh slot starts cold). A no-op compare on non-debug runs.
+            if caches.len() < module.cache_slots as usize {
+                caches.resize(module.cache_slots as usize, None);
+            }
             let top = frames.len() - 1;
             let fbase = frames[top].base;
             let proto = frames[top].proto as usize;
@@ -5398,6 +5440,107 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Install a debug-console **fragment** into this running Vm (tooling-unification T4). The
+    /// fragment compiles through the adopted session compiler — checkerless, stable-prefix id
+    /// accumulation, exactly a REPL entry — and the Vm then:
+    ///
+    /// 1. **Relocates the fragment's entry chunk** to a fresh proto index at the end of the table.
+    ///    `SessionCompiler::extend` rewrites proto 0 per entry, but proto 0 of the *running* module
+    ///    is the program's `main`, which live frame 0 is still executing — so the snapshot's proto 0
+    ///    is restored to `main` and the fragment's statements get their own index. (Entry chunks
+    ///    never self-reference index 0; every callee/closure index inside is absolute and new.)
+    /// 2. **Grows the derived tables** the fragment introduced — the same appends `Vm::load` /
+    ///    `SessionState::sync_to` perform: interned shapes and packed schemas (global interning
+    ///    makes identity hold by construction), shared `TypeRepr`s, method / destructor /
+    ///    field-default entries, derive sets, destruct-reachability, and the globals vector (new
+    ///    slots start unbound).
+    /// 3. **Swaps `self.module` to the extended snapshot**, kept alive in the session's arena for
+    ///    the rest of the run. Every snapshot is a stable-prefix superset of every earlier one, so
+    ///    old frames keep executing identical code and an escaped fragment value (a closure's raw
+    ///    proto index) stays resolvable after the program resumes — the dispatch loop re-reads the
+    ///    module at each frame transfer.
+    ///
+    /// Returns the relocated entry's proto index; the caller runs it via [`Vm::run_thunk`]. Debug
+    /// runs keep the JIT unarmed (asserted): tier-1 mirror tables never see a swapped module.
+    // TODO(tooling-unification T5): the `allow` comes off when the debugger trampoline calls this.
+    #[allow(dead_code)]
+    fn install_fragment(&mut self, fragment: &Program) -> Result<u32, String> {
+        #[cfg(feature = "jit")]
+        assert!(
+            self.jit.is_none() && self.jit_service.is_none(),
+            "debug fragments require the JIT unarmed"
+        );
+        let Some(session) = self.debug_session.as_mut() else {
+            return Err("this run has no debug session (fragments need a session launch)".into());
+        };
+        let arena = session.arena;
+        let mut extended = session
+            .compiler
+            .extend(fragment)
+            .map_err(|u| u.reason.clone())?;
+        // (1) Relocate the entry; proto 0 stays the program's `main`.
+        let entry = std::mem::replace(&mut extended.protos[0], self.module.protos[0].clone());
+        extended.protos.push(entry);
+        let entry_idx = (extended.protos.len() - 1) as u32;
+        // The checkerless snapshot carries no `map(...)`-packed pairs; keep the base compile's
+        // precise ones so the swapped module stays self-consistent (`vm.map_packed` already holds
+        // the resolved schemas either way).
+        extended.map_packed_sites = self.module.map_packed_sites.clone();
+
+        // (2) Grow the derived tables from the snapshot's tails (all appends are prefix-stable).
+        for shape in &extended.shapes[self.shapes.len()..] {
+            self.shapes.push(noeta_object::intern_shape(shape.clone()));
+        }
+        for def in &extended.packed_schemas[self.packed_schemas.len()..] {
+            let fields = def
+                .fields
+                .iter()
+                .map(|f| match f {
+                    noeta_bytecode::PackedFieldDef::Int => noeta_object::PackedKind::Int,
+                    noeta_bytecode::PackedFieldDef::Float => noeta_object::PackedKind::Float,
+                    noeta_bytecode::PackedFieldDef::F32 => noeta_object::PackedKind::F32,
+                    noeta_bytecode::PackedFieldDef::Bool => noeta_object::PackedKind::Bool,
+                    noeta_bytecode::PackedFieldDef::Struct(idx) => {
+                        noeta_object::PackedKind::Struct(self.packed_schemas[*idx as usize])
+                    }
+                })
+                .collect();
+            self.packed_schemas
+                .push(noeta_object::intern_schema(noeta_object::PackedSchema {
+                    shape: self.shapes[def.shape as usize],
+                    fields,
+                    byte_size: def.byte_size as usize,
+                    column: def.column,
+                }));
+        }
+        for repr in &extended.type_reprs[self.type_reprs.len()..] {
+            self.type_reprs.push(Rc::new(repr.clone()));
+        }
+        for m in &extended.methods[self.module.methods.len()..] {
+            self.methods
+                .insert((m.type_name.clone(), m.method.clone()), m.proto);
+        }
+        for (ty, proto) in &extended.destructors[self.module.destructors.len()..] {
+            self.destructors.insert(ty.clone(), *proto);
+        }
+        for (ty, field, proto) in &extended.field_defaults[self.module.field_defaults.len()..] {
+            self.field_defaults
+                .insert((ty.clone(), field.clone()), *proto);
+        }
+        self.comparable_derives
+            .extend(extended.comparable_derives.iter().cloned());
+        self.tojson_derives
+            .extend(extended.tojson_derives.iter().cloned());
+        self.destruct_reachable
+            .extend(extended.destruct_reachable.iter().cloned());
+        self.globals
+            .resize(extended.global_names.len(), Value::unbound());
+
+        // (3) Swap to the arena'd snapshot; the dispatch loop picks it up at the next frame transfer.
+        self.module = arena.alloc(extended);
+        Ok(entry_idx)
+    }
+
     /// Service a paused-frame `evaluate` (the D5.2 trampoline — see [`DebugAction::Evaluate`]). Runs on
     /// the VM with `&mut self`, so a call in the expression can execute; the caller (the dispatch loop)
     /// has already lifted the debugger out of `self`, so a call's own body does not re-break. Reads the
@@ -7283,6 +7426,131 @@ mod tests {
         let parsed = parse(&source, &lexed.tokens);
         let module = compile(&parsed.program).expect("program should compile");
         VmBackend::new().run_module_traced(&module)
+    }
+
+    /// Parse a fragment the way a debug console would (statements allowed; no checker).
+    fn fragment(src: &str) -> Program {
+        let source = Source::new(SourceId(1), "<console>", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        assert!(
+            lexed.diagnostics.is_empty() && parsed.diagnostics.is_empty(),
+            "fragment should parse cleanly: {src:?}"
+        );
+        parsed.program
+    }
+
+    /// Build a **session-adopted debug Vm**: the checked program compiled with the compiler kept
+    /// alive (T3), the module arena'd, and the [`DebugSession`] installed — the debug console's
+    /// launch shape. Returns the Vm ready to `run_top` entry 0.
+    fn debug_session_vm<'a>(arena: &'a typed_arena::Arena<Module>, src: &str) -> Vm<'a> {
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        assert!(
+            lexed.diagnostics.is_empty() && parsed.diagnostics.is_empty(),
+            "program should parse cleanly"
+        );
+        let checked = noeta_check::check_all(&parsed.program);
+        assert!(
+            checked.diagnostics.is_empty(),
+            "program should check cleanly: {:?}",
+            checked.diagnostics
+        );
+        let (module, compiler) =
+            noeta_compiler::compile_with_sites_session(&parsed.program, checked.sites, false, true)
+                .expect("a checked program compiles");
+        let module: &Module = arena.alloc(module);
+        noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+        let mut vm = Vm::load(
+            module,
+            Box::new(noeta_stdlib::SandboxHost::new()),
+            Box::new(noeta_stdlib::SandboxExecutor::new()),
+        );
+        vm.debug_session = Some(DebugSession { compiler, arena });
+        vm
+    }
+
+    /// T4 (tooling-unification): a fragment installed into a *running* Vm executes against the
+    /// swapped extended module — calling the program's functions and reading its globals by their
+    /// original ids — and code the fragment defines (a closure bound into a global) stays callable
+    /// by LATER code, including the program's own functions, after further installs.
+    #[test]
+    fn installed_fragments_extend_a_running_debug_vm() {
+        let before = noeta_value::live_count();
+        let arena = typed_arena::Arena::new();
+        let mut vm = debug_session_vm(
+            &arena,
+            "struct P { x: int }\n\
+             fn twice(n: int): int { return n * 2 }\n\
+             fn callcb(n: int): int { return cb(n) }\n\
+             mut cb = fn(n: int) => n\n\
+             mut base = 10\n\
+             mut p0 = P { x: 3 }\n\
+             echo twice(base)\n",
+        );
+        vm.run_top();
+        assert_eq!(vm.stdout, "20\n");
+
+        // Fragment 1: calls the program's fn + global by their original ids.
+        let entry = vm
+            .install_fragment(&fragment("echo twice(base + 1);"))
+            .expect("fragment compiles");
+        let Ok(v) = vm.run_thunk(entry, &[]) else {
+            panic!("fragment runs: {:?}", vm.diagnostics);
+        };
+        release(v);
+        assert_eq!(vm.stdout, "20\n22\n");
+
+        // Fragment 2: constructs the program's struct; interned-shape identity makes it equal to
+        // the value entry 0 built.
+        let entry = vm
+            .install_fragment(&fragment("echo p0 == P { x: 3 };"))
+            .expect("fragment compiles");
+        let Ok(v) = vm.run_thunk(entry, &[]) else {
+            panic!("fragment runs: {:?}", vm.diagnostics);
+        };
+        release(v);
+        assert_eq!(vm.stdout, "20\n22\ntrue\n");
+
+        // Fragment 3: ESCAPE — rebind the program's callback global to a fragment-defined closure
+        // (a proto index that only exists in the extended module).
+        let entry = vm
+            .install_fragment(&fragment("cb = fn(n: int) => twice(n) + base;"))
+            .expect("fragment compiles");
+        let Ok(v) = vm.run_thunk(entry, &[]) else {
+            panic!("fragment runs: {:?}", vm.diagnostics);
+        };
+        release(v);
+
+        // Fragment 4: the PROGRAM's own function (old-module code) calls the escaped closure — the
+        // dispatch resolves its fragment proto through the newest module at the frame transfer.
+        let entry = vm
+            .install_fragment(&fragment("echo callcb(4);"))
+            .expect("fragment compiles");
+        let Ok(v) = vm.run_thunk(entry, &[]) else {
+            panic!("fragment runs: {:?}", vm.diagnostics);
+        };
+        release(v);
+        assert_eq!(vm.stdout, "20\n22\ntrue\n18\n");
+
+        // A fragment that ABORTS unwinds cleanly through the swapped module (the release loops
+        // resolve every frame's proto against the newest snapshot) and pollutes nothing.
+        let entry = vm
+            .install_fragment(&fragment("echo [1][5];"))
+            .expect("fragment compiles");
+        assert!(vm.run_thunk(entry, &[]).is_err(), "out of bounds aborts");
+        vm.diagnostics.clear();
+        vm.abort_trace.clear();
+
+        // Teardown drains everything; residency returns to the baseline (no leaked fragment values).
+        let result = vm.teardown(noeta_value::CollectorMode::Trace);
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            noeta_value::live_count(),
+            before,
+            "teardown after fragment installs returns residency to baseline"
+        );
     }
 
     /// R0 (REPL-on-VM): [`Vm::run_top`] runs the entry chunk against globals that **persist between
