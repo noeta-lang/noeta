@@ -607,7 +607,7 @@ impl<M: ClifModule> Jit<M> {
             b.ins().return_(&[zero]);
             b.finalize();
         }
-        self.define_body(&format!("noeta_jit_stub{proto}"))
+        self.define_body(&stub_symbol(proto))
     }
 
     /// Emit the native integer body for a J1-eligible prototype (see the module docs). One Cranelift
@@ -953,8 +953,61 @@ impl<M: ClifModule> Jit<M> {
             b.seal_all_blocks();
             b.finalize();
         }
-        let tag = if fast { "fast" } else { "proto" };
-        self.define_body(&format!("noeta_jit_{tag}{proto}"))
+        let name = if fast {
+            fast_symbol(proto)
+        } else {
+            proto_symbol(proto)
+        };
+        self.define_body(&name)
+    }
+}
+
+/// The export symbol name of prototype `p`'s main native body. A **single source of truth** shared
+/// by codegen (the `Linkage::Export` name), the AOT manifest, and — at L3.2 — the runtime that binds
+/// these symbols back into its per-proto entry tables. (Proto index is the stable dispatch key the
+/// interpreter, JIT, AOT, and any future hot-reload all agree on.)
+pub fn proto_symbol(p: usize) -> String {
+    format!("noeta_jit_proto{p}")
+}
+
+/// The export symbol name of prototype `p`'s fast-convention body (P-JSSA S4.1), if it has one.
+pub fn fast_symbol(p: usize) -> String {
+    format!("noeta_jit_fast{p}")
+}
+
+/// The export symbol name of prototype `p`'s bail stub (an ineligible prototype's placeholder body).
+pub fn stub_symbol(p: usize) -> String {
+    format!("noeta_jit_stub{p}")
+}
+
+/// What an ahead-of-time compile produced for one prototype (P-AOT L3.1b) — its slot in an
+/// [`AotManifest`], indexed by the prototype's dispatch key. `native == false` means the prototype
+/// was left for the interpreter (ineligible), so no symbol was emitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AotProtoEntry {
+    /// Whether a real native body was emitted (vs. left interpreted).
+    pub native: bool,
+    /// The main body's export symbol, if `native` — see [`proto_symbol`].
+    pub symbol: Option<String>,
+    /// The fast-convention body's export symbol, if one was emitted — see [`fast_symbol`].
+    pub fast_symbol: Option<String>,
+}
+
+/// The result of an ahead-of-time whole-module compile (P-AOT L3.1b): one [`AotProtoEntry`] per
+/// prototype, in prototype-index order. The runtime binds each `native` entry's symbol back into its
+/// per-proto dispatch tables at startup (L3.2); the shape is fully derivable from the `Module`
+/// (eligibility + symbol naming), so it need not be serialized separately — it travels *as* the
+/// module plus this naming contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AotManifest {
+    /// One entry per prototype, in index order.
+    pub protos: Vec<AotProtoEntry>,
+}
+
+impl AotManifest {
+    /// How many prototypes were compiled to real native bodies (the AOT coverage stat).
+    pub fn native_count(&self) -> usize {
+        self.protos.iter().filter(|e| e.native).count()
     }
 }
 
@@ -1052,10 +1105,10 @@ impl Jit<ObjectModule> {
     /// pages. Runtime-helper calls become `Linkage::Import` relocations, resolved when the object is
     /// linked against the runtime crate (L3.2). `name` is the object's module name.
     ///
-    /// NOTE (L3.1): a native body bakes the VM's `frame_template` as an *absolute* pointer for its
-    /// frame push — meaningless in a relocatable object. Emitting native AOT bodies that *run*
-    /// correctly is L3.1's job (relocation- or helper-based frame push); L3.0 only proves the shared
-    /// codegen targets `ObjectModule` and finishes to object bytes.
+    /// AOT bodies are object-safe (L3.1a audit): the frame push bakes the template's *words* as
+    /// position-independent immediates (not the template address), and the inline cache — the one
+    /// per-process absolute address — is turned off in AOT mode, so calls route through the
+    /// `prepare_call` helper (a `Linkage::Import` relocation). Running the linked bodies is L3.2.
     pub fn new_object(
         name: &str,
         layout: FrameLayout,
@@ -1077,6 +1130,49 @@ impl Jit<ObjectModule> {
         } else {
             self.emit_bail_stub(proto)
         }
+    }
+
+    /// Eagerly compile **every** J1-eligible prototype of `module` into the object (P-AOT L3.1b),
+    /// returning the [`AotManifest`] the runtime uses to bind the finished symbols back into its
+    /// per-proto entry tables at startup. Unlike the runtime JIT (which compiles hot prototypes on
+    /// demand), this is whole-module: every eligible prototype gets a native main body — and its
+    /// fast-convention body where the S4.1 contract holds — as an exported symbol. Ineligible
+    /// prototypes get **no** native entry (the runtime simply interprets them; no bail-stub
+    /// round-trip), recorded as [`AotProtoEntry::native`] `= false`.
+    ///
+    /// Design note (hot-reload): the manifest is a proto-index → symbol map that populates the
+    /// runtime's *mutable* entry tables — the same tables JIT compilation fills. AOT symbols are the
+    /// *initial* population, not a frozen binding; a later hot-reload can re-point any proto's entry
+    /// to a freshly (re)compiled body. Crucially, AOT calls route through the entry-table indirection
+    /// (the `prepare_call` helper), **not** baked direct native→native call targets — so swapping a
+    /// proto never requires patching its callers.
+    pub fn compile_module(&mut self, module: &Module) -> Result<AotManifest, String> {
+        let mut protos = Vec::with_capacity(module.protos.len());
+        for (p, chunk) in module.protos.iter().enumerate() {
+            let entry = if is_eligible(chunk) {
+                self.emit_int_body(module, p, false, true)?;
+                let fast = if fast_ok(chunk) {
+                    self.emit_int_body(module, p, true, true)?;
+                    Some(fast_symbol(p))
+                } else {
+                    None
+                };
+                AotProtoEntry {
+                    native: true,
+                    symbol: Some(proto_symbol(p)),
+                    fast_symbol: fast,
+                }
+            } else {
+                // Ineligible: no native entry — the runtime interprets this prototype directly.
+                AotProtoEntry {
+                    native: false,
+                    symbol: None,
+                    fast_symbol: None,
+                }
+            };
+            protos.push(entry);
+        }
+        Ok(AotManifest { protos })
     }
 
     /// Consume the compiler and emit the finished object-file bytes (ELF/Mach-O/COFF for the host).
@@ -3545,6 +3641,81 @@ mod tests {
         // The host object carries a valid header (ELF on Linux).
         #[cfg(target_os = "linux")]
         assert_eq!(&obj[..4], b"\x7fELF", "emits a host ELF object");
+    }
+
+    /// P-AOT L3.1b: the eager whole-module driver compiles *every* eligible prototype into the object
+    /// and the manifest's symbols are actually defined in it. Reads the emitted ELF's symbol table and
+    /// asserts each native prototype's main (and fast) symbol is a real definition — the contract the
+    /// L3.2 runtime binding depends on.
+    #[test]
+    fn aot_compile_module_emits_every_native_proto_as_a_defined_symbol() {
+        use noeta_compiler::compile;
+        use noeta_lexer::lex;
+        use noeta_parser::parse;
+        use noeta_span::{Source, SourceId};
+        use object::{Object, ObjectSymbol};
+
+        // Several eligible functions + a call chain, so there are multiple native prototypes (and at
+        // least one fast-convention body).
+        let src = "fn sq(n: int): int { return n * n }\n\
+                   fn add(a: int, b: int): int { return a + b }\n\
+                   fn work(n: int): int { return add(sq(n), n) }\n\
+                   echo work(6)\n";
+        let source = Source::new(SourceId::FIRST, "aot_module.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).expect("program is in the VM subset");
+
+        let template = [0u8; 64];
+        let layout = FrameLayout {
+            frame_size: 64,
+            frame_align: 8,
+            proto_offset: 0,
+            base_offset: 8,
+            pc_offset: 16,
+            ret_dst_offset: 24,
+            ret_transform_offset: 32,
+            upvalues_offset: 40,
+            vec_ptr_word: 0,
+            vec_len_word: 1,
+            vec_cap_word: 2,
+        };
+        let mut aot = Jit::<ObjectModule>::new_object("aot_module", layout, template.as_ptr())
+            .expect("object backend builds");
+        let manifest = aot.compile_module(&module).expect("whole module compiles");
+        let obj = aot.finish().expect("object file emits");
+
+        assert_eq!(
+            manifest.protos.len(),
+            module.protos.len(),
+            "one manifest entry per prototype"
+        );
+        assert!(
+            manifest.native_count() > 0,
+            "the program has eligible prototypes compiled to native code"
+        );
+
+        // Every symbol the manifest claims must be a real definition in the object.
+        let file = object::File::parse(&*obj).expect("valid object file");
+        let defined: std::collections::HashSet<String> = file
+            .symbols()
+            .filter(|s| s.is_definition())
+            .filter_map(|s| s.name().ok().map(str::to_string))
+            .collect();
+        for (p, entry) in manifest.protos.iter().enumerate() {
+            if let Some(sym) = &entry.symbol {
+                assert!(
+                    defined.contains(sym),
+                    "proto {p} main symbol {sym} is defined in the object; have {defined:?}"
+                );
+            }
+            if let Some(fsym) = &entry.fast_symbol {
+                assert!(
+                    defined.contains(fsym),
+                    "proto {p} fast symbol {fsym} is defined in the object"
+                );
+            }
+        }
     }
 
     /// The ownership-transfer peephole marks a `Move dst <- src` immediately followed by `Drop src`.

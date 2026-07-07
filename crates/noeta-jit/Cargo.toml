@@ -22,6 +22,8 @@ noeta-span = { workspace = true }
 noeta-compiler = { workspace = true }
 noeta-lexer = { workspace = true }
 noeta-parser = { workspace = true }
+# Read the emitted object's symbol table in the L3.1b test (already in-tree via cranelift-object).
+object = "0.37"
 
 # This crate deliberately does NOT inherit the workspace lint table: the JIT transmutes
 # Cranelift-finalized code pointers to `extern "C" fn` and calls them, which is inherently
