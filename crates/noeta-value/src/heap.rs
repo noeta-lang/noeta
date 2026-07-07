@@ -13,6 +13,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ptr;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use noeta_ast::reflect::TypeRepr;
 use noeta_bytecode::Builtin;
@@ -306,15 +307,15 @@ pub(crate) enum Payload {
     /// owns no child `Value`s (only primitive bytes), so freeing it just drops the buffer. Elements
     /// are materialized to/from `Payload::Object` on demand, so the layout is invisible to `RunResult`.
     PackedList {
-        schema: Rc<PackedSchema>,
+        schema: Arc<PackedSchema>,
         bytes: Vec<u8>,
     },
     Object {
-        shape: Rc<Shape>,
+        shape: Arc<Shape>,
         slots: Vec<Value>,
     },
     Enum {
-        shape: Rc<Shape>,
+        shape: Arc<Shape>,
         data: Vec<Value>,
     },
     /// A Ring 2 native module (`use std.{json}`), identified by its surface name. A leaf with
@@ -1064,8 +1065,8 @@ enum PromoteJob {
     Tuple(Vec<Value>),
     Set(Vec<Value>),
     Map(Vec<(MapKey, Value)>),
-    Object(Rc<Shape>, Vec<Value>),
-    Enum(Rc<Shape>, Vec<Value>),
+    Object(Arc<Shape>, Vec<Value>),
+    Enum(Arc<Shape>, Vec<Value>),
 }
 
 /// A **shared-immutable region** (isolates I.3): the borrow-shared heap a `concurrent { }` scope owns.
@@ -1153,7 +1154,7 @@ impl SharedRegion {
                 Payload::Extern(e) => PromoteJob::Leaf(Payload::Extern(e.clone())),
                 Payload::Int(i) => PromoteJob::Leaf(Payload::Int(*i)),
                 Payload::PackedList { schema, bytes } => PromoteJob::Leaf(Payload::PackedList {
-                    schema: Rc::clone(schema),
+                    schema: Arc::clone(schema),
                     bytes: bytes.clone(),
                 }),
                 Payload::List(items) => PromoteJob::List(items.clone()),
@@ -1163,9 +1164,9 @@ impl SharedRegion {
                     PromoteJob::Map(entries.iter().map(|(k, &v)| (k.clone(), v)).collect())
                 }
                 Payload::Object { shape, slots } => {
-                    PromoteJob::Object(Rc::clone(shape), slots.clone())
+                    PromoteJob::Object(Arc::clone(shape), slots.clone())
                 }
-                Payload::Enum { shape, data } => PromoteJob::Enum(Rc::clone(shape), data.clone()),
+                Payload::Enum { shape, data } => PromoteJob::Enum(Arc::clone(shape), data.clone()),
                 _ => unreachable!(
                     "a non-Send payload cannot be promoted into a shared region — the checker's \
                      E0042 Send classifier rejects a non-Send isolate argument before it reaches here"

@@ -36,6 +36,15 @@ miri-proven (I.3) but has **no caller on the real path**.
 5. **Result path unchanged** (`Wire` back from worker): results are worker-heap values whose
    owner is about to exit; copying back is correct and cheap relative to inputs.
 
+### Audit obligations found during S1
+
+- **`set_reflect` on shared objects**: heap objects carry a mutable `Option<Rc<TypeRepr>>` reflect
+  tag (`heap.rs`), written by `set_reflect` at construction sites. `alloc_shared` sets
+  `reflect: None` and `Wire` rebuilds don't tag either (behavioural parity ✓), but S2 must verify
+  no worker-side path calls `set_reflect` on a *borrowed* shared object — that would be a
+  cross-thread data race on the tag (and an `Rc<TypeRepr>` clone across threads). If any such
+  path exists, promotion-freezes-the-tag is the rule to enforce.
+
 ## Semantics / oracle posture
 
 Copy ≡ borrow for immutable `Send` value types — observable behaviour is identical by

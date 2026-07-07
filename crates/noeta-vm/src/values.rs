@@ -8,6 +8,7 @@
 //! receiver methods, and the scheduler are the callers.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use noeta_diagnostics::DiagnosticCode;
 use noeta_object::{Shape, ShapeKind};
@@ -217,7 +218,7 @@ pub(crate) fn canonical_set(items: &[Value]) -> Option<Vec<Value>> {
 /// on-the-fly shape is interchangeable with any other `Ordering` shape — including the
 /// tree-walker's, which is what keeps the differential identical.
 pub(crate) fn make_ordering(variant: &str) -> Value {
-    let shape = Rc::new(Shape::enum_variant("Ordering", variant, Vec::new(), false));
+    let shape = Arc::new(Shape::enum_variant("Ordering", variant, Vec::new(), false));
     Value::enum_value(shape, Vec::new())
 }
 
@@ -225,7 +226,7 @@ pub(crate) fn make_ordering(variant: &str) -> Value {
 /// the payload-free `roles_of()` counterpart to [`make_ordering`], for whichever `@semantic` enum a
 /// `@role` tag named. Matches the tree-walker's by structural equality.
 pub(crate) fn make_role(enum_name: &str, variant: &str) -> Value {
-    let shape = Rc::new(Shape::enum_variant(enum_name, variant, Vec::new(), false));
+    let shape = Arc::new(Shape::enum_variant(enum_name, variant, Vec::new(), false));
     Value::enum_value(shape, Vec::new())
 }
 
@@ -316,7 +317,7 @@ pub(crate) fn build_type_value(repr: &noeta_ast::reflect::TypeRepr) -> Value {
             vec![Value::list(members.iter().map(build_type_value).collect())]
         }
     };
-    let shape = Rc::new(Shape::enum_variant(
+    let shape = Arc::new(Shape::enum_variant(
         TYPE_ENUM,
         repr.variant_name(),
         Vec::new(),
@@ -361,7 +362,7 @@ pub(crate) fn attr_value_to_vm(
         } => make_attr_enum(enum_name, variant, args.iter().map(recur).collect()),
         A::Struct { type_name, fields } => {
             let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
-            let shape = Rc::new(Shape::object(ShapeKind::Struct, type_name, names));
+            let shape = Arc::new(Shape::object(ShapeKind::Struct, type_name, names));
             let values: Vec<Value> = fields.iter().map(|(_, v)| recur(v)).collect();
             Value::object(shape, values)
         }
@@ -393,7 +394,7 @@ pub(crate) fn reflection_type_name(value: Value) -> Option<String> {
 /// payload-free or payload-carrying shape. Matches the tree-walker's `builtin_enum` by structural
 /// shape equality.
 pub(crate) fn make_attr_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
-    let shape = Rc::new(Shape::enum_variant(
+    let shape = Arc::new(Shape::enum_variant(
         enum_name,
         variant,
         Vec::new(),
@@ -419,13 +420,13 @@ pub(crate) fn arity_message(kind: &str, required: usize, total: usize, supplied:
 /// makes it render as `some(..)`, matching the tree-walker and the compiler-lowered `some(x)`).
 /// The enum owns one reference to `value`, so the caller must have retained it first.
 pub(crate) fn make_some(value: Value) -> Value {
-    let shape = Rc::new(Shape::enum_variant("Option", "some", Vec::new(), true));
+    let shape = Arc::new(Shape::enum_variant("Option", "some", Vec::new(), true));
     Value::enum_value(shape, vec![value])
 }
 
 /// Build the built-in `Option::none` (no payload), matching the tree-walker / compiler `none`.
 pub(crate) fn make_none() -> Value {
-    let shape = Rc::new(Shape::enum_variant("Option", "none", Vec::new(), true));
+    let shape = Arc::new(Shape::enum_variant("Option", "none", Vec::new(), true));
     Value::enum_value(shape, Vec::new())
 }
 
@@ -457,7 +458,7 @@ pub(crate) fn materialize_recipe(out: noeta_stdlib::NativeOut) -> Value {
         }
         NativeOut::Struct { name, fields } => {
             let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
-            let shape = Rc::new(Shape::object(ShapeKind::Struct, &name, names));
+            let shape = Arc::new(Shape::object(ShapeKind::Struct, &name, names));
             let values: Vec<Value> = fields
                 .into_iter()
                 .map(|(_, v)| materialize_recipe(v))

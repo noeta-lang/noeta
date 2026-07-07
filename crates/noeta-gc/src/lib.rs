@@ -342,11 +342,11 @@ mod tests {
     }
 
     use noeta_object::{Shape, ShapeKind};
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     /// A one-slot object whose slot starts as unit — the building block for a heap cycle.
     fn cell() -> Value {
-        let shape = Rc::new(Shape::object(ShapeKind::Class, "Cell", vec!["next".into()]));
+        let shape = Arc::new(Shape::object(ShapeKind::Class, "Cell", vec!["next".into()]));
         Value::object(shape, vec![Value::unit()])
     }
 

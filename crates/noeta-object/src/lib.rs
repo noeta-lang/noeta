@@ -8,8 +8,10 @@
 //!
 //! Shapes are pure, immutable layout data — no runtime `Value` lives here, so this crate sits
 //! below `noeta-value` in the dependency DAG. The compiler emits a flat shape table into the
-//! compiled module; the VM wraps each entry in an `Rc<Shape>` once and clones that handle into
-//! every value of that shape, making shape identity a cheap pointer comparison.
+//! compiled module; the VM wraps each entry in an `Arc<Shape>` once and clones that handle into
+//! every value of that shape, making shape identity a cheap pointer comparison. The handle is
+//! atomic (`Arc`, P-PAR S1) because shared-region borrow-share hands promoted objects — shape
+//! handle included — to other isolate threads; `Shape` itself is immutable plain data.
 //!
 //! Inline caches (monomorphic call-site/field-access caches keyed by shape) are a pure
 //! performance layer over this representation — invisible in observable output — and are
@@ -134,12 +136,12 @@ impl Shape {
 /// instance into, and materialize it back from, a contiguous run of raw primitive words. Built once
 /// per packed list type (the VM resolves it at module load from the compiled
 /// `PackedSchemaDef`/shape table; the tree-walker has its own equivalent over `TypeDef`). Holds the
-/// element's `Rc<Shape>` so a materialized element shares shape identity with a directly-constructed
+/// element's `Arc<Shape>` so a materialized element shares shape identity with a directly-constructed
 /// one, plus each field's kind in slot (declared) order and the total word width.
 #[derive(Debug, Clone)]
 pub struct PackedSchema {
     /// The element type's shape — materialized elements use this exact handle.
-    pub shape: std::rc::Rc<Shape>,
+    pub shape: std::sync::Arc<Shape>,
     /// One entry per field, in `shape.fields` (slot) order.
     pub fields: Vec<PackedKind>,
     /// **Bytes** per element — the sum of each field's [`PackedKind::byte_width`] (P-PACK 3.2b: the
@@ -190,7 +192,7 @@ pub enum PackedKind {
     /// A 32-bit float field (P-PACK Phase 3) — **4 bytes** (slice 3.2b), half an `int`/`float`.
     F32,
     Bool,
-    Struct(std::rc::Rc<PackedSchema>),
+    Struct(std::sync::Arc<PackedSchema>),
 }
 
 impl PackedKind {
@@ -205,6 +207,15 @@ impl PackedKind {
         }
     }
 }
+
+// P-PAR S1: shape/schema handles ride inside shared-region objects that other isolate threads
+// borrow, so both types must stay `Send + Sync` (immutable plain data). Compile-time lock — a
+// future non-`Send` field is a build error here, not a latent data race.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Shape>();
+    assert_send_sync::<PackedSchema>();
+};
 
 #[cfg(test)]
 mod tests {
