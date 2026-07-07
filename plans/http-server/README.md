@@ -155,15 +155,23 @@ first-party router/middleware library is a follow-on arc or a documented example
   `tokio::net::TcpListener` (the runtime is already built with `enable_all`, so the IO driver is on;
   only the compile-time API feature was missing). Conformance directory
   `tests/conformance/http_server/`.
-- **S1** — the **inbound `Network` methods on both hosts at once** (forced: the trait grows, so
-  `SandboxHost` *and* `RealHost` must implement or nothing is a `Host`), with **accept as an async
-  leaf**. `net_listen(port)` → a listener id; `net_accept(listener)` → an `ExternIo` whose real body
-  is `TcpListener::accept().await` (sandbox: yields the next scripted `NetRequest` ready, then a
-  closed sentinel); `net_reply(conn_id, NetResponse)` writes the response and closes (sandbox:
-  appends to the deterministic response transcript). The real host holds the open `TcpStream` in a
-  per-connection map keyed by `conn_id`. Unit-tested both sides (sandbox: the exact scripted
-  sequence + transcript; real: a loopback round trip, `#[ignore]`). No language surface yet.
-- **S2** — the **`Request` extern type** + accessor methods (`method`/`path`/`query`/`header`/`body`/
+- **S1 — done (`<pending>`).** The **inbound `Network` methods on both hosts at once** (forced: the
+  trait grows, so `SandboxHost` *and* `RealHost` must implement or nothing is a `Host`), with
+  **accept as an async leaf**. `net_listen(addr)` → a listener id; `net_accept(listener)` → an
+  `ExternIo` (default `AcceptIo` resolves through the sync `net_accept_next` at spawn; `RealHost`
+  overrides it with a `TcpListener::accept().await` future); `net_reply(conn, NetResponse)` → an
+  `ExternIo` (default `ReplyIo` via the sync `net_reply_now`; `RealHost` overrides with an async
+  socket write). The accept outcome is `Option<Request>` — and the **`Request` extern *value type***
+  (holding the `conn` id internally + the `NetRequest`) is defined here, since accept must produce
+  it; its *language-surface accessor methods* are S2. Sandbox drives the fixed
+  `net::sandbox_request_script()` then signals close, recording replies in a transcript; `RealHost`
+  binds via `std::net` (runtime-free) and attaches the tokio listener lazily on the executor's
+  runtime at first accept, parking accepted `TcpStream`s in a shared `conns` map keyed by `conn`
+  (so all socket IO stays on the runtime that accepted it — the cross-runtime pitfall, resolved).
+  Includes a minimal dependency-free HTTP/1.1 request parser + response writer on the real host.
+  Unit-tested both sides (sandbox: the exact scripted sequence + transcript; real: a loopback round
+  trip, `#[ignore]`). No language surface yet.
+- **S2** — the **`Request` accessor methods** (`method`/`path`/`query`/`header`/`body`/
   `body_bytes`, registry, zero backend edits) and the **`http.response(status, body?, headers?)`
   builder** (+ a copy-modify `with_header` so middleware can augment a response). Conformance builds a
   `Request` from a fixture and a `Response`, reading both back, in both backends.

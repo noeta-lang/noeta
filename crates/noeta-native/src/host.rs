@@ -123,6 +123,50 @@ pub trait Network {
     fn net_spawn(&self, request: crate::NetRequest) -> Box<dyn crate::ExternIo> {
         Box::new(crate::net::NetFetchIo { request })
     }
+
+    // --- Inbound: the server side (http-server S1). The exact inverse of the outbound side above:
+    // the world initiates a connection and the program's handler responds. Determinism is the
+    // mirror image of the pure responder — the sandbox drives a *pure, finite request script*
+    // (`net_accept_next` pops it, then `None`), so a served program terminates in-oracle; the real
+    // host binds a socket and blocks. ---
+
+    /// Bind an inbound listener at `addr`, returning a listener id passed to [`Self::net_accept`]
+    /// / [`Self::net_reply`]. The sandbox arms its deterministic request script (ignoring `addr`);
+    /// the real host binds a real socket.
+    fn net_listen(&mut self, addr: &str) -> Result<u64, StdError>;
+
+    /// The next inbound connection for the default (sandbox / degraded) accept descriptor: a
+    /// `(conn_id, request)`, or `None` once the listener is exhausted/closed. The sandbox pops its
+    /// script; a real host overrides [`Self::net_accept`] with a genuine async accept and never
+    /// reaches this (like `fs_read_more` on the sandbox).
+    fn net_accept_next(
+        &mut self,
+        listener: u64,
+    ) -> Result<Option<(u64, crate::NetRequest)>, StdError>;
+
+    /// Build the async accept descriptor for `listener` — the inbound mirror of [`Self::net_spawn`].
+    /// Default: an [`AcceptIo`](crate::net::AcceptIo) resolving through [`Self::net_accept_next`] at
+    /// spawn (deterministic in the sandbox; serial on any host). `RealHost` overrides it with a
+    /// `TcpListener::accept().await` future so a slow handler yields cooperatively while the next
+    /// connection is awaited.
+    fn net_accept(&self, listener: u64) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::net::AcceptIo { listener })
+    }
+
+    /// Write `response` to connection `conn` and close it, for the default (sandbox / degraded)
+    /// reply descriptor. The sandbox records it (its request script is a pure driver); a real host
+    /// overrides [`Self::net_reply`].
+    fn net_reply_now(&mut self, conn: u64, response: crate::NetResponse) -> Result<(), StdError>;
+
+    /// Build the async reply descriptor for `conn`. Default: a [`ReplyIo`](crate::net::ReplyIo)
+    /// via [`Self::net_reply_now`]. `RealHost` overrides it with an async socket write on the
+    /// executor's runtime, so a connection's IO stays on the runtime that accepted it.
+    fn net_reply(&self, conn: u64, response: crate::NetResponse) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::net::ReplyIo {
+            conn,
+            response: Some(response),
+        })
+    }
 }
 
 /// **Host introspection** capability (M2.2). `env_keys` is sorted. The sandbox presents a fixed
