@@ -61,28 +61,48 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Join a finished isolate's worker thread and drop it from the in-flight count.
+    /// Join a finished isolate's worker thread and drop it from the in-flight count. When the
+    /// last in-flight isolate is joined, no thread can be borrowing the shared region any more,
+    /// so the promoted argument graphs are freed wholesale (P-PAR S2).
     fn finish_isolate(&mut self, id: u32) {
         if let Some(handle) = self.isolates[id as usize].handle.take() {
             let _ = handle.join();
         }
         self.inflight_isolates = self.inflight_isolates.saturating_sub(1);
+        if self.inflight_isolates == 0 {
+            self.free_shared_region();
+        }
+    }
+
+    /// Free the borrow-share region and its promote-once memo (P-PAR S2). Sound only when no
+    /// worker thread can still borrow it: every in-flight isolate joined (`finish_isolate` at
+    /// count 0) or VM teardown after the defensive join loop. Idempotent (everything drains).
+    pub(crate) fn free_shared_region(&mut self) {
+        std::mem::take(&mut self.shared_region).free_all();
+        self.promote_memo.clear();
+        for source in std::mem::take(&mut self.promote_sources) {
+            release(source);
+        }
     }
 
     /// At a scheduler stall (no task completed, no channel op, no timer to advance): if another isolate
     /// thread could still make this VM progress — a real isolate worker (I.4b) is still running, or an
-    /// open *shared* channel (I.4c) could yet be fed/drained by a worker — briefly yield and report
-    /// `true` ("keep looping") rather than declaring a deadlock. `false` when no cross-thread work is
-    /// outstanding, so the caller raises the deterministic deadlock. Always `false` in the sandbox (no
-    /// real isolates, all channels `Local`), so cooperative deadlock detection is unchanged in-oracle.
-    pub(crate) fn isolate_in_flight_wait(&self) -> bool {
+    /// open *shared* channel (I.4c) could yet be fed/drained by a worker — park on the [`isolate::WAKE`]
+    /// eventcount (P-PAR S3) and report `true` ("keep looping") rather than declaring a deadlock.
+    /// `seen` is the generation snapshot the caller took **before** its poll round, so progress made
+    /// during the round returns immediately; the 5 ms timeout is a liveness backstop for a
+    /// missed-notify bug, not part of the protocol (S0b measured the old 100 µs sleep-spin at
+    /// ~160 µs/round on a cross-thread ping-pong). `false` when no cross-thread work is outstanding,
+    /// so the caller raises the deterministic deadlock. Always `false` in the sandbox (no real
+    /// isolates, all channels `Local`), so cooperative deadlock detection is unchanged in-oracle.
+    pub(crate) fn isolate_in_flight_wait(&self, seen: u64) -> bool {
         let cross_thread_pending = self.inflight_isolates > 0
             || self
                 .channels
                 .iter()
                 .any(|c| matches!(c, Channel::Shared(core) if core.is_open()));
         if cross_thread_pending {
-            std::thread::sleep(std::time::Duration::from_micros(100));
+            isolate::WAKE.wait_past(seen, std::time::Duration::from_millis(5));
             true
         } else {
             false
@@ -380,10 +400,26 @@ impl<'m> Vm<'m> {
         let Some(proto) = callee.as_closure() else {
             return Ok(None); // not a plain function value — cooperative fallback
         };
-        let mut wire_args = Vec::with_capacity(args.len());
+        let mut iso_args = Vec::with_capacity(args.len());
         for &v in args {
+            // Borrow-share a promotable data graph (P-PAR S2): promote it into the VM's shared
+            // region once — the memo makes the same corpus fanned to N workers a single
+            // promotion — and hand the worker a zero-copy borrowed root. Immediates, channel
+            // endpoints, function values, and anything else non-promotable keep the `Wire` copy.
+            if v.is_pointer() && v.is_promotable_graph() {
+                // The memo keys on the source's address: on first promotion, retain the source
+                // into the region's lifetime so the entry can never alias a freed-and-reallocated
+                // object. (Children get their own memo entries but stay alive through the root.)
+                if !self.promote_memo.contains_key(&v.bits()) {
+                    retain(v);
+                    self.promote_sources.push(v);
+                }
+                let root = self.shared_region.promote_with(v, &mut self.promote_memo);
+                iso_args.push(isolate::IsoArg::Borrowed(isolate::SharedRoot::new(root)));
+                continue;
+            }
             match isolate::marshal(v, &self.shapes, &self.channels) {
-                Ok(w) => wire_args.push(w),
+                Ok(w) => iso_args.push(isolate::IsoArg::Copied(w)),
                 Err(_) => return Ok(None), // unshippable arg — cooperative fallback
             }
         }
@@ -412,8 +448,11 @@ impl<'m> Vm<'m> {
             .clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let thread_handle = std::thread::spawn(move || {
-            let msg = run_isolate_worker(&module, &factory, proto, wire_args, wire_globals, span);
+            let msg = run_isolate_worker(&module, &factory, proto, iso_args, wire_globals, span);
             let _ = tx.send(msg);
+            // The result landing is cross-thread progress: wake the parent's parked scheduler
+            // (P-PAR S3) so it harvests immediately instead of sleeping out its stall quantum.
+            isolate::WAKE.notify();
         });
         let id = self.isolates.len() as u32;
         self.isolates.push(IsolateSlot {
@@ -432,6 +471,9 @@ impl<'m> Vm<'m> {
     pub(crate) fn join_scope(&mut self, span: Span) -> Result<(), Abort> {
         let si = self.scopes.len() - 1;
         loop {
+            // Snapshot the wake generation before polling (P-PAR S3): progress a worker makes
+            // *during* this round then returns the stall wait immediately instead of parking.
+            let wake_gen = isolate::WAKE.generation();
             let before = self.channel_progress;
             let progressed = self.poll_all_scopes_round(span)?;
             if self.scopes[si]
@@ -443,7 +485,10 @@ impl<'m> Vm<'m> {
             // A channel op (a `send` unblocked, a `recv` drained) is progress even when no task
             // completed this round — otherwise a producer/consumer pair would look deadlocked.
             let progressed = progressed || self.channel_progress != before;
-            if !progressed && self.executor.advance().is_none() && !self.isolate_in_flight_wait() {
+            if !progressed
+                && self.executor.advance().is_none()
+                && !self.isolate_in_flight_wait(wake_gen)
+            {
                 return Err(self.error(
                     DiagnosticCode::Panic,
                     span,
@@ -461,6 +506,7 @@ impl<'m> Vm<'m> {
     /// advance. Returns the completion value (owned). The caller's register keeps owning the future.
     pub(crate) fn drive_future(&mut self, future: Value, span: Span) -> Result<Value, Abort> {
         loop {
+            let wake_gen = isolate::WAKE.generation();
             let before = self.channel_progress;
             if let Poll::Ready(value) = self.poll_once(future, span)? {
                 return Ok(value);
@@ -472,7 +518,10 @@ impl<'m> Vm<'m> {
             };
             // A channel op during any poll this iteration is progress (see `join_scope`).
             let progressed = progressed || self.channel_progress != before;
-            if !progressed && self.executor.advance().is_none() && !self.isolate_in_flight_wait() {
+            if !progressed
+                && self.executor.advance().is_none()
+                && !self.isolate_in_flight_wait(wake_gen)
+            {
                 return Err(self.error(
                     DiagnosticCode::Panic,
                     span,

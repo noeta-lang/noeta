@@ -1611,7 +1611,9 @@ impl Checker {
                                         self.error(
                                             DiagnosticCode::ImmutableAssignment,
                                             *name_span,
-                                            format!("cannot assign to `{name}`, which is immutable"),
+                                            format!(
+                                                "cannot assign to `{name}`, which is immutable"
+                                            ),
                                         )
                                         .help(format!(
                                             "declare it `mut {name} = …` to allow reassignment"
@@ -4168,8 +4170,9 @@ impl Checker {
                     && lookup(env, name).is_none()
                 {
                     if let Some(params) = stdlib::module_params(&module, &func) {
-                        let n = params.len();
-                        self.check_args(&params, n, args, arg_exprs, span, &func);
+                        let required =
+                            stdlib::module_required(&module, &func).unwrap_or(params.len());
+                        self.check_args(&params, required, args, arg_exprs, span, &func);
                     }
                     return stdlib::module_return(&module, &func, args).unwrap_or(Type::Unknown);
                 }
@@ -4208,8 +4211,8 @@ impl Checker {
                     && self.modules.contains(m)
                 {
                     if let Some(params) = stdlib::module_params(m, name) {
-                        let n = params.len();
-                        self.check_args(&params, n, args, arg_exprs, span, name);
+                        let required = stdlib::module_required(m, name).unwrap_or(params.len());
+                        self.check_args(&params, required, args, arg_exprs, span, name);
                     }
                     return stdlib::module_return(m, name, args).unwrap_or(Type::Unknown);
                 }
@@ -4446,8 +4449,8 @@ impl Checker {
         span: Span,
     ) {
         if let Some(params) = stdlib::method_params(recv, name) {
-            let n = params.len();
-            self.check_args(&params, n, args, arg_exprs, span, name);
+            let required = stdlib::method_required(recv, name).unwrap_or(params.len());
+            self.check_args(&params, required, args, arg_exprs, span, name);
         } else if let Type::Named(n, _) = recv
             && let Some(sig) = self.methods.get(&(n.clone(), name.to_string()))
         {

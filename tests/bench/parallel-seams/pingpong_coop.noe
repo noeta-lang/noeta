@@ -1,0 +1,39 @@
+// P-PAR S0b floor: the same 2000-round ping-pong with a cooperative `spawn` echoer — one
+// thread, no cross-thread stall, so this is the scheduler-overhead floor the isolate variant
+// (pingpong.noe) is compared against.
+async fn echoer(inp: Receiver<int>, out: Sender<int>): void {
+    mut running = true
+    while running {
+        r = inp.recv().await
+        (v, keep) = match r { some(x) => (x, true), none => (0, false) }
+        if keep {
+            out.send(v + 1).await
+        }
+        running = keep
+    }
+    out.close()
+}
+
+async fn driver(out: Sender<int>, inp: Receiver<int>, rounds: int): int {
+    mut last = 0
+    for i in 0..rounds {
+        out.send(i).await
+        r = inp.recv().await
+        last = match r { some(x) => x, none => 0 - 1 }
+    }
+    out.close()
+    return last
+}
+
+async fn run(): int {
+    (tx1, rx1) = channel::<int>(1)
+    (tx2, rx2) = channel::<int>(1)
+    mut result = 0
+    concurrent {
+        spawn echoer(rx1, tx2)
+        h = spawn driver(tx1, rx2, 2000)
+        result = h.await
+    }
+    return result
+}
+echo run().await

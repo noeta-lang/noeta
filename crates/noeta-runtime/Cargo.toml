@@ -10,6 +10,7 @@ rust-version.workspace = true
 noeta-stdlib = { workspace = true }
 tokio = { workspace = true }
 getrandom = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

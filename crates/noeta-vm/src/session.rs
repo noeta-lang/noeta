@@ -44,11 +44,11 @@ pub(crate) struct SessionState {
     channel_progress: u64,
     reactive: Rc<ReactiveGraph<GcVal>>,
     /// The `Rc`-wrapped derived tables grow by **append** (never rebuild), so an entry-1 aggregate and
-    /// an entry-2 aggregate of the same type share `Rc<Shape>` identity — the invariant the reuse
+    /// an entry-2 aggregate of the same type share `&'static Shape` identity — the invariant the reuse
     /// gate, packed-value ops, and inline caches assume within a single run. [`SessionState::sync_to`]
     /// extends them to a grown module; the existing prefix keeps its identity.
-    shapes: Vec<Rc<Shape>>,
-    packed_schemas: Vec<Rc<PackedSchema>>,
+    shapes: Vec<&'static Shape>,
+    packed_schemas: Vec<&'static PackedSchema>,
     type_reprs: Vec<Rc<noeta_ast::reflect::TypeRepr>>,
     host: Box<dyn Host>,
     executor: Box<dyn Executor>,
@@ -80,7 +80,7 @@ impl SessionState {
                 .resize(module.global_names.len(), Value::unbound());
         }
         for shape in &module.shapes[self.shapes.len()..] {
-            self.shapes.push(Rc::new(shape.clone()));
+            self.shapes.push(noeta_object::intern_shape(shape.clone()));
         }
         // Packed schemas are interned inner-before-outer, so a new schema's referenced shape index and
         // nested-schema index are already present in the grown tables above / earlier in this loop.
@@ -94,16 +94,17 @@ impl SessionState {
                     PackedFieldDef::F32 => PackedKind::F32,
                     PackedFieldDef::Bool => PackedKind::Bool,
                     PackedFieldDef::Struct(idx) => {
-                        PackedKind::Struct(Rc::clone(&self.packed_schemas[*idx as usize]))
+                        PackedKind::Struct(self.packed_schemas[*idx as usize])
                     }
                 })
                 .collect();
-            self.packed_schemas.push(Rc::new(PackedSchema {
-                shape: Rc::clone(&self.shapes[def.shape as usize]),
-                fields,
-                byte_size: def.byte_size as usize,
-                column: def.column,
-            }));
+            self.packed_schemas
+                .push(noeta_object::intern_schema(PackedSchema {
+                    shape: self.shapes[def.shape as usize],
+                    fields,
+                    byte_size: def.byte_size as usize,
+                    column: def.column,
+                }));
         }
         for repr in &module.type_reprs[self.type_reprs.len()..] {
             self.type_reprs.push(Rc::new(repr.clone()));
@@ -133,7 +134,7 @@ impl<'m> Vm<'m> {
         vm.map_packed = module
             .map_packed_sites
             .iter()
-            .map(|(span, idx)| (*span, Rc::clone(&vm.packed_schemas[*idx as usize])))
+            .map(|(span, idx)| (*span, vm.packed_schemas[*idx as usize]))
             .collect();
         vm
     }

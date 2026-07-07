@@ -159,6 +159,16 @@ own; these are additive capabilities.
 | **argon2 / scrypt** | crypto C4 scope cut | Password-hash *pluggability* design (an algorithm-tagged verify like bcrypt's modular-crypt, across algorithms). bcrypt covers the M2 story. |
 | **Encryption (AES-GCM / chacha20-poly1305)** | crypto C0 scope cut | A real use case arrives WITH a key-management story — an encrypt API without one invites hardcoded keys. |
 
+## HTTP (http arc — `std.http` is COMPLETE, these are follow-ons)
+
+| Item | Source | Trigger to implement |
+|---|---|---|
+| **Request timeout** | http H5 scope cut | A per-request timeout (`headers`-style option or a `timeout_ms` arg). reqwest supports it directly; the sandbox responder is instant so it needs a deterministic model (ignore, or a control route that "hangs"). Add when a caller needs to bound a slow endpoint. |
+| **`http.serve` (server/listener)** | http (design non-goal) | Its own arc — an inbound HTTP capability (routing, request/response handlers) + a deterministic virtual listener. Much larger than the client; the reactive/task machinery would underpin handlers. |
+| **Streaming bodies** (chunked upload/download, `Response` as a byte stream) | http design | A large-payload use case. Today `body()`/`body_bytes()` buffer the whole response (fine for API JSON). Would reuse the P-LAZY `ReadSource` streaming model. |
+| **Cookie jar / redirect policy / retries beyond reqwest defaults** | http design | A client-session use case. reqwest exposes these on the `Client` builder; surface them as `http`-module config when needed. |
+| **HMAC-signed requests / auth helpers** | crypto + http | Belongs with the crypto arc's `hmac_*` follow-ons now that a network path exists (signing an outbound request, verifying a webhook). |
+
 ## Backend divergences (latent — would fail the differential if a corpus case reached it)
 
 | Item | Source | Trigger / note |

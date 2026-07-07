@@ -39,8 +39,10 @@ impl ReflectionInfo {
             .chain(fragment.roles.iter().map(|r| r.target.as_str()))
             .collect();
         self.types.retain(|t| !redeclared.contains(t.name.as_str()));
-        self.manifest.retain(|a| !redeclared.contains(a.target.as_str()));
-        self.roles.retain(|r| !redeclared.contains(r.target.as_str()));
+        self.manifest
+            .retain(|a| !redeclared.contains(a.target.as_str()));
+        self.roles
+            .retain(|r| !redeclared.contains(r.target.as_str()));
         drop(redeclared);
         self.types.extend(fragment.types);
         self.manifest.extend(fragment.manifest);

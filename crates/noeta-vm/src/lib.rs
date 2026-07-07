@@ -54,6 +54,8 @@ use noeta_value::{
 };
 
 mod isolate;
+#[cfg(feature = "jit")]
+mod jit_service;
 mod values;
 pub(crate) use values::*;
 mod methods;
@@ -328,10 +330,11 @@ impl VmBackend {
         vm.parallel_isolates = true;
         vm.isolate_module = Some(Arc::clone(&module));
         vm.isolate_factory = Some(factory);
-        // The main isolate is a real-host production run: enable the hot-counter JIT (P-JIT). Worker
-        // isolates load through `Vm::load` and stay tier-0 (Cranelift's `JITModule` is `!Send`).
+        // The main isolate is a real-host production run: enable the hot-counter JIT (P-JIT),
+        // compiling off-thread (P-PAR S4). Worker isolates load through `Vm::load` and stay
+        // tier-0 (the engine lives on the compile-service thread).
         #[cfg(feature = "jit")]
-        vm.init_jit();
+        vm.init_jit_service(Arc::clone(&module));
         let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
         // The abort traceback (empty for a clean run) rides beside the result — `RunResult` itself
         // stays the differential's compared unit, which the trace is deliberately not part of (yet):
@@ -385,6 +388,9 @@ impl VmBackend {
             .map(|j| JitStats {
                 native: j.native_count(),
                 compiled: j.compiled_count(),
+                compile_ns_total: j.compile_ns_total(),
+                compile_ns_max: j.compile_ns_max(),
+                breakdown: j.compile_breakdown(),
             })
             .unwrap_or_default();
         (result, stats)
@@ -409,27 +415,31 @@ impl VmBackend {
             Box::new(noeta_stdlib::SandboxHost::new()),
             Box::new(noeta_stdlib::SandboxExecutor::new()),
         );
-        vm.init_jit(); // force_jit stays false → hot-counter + OSR promotion
+        // force_jit stays false → hot-counter + OSR promotion, compiled OFF-THREAD (P-PAR S4).
+        vm.init_jit_service(Arc::new(module.clone()));
+        // Stats determinism: compile the outstanding queue at exit so promotion counts don't
+        // race the program's runtime (the OSR tests assert them exactly).
+        vm.jit_drain_at_exit = true;
         let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
-        let stats = vm
-            .jit
-            .as_ref()
-            .map(|j| JitStats {
-                native: j.native_count(),
-                compiled: j.compiled_count(),
-            })
-            .unwrap_or_default();
+        // Teardown shut the service down and parked its final accounting.
+        let stats = vm.jit_final_stats.take().unwrap_or_default();
         (result, stats)
     }
 }
 
 /// JIT-coverage counts for one forced-JIT run: how many prototypes were compiled to real native code
-/// (`native`) out of the total that were compiled at all (`compiled`, native + bail stubs).
+/// (`native`) out of the total that were compiled at all (`compiled`, native + bail stubs), plus the
+/// compile-pause accounting (P-PAR S0c) — compilation runs synchronously on the mutator thread, so
+/// `compile_ns_max` is the worst single pause the program felt and `compile_ns_total` the sum.
 #[cfg(feature = "jit")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct JitStats {
     pub native: usize,
     pub compiled: usize,
+    pub compile_ns_total: u64,
+    pub compile_ns_max: u64,
+    /// Where `compile_ns_total` goes + compiled volume (P-JCT C0).
+    pub breakdown: noeta_jit::CompileBreakdown,
 }
 
 impl Backend for VmBackend {
@@ -477,7 +487,7 @@ enum RetTransform {
     /// Wrap a by-name invocation's return value in `Result.Ok` (P2.6). The shape is the `Result.Ok`
     /// variant shape, baked into `Op::Invoke` and cloned in at frame setup; the raw return's
     /// reference transfers into the enum payload, so the original is *not* released afterward.
-    WrapOk(Rc<Shape>),
+    WrapOk(&'static Shape),
 }
 
 impl RetTransform {
@@ -516,13 +526,13 @@ struct Abort;
 /// global environment, captured stdout, and the diagnostics recorded so far.
 struct Vm<'m> {
     module: &'m Module,
-    /// One shared `Rc<Shape>` per shape-table entry — cloned into every value of that shape,
+    /// One shared `&'static Shape` per shape-table entry — cloned into every value of that shape,
     /// so equal-built aggregates point at one shape (identity is a pointer comparison).
-    shapes: Vec<Rc<Shape>>,
+    shapes: Vec<&'static Shape>,
     /// One shared `Rc<PackedSchema>` per compiled packed-list layout (P-PACK 2.4), resolved at load
     /// from [`Module::packed_schemas`] against `shapes` — so `Op::MakePackedList` packs/materializes
     /// elements that share shape identity with directly-constructed instances.
-    packed_schemas: Vec<Rc<noeta_object::PackedSchema>>,
+    packed_schemas: Vec<&'static noeta_object::PackedSchema>,
     /// One shared `Rc<TypeRepr>` per interned reflected element type (runtime type-argument
     /// reflection, R1), built once at load from [`Module::type_reprs`]. `Op::MakeList` stamps a cheap
     /// `Rc` clone of its indexed entry onto the built list, so `type_of` recovers the element type
@@ -531,7 +541,7 @@ struct Vm<'m> {
     /// `map(...)` call span → the result element's `Rc<PackedSchema>` (P-PACK 2.6 category B), resolved
     /// at load from [`Module::map_packed_sites`]. The `map` builtin looks up its call span here to build
     /// a flat result instead of N boxed objects.
-    map_packed: HashMap<Span, Rc<noeta_object::PackedSchema>>,
+    map_packed: HashMap<Span, &'static noeta_object::PackedSchema>,
     /// Instance-method dispatch: `(type_name, method)` to the method's prototype index.
     methods: HashMap<(String, String), u32>,
     /// `type_name` to its `destruct` prototype, for classes with a destructor.
@@ -607,6 +617,15 @@ struct Vm<'m> {
     isolate_factory: Option<IsolateFactory>,
     isolates: Vec<IsolateSlot>,
     inflight_isolates: usize,
+    /// The borrow-share region for real-isolate arguments (P-PAR S2): promotable argument graphs
+    /// are deep-copied into it **once** and every worker borrows zero-copy. `promote_memo` maps a
+    /// source object's bits → its promoted root across spawns (the fan-out promote-once memo);
+    /// each memoized source is retained into `promote_sources` so its address stays valid for the
+    /// memo's lifetime. All three are freed/cleared together when the last in-flight isolate is
+    /// joined (`finish_isolate`) and defensively at teardown. Always empty in the sandbox.
+    shared_region: noeta_value::SharedRegion,
+    promote_memo: HashMap<u64, Value>,
+    promote_sources: Vec<Value>,
     stdout: String,
     diagnostics: Vec<Diagnostic>,
     /// The tier-1 JIT engine (milestone P-JIT), present only when the `jit` feature is on *and* the
@@ -646,6 +665,40 @@ struct Vm<'m> {
     /// `Vm`'s lifetime; the `Jit` and its generated code are dropped with the same `Vm`).
     #[cfg(feature = "jit")]
     jit_frame_template: Option<Box<Frame>>,
+    /// The off-thread compile service (P-PAR S4) — the production hot-counter path. Mutually
+    /// exclusive with the synchronous `jit` engine (which the `force_jit` oracle keeps).
+    #[cfg(feature = "jit")]
+    jit_service: Option<jit_service::JitService>,
+    /// The **mirror tables** — the single tier-1 lookup source for the dispatch loop and the
+    /// native call helpers, in both modes: the sync engine fills them right after compiling,
+    /// the service via the mailbox drain. The engine's own tables are never read by the
+    /// mutator in service mode (they live on the compile thread).
+    #[cfg(feature = "jit")]
+    jit_entries: Vec<Option<noeta_jit::CompiledFn>>,
+    #[cfg(feature = "jit")]
+    jit_fast: Vec<Option<usize>>,
+    /// Per-prototype "request sent" flag (service mode) — a hot prototype is queued exactly once.
+    #[cfg(feature = "jit")]
+    jit_requested: Vec<bool>,
+    /// Prototypes whose compile request was born at a **loop back-edge** (service mode): when the
+    /// entry lands, the next back-edge OSR-enters mid-loop instead of waiting for a frame entry
+    /// that a single long-running loop may never make.
+    #[cfg(feature = "jit")]
+    jit_osr_pending: Vec<bool>,
+    /// Requests in flight to the service (sends minus drained responses): the mailbox mutex is
+    /// only ever locked while this is non-zero, so a program that never promotes pays nothing.
+    #[cfg(feature = "jit")]
+    jit_pending: usize,
+    /// The service's final compile accounting, captured at teardown shutdown (the engine — and
+    /// its counters — live on the compile thread until then).
+    #[cfg(feature = "jit")]
+    jit_final_stats: Option<JitStats>,
+    /// Whether teardown's service shutdown **drains** (compiles) the outstanding queue rather
+    /// than abandoning it. Off in production (a process should not linger at exit for entries
+    /// nothing will run); on for the stats entry points, whose tests/benches assert
+    /// deterministic promotion counts.
+    #[cfg(feature = "jit")]
+    jit_drain_at_exit: bool,
     /// The attached debugger (`noeta dap`), consulted before every instruction. `None` on every
     /// non-debug run (production, differential, salsa), where it costs one predicted branch per op.
     debugger: Option<Box<dyn Debugger>>,
@@ -971,14 +1024,13 @@ extern "C" fn jit_prepare_call(
     if regs.len() + num_regs > regs.capacity() {
         return FALLBACK;
     }
-    let Some(jit) = vm.jit.as_ref() else {
-        return FALLBACK;
-    };
     // Fast convention (P-JSSA S4.1): the callee has a frameless-window body — reserve the window
     // WITHOUT initializing it (the fast body normalizes it before the interpreter can ever see
     // it) and skip the argument copy/retain (the arguments travel as machine arguments, borrowed
     // from the caller's still-live registers). Bit 0 of the returned pointer tags the convention.
-    if let Some(ff) = jit.get_fast(callee_proto as usize) {
+    // Lookups go through the VM's mirror tables (P-PAR S4) — empty when the JIT is off, and the
+    // only tier-1 tables the mutator may read in service mode.
+    if let Some(ff) = vm.jit_fast.get(callee_proto as usize).copied().flatten() {
         // S4.2: fill this call site's inline cache so the next call with the same callee pushes
         // the frame natively, without this helper. The cached closure is **pinned** (retained +
         // held on `jit_cache_pins` until teardown) so its bits can never be reused by another
@@ -1021,7 +1073,7 @@ extern "C" fn jit_prepare_call(
         };
     }
     // The classic direct path needs the callee's normal body compiled.
-    let Some(f) = jit.get(callee_proto as usize) else {
+    let Some(f) = vm.jit_entry(callee_proto as usize) else {
         return FALLBACK;
     };
     // Set up the callee frame (like `setup_closure_call`'s closure arm, minus defaults/upvalues).
@@ -1518,7 +1570,10 @@ fn execute_with_collector(
     // no-op without the `jit` feature; the `jit` binding is unused there, so quiet the warning.
     #[cfg(feature = "jit")]
     if jit {
-        vm.init_jit();
+        // Production hot-counter tiering compiles OFF-THREAD (P-PAR S4): the mutator never
+        // pauses for Cranelift. The compile thread outlives every `&Module` borrow, so it takes
+        // the module by `Arc` (a one-time table clone at startup).
+        vm.init_jit_service(Arc::new(module.clone()));
     }
     #[cfg(not(feature = "jit"))]
     let _ = jit;
@@ -1550,11 +1605,16 @@ impl<'m> Vm<'m> {
         let destruct_reachable = module.destruct_reachable.iter().cloned().collect();
         let comparable_derives = module.comparable_derives.iter().cloned().collect();
         let tojson_derives = module.tojson_derives.iter().cloned().collect();
-        // One shared `Rc<Shape>` per shape-table entry, then resolve each packed-list layout against it.
+        // One shared `&'static Shape` per shape-table entry, then resolve each packed-list layout against it.
         // Schemas are interned inner-before-outer, so a nested struct's schema (a lower index) is always
         // built before the parent that references it.
-        let shapes: Vec<Rc<Shape>> = module.shapes.iter().cloned().map(Rc::new).collect();
-        let mut packed_schemas: Vec<Rc<noeta_object::PackedSchema>> =
+        let shapes: Vec<&'static Shape> = module
+            .shapes
+            .iter()
+            .cloned()
+            .map(noeta_object::intern_shape)
+            .collect();
+        let mut packed_schemas: Vec<&'static noeta_object::PackedSchema> =
             Vec::with_capacity(module.packed_schemas.len());
         for def in &module.packed_schemas {
             let fields = def
@@ -1566,22 +1626,22 @@ impl<'m> Vm<'m> {
                     noeta_bytecode::PackedFieldDef::F32 => noeta_object::PackedKind::F32,
                     noeta_bytecode::PackedFieldDef::Bool => noeta_object::PackedKind::Bool,
                     noeta_bytecode::PackedFieldDef::Struct(idx) => {
-                        noeta_object::PackedKind::Struct(Rc::clone(&packed_schemas[*idx as usize]))
+                        noeta_object::PackedKind::Struct(packed_schemas[*idx as usize])
                     }
                 })
                 .collect();
-            packed_schemas.push(Rc::new(noeta_object::PackedSchema {
-                shape: Rc::clone(&shapes[def.shape as usize]),
+            packed_schemas.push(noeta_object::intern_schema(noeta_object::PackedSchema {
+                shape: shapes[def.shape as usize],
                 fields,
                 byte_size: def.byte_size as usize,
                 column: def.column,
             }));
         }
         // Resolve each packed `map(...)` result site to its shared schema (P-PACK 2.6 category B).
-        let map_packed: HashMap<Span, Rc<noeta_object::PackedSchema>> = module
+        let map_packed: HashMap<Span, &'static noeta_object::PackedSchema> = module
             .map_packed_sites
             .iter()
-            .map(|(span, idx)| (*span, Rc::clone(&packed_schemas[*idx as usize])))
+            .map(|(span, idx)| (*span, packed_schemas[*idx as usize]))
             .collect();
         // Build one shared `Rc<TypeRepr>` per interned reflected element type (R1), so each tagged
         // `MakeList` is a cheap `Rc` clone rather than a fresh `TypeRepr` allocation per execution.
@@ -1612,6 +1672,9 @@ impl<'m> Vm<'m> {
             isolate_factory: None,
             isolates: Vec::new(),
             inflight_isolates: 0,
+            shared_region: noeta_value::SharedRegion::new(),
+            promote_memo: HashMap::new(),
+            promote_sources: Vec::new(),
             stdout: String::new(),
             diagnostics: Vec::new(),
             #[cfg(feature = "jit")]
@@ -1628,6 +1691,22 @@ impl<'m> Vm<'m> {
             jit_cache_pins: Vec::new(),
             #[cfg(feature = "jit")]
             jit_frame_template: None,
+            #[cfg(feature = "jit")]
+            jit_service: None,
+            #[cfg(feature = "jit")]
+            jit_entries: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_fast: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_requested: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_osr_pending: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_pending: 0,
+            #[cfg(feature = "jit")]
+            jit_final_stats: None,
+            #[cfg(feature = "jit")]
+            jit_drain_at_exit: false,
             debugger: None,
             abort_trace: Vec::new(),
         }
@@ -1675,12 +1754,108 @@ impl<'m> Vm<'m> {
             Ok(mut jit) => {
                 if self.force_jit {
                     for p in 0..self.module.protos.len() {
-                        let _ = jit.compile(self.module, p);
+                        if let Ok(f) = jit.compile(self.module, p) {
+                            let fast = jit.get_fast(p);
+                            self.jit_install(p, f, fast);
+                        }
                     }
                 }
                 self.jit = Some(jit);
             }
             Err(_) => self.jit = None,
+        }
+    }
+
+    /// Start the **off-thread** tier-1 compile service (P-PAR S4) — the production hot-counter
+    /// path. Mutually exclusive with [`init_jit`](Self::init_jit) (the `force_jit` oracle's
+    /// synchronous engine). Needs the module by `Arc` because the compile thread outlives every
+    /// borrow the mutator holds.
+    #[cfg(feature = "jit")]
+    fn init_jit_service(&mut self, module: Arc<Module>) {
+        let helpers: Vec<(&'static str, usize)> = vec![
+            (noeta_jit::OBSERVE_HELPER, jit_observe as *const u8 as usize),
+            (
+                noeta_jit::NOTE_GLOBAL_BOUND_HELPER,
+                jit_note_global_bound as *const u8 as usize,
+            ),
+            (noeta_jit::RETAIN_HELPER, jit_retain as *const u8 as usize),
+            (noeta_jit::RELEASE_HELPER, jit_release as *const u8 as usize),
+            (
+                noeta_jit::RELEASE_VALUE_HELPER,
+                jit_release_value as *const u8 as usize,
+            ),
+            (noeta_jit::CALL_HELPER, jit_call as *const u8 as usize),
+            (noeta_jit::RETURN_HELPER, jit_return as *const u8 as usize),
+            (
+                noeta_jit::PREPARE_CALL_HELPER,
+                jit_prepare_call as *const u8 as usize,
+            ),
+            (
+                noeta_jit::AFTER_CALL_HELPER,
+                jit_after_call as *const u8 as usize,
+            ),
+            (
+                noeta_jit::LEAF_OP_HELPER,
+                jit_run_leaf_op as *const u8 as usize,
+            ),
+        ];
+        let template = self.jit_frame_template.get_or_insert_with(|| {
+            Box::new(Frame {
+                proto: 0,
+                base: 0,
+                pc: 0,
+                ret_dst: 0,
+                ret_transform: RetTransform::None,
+                upvalues: Vec::new(),
+            })
+        });
+        let template_addr = template.as_ref() as *const Frame as usize;
+        self.jit_service =
+            jit_service::JitService::spawn(module, helpers, frame_layout(), template_addr);
+    }
+
+    /// Install a compiled prototype into the mirror tables — the single lookup source for the
+    /// dispatch loop and the native call helpers, in both sync and service modes.
+    #[cfg(feature = "jit")]
+    fn jit_install(&mut self, proto: usize, entry: noeta_jit::CompiledFn, fast: Option<usize>) {
+        if proto >= self.jit_entries.len() {
+            self.jit_entries.resize(proto + 1, None);
+            self.jit_fast.resize(proto + 1, None);
+        }
+        self.jit_entries[proto] = Some(entry);
+        self.jit_fast[proto] = fast;
+    }
+
+    /// The mirrored tier-1 entry point for `proto`, if compiled.
+    #[cfg(feature = "jit")]
+    fn jit_entry(&self, proto: usize) -> Option<noeta_jit::CompiledFn> {
+        self.jit_entries.get(proto).copied().flatten()
+    }
+
+    /// Drain the service mailbox into the mirror tables (service mode, only while requests are
+    /// in flight). A failed compile (`entry: None`) declines its prototype — same terminal state
+    /// as the worthiness gates — so every request reaches a fixed point and `jit_pending` always
+    /// returns to zero.
+    #[cfg(feature = "jit")]
+    fn jit_drain_service(&mut self) {
+        if self.jit_pending == 0 {
+            return;
+        }
+        let Some(service) = self.jit_service.as_ref() else {
+            self.jit_pending = 0;
+            return;
+        };
+        for done in service.drain() {
+            self.jit_pending = self.jit_pending.saturating_sub(1);
+            match done.entry {
+                Some(entry) => self.jit_install(done.proto, entry, done.fast),
+                None => {
+                    if done.proto >= self.jit_declined.len() {
+                        self.jit_declined.resize(done.proto + 1, false);
+                    }
+                    self.jit_declined[done.proto] = true;
+                }
+            }
         }
     }
 
@@ -1700,7 +1875,7 @@ impl<'m> Vm<'m> {
         base: usize,
         entry_pc: usize,
     ) -> Option<JitOutcome> {
-        let f = match self.jit.as_ref().and_then(|j| j.get(proto)) {
+        let f = match self.jit_entry(proto) {
             Some(f) => f,
             // Only a fresh entry drives compilation; a resume at a compiled-away frame just interprets.
             None if entry_pc == 0 => self.jit_maybe_compile(proto)?,
@@ -1738,11 +1913,21 @@ impl<'m> Vm<'m> {
     }
 
     /// Bump prototype `proto`'s entry counter and, once it is hot (or immediately under `force_jit`),
-    /// compile it — returning the fresh entry point on the promoting call. `None` while still cold or
-    /// when the JIT is unavailable.
+    /// promote it. Synchronous mode compiles in place and returns the fresh entry point on the
+    /// promoting call; **service mode** (P-PAR S4) queues the compile off-thread and keeps
+    /// interpreting — the entry lands in the mirror via the mailbox drain a later call performs.
+    /// `None` while still cold, queued, or when the JIT is unavailable.
     #[cfg(feature = "jit")]
     fn jit_maybe_compile(&mut self, proto: usize) -> Option<noeta_jit::CompiledFn> {
-        self.jit.as_ref()?;
+        if self.jit.is_none() && self.jit_service.is_none() {
+            return None;
+        }
+        // Harvest any compiles that landed since the last checkpoint (no-op at zero pending),
+        // then re-check the mirror — the promoting entry may already be ready.
+        self.jit_drain_service();
+        if let Some(f) = self.jit_entry(proto) {
+            return Some(f);
+        }
         // Already found not worth compiling (a prototype whose only loops bail) → keep interpreting.
         if self.jit_declined.get(proto).copied().unwrap_or(false) {
             return None;
@@ -1764,9 +1949,48 @@ impl<'m> Vm<'m> {
             self.jit_declined[proto] = true;
             return None;
         }
+        if self.jit_service.is_some() {
+            self.jit_request(proto, false);
+            return None;
+        }
         let module = self.module;
         let jit = self.jit.as_mut()?;
-        jit.compile(module, proto).ok()
+        let f = jit.compile(module, proto).ok()?;
+        let fast = jit.get_fast(proto);
+        self.jit_install(proto, f, fast);
+        Some(f)
+    }
+
+    /// Queue `proto` for off-thread compilation, exactly once (service mode). `osr` marks a
+    /// request born at a loop back-edge, so the landing entry OSR-enters mid-loop.
+    #[cfg(feature = "jit")]
+    fn jit_request(&mut self, proto: usize, osr: bool) {
+        if self.jit_requested.get(proto).copied().unwrap_or(false) {
+            return;
+        }
+        if proto >= self.jit_requested.len() {
+            self.jit_requested.resize(proto + 1, false);
+        }
+        self.jit_requested[proto] = true;
+        if osr {
+            if proto >= self.jit_osr_pending.len() {
+                self.jit_osr_pending.resize(proto + 1, false);
+            }
+            self.jit_osr_pending[proto] = true;
+        }
+        let sent = self
+            .jit_service
+            .as_ref()
+            .is_some_and(|service| service.request(proto));
+        if sent {
+            self.jit_pending += 1;
+        } else {
+            // The service thread is gone: decline so no caller waits on a response forever.
+            if proto >= self.jit_declined.len() {
+                self.jit_declined.resize(proto + 1, false);
+            }
+            self.jit_declined[proto] = true;
+        }
     }
 
     /// On-stack replacement trigger (P-JIT J5): a taken **backward branch** in prototype `proto` is a
@@ -1785,11 +2009,30 @@ impl<'m> Vm<'m> {
     /// would risk bouncing tier-0↔tier-1 every iteration for a loop whose body native can't sustain.
     #[cfg(feature = "jit")]
     fn jit_osr_backedge(&mut self, proto: usize) -> bool {
-        if self.jit.as_ref().and_then(|j| j.get(proto)).is_some() {
+        if self.jit_entry(proto).is_some() {
+            // Service mode: a back-edge-born compile just landed in the mirror — take the one
+            // pending OSR entry now (a single long-running loop gets no other chance to go
+            // native mid-flight). A prototype compiled via the call-entry path has no pending
+            // OSR and keeps the one-OSR-per-prototype rule: it goes native at its next `'reload`.
+            if self.jit_osr_pending.get(proto).copied().unwrap_or(false) {
+                self.jit_osr_pending[proto] = false;
+                return true;
+            }
             return false;
         }
         // Already found un-sustainable (all loops bail) → keep interpreting, no per-iteration re-scan.
         if self.jit_declined.get(proto).copied().unwrap_or(false) {
+            return false;
+        }
+        // A back-edge-born request is in flight: harvest the mailbox; enter the moment it lands.
+        if self.jit_requested.get(proto).copied().unwrap_or(false) {
+            self.jit_drain_service();
+            if self.jit_entry(proto).is_some()
+                && self.jit_osr_pending.get(proto).copied().unwrap_or(false)
+            {
+                self.jit_osr_pending[proto] = false;
+                return true;
+            }
             return false;
         }
         // Bump the back-edge counter; only decide once the prototype is hot. `force_jit` (the oracle)
@@ -1810,12 +2053,23 @@ impl<'m> Vm<'m> {
             self.jit_declined[proto] = true;
             return false;
         }
+        if self.jit_service.is_some() {
+            self.jit_request(proto, true);
+            return false;
+        }
         let module = self.module;
         let jit = match self.jit.as_mut() {
             Some(j) => j,
             None => return false,
         };
-        jit.compile(module, proto).is_ok()
+        match jit.compile(module, proto) {
+            Ok(f) => {
+                let fast = jit.get_fast(proto);
+                self.jit_install(proto, f, fast);
+                true
+            }
+            Err(_) => false,
+        }
     }
 }
 
@@ -1943,6 +2197,22 @@ impl<'m> Vm<'m> {
                 let _ = h.join();
             }
         }
+        // Every worker is joined, so nothing borrows the shared region: free any promoted
+        // argument graphs (P-PAR S2) — normally already emptied by `finish_isolate` at in-flight
+        // count 0; defensive here so the leak oracle's zero-residency balance holds on early
+        // exits too.
+        self.free_shared_region();
+
+        // Shut the off-thread compile service down LAST (P-PAR S4): the destructors above may
+        // have called compiled code, and shutdown drops the code pages with the engine. The
+        // mirrors are cleared first so no stale entry can outlive its pages; the service's final
+        // compile accounting parks on the VM for the stats entry points.
+        #[cfg(feature = "jit")]
+        if let Some(service) = self.jit_service.take() {
+            self.jit_entries.clear();
+            self.jit_fast.clear();
+            self.jit_final_stats = service.shutdown(self.jit_drain_at_exit);
+        }
 
         let exit_code = if self.diagnostics.is_empty() { 0 } else { 1 };
         RunResult {
@@ -1963,7 +2233,7 @@ fn run_isolate_worker(
     module: &Arc<Module>,
     factory: &IsolateFactory,
     proto: u32,
-    wire_args: Vec<isolate::Wire>,
+    iso_args: Vec<isolate::IsoArg>,
     wire_globals: Vec<(u32, isolate::Wire)>,
     span: Span,
 ) -> Result<isolate::Wire, IsolateFailure> {
@@ -1981,9 +2251,16 @@ fn run_isolate_worker(
         wvm.globals[*slot as usize] = value;
         wvm.global_order.push(*slot);
     }
-    let arg_vals: Vec<Value> = wire_args
+    let arg_vals: Vec<Value> = iso_args
         .iter()
-        .map(|w| isolate::rebuild(w, &wvm.shapes, &mut wvm.channels))
+        .map(|a| match a {
+            isolate::IsoArg::Copied(w) => isolate::rebuild(w, &wvm.shapes, &mut wvm.channels),
+            // A borrowed shared-region root (P-PAR S2): usable as-is — no rebuild, no retain.
+            // The worker's ordinary retain/release discipline no-ops on it (shared tag), its
+            // COW gates copy instead of mutating (`is_uniquely_owned` is false), and the
+            // parent's region outlives this thread (freed only after the join).
+            isolate::IsoArg::Borrowed(root) => root.value(),
+        })
         .collect();
     let callee = Value::closure(proto, Vec::new());
     let outcome = match wvm.call_value(callee, arg_vals, span) {
@@ -2048,7 +2325,7 @@ impl<'m> Vm<'m> {
     /// target. Shapes are built fresh from the shared reflection info; because shape equality is
     /// structural (name + fields), they match the tree-walker's by construction.
     fn materialize_attributes(&self, type_name: &str) -> Value {
-        let attributed_shape = Rc::new(Shape::object(
+        let attributed_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "Attributed",
             vec!["target".to_string(), "value".to_string()],
@@ -2072,12 +2349,10 @@ impl<'m> Vm<'m> {
                         .iter()
                         .map(|v| attr_value_to_vm(v, &self.module.reflection))
                         .collect();
-                let t_shape = Rc::new(Shape::object(kind, type_name, fields.clone()));
+                let t_shape =
+                    noeta_object::intern_shape(Shape::object(kind, type_name, fields.clone()));
                 let t_value = Value::object(t_shape, values);
-                Value::object(
-                    attributed_shape.clone(),
-                    vec![Value::string(&a.target), t_value],
-                )
+                Value::object(attributed_shape, vec![Value::string(&a.target), t_value])
             })
             .collect();
         Value::list(items)
@@ -2088,7 +2363,7 @@ impl<'m> Vm<'m> {
     /// shape equality is structural (name + variant + fields), the `Role` enum and `RoleBinding`
     /// struct match the tree-walker's by construction. (P2.7.)
     fn materialize_roles(&self) -> Value {
-        let binding_shape = Rc::new(Shape::object(
+        let binding_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "RoleBinding",
             vec!["target".to_string(), "role".to_string()],
@@ -2100,7 +2375,7 @@ impl<'m> Vm<'m> {
             .iter()
             .map(|r| {
                 Value::object(
-                    binding_shape.clone(),
+                    binding_shape,
                     vec![
                         Value::string(&r.target),
                         make_role(&r.enum_name, &r.variant),
@@ -2275,7 +2550,7 @@ impl<'m> Vm<'m> {
             // map/struct in-place paths), so the `refcount == 1` check below sees the accumulator's
             // reference and a `dst == obj` store is safe.
             regs[base + obj as usize] = Value::unit();
-            if v.refcount() == 1 {
+            if v.is_uniquely_owned() {
                 // Unique: overwrite the slot in place (`replace_slot` retains the new value); the
                 // displaced old value's `destruct` fires now (spec §5).
                 let old = v.replace_slot(slot, val);
@@ -2432,8 +2707,9 @@ impl<'m> Vm<'m> {
         // resolved field-slot / method prototype; a hit is a pointer compare against the cached
         // shape, skipping the field-name scan / `(type, method)` hashmap lookup. A local (not a
         // `self` field) so it neither borrows `self` in the loop nor leaks across runs; holding the
-        // `Rc<Shape>` keeps the cached shape alive, so the pointer key can never alias a freed shape.
-        let mut caches: Vec<Option<(Rc<Shape>, u32)>> = vec![None; module.cache_slots as usize];
+        // `&'static Shape` keeps the cached shape alive, so the pointer key can never alias a freed shape.
+        let mut caches: Vec<Option<(&'static Shape, u32)>> =
+            vec![None; module.cache_slots as usize];
         // S3 dispatch window (P-VMT-DISP). The interpreter is two nested loops. The OUTER `'reload`
         // loop re-derives the active frame's register window — its base, prototype (`chunk`), and
         // starting `pc` — and is re-entered ONLY when control transfers to a *different* frame: a
@@ -2464,7 +2740,7 @@ impl<'m> Vm<'m> {
             // resume pc otherwise; the compiled code jumps to that block (or bails if it has no entry
             // for it).
             #[cfg(feature = "jit")]
-            if self.jit.is_some() {
+            if self.jit.is_some() || self.jit_service.is_some() {
                 match self.jit_enter(proto, frames, regs, fbase, pc) {
                     // Not compiled → interpret as usual.
                     None => {}
@@ -2495,7 +2771,10 @@ impl<'m> Vm<'m> {
                     #[cfg(feature = "jit")]
                     {
                         let _osr_t = $target as usize;
-                        if _osr_t <= pc && self.jit.is_some() && self.jit_osr_backedge(proto) {
+                        if _osr_t <= pc
+                            && (self.jit.is_some() || self.jit_service.is_some())
+                            && self.jit_osr_backedge(proto)
+                        {
                             frames[top].pc = _osr_t;
                             continue 'reload;
                         }
@@ -2651,7 +2930,7 @@ impl<'m> Vm<'m> {
                         let result = if l.is_list() && r.is_list() {
                             if l.is_packed_list()
                                 && r.is_packed_list()
-                                && l.refcount() == 1
+                                && l.is_uniquely_owned()
                                 && l.packed_extend_in_place(r)
                             {
                                 // Sole owner, both flat, same layout: append `rhs`'s words to `lhs`'s
@@ -2659,7 +2938,7 @@ impl<'m> Vm<'m> {
                                 l
                             } else if !l.is_packed_list()
                                 && !r.is_packed_list()
-                                && l.refcount() == 1
+                                && l.is_uniquely_owned()
                             {
                                 // Sole owner, both boxed: extend the backing buffer in place (O(1)
                                 // amortized). The single reference moves from `lhs` into the result.
@@ -2687,7 +2966,7 @@ impl<'m> Vm<'m> {
                                 release(l);
                                 Value::list(items)
                             }
-                        } else if l.is_string() && l.refcount() == 1 {
+                        } else if l.is_string() && l.is_uniquely_owned() {
                             // Sole owner of a string accumulator: append `rhs`'s display form to its
                             // buffer in place (amortized O(1)), mirroring the list path — the single
                             // reference moves into the result. This is what makes `s = s ~ x` in a loop
@@ -2800,7 +3079,7 @@ impl<'m> Vm<'m> {
                     Op::PackedListNew { dst, schema } => {
                         // Allocate the empty flat buffer the following `PackedListPush` chain fills
                         // (P-PACK 2.5 streaming construction).
-                        let schema = Rc::clone(&self.packed_schemas[*schema as usize]);
+                        let schema = self.packed_schemas[*schema as usize];
                         let list = Value::packed_list(schema, Vec::new());
                         set_reg(regs, fbase, *dst, list);
                         pc += 1;
@@ -2824,7 +3103,7 @@ impl<'m> Vm<'m> {
                                 ),
                             ));
                         };
-                        let schema = Rc::clone(&self.packed_schemas[*schema as usize]);
+                        let schema = self.packed_schemas[*schema as usize];
                         if schema.byte_size == 0 || bytes.len() % schema.byte_size != 0 {
                             return Err(self.error(
                             DiagnosticCode::TypeMismatch,
@@ -3357,7 +3636,11 @@ impl<'m> Vm<'m> {
                             let ci = *cache as usize;
                             let shape_ptr = v.object_shape_ptr();
                             let hit = match &caches[ci] {
-                                Some((cs, p)) if Some(Rc::as_ptr(cs)) == shape_ptr => Some(*p),
+                                Some((cs, p))
+                                    if Some(std::ptr::from_ref::<Shape>(cs)) == shape_ptr =>
+                                {
+                                    Some(*p)
+                                }
                                 _ => None,
                             };
                             let proto = match hit {
@@ -3752,7 +4035,7 @@ impl<'m> Vm<'m> {
                         reflect,
                         span,
                     } => {
-                        let shape = self.shapes[*shape as usize].clone();
+                        let shape = self.shapes[*shape as usize];
                         let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
                         // `...base` fills declared slots the base provides; named initializers then
                         // override. A slot left unset by both is a missing-field error (E0009).
@@ -3837,14 +4120,15 @@ impl<'m> Vm<'m> {
                         reflect,
                         span,
                     } => {
-                        let shape = self.shapes[*shape as usize].clone();
+                        let shape = self.shapes[*shape as usize];
                         // The base is consumed: take its single reference out of the register without
                         // releasing (a direct overwrite, mirroring `ConcatInPlace`), so the refcount
                         // below still counts the accumulator's reference and a `dst == base` store is
                         // safe (the old occupant is now `unit`).
                         let base_val = regs[fbase + *base as usize];
                         regs[fbase + *base as usize] = Value::unit();
-                        let same_shape = base_val.object_shape_ptr() == Some(Rc::as_ptr(&shape));
+                        let same_shape =
+                            base_val.object_shape_ptr() == Some(std::ptr::from_ref::<Shape>(shape));
                         let reuse = match check {
                             ReuseCheck::Static => {
                                 // The linearity analysis proved sole ownership, so the **refcount** check
@@ -3854,12 +4138,12 @@ impl<'m> Vm<'m> {
                                 // well-typed self-update always matches, but a mismatch must fall back to
                                 // copy rather than corrupt the object at the wrong slot layout).
                                 debug_assert!(
-                                    base_val.refcount() == 1,
+                                    base_val.is_uniquely_owned(),
                                     "static record reuse requires a uniquely-owned base"
                                 );
                                 same_shape
                             }
-                            ReuseCheck::Runtime => same_shape && base_val.refcount() == 1,
+                            ReuseCheck::Runtime => same_shape && base_val.is_uniquely_owned(),
                         };
                         if reuse {
                             // Reuse the allocation: overwrite only the changed slots. Every unchanged
@@ -3963,7 +4247,7 @@ impl<'m> Vm<'m> {
                         }
                         let fields: Vec<String> = bag.keys().cloned().collect();
                         let slots: Vec<Value> = bag.into_values().collect();
-                        let shape = Rc::new(Shape::object(
+                        let shape = noeta_object::intern_shape(Shape::object(
                             ShapeKind::Opaque,
                             module.name(*type_name).to_string(),
                             fields,
@@ -3977,7 +4261,7 @@ impl<'m> Vm<'m> {
                         args,
                         reflect,
                     } => {
-                        let shape = self.shapes[*shape as usize].clone();
+                        let shape = self.shapes[*shape as usize];
                         let mut data = Vec::with_capacity(args.len());
                         for &r in args.iter() {
                             let v = regs[fbase + r as usize];
@@ -4023,12 +4307,12 @@ impl<'m> Vm<'m> {
                         let result = match matched {
                             Some((_, shape_idx)) => {
                                 // Build the payload-free case; its single reference transfers onward.
-                                let shape = self.shapes[*shape_idx as usize].clone();
+                                let shape = self.shapes[*shape_idx as usize];
                                 let case = Value::enum_value(shape, Vec::new());
                                 if *panic {
                                     case
                                 } else {
-                                    let some = self.shapes[*some_shape as usize].clone();
+                                    let some = self.shapes[*some_shape as usize];
                                     Value::enum_value(some, vec![case])
                                 }
                             }
@@ -4040,7 +4324,7 @@ impl<'m> Vm<'m> {
                                 ));
                             }
                             None => {
-                                let none = self.shapes[*none_shape as usize].clone();
+                                let none = self.shapes[*none_shape as usize];
                                 Value::enum_value(none, Vec::new())
                             }
                         };
@@ -4062,7 +4346,10 @@ impl<'m> Vm<'m> {
                         // miss path mutates the same entry.
                         let ci = *cache as usize;
                         let hit = match &caches[ci] {
-                            Some((cs, slot)) if v.object_shape_ptr() == Some(Rc::as_ptr(cs)) => {
+                            Some((cs, slot))
+                                if v.object_shape_ptr()
+                                    == Some(std::ptr::from_ref::<Shape>(cs)) =>
+                            {
                                 Some(*slot as usize)
                             }
                             _ => None,
@@ -4071,7 +4358,7 @@ impl<'m> Vm<'m> {
                             Some(slot) => Some(slot),
                             None => match v.shape() {
                                 Some(sh) => sh.slot_of(field).inspect(|&s| {
-                                    caches[ci] = Some((sh.clone(), s as u32));
+                                    caches[ci] = Some((sh, s as u32));
                                 }),
                                 None => None,
                             },
@@ -4246,10 +4533,10 @@ impl<'m> Vm<'m> {
                         let v = regs[fbase + *src as usize];
                         let result = if narrow_matches(v, target) {
                             retain(v);
-                            let shape = self.shapes[*some_shape as usize].clone();
+                            let shape = self.shapes[*some_shape as usize];
                             Value::enum_value(shape, vec![v])
                         } else {
-                            let shape = self.shapes[*none_shape as usize].clone();
+                            let shape = self.shapes[*none_shape as usize];
                             Value::enum_value(shape, Vec::new())
                         };
                         set_reg(regs, fbase, *dst, result);
@@ -4536,7 +4823,7 @@ impl<'m> Vm<'m> {
                         };
                         match outcome {
                             Err(message) => {
-                                let shape = self.shapes[*err_shape as usize].clone();
+                                let shape = self.shapes[*err_shape as usize];
                                 let err = Value::enum_value(shape, vec![Value::string(&message)]);
                                 set_reg(regs, fbase, *dst, err);
                                 pc += 1;
@@ -4567,7 +4854,7 @@ impl<'m> Vm<'m> {
                                 }
                                 // The result is wrapped in `Result.Ok` as it lands in the caller, so the
                                 // invocation yields a `Result` whichever way the body returns.
-                                let ok = self.shapes[*ok_shape as usize].clone();
+                                let ok = self.shapes[*ok_shape as usize];
                                 frames[top].pc = pc + 1;
                                 frames.push(Frame {
                                     proto,
@@ -6673,6 +6960,7 @@ impl<'m> Vm<'m> {
                 let n = list.list_len().expect("a list has a length");
                 let mut results: Vec<Option<Value>> = vec![None; n];
                 loop {
+                    let wake_gen = isolate::WAKE.generation();
                     let mut i = 0;
                     while i < n {
                         if results[i].is_none() {
@@ -6690,7 +6978,7 @@ impl<'m> Vm<'m> {
                     let progressed = self.poll_all_scopes_round(span)?;
                     if !progressed
                         && self.executor.advance().is_none()
-                        && !self.isolate_in_flight_wait()
+                        && !self.isolate_in_flight_wait(wake_gen)
                     {
                         for v in results.into_iter().flatten() {
                             release(v);
@@ -6729,6 +7017,7 @@ impl<'m> Vm<'m> {
                     ));
                 }
                 loop {
+                    let wake_gen = isolate::WAKE.generation();
                     for i in 0..n {
                         let h = list.list_get(i).expect("in bounds");
                         if let Poll::Ready(v) = self.poll_once(h, span)? {
@@ -6744,7 +7033,7 @@ impl<'m> Vm<'m> {
                     let progressed = self.poll_all_scopes_round(span)?;
                     if !progressed
                         && self.executor.advance().is_none()
-                        && !self.isolate_in_flight_wait()
+                        && !self.isolate_in_flight_wait(wake_gen)
                     {
                         return Err(self.error(
                             DiagnosticCode::Panic,
@@ -6801,6 +7090,7 @@ impl<'m> Vm<'m> {
                     }};
                 }
                 loop {
+                    let wake_gen = isolate::WAKE.generation();
                     while in_flight.len() < window && next < count {
                         let item = items.list_get(next).expect("in bounds");
                         retain(item);
@@ -6841,7 +7131,7 @@ impl<'m> Vm<'m> {
                     }
                     if !progressed
                         && self.executor.advance().is_none()
-                        && !self.isolate_in_flight_wait()
+                        && !self.isolate_in_flight_wait(wake_gen)
                     {
                         cleanup!(in_flight, results);
                         return Err(self.error(

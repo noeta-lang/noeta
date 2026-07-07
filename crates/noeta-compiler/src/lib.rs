@@ -431,8 +431,7 @@ impl SessionCompiler {
         // Accumulate this entry's reflection into the persistent set (latest-wins), so a query on a
         // type declared in an earlier entry resolves — the tree-walker `Session` accumulates the same
         // way, keeping the session differential green.
-        self.reflection
-            .accumulate(noeta_ast::reflect::build(entry));
+        self.reflection.accumulate(noeta_ast::reflect::build(entry));
 
         // Snapshot the persistent tables into a runnable module. Cloned (not moved) so the tables stay
         // alive for the next entry; O(total bytecode) per entry, negligible at an interactive prompt.

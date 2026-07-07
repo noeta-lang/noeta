@@ -306,15 +306,15 @@ pub(crate) enum Payload {
     /// owns no child `Value`s (only primitive bytes), so freeing it just drops the buffer. Elements
     /// are materialized to/from `Payload::Object` on demand, so the layout is invisible to `RunResult`.
     PackedList {
-        schema: Rc<PackedSchema>,
+        schema: &'static PackedSchema,
         bytes: Vec<u8>,
     },
     Object {
-        shape: Rc<Shape>,
+        shape: &'static Shape,
         slots: Vec<Value>,
     },
     Enum {
-        shape: Rc<Shape>,
+        shape: &'static Shape,
         data: Vec<Value>,
     },
     /// A Ring 2 native module (`use std.{json}`), identified by its surface name. A leaf with
@@ -1064,8 +1064,36 @@ enum PromoteJob {
     Tuple(Vec<Value>),
     Set(Vec<Value>),
     Map(Vec<(MapKey, Value)>),
-    Object(Rc<Shape>, Vec<Value>),
-    Enum(Rc<Shape>, Vec<Value>),
+    Object(&'static Shape, Vec<Value>),
+    Enum(&'static Shape, Vec<Value>),
+}
+
+/// Whether `value`'s whole graph consists of payloads [`SharedRegion::promote`] can copy (P-PAR
+/// S2): the `Send` **data** kinds. `Send`-checked (E0042) is necessary but not sufficient — a
+/// function value, bound method, or channel endpoint is `Send`-shippable over `Wire` yet has no
+/// promoted form, so an argument graph containing one falls back to the `Wire` copy path instead
+/// of borrow-share. Immediates are trivially promotable (they pass through unchanged).
+pub(crate) fn promotable_graph(value: Value) -> bool {
+    if !value.is_pointer() {
+        return true;
+    }
+    // SAFETY: a live pointer this module allocated; a short shared read (children copied out
+    // before recursing, mirroring `promote_value`'s borrow discipline).
+    let children: Vec<Value> = {
+        let obj = unsafe { &*obj_ptr(value) };
+        match &obj.payload {
+            Payload::Str(_) | Payload::Bytes(_) | Payload::Extern(_) | Payload::Int(_) => {
+                return true;
+            }
+            Payload::PackedList { .. } => return true,
+            Payload::List(items) | Payload::Tuple(items) | Payload::Set(items) => items.clone(),
+            Payload::Map(entries) => entries.iter().map(|(_, &v)| v).collect(),
+            Payload::Object { slots, .. } => slots.clone(),
+            Payload::Enum { data, .. } => data.clone(),
+            _ => return false,
+        }
+    };
+    children.iter().all(|&c| promotable_graph(c))
 }
 
 /// A **shared-immutable region** (isolates I.3): the borrow-shared heap a `concurrent { }` scope owns.
@@ -1130,6 +1158,16 @@ impl SharedRegion {
         self.promote_value(root, &mut memo)
     }
 
+    /// [`promote`](Self::promote) with a **caller-owned memo** (P-PAR S2): the real spawn path
+    /// keeps one memo across every `isolate f(corpus)` in flight, so a corpus fanned to N workers
+    /// is promoted **once** and the other N−1 spawns hit the memo. The caller owns the memo's
+    /// validity: an entry keys on the *source* object's address, so the caller must keep each
+    /// memoized source alive (retained) until the memo is cleared — the spawn path retains
+    /// sources into the region's lifetime for exactly this reason.
+    pub fn promote_with(&mut self, root: Value, memo: &mut HashMap<u64, Value>) -> Value {
+        self.promote_value(root, memo)
+    }
+
     fn promote_value(&mut self, value: Value, memo: &mut HashMap<u64, Value>) -> Value {
         if !value.is_pointer() {
             return value;
@@ -1153,7 +1191,7 @@ impl SharedRegion {
                 Payload::Extern(e) => PromoteJob::Leaf(Payload::Extern(e.clone())),
                 Payload::Int(i) => PromoteJob::Leaf(Payload::Int(*i)),
                 Payload::PackedList { schema, bytes } => PromoteJob::Leaf(Payload::PackedList {
-                    schema: Rc::clone(schema),
+                    schema,
                     bytes: bytes.clone(),
                 }),
                 Payload::List(items) => PromoteJob::List(items.clone()),
@@ -1162,10 +1200,8 @@ impl SharedRegion {
                 Payload::Map(entries) => {
                     PromoteJob::Map(entries.iter().map(|(k, &v)| (k.clone(), v)).collect())
                 }
-                Payload::Object { shape, slots } => {
-                    PromoteJob::Object(Rc::clone(shape), slots.clone())
-                }
-                Payload::Enum { shape, data } => PromoteJob::Enum(Rc::clone(shape), data.clone()),
+                Payload::Object { shape, slots } => PromoteJob::Object(shape, slots.clone()),
+                Payload::Enum { shape, data } => PromoteJob::Enum(shape, data.clone()),
                 _ => unreachable!(
                     "a non-Send payload cannot be promoted into a shared region — the checker's \
                      E0042 Send classifier rejects a non-Send isolate argument before it reaches here"
@@ -1213,5 +1249,38 @@ impl SharedRegion {
         for value in self.objects {
             free_shared(value);
         }
+    }
+}
+
+/// A sanctioned `Value` crossing (P-PAR S2): the root of a graph promoted into a [`SharedRegion`].
+/// The blanket rule is "no `Value` crosses a thread" — this newtype is the one exception and
+/// carries the safety argument: every object in the promoted graph is `shared`-tagged
+/// (retain/release no-op and `is_uniquely_owned` is `false`, so no refcount is ever written and no
+/// COW fast path mutates it cross-thread), it holds only `Send` data payloads (interned `&'static`
+/// shape/schema handles, no `Rc`), and it is owned by a region the spawning VM frees only after
+/// every borrowing worker thread has been joined.
+#[derive(Debug)]
+pub struct SharedRoot(u64);
+
+// SAFETY: see the type doc — shared-tagged immutable graph, Send-only payloads, and the owning
+// region outlives every borrower (the VM frees it only once no isolate is in flight, after
+// joining each worker thread).
+#[allow(unsafe_code)]
+unsafe impl Send for SharedRoot {}
+
+impl SharedRoot {
+    /// Wrap a promoted root for shipping to a worker thread.
+    pub fn new(root: Value) -> SharedRoot {
+        debug_assert!(
+            !root.is_pointer() || is_shared(root),
+            "a SharedRoot must point into a SharedRegion"
+        );
+        SharedRoot(root.0)
+    }
+
+    /// The borrowed root value, usable directly on the worker thread (no rebuild, no retain —
+    /// the worker's retain/release no-op on it by the shared tag).
+    pub fn value(&self) -> Value {
+        Value(self.0)
     }
 }

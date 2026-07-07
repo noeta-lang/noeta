@@ -72,6 +72,9 @@ fn sig_to_type(sig: &registry::SigType) -> Type {
         SigType::Future(t) => Type::Named(FUTURE.to_string(), vec![sig_to_type(t)]),
         SigType::Named(n) => Type::Named((*n).to_string(), vec![]),
         SigType::Union(members) => Type::union(members.iter().map(sig_to_type)),
+        // A trailing-optional param's type IS the wrapped type when present (http arc H4); the
+        // optionality is carried separately as the required-argument count, not in the type.
+        SigType::Optional(inner) => sig_to_type(inner),
     }
 }
 
@@ -415,6 +418,26 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         }
         _ => None,
     }
+}
+
+/// The count of **required** arguments a Ring 2 module function takes — everything up to its first
+/// trailing-optional param (http arc H4). `None` for a non-registry function (the `vec` `*_all`
+/// fallback), whose params are all required. Runs alongside [`module_params`] so the arity gate
+/// admits `http.get(url)` as well as `http.get(url, headers)`.
+pub(super) fn module_required(module: &str, name: &str) -> Option<usize> {
+    registry::find_function(module, name).map(|f| registry::SigType::required_count(f.params))
+}
+
+/// The required-argument count of a registered extern type's method (http arc H4); `None` for a
+/// built-in receiver method (all required), so the caller falls back to `params.len()`.
+pub(super) fn method_required(receiver: &Type, name: &str) -> Option<usize> {
+    if let Type::Named(n, _) = receiver
+        && registry::find_type(n).is_some()
+    {
+        return registry::find_type_method(n, name)
+            .map(|sig| registry::SigType::required_count(sig.params));
+    }
+    None
 }
 
 fn iterator_params(name: &str, elem: &Type) -> Option<Vec<Type>> {

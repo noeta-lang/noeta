@@ -1390,7 +1390,11 @@ fn repl_step(session: &mut VmSession, buffer: &str, sources: &mut Vec<Source>) -
 
     // A bare expression needs a terminating `;`; retry with one appended (same id — only one of the
     // two sources is ever kept, whichever compiled).
-    let psource = Source::new(id, format!("<repl:{}>", sources.len()), format!("{buffer};"));
+    let psource = Source::new(
+        id,
+        format!("<repl:{}>", sources.len()),
+        format!("{buffer};"),
+    );
     let plexed = lex(&psource);
     let pparsed = parse(&psource, &plexed.tokens);
     if plexed.diagnostics.is_empty() && pparsed.diagnostics.is_empty() {
