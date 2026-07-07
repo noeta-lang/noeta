@@ -182,9 +182,8 @@ pub fn task_ctx_dispatch(
             loop {
                 let wake_gen = ctx.wake_generation();
                 while in_flight.len() < window && next < count {
-                    let item = ctx.list_get(args[0], next)?;
-                    let future = ctx.call(f, &[item])?;
-                    ctx.free(item);
+                    // Fused element call: no per-item slot is minted (see `call_with_element`).
+                    let future = ctx.call_with_element(f, args[0], next)?;
                     in_flight.push((next, future));
                     next += 1;
                 }
@@ -197,9 +196,9 @@ pub fn task_ctx_dispatch(
                 let mut k = 0;
                 while k < in_flight.len() {
                     let (index, future) = in_flight[k];
+                    // A `Some` poll spends the future's slot (the result reuses its index).
                     if let Some(result) = ctx.poll(future)? {
                         results[index] = Some(result);
-                        ctx.free(future);
                         in_flight.remove(k);
                         done += 1;
                         progressed = true;

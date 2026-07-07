@@ -137,6 +137,21 @@ impl NativeCtx for VmCtx<'_, '_> {
         }
     }
 
+    fn call_with_element(&mut self, callee: Slot, list: Slot, index: usize) -> CtxResult<Slot> {
+        let callee = self.get(callee)?;
+        let element = self
+            .get(list)?
+            .list_get(index)
+            .ok_or_else(|| CtxError::Std(noeta_stdlib::type_error("call_with_element", "list")))?;
+        // The element rides straight into the callee's frame (which consumes the reference) —
+        // no table entry, exactly the fused `list_get` + `call` + `free`.
+        retain(element);
+        match self.vm.call_value(callee, vec![element], self.span) {
+            Ok(result) => Ok(self.insert(result)),
+            Err(Abort) => Err(CtxError::Abort),
+        }
+    }
+
     fn list_len(&mut self, list: Slot) -> CtxResult<usize> {
         self.get(list)?
             .list_len()
@@ -156,11 +171,9 @@ impl NativeCtx for VmCtx<'_, '_> {
     fn make_list(&mut self, items: &[Slot]) -> CtxResult<Slot> {
         let mut elements = Vec::with_capacity(items.len());
         for &item in items {
-            let v = self.get(item)?;
-            retain(v);
-            elements.push(v);
+            // The slot is spent: its owned reference moves straight into the list — no RC ops.
+            elements.push(self.take(item)?);
         }
-        // `Value::list` takes ownership of the element references.
         let list = Value::list(elements);
         Ok(self.insert(list))
     }
@@ -175,9 +188,16 @@ impl NativeCtx for VmCtx<'_, '_> {
     }
 
     fn poll(&mut self, future: Slot) -> CtxResult<Option<Slot>> {
-        let future = self.get(future)?;
-        match self.vm.poll_once(future, self.span) {
-            Ok(Poll::Ready(result)) => Ok(Some(self.insert(result))),
+        let value = self.get(future)?;
+        match self.vm.poll_once(value, self.span) {
+            Ok(Poll::Ready(result)) => {
+                // Ready spends the future slot (never re-polled); the result takes over its
+                // index in place — one write, no free-list churn, the table stays hot and tiny.
+                let entry = &mut self.slots[future as usize];
+                let spent = entry.replace(result).expect("checked by get above");
+                self.vm.release_value(spent);
+                Ok(Some(future))
+            }
             Ok(Poll::Pending) => Ok(None),
             Err(Abort) => Err(CtxError::Abort),
         }

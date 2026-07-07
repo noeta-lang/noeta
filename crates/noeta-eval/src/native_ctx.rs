@@ -114,6 +114,19 @@ impl NativeCtx for EvalCtx<'_> {
         }
     }
 
+    fn call_with_element(&mut self, callee: Slot, list: Slot, index: usize) -> CtxResult<Slot> {
+        let callee = self.get(callee)?.clone();
+        let element = match self.get(list)? {
+            Value::List(repr) => repr.get(index),
+            _ => None,
+        }
+        .ok_or_else(|| CtxError::Std(noeta_stdlib::type_error("call_with_element", "list")))?;
+        match self.interp.call(callee, vec![element], self.span) {
+            Ok(result) => Ok(self.insert(result)),
+            Err(_) => Err(CtxError::Abort),
+        }
+    }
+
     fn list_len(&mut self, list: Slot) -> CtxResult<usize> {
         match self.get(list)? {
             Value::List(repr) => Ok(repr.len()),
@@ -133,7 +146,8 @@ impl NativeCtx for EvalCtx<'_> {
     fn make_list(&mut self, items: &[Slot]) -> CtxResult<Slot> {
         let mut elements = Vec::with_capacity(items.len());
         for &item in items {
-            elements.push(self.get(item)?.clone());
+            // Spent slot: the owned clone moves into the list (the VM twin moves a reference).
+            elements.push(self.take(item)?);
         }
         let list = Value::list(elements);
         Ok(self.insert(list))
@@ -153,9 +167,14 @@ impl NativeCtx for EvalCtx<'_> {
     }
 
     fn poll(&mut self, future: Slot) -> CtxResult<Option<Slot>> {
-        let future = self.get(future)?.clone();
-        match self.interp.poll_once(&future, self.span) {
-            Ok(Some(result)) => Ok(Some(self.insert(result))),
+        let value = self.get(future)?.clone();
+        match self.interp.poll_once(&value, self.span) {
+            Ok(Some(result)) => {
+                // Ready spends the future slot; the result takes over its index in place (the
+                // VM twin's table-reclaim semantics).
+                self.slots[future as usize] = Some(result);
+                Ok(Some(future))
+            }
             Ok(None) => Ok(None),
             Err(_) => Err(CtxError::Abort),
         }

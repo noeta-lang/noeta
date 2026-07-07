@@ -99,13 +99,22 @@ pub trait NativeCtx {
     /// [`CtxError::Abort`] (recorded backend-side), which the dispatch may propagate or recover.
     fn call(&mut self, callee: Slot, args: &[Slot]) -> CtxResult<Slot>;
 
+    /// Call a callable slot with `list[index]` as its single argument — the fused
+    /// `list_get` + `call` + `free` a bounded mapper's fill loop performs per item (H2). One
+    /// re-entry instead of three and no element slot is minted, which is what keeps a
+    /// 100k-item `map_bounded` at builtin speed; semantically identical to the unfused sequence.
+    fn call_with_element(&mut self, callee: Slot, list: Slot, index: usize) -> CtxResult<Slot>;
+
     /// Length of a list slot ([`CtxError::Std`] with an `ArgType` error if not a list).
     fn list_len(&mut self, list: Slot) -> CtxResult<usize>;
 
     /// Element `index` of a list slot, as a fresh slot.
     fn list_get(&mut self, list: Slot, index: usize) -> CtxResult<Slot>;
 
-    /// Build a list value from element slots (elements are not consumed), as a fresh slot.
+    /// Build a list value from element slots, as a fresh slot. The element slots are **spent** —
+    /// their references move into the list, so a 100k-result collect is a pointer pass, not a
+    /// retain/release round-trip (H2). (The one deliberate exception to "methods never consume
+    /// argument slots"; a dispatch needing an element afterwards reads it off the list.)
     fn make_list(&mut self, items: &[Slot]) -> CtxResult<Slot>;
 
     /// Ticket an async descriptor on the executor; the resulting leaf future arrives as a slot
@@ -118,8 +127,10 @@ pub trait NativeCtx {
     fn timer(&mut self, ms: u64) -> Slot;
 
     /// Poll a future slot once: `Some(result-slot)` when ready, `None` while pending (the
-    /// deadline/waker registration happens inside, as in the backends' own `poll_once`). The
-    /// future slot itself stays valid (free it after it resolves).
+    /// deadline/waker registration happens inside, as in the backends' own `poll_once`). A
+    /// `Some` **spends the future slot** — a resolved future is never re-polled, so the table
+    /// reclaims it on the spot (and the result typically reuses the same hot index); while
+    /// pending the slot stays valid for the next round.
     fn poll(&mut self, future: Slot) -> CtxResult<Option<Slot>>;
 
     /// Cancel the task a future slot references (a `race` loser, H2): the scheduler stops polling
