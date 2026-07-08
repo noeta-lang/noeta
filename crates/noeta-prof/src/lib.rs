@@ -33,8 +33,9 @@ pub enum Mode {
     Summary,
     /// Exact per-function call counts + self/total time (the instrumenting profiler).
     Instrument,
-    /// Periodic stack sampling → a folded-stack flamegraph.
-    Sample(SampleClock),
+    /// Periodic stack sampling → a folded-stack flamegraph. `lines` attributes the leaf frame to its
+    /// current source line (`fn:line` in the folded labels) rather than just the function.
+    Sample { clock: SampleClock, lines: bool },
 }
 
 /// What clock drives the sampling profiler.
@@ -124,7 +125,7 @@ pub fn profile(path: &Path, mode: Mode) -> Report {
             let functions = hook.map(|hook| resolve_functions(hook, &compiled));
             report_from(out, functions, None)
         }
-        Mode::Sample(clock) => {
+        Mode::Sample { clock, lines } => {
             // Wall-clock sampling needs a timer thread bumping a shared atomic; op-clock is
             // self-contained. Either way the collector rides the per-op seam and comes back with the
             // aggregated stacks, which we resolve to labels here.
@@ -132,9 +133,9 @@ pub fn profile(path: &Path, mode: Mode) -> Report {
                 SampleClock::Wall { hz } => {
                     let pending = Arc::new(AtomicU32::new(0));
                     let timer = sample::spawn_timer(hz, Arc::clone(&pending));
-                    (sample::SampleCollector::wall(pending), Some(timer))
+                    (sample::SampleCollector::wall(pending, lines), Some(timer))
                 }
-                SampleClock::Ops { every } => (sample::SampleCollector::ops(every), None),
+                SampleClock::Ops { every } => (sample::SampleCollector::ops(every, lines), None),
             };
             let (out, hook) = session::run(&compiled, Some(Box::new(collector)));
             // Stop the timer *before* resolving, so no further ticks accrue.
@@ -162,6 +163,43 @@ fn proto_label(compiled: &session::Compiled, proto: u32) -> String {
         }
         None => "<anonymous>".to_string(),
     }
+}
+
+/// Resolve a captured leaf `pc` (in prototype `proto`) to a 1-based source line, via the
+/// prototype's always-emitted line table. `None` if the pc predates the first spanned statement.
+fn leaf_line(compiled: &session::Compiled, proto: u32, pc: usize) -> Option<u32> {
+    let span = compiled.module.protos[proto as usize].line_span(pc)?;
+    Some(compiled.sources.line_col(span).line)
+}
+
+/// The top `n` functions by leaf (self) samples: the innermost frame of each sampled stack is that
+/// stack's "current" function, so aggregating stacks by their leaf label gives a quick "where is the
+/// program *actually* executing" view — the human summary complementing the full folded artifact.
+/// Returns `(label, samples, percent)` heaviest-first. Empty when there is no flamegraph.
+pub fn top_functions(report: &Report, n: usize) -> Vec<(String, u64, f64)> {
+    let Some(flame) = &report.flamegraph else {
+        return Vec::new();
+    };
+    let mut by_leaf: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    for stack in &flame.stacks {
+        if let Some(leaf) = stack.frames.last() {
+            *by_leaf.entry(leaf.as_str()).or_insert(0) += stack.count;
+        }
+    }
+    let mut rows: Vec<(String, u64, f64)> = by_leaf
+        .into_iter()
+        .map(|(label, samples)| {
+            let pct = if flame.total > 0 {
+                100.0 * samples as f64 / flame.total as f64
+            } else {
+                0.0
+            };
+            (label.to_string(), samples, pct)
+        })
+        .collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    rows.truncate(n);
+    rows
 }
 
 /// Resolve the collector's raw per-proto counters into labelled, self-time-sorted [`FnStat`] rows.
@@ -220,16 +258,30 @@ fn resolve_flamegraph(
         .downcast::<sample::SampleCollector>()
         .expect("the sample mode installs a SampleCollector");
     let (total, raw) = collector.finish();
-    let mut stacks: Vec<FoldedStack> = raw
+
+    // Resolve each raw stack to frame *labels*, then re-aggregate by label chain: in
+    // line-attribution mode several distinct leaf pcs on the same source line resolve to the same
+    // `fn:line` label, so they must merge into one folded entry (without lines the keys are already
+    // unique per chain, so this is a no-op).
+    let mut merged: std::collections::HashMap<Vec<String>, u64> = std::collections::HashMap::new();
+    for folded in raw {
+        let mut frames: Vec<String> = folded
+            .chain
+            .iter()
+            .map(|&proto| proto_label(compiled, proto))
+            .collect();
+        if folded.leaf_pc != 0
+            && let (Some(&leaf_proto), Some(last)) = (folded.chain.last(), frames.last_mut())
+            && let Some(line) = leaf_line(compiled, leaf_proto, folded.leaf_pc as usize)
+        {
+            last.push_str(&format!(":{line}"));
+        }
+        *merged.entry(frames).or_insert(0) += folded.count;
+    }
+
+    let mut stacks: Vec<FoldedStack> = merged
         .into_iter()
-        .map(|folded| FoldedStack {
-            frames: folded
-                .chain
-                .iter()
-                .map(|&proto| proto_label(compiled, proto))
-                .collect(),
-            count: folded.count,
-        })
+        .map(|(frames, count)| FoldedStack { frames, count })
         .collect();
     // Heaviest stacks first; ties broken by the folded label so the order is deterministic.
     stacks.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.frames.cmp(&b.frames)));
@@ -349,14 +401,16 @@ fn default_format(mode: Mode) -> Option<Format> {
     match mode {
         Mode::Summary => None,
         Mode::Instrument => Some(Format::Table),
-        Mode::Sample(_) => Some(Format::Folded),
+        // Sampling's default human view is the top-N summary printed by `run`, not a folded dump; a
+        // machine artifact is emitted only when `--format` is given explicitly.
+        Mode::Sample { .. } => None,
     }
 }
 
 /// Whether `format` is valid for `mode` (a sampling artifact needs a sampling run, and vice versa).
 fn format_fits(mode: Mode, format: Format) -> bool {
     match mode {
-        Mode::Sample(_) => format.is_sampling(),
+        Mode::Sample { .. } => format.is_sampling(),
         Mode::Instrument => !format.is_sampling(),
         Mode::Summary => false,
     }
@@ -401,7 +455,7 @@ pub fn run(path: &Path, mode: Mode, format: Option<Format>, out: Option<PathBuf>
                 report.wall
             );
         }
-        Mode::Sample(clock) => {
+        Mode::Sample { clock, .. } => {
             let flame = report.flamegraph.as_ref();
             let clock_desc = match clock {
                 SampleClock::Wall { hz } => format!("wall-clock {hz} Hz"),
@@ -415,6 +469,19 @@ pub fn run(path: &Path, mode: Mode, format: Option<Format>, out: Option<PathBuf>
                 flame.map_or(0, |f| f.stacks.len()),
                 report.wall
             );
+            // The default human view: the hottest functions by leaf (self) samples.
+            let top = top_functions(&report, 10);
+            if !top.is_empty() {
+                let width = top
+                    .iter()
+                    .map(|(l, ..)| l.len())
+                    .max()
+                    .unwrap_or(8)
+                    .clamp(8, 48);
+                for (label, samples, pct) in top {
+                    let _ = writeln!(err, "  {label:<width$}  {samples:>8}  {pct:>5.1}%");
+                }
+            }
         }
     }
 

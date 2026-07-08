@@ -33,26 +33,33 @@ pub enum Trigger {
     Ops { every: u64, counter: u64 },
 }
 
-/// Accumulates `stack → sample count`, keyed by the chain of prototype indices (root → leaf).
+/// Accumulates `stack → sample count`, keyed by the chain of prototype indices (root → leaf) plus
+/// the leaf's pc (0 unless line-attribution is on, so the default output is unchanged).
 pub struct SampleCollector {
     trigger: Trigger,
-    stacks: HashMap<Vec<u32>, u64>,
+    /// When on, the leaf frame's pc is folded into the key so distinct source lines within one
+    /// function become distinct stacks (resolved to `fn:line` labels after the run).
+    lines: bool,
+    stacks: HashMap<(Vec<u32>, u32), u64>,
     total: u64,
     /// Reused snapshot buffer, to avoid allocating on the ops that don't sample.
     scratch: Vec<u32>,
 }
 
-/// One resolved folded stack: the chain of frame labels (root → leaf) and its sample count.
+/// One resolved folded stack: the chain of frame indices (root → leaf), the leaf's pc (0 = no line
+/// attribution), and the sample count.
 pub struct RawFolded {
     pub chain: Vec<u32>,
+    pub leaf_pc: u32,
     pub count: u64,
 }
 
 impl SampleCollector {
     /// A wall-clock sampler reading `pending` (shared with a timer thread).
-    pub fn wall(pending: Arc<AtomicU32>) -> SampleCollector {
+    pub fn wall(pending: Arc<AtomicU32>, lines: bool) -> SampleCollector {
         SampleCollector {
             trigger: Trigger::Wall { pending },
+            lines,
             stacks: HashMap::new(),
             total: 0,
             scratch: Vec::new(),
@@ -60,24 +67,29 @@ impl SampleCollector {
     }
 
     /// A deterministic op-clock sampler taking one sample every `every` ops.
-    pub fn ops(every: u64) -> SampleCollector {
+    pub fn ops(every: u64, lines: bool) -> SampleCollector {
         SampleCollector {
             trigger: Trigger::Ops {
                 every: every.max(1),
                 counter: 0,
             },
+            lines,
             stacks: HashMap::new(),
             total: 0,
             scratch: Vec::new(),
         }
     }
 
-    /// Total samples taken and the aggregated stacks (each a root→leaf proto chain + its count).
+    /// Total samples taken and the aggregated stacks (each a root→leaf proto chain, leaf pc, count).
     pub fn finish(self) -> (u64, Vec<RawFolded>) {
         let folded = self
             .stacks
             .into_iter()
-            .map(|(chain, count)| RawFolded { chain, count })
+            .map(|((chain, leaf_pc), count)| RawFolded {
+                chain,
+                leaf_pc,
+                count,
+            })
             .collect();
         (self.total, folded)
     }
@@ -107,7 +119,17 @@ impl ProfileHook for SampleCollector {
         for i in 0..depth {
             self.scratch.push(view.proto_at(i));
         }
-        *self.stacks.entry(self.scratch.clone()).or_insert(0) += n;
+        // Capture the leaf's pc only in line-attribution mode; otherwise 0 keeps the default output
+        // (same-chain samples merge regardless of which line they landed on).
+        let leaf_pc = if self.lines && depth > 0 {
+            view.pc_at(depth - 1) as u32
+        } else {
+            0
+        };
+        *self
+            .stacks
+            .entry((self.scratch.clone(), leaf_pc))
+            .or_insert(0) += n;
         self.total += n;
     }
 

@@ -189,6 +189,10 @@ enum Command {
         /// `speedscope`). The program's own stdout is never touched.
         #[arg(long, short)]
         out: Option<PathBuf>,
+        /// Attribute each flamegraph leaf to its **source line** (`fn:line`), not just the function —
+        /// so the hot *line* within a function is visible. Sampling only.
+        #[arg(long)]
+        lines: bool,
     },
     /// Serve a program's HTTP handler. The file defines a top-level `fn fetch(req: Request):
     /// Response` (sync or async) and `use std.{http}`; `noeta serve` runs the file's top-level
@@ -255,7 +259,8 @@ fn main() -> ExitCode {
             every,
             format,
             out,
-        } => cmd_profile(&file, instrument, hz, every, format.as_deref(), out),
+            lines,
+        } => cmd_profile(&file, instrument, hz, every, format.as_deref(), out, lines),
         Command::Serve { file, port } => cmd_serve(&file, port),
     }
 }
@@ -275,6 +280,7 @@ fn cmd_dap() -> ExitCode {
 /// Profile a program: run it tier-0 under the production VM and report where it spends its time.
 /// Sampling (wall-time flamegraph) is the default; `--instrument` selects the exact per-function
 /// profiler; `--every N` makes sampling deterministic (op-weighted).
+#[allow(clippy::too_many_arguments)]
 fn cmd_profile(
     file: &std::path::Path,
     instrument: bool,
@@ -282,15 +288,22 @@ fn cmd_profile(
     every: Option<u64>,
     format: Option<&str>,
     out: Option<PathBuf>,
+    lines: bool,
 ) -> ExitCode {
     let mode = if instrument {
         noeta_prof::Mode::Instrument
     } else if let Some(every) = every {
-        noeta_prof::Mode::Sample(noeta_prof::SampleClock::Ops { every })
+        noeta_prof::Mode::Sample {
+            clock: noeta_prof::SampleClock::Ops { every },
+            lines,
+        }
     } else {
-        noeta_prof::Mode::Sample(noeta_prof::SampleClock::Wall {
-            hz: hz.unwrap_or(1000),
-        })
+        noeta_prof::Mode::Sample {
+            clock: noeta_prof::SampleClock::Wall {
+                hz: hz.unwrap_or(1000),
+            },
+            lines,
+        }
     };
     let format = match format {
         Some(s) => match noeta_prof::Format::parse(s) {

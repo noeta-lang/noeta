@@ -193,6 +193,14 @@ impl<'a> DebugView<'a> {
         self.frames[i].proto
     }
 
+    /// The program counter of the frame at call-stack index `i`. For the innermost frame this is the
+    /// instruction about to run (synced by the profiler/debugger consult before the view is built);
+    /// the profiler's line-attribution mode captures the leaf's pc here and resolves it to a source
+    /// line (via the prototype's line table) after the run.
+    pub fn pc_at(&self, i: usize) -> usize {
+        self.frames[i].pc
+    }
+
     /// The frame at call-stack index `i` (`0` = bottom `main`, `depth()-1` = innermost).
     ///
     /// The reported [`DebugFrame::op_span`] is the frame's *current source line*. For the innermost

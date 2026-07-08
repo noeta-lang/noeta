@@ -227,7 +227,10 @@ fn op_clock_sampling_is_deterministic() {
     // The whole point of the op-clock mode: two runs of the same program produce byte-identical
     // flamegraphs (unlike wall-clock sampling), so the fixtures can assert exactly.
     let path = fixture("det", HOT_SRC);
-    let mode = Mode::Sample(SampleClock::Ops { every: 1000 });
+    let mode = Mode::Sample {
+        clock: SampleClock::Ops { every: 1000 },
+        lines: false,
+    };
     let a = noeta_prof::profile(&path, mode);
     let b = noeta_prof::profile(&path, mode);
 
@@ -245,7 +248,13 @@ fn op_clock_sampling_is_deterministic() {
 #[test]
 fn sampling_attributes_most_samples_to_the_hot_function() {
     let path = fixture("hot_fg", HOT_SRC);
-    let report = noeta_prof::profile(&path, Mode::Sample(SampleClock::Ops { every: 1000 }));
+    let report = noeta_prof::profile(
+        &path,
+        Mode::Sample {
+            clock: SampleClock::Ops { every: 1000 },
+            lines: false,
+        },
+    );
     assert_eq!(report.exit_code, 0, "{}", report.stderr);
     assert!(
         report.functions.is_none(),
@@ -282,8 +291,20 @@ fn op_clock_rate_changes_the_sample_count_proportionally() {
     // Sampling twice as often (every 500 ops vs every 1000) takes ~2× the samples — a sanity check
     // that the op-clock trigger actually fires on the configured cadence.
     let path = fixture("rate", HOT_SRC);
-    let coarse = noeta_prof::profile(&path, Mode::Sample(SampleClock::Ops { every: 2000 }));
-    let fine = noeta_prof::profile(&path, Mode::Sample(SampleClock::Ops { every: 1000 }));
+    let coarse = noeta_prof::profile(
+        &path,
+        Mode::Sample {
+            clock: SampleClock::Ops { every: 2000 },
+            lines: false,
+        },
+    );
+    let fine = noeta_prof::profile(
+        &path,
+        Mode::Sample {
+            clock: SampleClock::Ops { every: 1000 },
+            lines: false,
+        },
+    );
     let c = coarse.flamegraph.unwrap().total;
     let f = fine.flamegraph.unwrap().total;
     assert!(
@@ -295,7 +316,13 @@ fn op_clock_rate_changes_the_sample_count_proportionally() {
 #[test]
 fn folded_lines_are_well_formed() {
     let path = fixture("folded", HOT_SRC);
-    let report = noeta_prof::profile(&path, Mode::Sample(SampleClock::Ops { every: 1000 }));
+    let report = noeta_prof::profile(
+        &path,
+        Mode::Sample {
+            clock: SampleClock::Ops { every: 1000 },
+            lines: false,
+        },
+    );
     for line in noeta_prof::render_folded(&report).lines() {
         // Each line is "<frame>;<frame>;… <count>".
         let (stack, count) = line
@@ -317,7 +344,13 @@ fn folded_lines_are_well_formed() {
 fn wall_clock_sampling_produces_a_profile() {
     // Nondeterministic, so only structural assertions: a long run gets samples, all under `hot`.
     let path = fixture("wall", HOT_SRC);
-    let report = noeta_prof::profile(&path, Mode::Sample(SampleClock::Wall { hz: 2000 }));
+    let report = noeta_prof::profile(
+        &path,
+        Mode::Sample {
+            clock: SampleClock::Wall { hz: 2000 },
+            lines: false,
+        },
+    );
     assert_eq!(report.exit_code, 0, "{}", report.stderr);
     let flame = report.flamegraph.as_ref().unwrap();
     assert!(flame.total > 0, "wall-clock sampling took samples");
@@ -352,7 +385,13 @@ fn format_parse_round_trips_and_rejects_unknown() {
 #[test]
 fn svg_renders_a_flamegraph() {
     let path = fixture("svg", HOT_SRC);
-    let report = noeta_prof::profile(&path, Mode::Sample(SampleClock::Ops { every: 1000 }));
+    let report = noeta_prof::profile(
+        &path,
+        Mode::Sample {
+            clock: SampleClock::Ops { every: 1000 },
+            lines: false,
+        },
+    );
     let svg = String::from_utf8(noeta_prof::render(&report, Format::Svg).expect("svg renders"))
         .expect("svg is utf-8");
     assert!(svg.contains("<svg"), "output is an SVG document");
@@ -365,7 +404,13 @@ fn svg_renders_a_flamegraph() {
 #[test]
 fn speedscope_is_valid_and_well_formed() {
     let path = fixture("speedscope", HOT_SRC);
-    let report = noeta_prof::profile(&path, Mode::Sample(SampleClock::Ops { every: 1000 }));
+    let report = noeta_prof::profile(
+        &path,
+        Mode::Sample {
+            clock: SampleClock::Ops { every: 1000 },
+            lines: false,
+        },
+    );
     let flame_total = report.flamegraph.as_ref().unwrap().total;
 
     let bytes = noeta_prof::render(&report, Format::Speedscope).expect("speedscope renders");
@@ -402,4 +447,79 @@ fn instrument_json_lists_functions() {
         .find(|f| f["name"] == "fib")
         .expect("fib row present");
     assert_eq!(fib["calls"], 177, "exact call count survives into JSON");
+}
+
+// ---- P3.1: line attribution + top-N --------------------------------------------------------------
+
+#[test]
+fn line_attribution_labels_the_leaf_with_its_source_line() {
+    let path = fixture("lines", HOT_SRC);
+    let report = noeta_prof::profile(
+        &path,
+        Mode::Sample {
+            clock: SampleClock::Ops { every: 1000 },
+            lines: true,
+        },
+    );
+    let flame = report.flamegraph.as_ref().unwrap();
+    // The hot leaf now carries its source line (`hot:<line>`), and the while-loop line dominates.
+    let leaf = flame.stacks[0].frames.last().unwrap();
+    assert!(
+        leaf.starts_with("hot:"),
+        "leaf carries a source line: {leaf}"
+    );
+    assert!(
+        leaf.rsplit(':').next().unwrap().parse::<u32>().is_ok(),
+        "…and it is a line number: {leaf}"
+    );
+    // Line-attributed stacks are merged by resolved label — no duplicate chains.
+    let mut seen = std::collections::HashSet::new();
+    for s in &flame.stacks {
+        assert!(
+            seen.insert(&s.frames),
+            "no duplicate folded chains: {:?}",
+            s.frames
+        );
+    }
+}
+
+#[test]
+fn line_attribution_is_off_by_default() {
+    let path = fixture("nolines", HOT_SRC);
+    let report = noeta_prof::profile(
+        &path,
+        Mode::Sample {
+            clock: SampleClock::Ops { every: 1000 },
+            lines: false,
+        },
+    );
+    let flame = report.flamegraph.as_ref().unwrap();
+    // Without `--lines`, leaf labels are bare function names (no `:line` suffix).
+    assert!(
+        flame
+            .stacks
+            .iter()
+            .all(|s| s.frames.iter().all(|f| !f.contains(':'))),
+        "no line suffixes without --lines"
+    );
+}
+
+#[test]
+fn top_functions_ranks_the_hot_leaf_with_its_percentage() {
+    let path = fixture("topn", HOT_SRC);
+    let report = noeta_prof::profile(
+        &path,
+        Mode::Sample {
+            clock: SampleClock::Ops { every: 1000 },
+            lines: false,
+        },
+    );
+    let top = noeta_prof::top_functions(&report, 5);
+    assert_eq!(top[0].0, "hot", "the hot leaf ranks first");
+    assert!(top[0].2 >= 80.0, "…with most of the samples: {}%", top[0].2);
+    // Percentages never exceed 100 and the top row is the largest.
+    assert!(
+        top.windows(2).all(|w| w[0].1 >= w[1].1),
+        "sorted by samples desc"
+    );
 }
