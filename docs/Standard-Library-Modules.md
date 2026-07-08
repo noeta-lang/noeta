@@ -136,6 +136,10 @@ Server-side reactivity ([Reactivity](Reactivity)): `signal(v: T) -> Signal<T>` (
 
 The concurrency combinators ([Concurrency](Concurrency)): `sleep(ms) -> Future<void>`, `all(List<Future<T>>) -> List<T>`, `race(List<Future<T>>) -> T` (losers cancelled), `map_bounded(items, n, f) -> List<B>` (≤ n in flight). Named `task` — `async` is a keyword and cannot appear in a `use` path.
 
+## `crdt`, `p2p`, `synced`
+
+The local-first / peer-to-peer stack ([Local-First & P2P](Local-First-and-P2P)): `crdt` builds conflict-free replicated values (`gcounter`/`pncounter`/`gset`) that `.merge` to convergence; `p2p` publishes/receives messages over topics (`publish`, `receive(topic) -> Future<?bytes>`); `synced` fuses them with reactivity — `synced_signal(initial, topic)` where `initial: Mergeable` is a [reactive](Reactivity) signal holding a CRDT, converging over p2p (`.get`/`.merge`/`.sync`). Misuse maps onto E0007/E0025 as noted on that page.
+
 ## `cell`
 
 A shared, mutable, identity-carrying box: `cell.new(v: T) -> Cell<T>` holds one value; `.get() -> T` reads it, `.set(v: T)` replaces it, `.update(fn(T) -> T) -> T` reads-modifies-writes and returns the new value. Copies of the handle alias the one box (reference semantics — the point of a cell), and equality is identity: two cells over equal values are still different cells.
@@ -341,4 +345,6 @@ For bulk work, a `List<Vec3>` is stored as a flat packed buffer, and the `vec.so
 
 - [Standard Library](Standard-Library) — the always-available Ring 1 surface.
 - [Concurrency](Concurrency) — `sleep`, futures, channels.
+- [Reactivity](Reactivity) — `signal`/`computed`/`effect`.
+- [Local-First & P2P](Local-First-and-P2P) — CRDTs, peer-to-peer messaging, synced signals.
 - [Native Extensions](Native-Extensions) — how these modules are registered, and how you could add your own.
