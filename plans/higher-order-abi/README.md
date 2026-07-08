@@ -199,9 +199,21 @@ flags) and dispatches unmatched names to registered commands (`cargo clippy` mod
   (both enums + both ~140-line arms), both intercepts, the checker special case. Gate: suite
   green, real-host smoke (probe + requests), loopback-throughput A/B overlaps fully (per-request
   seam cost ≪ TCP round-trip).
-- **H4** — Class-3 machinery: per-run `ExtState` + retained-value arena (leak-oracle/cycle-
-  collector integration, teardown ordering); generic extern types + ctx-form method dispatch.
-  Proven by a small dogfood before reactive lands on it.
+- **H4 ✅ DONE** — Class-3 machinery, proven by **std.cell** (the smallest Class-3 client —
+  reactive minus the graph). Retained arena: `NativeCtx::{retain, retained_get, retained_set,
+  release_retained}` over a per-run backend field; extern boxes carry only the plain `Retained`
+  id (the `Send` rule); teardown feeds the arena into the trace roots then releases
+  destructor-aware on both backends (leak-0). Per-run `state(key, init)` →
+  `Rc<RefCell<Box<dyn Any>>>` (borrow-around-re-entry discipline documented; first real
+  exerciser is H5's graph). Generic extern types: `SigType::Generic(name, args)` construction
+  returns + receiver-seeded `Var` method signatures (`Cell<int>.set("x")` = static E0007);
+  runtime reflection stays the bare nominal name (reactive handles reflect as `dyn` today, so
+  parity improves at H5). Ctx-form `ExtType::{ctx_methods, ctx_dispatch}` (+`DEFAULTS`),
+  receiver as slot 0, routed per-method in both backends. `cell.new(v) -> Cell<T>` with
+  `get`/`set`/`update(f)` ships; 4 fixtures (aliasing/identity, re-entrant update, generic
+  mismatch, destructor exactness through set-replace + teardown). `Cell` reserved (one doc
+  sample + one fixture renamed their own `Cell` → `Counter`). No `Wire::Extern` exists, so
+  cells cannot cross isolates. Full gate green.
 - **H5** — migrate **std.reactive fully**: the graph becomes extension state (`noeta-reactive`
   becomes the extension's internal data structure over `Retained`); `Signal<T>`/`Computed<T>`/
   `Effect` = generic extern types; handle methods via ctx-form dispatch; flush loop + coalescing
