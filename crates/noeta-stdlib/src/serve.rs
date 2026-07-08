@@ -71,6 +71,17 @@ pub const SERVE_COMMAND: ExtCommand = ExtCommand {
     },
 };
 
+/// One accepted connection's handler in flight: where to reply, the handler future the loop reaps,
+/// the SERVER span it runs under (T4; `None` when tracing is off), and its **task-local context**
+/// (T5b) — seeded with that span and swapped in around every call/poll of the handler, so its spans
+/// nest under its own request and interleaved handlers stay isolated.
+struct InFlight {
+    conn: u64,
+    fut: Slot,
+    span: Option<SpanId>,
+    context: Vec<u64>,
+}
+
 /// The reply for a handler that errors or returns a non-`Response`.
 fn server_error() -> NetResponse {
     NetResponse {
@@ -114,8 +125,13 @@ pub fn http_ctx_dispatch(
             // actually configured, so an unconfigured `noeta serve` does zero span work per request.
             let tracing = ctx.host().tel_enabled();
             // Each in-flight handler carries the SERVER span it runs under (`None` when tracing is
-            // off), ended when the handler replies so the span's duration is the request's.
-            let mut in_flight: Vec<(u64, Slot, Option<SpanId>)> = Vec::new();
+            // off), ended when the handler replies so the span's duration is the request's — plus
+            // its own **task-local context** seeded with that span (T5b): handler futures are polled
+            // *manually* here (they are not scheduler tasks), so the loop swaps each handler's
+            // context in around its call/polls, mirroring the scheduler's own per-task discipline.
+            // A handler's `with_span`s then nest under its request's SERVER span, its `spawn`ed
+            // tasks inherit it, and interleaved handlers cannot see each other's scope.
+            let mut in_flight: Vec<InFlight> = Vec::new();
             let mut accept_future: Option<Slot> = None;
             let mut closing = false;
             loop {
@@ -142,13 +158,25 @@ pub fn http_ctx_dispatch(
                                     } else {
                                         None
                                     };
-                                    // Spawn the handler. A sync handler returns the `Response`
-                                    // immediately; an async one a `Future` reaped below. A
-                                    // call-time abort → 500 now.
+                                    // The handler's task-local context, seeded with its SERVER
+                                    // span (empty when tracing is off — the swaps stay no-ops).
+                                    let mut context: Vec<u64> =
+                                        span.map(|s| vec![s]).unwrap_or_default();
+                                    // Spawn the handler under its own context. A sync handler
+                                    // returns the `Response` immediately (its whole body runs
+                                    // inside this call — under the context); an async one a
+                                    // `Future` reaped below. A call-time abort → 500 now.
+                                    let prior = ctx.context_swap(std::mem::take(&mut context));
                                     let called = ctx.call(handler, &[request]);
+                                    context = ctx.context_swap(prior);
                                     ctx.free(request);
                                     match called {
-                                        Ok(fut) => in_flight.push((conn, fut, span)),
+                                        Ok(fut) => in_flight.push(InFlight {
+                                            conn,
+                                            fut,
+                                            span,
+                                            context,
+                                        }),
                                         Err(CtxError::Abort) => {
                                             end_server_span(ctx, span, 500);
                                             reply(ctx, conn, server_error())?;
@@ -172,8 +200,18 @@ pub fn http_ctx_dispatch(
                 // Reap: poll each in-flight handler; reply on completion, 500 on abort.
                 let mut k = 0;
                 while k < in_flight.len() {
-                    let (conn, fut, span) = in_flight[k];
-                    let done = match ctx.poll(fut) {
+                    let (conn, fut, span) = {
+                        let e = &in_flight[k];
+                        (e.conn, e.fut, e.span)
+                    };
+                    // Poll this handler under its own context (T5b): the swap pair mirrors the
+                    // scheduler's per-task discipline, so a resumed handler sees exactly the scope
+                    // it suspended with — never a sibling's.
+                    let handler_ctx = std::mem::take(&mut in_flight[k].context);
+                    let prior = ctx.context_swap(handler_ctx);
+                    let polled = ctx.poll(fut);
+                    in_flight[k].context = ctx.context_swap(prior);
+                    let done = match polled {
                         Ok(Some(value)) => {
                             let mut response = None;
                             // A non-extern or non-`Response` result falls to the 500.

@@ -71,6 +71,38 @@ pub fn reference_run_traced(
     TreeWalkBackend::new().run_ir_traced(program, &ir, sites.type_of_sites)
 }
 
+/// As [`reference_run`], but against a caller-provided [`noeta_stdlib::Host`] — the telemetry
+/// parity oracle's entry: spans are write-only (invisible to `RunResult`), so proving both backends
+/// *parent* spans identically needs a host whose recorder the test can observe (a `SandboxHost`
+/// with a span sink installed). Same lower→drops→reuse recipe as the oracle run.
+pub fn reference_run_with_host(
+    program: &Program,
+    sites: noeta_check::Sites,
+    host: Box<dyn noeta_stdlib::Host>,
+) -> RunResult {
+    let ir = noeta_ir::lower_with_sites(
+        program,
+        noeta_ir::LoweringSites {
+            packed_list_sites: &sites.packed_list_sites,
+            index_field_sites: &sites.index_field_sites,
+            ext_call_sites: &sites.ext_call_sites,
+            for_stream_sites: &sites.for_stream_sites,
+            width_sites: &sites.width_sites,
+            construction_sites: &sites.construction_sites,
+            handle_sites: &sites.handle_sites,
+            bound_handle_sites: &sites.bound_handle_sites,
+            f32_literal_sites: &sites.f32_literal_sites,
+        },
+    )
+    .expect(
+        "Core-IR lowering is total over the parsed language \
+         (gate: ir_lowering_is_total_over_the_corpus)",
+    );
+    let ir = noeta_ir_passes::insert_drops(&ir, Some(&to_relevance(&sites.destructor_relevance)));
+    let ir = noeta_ir_passes::thread_reuse(&ir);
+    TreeWalkBackend::new().run_ir_with_host(program, &ir, host, sites.type_of_sites)
+}
+
 /// The drop pass's relevance form, copied from the checker's (identical sets). Mirrors the
 /// compiler's `passes_relevance`, so the IR interpreter and the VM annotate drops identically.
 pub fn to_relevance(r: &noeta_check::DestructorRelevance) -> noeta_ir_passes::Relevance {
