@@ -99,9 +99,17 @@ backends + leak oracle). Rough ordering, not committed:
   conformance cases green. Type-mismatched `merge` is a **static E0007** — a preview of P2's
   compile-time `Mergeable` safety. *No p2panda dependency.* **Deferred to P2:** value-carrying CRDTs
   (LWW-register, OR-Set), which need the retained-arena seam to hold arbitrary language values.
-- **P1 — the `P2p` host capability + sandbox script.** Add the 8th capability trait, the pure
-  scripted-peer sandbox driver, and the leaf `ExternIo` for "next peer/sync event." Establishes the
-  determinism story before any real transport. Validates §3's bet end-to-end on a toy program.
+- **P1 — the `P2p` host capability + deterministic broker. ✅ DONE.** Added the 8th `Host`
+  capability (`P2p`: `p2p_publish`/`p2p_poll` + the async `p2p_receive` leaf `ExternIo`), a
+  deterministic **in-process per-topic FIFO broker** as the sandbox "network" (publish enqueues,
+  receive drains, `none` at empty → programs terminate in-oracle), and the same broker on `RealHost`
+  (single-node loopback; real p2panda transport is P3). Surface `std.p2p`: `publish(topic,
+  string|bytes)` + async `receive(topic) -> Future<?bytes>` (a `NativeOut::Spawn` leaf like
+  `fs.read_async`). Differential/leak/JIT-diff all 510, full corpus 521, 2 `p2p/` conformance cases
+  (round-trip FIFO, topic isolation), clippy clean. **§3 bet validated:** a scripted publish/receive
+  program is byte-identical across both backends. **P1 boundary (stated, not silent):** single-node
+  loopback only — genuine peer/cross-isolate delivery is a later slice; payload is raw bytes (CRDT
+  serialization onto this seam is P2).
 - **P2 — `synced_signal` surface over the ctx seam.** A new stdlib extension crate
   (`std.synced` / fold into `std.reactive`), modeled on `crates/noeta-stdlib/src/reactive.rs`:
   ExtState holds the sync engine over `Retained` cells; `SyncedSignal<T>` / `SyncStatus` extern

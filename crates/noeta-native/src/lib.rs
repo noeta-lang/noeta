@@ -16,6 +16,7 @@ pub mod extern_value;
 pub mod host;
 pub mod map_key;
 pub mod net;
+pub mod p2p;
 pub mod registry;
 
 pub use command::{ArgKind, ArgSpec, CommandCtx, EntryArg, EntryCall, ExtCommand, ParsedArgs};
@@ -24,9 +25,12 @@ pub use ctx::{
 };
 pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};
-pub use host::{Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, ReadSource, Rng};
+pub use host::{
+    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, P2p, ReadSource, Rng,
+};
 pub use map_key::{ExternKeyRef, MapKey};
 pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
+pub use p2p::ReceiveIo;
 pub use registry::{
     ArenaGetter, CtxTypeDispatch, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut,
     NativeValue, RetTy, Scalar, SigType, TypeDispatch, TypeRecipe,

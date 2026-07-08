@@ -27,9 +27,9 @@ pub use executor::RealExecutor;
 use noeta_stdlib::net::accept_outcome;
 use noeta_stdlib::{
     Clock, Entropy, Env, ErrorKind, ExternBox, ExternIo, FileReader, FileSystem, Ids, NativeOut,
-    NetRequest, NetResponse, Network, ReadSource, RealBody, Rng, StdError,
+    NetRequest, NetResponse, Network, P2p, ReadSource, RealBody, Rng, StdError,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::fs::File;
@@ -86,6 +86,10 @@ pub struct RealHost {
     /// run from source or shipped as an executable — the toolchain's own `noeta run` prefix never
     /// leaks into the program.
     args: Vec<String>,
+    /// The p2p broker (p2p P1): a per-topic FIFO, identical to the sandbox's. Real p2p transport
+    /// (p2panda gossip over the network, cross-node) is P3; until then the real host is a single-
+    /// node loopback broker, so `noeta run` of a p2p program works locally without a network.
+    p2p: BTreeMap<String, VecDeque<Vec<u8>>>,
 }
 
 /// One inbound listener's shared state. The socket is bound at `net_listen` (runtime-free, via
@@ -121,6 +125,7 @@ impl RealHost {
             conns: Arc::new(Mutex::new(HashMap::new())),
             next_conn: Arc::new(AtomicU64::new(0)),
             args: std::env::args().collect(),
+            p2p: BTreeMap::new(),
         })
     }
 
@@ -695,6 +700,20 @@ impl Ids for RealHost {
         let id = self.ids;
         self.ids += 1;
         id
+    }
+}
+
+impl P2p for RealHost {
+    // p2p P1: the same in-process FIFO broker as the sandbox (single-node loopback). Real p2panda
+    // gossip transport, cross-node delivery, and a genuine async subscription future are P3 — at
+    // which point this becomes the non-deterministic, CLI-only side (like the real Network client).
+    fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
+        self.p2p.entry(topic.to_string()).or_default().push_back(message);
+        Ok(())
+    }
+
+    fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, StdError> {
+        Ok(self.p2p.get_mut(topic).and_then(VecDeque::pop_front))
     }
 }
 

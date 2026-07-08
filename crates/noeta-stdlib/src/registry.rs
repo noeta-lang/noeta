@@ -2249,6 +2249,14 @@ const STD_MODULES: &[ExtModule] = &[
         dispatch: crate::crdt::crdt_dispatch,
         ..ExtModule::DEFAULTS
     },
+    // `p2p` (p2p P1) — publish/receive over the `P2p` host capability. `publish` is a plain host
+    // effect; `receive` returns a `Future<?bytes>` via `NativeOut::Spawn`, like `fs.read_async`.
+    ExtModule {
+        name: "p2p",
+        functions: crate::p2p::P2P_FNS,
+        dispatch: crate::p2p::p2p_dispatch,
+        ..ExtModule::DEFAULTS
+    },
 ];
 
 /// Compiled-in fast route for ctx **functions** (H5 perf): the same generic dispatch fns the
