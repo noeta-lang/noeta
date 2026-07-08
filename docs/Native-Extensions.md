@@ -24,8 +24,8 @@ and their heavy deps on top. So a third-party extension (and internal mid-end cr
 
 ## The seam
 
-The registry vocabulary (`noeta-native`, `registry.rs`; the concrete `StdExtension` registration and
-dispatch router are in `noeta-stdlib`) is built on a **neutral value-marshalling** layer:
+The registry vocabulary (`noeta-native`, `registry.rs`; the concrete `std` registration and dispatch
+router are in `noeta-stdlib`) is built on a **neutral value-marshalling** layer:
 
 - `NativeValue` — the argument view: `Scalar`, `Str`, `Bytes`, `Object { fields }`, `Packed { layout, bytes }`, `List`, and so on.
 - `NativeOut` — the result view.
@@ -37,10 +37,25 @@ Registration is declarative:
 ```
 trait Extension {
     name;
-    modules() -> &[ExtModule];   // each with ExtFn { name, params, ret } + one dispatch
+    root() -> &str;              // namespace root; defaults to name(). Module identity is
+                                 // <root>.<module.name> (`std.http.client`), so two extensions
+                                 // with distinct roots never collide (`std.http` vs `guzzle.http`).
+    modules() -> &[ExtModule];   // each with ExtFn { name, params, ret }, one dispatch, and an
+                                 // optional `ring` (the native-dep Cargo feature it lives behind)
     types()   -> &[ExtType];     // first-class value types (see below)
 }
 ```
+
+**The registry is an assembled list of extension units.** Core's `std` is not one monolith but
+several in-tree `Extension` units sharing the `"std"` root — `CoreExtension` (always-on) plus one per
+capability with a separable identity (`HttpExtension`, `CryptoExtension`, `IdExtension`, the
+`vec`/`quat` `VecExtension`, `P2pExtension`). Every lookup (`find_module`/`find_type`/`commands`)
+iterates the whole registry filtered by root, so the split is invisible to resolution — it's the
+**dogfood of the multi-extension registry a package plugs into**: a third-party package registers as
+another unit under its own root. Each `ExtModule` declares its `ring: Option<&str>` — the single
+source of truth for which Cargo feature gates its heavy native deps in a tailored `noeta build
+--native` (`std.http.client` → `ring-http-client`, the ~3 MB reqwest/TLS tree; `None` = always-on
+core). The footprint scan reads it off the registry, so there's no hand-maintained module→ring table.
 
 `params` and `ret` use `SigType`, a small signature vocabulary (noeta-stdlib cannot see the checker's `Type`); `noeta-check` maps each `SigType` to a real `Type`, so the registry is the single source of truth that *both* the checker and both backends read. A parameter wrapped in `SigType::Optional(&…)` is **trailing-optional** (`client.get(url, headers?)`): the checker derives the required-argument count from the first `Optional`, and the dispatch reads the slot with `args.get(i)`, supplying its own default when the call omits it — so optional params cost no backend change and no default-value machinery.
 

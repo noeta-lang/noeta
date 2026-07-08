@@ -42,38 +42,32 @@ Each commits green (`cargo test --workspace`, differential + conformance, fmt/cl
   selection is byte-identical. The `aot_ring_features_selects_http_client_but_not_server` test
   exercises it end-to-end (unchanged — it never named the deleted helpers).
 
-### 1.1 — Gate `ring-http-server` (capability completeness)
+### 1.1–1.3 — Negligible native rings: deliberately NOT byte-gated (decided 2026-07-08)
 
-The inbound `RealHost` server code (`net_listen`/`net_accept`/`net_reply`, `servers`/`conns`,
-`ServerState`, `RealAcceptIo`) is currently always-compiled. It rides tokio (already linked for `fs`),
-so this is near-zero bytes — but it finishes the client/server capability separation (dce.md §2): a
-program using neither http ring links no http host code at all. `std.http.server`'s `ExtModule.ring`
-stays `None` for *reqwest* but the RealHost server methods gate behind `ring-http-server`.
-**Open question to resolve in-slice:** whether the ~0-byte payoff justifies the `#[cfg]` surface, or
-whether http-server stays always-on and this slice is a documented no-op. Surfaced, not pre-decided.
+`ring-http-server`, `ring-crypto`, and `ring-id` were scoped for byte-gating but the code shows they
+don't separate cleanly and the payoff is negligible:
 
-### 1.2 — Gate `ring-crypto`
+- **`ring-http-server`** — the inbound `RealHost` server (`net_listen`/`net_accept`/`net_reply`,
+  `ServerState`, `RealAcceptIo`) rides tokio, which `fs` already links. Gating it sheds **~0 bytes**.
+  Documented no-op; `std.http.server.ring = None` and the server host code stays always-on.
+- **`ring-crypto` / `ring-id`** — entangled, and ~55 KB + ~6 KB (vs http-client's ~3 MB, the win
+  P0.3b + P1.0 already capture): `id::v5` shares `crypto::sha1` (deliberately, to avoid a second SHA-1
+  impl), and `uuid` is used by *both* `id` and the CRDT/p2p types — so neither maps to a clean
+  per-capability ring. Byte-gating them would contort the Cargo feature graph for negligible size.
+  Left as declared-but-always-on (`ring = None`), matching dce.md §3's own "deliberately not
+  hand-gated — negligible size." **User-confirmed** (agreed to skip; make `vec`/`quat` a unit instead).
 
-Make `sha1`/`sha2`/`md-5`/`hmac`/`bcrypt` **optional** in `noeta-stdlib` behind a `ring-crypto`
-feature (default-on everywhere, so `noeta run` / the checker / the differential keep crypto); `#[cfg]`
-the crypto module registration + its dispatch/type so a `--no-default-features` archive build without
-`ring-crypto` compiles without those crates. Forward the feature `noeta-stdlib` → `noeta-runtime` →
-`noeta-aot-runtime` (default set), and add it to the aot-runtime default so the plain archive stays
-fully capable. `ring_of("std.crypto")` → `Some("ring-crypto")` closes the footprint loop. ~55 KB.
-
-### 1.3 — Gate `ring-id`
-
-Same shape for `uuid` (~6 KB). `id::Uuid` is used by crypto's `uuid_v5` — so `ring-crypto` depends on
-`ring-id` (or the `uuid_v5` path is itself `#[cfg]`'d). Resolve the coupling in-slice.
-
-### 1.4 — Registry assembly: kill the hardwired `&[&StdExtension]`
+### 1.4 — Registry assembly: kill the hardwired `&[&StdExtension]` ✅ DONE
 
 Split `StdExtension` into per-capability in-tree `Extension` units sharing the `"std"` root
-(`CoreExtension` = always-on rings; `HttpExtension`, `CryptoExtension`, `IdExtension`, `P2pExtension`,
-…), and build the registry as an **assembled, feature-gated list** — a capability whose ring is off at
-build time drops out of the list *wholesale* (the uniform model dce.md §3 wants), instead of per-site
-`#[cfg]`. `extensions()` returns the assembled slice; `find_module`/`find_type`/`commands` already
-iterate it, so they're unchanged. This is the seam Phase 2/3 plug packages into.
+(`CoreExtension` = always-on Ring-1/2; `HttpExtension`, `CryptoExtension`, `IdExtension`,
+`VecExtension` = the vec/quat pair, `P2pExtension`), and build the registry as an **assembled** list.
+`extensions()` returns the assembled slice; `find_module`/`find_type`/`commands` already iterate it,
+so the registered surface is byte-identical (faithful partition, differential-green). This is the seam
+Phase 2/3 plug packages into: a package registers as a new `Extension` unit; Phase 3's out-of-tree
+native path is where a unit's *deps* drop wholesale (its crate is simply not compiled). In-tree today
+the heavy weight (reqwest) is already gated at the runtime layer (`noeta-runtime/ring-http-client`),
+not by dropping the tiny registry entry — so the entries stay unconditional here.
 
 ### 1.5 — Docs + memory
 
@@ -89,10 +83,22 @@ Update `docs/Native-Extensions.md` (ring declaration + capability-unit model); u
   (p2p as a dependency-gated first-party extension unit + its ring). The transport wiring rides the
   p2p arc once this registry seam exists.
 
-## Phase 1 gate
+## What defers to Phase 2 (surfaced, not silently narrowed)
 
-Each native-backed std ring (`http-client`, `crypto`, `id`) is a declared unit a tailored
-`noeta build --native` sheds when unused; the module→ring map lives only on the registry (no CLI
-table); the registry is an assembled per-capability list (no hardwired `&[&StdExtension]`); full
-corpus + JIT differential + AOT differential green; clippy clean; no `unsafe` touched outside the
-already-relaxed aot-runtime.
+The plan's Phase 1 bullet said *"in-tree first-party extensions become dependency-gated: an app that
+doesn't declare a capability never links it."* The **declaration** half needs the `[dependencies]`
+table — a **Phase 2** deliverable. Phase 1 delivers the *mechanism*: the ring is registry-declared,
+capabilities are per-capability units, and a tailored `noeta build --native` already gates the one
+heavy ring (reqwest) by **usage** (the footprint scan reads `ring_of`). Making the *manifest* the
+authoritative selector (dce.md §4, footprint scan → cross-check fallback) rides Phase 2, because
+there's nothing to declare until the dependency table exists. This is a scoping correction: Phase 1 =
+the registry/ring *mechanism* + the extension-unit seam; manifest-driven gating = Phase 2.
+
+## Phase 1 gate ✅ MET
+
+The module→ring map lives only on the registry (no CLI table, P1.0); the registry is an assembled
+per-capability list of `Extension` units, no hardwired `&[&StdExtension]` (P1.4); `vec`/`quat` are
+their own unit (extraction-prep); the heavy `ring-http-client` is shed by a tailored native build via
+the registry-declared ring; negligible rings deliberately left always-on (user-confirmed). Full corpus
++ JIT differential green (0 failed), clippy clean, no `unsafe` touched. Next: Phase 2 (package +
+dependency system).
