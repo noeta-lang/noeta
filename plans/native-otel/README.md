@@ -159,11 +159,19 @@ so tracing calls in un-configured programs are ~free (the perf gate below).
 
 ## Slices (commit per green slice; full gate = workspace suites + differential + leak + conformance + fmt + clippy)
 
-- **T0 — the capability.** `Telemetry` trait + ABI data types in `noeta-native`; add to the `Host`
-  union. Sandbox recorder in `noeta-stdlib`. Real OTLP/JSON exporter skeleton in `noeta-runtime`
-  behind `telemetry` (span start/end/attr; batch processor; null-sink when unconfigured). Both
-  backends compile (the union forces it). *Smoke:* a hardcoded span reaches a local collector
-  (real) / the recorder (sandbox). No language surface yet.
+- **T0 ✅ DONE (`7343956`).** `Telemetry` trait + neutral ABI data types
+  (`SpanId`/`SpanKind`/`SpanStatus`/`AttrValue`/`TraceContext`/`SpanData`/`SpanEvent`, W3C
+  `traceparent` round-trip) in `noeta-native`, added to the `Host` union so both backends are
+  compiler-forced to implement it. The capability is a pure span factory/sink (start/set-attr/
+  add-event/set-status/end + a live span's `TraceContext`); the active-span stack is deferred to the
+  SDK extension (T1+), keeping both host impls simple. `SandboxHost` = deterministic in-memory
+  recorder (counter-derived ids, logical-clock timestamps; test introspection via `recorded_spans`).
+  `RealHost` (behind default-on `telemetry`) = real-entropy ids + a hand-rolled **OTLP/HTTP-JSON**
+  exporter over the reqwest+serde_json already compiled (no `opentelemetry-otlp`/tonic/prost);
+  env-configured, null sink when unset, buffer+flush at a threshold / on teardown. Gate: runtime+
+  stdlib unit tests (OTLP/JSON shape, deterministic recorder, traceparent), conformance
+  differential/leak/trace-parity, clippy, and both feature-on/`--no-default-features` builds — all
+  green. No language surface yet (T1).
 - **T1 — manual tracing.** `std.telemetry` module: `span(name) -> Span` + `Span` extern type with
   `set_attribute`/`end`. End-to-end from Noeta source. Conformance asserts recorded spans (name,
   attrs, parent, ordering) via the sandbox recorder. *Gate:* differential/leak green (Span is a
