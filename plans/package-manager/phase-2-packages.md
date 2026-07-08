@@ -24,7 +24,16 @@ deterministically. So fetch/resolve live *outside* the differential oracle (like
 the build stays reproducible because it's lockfile-pinned. The oracle sees only already-materialized
 source.
 
-## The one design decision to confirm before 2.1 — namespace ↔ dep-key
+## The namespace ↔ dep-key model — ✅ R1 CONFIRMED (2026-07-08)
+
+**Re-root at the package boundary.** A package's modules declare namespaces rooted at the package's
+own name segment (package `guzzle/http` → modules `namespace http.client;`, `namespace http.models;`,
+internal `use http.client.X`). A consumer keys the dependency freely and the loader **replaces that
+root segment with the key**: `webclient = { … }` + `use webclient.client.Client`. Convention: a
+package's module namespaces must start with its package-name segment (like Rust's crate-rooted paths).
+Chosen over R2 (consumer imports the canonical root, no rewrite) — R1 honors the Phase 0 "import root
+= dep-key" decision and kills cross-org root collisions (two `*/http` packages coexist under distinct
+keys because the key, not the shared root `http`, is what the consumer writes).
 
 Phase 0 (user-confirmed) fixed **import root = the dependency-table key**, decoupled from the global
 `company/package` identity (mirrors Rust `foo = { package = "real" }` → `use foo::X`). The mechanism:
