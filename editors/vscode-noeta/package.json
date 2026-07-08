@@ -1,7 +1,7 @@
 {
   "name": "noeta",
   "displayName": "Noeta",
-  "description": "Language support for the Noeta programming language (.noe): syntax highlighting, the noeta lsp language server (diagnostics, hover, go-to-definition, outline, completion), and the noeta dap debugger (breakpoints, stepping, variables).",
+  "description": "Language support for the Noeta programming language (.noe): syntax highlighting, the noeta lsp language server (diagnostics, hover, inlay type hints, go-to-definition, outline, completion), and the noeta dap debugger (breakpoints, stepping, variables).",
   "version": "0.3.0",
   "publisher": "noeta",
   "license": "MIT",
