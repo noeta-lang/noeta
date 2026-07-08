@@ -102,25 +102,37 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
 
+    // The lock is consulted during the walk (git deps fetched by their pinned SHA — offline when
+    // already stored) and refreshed afterwards.
+    let lock = crate::lock::Lock::read(&manifest_dir);
     let mut walker = Walker {
         instances: BTreeMap::new(),
         store: None,
+        lock: &lock,
     };
     let mut root_edges = BTreeMap::new();
     walker.walk(manifest.dependencies(), &manifest_dir, &mut root_edges)?;
 
     validate_with_resolver(&walker.instances, &root_edges)?;
-    Ok(assemble(walker.instances, &root_edges))
+    let graph = assemble(walker.instances, &root_edges);
+
+    // Refresh the lockfile (best-effort: a read-only project must not fail a build). Skipped for a
+    // manifest with no resolved dependencies, so a bare-`[profiles]` project grows no lock.
+    if !graph.locked.is_empty() {
+        let _ = crate::lock::write(&manifest_dir, &graph.locked);
+    }
+    Ok(graph)
 }
 
-/// Carries the walk's growing state: the deduped package instances and the lazily-opened package
-/// store (opened only when a git dependency is first encountered).
-struct Walker {
+/// Carries the walk's growing state: the deduped package instances, the lazily-opened package store
+/// (opened only when a git dependency is first encountered), and the lockfile consulted for git pins.
+struct Walker<'a> {
     instances: BTreeMap<String, Instance>,
     store: Option<Store>,
+    lock: &'a crate::lock::Lock,
 }
 
-impl Walker {
+impl Walker<'_> {
     /// Materialize and recurse into every dependency in `deps` (a manifest's `[dependencies]`),
     /// relative to `base_dir` (for path deps), recording each `key → child identity` edge into
     /// `edges`. Dedups by identity; a second sighting of an identity at a *different* version is a
@@ -158,6 +170,19 @@ impl Walker {
 
             let content_hash = hash_tree(&dir)
                 .map_err(|err| format!("dependency `{key}`: hashing `{}`: {err}", dir.display()))?;
+            // A git source is immutable, so a lock-recorded hash must match — a mismatch means the
+            // stored tree drifted from what the lock pinned. A path source is a mutable local tree,
+            // so its hash legitimately changes as the developer edits it; it is not verified.
+            if matches!(source, ResolvedSource::Git { .. })
+                && let Some(locked) = self.lock.content_hash(&identity)
+                && locked != content_hash
+            {
+                return Err(format!(
+                    "dependency `{key}` (`{identity}`) content hash does not match `{}` — the \
+                     stored source drifted from the lock; run `noeta update` to re-pin",
+                    crate::lock::LOCK_NAME
+                ));
+            }
             // Insert before recursing so a dependency cycle terminates (a back-edge sees the
             // in-progress instance and dedups).
             self.instances.insert(
@@ -202,9 +227,15 @@ impl Walker {
                 ))
             }
             Dependency::Git { url, tag } => {
+                // If the lock pins this url@tag to a SHA, fetch by it — an already-stored tree needs
+                // no network at all (offline, reproducible); otherwise resolve the tag at the remote.
+                let pin = self.lock.git_pin(url, tag).map(str::to_string);
                 let store = self.store()?;
-                let fetched = crate::git::fetch(url, tag, store)
-                    .map_err(|err| format!("dependency `{key}`: {err}"))?;
+                let fetched = match &pin {
+                    Some(sha) => crate::git::fetch_pinned(url, tag, sha, store),
+                    None => crate::git::fetch(url, tag, store),
+                }
+                .map_err(|err| format!("dependency `{key}`: {err}"))?;
                 Ok((
                     fetched.path,
                     ResolvedSource::Git {

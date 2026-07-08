@@ -42,6 +42,8 @@ mod store;
 mod git;
 // Transitive dependency resolution (P2.4) — the graph walk over path+git sources.
 mod graph;
+// The reproducible dependency pin — `noeta.lock` (P2.4c).
+mod lock;
 
 #[derive(Parser)]
 #[command(name = "noeta", version, about = "The Noeta toolchain")]

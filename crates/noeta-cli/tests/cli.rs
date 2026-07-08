@@ -2259,3 +2259,66 @@ fn a_git_tag_dependency_is_fetched_and_run() {
         .success()
         .stdout(predicate::str::contains("hi from a git dep"));
 }
+
+#[test]
+fn a_git_dependency_is_pinned_and_reproduces_offline() {
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_gitdep_lock");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let dep_repo = base.join("pinlib_repo");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&dep_repo).unwrap();
+
+    git_in(&["init", "-q"], &dep_repo);
+    std::fs::write(
+        dep_repo.join("noeta.toml"),
+        "[package]\nname = \"acme/pinned\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dep_repo.join("m.noe"),
+        "namespace pinned.core;\npub fn val(): string { return \"pinned offline value\"; }\n",
+    )
+    .unwrap();
+    git_in(&["add", "."], &dep_repo);
+    git_in(&["commit", "-q", "-m", "release"], &dep_repo);
+    git_in(&["tag", "v1.0.0"], &dep_repo);
+
+    std::fs::write(
+        app.join("noeta.toml"),
+        format!(
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\np = {{ git = \"{}\", tag = \"v1.0.0\" }}\n",
+            dep_repo.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "use p.core.val;\necho val();\n").unwrap();
+
+    // First run: resolves, fetches, and writes the lock.
+    lang()
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pinned offline value"));
+
+    // The lock pins the git source + commit SHA.
+    let lock = std::fs::read_to_string(app.join("noeta.lock")).expect("lock written");
+    assert!(lock.contains("acme/pinned"), "lock names the package: {lock}");
+    assert!(lock.contains("source = \"git\""), "lock records the git source: {lock}");
+    assert!(lock.contains("sha = "), "lock pins a commit SHA: {lock}");
+
+    // Delete the remote repo entirely; the pinned tree already lives in the store, so a second run
+    // reproduces with no network access at all (offline).
+    std::fs::remove_dir_all(&dep_repo).unwrap();
+    lang()
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pinned offline value"));
+}

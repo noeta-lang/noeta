@@ -29,10 +29,26 @@ pub struct Fetched {
     pub path: PathBuf,
 }
 
-/// Fetch `url`@`tag` into `store`, returning the materialized tree. If the tag's commit is already
-/// stored (keyed by SHA), no network clone happens — only the cheap `ls-remote` to learn the SHA.
+/// Fetch `url`@`tag` into `store`, returning the materialized tree. The tag is resolved to a commit
+/// SHA at the remote (`ls-remote`), then materialized. If that SHA is already stored, no clone
+/// happens — only the cheap `ls-remote`. Use [`fetch_pinned`] when the lockfile already records the
+/// SHA (it skips even the `ls-remote`).
 pub fn fetch(url: &str, tag: &str, store: &Store) -> Result<Fetched, String> {
     let sha = ls_remote_tag(url, tag)?;
+    materialize_sha(url, tag, sha, store)
+}
+
+/// Fetch `url`@`tag` **pinned to a known commit `sha`** (package-manager P2.4) — the lockfile path.
+/// If the SHA is already stored, this touches the network **not at all** (offline, reproducible). If
+/// it isn't, the tag is cloned and its `HEAD` verified against `sha`; a mismatch means the tag moved
+/// since the lock was written — a reproducibility violation the user resolves with `noeta update`.
+pub fn fetch_pinned(url: &str, tag: &str, sha: &str, store: &Store) -> Result<Fetched, String> {
+    materialize_sha(url, tag, sha.to_string(), store)
+}
+
+/// Materialize a known `url`@`tag`→`sha` into the store (shared by [`fetch`] and [`fetch_pinned`]):
+/// reuse the stored tree if present, else clone the tag and verify its `HEAD` equals `sha`.
+fn materialize_sha(url: &str, tag: &str, sha: String, store: &Store) -> Result<Fetched, String> {
     let path = if store.contains(&sha) {
         store.path_for(&sha)
     } else {
