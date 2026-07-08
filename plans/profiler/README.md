@@ -1,7 +1,6 @@
 # Dev profiler / flamegraph — `noeta profile`
 
-**Status: P0–P4 COMPLETE — arc done** (one gate item outstanding: the pinned dispatch A/B on a quiet
-box; see the note on the P1 row). This is the reconnaissance-backed scope for the built-in dev
+**Status: P0–P4 COMPLETE — arc done, all gates met.** This is the reconnaissance-backed scope for the built-in dev
 profiler, the sibling of `noeta dap` / `noeta lsp` in the dev-tooling cluster. Like DAP, it is a
 dev-time introspection tool over the **production bytecode VM**, and — because its signal is
 wall-time and call structure, not program output — it lives **outside the differential oracle**
@@ -259,11 +258,11 @@ non-profiled `run` shows no dispatch regression from the new gated seams.
 | **P3.1** ✅ | Line attribution + top-N | Hot *line* in the flamegraph; a hot-function summary | **DONE** (`82e1a9c`). `--lines` (sampling): `DebugView::pc_at` → sampler captures the leaf pc into the key only when on (0 otherwise → default output unchanged) → resolved to `fn:line` via the line table; `resolve_flamegraph` re-aggregates by resolved label so several pcs on one line merge. `top_functions()` aggregates samples by leaf fn → the sampling **default** output is now that top-N summary (not a folded dump; a machine artifact needs explicit `--format`). +3 fixtures. |
 | **P4** ✅ | Docs + roadmap + memory | The arc is recorded | **DONE.** New `docs/Profiling.md` wiki page (two modes, formats, tier-0 honesty, determinism, cooperative sampling); `docs/The-CLI.md` command-table row + `docs/_Sidebar.md` entry; `docs/Performance-Techniques.md` cross-link; roadmap ticked (dev-profiler half of observability done); memory ([[profiler-arc]]). |
 
-**One gate item outstanding:** the pinned dispatch A/B on a quiet box (the per-op seam's cost on a
-non-profiled run). Measured only under load ~20 → noise-dominated (2× run-to-run swing); the added
-branch is one predicted-not-taken op identical in shape to the shipped debugger consult beside it.
-Re-run `cargo bench -p noeta-vm -- vm/dispatch_fib` (with vs. without the profiler consult) on a
-quiet box before merging.
+**Dispatch bench — gate met.** Pinned A/B on a quiet box (`taskset -c 3 cargo bench -p noeta-vm --
+vm/dispatch_fib`, tight <0.2% spreads): baseline without the profiler consult **7.855 ms**, with it
+**7.759 ms** (−1.2%). The per-op seam shows **no measurable regression** on a non-profiled run (the
+consulted side is if anything marginally faster — code-layout jitter; a predicted-not-taken branch
+can't genuinely speed a loop up). This matches the shipped debugger consult it sits beside.
 
 P1 (instrument) before P2 (sample) matches the roadmap's "near-free first, richer add second," and
 gives an exact, timer-free base before the sampling seam builds on the same crate.
