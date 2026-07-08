@@ -40,6 +40,9 @@ mod resolve;
 // The content-addressed package store (P2.3a); consumed once git fetch lands (P2.3c).
 #[allow(dead_code)]
 mod store;
+// Git-tag dependency fetch (P2.3b); wired into dependency resolution in P2.3c.
+#[allow(dead_code)]
+mod git;
 
 #[derive(Parser)]
 #[command(name = "noeta", version, about = "The Noeta toolchain")]
