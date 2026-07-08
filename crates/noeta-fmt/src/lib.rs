@@ -199,6 +199,58 @@ pub fn format_stmt_at(
     Some((span.start, span.end, formatted))
 }
 
+/// Reformat the top-level statements overlapping the byte range `[start, end)` — the engine behind
+/// range ("Format Selection") formatting. Each overlapping statement is reformatted whole (a partial
+/// selection is expanded to complete statements, as editors expect), yielding one `(start, end,
+/// text)` edit per changed statement in source order.
+///
+/// Returns `None` when the document does not fully parse, no statement overlaps the range, nothing
+/// would change, or applying the edits would not be safe (all edits are spliced in together, the
+/// whole document re-parsed, and compared AST-equal-modulo-spans — the same guarantee as
+/// [`format_source`]).
+pub fn format_range(
+    name: &str,
+    text: &str,
+    start: u32,
+    end: u32,
+    config: &FmtConfig,
+) -> Option<Vec<(u32, u32, String)>> {
+    let source = Source::new(SourceId(0), name, text);
+    let lexed = noeta_lexer::lex_with_trivia(&source);
+    let program = parse_checked(&source, &lexed).ok()?;
+
+    let mut edits: Vec<(u32, u32, String)> = Vec::new();
+    for stmt in &program.stmts {
+        let span = stmt.span();
+        // A statement overlaps the (possibly zero-width) selection when their ranges touch.
+        if span.start <= end && start <= span.end {
+            let formatted = print::print_stmt(stmt, text, &lexed.comments, config).ok()?;
+            if text.get(span.start as usize..span.end as usize) != Some(formatted.as_str()) {
+                edits.push((span.start, span.end, formatted));
+            }
+        }
+    }
+    if edits.is_empty() {
+        return None;
+    }
+
+    // Safety: splice every edit into the document (edits are disjoint, in source order), re-parse,
+    // and require the same AST modulo spans.
+    let mut edited = String::with_capacity(text.len());
+    let mut prev = 0usize;
+    for (s, e, txt) in &edits {
+        edited.push_str(&text[prev..*s as usize]);
+        edited.push_str(txt);
+        prev = *e as usize;
+    }
+    edited.push_str(&text[prev..]);
+    let reparsed = parse_clean(&Source::new(SourceId(0), name, edited.as_str())).ok()?;
+    if !safety::ast_equal_modulo_spans(&program, &reparsed) {
+        return None;
+    }
+    Some(edits)
+}
+
 /// Parse an already-lexed `source`, failing with [`FmtError::Parse`] if lexing or parsing produced
 /// any diagnostic. The formatter only ever operates on programs that parse cleanly.
 fn parse_checked(
@@ -275,6 +327,29 @@ mod tests {
             &src[start as usize..end as usize],
             "fn  f( a ){\n echo a\n}"
         );
+    }
+
+    #[test]
+    fn format_range_reformats_overlapping_statements() {
+        // Two messy fns; select a range covering only the first → only it is reformatted.
+        let src = "fn  a(){\n echo 1\n}\nfn  b(){\n echo 2\n}\n";
+        let first_end = src.find("}\n").unwrap() as u32 + 1;
+        let edits = format_range("t.noe", src, 0, first_end, &FmtConfig::default())
+            .expect("reformats the first fn");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].2, "fn a() {\n    echo 1\n}");
+
+        // A range spanning both → two edits.
+        let edits = format_range("t.noe", src, 0, src.len() as u32, &FmtConfig::default()).unwrap();
+        assert_eq!(edits.len(), 2);
+    }
+
+    #[test]
+    fn format_range_declines_when_nothing_overlaps_or_parses() {
+        // Already-canonical selection → no edits.
+        assert!(format_range("t.noe", "echo 1\n", 0, 6, &FmtConfig::default()).is_none());
+        // Unparseable doc → no edits.
+        assert!(format_range("t.noe", "fn (", 0, 4, &FmtConfig::default()).is_none());
     }
 
     #[test]

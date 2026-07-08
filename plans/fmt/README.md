@@ -23,9 +23,13 @@ than reimplementing it — `noeta-fmt` is a reusable library, as required.
   `use A.B.C` was printing as `use A.B.{C}`).
 - ✅ **Extension wiring** — VS Code ext turns on format-on-save + format-on-type by default for `.noe`
   (verified the live LSP advertises both providers); ext 0.3.0→0.4.0.
+- ✅ **Range ("Format Selection") formatting** (branch `fmt-range`) — `noeta_fmt::format_range`
+  reformats the top-level statements overlapping a byte range (partial selection expanded to whole
+  statements), one safety-checked edit per changed statement; LSP advertises
+  `documentRangeFormattingProvider` (Format Selection works with no extension change).
 
 *Still deferred (optional): width-wrapping of long binary/method chains and `A|B|C` unions;
-`noeta fmt --diff`; LSP range formatting; `// fmt: off`; broader config.*
+`noeta fmt --diff`; `// fmt: off`; broader config.*
 
 ## The one idea that shapes everything: canonical reformat, not whitespace touch-up
 

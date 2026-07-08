@@ -206,6 +206,29 @@ impl DocumentStore {
         }])
     }
 
+    /// Range ("Format Selection") formatting: reformat the top-level statements overlapping `range`,
+    /// each expanded to a whole statement. `None` unless the whole document parses and something in
+    /// the selection would change — same AST-preserving safety as the other formatting entry points.
+    fn format_range(&self, uri: &str, range: Range, encoding: Encoding) -> Option<Vec<TextEdit>> {
+        let text = self.buffers.get(uri)?;
+        let config = uri_to_path(uri)
+            .and_then(|p| p.parent().map(noeta_fmt::FmtConfig::discover))
+            .unwrap_or_default();
+        let index = LineIndex::new(text);
+        let start = index.offset(range.start, encoding);
+        let end = index.offset(range.end, encoding);
+        let edits = noeta_fmt::format_range(uri, text, start, end, &config)?;
+        Some(
+            edits
+                .into_iter()
+                .map(|(s, e, new_text)| TextEdit {
+                    range: Range::new(index.position(s, encoding), index.position(e, encoding)),
+                    new_text,
+                })
+                .collect(),
+        )
+    }
+
     /// Rebuild or update the workspace of every open document. Each open document is the entry of
     /// its own workspace; its modules are the sibling `.noe` files in the entry's directory, with
     /// open files taking their (unsaved) buffer content over disk.
@@ -1091,6 +1114,8 @@ impl LanguageServer for Backend {
                 document_symbol_provider: Some(OneOf::Left(true)),
                 // Whole-document formatting via the shared `noeta fmt` engine.
                 document_formatting_provider: Some(OneOf::Left(true)),
+                // Range ("Format Selection") formatting over the same engine.
+                document_range_formatting_provider: Some(OneOf::Left(true)),
                 // On-type formatting: reformat the just-closed block when the user types `}`.
                 document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
                     first_trigger_character: "}".to_string(),
@@ -1191,6 +1216,20 @@ impl LanguageServer for Backend {
         let edits = {
             let store = self.store.lock().expect("document store poisoned");
             store.format_document(uri.as_str(), encoding)
+        };
+        Ok(edits)
+    }
+
+    async fn range_formatting(
+        &self,
+        params: DocumentRangeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        let range = params.range;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let edits = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.format_range(uri.as_str(), range, encoding)
         };
         Ok(edits)
     }
@@ -1485,6 +1524,22 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].new_text, "fn f(a) {\n    echo a\n}");
         assert_eq!(edits[0].range.start, Position::new(0, 0));
+    }
+
+    #[test]
+    fn format_range_reformats_the_selected_statement() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///a.noe",
+            "fn  a(){\n echo 1\n}\nfn  b(){\n echo 2\n}\n".to_string(),
+        );
+        // Select all of the first fn (lines 0–2).
+        let range = Range::new(Position::new(0, 0), Position::new(2, 1));
+        let edits = store
+            .format_range("file:///a.noe", range, Encoding::Utf16)
+            .expect("reformats the selection");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "fn a() {\n    echo 1\n}");
     }
 
     #[test]
