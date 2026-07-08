@@ -1647,8 +1647,10 @@ fn emit_native(
         return cleanup(ExitCode::from(2));
     }
 
-    // 2. Locate the runtime archive + the system libs it must link with, then `cc`-link.
-    let (archive, libs) = match resolve_aot_runtime() {
+    // 2. Locate the runtime archive + the system libs it must link with, then `cc`-link. The archive
+    // is built with only the stdlib rings this program uses, so unused rings' native deps are dropped.
+    let rings = aot_ring_features(module);
+    let (archive, libs) = match resolve_aot_runtime(&rings) {
         Ok(pair) => pair,
         Err(err) => {
             eprintln!("lang: {err}");
@@ -1705,15 +1707,116 @@ fn emit_native(
     ExitCode::from(2)
 }
 
-/// Locate the AOT runtime staticlib (`libnoeta_aot.a`) and the native system libraries it must be
-/// linked against.
-/// Priority: an explicit `NOETA_AOT_RUNTIME_LIB` (paired with `NOETA_AOT_LINK_LIBS`,
-/// space-separated) — the packaged/hermetic path — else build it from the workspace with `cargo
-/// rustc … --print native-static-libs` (interim: needs cargo + the source tree), which both produces
-/// the archive and prints the exact link line. Packaging the archive for a shipped toolchain (so
-/// `--native` works outside the workspace) is a later distribution decision.
+/// The stdlib rings the program actually needs, as `noeta-aot-runtime` cargo features — derived from
+/// the native modules it references. `noeta build --native` builds the runtime archive with exactly
+/// these features, so the linker drops every unused ring's native dependency tree (DCE Axis B — e.g.
+/// an http-free program sheds reqwest + its ~5 MB TLS stack).
+///
+/// A native module surfaces in the bytecode three ways, all covered here (missing one would build a
+/// binary that stubs out a ring the program actually calls):
+/// - `Const::NativeModule(name)` — `use std.{http}` loads the whole module as a value, then member
+///   calls (`http.get_async(...)`) dispatch on it via `CallMethod` (no `TypedModuleCall`).
+/// - `Const::ModuleFn { module, .. }` — a selective import (`use std.http.get`).
+/// - `Op::TypedModuleCall { module, .. }` — the fully-qualified / turbofish call form (`json.parse::<T>`).
+///
+/// Conservative by construction: a module with **no** ring row here is always-on core (Ring-1
+/// string/list/map/set, the pure builders) or a ring not yet gated — either way it stays in the
+/// default feature set and is never stripped. Only a module with an explicit row can turn its ring
+/// off, so an unrecognized or newly-added module can never be silently dropped.
 #[cfg(feature = "jit")]
-fn resolve_aot_runtime() -> Result<(std::path::PathBuf, Vec<String>), String> {
+fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
+    use noeta_bytecode::{Const, Op};
+    use std::collections::BTreeSet;
+
+    let mut rings: BTreeSet<String> = BTreeSet::new();
+
+    // A whole-module value (`use std.{http}`): the program holds the module and can call *any* of its
+    // functions dynamically (member calls lower to `CallMethod` on the value, whose receiver isn't
+    // statically pinned), so a module that owns a native-dep ring is selected conservatively.
+    let note_module = |name: &str, rings: &mut BTreeSet<String>| {
+        if let Some(ring) = module_ring(name) {
+            rings.insert(ring.to_string());
+        }
+    };
+    // A precisely-named function (`use std.http.get`, or a turbofish `TypedModuleCall`): the exact function is
+    // known, so a ring can be selected only when a function that actually needs it is referenced. This
+    // is what lets a *client/server split* pay off — a program that names only `http.serve`/
+    // `http.response` selects no client ring and sheds reqwest, while `http.get` selects it.
+    let note_fn = |m: &str, func: &str, rings: &mut BTreeSet<String>| {
+        if let Some(ring) = fn_ring(m, func) {
+            rings.insert(ring.to_string());
+        }
+    };
+
+    for chunk in &module.protos {
+        for c in &chunk.consts {
+            match c {
+                Const::NativeModule(name) => note_module(name, &mut rings),
+                Const::ModuleFn { module: m, func } => note_fn(m, func, &mut rings),
+                _ => {}
+            }
+        }
+        for op in &chunk.code {
+            if let Op::TypedModuleCall { module: m, func, .. } = op {
+                note_fn(module.name(*m), module.name(*func), &mut rings);
+            }
+        }
+    }
+    rings.into_iter().collect()
+}
+
+/// The `noeta-aot-runtime` ring a *whole-module* reference selects — conservative, since the value can
+/// reach any of the module's functions. `http` maps to the outbound client (its reqwest/TLS tree is
+/// the ~5 MB payload), because a `use std.{http}` value could call `http.get`. A module with no row
+/// is always-on core or a not-yet-gated ring: never stripped. See the package-manager note below —
+/// splitting `http` into client/server modules would make even the whole-module case precise.
+#[cfg(feature = "jit")]
+fn module_ring(name: &str) -> Option<&'static str> {
+    match name {
+        "http" => Some("ring-http-client"),
+        _ => None,
+    }
+}
+
+/// The ring a *precisely-named* function selects. Only the outbound-client functions of `http` pull
+/// reqwest; its `response` builder (pure) and `serve` (inbound, tokio — always compiled) do not, so a
+/// program that references only those selects no client ring. Sound by construction: a real client
+/// call always surfaces as one of these names (or as a whole-module value, handled above), so reqwest
+/// is never stripped from a program that can reach it.
+#[cfg(feature = "jit")]
+fn fn_ring(module: &str, func: &str) -> Option<&'static str> {
+    const HTTP_CLIENT_FNS: &[&str] = &[
+        "get",
+        "head",
+        "delete",
+        "post",
+        "put",
+        "query",
+        "request",
+        "get_async",
+        "head_async",
+        "delete_async",
+        "post_async",
+        "put_async",
+        "query_async",
+        "request_async",
+    ];
+    match module {
+        "http" if HTTP_CLIENT_FNS.contains(&func) => Some("ring-http-client"),
+        _ => None,
+    }
+}
+
+/// Locate the AOT runtime staticlib (`libnoeta_aot.a`) and the native system libraries it must be
+/// linked against, built with exactly the stdlib `rings` the program needs (DCE Axis B).
+/// Priority: an explicit `NOETA_AOT_RUNTIME_LIB` (paired with `NOETA_AOT_LINK_LIBS`,
+/// space-separated) — the packaged/hermetic path, which supplies its own ring set so `rings` is
+/// ignored — else build it from the workspace with `cargo rustc --no-default-features --features
+/// <rings> … --print native-static-libs` (interim: needs cargo + the source tree), which both
+/// produces the archive and prints the exact link line. Packaging the archive for a shipped toolchain
+/// (so `--native` works outside the workspace) is a later distribution decision.
+#[cfg(feature = "jit")]
+fn resolve_aot_runtime(rings: &[String]) -> Result<(std::path::PathBuf, Vec<String>), String> {
     if let Ok(path) = std::env::var("NOETA_AOT_RUNTIME_LIB") {
         let libs = std::env::var("NOETA_AOT_LINK_LIBS")
             .ok()
@@ -1723,17 +1826,23 @@ fn resolve_aot_runtime() -> Result<(std::path::PathBuf, Vec<String>), String> {
     }
 
     // Interim workspace build: one `cargo rustc` compiles the staticlib and prints its
-    // native-static-libs note. Combined stdout+stderr is captured so we can parse the note.
+    // native-static-libs note. `--no-default-features --features <rings>` links only the rings the
+    // program uses; the `aot` runtime support is a hard dep feature, so it survives regardless.
+    let mut args = vec![
+        "rustc",
+        "-p",
+        "noeta-aot-runtime",
+        "--release",
+        "--no-default-features",
+    ];
+    let joined = rings.join(",");
+    if !joined.is_empty() {
+        args.push("--features");
+        args.push(&joined);
+    }
+    args.extend(["--", "--print", "native-static-libs"]);
     let output = std::process::Command::new("cargo")
-        .args([
-            "rustc",
-            "-p",
-            "noeta-aot-runtime",
-            "--release",
-            "--",
-            "--print",
-            "native-static-libs",
-        ])
+        .args(&args)
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .output()
@@ -3092,5 +3201,95 @@ mod tests {
         assert!(!unclosed_delimiters(&toks("}")));
         // Braces inside a template string are one token — they never miscount.
         assert!(!unclosed_delimiters(&toks("echo \"drop ${id}\";")));
+    }
+
+    /// A one-proto module whose const pool + code carry the given entries, with `names` as the op
+    /// name table — enough to exercise the ring scan.
+    #[cfg(feature = "jit")]
+    fn module_with(
+        consts: Vec<noeta_bytecode::Const>,
+        code: Vec<noeta_bytecode::Op>,
+        names: Vec<String>,
+    ) -> noeta_bytecode::Module {
+        let mut chunk = noeta_bytecode::Chunk::placeholder();
+        chunk.consts = consts;
+        chunk.code = code;
+        noeta_bytecode::Module {
+            protos: vec![chunk],
+            shapes: Vec::new(),
+            packed_schemas: Vec::new(),
+            map_packed_sites: Vec::new(),
+            methods: Vec::new(),
+            destructors: Vec::new(),
+            field_defaults: Vec::new(),
+            comparable_derives: Vec::new(),
+            tojson_derives: Vec::new(),
+            destruct_reachable: Vec::new(),
+            cache_slots: 0,
+            reflection: Default::default(),
+            type_reprs: Vec::new(),
+            names,
+            global_names: Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn aot_ring_features_detects_http_through_every_lowering() {
+        use noeta_bytecode::{Const, NameId, Op};
+        use noeta_span::Span;
+        let client = vec!["ring-http-client".to_string()];
+
+        // `use std.{http}` → a whole-module value: conservative (could call any http fn) → client ring.
+        let via_module = module_with(vec![Const::NativeModule("http".into())], vec![], vec![]);
+        assert_eq!(aot_ring_features(&via_module), client);
+
+        // `use std.http.get` → a selective import of a *client* function → client ring.
+        let client_fn = module_with(
+            vec![Const::ModuleFn {
+                module: "http".into(),
+                func: "get".into(),
+            }],
+            vec![],
+            vec![],
+        );
+        assert_eq!(aot_ring_features(&client_fn), client);
+
+        // The client/server split payoff: a selective import of only *server* functions
+        // (`use std.http.{serve, response}`) selects NO client ring — reqwest is shed.
+        let server_fn = module_with(
+            vec![
+                Const::ModuleFn {
+                    module: "http".into(),
+                    func: "serve".into(),
+                },
+                Const::ModuleFn {
+                    module: "http".into(),
+                    func: "response".into(),
+                },
+            ],
+            vec![],
+            vec![],
+        );
+        assert!(aot_ring_features(&server_fn).is_empty());
+
+        // The fully-qualified / turbofish call form → a `TypedModuleCall` naming module + func (names[0], [1]).
+        let via_extcall = module_with(
+            vec![],
+            vec![Op::TypedModuleCall {
+                dst: 0,
+                module: NameId(0),
+                func: NameId(1),
+                args: Box::new([]),
+                recipe: None,
+                span: Span::empty_at(0),
+            }],
+            vec!["http".to_string(), "get".to_string()],
+        );
+        assert_eq!(aot_ring_features(&via_extcall), client);
+
+        // A program that only touches an always-on core / not-yet-gated module selects no ring.
+        let non_http = module_with(vec![Const::NativeModule("math".into())], vec![], vec![]);
+        assert!(aot_ring_features(&non_http).is_empty());
     }
 }

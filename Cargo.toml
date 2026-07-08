@@ -33,6 +33,7 @@ noeta-compiler = { path = "crates/noeta-compiler" }
 noeta-vm = { path = "crates/noeta-vm" }
 # JIT backend (milestone P-JIT): Cranelift tier-1 compiler, behind noeta-vm's `jit` feature.
 noeta-jit = { path = "crates/noeta-jit" }
+noeta-jit-abi = { path = "crates/noeta-jit-abi" }
 noeta-db = { path = "crates/noeta-db" }
 noeta-conformance = { path = "crates/noeta-conformance" }
 # Test-only heap-residency probe (dev-dependency; tracking global allocator)

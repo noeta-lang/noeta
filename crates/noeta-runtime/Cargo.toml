@@ -10,7 +10,18 @@ rust-version.workspace = true
 noeta-stdlib = { workspace = true }
 tokio = { workspace = true }
 getrandom = { workspace = true }
-reqwest = { workspace = true }
+# The outbound HTTP client (the `Network::net_fetch`/`net_spawn` capability on `RealHost`). Optional
+# so an AOT binary whose program never imports `std.http` links without reqwest and its ~1.5 MB TLS
+# stack (rustls/ring/hyper/h2) — dropped by `noeta build --native`'s per-ring footprint selection
+# (DCE Axis B). Default-on: the toolchain and every non-tailored build keep the full client.
+reqwest = { workspace = true, optional = true }
+
+[features]
+default = ["ring-http-client"]
+# The `std.http` outbound-client ring: pulls reqwest into `RealHost`. Off ⇒ `net_fetch` is a stub
+# that errors (never reached — a program that doesn't import `std.http` never calls it), and reqwest
+# is absent from the link.
+ring-http-client = ["dep:reqwest"]
 
 [dev-dependencies]
 criterion = { workspace = true }

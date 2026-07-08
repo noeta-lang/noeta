@@ -1894,11 +1894,19 @@ dependencies = [
  "noeta-ast",
  "noeta-bytecode",
  "noeta-compiler",
+ "noeta-jit-abi",
  "noeta-lexer",
  "noeta-parser",
  "noeta-span",
  "noeta-value",
  "object 0.37.3",
+]
+
+[[package]]
+name = "noeta-jit-abi"
+version = "0.0.0"
+dependencies = [
+ "noeta-value",
 ]
 
 [[package]]
@@ -2067,6 +2075,7 @@ dependencies = [
  "noeta-diagnostics",
  "noeta-gc",
  "noeta-jit",
+ "noeta-jit-abi",
  "noeta-lexer",
  "noeta-object",
  "noeta-parser",
