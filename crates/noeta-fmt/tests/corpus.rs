@@ -64,8 +64,8 @@ fn collect_noe(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[test]
 fn corpus_is_safe_and_idempotent() {
-    // Both formatting policies must be safe, idempotent, and comment-complete: the default
-    // (source-directed) and width-driven wrapping (`wrap = true`).
+    // Every configuration must be safe, idempotent, and comment-complete: the default
+    // (source-directed), width-driven wrapping, and import sorting.
     let configs = [
         ("wrap=false", FmtConfig::default()),
         (
@@ -73,6 +73,13 @@ fn corpus_is_safe_and_idempotent() {
             FmtConfig {
                 wrap: true,
                 line_width: 80,
+                ..FmtConfig::default()
+            },
+        ),
+        (
+            "sort_imports",
+            FmtConfig {
+                sort_imports: true,
                 ..FmtConfig::default()
             },
         ),

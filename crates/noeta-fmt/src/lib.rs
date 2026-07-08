@@ -85,6 +85,11 @@ pub struct FmtConfig {
     pub line_width: usize,
     /// `match` arm arrow layout.
     pub match_arm_arrows: ArrowStyle,
+    /// Sort `use` imports. `false` (default) leaves them in source order; `true` alphabetizes each
+    /// contiguous run of `use` statements (and the names inside a `use A.{…}` group). A run that
+    /// carries comments is left untouched, so a hand-grouped, commented import block is never
+    /// scrambled. Import order is semantically irrelevant, so this never changes behavior.
+    pub sort_imports: bool,
 }
 
 impl Default for FmtConfig {
@@ -93,6 +98,7 @@ impl Default for FmtConfig {
             wrap: false,
             line_width: 100,
             match_arm_arrows: ArrowStyle::default(),
+            sort_imports: false,
         }
     }
 }
@@ -277,6 +283,46 @@ mod tests {
         assert!(format_stmt_at("t.noe", "fn f( {", 3, &FmtConfig::default()).is_none());
         // Already canonical statement → no edit.
         assert!(format_stmt_at("t.noe", "echo 1\n", 4, &FmtConfig::default()).is_none());
+    }
+
+    fn fmt_sorted(text: &str) -> Result<String, FmtError> {
+        format_source(
+            "test.noe",
+            text,
+            &FmtConfig {
+                sort_imports: true,
+                ..FmtConfig::default()
+            },
+        )
+    }
+
+    #[test]
+    fn use_forms_round_trip() {
+        // Single imports print dotted (no braces); groups keep braces.
+        assert_eq!(
+            fmt("use App.Models.User\nuse std.math.sqrt\nuse App.{Invoice, Receipt}\n").unwrap(),
+            "use App.Models.User\nuse std.math.sqrt\nuse App.{Invoice, Receipt}\n"
+        );
+    }
+
+    #[test]
+    fn sort_imports_orders_runs_and_names() {
+        assert_eq!(
+            fmt_sorted("use App.Zebra\nuse App.Alpha\nuse std.math.{sqrt, abs}\n").unwrap(),
+            "use App.Alpha\nuse App.Zebra\nuse std.math.{abs, sqrt}\n"
+        );
+        // Default leaves them in source order.
+        assert_eq!(
+            fmt("use App.Zebra\nuse App.Alpha\n").unwrap(),
+            "use App.Zebra\nuse App.Alpha\n"
+        );
+    }
+
+    #[test]
+    fn sort_imports_leaves_a_commented_run_alone() {
+        // A comment anywhere in the run pins its order (never scramble a hand-grouped block).
+        let src = "use App.Zebra // pinned\nuse App.Alpha\n";
+        assert_eq!(fmt_sorted(src).unwrap(), src);
     }
 
     #[test]
