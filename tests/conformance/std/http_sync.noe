@@ -14,23 +14,23 @@
 // expect: stdout "204"
 // expect: stdout "none"
 // expect: exit 0
-use std.{http}
+use std.http.client
 
-r = http.get("https://svc.test/echo")
+r = client.get("https://svc.test/echo")
 echo r.status()
 echo r.ok()
 echo r.body()
 echo r.header("content-type")
 echo r is Response
 
-p = http.post("https://svc.test/echo", "hi")
+p = client.post("https://svc.test/echo", "hi")
 echo p.body()
 
-nf = http.get("https://svc.test/status/404")
+nf = client.get("https://svc.test/status/404")
 echo nf.status()
 echo nf.ok()
 
-echo http.get("https://api.example.com/v1/data").body()
+echo client.get("https://api.example.com/v1/data").body()
 
-echo http.request("delete", "https://svc.test/status/204").status()
-echo http.head("https://svc.test/echo").header("x-missing")
+echo client.request("delete", "https://svc.test/status/204").status()
+echo client.head("https://svc.test/echo").header("x-missing")

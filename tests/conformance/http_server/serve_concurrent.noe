@@ -1,4 +1,4 @@
-// http.serve concurrent dispatch (http-server S3b): an async handler suspends at its `await`, so all
+// server.serve concurrent dispatch (http-server S3b): an async handler suspends at its `await`, so all
 // five scripted connections are accepted and in flight — each prints "handling" — *before* any
 // completes and prints "done". A serial server would print handling/done paired per request; here
 // every handler starts before the first sleep elapses, then they all resume together. Both backends
@@ -15,7 +15,7 @@
 // expect: stdout "done DELETE /users/42"
 // expect: stdout "served"
 // expect: exit 0
-use std.{http}
+use std.http.server
 use std.task.{sleep}
 
 async fn handle(req: Request): Response {
@@ -23,8 +23,8 @@ async fn handle(req: Request): Response {
     echo "handling ${line}"
     sleep(5).await
     echo "done ${line}"
-    return http.response(200, "ok")
+    return server.response(200, "ok")
 }
 
-http.serve(8080, handle)
+server.serve(8080, handle)
 echo "served"

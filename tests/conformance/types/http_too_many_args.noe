@@ -2,5 +2,5 @@
 // third positional argument to a bodyless verb is a static arity error — proving the registry's
 // optional-param support bounds the max arity, not just the min.
 // expect: error E0007 at 6:6
-use std.{http}
-echo http.get("https://svc.test/echo", {"a": "b"}, "extra").status()
+use std.http.client
+echo client.get("https://svc.test/echo", {"a": "b"}, "extra").status()

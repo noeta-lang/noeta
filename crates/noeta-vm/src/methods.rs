@@ -410,7 +410,7 @@ impl<'m> Vm<'m> {
         // `vec`'s bulk `*_all` kernels are the only unmigrated native functions and stay per-backend;
         // every other reachable name is registered, so anything else here is an unknown function.
         // `module` is the root-qualified identity, so match on its bare name (`std.vec` → `vec`).
-        if noeta_stdlib::registry::bare_module_name(module) == "vec" {
+        if noeta_stdlib::registry::module_name(module) == "vec" {
             return self.call_vec(func, args, span);
         }
         let error = noeta_stdlib::no_function_error(module, func);

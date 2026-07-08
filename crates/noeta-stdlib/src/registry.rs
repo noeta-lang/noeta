@@ -260,11 +260,12 @@ pub fn find_module(name: &str) -> Option<&'static ExtModule> {
         .find(|m| m.name == name)
 }
 
-/// The bare module name of a (possibly root-qualified) module identity: `"std.vec"` → `"vec"`,
-/// `"vec"` → `"vec"`. The transitional per-backend kernel sites (`vec`/`quat` bulk `*_all`, `fs.list`,
-/// `json.parse`) still match by bare name; they read it through this so a qualified identity resolves.
-pub fn bare_module_name(module: &str) -> &str {
-    module.rsplit('.').next().unwrap_or(module)
+/// The registered module name of a (possibly root-qualified) module identity — the identity with its
+/// extension root stripped: `"std.vec"` → `"vec"`, `"std.http.client"` → `"http.client"`, bare
+/// `"vec"` → `"vec"`. This is the `ExtModule::name` the identity resolves to. The transitional
+/// per-backend sites (`vec`/`quat` bulk `*_all`, `fs.list`) and the AOT ring tables key on this name.
+pub fn module_name(module: &str) -> &str {
+    module.split_once('.').map_or(module, |(_root, name)| name)
 }
 
 /// Whether `root` is the namespace root of some registered extension (`"std"` today; a package's
@@ -414,7 +415,7 @@ pub fn dispatch_method(
 pub fn is_module_function(module: &str, func: &str) -> bool {
     find_function_sig(module, func).is_some()
         || matches!(
-            (bare_module_name(module), func),
+            (module_name(module), func),
             (
                 "vec",
                 "add_all" | "sub_all" | "scale_all" | "dot_all" | "length_all"
@@ -959,7 +960,10 @@ const OPT_BODY: SigType = SigType::Optional(&STR_OR_BYTES);
 /// reqwest future on the real host. `query` is the RFC-draft HTTP QUERY method — safe, idempotent,
 /// body-carrying. Each performs the request through the Host (deterministic sandbox, real under
 /// `noeta run`). Timeouts are a deferred follow-on.
-const HTTP_FNS: &[ExtFn] = &[
+/// The outbound-client functions of `std.http.client` — each pulls the reqwest/TLS ring. Split out
+/// of the former single `http` module (package-manager P0.3b) so a whole-module `use std.http.client`
+/// is precisely the client-ring signal, and `use std.http.server` sheds reqwest entirely.
+const HTTP_CLIENT_FNS: &[ExtFn] = &[
     ExtFn {
         name: "get",
         params: &[Str, OPT_HEADERS],
@@ -993,13 +997,6 @@ const HTTP_FNS: &[ExtFn] = &[
     ExtFn {
         name: "request",
         params: &[Str, Str, OPT_HEADERS],
-        ret: Concrete(RESPONSE_SIG),
-    },
-    // The server-side response builder (http-server S2): the handler constructs its reply. Status
-    // is required; body (string|bytes, default empty) and a headers map are optional.
-    ExtFn {
-        name: "response",
-        params: &[Int, OPT_BODY, OPT_HEADERS],
         ret: Concrete(RESPONSE_SIG),
     },
     ExtFn {
@@ -1038,6 +1035,15 @@ const HTTP_FNS: &[ExtFn] = &[
         ret: Concrete(SigType::Future(&RESPONSE_SIG)),
     },
 ];
+
+/// The server-side functions of `std.http.server`: the pure `response` builder (status + optional
+/// body/headers). `serve` (the inbound accept loop, a higher-order orchestrator) is the module's
+/// ctx function. None of these pull reqwest — a `use std.http.server` program links no client ring.
+const HTTP_SERVER_FNS: &[ExtFn] = &[ExtFn {
+    name: "response",
+    params: &[Int, OPT_BODY, OPT_HEADERS],
+    ret: Concrete(RESPONSE_SIG),
+}];
 
 /// Read the optional `headers: Map<string, string>` argument at `index`, or an empty list if the
 /// call omitted it (http arc H5). The `http` module is `deep_marshal`, so the map arrives as a
@@ -2277,14 +2283,26 @@ const STD_MODULES: &[ExtModule] = &[
         ..ExtModule::DEFAULTS
     },
     ExtModule {
-        name: "http",
-        functions: HTTP_FNS,
+        // The outbound client (package-manager P0.3b): `get`/`post`/…/`_async`. Its reqwest/TLS tree
+        // is the ~5 MB `ring-http-client` payload, so isolating it from the server lets a
+        // server-only program shed it. `http_dispatch` is shared with the server module (the two
+        // function-name sets are disjoint, so one func-name router serves both).
+        name: "http.client",
+        functions: HTTP_CLIENT_FNS,
         dispatch: http_dispatch,
         // The optional `headers` argument is a `Map` — needs the deep marshalling that surfaces
         // it as `NativeValue::Map` (http arc H5). url/body strings project fine either way.
         deep_marshal: true,
-        // `serve` — the accept→dispatch→reply loop (higher-order-abi H3): a higher-order
-        // orchestrator (closure handler, many futures in flight), so it lives in the ctx table.
+        ..ExtModule::DEFAULTS
+    },
+    ExtModule {
+        // The inbound server (package-manager P0.3b): the pure `response` builder + the `serve`
+        // accept→dispatch→reply loop. `serve` (higher-order-abi H3) is a higher-order orchestrator
+        // (closure handler, many futures in flight), so it lives in the ctx table. No reqwest.
+        name: "http.server",
+        functions: HTTP_SERVER_FNS,
+        dispatch: http_dispatch,
+        deep_marshal: true,
         ctx_functions: crate::serve::HTTP_CTX_FNS,
         ctx_dispatch: Some(crate::serve::http_ctx_dispatch),
     },
@@ -2519,7 +2537,7 @@ mod tests {
         let mut h = host();
         // Status + body + headers.
         let built = dispatch(
-            "http",
+            "http.server",
             "response",
             &mut h,
             &[
@@ -2543,7 +2561,7 @@ mod tests {
         // An out-of-range status is rejected.
         assert!(
             dispatch(
-                "http",
+                "http.server",
                 "response",
                 &mut h,
                 &[NativeValue::Scalar(Scalar::Int(700))],

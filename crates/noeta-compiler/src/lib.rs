@@ -112,7 +112,7 @@ fn is_native_module(path: &[String], name: &str) -> bool {
 /// called through the same `call_native_module` path as `<mod>.<name>(...)`. `None` for a plain or
 /// nested module import, or a non-extension path.
 fn selective_import_module(path: &[String]) -> Option<String> {
-    if path.len() == 2
+    if path.len() >= 2
         && noeta_stdlib::registry::is_extension_root(&path[0])
         && noeta_stdlib::registry::find_module(&path.join(".")).is_some()
     {

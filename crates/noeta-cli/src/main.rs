@@ -1742,9 +1742,9 @@ fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
     // statically pinned), so a module that owns a native-dep ring is selected conservatively.
     // Module identities are root-qualified (`std.http`); the ring tables key on the module name, so
     // strip the root before looking up. A turbofish's module is the source receiver (a local name,
-    // unrooted) and passes through `bare_module_name` unchanged.
+    // unrooted) and passes through `module_name` unchanged.
     let note_module = |name: &str, rings: &mut BTreeSet<String>| {
-        if let Some(ring) = module_ring(noeta_stdlib::registry::bare_module_name(name)) {
+        if let Some(ring) = module_ring(noeta_stdlib::registry::module_name(name)) {
             rings.insert(ring.to_string());
         }
     };
@@ -1753,7 +1753,7 @@ fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
     // is what lets a *client/server split* pay off — a program that names only `http.serve`/
     // `http.response` selects no client ring and sheds reqwest, while `http.get` selects it.
     let note_fn = |m: &str, func: &str, rings: &mut BTreeSet<String>| {
-        if let Some(ring) = fn_ring(noeta_stdlib::registry::bare_module_name(m), func) {
+        if let Some(ring) = fn_ring(noeta_stdlib::registry::module_name(m), func) {
             rings.insert(ring.to_string());
         }
     };
@@ -1786,38 +1786,22 @@ fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
 #[cfg(feature = "jit")]
 fn module_ring(name: &str) -> Option<&'static str> {
     match name {
-        "http" => Some("ring-http-client"),
+        // Post-split (P0.3b) the module identity already separates client from server: the whole
+        // `http.client` module pulls reqwest, `http.server` pulls none. So a whole-module value is
+        // now *precise* — no conservative over-selection, and no per-function list needed.
+        "http.client" => Some("ring-http-client"),
         _ => None,
     }
 }
 
-/// The ring a *precisely-named* function selects. Only the outbound-client functions of `http` pull
-/// reqwest; its `response` builder (pure) and `serve` (inbound, tokio — always compiled) do not, so a
-/// program that references only those selects no client ring. Sound by construction: a real client
-/// call always surfaces as one of these names (or as a whole-module value, handled above), so reqwest
-/// is never stripped from a program that can reach it.
+/// The ring a *precisely-named* function selects (a selective import `use std.http.client.get`, or a
+/// turbofish). Post-split (P0.3b) the client/server distinction lives in the *module* identity, not
+/// the function name, so a selectively-imported function selects exactly its module's ring — no
+/// per-function list. Sound by construction: a client call names a `http.client` function (or a
+/// whole-module value), so reqwest is never stripped from a program that can reach it.
 #[cfg(feature = "jit")]
-fn fn_ring(module: &str, func: &str) -> Option<&'static str> {
-    const HTTP_CLIENT_FNS: &[&str] = &[
-        "get",
-        "head",
-        "delete",
-        "post",
-        "put",
-        "query",
-        "request",
-        "get_async",
-        "head_async",
-        "delete_async",
-        "post_async",
-        "put_async",
-        "query_async",
-        "request_async",
-    ];
-    match module {
-        "http" if HTTP_CLIENT_FNS.contains(&func) => Some("ring-http-client"),
-        _ => None,
-    }
+fn fn_ring(module: &str, _func: &str) -> Option<&'static str> {
+    module_ring(module)
 }
 
 /// Locate the AOT runtime staticlib (`libnoeta_aot.a`) and the native system libraries it must be
@@ -3248,20 +3232,21 @@ mod tests {
 
     #[cfg(feature = "jit")]
     #[test]
-    fn aot_ring_features_detects_http_through_every_lowering() {
-        use noeta_bytecode::{Const, NameId, Op};
-        use noeta_span::Span;
+    fn aot_ring_features_selects_http_client_but_not_server() {
+        use noeta_bytecode::Const;
         let client = vec!["ring-http-client".to_string()];
 
-        // `use std.{http}` → a whole-module value: conservative (could call any http fn) → client ring.
-        // Module identities are root-qualified (`std.http`), as the compiler now emits them.
-        let via_module = module_with(vec![Const::NativeModule("std.http".into())], vec![], vec![]);
+        // `use std.http.client` → a whole-module value. Post-split (P0.3b) this is *precise*: the
+        // client module owns reqwest, so the whole-module reference selects the client ring. Module
+        // identities are root-qualified (`std.http.client`), as the compiler now emits them.
+        let via_module =
+            module_with(vec![Const::NativeModule("std.http.client".into())], vec![], vec![]);
         assert_eq!(aot_ring_features(&via_module), client);
 
-        // `use std.http.get` → a selective import of a *client* function → client ring.
+        // `use std.http.client.get` → a selective import of a client function → client ring.
         let client_fn = module_with(
             vec![Const::ModuleFn {
-                module: "std.http".into(),
+                module: "std.http.client".into(),
                 func: "get".into(),
             }],
             vec![],
@@ -3269,41 +3254,23 @@ mod tests {
         );
         assert_eq!(aot_ring_features(&client_fn), client);
 
-        // The client/server split payoff: a selective import of only *server* functions
-        // (`use std.http.{serve, response}`) selects NO client ring — reqwest is shed.
+        // The split payoff: a `use std.http.server` program — whole module *or* its `response`/`serve`
+        // functions — selects NO client ring, so reqwest is shed from the archive.
+        let server_module =
+            module_with(vec![Const::NativeModule("std.http.server".into())], vec![], vec![]);
+        assert!(aot_ring_features(&server_module).is_empty());
         let server_fn = module_with(
-            vec![
-                Const::ModuleFn {
-                    module: "std.http".into(),
-                    func: "serve".into(),
-                },
-                Const::ModuleFn {
-                    module: "std.http".into(),
-                    func: "response".into(),
-                },
-            ],
+            vec![Const::ModuleFn {
+                module: "std.http.server".into(),
+                func: "response".into(),
+            }],
             vec![],
             vec![],
         );
         assert!(aot_ring_features(&server_fn).is_empty());
 
-        // The fully-qualified / turbofish call form → a `TypedModuleCall` naming module + func (names[0], [1]).
-        let via_extcall = module_with(
-            vec![],
-            vec![Op::TypedModuleCall {
-                dst: 0,
-                module: NameId(0),
-                func: NameId(1),
-                args: Box::new([]),
-                recipe: None,
-                span: Span::empty_at(0),
-            }],
-            vec!["http".to_string(), "get".to_string()],
-        );
-        assert_eq!(aot_ring_features(&via_extcall), client);
-
         // A program that only touches an always-on core / not-yet-gated module selects no ring.
-        let non_http = module_with(vec![Const::NativeModule("math".into())], vec![], vec![]);
+        let non_http = module_with(vec![Const::NativeModule("std.math".into())], vec![], vec![]);
         assert!(aot_ring_features(&non_http).is_empty());
     }
 }

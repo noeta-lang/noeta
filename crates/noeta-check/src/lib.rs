@@ -1555,7 +1555,7 @@ impl Checker {
                     // A selective member import `use <root>.<mod>.<fn>` — a two-segment path under a
                     // registered extension root whose second segment is a known module. Each name
                     // binds as a bare function alias against the module's root-qualified identity.
-                    let selective = (path.len() == 2 && rooted)
+                    let selective = (path.len() >= 2 && rooted)
                         .then(|| path.join("."))
                         .filter(|m| stdlib::is_std_module(m));
                     for name in names {

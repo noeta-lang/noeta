@@ -1501,7 +1501,7 @@ impl Interpreter {
         // member import (`use std.math.sqrt`) binds each member to a `(module, func)` module-function
         // value; other imports (and unrecognized `std` names) fall back to the opaque-stub binding.
         let rooted = !path.is_empty() && noeta_stdlib::registry::is_extension_root(&path[0]);
-        let selective_module = (path.len() == 2 && rooted)
+        let selective_module = (path.len() >= 2 && rooted)
             .then(|| path.join("."))
             .filter(|m| noeta_stdlib::registry::find_module(m).is_some());
         for imported in names {
@@ -2628,7 +2628,7 @@ impl Interpreter {
         // `vec`'s bulk `*_all` kernels are the only unmigrated native functions and stay per-backend;
         // every other reachable name is registered, so anything else here is an unknown function.
         // `module` is the root-qualified identity, so match on its bare name (`std.vec` → `vec`).
-        if noeta_stdlib::registry::bare_module_name(module) == "vec" {
+        if noeta_stdlib::registry::module_name(module) == "vec" {
             return self.call_vec(func, args, span);
         }
         let error = noeta_stdlib::no_function_error(name, func);
