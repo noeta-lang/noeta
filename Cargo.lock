@@ -1766,7 +1766,9 @@ dependencies = [
 name = "noeta-crdt"
 version = "0.0.0"
 dependencies = [
+ "postcard",
  "proptest",
+ "serde",
 ]
 
 [[package]]

@@ -7,6 +7,12 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+# Wire serialization (p2p P2.0): CRDT state crosses the P2p byte seam, so a Mergeable value must be
+# sendable. serde derive + postcard (compact, deterministic, no_std+alloc) — the same postcard the
+# rest of the workspace pins. This is the one dependency the convergence core carries, and only
+# because serialization is genuinely part of a replicated type's contract.
+serde = { workspace = true }
+postcard = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

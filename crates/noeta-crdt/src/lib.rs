@@ -40,15 +40,35 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+
 /// A **state-based CRDT**: a join-semilattice whose [`merge`](Mergeable::merge) is commutative,
 /// associative, and idempotent. Implementing this type is a *promise* to uphold those three laws —
 /// it is what makes a value safe to replicate. In a later slice this Rust trait is the backing for
 /// the language-level `Mergeable` bound that `synced_signal` requires of its state (§9.15.1); in P0
 /// it is the internal contract the `std.crdt` surface dispatches `merge` through.
-pub trait Mergeable {
+///
+/// A replicated value must also be **wire-sendable** — its whole state has to cross the [`crate`]-
+/// external P2p byte seam to reach a peer — so serialization is part of the contract (p2p P2.0),
+/// provided once here over [`postcard`] (compact and deterministic: the same bytes on every host,
+/// which the sandbox differential depends on). Concrete types only implement [`Mergeable::merge`].
+pub trait Mergeable: Serialize + DeserializeOwned + Sized {
     /// The least upper bound of `self` and `other` — a new state greater than or equal to both
     /// under the lattice order. Never mutates either operand.
     fn merge(&self, other: &Self) -> Self;
+
+    /// The full state serialized for the wire. Deterministic (the state's ordered collections
+    /// serialize in a fixed order), so two hosts encode an equal value to equal bytes.
+    fn to_bytes(&self) -> Vec<u8> {
+        postcard::to_allocvec(self).expect("CRDT state is always serializable")
+    }
+
+    /// Reconstruct state from wire bytes, or `None` if they are malformed / not this type — a
+    /// received message is untrusted input, so decoding failure is an ordinary outcome, not a panic.
+    fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        postcard::from_bytes(bytes).ok()
+    }
 }
 
 /// A **grow-only counter** (G-Counter): a per-replica map of monotonically increasing counts whose
@@ -58,7 +78,7 @@ pub trait Mergeable {
 ///
 /// Counts saturate at [`u64::MAX`] rather than overflow — a grow-only counter is conceptually
 /// unbounded, and saturation keeps every operation total (no panic path across the extern seam).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GCounter {
     /// Replica id → that replica's contributed count. Ordered so merge/equality/display are
     /// iteration-order-independent. An absent replica reads as 0.
@@ -105,7 +125,7 @@ impl Mergeable for GCounter {
 /// accumulating decrements — whose value is `positive - negative`. This is the standard way to get
 /// a decrementable counter while keeping each half grow-only (and therefore a lattice), since a
 /// single counter that could go down would not have a monotone merge.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PnCounter {
     positive: GCounter,
     negative: GCounter,
@@ -158,7 +178,7 @@ impl Mergeable for PnCounter {
 /// the convergence machinery generalizes past counters. Removal is deliberately absent: it needs an
 /// add/remove CRDT (OR-Set) whose per-element tags belong with the value-carrying types in a later
 /// slice.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GSet {
     /// Members, ordered — so merge/equality/`members()` are iteration-order-independent.
     members: BTreeSet<String>,
@@ -267,6 +287,37 @@ mod tests {
     }
 
     // --- GSet ---------------------------------------------------------------------------------
+
+    // --- Wire serialization (p2p P2.0) --------------------------------------------------------
+
+    #[test]
+    fn every_crdt_round_trips_through_the_wire() {
+        let g = GCounter::new().increment("A", 7).increment("B", 3);
+        assert_eq!(GCounter::from_bytes(&g.to_bytes()), Some(g.clone()));
+
+        let p = PnCounter::new().increment("A", 5).decrement("B", 2);
+        assert_eq!(PnCounter::from_bytes(&p.to_bytes()), Some(p.clone()));
+
+        let s = GSet::new().insert("x").insert("y");
+        assert_eq!(GSet::from_bytes(&s.to_bytes()), Some(s.clone()));
+    }
+
+    #[test]
+    fn a_decoded_peer_state_merges_like_the_original() {
+        // The wire round-trip must preserve merge behavior: decoding B's state and merging it is
+        // identical to merging B directly — the property the synced signal relies on.
+        let a = GCounter::new().increment("A", 4);
+        let b = GCounter::new().increment("B", 6);
+        let decoded_b = GCounter::from_bytes(&b.to_bytes()).unwrap();
+        assert_eq!(a.merge(&decoded_b), a.merge(&b));
+        assert_eq!(a.merge(&decoded_b).value(), 10);
+    }
+
+    #[test]
+    fn malformed_or_cross_type_bytes_decode_to_none_not_a_panic() {
+        // Garbage bytes are untrusted input → None, never a panic.
+        assert_eq!(GCounter::from_bytes(&[0xFF, 0xFF, 0xFF, 0xFF]), None);
+    }
 
     #[test]
     fn gset_insert_is_idempotent_and_merge_is_union() {
