@@ -311,6 +311,10 @@ pub type CtxTypeDispatch = fn(
     args: &[crate::Slot],
 ) -> Result<crate::CtxOut, crate::CtxError>;
 
+/// An [`ExtType::arena_getter`] declaration: the method name plus the projection reading the
+/// [`crate::Retained`] id off the extern box.
+pub type ArenaGetter = (&'static str, fn(&dyn crate::ExternValue) -> crate::Retained);
+
 /// A first-class value type contributed by an extension (extern-types X1): a reserved type name,
 /// its instance-method signatures, their shared dispatch, and the key capability the checker
 /// reads. The value behavior itself (equality, ordering, hash, display) lives on the
@@ -336,6 +340,18 @@ pub struct ExtType {
     /// [`ExtType::ctx_dispatch`] with slot arguments. Disjoint from `methods` by name.
     pub ctx_methods: &'static [ExtFn],
     pub ctx_dispatch: Option<CtxTypeDispatch>,
+    /// Hot-path declaration (H5 perf): `Some((method, project))` marks `method` — one of the
+    /// `ctx_methods` — as a **gated arena read**: its entire observable behavior is "return the
+    /// receiver's retained arena entry", where `project` reads the [`crate::Retained`] id off
+    /// the extern box. While the type's **read gate** is open (the default), the backend inlines
+    /// the read at the call site — arena load + retain, no ctx dispatch — which is what keeps a
+    /// `signal.get()`/`cell.get()` hot loop at intercept speed. The extension closes the gate
+    /// ([`crate::NativeCtx::set_read_gate`]) for exactly the windows where the full dispatch
+    /// does *more* than the plain read (dependency tracking while an effect body runs; a dirty
+    /// memo), and calls fall back to the ordinary ctx dispatch — which must behave identically
+    /// to the fast path whenever the gate is open. The declaration is semantic, not an
+    /// optimization hint: every tier (interpreter now, JIT later) may compile it.
+    pub arena_getter: Option<ArenaGetter>,
 }
 
 impl ExtType {
@@ -353,6 +369,7 @@ impl ExtType {
         key_capable: false,
         ctx_methods: &[],
         ctx_dispatch: None,
+        arena_getter: None,
     };
 }
 

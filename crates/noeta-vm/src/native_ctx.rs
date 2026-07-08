@@ -42,8 +42,10 @@ fn bad_retained() -> CtxError {
 impl<'c, 'm> VmCtx<'c, 'm> {
     /// Wrap the VM for one dispatch, seeding the table with the (borrowed) call arguments —
     /// retained here, so the table's uniform "every entry owns a reference" invariant holds.
+    /// The table itself comes from the VM's pool (H5 perf), so a hot dispatch loop runs
+    /// alloc-free; re-entrant dispatches simply pop the next spare.
     pub(crate) fn new(vm: &'c mut Vm<'m>, args: &[Value], span: Span) -> VmCtx<'c, 'm> {
-        let mut slots = Vec::with_capacity(args.len() + 4);
+        let mut slots = vm.ctx_table_pool.pop().unwrap_or_default();
         for &a in args {
             retain(a);
             slots.push(Some(a));
@@ -54,6 +56,13 @@ impl<'c, 'm> VmCtx<'c, 'm> {
             free_list: Vec::new(),
             span,
         }
+    }
+
+    /// Seed one (borrowed) argument into the table — retained here, like `new`'s seeding loop.
+    /// Used by the type-method entry to place the receiver + args without an intermediate vec.
+    pub(crate) fn insert_seed(&mut self, borrowed: Value) {
+        retain(borrowed);
+        self.slots.push(Some(borrowed));
     }
 
     /// Store an **owned** reference, minting its slot (freed indices are reused so a long serve
@@ -89,9 +98,16 @@ impl<'c, 'm> VmCtx<'c, 'm> {
 
 impl Drop for VmCtx<'_, '_> {
     fn drop(&mut self) {
-        // Release every reference the dispatch left behind (its arguments, forgotten temps).
-        for value in std::mem::take(&mut self.slots).into_iter().flatten() {
+        // Release every reference the dispatch left behind (its arguments, forgotten temps),
+        // then hand the emptied table back to the pool for the next dispatch.
+        let mut slots = std::mem::take(&mut self.slots);
+        for value in slots.drain(..).flatten() {
             self.vm.release_value(value);
+        }
+        // Cap what we keep: a long-lived serve loop's table stays window-sized, but a one-off
+        // giant table (a 200k-result collect) is not worth holding onto.
+        if slots.capacity() <= 1024 && self.vm.ctx_table_pool.len() < 8 {
+            self.vm.ctx_table_pool.push(slots);
         }
     }
 }
@@ -359,6 +375,15 @@ impl NativeCtx for VmCtx<'_, '_> {
             self.vm.ext_arena_free.push(retained);
         }
     }
+
+    fn set_read_gate(&mut self, type_name: &'static str, open: bool) {
+        let closed = &mut self.vm.ext_closed_gates;
+        if open {
+            closed.retain(|t| *t != type_name);
+        } else if !closed.contains(&type_name) {
+            closed.push(type_name);
+        }
+    }
 }
 
 impl<'m> Vm<'m> {
@@ -373,14 +398,33 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
-        let mut all = Vec::with_capacity(args.len() + 1);
-        all.push(recv);
-        all.extend_from_slice(args);
-        let mut ctx = VmCtx::new(self, &all, span);
-        let arg_slots: Vec<Slot> = (1..all.len() as Slot).collect();
-        let outcome = noeta_stdlib::registry::dispatch_ctx_method(
-            type_name, method, &mut ctx, 0, &arg_slots,
-        );
+        // Seed the table directly — receiver as slot 0, arguments after it — and index the
+        // argument slots from a stack buffer: a hot `set(v)` loop then builds no vectors at all
+        // (the table itself is pooled).
+        let mut ctx = VmCtx::new(self, &[], span);
+        ctx.insert_seed(recv);
+        for &a in args {
+            ctx.insert_seed(a);
+        }
+        let mut slot_buf = [0 as Slot; 8];
+        let slot_vec;
+        let arg_slots: &[Slot] = if args.len() <= 8 {
+            for (i, s) in slot_buf.iter_mut().take(args.len()).enumerate() {
+                *s = (i + 1) as Slot;
+            }
+            &slot_buf[..args.len()]
+        } else {
+            slot_vec = (1..=args.len() as Slot).collect::<Vec<_>>();
+            &slot_vec
+        };
+        // Compiled-in extensions dispatch through the monomorphized route (every ctx op
+        // inlines); anything else falls back to the dyn table (H5 perf).
+        let outcome = noeta_stdlib::registry::static_dispatch_ctx_method(
+            type_name, method, &mut ctx, 0, arg_slots,
+        )
+        .unwrap_or_else(|| {
+            noeta_stdlib::registry::dispatch_ctx_method(type_name, method, &mut ctx, 0, arg_slots)
+        });
         match outcome {
             Ok(CtxOut::Slot(slot)) => {
                 let result = ctx.take(slot);
@@ -394,12 +438,20 @@ impl<'m> Vm<'m> {
                     )),
                 }
             }
+            // The overwhelmingly common data result of a mutator (`set`) — no shape/ret lookup.
+            Ok(CtxOut::Out(noeta_stdlib::NativeOut::Unit)) => {
+                drop(ctx);
+                Ok(Value::unit())
+            }
             Ok(CtxOut::Out(out)) => {
                 drop(ctx);
                 let ret = noeta_stdlib::registry::find_type_ctx_method(type_name, method)
                     .map(|f| f.ret)
                     .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit));
-                // Shape derivation sees the same `[recv, args…]` view the slots use.
+                // Shape derivation sees the receiver at index 0, as the slots do.
+                let mut all = Vec::with_capacity(args.len() + 1);
+                all.push(recv);
+                all.extend_from_slice(args);
                 Ok(materialize_ext(out, ret, &all))
             }
             Err(CtxError::Std(e)) => {
@@ -423,7 +475,12 @@ impl<'m> Vm<'m> {
     ) -> Result<Value, Abort> {
         let mut ctx = VmCtx::new(self, args, span);
         let arg_slots: Vec<Slot> = (0..args.len() as Slot).collect();
-        let outcome = noeta_stdlib::registry::dispatch_ctx(module, func, &mut ctx, &arg_slots);
+        // Compiled-in extensions dispatch through the monomorphized route (H5 perf).
+        let outcome =
+            noeta_stdlib::registry::static_dispatch_ctx(module, func, &mut ctx, &arg_slots)
+                .unwrap_or_else(|| {
+                    noeta_stdlib::registry::dispatch_ctx(module, func, &mut ctx, &arg_slots)
+                });
         match outcome {
             Ok(CtxOut::Slot(slot)) => {
                 let result = ctx.take(slot);

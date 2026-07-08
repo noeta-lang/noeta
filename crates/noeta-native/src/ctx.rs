@@ -232,4 +232,11 @@ pub trait NativeCtx {
     /// Release a retained value and free its arena cell (the id may be reused). Releasing an
     /// already-freed id is a no-op, so extension teardown paths need not track liveness.
     fn release_retained(&mut self, retained: Retained);
+
+    /// Open/close an extern type's **read gate** (H5 perf — see
+    /// [`crate::registry::ExtType::arena_getter`]). While closed, the type's declared arena-read
+    /// method dispatches through the full ctx path (where the extension can track dependencies,
+    /// recompute a memo, …); while open — the default — the backend inlines the read. Closing an
+    /// already-closed gate (or opening an open one) is a no-op; gates are per-run, per-type.
+    fn set_read_gate(&mut self, type_name: &'static str, open: bool);
 }

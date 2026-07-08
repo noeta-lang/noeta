@@ -663,6 +663,23 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
+        // A declared **gated arena read** (H5 perf, `ExtType::arena_getter`): while the type's
+        // read gate is open — the overwhelmingly common state — the whole call is an arena load
+        // + retain, no ctx machinery, which is what keeps a `get()` hot loop at intercept speed.
+        // One heap access resolves the type, matches the method, and projects the retained id.
+        let fast = recv.with_extern(|e| {
+            let ext = noeta_stdlib::registry::find_type(e.type_name())?;
+            let (getter, project) = ext.arena_getter?;
+            (getter == method).then(|| (ext.name, project(e)))
+        });
+        if let Some((type_name, retained)) = fast
+            && args.is_empty()
+            && (self.ext_closed_gates.is_empty() || !self.ext_closed_gates.contains(&type_name))
+        {
+            let value = self.ext_arena[retained as usize].expect("a live arena entry");
+            retain(value);
+            return Ok(value);
+        }
         // A type's **higher-order** methods (higher-order-abi H4) route through the ctx seam —
         // they call closures back and reach the retained arena, which the plain by-value
         // dispatch below cannot. Name sets are disjoint, so routing is per-method.

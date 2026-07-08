@@ -744,6 +744,15 @@ struct Vm<'m> {
     /// extension's own `'static` key, created on first access, dropped at VM drop. Language
     /// values never live here — they go through the arena above.
     ext_state: Vec<(&'static str, noeta_stdlib::ExtState)>,
+    /// Extern types whose **read gate** is currently closed (H5 perf): while a type is listed,
+    /// its declared `arena_getter` method takes the full ctx dispatch instead of the inlined
+    /// arena read. Almost always empty (the hot check is `is_empty()`); toggled by extensions
+    /// via `NativeCtx::set_read_gate` around tracking/dirty windows.
+    ext_closed_gates: Vec<&'static str>,
+    /// Spare ctx slot tables (H5 perf): a ctx dispatch pops one instead of allocating, and its
+    /// drop clears + returns it — a hot `set` loop then runs alloc-free. A stack, so ctx
+    /// re-entrancy (a called closure re-entering a dispatch) simply pops the next one.
+    ctx_table_pool: Vec<Vec<Option<Value>>>,
     /// Real OS-thread isolates (isolates I.4b), CLI-only / out-of-oracle. `parallel_isolates` selects
     /// the real path in the `Op::SpawnIsolate` handler; `isolate_module` is an `Arc` clone of the
     /// compiled module (`Send + Sync`) the entry point holds *alongside* the `&Module` borrow, so a
@@ -1812,6 +1821,8 @@ impl<'m> Vm<'m> {
             ext_arena: Vec::new(),
             ext_arena_free: Vec::new(),
             ext_state: Vec::new(),
+            ext_closed_gates: Vec::new(),
+            ctx_table_pool: Vec::new(),
             parallel_isolates: false,
             isolate_module: None,
             isolate_factory: None,

@@ -50,6 +50,17 @@ pub const CELL_CTX_METHODS: &[ExtFn] = &[
     },
 ];
 
+/// `Cell.get` is a **declared arena read** (H5 perf): its whole behavior is "return the retained
+/// entry", unconditionally (a cell tracks nothing), so the gate never closes and the backend may
+/// always inline it. The ctx `get` arm below stays the reference semantics — the tree-walker
+/// always dispatches through it, so the differential proves the two agree.
+pub const CELL_ARENA_GETTER: (&str, fn(&dyn ExternValue) -> Retained) = ("get", |e| {
+    e.as_any()
+        .downcast_ref::<CellBox>()
+        .expect("a Cell receiver wraps a CellBox")
+        .retained
+});
+
 /// The extern box: nothing but the arena id. Equality is **identity** (same box), the natural
 /// semantics for a mutable reference cell — and all a plain-data box *can* compare, since the
 /// held value is not in here.
@@ -85,9 +96,15 @@ impl ExternValue for CellBox {
     }
 }
 
-pub fn cell_ctx_dispatch(
+// The dispatches are **generic over the ctx** (`C: NativeCtx + ?Sized`, H5 perf): one source,
+// two instantiations. The registry's dyn table stores the `dyn NativeCtx` instantiation (what a
+// dynamically-loaded extension will use); a backend that compiles the extension in calls its
+// concrete instantiation instead, so every small ctx op (arena read/write, slot bookkeeping)
+// inlines — the Rust generics/dyn duality, applied to the extension ABI.
+
+pub fn cell_ctx_dispatch<C: NativeCtx + ?Sized>(
     func: &str,
-    ctx: &mut dyn NativeCtx,
+    ctx: &mut C,
     args: &[Slot],
 ) -> Result<CtxOut, CtxError> {
     match func {
@@ -102,9 +119,9 @@ pub fn cell_ctx_dispatch(
     }
 }
 
-pub fn cell_ctx_method_dispatch(
+pub fn cell_ctx_method_dispatch<C: NativeCtx + ?Sized>(
     method: &str,
-    ctx: &mut dyn NativeCtx,
+    ctx: &mut C,
     recv: Slot,
     args: &[Slot],
 ) -> Result<CtxOut, CtxError> {
@@ -134,7 +151,7 @@ pub fn cell_ctx_method_dispatch(
 }
 
 /// The arena id riding inside a `Cell` receiver.
-fn cell_of(ctx: &mut dyn NativeCtx, recv: Slot) -> CtxResult<Retained> {
+fn cell_of<C: NativeCtx + ?Sized>(ctx: &mut C, recv: Slot) -> CtxResult<Retained> {
     let mut retained = None;
     ctx.with_extern(recv, &mut |e| {
         retained = e.as_any().downcast_ref::<CellBox>().map(|c| c.retained);

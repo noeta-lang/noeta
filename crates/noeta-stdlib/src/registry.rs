@@ -73,11 +73,17 @@ const STD_TYPES: &[ExtType] = &[
         ..ExtType::DEFAULTS
     },
     // `Cell<T>` (higher-order-abi H4) — the generic, Class-3 corner of the matrix: all methods
-    // higher-order (ctx table), the held value in the retained arena.
+    // higher-order (ctx table), the held value in the retained arena; `get` is a declared
+    // always-open arena read (H5), so the backend inlines it.
     ExtType {
         name: crate::cell::CELL_TYPE_NAME,
         ctx_methods: crate::cell::CELL_CTX_METHODS,
-        ctx_dispatch: Some(crate::cell::cell_ctx_method_dispatch),
+        // A shim closure picks the `dyn` instantiation of the generic dispatch (the fn-pointer
+        // table needs the higher-ranked trait-object lifetime a turbofish cannot name).
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::cell::cell_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        arena_getter: Some(crate::cell::CELL_ARENA_GETTER),
         ..ExtType::DEFAULTS
     },
 ];
@@ -2191,10 +2197,47 @@ const STD_MODULES: &[ExtModule] = &[
     ExtModule {
         name: "cell",
         ctx_functions: crate::cell::CELL_CTX_FNS,
-        ctx_dispatch: Some(crate::cell::cell_ctx_dispatch),
+        ctx_dispatch: Some(|func, ctx, args| crate::cell::cell_ctx_dispatch(func, ctx, args)),
         ..ExtModule::DEFAULTS
     },
 ];
+
+/// Compiled-in fast route for ctx **functions** (H5 perf): the same generic dispatch fns the
+/// dyn table stores, instantiated over the backend's **concrete** ctx so every small ctx op
+/// (arena read/write, slot bookkeeping, closure call) inlines — the Rust generics/dyn duality
+/// applied to the extension ABI. `None` = the module is not compiled in (a future
+/// dynamically-loaded extension); the caller falls back to the dyn table, which behaves
+/// identically, just without the inlining.
+#[inline]
+pub fn static_dispatch_ctx<C: crate::NativeCtx + ?Sized>(
+    module: &str,
+    func: &str,
+    ctx: &mut C,
+    args: &[crate::Slot],
+) -> Option<Result<crate::CtxOut, crate::CtxError>> {
+    match module {
+        "cell" => Some(crate::cell::cell_ctx_dispatch(func, ctx, args)),
+        _ => None,
+    }
+}
+
+/// Compiled-in fast route for ctx **type methods** (H5 perf) — the type-method twin of
+/// [`static_dispatch_ctx`].
+#[inline]
+pub fn static_dispatch_ctx_method<C: crate::NativeCtx + ?Sized>(
+    type_name: &str,
+    method: &str,
+    ctx: &mut C,
+    recv: crate::Slot,
+    args: &[crate::Slot],
+) -> Option<Result<crate::CtxOut, crate::CtxError>> {
+    match type_name {
+        crate::cell::CELL_TYPE_NAME => Some(crate::cell::cell_ctx_method_dispatch(
+            method, ctx, recv, args,
+        )),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 mod tests {

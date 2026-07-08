@@ -322,6 +322,13 @@ impl NativeCtx for EvalCtx<'_> {
             self.interp.ext_arena_free.push(retained);
         }
     }
+
+    // The tree-walker never takes the inlined arena-read fast path — every declared
+    // `arena_getter` method goes through the full ctx dispatch here. That asymmetry is an
+    // ORACLE: the VM inlines the read while the gate is open, so the differential proves the
+    // extension's contract ("the fast path and the full dispatch behave identically whenever
+    // the gate is open") on every reactive/cell fixture. Gates are therefore meaningless here.
+    fn set_read_gate(&mut self, _type_name: &'static str, _open: bool) {}
 }
 
 impl Interpreter {
@@ -340,9 +347,14 @@ impl Interpreter {
         all.extend_from_slice(args);
         let mut ctx = EvalCtx::new(self, &all, span);
         let arg_slots: Vec<Slot> = (1..all.len() as Slot).collect();
-        let outcome = noeta_stdlib::registry::dispatch_ctx_method(
+        // Same monomorphized route as the VM (identical fn either way — the instantiation only
+        // decides inlining).
+        let outcome = noeta_stdlib::registry::static_dispatch_ctx_method(
             type_name, method, &mut ctx, 0, &arg_slots,
-        );
+        )
+        .unwrap_or_else(|| {
+            noeta_stdlib::registry::dispatch_ctx_method(type_name, method, &mut ctx, 0, &arg_slots)
+        });
         match outcome {
             Ok(CtxOut::Slot(slot)) => {
                 let result = ctx.take(slot);
@@ -384,7 +396,11 @@ impl Interpreter {
     ) -> Eval<Value> {
         let mut ctx = EvalCtx::new(self, args, span);
         let arg_slots: Vec<Slot> = (0..args.len() as Slot).collect();
-        let outcome = noeta_stdlib::registry::dispatch_ctx(module, func, &mut ctx, &arg_slots);
+        let outcome =
+            noeta_stdlib::registry::static_dispatch_ctx(module, func, &mut ctx, &arg_slots)
+                .unwrap_or_else(|| {
+                    noeta_stdlib::registry::dispatch_ctx(module, func, &mut ctx, &arg_slots)
+                });
         match outcome {
             Ok(CtxOut::Slot(slot)) => {
                 let result = ctx.take(slot);
