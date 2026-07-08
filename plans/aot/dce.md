@@ -204,15 +204,31 @@ machinery (generate the `REGISTRY` slice from a manifest's native deps, compile 
 them). When that lands, fold in the following — each is either a precision gap the manifest closes or
 a generalization the extension-split makes uniform:
 
-1. **Split `std.http` into client vs server *modules*.** Today the whole-module `use std.{http}` case
-   is conservative (keeps reqwest) because member calls lower to `CallMethod` on an unpinned receiver
-   and sync client fns (`get`/`post`) collide with `map.get`/user methods — so a server program that
-   imports the whole module can't be proven client-free. Splitting the surface (e.g. `std.http` =
-   outbound client; `std.http.server` / `std.serve` = `serve` + `response` + `Request`) makes
-   *module-level* detection precise, and lets a `ring-http-server` (inbound tokio — no reqwest)
-   separate cleanly from `ring-http-client` (reqwest). Until then, server programs should use
-   *selective* imports (`use std.http.{serve, response}`) to shed reqwest — the scan already handles
-   that soundly.
+1. **Namespace-qualified module identity + nested paths + the `std.http.client`/`std.http.server`
+   split.** (User-decided 2026-07-08; deferred here because it's *foundational* to the extension model,
+   not a DCE follow-on.) Three coupled pieces:
+   - **Module identity = the full path including the package root.** Today `find_module` matches a
+     **bare name** (`"http"`) and the resolver hard-codes `path == ["std"]`, so `std` is stripped/
+     assumed and a third-party `guzzle.http` would collide with `std.http`. Make identity the full
+     qualified path (`std.http.client` vs `guzzle.http.client` — distinct), each `Extension` owning a
+     namespace **root** in the `REGISTRY`. Generalize `is_native_module` / `selective_import_module` /
+     the checker off the hard-coded `std` to match any registered root's full path.
+   - **Nested-path resolution, binding the last segment.** `use std.http.client` today fails with
+     `E0005: module 'http' has no function 'client'` (it reads the last segment as a *function*). It
+     should join the segments after the root, look up the module `std.http.client`, and bind the
+     **last segment** (`client`) as the local — so calls read `client.get(...)`. `Const::NativeModule`
+     carries the full path; member calls dispatch on the value's stored path. Checker change is shallow:
+     `self.modules: HashSet<String>` (2 uses) → a `bound → full-path` map so `client.get` resolves.
+     (Qualified call-site form `http.client.get(...)` was considered and rejected — needs call-site
+     path resolution and namespace *values*; last-segment binding is what the user chose.)
+   - **The split itself:** move `serve` (ctx) + `response` (builder) out of `http` into `std.http.server`;
+     `get`/`post`/…/`_async` stay in `std.http.client`. `http` stops being a module. The `Response`/
+     `Request` extern **types** stay top-level (already registered independently — no move). Then
+     `module_ring("std.http.client")` → `ring-http-client`, `std.http.server` → none, and a
+     whole-module `use std.http.server` becomes **precise** (sheds reqwest) — no more conservatism.
+     Migration: ~21 files + 3 docs (`http.get`→`client.get`, `http.serve`→`server.serve`). Then land
+     `ring-http-server` (item 2). **Until this ships, server programs shed reqwest by using *selective*
+     imports (`use std.http.{serve, response}`) — the scan already handles that soundly.**
 2. **Add `ring-http-server`.** The inbound `RealHost` code (`net_listen`/`net_accept`/`net_reply`,
    `servers`/`conns`, `ServerState`, `RealAcceptIo`) is currently always-compiled (cheap — tokio is
    already linked for fs). Gate it for capability completeness once (1) makes the server signal
