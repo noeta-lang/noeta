@@ -2057,6 +2057,115 @@ fn a_path_dependency_resolves_and_runs() {
 }
 
 #[test]
+fn a_transitive_path_dependency_resolves_and_runs() {
+    // app → mid → low, each a path package. `mid` keys its own dependency `deep` (≠ low's root
+    // segment `low`), so the graph walk must rewrite mid's internal `use deep.base.leaf` to low's
+    // global segment for it to link — a transitive reference the app never names (P2.4).
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_transitive_run");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let mid = base.join("midlib");
+    let low = base.join("lowlib");
+    for d in [&app, &mid, &low] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nmid = { path = \"../midlib\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "use mid.api.top;\necho top();\n").unwrap();
+    std::fs::write(
+        mid.join("noeta.toml"),
+        "[package]\nname = \"acme/mid\"\nversion = \"1.0.0\"\n\
+         [dependencies]\ndeep = { path = \"../lowlib\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        mid.join("api.noe"),
+        "namespace mid.api;\nuse deep.base.leaf;\npub fn top(): string { return leaf(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        low.join("noeta.toml"),
+        "[package]\nname = \"acme/low\"\nversion = \"2.3.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        low.join("base.noe"),
+        "namespace low.base;\npub fn leaf(): string { return \"deep transitive value\"; }\n",
+    )
+    .unwrap();
+
+    lang()
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("deep transitive value"));
+}
+
+#[test]
+fn a_version_conflict_is_reported() {
+    // app depends on two packages that each pull a third at *different* versions — our flat link
+    // model permits one version per package, so this is an explainable conflict (P2.4).
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_version_conflict");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let a = base.join("a");
+    let b = base.join("b");
+    let c1 = base.join("c1");
+    let c2 = base.join("c2");
+    for d in [&app, &a, &b, &c1, &c2] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\na = { path = \"../a\" }\nb = { path = \"../b\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+    // a and b both depend on acme/shared, but at different on-disk versions.
+    std::fs::write(
+        a.join("noeta.toml"),
+        "[package]\nname = \"acme/a\"\nversion = \"1.0.0\"\n\
+         [dependencies]\ns = { path = \"../c1\" }\n",
+    )
+    .unwrap();
+    std::fs::write(a.join("a.noe"), "namespace a.x;\npub fn f(): int { return 1; }\n").unwrap();
+    std::fs::write(
+        b.join("noeta.toml"),
+        "[package]\nname = \"acme/b\"\nversion = \"1.0.0\"\n\
+         [dependencies]\ns = { path = \"../c2\" }\n",
+    )
+    .unwrap();
+    std::fs::write(b.join("b.noe"), "namespace b.x;\npub fn g(): int { return 2; }\n").unwrap();
+    std::fs::write(
+        c1.join("noeta.toml"),
+        "[package]\nname = \"acme/shared\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(c1.join("s.noe"), "namespace shared.core;\npub fn h(): int { return 3; }\n")
+        .unwrap();
+    std::fs::write(
+        c2.join("noeta.toml"),
+        "[package]\nname = \"acme/shared\"\nversion = \"2.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(c2.join("s.noe"), "namespace shared.core;\npub fn h(): int { return 4; }\n")
+        .unwrap();
+
+    lang()
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("acme/shared"));
+}
+
+#[test]
 fn a_registry_dependency_reports_it_is_not_yet_resolvable() {
     // Registry deps need the registry index (P2.5); path + git deps work today.
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_registrydep");

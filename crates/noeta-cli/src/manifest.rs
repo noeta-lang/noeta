@@ -149,101 +149,14 @@ pub fn resolve_active_tiers(entry: &Path, profile: &str) -> Result<Vec<String>, 
     manifest.active_tiers(profile)
 }
 
-/// Gather the entry's **dependency packages** as loader [`DepPackage`]s (package-manager P2.1/P2.3):
-/// discover the nearest `noeta.toml`, and for each `[dependencies]` entry materialize its sources so
-/// the loader can link them under the consumer's key. No manifest, or no `[dependencies]`, yields an
-/// empty list (a bare script has no deps).
-///
-/// A `path` dependency is a local tree; a `git` dependency is **fetched** (`ls-remote` for the tag's
-/// SHA, then a cached checkout into the package store — see [`crate::git`]). A `registry` dependency
-/// still errors, pending the registry index (P2.5). Each dependency must carry a `[package]` table —
-/// its `package` name segment is the **root** the loader re-roots to the consumer's key.
-///
-/// This layer is **flat** (direct dependencies only): a dependency's *own* transitive dependencies
-/// are not yet resolved — that (plus the `noeta.lock` pin that avoids an `ls-remote` per run) is P2.4.
+/// Gather the entry's **dependency packages** as loader [`DepPackage`]s (package-manager P2.1/P2.4):
+/// resolve the full transitive dependency graph and hand back the re-rooted packages the loader links.
+/// No manifest, or no `[dependencies]`, yields an empty list (a bare script has no deps). The graph
+/// walk ([`crate::graph`]) materializes each package (a `path` tree, a fetched `git` tag; a `registry`
+/// dependency errors pending P2.5), dedups by identity, and assigns global segments so transitive
+/// `use`s link without key collision.
 pub fn dependency_packages(entry: &Path) -> Result<Vec<noeta_loader::DepPackage>, String> {
-    let dir = entry.parent().unwrap_or_else(|| Path::new("."));
-    let Some(manifest_path) = find(dir) else {
-        return Ok(Vec::new());
-    };
-    let text = std::fs::read_to_string(&manifest_path)
-        .map_err(|err| format!("cannot read `{}`: {err}", manifest_path.display()))?;
-    let manifest =
-        Manifest::parse(&text).map_err(|err| format!("invalid `{}`: {err}", manifest_path.display()))?;
-    let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
-
-    // Open the package store once, only if a git dependency actually needs it.
-    let needs_store = manifest
-        .dependencies()
-        .values()
-        .any(|d| matches!(d, Dependency::Git { .. }));
-    let store = if needs_store {
-        Some(crate::store::Store::open().ok_or_else(|| {
-            "cannot open the package store (no writable cache directory) — needed for git \
-             dependencies"
-                .to_string()
-        })?)
-    } else {
-        None
-    };
-
-    let mut packages = Vec::new();
-    for (key, dep) in manifest.dependencies() {
-        let dep_dir = match dep {
-            Dependency::Path { path } => manifest_dir.join(path),
-            Dependency::Git { url, tag } => {
-                let store = store.as_ref().expect("store opened when a git dep is present");
-                crate::git::fetch(url, tag, store)
-                    .map_err(|err| format!("dependency `{key}`: {err}"))?
-                    .path
-            }
-            Dependency::Registry { .. } => {
-                return Err(format!(
-                    "dependency `{key}` is a registry dependency — resolving name→git-coords needs \
-                     the registry index (package-manager P2.5); use a `path` or `git` dependency \
-                     today"
-                ));
-            }
-        };
-        packages.push(dep_package_from_dir(key, &dep_dir)?);
-    }
-    Ok(packages)
-}
-
-/// Build a [`noeta_loader::DepPackage`] from a materialized package directory `dir` (a local path dep
-/// or a fetched git checkout): read its `[package]` for the root namespace segment, and gather its
-/// `.noe` sources recursively.
-fn dep_package_from_dir(key: &str, dir: &Path) -> Result<noeta_loader::DepPackage, String> {
-    let manifest_path = dir.join(MANIFEST_NAME);
-    let text = std::fs::read_to_string(&manifest_path).map_err(|err| {
-        format!(
-            "dependency `{key}` at `{}`: cannot read its `{MANIFEST_NAME}`: {err}",
-            dir.display()
-        )
-    })?;
-    let manifest = Manifest::parse(&text)
-        .map_err(|err| format!("dependency `{key}`: invalid `{MANIFEST_NAME}`: {err}"))?;
-    let pkg = manifest.package().ok_or_else(|| {
-        format!(
-            "dependency `{key}` at `{}` has no `[package]` table (needed for its namespace root)",
-            dir.display()
-        )
-    })?;
-    let root = pkg.name.root().to_string();
-    let modules = noeta_loader::read_package_sources(dir).map_err(|err| {
-        format!(
-            "dependency `{key}`: cannot read sources under `{}`: {err}",
-            dir.display()
-        )
-    })?;
-    Ok(noeta_loader::DepPackage {
-        key: key.to_string(),
-        root,
-        modules,
-        // Flat linking: this direct dependency's own transitive keys are populated by the graph
-        // walk (P2.4b); a leaf dependency needs none.
-        dep_renames: Default::default(),
-    })
+    Ok(crate::graph::resolve_graph(entry)?.packages)
 }
 
 /// Resolve the [`FmtConfig`] for a target directory: discover the nearest `noeta.toml`, read its

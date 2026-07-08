@@ -33,14 +33,15 @@ use noeta_span::{Source, SourceId, SourceMap, Span};
 use noeta_vm::{SessionOutput, VmBackend, VmSession};
 
 mod manifest;
-// The PubGrub resolver (P2.2) is the pure algorithm; it's consumed once git/registry dependencies
-// need version selection (P2.3+). Landed + unit-tested first, isolated from IO.
-#[allow(dead_code)]
+// The PubGrub resolver (P2.2) is the pure algorithm; the transitive graph walk (P2.4) runs it as the
+// authoritative selection/validation pass over the materialized dependency versions.
 mod resolve;
 // The content-addressed package store (P2.3a) — holds fetched git dependency trees.
 mod store;
 // Git-tag dependency fetch (P2.3b) — wired into dependency resolution (P2.3c).
 mod git;
+// Transitive dependency resolution (P2.4) — the graph walk over path+git sources.
+mod graph;
 
 #[derive(Parser)]
 #[command(name = "noeta", version, about = "The Noeta toolchain")]
@@ -1457,6 +1458,11 @@ fn open_startup_cache(
     // module's source text into the key, so any dependency change invalidates the cache.
     for dep in deps {
         key.source(format!("<dep {}>", dep.key), dep.root.as_bytes());
+        // The transitive key-rewrite map is part of what re-rooting produces: two builds with
+        // byte-identical dep sources but different transitive wiring link to different programs.
+        for (local, global) in &dep.dep_renames {
+            key.source(format!("<rename {} {local}>", dep.key), global.as_bytes());
+        }
         for module in &dep.modules {
             key.source(&module.name, module.text.as_bytes());
         }
