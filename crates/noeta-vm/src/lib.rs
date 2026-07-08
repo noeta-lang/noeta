@@ -1702,6 +1702,12 @@ struct Task {
     /// `destruct` on an async task's captured locals is a separate, pre-existing gap — see
     /// `plans/deferred.md` — that affects completed and cancelled tasks alike.)
     cancelled: bool,
+    /// Set while this task's future is **being polled** (its step is executing). A nested
+    /// `poll_all_scopes_round` — a `concurrent` join *inside* this task's own body — must skip it:
+    /// re-entering a mid-execution state machine re-runs its current segment (infinite recursion /
+    /// duplicated effects). The task is already progressing; "skip while polling" is the correct
+    /// scheduling, and it is also what keeps per-task context swaps balanced.
+    polling: bool,
 }
 
 /// The outcome of polling a future once (Track A.3): ready with a value, or still pending.
@@ -5060,6 +5066,7 @@ impl<'m> Vm<'m> {
                                 future,
                                 result: None,
                                 cancelled: false,
+                                polling: false,
                             });
                             Value::make_handle(
                                 ScopeId::from_index(scope_idx),

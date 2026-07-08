@@ -1393,6 +1393,7 @@ impl Interpreter {
                     future,
                     result: None,
                     cancelled: false,
+                    polling: false,
                 });
                 Ok(Value::Handle(
                     ScopeId::from_index(scope_idx),
@@ -1417,6 +1418,7 @@ impl Interpreter {
                     future,
                     result: None,
                     cancelled: false,
+                    polling: false,
                 });
                 Ok(Value::Handle(
                     ScopeId::from_index(scope_idx),

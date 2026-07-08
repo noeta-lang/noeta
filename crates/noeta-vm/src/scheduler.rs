@@ -296,9 +296,16 @@ impl<'m> Vm<'m> {
             let mut ti = 0;
             while ti < self.scopes[si].len() {
                 let task = &self.scopes[si][ti];
-                if task.result.is_none() && !task.cancelled {
+                // Skip a task whose step is *currently executing* (`polling`): a nested round — a
+                // `concurrent` join inside that task's own body — reaching the task again must not
+                // re-enter its mid-execution state machine (that re-runs the current segment:
+                // infinite recursion). It is already progressing on the stack above us.
+                if task.result.is_none() && !task.cancelled && !task.polling {
                     let future = task.future;
-                    if let Poll::Ready(value) = self.poll_once(future, span)? {
+                    self.scopes[si][ti].polling = true;
+                    let polled = self.poll_once(future, span);
+                    self.scopes[si][ti].polling = false;
+                    if let Poll::Ready(value) = polled? {
                         self.scopes[si][ti].result = Some(value);
                         completed = true;
                     }
@@ -360,6 +367,7 @@ impl<'m> Vm<'m> {
             future,
             result: None,
             cancelled: false,
+            polling: false,
         });
         Value::make_handle(ScopeId::from_index(scope_idx), TaskId::from_index(task_idx))
     }

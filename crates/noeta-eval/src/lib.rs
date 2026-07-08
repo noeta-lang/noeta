@@ -1026,6 +1026,11 @@ struct Task {
     /// Set when the task is **cancelled** (Track A.8) — e.g. a `race` loser. Cancelled tasks are never
     /// polled again and count as done for the join; the tree-walker mirror of the VM's flag.
     cancelled: bool,
+    /// Set while this task's future is **being polled** (its step is executing). A nested
+    /// `poll_all_scopes_round` — a `concurrent` join *inside* this task's own body — must skip it:
+    /// re-entering a mid-execution state machine re-runs its current segment (infinite recursion).
+    /// The tree-walker mirror of the VM's flag.
+    polling: bool,
 }
 
 /// A bounded channel's scheduler-owned state (isolates I.1): a FIFO queue of buffered messages, its
@@ -3641,9 +3646,16 @@ impl Interpreter {
             let mut ti = 0;
             while ti < self.scopes[si].len() {
                 let task = &self.scopes[si][ti];
-                if task.result.is_none() && !task.cancelled {
+                // Skip a task whose step is *currently executing* (`polling`): a nested round — a
+                // `concurrent` join inside that task's own body — must not re-enter its
+                // mid-execution state machine (that re-runs the current segment: infinite
+                // recursion). The VM's guard, mirrored.
+                if task.result.is_none() && !task.cancelled && !task.polling {
                     let future = task.future.clone();
-                    if let Some(value) = self.poll_once(&future, span)? {
+                    self.scopes[si][ti].polling = true;
+                    let polled = self.poll_once(&future, span);
+                    self.scopes[si][ti].polling = false;
+                    if let Some(value) = polled? {
                         self.scopes[si][ti].result = Some(value);
                         completed = true;
                     }
