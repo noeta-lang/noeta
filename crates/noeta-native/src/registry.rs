@@ -390,6 +390,14 @@ impl ExtType {
 /// modules/types.
 pub trait Extension: Sync {
     fn name(&self) -> &'static str;
+    /// The namespace **root** this extension's modules live under — the first segment of every
+    /// qualified module path it owns (`std.math`, `std.http.client`). Defaults to [`Extension::name`]
+    /// (core's `"std"`); a package whose import namespace diverges from its package name overrides it.
+    /// Module identity is the full path, so two extensions with distinct roots never collide
+    /// (`std.http` vs `guzzle.http`).
+    fn root(&self) -> &'static str {
+        self.name()
+    }
     fn modules(&self) -> &'static [ExtModule];
     /// The extension's first-class value types. Default empty — a modules-only extension does
     /// not change.

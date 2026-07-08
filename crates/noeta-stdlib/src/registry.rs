@@ -248,6 +248,32 @@ pub fn find_module(name: &str) -> Option<&'static ExtModule> {
         .find(|m| m.name == name)
 }
 
+/// Whether `root` is the namespace root of some registered extension (`"std"` today; a package's
+/// root once the manifest populates the registry). The generalization of the hard-coded `path[0]
+/// == "std"` module-import check — a `use <root>.…` import binds a native module iff this holds.
+pub fn is_extension_root(root: &str) -> bool {
+    extensions().iter().any(|e| e.root() == root)
+}
+
+/// Find a registered module by its **fully qualified path** — `["std", "math"]`, or (nested,
+/// phase 0.3+) `["std", "http", "client"]`. The first segment selects the extension by [root]; the
+/// remainder, dot-joined, matches the module's registered name. Two extensions with distinct roots
+/// never collide (`std.http` ≠ `guzzle.http`).
+///
+/// [root]: noeta_native::Extension::root
+pub fn find_module_qualified(path: &[String]) -> Option<&'static ExtModule> {
+    let (root, rest) = path.split_first()?;
+    if rest.is_empty() {
+        return None;
+    }
+    let module_name = rest.join(".");
+    extensions()
+        .iter()
+        .filter(|e| e.root() == root.as_str())
+        .flat_map(|e| e.modules())
+        .find(|m| m.name == module_name.as_str())
+}
+
 /// Find a registered function's signature.
 pub fn find_function(module: &str, func: &str) -> Option<&'static ExtFn> {
     find_module(module)?
@@ -2619,5 +2645,20 @@ mod tests {
             Some(Concrete(SigType::Dyn))
         ));
         assert!(find_module("json").is_some_and(|m| m.deep_marshal));
+    }
+
+    #[test]
+    fn qualified_lookup_resolves_under_the_std_root() {
+        // `std` is a registered extension root; nothing else is (until the manifest populates it).
+        assert!(is_extension_root("std"));
+        assert!(!is_extension_root("guzzle"));
+        // A fully-qualified path resolves to the same module the bare name does.
+        assert!(std::ptr::eq(
+            find_module_qualified(&["std".into(), "math".into()]).unwrap(),
+            find_module("math").unwrap(),
+        ));
+        // The root must match, the remainder must be non-empty, and a bare root names no module.
+        assert!(find_module_qualified(&["guzzle".into(), "math".into()]).is_none());
+        assert!(find_module_qualified(&["std".into()]).is_none());
     }
 }
