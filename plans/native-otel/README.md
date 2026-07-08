@@ -276,9 +276,38 @@ so tracing calls in un-configured programs are ~free (the perf gate below).
   remains (interop with non-Noeta peers).
 - **T5e — deferred (own follow-on).** **Reactive-flush spans behind an opt-in flag** (per-signal-
   flush tracing is too noisy by default).
-- **T6 — docs + close-out.** `docs/Observability.md` (or `Telemetry.md`) — the SDK surface, config,
-  the profiler-vs-OTEL split, the differential/bundle stances; CLI/sidebar/roadmap cross-links;
-  roadmap tick; memory.
+- **T6 ✅ DONE.** Close-out. New **`docs/Observability.md`** — profiler-vs-tracing split, the opt-in
+  table (endpoint on-switch, `OTEL_SDK_DISABLED` opt-out, the deliberate localhost-default deviation),
+  full SDK surface, auto-instrumentation, propagation (auto + manual interop), and the write-only /
+  per-task / bundle design notes. `std.telemetry` entry in **Standard-Library-Modules**; **_Sidebar**
+  link (Tools); **The-CLI** observability note (no subcommand — env-configured, rides run/serve);
+  **roadmap** ticked (M2 status cell + the observability split both mark native OTEL ✅). Memory
+  written.
+
+## Status: ARC COMPLETE (T0–T6; T5e deferred)
+
+All committed on branch `native-otel` (off `main`), **not pushed/merged**. The deliverable: a
+`Telemetry` Host capability (8th) + `std.telemetry` SDK; W3C propagation explicit **and** automatic
+across `await`s / channels / isolates on per-task task-local context; `http.serve` request
+auto-instrumentation (one connected trace per request); hand-rolled OTLP/HTTP-JSON exporter (no
+tonic/prost), opt-in + feature-gated. Held together by a deterministic sandbox recorder and a
+**byte-identical span-parity oracle** (both backends), since spans are write-only and out of the
+ordinary differential. Perf flat vs the pre-arc baseline (cumulative T5a–d). One pre-existing
+scheduler bug fixed en route (`ff9cbf4`, mid-poll re-entrancy). Deferred follow-ons: **T5e**
+reactive-flush spans (opt-in); **metrics + logs** signals; a real-collector smoke test; sampling
+policy.
+
+### ⚠️ Merge is NOT a fast-forward — rebase required
+Branched off `main @ 9bd38e1`; local `main` has since advanced ~40 commits to `a7f4223` (p2p arc
+P0–P2, aot-dce L3.4, fmt follow-ons, inlay-hints, **bidirectional closure-argument typing**
+`229ce32`). Rebase `native-otel` onto current `main` before merging. Known reconciliations:
+- **The T3 cache-collision fix (`9e4e01e`) DUPLICATES an already-merged fix** — `main`'s `5ffe924`
+  ("key on the entry file") added `KeyBuilder::entry(name)` (single-arg, key tag `v1`); mine added
+  `entry(name, bytes)` + tag `v1→v2`. Drop `9e4e01e` at rebase and adopt main's form (or fold the
+  content-bytes refinement into it) — they fix the same collision. The telemetry conformance dir
+  that *exposed* it stays valid either way.
+- **Bidirectional closure typing (`229ce32`)** may change how `with_span(name, Fn()->Var0)` / the
+  serve handler closures type-check — re-run the telemetry + serve suites after rebase.
 
 ## Perf gate
 

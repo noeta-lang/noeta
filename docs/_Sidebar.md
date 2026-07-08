@@ -12,6 +12,7 @@
 - [Editor & AI Tooling](Editor-and-AI-Tooling)
 - [Debugging](Debugging)
 - [Profiling](Profiling)
+- [Observability](Observability)
 
 **Language reference**
 - [Syntax Basics](Syntax-Basics)
