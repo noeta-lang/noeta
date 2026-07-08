@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.0
+
+Adds **formatting** via the `noeta lsp` server (the same engine as `noeta fmt`):
+
+- **Format Document** and **format-on-save** — reformats the whole file into the canonical style.
+  A safety check re-parses the result, so formatting can never change what a program means.
+- **Format-on-type** — reformatting a block the moment you type its closing `}` (quiet while the
+  code is still mid-typed).
+- Both are **on by default** for `.noe` files (`editor.formatOnSave` / `editor.formatOnType`), along
+  with 4-space indentation.
+
 ## 0.3.0
 
 Adds **debugging** via the `noeta dap` Debug Adapter Protocol server:

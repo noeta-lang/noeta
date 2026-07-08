@@ -38,6 +38,10 @@ pub enum Doc {
     Nest(isize, Box<Doc>),
     /// Lay out flat if it fits the remaining width, otherwise broken.
     Group(Box<Doc>),
+    /// Content emitted **only when the nearest enclosing group breaks** (nothing when it is flat) —
+    /// the standard "if-break" combinator, used for a trailing comma that appears on a wrapped list
+    /// but not an inline one.
+    IfBreak(Box<Doc>),
 }
 
 impl Doc {
@@ -98,6 +102,11 @@ impl Doc {
     /// Group this doc: flat if it fits, else broken.
     pub fn group(self) -> Doc {
         Doc::Group(Box::new(self))
+    }
+
+    /// Emit this doc only when the enclosing group breaks (see [`Doc::IfBreak`]).
+    pub fn if_break(self) -> Doc {
+        Doc::IfBreak(Box::new(self))
     }
 
     /// Append `other` after `self`. A test-only builder convenience (the printer uses
@@ -177,6 +186,11 @@ pub fn render(doc: &Doc, width: usize) -> String {
                 };
                 stack.push((indent, mode, d));
             }
+            Doc::IfBreak(d) => {
+                if mode == Mode::Break {
+                    stack.push((indent, mode, d));
+                }
+            }
         }
     }
     out
@@ -241,6 +255,13 @@ fn fits(
                 Mode::Break => return true, // the line ends here
             },
             Doc::Group(d) => local.push((indent, Mode::Flat, d)),
+            // In `fits` the group under test is Flat, so an if-break contributes nothing; a
+            // Break-mode item in the trailing continuation contributes its content.
+            Doc::IfBreak(d) => {
+                if mode == Mode::Break {
+                    local.push((indent, mode, d));
+                }
+            }
         }
     }
 }
@@ -304,6 +325,28 @@ mod tests {
             .append(Doc::hardline())
             .append(Doc::text("}"));
         assert_eq!(render(&d, 80), "fn {\n    body\n}");
+    }
+
+    #[test]
+    fn if_break_emits_only_when_the_group_breaks() {
+        // `[ a, b <ifbreak ,> ]` — the trailing comma appears broken, vanishes flat.
+        let d = Doc::text("[")
+            .append(
+                Doc::concat([
+                    Doc::softline(),
+                    Doc::join(
+                        [Doc::text("a"), Doc::text("b")],
+                        Doc::concat([Doc::text(","), Doc::line()]),
+                    ),
+                    Doc::text(",").if_break(),
+                ])
+                .nest(4),
+            )
+            .append(Doc::softline())
+            .append(Doc::text("]"))
+            .group();
+        assert_eq!(render(&d, 80), "[a, b]"); // flat: no trailing comma
+        assert_eq!(render(&d, 3), "[\n    a,\n    b,\n]"); // broken: trailing comma
     }
 
     #[test]

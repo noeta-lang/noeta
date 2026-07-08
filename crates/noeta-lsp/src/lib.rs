@@ -180,6 +180,32 @@ impl DocumentStore {
         }])
     }
 
+    /// On-type formatting: reformat just the top-level statement containing `position` (e.g. the
+    /// block the user just closed with `}`). Returns `None` unless the whole document parses and the
+    /// statement is not already canonical — so it is quiet while code is mid-typed and never edits
+    /// unsafely (the same AST-preserving guarantee as [`Self::format_document`]).
+    fn format_on_type(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<Vec<TextEdit>> {
+        let text = self.buffers.get(uri)?;
+        let config = uri_to_path(uri)
+            .and_then(|p| p.parent().map(noeta_fmt::FmtConfig::discover))
+            .unwrap_or_default();
+        let index = LineIndex::new(text);
+        let offset = index.offset(position, encoding);
+        let (start, end, new_text) = noeta_fmt::format_stmt_at(uri, text, offset, &config)?;
+        Some(vec![TextEdit {
+            range: Range::new(
+                index.position(start, encoding),
+                index.position(end, encoding),
+            ),
+            new_text,
+        }])
+    }
+
     /// Rebuild or update the workspace of every open document. Each open document is the entry of
     /// its own workspace; its modules are the sibling `.noe` files in the entry's directory, with
     /// open files taking their (unsaved) buffer content over disk.
@@ -1065,6 +1091,11 @@ impl LanguageServer for Backend {
                 document_symbol_provider: Some(OneOf::Left(true)),
                 // Whole-document formatting via the shared `noeta fmt` engine.
                 document_formatting_provider: Some(OneOf::Left(true)),
+                // On-type formatting: reformat the just-closed block when the user types `}`.
+                document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
+                    first_trigger_character: "}".to_string(),
+                    more_trigger_character: None,
+                }),
                 // Compiler-accurate identifier highlighting, overlaid on the client's static grammar.
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
@@ -1160,6 +1191,20 @@ impl LanguageServer for Backend {
         let edits = {
             let store = self.store.lock().expect("document store poisoned");
             store.format_document(uri.as_str(), encoding)
+        };
+        Ok(edits)
+    }
+
+    async fn on_type_formatting(
+        &self,
+        params: DocumentOnTypeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let position = params.text_document_position.position;
+        let uri = params.text_document_position.text_document.uri;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let edits = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.format_on_type(uri.as_str(), position, encoding)
         };
         Ok(edits)
     }
@@ -1427,6 +1472,30 @@ mod tests {
         // Broken source yields no edits (the LSP returns `None`), leaving the buffer untouched.
         let edits = store.format_document("file:///a.noe", Encoding::Utf16);
         assert!(edits.unwrap_or_default().is_empty());
+    }
+
+    #[test]
+    fn format_on_type_reformats_the_closed_block() {
+        let mut store = DocumentStore::default();
+        // Cursor at end of line 1 (just after the fn's `}`), UTF-16.
+        store.open("file:///a.noe", "fn  f( a ){\n    echo a\n}\n".to_string());
+        let edits = store
+            .format_on_type("file:///a.noe", Position::new(2, 1), Encoding::Utf16)
+            .expect("a parseable doc reformats the enclosing statement");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "fn f(a) {\n    echo a\n}");
+        assert_eq!(edits[0].range.start, Position::new(0, 0));
+    }
+
+    #[test]
+    fn format_on_type_is_quiet_mid_typing() {
+        let mut store = DocumentStore::default();
+        store.open("file:///a.noe", "fn f() {\n".to_string()); // unbalanced, mid-type
+        assert!(
+            store
+                .format_on_type("file:///a.noe", Position::new(1, 0), Encoding::Utf16)
+                .is_none()
+        );
     }
 
     #[test]

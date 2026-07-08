@@ -819,6 +819,7 @@ where
                 type_
                     .clone()
                     .separated_by(just(T::Comma))
+                    .allow_trailing()
                     .at_least(1)
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::Lt), just(T::Gt))
@@ -837,6 +838,7 @@ where
         let tuple_type = type_
             .clone()
             .separated_by(just(T::Comma))
+            .allow_trailing()
             .at_least(2)
             .collect::<Vec<_>>()
             .delimited_by(just(T::LParen), just(T::RParen))
@@ -851,6 +853,7 @@ where
         let fn_type = type_
             .clone()
             .separated_by(just(T::Comma))
+            .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just(T::LParen), just(T::RParen))
             .then_ignore(just(T::Arrow))
@@ -924,6 +927,7 @@ where
         });
     param
         .separated_by(just(T::Comma))
+        .allow_trailing()
         .collect::<Vec<_>>()
         .delimited_by(just(T::LParen), just(T::RParen))
         .boxed()
@@ -969,6 +973,7 @@ where
         let bindings = pat
             .clone()
             .separated_by(just(T::Comma))
+            .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just(T::LParen), just(T::RParen));
 
@@ -1009,6 +1014,7 @@ where
         let tuple = pat
             .clone()
             .separated_by(just(T::Comma))
+            .allow_trailing()
             .at_least(2)
             .collect::<Vec<_>>()
             .delimited_by(just(T::LParen), just(T::RParen))
@@ -1388,6 +1394,7 @@ where
         let paren = sub
             .clone()
             .separated_by(just(T::Comma))
+            .allow_trailing()
             .at_least(1)
             .collect::<Vec<_>>()
             .delimited_by(just(T::LParen), just(T::RParen))
@@ -1480,6 +1487,7 @@ where
                     .or_not()
                     .ignore_then(sub.clone())
                     .separated_by(just(T::Comma))
+                    .allow_trailing()
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LParen), just(T::RParen)),
             )
@@ -1565,6 +1573,7 @@ where
             .ignore_then(sub.clone());
         let call_args = call_arg
             .separated_by(just(T::Comma))
+            .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just(T::LParen), just(T::RParen));
 
@@ -1974,6 +1983,7 @@ where
         let for_pattern = choice((
             id.clone()
                 .separated_by(just(T::Comma))
+                .allow_trailing()
                 .at_least(2)
                 .collect::<Vec<_>>()
                 .delimited_by(just(T::LParen), just(T::RParen))
@@ -2821,6 +2831,7 @@ where
                 .map(DirectiveSuffix::Named),
             type_parser(ctx)
                 .separated_by(just(T::Comma))
+                .allow_trailing()
                 .at_least(1)
                 .collect::<Vec<_>>()
                 .delimited_by(just(T::Lt), just(T::Gt))

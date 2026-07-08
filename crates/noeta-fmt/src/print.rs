@@ -97,6 +97,38 @@ pub fn print_program(
     Ok(out)
 }
 
+/// Render a **single** statement (for on-type formatting of a just-completed block). The cursor is
+/// pre-advanced past every comment before the statement so only the statement's *own* (inner)
+/// comments are reattached; leading and trailing comments sit outside its span and are left in place.
+/// No trailing newline (the result replaces the statement's inline range).
+pub fn print_stmt(
+    stmt: &Stmt,
+    source: &str,
+    comments: &[Comment],
+    config: &FmtConfig,
+) -> Result<String, FmtError> {
+    let cursor = comments
+        .iter()
+        .take_while(|c| c.span.start < stmt.span().start)
+        .count();
+    let p = Printer {
+        source,
+        comments,
+        cursor: Cell::new(cursor),
+        config,
+    };
+    let doc = p.stmt(stmt)?;
+    let rendered = render(&doc, config.line_width);
+    let mut out = String::with_capacity(rendered.len());
+    for (i, line) in rendered.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(line.trim_end());
+    }
+    Ok(out)
+}
+
 struct Printer<'a> {
     source: &'a str,
     /// Every comment, in source order (from `lex_with_trivia`).
@@ -255,9 +287,53 @@ impl Printer<'_> {
 
     /// A sequence of statements, one per line, preserving one blank line where the author left one
     /// and interleaving their comments. `start`/`end` bound the enclosing region so leading and
-    /// dangling comments attach correctly.
+    /// dangling comments attach correctly. With `sort_imports`, comment-free runs of `use` statements
+    /// are alphabetized first.
     fn stmt_seq(&self, stmts: &[Stmt], start: u32, end: u32) -> Result<Doc, FmtError> {
-        self.interleave_comments(stmts, start, end, |s| s.span(), |s| self.stmt(s))
+        let ordered = self.ordered_stmts(stmts);
+        self.interleave_comments(&ordered, start, end, |s| s.span(), |s| self.stmt(s))
+    }
+
+    /// The statements in the order they should print: source order, except that — when
+    /// `sort_imports` is on — each **comment-free** contiguous run of `use` statements is sorted. A
+    /// run carrying any comment is left in source order so a hand-grouped import block is never
+    /// scrambled (and the comment cursor, which walks in source order, stays consistent — a sorted
+    /// run has no comments to reattach).
+    fn ordered_stmts<'s>(&self, stmts: &'s [Stmt]) -> Vec<&'s Stmt> {
+        let mut out: Vec<&Stmt> = stmts.iter().collect();
+        if !self.config.sort_imports {
+            return out;
+        }
+        let mut i = 0;
+        while i < out.len() {
+            if !matches!(out[i], Stmt::Use { .. }) {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < out.len() && matches!(out[i], Stmt::Use { .. }) {
+                i += 1;
+            }
+            let run_start = out[start].span().start;
+            let run_end = self.line_end(out[i - 1].span().end);
+            let has_comment = self
+                .comments
+                .iter()
+                .any(|c| c.span.start >= run_start && c.span.start <= run_end);
+            if !has_comment {
+                out[start..i].sort_by_key(|s| use_sort_key(s));
+            }
+        }
+        out
+    }
+
+    /// The byte offset of the end of the source line containing `pos` (the next `\n`, or end of
+    /// source) — the outer bound for "is there a comment attached to this import run?".
+    fn line_end(&self, pos: u32) -> u32 {
+        match self.source.get(pos as usize..).and_then(|s| s.find('\n')) {
+            Some(nl) => pos + nl as u32,
+            None => self.source.len() as u32,
+        }
     }
 
     fn stmt(&self, stmt: &Stmt) -> Result<Doc, FmtError> {
@@ -337,16 +413,18 @@ impl Printer<'_> {
             )),
             Stmt::Use { path, names, span } => {
                 let prefix = path.join(".");
-                let doc = match names {
-                    // `use A.B.C;` — a single leaf whose name is the last path element.
-                    n if n.len() == 1 && !prefix.is_empty() && path.last() == Some(&n[0].name) => {
-                        Doc::text(format!("use {prefix}"))
-                    }
-                    n if n.len() == 1 && prefix.is_empty() => {
-                        Doc::text(format!("use {}", n[0].name))
-                    }
+                let doc = match names.as_slice() {
+                    // Whole-namespace import `use App.Models` (no leaf names).
+                    [] => Doc::text(format!("use {prefix}")),
+                    // A single import prints dotted, without braces: `use std.math.sqrt`.
+                    [only] if prefix.is_empty() => Doc::text(format!("use {}", only.name)),
+                    [only] => Doc::text(format!("use {prefix}.{}", only.name)),
+                    // A selective group `use App.{Invoice, Receipt}` (names sorted when configured).
                     names => {
-                        let leaves = names.iter().map(|u| u.name.clone()).collect::<Vec<_>>();
+                        let mut leaves = names.iter().map(|u| u.name.clone()).collect::<Vec<_>>();
+                        if self.config.sort_imports {
+                            leaves.sort();
+                        }
                         Doc::text(format!("use {prefix}.{{{}}}", leaves.join(", ")))
                     }
                 };
@@ -1333,12 +1411,12 @@ impl Printer<'_> {
         })
     }
 
-    /// A parenthesized, comma-separated argument list.
     /// A comma-delimited `open … close` sequence. With `wrap = false` (default) it lays out flat —
     /// `[a, b, c]`, or `{ a, b }` when `spaced` — reproducing the pre-wrap output byte-for-byte. With
     /// `wrap = true` it becomes a width-driven [`Doc::group`]: flat if it fits [`FmtConfig::line_width`],
-    /// otherwise one element per line, indented, with the delimiters on their own lines. No trailing
-    /// comma (call arguments reject one).
+    /// otherwise one element per line, indented, with the delimiters on their own lines and a
+    /// **trailing comma** (the parser accepts one uniformly). The trailing comma is an
+    /// [`Doc::if_break`], so it appears only when the group breaks, never inline.
     fn delimited(&self, open: &str, elems: Vec<Doc>, close: &str, spaced: bool) -> Doc {
         if elems.is_empty() {
             return Doc::text(format!("{open}{close}"));
@@ -1350,6 +1428,7 @@ impl Printer<'_> {
                 Doc::concat([
                     boundary.clone(),
                     Doc::join(elems, Doc::concat([Doc::text(","), Doc::line()])),
+                    Doc::text(",").if_break(),
                 ])
                 .nest(INDENT),
                 boundary,
@@ -1561,6 +1640,19 @@ fn prec(e: &Expr) -> u8 {
         Expr::FieldSet { .. } => 0,
         // Atoms and self-delimiting forms never need parentheses as an operand.
         _ => u8::MAX,
+    }
+}
+
+/// A deterministic sort key for a `use` statement (`path`, then names) — the import-sort order.
+/// Non-`use` statements sort as empty (never mixed into a run in practice).
+fn use_sort_key(stmt: &Stmt) -> (Vec<String>, Vec<String>) {
+    match stmt {
+        Stmt::Use { path, names, .. } => {
+            let mut leaves: Vec<String> = names.iter().map(|n| n.name.clone()).collect();
+            leaves.sort();
+            (path.clone(), leaves)
+        }
+        _ => (Vec::new(), Vec::new()),
     }
 }
 

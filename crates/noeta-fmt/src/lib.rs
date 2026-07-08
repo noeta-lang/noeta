@@ -85,6 +85,11 @@ pub struct FmtConfig {
     pub line_width: usize,
     /// `match` arm arrow layout.
     pub match_arm_arrows: ArrowStyle,
+    /// Sort `use` imports. `false` (default) leaves them in source order; `true` alphabetizes each
+    /// contiguous run of `use` statements (and the names inside a `use A.{…}` group). A run that
+    /// carries comments is left untouched, so a hand-grouped, commented import block is never
+    /// scrambled. Import order is semantically irrelevant, so this never changes behavior.
+    pub sort_imports: bool,
 }
 
 impl Default for FmtConfig {
@@ -93,6 +98,7 @@ impl Default for FmtConfig {
             wrap: false,
             line_width: 100,
             match_arm_arrows: ArrowStyle::default(),
+            sort_imports: false,
         }
     }
 }
@@ -151,6 +157,48 @@ pub fn format_source(name: &str, text: &str, config: &FmtConfig) -> Result<Strin
     Ok(out)
 }
 
+/// Reformat the single top-level statement that contains byte offset `offset` — the engine behind
+/// on-type formatting (e.g. reformatting a just-closed block when the user types `}`). Returns the
+/// statement's `[start, end)` byte range and its formatted text, or `None` when: the document does
+/// not fully parse (the common mid-typing case — nothing is changed), no statement contains the
+/// offset, the statement is already canonical, or the edit would not be safe.
+///
+/// Safety is the same guarantee as [`format_source`]: the edit is spliced into the document and the
+/// whole thing re-parsed and compared AST-equal-modulo-spans; a mismatch yields `None`.
+pub fn format_stmt_at(
+    name: &str,
+    text: &str,
+    offset: u32,
+    config: &FmtConfig,
+) -> Option<(u32, u32, String)> {
+    let source = Source::new(SourceId(0), name, text);
+    let lexed = noeta_lexer::lex_with_trivia(&source);
+    let program = parse_checked(&source, &lexed).ok()?;
+
+    let stmt = program.stmts.iter().find(|s| {
+        let span = s.span();
+        span.start <= offset && offset <= span.end
+    })?;
+    let span = stmt.span();
+    let (start, end) = (span.start as usize, span.end as usize);
+
+    let formatted = print::print_stmt(stmt, text, &lexed.comments, config).ok()?;
+    if text.get(start..end) == Some(formatted.as_str()) {
+        return None; // already canonical
+    }
+
+    // Safety: splice the edit into the document, re-parse, and require the same AST modulo spans.
+    let mut edited = String::with_capacity(text.len());
+    edited.push_str(&text[..start]);
+    edited.push_str(&formatted);
+    edited.push_str(&text[end..]);
+    let reparsed = parse_clean(&Source::new(SourceId(0), name, edited.as_str())).ok()?;
+    if !safety::ast_equal_modulo_spans(&program, &reparsed) {
+        return None;
+    }
+    Some((span.start, span.end, formatted))
+}
+
 /// Parse an already-lexed `source`, failing with [`FmtError::Parse`] if lexing or parsing produced
 /// any diagnostic. The formatter only ever operates on programs that parse cleanly.
 fn parse_checked(
@@ -199,10 +247,10 @@ mod tests {
             fmt_wrapped("echo [1, 2, 3]", 40).unwrap(),
             "echo [1, 2, 3]\n"
         );
-        // Exceeds width → one element per line, indented, no trailing comma.
+        // Exceeds width → one element per line, indented, with a trailing comma.
         assert_eq!(
             fmt_wrapped("echo [11111, 22222, 33333]", 12).unwrap(),
-            "echo [\n    11111,\n    22222,\n    33333\n]\n"
+            "echo [\n    11111,\n    22222,\n    33333,\n]\n"
         );
     }
 
@@ -212,6 +260,69 @@ mod tests {
             fmt_wrapped("y = aaaa |> bbbb() |> cccc() |> dddd()", 20).unwrap(),
             "y = aaaa\n    |> bbbb()\n    |> cccc()\n    |> dddd()\n"
         );
+    }
+
+    #[test]
+    fn format_stmt_at_reformats_the_containing_statement() {
+        let src = "echo 1\nfn  f( a ){\n echo a\n}\necho 2\n";
+        // Offset inside the messy fn (on the `}` at the fn's end region).
+        let offset = src.find('}').unwrap() as u32;
+        let (start, end, text) =
+            format_stmt_at("t.noe", src, offset, &FmtConfig::default()).expect("reformats the fn");
+        assert_eq!(text, "fn f(a) {\n    echo a\n}");
+        // The range covers exactly the fn statement, not the neighbours.
+        assert_eq!(
+            &src[start as usize..end as usize],
+            "fn  f( a ){\n echo a\n}"
+        );
+    }
+
+    #[test]
+    fn format_stmt_at_declines_on_unparseable_or_canonical() {
+        // Mid-typing / unparseable → no edit.
+        assert!(format_stmt_at("t.noe", "fn f( {", 3, &FmtConfig::default()).is_none());
+        // Already canonical statement → no edit.
+        assert!(format_stmt_at("t.noe", "echo 1\n", 4, &FmtConfig::default()).is_none());
+    }
+
+    fn fmt_sorted(text: &str) -> Result<String, FmtError> {
+        format_source(
+            "test.noe",
+            text,
+            &FmtConfig {
+                sort_imports: true,
+                ..FmtConfig::default()
+            },
+        )
+    }
+
+    #[test]
+    fn use_forms_round_trip() {
+        // Single imports print dotted (no braces); groups keep braces.
+        assert_eq!(
+            fmt("use App.Models.User\nuse std.math.sqrt\nuse App.{Invoice, Receipt}\n").unwrap(),
+            "use App.Models.User\nuse std.math.sqrt\nuse App.{Invoice, Receipt}\n"
+        );
+    }
+
+    #[test]
+    fn sort_imports_orders_runs_and_names() {
+        assert_eq!(
+            fmt_sorted("use App.Zebra\nuse App.Alpha\nuse std.math.{sqrt, abs}\n").unwrap(),
+            "use App.Alpha\nuse App.Zebra\nuse std.math.{abs, sqrt}\n"
+        );
+        // Default leaves them in source order.
+        assert_eq!(
+            fmt("use App.Zebra\nuse App.Alpha\n").unwrap(),
+            "use App.Zebra\nuse App.Alpha\n"
+        );
+    }
+
+    #[test]
+    fn sort_imports_leaves_a_commented_run_alone() {
+        // A comment anywhere in the run pins its order (never scramble a hand-grouped block).
+        let src = "use App.Zebra // pinned\nuse App.Alpha\n";
+        assert_eq!(fmt_sorted(src).unwrap(), src);
     }
 
     #[test]

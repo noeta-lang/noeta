@@ -1,8 +1,8 @@
 {
   "name": "noeta",
   "displayName": "Noeta",
-  "description": "Language support for the Noeta programming language (.noe): syntax highlighting, the noeta lsp language server (diagnostics, hover, inlay type hints, go-to-definition, outline, completion), and the noeta dap debugger (breakpoints, stepping, variables).",
-  "version": "0.3.0",
+  "description": "Language support for the Noeta programming language (.noe): syntax highlighting, the noeta lsp language server (diagnostics, hover, inlay type hints, go-to-definition, outline, completion, formatting with format-on-save/on-type), and the noeta dap debugger (breakpoints, stepping, variables).",
+  "version": "0.4.0",
   "publisher": "noeta",
   "license": "MIT",
   "repository": {
@@ -46,6 +46,14 @@
         "path": "./syntaxes/noeta.tmLanguage.json"
       }
     ],
+    "configurationDefaults": {
+      "[noeta]": {
+        "editor.formatOnSave": true,
+        "editor.formatOnType": true,
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true
+      }
+    },
     "breakpoints": [
       {
         "language": "noeta"
