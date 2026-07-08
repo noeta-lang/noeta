@@ -37,7 +37,7 @@ The same deterministic/real split applies:
 | Async | `SandboxExecutor` (logical time) | `RealExecutor` (tokio) |
 | Isolates | `SandboxScheduler` (cooperative, deterministic interleave + FIFO channels) | `RealScheduler` (OS threads, one runtime per isolate) |
 
-`std.http` rides both the Host split (its `Network` capability) and the async split: a sync `http.get` performs the request through the Host, while `http.get_async` returns work the executor tickets — the real host handing over a genuine reqwest future (`RealBody::Async`), the sandbox resolving deterministically at spawn from the pure responder.
+`std.http.client` rides both the Host split (its `Network` capability) and the async split: a sync `client.get` performs the request through the Host, while `client.get_async` returns work the executor tickets — the real host handing over a genuine reqwest future (`RealBody::Async`), the sandbox resolving deterministically at spawn from the pure responder.
 
 A program using isolates type-checks and runs *identically in the sandbox* (deterministic, differential-covered) and with real parallelism on the CLI. The sandbox is observationally faithful because isolates are shared-nothing and communicate only by *copied* messages — a single-threaded cooperative simulation cannot differ from real threads for any well-typed program.
 
@@ -54,7 +54,7 @@ The real scheduler crosses threads by **faithful copy, not borrow**: no `Value`/
 
 ## Serving HTTP: inversion of control
 
-Every capability above is **program-initiated** — the program asks, the world answers. `http.serve`
+Every capability above is **program-initiated** — the program asks, the world answers. `server.serve`
 inverts that: the world initiates (a connection) and the program's handler responds. This reuses the
 async substrate wholesale. Accepting a connection is an **async leaf** (like `sleep` / `fs.read_async`)
 — a descriptor the executor drives (`TcpListener::accept().await` on the real host); the serve loop

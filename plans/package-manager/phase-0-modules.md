@@ -52,7 +52,13 @@ construction; 0.4 migrates surface + adds conformance.
   while only `std` is registered.
 - Faithful refactor: only `std` registered ⇒ every program resolves identically. Differential green.
 
-### 0.3 — Qualified module payload + nested-path binding + the `std.http` split
+### 0.3 — Qualified module payload + nested-path binding + the `std.http` split ✅ DONE
+
+*Landed as 0.3a (qualified identity end-to-end, `http` still one module — differential-identical) +
+0.3a-fix (AOT ring tables read qualified identities) + 0.3b (the split into `std.http.client` /
+`std.http.server`, selective imports generalized to nested `path.len() >= 2`, `noeta serve` →
+`server.serve`, 9 `.noe` files + the http docs migrated). The `bare_module_name` helper became
+`module_name` (strip-root, recovering `ExtModule.name`). `fn_ring` collapsed into `module_ring`.*
 
 *Landed together: the split produces the first real nested modules (`std.http.client`/`.server`);
 nested resolution is what consumes them — neither is testable alone.*
@@ -81,7 +87,16 @@ nested resolution is what consumes them — neither is testable alone.*
 - Conformance: split-module client + server cases; differential green; DCE footprint check on an
   http-server program.
 
-## Phase 0 gate
+## Phase 0 gate ✅ MET
+
+Phase 0 is complete: `use std.http.client` binds and dispatches (nested last-segment binding), module
+identity is root-qualified (no cross-root collisions), the `std.http` split makes DCE ring selection
+precise (a `use std.http.server` program sheds reqwest), and the full corpus + JIT differential + CLI
++ doc_samples run green (0 failed) with clippy clean. Next: Phase 1 (dynamic manifest-driven registry).
+
+---
+
+### Original gate criteria (all satisfied)
 
 `use std.http.client` binds and dispatches; a nested + a split-module import each have conformance
 cases; the synthetic second-root collision test passes; the full corpus is differential-identical
