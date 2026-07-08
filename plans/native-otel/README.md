@@ -192,10 +192,19 @@ so tracing calls in un-configured programs are ~free (the perf gate below).
   trace id but has a distinct span id. *Gate:* conformance differential over 4 telemetry `.noe`
   (basic/nesting/abort + 2 diagnostics) + corpus + leak-0; a stdlib unit test drives the plain `Span`
   methods against the sandbox recorder; 84 stdlib tests + clippy green.
-- **T3 — W3C propagation (remainder).** `span_from(name, traceparent)` (remote parent — the extract
-  side) + inject/extract `traceparent` at boundaries; **cross-isolate propagation via the Wire
-  envelope** (context string rides the channel message, the receiving isolate continues the trace).
-  (`current_context()` — the inject side — shipped in T2.)
+- **T3 ✅ DONE (`e5eb6fe`).** W3C propagation completed. `span_from(name, traceparent)` — the
+  **extract** side: parse an inbound `traceparent` (malformed → no-parent → new root, the
+  forgiving-reader rule) and continue that remote trace; ctx-dispatched (it starts a span). Plus
+  `Span.context() -> str` — the **inject** side for a *held* span (serialize a specific span, not just
+  the active one), complementing T2's `current_context()`. **Cross-isolate propagation needed no new
+  machinery**: a `traceparent` is a plain string, so it rides a channel message as-is — a conformance
+  test sends a producer isolate's `span.context()` over a channel and asserts the consumer's
+  `span_from` continued span shares the trace id. *Gate:* conformance differential over 6 telemetry
+  `.noe` (both backends agree) + leak-0; a stdlib unit test round-trips `Span.context()` through
+  `TraceContext::parse`; 85 stdlib + clippy green. **En route, found & fixed a pre-existing startup-
+  cache collision** (`9e4e01e`): the key sorted entry + siblings together, so two programs in one
+  directory (same sibling set) shared a key and the second `noeta run` served the first's bytecode —
+  now the entry folds through a distinct `KeyBuilder::entry` slot (key scheme v1→v2, regression test).
 - **T4 — server auto-instrumentation (headline).** `serve.rs`'s per-connection handler call
   (`serve.rs:92` loop) wrapped in a SERVER-kind span: extract inbound `traceparent`, name from
   method+route, status from the response, inject context on outbound. Opt-out, on by default when
