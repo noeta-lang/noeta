@@ -34,6 +34,7 @@ Loads, type-checks, and executes a `.noe` file on the **real host** — real `en
 |---|---|
 | `--tier <NAME>` | Activate a dev-tier for this run, e.g. `--tier debug` compiles in `@debug { … }` blocks. Repeatable. Without it, every tier block is stripped. |
 | `--profile <NAME>` | Activate the tiers a `noeta.toml` build profile makes live. Unioned with any `--tier`. |
+| `--no-cache` | Bypass the [startup cache](#the-startup-cache) for this run — don't read a cached compile and don't write one. Same effect as `NOETA_NO_CACHE`. |
 
 The active-tier set is the profile's live tiers ∪ any `--tier` flags, resolved *before* loading (a bad profile fails fast). With an empty active set — the default — every `@test`/`@bench`/`@doc`/`@debug` block strips away and the program runs as written. See [Documentation & Dev Tiers](Documentation-and-Tiers).
 
@@ -51,6 +52,55 @@ The active-tier set is the profile's live tiers ∪ any `--tier` flags, resolved
 $ noeta run hello.noe
 hello
 ```
+
+---
+
+## The startup cache
+
+`noeta run`, `dump`, and `build` re-lex, parse, type-check, and compile the source on every invocation. For a large program that front-end work dominates startup (≈120 ms on a 6000-line file — around 95 % of wall time). So the toolchain **caches the compiled bytecode**: the first run of a file compiles and stores it; subsequent runs of unchanged sources load the stored bytecode and skip the whole front-end (a ~17× startup win on that same file). It is **on by default** and requires no build step — a plain `noeta run app.noe` populates and reuses it.
+
+The cache is **transparent and safe**: a cached run is byte-identical to an uncached one (verified in the test suite). An entry is keyed by everything that can change the output — the entry file *and* every sibling module's content, the toolchain version, the running binary's build identity, and the active tier set — so any source edit, a rebuilt `noeta`, or a different `--tier`/profile transparently produces a fresh compile. `run`, `dump`, and `build` share entries (a `noeta build` warms the entry a later `noeta run` reads, and vice-versa). `serve`, `test`, and `bench` are not cached.
+
+Cached artifacts live under `~/.cache/noeta/` (XDG: `$XDG_CACHE_HOME/noeta/`; macOS `~/Library/Caches/noeta`), a per-user private directory. If the cache can't be read or written for any reason, the run silently falls back to compiling from source — it is an optimization, never a dependency.
+
+**Disable it**
+
+| How | Scope |
+|---|---|
+| `noeta run --no-cache …` | This run only. |
+| `NOETA_NO_CACHE=1` | Every command, for as long as it's set. |
+
+**Environment**
+
+| Variable | Effect |
+|---|---|
+| `NOETA_NO_CACHE` | If set (to anything), disables the cache entirely. |
+| `NOETA_CACHE_DIR` | Override the cache directory (default `~/.cache/noeta/`). |
+| `NOETA_CACHE_MAX_BYTES` | Cap on total cache size before oldest entries are evicted; default 256 MiB, `0` disables the cap. |
+
+### `noeta cache`
+
+```
+noeta cache <path|info|clear>
+```
+
+Inspect or clear the startup cache.
+
+| Subcommand | Effect |
+|---|---|
+| `noeta cache path` | Print the cache directory (whether or not it exists yet). |
+| `noeta cache info` | Show the location, entry count, total size on disk, and the size cap. |
+| `noeta cache clear` | Remove all cached compilations. |
+
+```console
+$ noeta cache info
+/home/you/.cache/noeta
+128 entries, 11.4 MiB on disk (cap 256.0 MiB)
+$ noeta cache clear
+removed 128 cached compilations from /home/you/.cache/noeta
+```
+
+The cache never grows without bound: once it exceeds `NOETA_CACHE_MAX_BYTES`, the oldest entries are evicted on the next compile (silently — inspect with `noeta cache info`).
 
 ---
 

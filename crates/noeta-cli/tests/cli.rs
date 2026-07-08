@@ -119,6 +119,51 @@ fn run_reports_parse_error_and_exits_1() {
 }
 
 #[test]
+fn cache_info_path_and_clear() {
+    let cache_dir = PathBuf::from(concat!(env!("CARGO_TARGET_TMPDIR"), "/cache-cmd"));
+    let _ = std::fs::remove_dir_all(&cache_dir);
+    let file = temp_program("cache_cmd", "echo 40 + 2\n");
+
+    // `cache <args>` against our dedicated dir.
+    let cache = |args: &[&str]| {
+        let mut cmd = lang();
+        cmd.env("NOETA_CACHE_DIR", &cache_dir).args(args);
+        cmd.assert()
+    };
+
+    // Empty to start.
+    cache(&["cache", "info"])
+        .success()
+        .stdout(predicate::str::contains("0 entries"));
+    cache(&["cache", "path"])
+        .success()
+        .stdout(predicate::str::contains(cache_dir.to_str().unwrap()));
+
+    // A run populates exactly one entry.
+    lang()
+        .env("NOETA_CACHE_DIR", &cache_dir)
+        .env_remove("NOETA_NO_CACHE")
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("42\n");
+    cache(&["cache", "info"])
+        .success()
+        .stdout(predicate::str::contains("1 entry"));
+
+    // Clear empties it.
+    cache(&["cache", "clear"])
+        .success()
+        .stdout(predicate::str::contains("removed 1"));
+    cache(&["cache", "info"])
+        .success()
+        .stdout(predicate::str::contains("0 entries"));
+
+    let _ = std::fs::remove_dir_all(&cache_dir);
+}
+
+#[test]
 fn startup_cache_is_semantically_invisible() {
     // The transparent startup cache (M3) must be *semantically invisible*: a warm run (cache hit —
     // decode a stored module and run it) produces byte-identical stdout, stderr, and exit code to an

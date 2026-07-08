@@ -1,9 +1,11 @@
 # Transparent startup cache — skip the front-end on unchanged sources
 
-**Status: C0–C3 DONE, branch `startup-cache` (worktree, off `main`@`fe14117`).** Signed off 2026-07-07
-after a three-agent investigation of the run pipeline, the salsa DB, and the `.noeb` envelope.
-`run`/`dump`/`build` share a transparent cache through one `compile_whole_file` seam, guarded by a
-semantic-invisibility differential and hermetic tests; C4 (hygiene + `cache clear`) remains.
+**Status: ✅ ARC COMPLETE (C0–C4), branch `startup-cache` (worktree, off `main`@`fe14117`, unmerged).**
+Signed off 2026-07-07 after a three-agent investigation of the run pipeline, the salsa DB, and the
+`.noeb` envelope. `run`/`dump`/`build` share a transparent, default-on startup cache through one
+`compile_whole_file` seam (17× warm-start on a 6000-line file); guarded by a semantic-invisibility
+differential + hermetic tests; bounded by an oldest-first size cap; `noeta cache path|info|clear` +
+docs shipped. `serve`/`test`/`bench` deliberately out of scope (see non-goals).
 
 This delivers the M3 roadmap item *"startup cache"* in its **transparent** form. The AOT arc already
 shipped the *explicit* form (`noeta build` → a `.noeb` you run instead of source, which skips the
@@ -143,9 +145,15 @@ wrong bytecode):
   plus exactly one cache entry after the cold run (proving the warm run is a real hit). The `lang()`
   helper (and `doc_samples`) now pin `NOETA_CACHE_DIR` to `CARGO_TARGET_TMPDIR`, so `cargo test` never
   touches the developer's real `~/.cache/noeta` (verified: it stays absent across a full run).
-- **C4 — hygiene + docs.** `noeta cache clear` (+ maybe `cache path`/`cache info`); a size cap or LRU/age
-  sweep so the dir can't grow unbounded; wiki/CLI-help note. Log a one-line notice when a cap evicts
-  (no silent truncation).
+- **C4 — hygiene + docs. ✅ DONE.** `noeta cache path|info|clear` (`Cache::locate`/`stats`, human-readable
+  sizes). Unbounded-growth guard: `prune_to(max)` evicts oldest-by-mtime until under a cap
+  (`NOETA_CACHE_MAX_BYTES`, default 256 MiB, `0` = off), run best-effort on the miss path after a store.
+  `docs/The-CLI.md` gains a "startup cache" section + `--no-cache`/env table + `noeta cache` reference.
+  - **Eviction is silent** (inspectable via `noeta cache info`), a deliberate change from the plan's
+    "log on evict": a compile cache evicting is normal, expected behavior (cf. ccache/sccache), and a
+    per-evict stderr line on every `run` once at the cap would be noise, not signal. The "no silent
+    truncation" principle is about not *misleading* about coverage — a cache hit/miss doesn't; `cache
+    info` gives full transparency on demand.
 
 ## Non-goals / deferred
 

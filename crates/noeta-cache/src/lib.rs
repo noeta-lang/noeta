@@ -166,6 +166,13 @@ impl Cache {
         Ok(Cache { dir })
     }
 
+    /// The cache root [`open`](Self::open) would use, *without* creating it — for `noeta cache
+    /// path`/`info`, which must not materialize the directory just to report on it. `None` if no
+    /// location resolves.
+    pub fn locate() -> Option<PathBuf> {
+        cache_root()
+    }
+
     /// The cache root directory.
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -210,6 +217,83 @@ impl Cache {
             }
         }
         Ok(removed)
+    }
+
+    /// The `.noeb` artifacts currently in the cache, with each one's size and modification time.
+    fn entries(&self) -> io::Result<Vec<Entry>> {
+        let mut out = Vec::new();
+        for entry in fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "noeb") {
+                let meta = entry.metadata()?;
+                out.push(Entry {
+                    path,
+                    size: meta.len(),
+                    mtime: meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// The number of cached entries and their total size in bytes (backs `noeta cache info`).
+    pub fn stats(&self) -> io::Result<(usize, u64)> {
+        let entries = self.entries()?;
+        let total = entries.iter().map(|e| e.size).sum();
+        Ok((entries.len(), total))
+    }
+
+    /// Evict oldest-by-mtime entries until the total on-disk size is at or under `max_bytes`, so the
+    /// cache can't grow without bound. `max_bytes == 0` disables the cap (evicts nothing). Returns the
+    /// number of entries removed. Best-effort: an entry that fails to remove is skipped.
+    ///
+    /// Eviction is oldest-first by modification time (the write time — reads don't touch it), i.e.
+    /// FIFO rather than strict LRU. For an iterate-on-one-file dev loop the active entries are the
+    /// most recent ones, so this keeps what's in use; it also keeps a cache *hit* a pure read (no
+    /// mtime touch on the hot path).
+    pub fn prune_to(&self, max_bytes: u64) -> io::Result<usize> {
+        if max_bytes == 0 {
+            return Ok(0);
+        }
+        let mut entries = self.entries()?;
+        let mut total: u64 = entries.iter().map(|e| e.size).sum();
+        if total <= max_bytes {
+            return Ok(0);
+        }
+        entries.sort_by_key(|e| e.mtime); // oldest first
+        let mut removed = 0;
+        for entry in entries {
+            if total <= max_bytes {
+                break;
+            }
+            if fs::remove_file(&entry.path).is_ok() {
+                total = total.saturating_sub(entry.size);
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+}
+
+/// One cached artifact's path, byte size, and modification time — the unit of eviction.
+#[derive(Debug)]
+struct Entry {
+    path: PathBuf,
+    size: u64,
+    mtime: std::time::SystemTime,
+}
+
+/// Default cap on total cache size before oldest entries are evicted (256 MiB). Override with the
+/// `NOETA_CACHE_MAX_BYTES` environment variable (`0` disables the cap entirely).
+pub const DEFAULT_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The configured cache size cap: `NOETA_CACHE_MAX_BYTES` if set and parseable (`0` = unbounded),
+/// otherwise [`DEFAULT_MAX_BYTES`].
+pub fn max_bytes() -> u64 {
+    match std::env::var("NOETA_CACHE_MAX_BYTES") {
+        Ok(v) => v.trim().parse().unwrap_or(DEFAULT_MAX_BYTES),
+        Err(_) => DEFAULT_MAX_BYTES,
     }
 }
 
@@ -465,6 +549,47 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|x| x == "tmp"))
             .collect();
         assert!(tmp.is_empty(), "temp file should be renamed away, found {tmp:?}");
+    }
+
+    #[test]
+    fn stats_counts_entries_and_bytes() {
+        let cache = Cache::open_at(temp_dir("stats")).unwrap();
+        assert_eq!(cache.stats().unwrap(), (0, 0));
+        cache.store(&sample_key(), b"12345").unwrap();
+        let mut other = KeyBuilder::new();
+        other.source("o.noe", b"z");
+        cache.store(&other.finish(), b"678").unwrap();
+        assert_eq!(cache.stats().unwrap(), (2, 8));
+    }
+
+    #[test]
+    fn prune_to_bounds_total_size() {
+        let cache = Cache::open_at(temp_dir("prune")).unwrap();
+        // Five 100-byte entries → 500 bytes total.
+        let keys: Vec<CacheKey> = (0..5)
+            .map(|i| {
+                let mut b = KeyBuilder::new();
+                b.source(format!("m{i}.noe"), format!("entry-{i}").as_bytes());
+                b.finish()
+            })
+            .collect();
+        for k in &keys {
+            cache.store(k, &vec![b'x'; 100]).unwrap();
+        }
+        assert_eq!(cache.stats().unwrap(), (5, 500));
+
+        // Cap at 250 bytes → evict until ≤ 250: three removed, two (200 B) remain. (Which two is a
+        // policy detail — oldest-first by mtime — not asserted here, since std can't set mtimes.)
+        let removed = cache.prune_to(250).unwrap();
+        assert_eq!(removed, 3);
+        let (count, bytes) = cache.stats().unwrap();
+        assert_eq!((count, bytes), (2, 200));
+        assert!(bytes <= 250, "total is under the cap");
+
+        // Already under cap → no-op; and a zero cap disables eviction entirely.
+        assert_eq!(cache.prune_to(250).unwrap(), 0);
+        assert_eq!(cache.prune_to(0).unwrap(), 0);
+        assert_eq!(cache.stats().unwrap().0, 2);
     }
 
     #[test]

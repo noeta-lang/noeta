@@ -196,6 +196,24 @@ enum Command {
         #[arg(long, default_value_t = 8080)]
         port: u16,
     },
+    /// Inspect or clear the transparent startup cache (M3). `noeta run`/`dump`/`build` cache each
+    /// compile under `~/.cache/noeta/` so a repeated run of unchanged sources skips the front-end;
+    /// caching is on by default (disable per-run with `--no-cache`, or everywhere with
+    /// `NOETA_NO_CACHE`).
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum CacheAction {
+    /// Print the cache directory path (whether or not it exists yet).
+    Path,
+    /// Show the cache location, entry count, total size on disk, and the size cap.
+    Info,
+    /// Remove all cached compilations.
+    Clear,
 }
 
 fn main() -> ExitCode {
@@ -248,6 +266,84 @@ fn main() -> ExitCode {
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),
         Command::Serve { file, port } => cmd_serve(&file, port),
+        Command::Cache { action } => cmd_cache(&action),
+    }
+}
+
+/// `noeta cache <path|info|clear>` — inspect or clear the transparent startup cache.
+fn cmd_cache(action: &CacheAction) -> ExitCode {
+    let Some(dir) = noeta_cache::Cache::locate() else {
+        eprintln!("lang: no cache directory could be resolved (set HOME or NOETA_CACHE_DIR)");
+        return ExitCode::from(1);
+    };
+    match action {
+        CacheAction::Path => {
+            println!("{}", dir.display());
+            ExitCode::SUCCESS
+        }
+        CacheAction::Info => {
+            let cap = noeta_cache::max_bytes();
+            let cap_str = if cap == 0 {
+                "unbounded".to_string()
+            } else {
+                human_bytes(cap)
+            };
+            if !dir.exists() {
+                println!("{}\n0 entries, 0 B on disk (cap {cap_str})", dir.display());
+                return ExitCode::SUCCESS;
+            }
+            match noeta_cache::Cache::open_at(dir.clone()).and_then(|c| c.stats()) {
+                Ok((count, bytes)) => {
+                    println!("{}", dir.display());
+                    println!(
+                        "{count} {}, {} on disk (cap {cap_str})",
+                        if count == 1 { "entry" } else { "entries" },
+                        human_bytes(bytes),
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("lang: cannot read cache at {}: {err}", dir.display());
+                    ExitCode::from(1)
+                }
+            }
+        }
+        CacheAction::Clear => {
+            if !dir.exists() {
+                println!("cache is already empty ({})", dir.display());
+                return ExitCode::SUCCESS;
+            }
+            match noeta_cache::Cache::open_at(dir.clone()).and_then(|c| c.clear()) {
+                Ok(n) => {
+                    println!(
+                        "removed {n} cached compilation{} from {}",
+                        if n == 1 { "" } else { "s" },
+                        dir.display()
+                    );
+                    ExitCode::SUCCESS
+                }
+                Err(err) => {
+                    eprintln!("lang: cannot clear cache at {}: {err}", dir.display());
+                    ExitCode::from(1)
+                }
+            }
+        }
+    }
+}
+
+/// Format a byte count as a short human-readable string (B / KiB / MiB / GiB).
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{n} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
     }
 }
 
@@ -849,8 +945,11 @@ fn compile_whole_file(
 
     // Populate the cache, best-effort. Synchronous: encoding + writing the blob is trivial next to
     // the compile we just paid, and a failure (read-only dir, disk full) never touches the outcome.
+    // Then bound the cache's size (oldest-first eviction) so it can't grow without limit — also only
+    // on this already-slow miss path, and also best-effort.
     if let Some(slot) = &cache {
         let _ = slot.cache.store(&slot.key, &noeta_bundle::write(&module));
+        let _ = slot.cache.prune_to(noeta_cache::max_bytes());
     }
     Ok(Compiled { module, sources })
 }
