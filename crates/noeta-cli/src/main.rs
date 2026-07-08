@@ -181,6 +181,14 @@ enum Command {
         /// `--instrument`.
         #[arg(long, value_name = "N")]
         every: Option<u64>,
+        /// Output format. Sampling: `folded` (default), `svg` (flamegraph), `speedscope` (JSON for
+        /// speedscope.app). Instrumenting: `table` (default), `json`.
+        #[arg(long, value_name = "FMT")]
+        format: Option<String>,
+        /// Write the profile artifact to this file instead of stderr (recommended for `svg` /
+        /// `speedscope`). The program's own stdout is never touched.
+        #[arg(long, short)]
+        out: Option<PathBuf>,
     },
     /// Serve a program's HTTP handler. The file defines a top-level `fn fetch(req: Request):
     /// Response` (sync or async) and `use std.{http}`; `noeta serve` runs the file's top-level
@@ -245,7 +253,9 @@ fn main() -> ExitCode {
             instrument,
             hz,
             every,
-        } => cmd_profile(&file, instrument, hz, every),
+            format,
+            out,
+        } => cmd_profile(&file, instrument, hz, every, format.as_deref(), out),
         Command::Serve { file, port } => cmd_serve(&file, port),
     }
 }
@@ -270,6 +280,8 @@ fn cmd_profile(
     instrument: bool,
     hz: Option<u32>,
     every: Option<u64>,
+    format: Option<&str>,
+    out: Option<PathBuf>,
 ) -> ExitCode {
     let mode = if instrument {
         noeta_prof::Mode::Instrument
@@ -280,7 +292,19 @@ fn cmd_profile(
             hz: hz.unwrap_or(1000),
         })
     };
-    noeta_prof::run(file, mode)
+    let format = match format {
+        Some(s) => match noeta_prof::Format::parse(s) {
+            Some(f) => Some(f),
+            None => {
+                eprintln!(
+                    "lang: unknown --format '{s}' (expected folded, svg, speedscope, table, or json)"
+                );
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    noeta_prof::run(file, mode, format, out)
 }
 
 /// For a tier runner: whether its `tier` is live under `--profile`. `Ok(true)` when no profile was

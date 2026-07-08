@@ -329,3 +329,77 @@ fn wall_clock_sampling_produces_a_profile() {
         "the hot function appears in the profile"
     );
 }
+
+// ---- P3: emit formats ----------------------------------------------------------------------------
+
+use noeta_prof::Format;
+
+#[test]
+fn format_parse_round_trips_and_rejects_unknown() {
+    for (s, f) in [
+        ("folded", Format::Folded),
+        ("svg", Format::Svg),
+        ("speedscope", Format::Speedscope),
+        ("table", Format::Table),
+        ("json", Format::Json),
+    ] {
+        assert_eq!(Format::parse(s), Some(f));
+    }
+    assert_eq!(Format::parse("nonsense"), None);
+    assert!(Format::Svg.is_sampling() && !Format::Table.is_sampling());
+}
+
+#[test]
+fn svg_renders_a_flamegraph() {
+    let path = fixture("svg", HOT_SRC);
+    let report = noeta_prof::profile(&path, Mode::Sample(SampleClock::Ops { every: 1000 }));
+    let svg = String::from_utf8(noeta_prof::render(&report, Format::Svg).expect("svg renders"))
+        .expect("svg is utf-8");
+    assert!(svg.contains("<svg"), "output is an SVG document");
+    assert!(
+        svg.contains("hot"),
+        "the hot function is a bar in the flamegraph"
+    );
+}
+
+#[test]
+fn speedscope_is_valid_and_well_formed() {
+    let path = fixture("speedscope", HOT_SRC);
+    let report = noeta_prof::profile(&path, Mode::Sample(SampleClock::Ops { every: 1000 }));
+    let flame_total = report.flamegraph.as_ref().unwrap().total;
+
+    let bytes = noeta_prof::render(&report, Format::Speedscope).expect("speedscope renders");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+
+    assert_eq!(json["profiles"][0]["type"], "sampled");
+    assert_eq!(json["profiles"][0]["endValue"], flame_total);
+    let n_samples = json["profiles"][0]["samples"].as_array().unwrap().len();
+    let n_weights = json["profiles"][0]["weights"].as_array().unwrap().len();
+    assert_eq!(n_samples, n_weights, "one weight per sample");
+    let n_frames = json["shared"]["frames"].as_array().unwrap().len();
+    assert!(n_frames > 0, "the shared frame table is populated");
+    // Every frame index in a sample is in range.
+    for sample in json["profiles"][0]["samples"].as_array().unwrap() {
+        for idx in sample.as_array().unwrap() {
+            assert!(
+                (idx.as_u64().unwrap() as usize) < n_frames,
+                "frame index in range"
+            );
+        }
+    }
+}
+
+#[test]
+fn instrument_json_lists_functions() {
+    let path = fixture("inst_json", &fib_src(10));
+    let report = noeta_prof::profile(&path, Mode::Instrument);
+    let bytes = noeta_prof::render(&report, Format::Json).expect("json renders");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+    let fib = json["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "fib")
+        .expect("fib row present");
+    assert_eq!(fib["calls"], 177, "exact call count survives into JSON");
+}

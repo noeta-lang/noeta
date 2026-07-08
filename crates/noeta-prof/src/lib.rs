@@ -12,15 +12,18 @@
 //! owns the collectors, the `proto → name @ file:line` resolution, and the report rendering (a
 //! per-function table, and folded stacks for the flamegraph).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 
 mod instrument;
+mod render;
 mod sample;
 mod session;
+
+pub use render::{Format, render};
 
 /// Which profiler to run. `Summary` just times the run; `Instrument` attaches the exact per-function
 /// collector; `Sample` builds a wall-time (or, deterministically, op-weighted) flamegraph.
@@ -340,9 +343,40 @@ fn fmt_ns(ns: u64) -> String {
 /// Profile the program at `path` in `mode`, replay its output on the real streams, and print the
 /// profile report. The program's own stdout/stderr are forwarded verbatim; the profiler's report
 /// goes to **stderr** so it never mixes into the program's stdout (a piped program stays pipeable).
-/// Returns the program's exit code.
-pub fn run(path: &Path, mode: Mode) -> ExitCode {
+/// The default emit format for a mode: `Table` for instrumenting, `Folded` for sampling, and none
+/// for the bare timed run.
+fn default_format(mode: Mode) -> Option<Format> {
+    match mode {
+        Mode::Summary => None,
+        Mode::Instrument => Some(Format::Table),
+        Mode::Sample(_) => Some(Format::Folded),
+    }
+}
+
+/// Whether `format` is valid for `mode` (a sampling artifact needs a sampling run, and vice versa).
+fn format_fits(mode: Mode, format: Format) -> bool {
+    match mode {
+        Mode::Sample(_) => format.is_sampling(),
+        Mode::Instrument => !format.is_sampling(),
+        Mode::Summary => false,
+    }
+}
+
+/// Returns the program's exit code. `format` overrides the mode's default artifact; `out` writes that
+/// artifact to a file (otherwise it goes to stderr — the program owns stdout).
+pub fn run(path: &Path, mode: Mode, format: Option<Format>, out: Option<PathBuf>) -> ExitCode {
     use std::io::Write;
+
+    // Reject a format that doesn't match the mode *before* running the program.
+    if let Some(format) = format
+        && !format_fits(mode, format)
+    {
+        eprintln!(
+            "noeta profile: --format {format:?} does not apply to this mode (sampling formats \
+             need a sampling run; use --instrument for the table/json)"
+        );
+        return ExitCode::from(2);
+    }
 
     let report = profile(path, mode);
     print!("{}", report.stdout);
@@ -350,6 +384,7 @@ pub fn run(path: &Path, mode: Mode) -> ExitCode {
     eprint!("{}", report.stderr);
 
     let mut err = std::io::stderr();
+    // The one-line summary always goes to stderr.
     match mode {
         Mode::Summary => {
             let _ = writeln!(
@@ -365,7 +400,6 @@ pub fn run(path: &Path, mode: Mode) -> ExitCode {
                 report.functions.as_ref().map_or(0, |f| f.len()),
                 report.wall
             );
-            let _ = write!(err, "{}", render_table(&report));
         }
         Mode::Sample(clock) => {
             let flame = report.flamegraph.as_ref();
@@ -381,10 +415,38 @@ pub fn run(path: &Path, mode: Mode) -> ExitCode {
                 flame.map_or(0, |f| f.stacks.len()),
                 report.wall
             );
-            // The folded stacks are the artifact; they go to stderr (keeping the program's stdout
-            // clean). `-o <file>` / SVG / speedscope rendering arrive in P3.
-            let _ = write!(err, "{}", render_folded(&report));
         }
     }
+
+    // Render + emit the artifact (unless the run failed to start or the mode has none).
+    if let Some(format) = format.or_else(|| default_format(mode)) {
+        match render::render(&report, format) {
+            Ok(bytes) if bytes.is_empty() => {}
+            Ok(bytes) => match &out {
+                Some(path) => {
+                    if let Err(e) = std::fs::write(path, &bytes) {
+                        let _ =
+                            writeln!(err, "noeta profile: cannot write {}: {e}", path.display());
+                        return ExitCode::from(2);
+                    }
+                    let _ = writeln!(
+                        err,
+                        "noeta profile: wrote {:?} profile to {}",
+                        format,
+                        path.display()
+                    );
+                }
+                // No file: the artifact goes to stderr (keeping the program's stdout clean).
+                None => {
+                    let _ = err.write_all(&bytes);
+                }
+            },
+            Err(e) => {
+                let _ = writeln!(err, "noeta profile: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+
     ExitCode::from(report.exit_code.clamp(0, 255) as u8)
 }
