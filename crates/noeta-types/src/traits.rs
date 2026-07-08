@@ -50,6 +50,14 @@ pub enum BuiltinTrait {
     Members,
     DynamicCall,
     TryAdd,
+    /// **Mergeable** (p2p P2) — the state-based CRDT convergence capability: a value that can be
+    /// `merge`d with a concurrent replica and converge (commutative/associative/idempotent), which
+    /// is what makes it safe to replicate via `synced_signal`. Unlike every other built-in trait it
+    /// is **intrinsic** ([`BuiltinTrait::intrinsic`]): a user cannot `impl` or `@derive` it — it is
+    /// satisfied only by the built-in CRDT extern types (`GCounter`/`PnCounter`/`GSet`), which
+    /// declare it through the extension registry, because only those types have a real merge at
+    /// runtime. It exists here so it can be *named as a bound* (`T: Mergeable`) and checked.
+    Mergeable,
 }
 
 /// The per-variant metadata of a [`BuiltinTrait`]: the name users write, the single method an `impl`
@@ -97,6 +105,9 @@ impl BuiltinTrait {
             Members => ("Members", Some(("get", 1)), None, false),
             DynamicCall => ("DynamicCall", Some(("call", 2)), None, false),
             TryAdd => ("TryAdd", Some(("try_add", 1)), None, false),
+            // A marker (no user-written method — the CRDT types carry the real merge natively) and
+            // not derivable; `intrinsic()` further bars a hand-written `impl`.
+            Mergeable => ("Mergeable", None, None, false),
         };
         Info {
             name,
@@ -132,6 +143,15 @@ impl BuiltinTrait {
     /// Whether `@derive(Name)` is accepted for this trait.
     pub fn derivable(self) -> bool {
         self.info().derivable
+    }
+
+    /// Whether this trait is **intrinsic** — satisfied only by built-in types that declare it (via
+    /// the extension registry), never by a user `impl`/`@derive`. Only [`BuiltinTrait::Mergeable`]
+    /// today: a value's convergence story is a property of a real built-in CRDT, not something a
+    /// user can claim, so `impl Mergeable` / `@derive(Mergeable)` are rejected while `T: Mergeable`
+    /// stays usable as a bound.
+    pub fn intrinsic(self) -> bool {
+        matches!(self, BuiltinTrait::Mergeable)
     }
 
     /// How many **generic type arguments** `@derive(Name<…>)` requires for this trait. Only
@@ -178,6 +198,7 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
     BuiltinTrait::Members,
     BuiltinTrait::DynamicCall,
     BuiltinTrait::TryAdd,
+    BuiltinTrait::Mergeable,
 ];
 
 #[cfg(test)]

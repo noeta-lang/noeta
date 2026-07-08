@@ -125,18 +125,21 @@ const STD_TYPES: &[ExtType] = &[
         name: crate::crdt::GCOUNTER_TYPE_NAME,
         methods: crate::crdt::GCOUNTER_METHODS,
         dispatch: crate::crdt::GCOUNTER_DISPATCH,
+        traits: crate::crdt::CRDT_TRAITS,
         ..ExtType::DEFAULTS
     },
     ExtType {
         name: crate::crdt::PNCOUNTER_TYPE_NAME,
         methods: crate::crdt::PNCOUNTER_METHODS,
         dispatch: crate::crdt::PNCOUNTER_DISPATCH,
+        traits: crate::crdt::CRDT_TRAITS,
         ..ExtType::DEFAULTS
     },
     ExtType {
         name: crate::crdt::GSET_TYPE_NAME,
         methods: crate::crdt::GSET_METHODS,
         dispatch: crate::crdt::GSET_DISPATCH,
+        traits: crate::crdt::CRDT_TRAITS,
         ..ExtType::DEFAULTS
     },
 ];

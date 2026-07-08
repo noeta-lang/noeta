@@ -964,6 +964,23 @@ impl Checker {
         self.register_type_enum();
         self.register_semantic_prelude();
         self.register_test_attributes();
+        self.seed_extern_type_traits();
+    }
+
+    /// Seed the built-in traits that **extern types** declare through the extension registry (p2p
+    /// P2) into the trait-impl table — the extern-type analogue of processing a user type's
+    /// `@derive`/`impl`. This is what makes `satisfies(GCounter, Mergeable)` true, so a
+    /// `T: Mergeable` bound accepts a CRDT. Runs at prelude time, once, from every construction
+    /// path; only registry-declared (intrinsic) traits appear here, so it cannot let a user type
+    /// masquerade as one.
+    fn seed_extern_type_traits(&mut self) {
+        for ext in noeta_stdlib::registry::extensions() {
+            for ty in ext.types() {
+                if !ty.traits.is_empty() {
+                    self.record_trait_impls(ty.name, ty.traits.iter().copied());
+                }
+            }
+        }
     }
 
     /// Register the built-in **test-metadata attributes** (object-model slice 6h) as prelude
@@ -2790,6 +2807,18 @@ impl Checker {
             .help("only built-in traits can be implemented (e.g. `Add`, `Equatable`, `Display`)");
             return;
         };
+        if t.intrinsic() {
+            self.error(
+                DiagnosticCode::InvalidImpl,
+                trait_span,
+                format!("`{trait_name}` cannot be implemented"),
+            )
+            .help(format!(
+                "`{trait_name}` is a built-in capability satisfied only by the runtime types that \
+                 provide it (e.g. the CRDT types for `Mergeable`), not by a user `impl`"
+            ));
+            return;
+        }
         let Some((req_name, req_arity)) = t.required_method() else {
             return; // a marker trait (e.g. `Clone`, `Attribute`) imposes no hand-written method
         };
@@ -4460,6 +4489,7 @@ impl Checker {
                         self.finalize_closure_args(&params, args, arg_exprs, env);
                         self.check_args(&params, required, args, arg_exprs, span, &func);
                     }
+                    self.check_module_bounds(&module, &func, args, span);
                     return stdlib::module_return(&module, &func, args).unwrap_or(Type::Unknown);
                 }
                 // Prelude functions are polymorphic/variadic — their result is typed, but their
@@ -4505,6 +4535,7 @@ impl Checker {
                         self.finalize_closure_args(&params, args, arg_exprs, env);
                         self.check_args(&params, required, args, arg_exprs, span, name);
                     }
+                    self.check_module_bounds(m, name, args, span);
                     return stdlib::module_return(m, name, args).unwrap_or(Type::Unknown);
                 }
                 // `Type.assoc(args)` — an associated function / static call on a known user type
@@ -5162,6 +5193,14 @@ impl Checker {
                     continue;
                 };
                 if !self.satisfies(concrete, t) {
+                    let help = if t.intrinsic() {
+                        format!(
+                            "`{bound}` is a built-in capability — only the runtime types that \
+                             provide it (the CRDT types for `Mergeable`) satisfy this bound"
+                        )
+                    } else {
+                        format!("`{concrete}` must `@derive` or `impl {bound}` to be used here")
+                    };
                     self.error(
                         DiagnosticCode::TraitBoundNotSatisfied,
                         span,
@@ -5170,9 +5209,7 @@ impl Checker {
                                  parameter `{pname}` of `{name}`"
                         ),
                     )
-                    .help(format!(
-                        "`{concrete}` must `@derive` or `impl {bound}` to be used here"
-                    ));
+                    .help(help);
                 }
             }
         }
@@ -5191,6 +5228,35 @@ impl Checker {
             return self.trait_impls.get(n).is_some_and(|s| s.contains(&t));
         }
         builtin_satisfies(ty, t)
+    }
+
+    /// Enforce the **trait bounds** on a registry function's bounded type variables (p2p P2): each
+    /// bound var is bound to a concrete type by the call's arguments (`module_var_bounds`), and that
+    /// type must satisfy the named trait or it is `E0025`. An undetermined var yields nothing
+    /// (gradual). This is the registry-call twin of the user-generic bound check.
+    fn check_module_bounds(&mut self, module: &str, func: &str, args: &[Type], span: Span) {
+        for (concrete, bound) in stdlib::module_var_bounds(module, func, args) {
+            let Some(t) = BuiltinTrait::from_name(bound) else {
+                continue;
+            };
+            if self.satisfies(&concrete, t) {
+                continue;
+            }
+            let help = if t.intrinsic() {
+                format!(
+                    "`{bound}` is a built-in capability — only the runtime types that provide it \
+                     (the CRDT types `GCounter`/`PnCounter`/`GSet`) satisfy this bound"
+                )
+            } else {
+                format!("`{concrete}` must `@derive` or `impl {bound}`")
+            };
+            self.error(
+                DiagnosticCode::TraitBoundNotSatisfied,
+                span,
+                format!("type `{concrete}` does not satisfy the bound `{bound}`"),
+            )
+            .help(help);
+        }
     }
 
     /// The return type of a method call `recv.name(...)`: a built-in method, a user-declared
@@ -5933,7 +5999,10 @@ fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
                     String | Bool | Unit | List(_) | Map(..) | Set(_) | Option(_) | Result(..)
                 )
         }
-        // No built-in type satisfies these marker/protocol traits without an explicit `impl`.
+        // No built-in *primitive* type satisfies these marker/protocol traits without an explicit
+        // `impl`. `Mergeable` in particular is satisfied only by the CRDT extern types, which are
+        // `Type::Named` and so resolve through the seeded `trait_impls` table in `satisfies`, never
+        // reaching here — no primitive is ever `Mergeable`.
         Bt::Clone
         | Bt::Serialize
         | Bt::Index
@@ -5942,7 +6011,8 @@ fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
         | Bt::Callable
         | Bt::Members
         | Bt::DynamicCall
-        | Bt::TryAdd => false,
+        | Bt::TryAdd
+        | Bt::Mergeable => false,
     }
 }
 

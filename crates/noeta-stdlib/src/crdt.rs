@@ -31,6 +31,12 @@ pub const GCOUNTER_TYPE_NAME: &str = "GCounter";
 pub const PNCOUNTER_TYPE_NAME: &str = "PnCounter";
 pub const GSET_TYPE_NAME: &str = "GSet";
 
+/// The built-in traits every CRDT extern type declares (p2p P2): `Mergeable` — the convergence
+/// capability that makes a value safe to sync, which the checker enforces as a `T: Mergeable` bound
+/// on `synced_signal`. This is the extern-type analogue of a user type's `@derive`, seeded into the
+/// checker's trait table from the registry.
+pub const CRDT_TRAITS: &[&str] = &["Mergeable"];
+
 const GCOUNTER_SIG: SigType = SigType::Named(GCOUNTER_TYPE_NAME);
 const PNCOUNTER_SIG: SigType = SigType::Named(PNCOUNTER_TYPE_NAME);
 const GSET_SIG: SigType = SigType::Named(GSET_TYPE_NAME);
