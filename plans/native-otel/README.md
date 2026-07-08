@@ -205,12 +205,27 @@ so tracing calls in un-configured programs are ~free (the perf gate below).
   cache collision** (`9e4e01e`): the key sorted entry + siblings together, so two programs in one
   directory (same sibling set) shared a key and the second `noeta run` served the first's bytecode —
   now the entry folds through a distinct `KeyBuilder::entry` slot (key scheme v1→v2, regression test).
-- **T4 — server auto-instrumentation (headline).** `serve.rs`'s per-connection handler call
-  (`serve.rs:92` loop) wrapped in a SERVER-kind span: extract inbound `traceparent`, name from
-  method+route, status from the response, inject context on outbound. Opt-out, on by default when
-  telemetry is configured.
-- **T5 — deeper auto-instrumentation.** Async task spans + isolate-message context propagation (in);
-  **reactive-flush spans behind an opt-in flag** (per-signal-flush tracing is too noisy by default).
+- **T4 ✅ DONE (`6e9884b`).** Server auto-instrumentation — the headline. `serve.rs`'s per-connection
+  handler call is wrapped in a **SERVER-kind span**: parent extracted from the inbound `traceparent`
+  (continues the client's trace; absent/malformed → root), named `"{method} {route}"` (query stripped
+  for low cardinality), OTel HTTP semantic attributes (`http.request.method`/`url.path`/
+  `http.response.status_code`), timed across the handler, error status only on `5xx`. The span rides
+  each in-flight handler and ends at reply (incl. the abort→500 path). **Gated on a new
+  `Telemetry::tel_enabled()`** so an unconfigured `noeta serve` does zero span work per request
+  (perf-gate #1 by construction); `OTEL_SDK_DISABLED=true` honored as the standard opt-out. *Verify:*
+  naming/extraction/status split into pure helpers + unit-tested (traceparent extract, 5xx rule); a
+  new end-to-end oracle (`crates/noeta-conformance/tests/telemetry_serve.rs`) runs a served program on
+  a sandbox host with a **span sink** (`SandboxHost::set_span_sink`, the write-only-span introspection
+  path) and asserts the 5 emitted SERVER spans; http_server differential unchanged; 88 stdlib + full
+  corpus differential/leak + clippy green; runtime builds telemetry on/off. **Handler-internal span
+  nesting deferred to T5** (needs per-task async context — decided with the user).
+- **T5 — deeper auto-instrumentation + per-task async context.** The **active-span context becomes
+  per-task** (each task/future carries its own stack, not one global LIFO), which is the prerequisite
+  for two things: (a) **handler-internal spans nesting under the T4 SERVER span** into one trace per
+  request (deferred here from T4 by design — the serve loop is cooperatively concurrent, so a global
+  LIFO mis-parents across `await`s); (b) **async task spans** + isolate-message context propagation
+  (in). Plus **reactive-flush spans behind an opt-in flag** (per-signal-flush tracing is too noisy by
+  default).
 - **T6 — docs + close-out.** `docs/Observability.md` (or `Telemetry.md`) — the SDK surface, config,
   the profiler-vs-OTEL split, the differential/bundle stances; CLI/sidebar/roadmap cross-links;
   roadmap tick; memory.
