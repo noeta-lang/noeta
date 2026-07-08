@@ -416,7 +416,7 @@ pub fn from_bytes_like(like: &dyn ExternValue, bytes: &[u8]) -> Option<Box<dyn E
     None
 }
 
-// --- Registration handles (referenced from `registry::STD_MODULES` / `STD_TYPES`) ---------------
+// --- Registration handles (referenced from `registry`'s `P2P_MODULES` / `P2P_TYPES`) ------------
 
 /// The `ExtType` method-dispatch entry for each CRDT — paired with its `*_METHODS` table when the
 /// type is registered.

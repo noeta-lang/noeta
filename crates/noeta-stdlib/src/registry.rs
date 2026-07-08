@@ -1,9 +1,11 @@
 //! The `std` extension registration — the concrete half of the native-extension registry (the ABI
 //! type & trait vocabulary lives in [`noeta_native::registry`], re-exported here).
 //!
-//! [`StdExtension`] is the dogfood: it registers the Ring 2 modules (`math`/`random`/`fs`/`json`/
-//! `crypto`/`http`/…) and the core extern types (`Uuid`/`FileHandle`/`Hasher`/`Response`) through
-//! the very API a third-party extension would use. Each module declares its [`ExtFn`] signatures
+//! Core's `std` is the dogfood: several in-tree [`Extension`] units ([`CoreExtension`],
+//! [`HttpExtension`], [`CryptoExtension`], [`IdExtension`], [`VecExtension`], [`P2pExtension`]), all
+//! sharing the `"std"` root, register the Ring 2 modules (`math`/`random`/`fs`/`json`/`crypto`/
+//! `http`/…) and the core extern types (`Uuid`/`FileHandle`/`Hasher`/`Response`) through the very API
+//! a third-party extension would use. Each module declares its [`ExtFn`] signatures
 //! plus one shared `dispatch`; both backends route every call through the lookup functions here
 //! (`find_module`/`dispatch`/`find_type`/`dispatch_method`), so the differential oracle
 //! (`TreeWalkBackend` ≡ `VmBackend`) holds by construction. The neutral value marshalling
@@ -16,22 +18,64 @@ use crate::{
     Arg, Dispatch, Host, Output, StdError, arity_error, math, no_function_error, type_error,
 };
 
-/// Core's "std" extension — the dogfood. Registers the Ring 2 modules through the same API a
-/// third-party extension would use. Every `use std.*` module lives in [`STD_MODULES`] — the
-/// slice-by-slice migration (Phase A → higher-order-abi H5) is complete; there is no other
-/// registration path.
-#[derive(Debug, Clone, Copy)]
-pub struct StdExtension;
+// Core's `std` is registered as **several in-tree [`Extension`] units** (package-manager P1.4),
+// all sharing the `"std"` namespace root — the dogfood proving the multi-extension registry a
+// third-party package plugs into. Each unit is a wholesale include/exclude boundary (the seam
+// Phase 2/3 populate; the shape a heavy ring would gate behind a Cargo feature): [`CoreExtension`]
+// is the always-on Ring-1/2 surface, and each capability with a separable identity — `http`,
+// `crypto`, `id`, the `vec`/`quat` geometry pair (extraction-prep, native-extensions), `p2p` — is
+// its own unit. `find_module`/`find_type`/`commands` iterate every unit filtered by root, so the
+// registered surface is **identical** to the former single `StdExtension` — this is a faithful
+// partition, differential-green by construction.
 
-impl Extension for StdExtension {
+/// A one-line `impl Extension` for a `std`-rooted core unit: a label name, the shared `"std"` root,
+/// and its module/type slices. Commands are default-empty (only `http` overrides).
+macro_rules! std_unit {
+    ($ty:ident, $label:literal, modules = $modules:expr, types = $types:expr $(,)?) => {
+        #[derive(Debug, Clone, Copy)]
+        pub struct $ty;
+        impl Extension for $ty {
+            fn name(&self) -> &'static str {
+                $label
+            }
+            fn root(&self) -> &'static str {
+                "std"
+            }
+            fn modules(&self) -> &'static [ExtModule] {
+                $modules
+            }
+            fn types(&self) -> &'static [ExtType] {
+                $types
+            }
+        }
+    };
+}
+
+std_unit!(CoreExtension, "std.core", modules = CORE_MODULES, types = CORE_TYPES);
+std_unit!(CryptoExtension, "std.crypto", modules = CRYPTO_MODULES, types = CRYPTO_TYPES);
+std_unit!(IdExtension, "std.id", modules = ID_MODULES, types = ID_TYPES);
+// The `vec`/`quat` packed-3D-math pair, split into its own unit to **prep extraction** into an
+// out-of-tree geometry package (native-extensions; Phase 3). No extern types — pure value math.
+std_unit!(VecExtension, "std.vec", modules = VEC_MODULES, types = &[]);
+std_unit!(P2pExtension, "std.p2p", modules = P2P_MODULES, types = P2P_TYPES);
+
+/// The `http` unit — the only one contributing a CLI subcommand (`noeta serve`), so it can't use the
+/// `std_unit!` shorthand.
+#[derive(Debug, Clone, Copy)]
+pub struct HttpExtension;
+
+impl Extension for HttpExtension {
     fn name(&self) -> &'static str {
+        "std.http"
+    }
+    fn root(&self) -> &'static str {
         "std"
     }
     fn modules(&self) -> &'static [ExtModule] {
-        STD_MODULES
+        HTTP_MODULES
     }
     fn types(&self) -> &'static [ExtType] {
-        STD_TYPES
+        HTTP_TYPES
     }
     fn commands(&self) -> &'static [noeta_native::ExtCommand] {
         // `noeta serve` (higher-order-abi H6) — contributed here, not a core CLI verb.
@@ -39,30 +83,27 @@ impl Extension for StdExtension {
     }
 }
 
-/// Core's extern types: `Uuid` (X2 — pure, byte-ordered, key-capable) and `FileHandle` (X3 —
-/// mutable + effectful, the other corner of the matrix; NOT key-capable).
-const STD_TYPES: &[ExtType] = &[
-    ExtType {
-        name: crate::id::TYPE_NAME,
-        methods: UUID_METHODS,
-        dispatch: uuid_method_dispatch,
-        key_capable: true,
-        ..ExtType::DEFAULTS
-    },
-    ExtType {
-        name: "FileHandle",
-        methods: FILE_HANDLE_METHODS,
-        dispatch: file_handle_dispatch,
-        key_capable: false,
-        ..ExtType::DEFAULTS
-    },
-    ExtType {
-        name: crate::crypto::HASHER_TYPE_NAME,
-        methods: HASHER_METHODS,
-        dispatch: hasher_method_dispatch,
-        key_capable: false, // `update` mutates — a hasher can never key a map
-        ..ExtType::DEFAULTS
-    },
+/// The `id` unit's extern type: `Uuid` (X2 — pure, byte-ordered, key-capable).
+const ID_TYPES: &[ExtType] = &[ExtType {
+    name: crate::id::TYPE_NAME,
+    methods: UUID_METHODS,
+    dispatch: uuid_method_dispatch,
+    key_capable: true,
+    ..ExtType::DEFAULTS
+}];
+
+/// The `crypto` unit's extern type: the incremental `Hasher` (C3).
+const CRYPTO_TYPES: &[ExtType] = &[ExtType {
+    name: crate::crypto::HASHER_TYPE_NAME,
+    methods: HASHER_METHODS,
+    dispatch: hasher_method_dispatch,
+    key_capable: false, // `update` mutates — a hasher can never key a map
+    ..ExtType::DEFAULTS
+}];
+
+/// The `http` unit's extern types: the outbound `Response` and inbound `Request` (http arc /
+/// http-server). Both stay top-level type names (no module move in P0.3b's client/server split).
+const HTTP_TYPES: &[ExtType] = &[
     ExtType {
         name: crate::net::RESPONSE_TYPE_NAME,
         methods: RESPONSE_METHODS,
@@ -75,6 +116,55 @@ const STD_TYPES: &[ExtType] = &[
         methods: REQUEST_METHODS,
         dispatch: request_method_dispatch,
         key_capable: false, // an inbound request is not a map key
+        ..ExtType::DEFAULTS
+    },
+];
+
+/// The `p2p` unit's extern types: the CRDT value types (p2p P0) plus `SyncedSignal<T>` (p2p P2).
+const P2P_TYPES: &[ExtType] = &[
+    // The CRDT value types (p2p P0): plain-data, immutable, content-equal extern values wrapping
+    // the `noeta-crdt` convergence core. All pure — no arena, no ctx seam, not key-capable.
+    ExtType {
+        name: crate::crdt::GCOUNTER_TYPE_NAME,
+        methods: crate::crdt::GCOUNTER_METHODS,
+        dispatch: crate::crdt::GCOUNTER_DISPATCH,
+        traits: crate::crdt::CRDT_TRAITS,
+        ..ExtType::DEFAULTS
+    },
+    ExtType {
+        name: crate::crdt::PNCOUNTER_TYPE_NAME,
+        methods: crate::crdt::PNCOUNTER_METHODS,
+        dispatch: crate::crdt::PNCOUNTER_DISPATCH,
+        traits: crate::crdt::CRDT_TRAITS,
+        ..ExtType::DEFAULTS
+    },
+    ExtType {
+        name: crate::crdt::GSET_TYPE_NAME,
+        methods: crate::crdt::GSET_METHODS,
+        dispatch: crate::crdt::GSET_DISPATCH,
+        traits: crate::crdt::CRDT_TRAITS,
+        ..ExtType::DEFAULTS
+    },
+    // `SyncedSignal<T>` (p2p P2) — a signal node in the shared reactive graph holding a CRDT; its
+    // methods reach the arena + graph + P2p host, so they live in the ctx table.
+    ExtType {
+        name: crate::synced::SYNCED_SIGNAL_TYPE_NAME,
+        ctx_methods: crate::synced::SYNCED_CTX_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::synced::synced_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        ..ExtType::DEFAULTS
+    },
+];
+
+/// The always-on core extern types: `FileHandle` (X3 — mutable + effectful, `fs`), `Cell<T>` (H4),
+/// and the reactive handles (H5).
+const CORE_TYPES: &[ExtType] = &[
+    ExtType {
+        name: "FileHandle",
+        methods: FILE_HANDLE_METHODS,
+        dispatch: file_handle_dispatch,
+        key_capable: false,
         ..ExtType::DEFAULTS
     },
     // `Cell<T>` (higher-order-abi H4) — the generic, Class-3 corner of the matrix: all methods
@@ -116,39 +206,6 @@ const STD_TYPES: &[ExtType] = &[
         ctx_methods: crate::reactive::EFFECT_CTX_METHODS,
         ctx_dispatch: Some(|method, ctx, recv, args| {
             crate::reactive::effect_ctx_method_dispatch(method, ctx, recv, args)
-        }),
-        ..ExtType::DEFAULTS
-    },
-    // The CRDT value types (p2p P0): plain-data, immutable, content-equal extern values wrapping
-    // the `noeta-crdt` convergence core. All pure — no arena, no ctx seam, not key-capable.
-    ExtType {
-        name: crate::crdt::GCOUNTER_TYPE_NAME,
-        methods: crate::crdt::GCOUNTER_METHODS,
-        dispatch: crate::crdt::GCOUNTER_DISPATCH,
-        traits: crate::crdt::CRDT_TRAITS,
-        ..ExtType::DEFAULTS
-    },
-    ExtType {
-        name: crate::crdt::PNCOUNTER_TYPE_NAME,
-        methods: crate::crdt::PNCOUNTER_METHODS,
-        dispatch: crate::crdt::PNCOUNTER_DISPATCH,
-        traits: crate::crdt::CRDT_TRAITS,
-        ..ExtType::DEFAULTS
-    },
-    ExtType {
-        name: crate::crdt::GSET_TYPE_NAME,
-        methods: crate::crdt::GSET_METHODS,
-        dispatch: crate::crdt::GSET_DISPATCH,
-        traits: crate::crdt::CRDT_TRAITS,
-        ..ExtType::DEFAULTS
-    },
-    // `SyncedSignal<T>` (p2p P2) — a signal node in the shared reactive graph holding a CRDT; its
-    // methods reach the arena + graph + P2p host, so they live in the ctx table.
-    ExtType {
-        name: crate::synced::SYNCED_SIGNAL_TYPE_NAME,
-        ctx_methods: crate::synced::SYNCED_CTX_METHODS,
-        ctx_dispatch: Some(|method, ctx, recv, args| {
-            crate::synced::synced_ctx_method_dispatch(method, ctx, recv, args)
         }),
         ..ExtType::DEFAULTS
     },
@@ -231,9 +288,19 @@ fn file_handle_dispatch(
     }
 }
 
-/// The in-process extension registry. A package manager will populate this from declared
-/// dependencies; for now it holds only core's std extension.
-static REGISTRY: &[&(dyn Extension + Sync)] = &[&StdExtension];
+/// The in-process extension registry (package-manager P1.4) — the **assembled** list of registered
+/// extension units, replacing the former hardwired `&[&StdExtension]`. In-tree it holds core's `std`
+/// split into per-capability units; a package manager will extend it with declared dependencies, and
+/// a tailored build gates a heavy capability's unit out wholesale (the Cargo-feature seam). The order
+/// is cosmetic — every lookup iterates the whole list filtered by namespace root.
+static REGISTRY: &[&(dyn Extension + Sync)] = &[
+    &CoreExtension,
+    &HttpExtension,
+    &CryptoExtension,
+    &IdExtension,
+    &VecExtension,
+    &P2pExtension,
+];
 
 /// All registered extensions.
 pub fn extensions() -> &'static [&'static (dyn Extension + Sync)] {
@@ -2258,7 +2325,9 @@ fn json_dispatch(
     }
 }
 
-const STD_MODULES: &[ExtModule] = &[
+/// [`CoreExtension`]'s modules — the always-on Ring-1/2 surface (no separable heavy native dep):
+/// pure scalar/collection/host-IO/introspection plus the higher-order concurrency primitives.
+const CORE_MODULES: &[ExtModule] = &[
     ExtModule {
         name: "math",
         functions: MATH_FNS,
@@ -2281,51 +2350,6 @@ const STD_MODULES: &[ExtModule] = &[
         ..ExtModule::DEFAULTS
     },
     ExtModule {
-        name: "id",
-        functions: ID_FNS,
-        dispatch: id_dispatch,
-        deep_marshal: false,
-        ..ExtModule::DEFAULTS
-    },
-    ExtModule {
-        name: "crypto",
-        functions: CRYPTO_FNS,
-        dispatch: crypto_dispatch,
-        deep_marshal: false,
-        ..ExtModule::DEFAULTS
-    },
-    ExtModule {
-        // The outbound client (package-manager P0.3b): `get`/`post`/…/`_async`. Its reqwest/TLS tree
-        // is the ~5 MB `ring-http-client` payload, so isolating it from the server lets a
-        // server-only program shed it. `http_dispatch` is shared with the server module (the two
-        // function-name sets are disjoint, so one func-name router serves both).
-        name: "http.client",
-        functions: HTTP_CLIENT_FNS,
-        dispatch: http_dispatch,
-        // The optional `headers` argument is a `Map` — needs the deep marshalling that surfaces
-        // it as `NativeValue::Map` (http arc H5). url/body strings project fine either way.
-        deep_marshal: true,
-        // The reqwest/TLS tree (~3 MB) rides behind this ring — a tailored AOT archive links it only
-        // when the program can reach a client function (package-manager P1.0). Single source of truth
-        // for the module→ring map the footprint scan reads.
-        ring: Some("ring-http-client"),
-        ..ExtModule::DEFAULTS
-    },
-    ExtModule {
-        // The inbound server (package-manager P0.3b): the pure `response` builder + the `serve`
-        // accept→dispatch→reply loop. `serve` (higher-order-abi H3) is a higher-order orchestrator
-        // (closure handler, many futures in flight), so it lives in the ctx table. No reqwest.
-        name: "http.server",
-        functions: HTTP_SERVER_FNS,
-        dispatch: http_dispatch,
-        deep_marshal: true,
-        ctx_functions: crate::serve::HTTP_CTX_FNS,
-        ctx_dispatch: Some(crate::serve::http_ctx_dispatch),
-        // The inbound serve loop rides tokio (already linked for `fs`) — no separable native dep, so
-        // no ring. A `use std.http.server` program links no reqwest, precisely (P0.3b split).
-        ring: None,
-    },
-    ExtModule {
         name: "env",
         functions: ENV_FNS,
         dispatch: env_dispatch,
@@ -2343,20 +2367,6 @@ const STD_MODULES: &[ExtModule] = &[
         name: "fs",
         functions: FS_FNS,
         dispatch: fs_dispatch,
-        deep_marshal: false,
-        ..ExtModule::DEFAULTS
-    },
-    ExtModule {
-        name: "vec",
-        functions: VEC_FNS,
-        dispatch: vec_dispatch,
-        deep_marshal: false,
-        ..ExtModule::DEFAULTS
-    },
-    ExtModule {
-        name: "quat",
-        functions: QUAT_FNS,
-        dispatch: quat_dispatch,
         deep_marshal: false,
         ..ExtModule::DEFAULTS
     },
@@ -2394,6 +2404,82 @@ const STD_MODULES: &[ExtModule] = &[
         }),
         ..ExtModule::DEFAULTS
     },
+];
+
+/// [`IdExtension`]'s module — sequential ids + UUIDs (id-entropy U2).
+const ID_MODULES: &[ExtModule] = &[ExtModule {
+    name: "id",
+    functions: ID_FNS,
+    dispatch: id_dispatch,
+    deep_marshal: false,
+    ..ExtModule::DEFAULTS
+}];
+
+/// [`CryptoExtension`]'s module — digests / HMAC / bcrypt (crypto arc).
+const CRYPTO_MODULES: &[ExtModule] = &[ExtModule {
+    name: "crypto",
+    functions: CRYPTO_FNS,
+    dispatch: crypto_dispatch,
+    deep_marshal: false,
+    ..ExtModule::DEFAULTS
+}];
+
+/// [`HttpExtension`]'s modules — the outbound client (its own ring) and inbound server (P0.3b split).
+const HTTP_MODULES: &[ExtModule] = &[
+    ExtModule {
+        // The outbound client (package-manager P0.3b): `get`/`post`/…/`_async`. Its reqwest/TLS tree
+        // is the ~5 MB `ring-http-client` payload, so isolating it from the server lets a
+        // server-only program shed it. `http_dispatch` is shared with the server module (the two
+        // function-name sets are disjoint, so one func-name router serves both).
+        name: "http.client",
+        functions: HTTP_CLIENT_FNS,
+        dispatch: http_dispatch,
+        // The optional `headers` argument is a `Map` — needs the deep marshalling that surfaces
+        // it as `NativeValue::Map` (http arc H5). url/body strings project fine either way.
+        deep_marshal: true,
+        // The reqwest/TLS tree (~3 MB) rides behind this ring — a tailored AOT archive links it only
+        // when the program can reach a client function (package-manager P1.0). Single source of truth
+        // for the module→ring map the footprint scan reads.
+        ring: Some("ring-http-client"),
+        ..ExtModule::DEFAULTS
+    },
+    ExtModule {
+        // The inbound server (package-manager P0.3b): the pure `response` builder + the `serve`
+        // accept→dispatch→reply loop. `serve` (higher-order-abi H3) is a higher-order orchestrator
+        // (closure handler, many futures in flight), so it lives in the ctx table. No reqwest.
+        name: "http.server",
+        functions: HTTP_SERVER_FNS,
+        dispatch: http_dispatch,
+        deep_marshal: true,
+        ctx_functions: crate::serve::HTTP_CTX_FNS,
+        ctx_dispatch: Some(crate::serve::http_ctx_dispatch),
+        // The inbound serve loop rides tokio (already linked for `fs`) — no separable native dep, so
+        // no ring. A `use std.http.server` program links no reqwest, precisely (P0.3b split).
+        ring: None,
+    },
+];
+
+/// [`VecExtension`]'s modules — the `vec`/`quat` packed-3D-math pair (extraction-prep unit).
+const VEC_MODULES: &[ExtModule] = &[
+    ExtModule {
+        name: "vec",
+        functions: VEC_FNS,
+        dispatch: vec_dispatch,
+        deep_marshal: false,
+        ..ExtModule::DEFAULTS
+    },
+    ExtModule {
+        name: "quat",
+        functions: QUAT_FNS,
+        dispatch: quat_dispatch,
+        deep_marshal: false,
+        ..ExtModule::DEFAULTS
+    },
+];
+
+/// [`P2pExtension`]'s modules — CRDT constructors (p2p P0), the `p2p` host capability (P1), and the
+/// `synced` CRDT-backed reactive signal (P2).
+const P2P_MODULES: &[ExtModule] = &[
     // `crdt` (p2p P0) — the CRDT constructors; a plain value-in/value-out module like `math`.
     ExtModule {
         name: "crdt",
