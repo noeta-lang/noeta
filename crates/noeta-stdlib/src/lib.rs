@@ -61,4 +61,6 @@ pub mod vec3;
 pub use handle::{FileHandle, FileMode, Flush};
 pub use host::SandboxHost;
 pub use iter::IterMethod;
-pub use registry::StdExtension;
+pub use registry::{
+    CoreExtension, CryptoExtension, HttpExtension, IdExtension, P2pExtension, VecExtension,
+};

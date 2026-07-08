@@ -12,6 +12,9 @@ noeta-ast = { workspace = true }
 noeta-lexer = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-db = { workspace = true }
+# Dependency resolution (package-manager P2.1c): the editor resolves the same dependency packages the
+# CLI does, so cross-package `use <dep-key>.…` resolves in hover/goto/completion.
+noeta-pm = { workspace = true }
 # Member completion on a bare `.` re-lexes/parses/checks a lightly-munged buffer off the salsa graph
 # (the dangling `.` otherwise drops the statement, so the receiver never gets a type).
 noeta-parser = { workspace = true }

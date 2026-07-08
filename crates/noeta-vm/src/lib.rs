@@ -1685,7 +1685,6 @@ struct IsolateFailure {
     trace: Vec<TraceFrame>,
 }
 
-
 /// A bounded channel's scheduler-owned state (isolates I.1): a FIFO queue of buffered messages, its
 /// capacity, and whether it has been closed. Endpoints are indices into [`Vm::channels`]; the queue is
 /// never shared heap memory. Mirrors the tree-walker's `Channel`, so the FIFO + block-on-full/empty
@@ -2040,7 +2039,10 @@ impl<'m> Vm<'m> {
                 noeta_jit_abi::PREPARE_CALL_HELPER,
                 jit_prepare_call as *const u8,
             ),
-            (noeta_jit_abi::AFTER_CALL_HELPER, jit_after_call as *const u8),
+            (
+                noeta_jit_abi::AFTER_CALL_HELPER,
+                jit_after_call as *const u8,
+            ),
             (noeta_jit_abi::LEAF_OP_HELPER, jit_run_leaf_op as *const u8),
         ];
         let template = self
@@ -2070,19 +2072,31 @@ impl<'m> Vm<'m> {
     #[cfg(feature = "jit")]
     fn init_jit_service(&mut self, module: Arc<Module>) {
         let helpers: Vec<(&'static str, usize)> = vec![
-            (noeta_jit_abi::OBSERVE_HELPER, jit_observe as *const u8 as usize),
+            (
+                noeta_jit_abi::OBSERVE_HELPER,
+                jit_observe as *const u8 as usize,
+            ),
             (
                 noeta_jit_abi::NOTE_GLOBAL_BOUND_HELPER,
                 jit_note_global_bound as *const u8 as usize,
             ),
-            (noeta_jit_abi::RETAIN_HELPER, jit_retain as *const u8 as usize),
-            (noeta_jit_abi::RELEASE_HELPER, jit_release as *const u8 as usize),
+            (
+                noeta_jit_abi::RETAIN_HELPER,
+                jit_retain as *const u8 as usize,
+            ),
+            (
+                noeta_jit_abi::RELEASE_HELPER,
+                jit_release as *const u8 as usize,
+            ),
             (
                 noeta_jit_abi::RELEASE_VALUE_HELPER,
                 jit_release_value as *const u8 as usize,
             ),
             (noeta_jit_abi::CALL_HELPER, jit_call as *const u8 as usize),
-            (noeta_jit_abi::RETURN_HELPER, jit_return as *const u8 as usize),
+            (
+                noeta_jit_abi::RETURN_HELPER,
+                jit_return as *const u8 as usize,
+            ),
             (
                 noeta_jit_abi::PREPARE_CALL_HELPER,
                 jit_prepare_call as *const u8 as usize,
@@ -6605,9 +6619,9 @@ impl<'m> Vm<'m> {
         {
             return Ok(Value::make_channel_recv(id));
         }
-            // (The reactive handle methods lived here until higher-order-abi H5 — `Signal`/
-            // `Computed`/`Effect` are registry extern types now, dispatched through the ctx
-            // seam like any other; `get` inlines via the declared arena read.)
+        // (The reactive handle methods lived here until higher-order-abi H5 — `Signal`/
+        // `Computed`/`Effect` are registry extern types now, dispatched through the ctx
+        // seam like any other; `get` inlines via the declared arena read.)
         // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file
         // handle above.
         if hk == Some(HeapKind::Iter)
@@ -7440,12 +7454,11 @@ impl<'m> Vm<'m> {
                     };
                     Err(self.error(DiagnosticCode::Panic, span, message))
                 }
-            }
-            // (The whole `Builtin` orchestration family — `task` at higher-order-abi H0/H2,
-            // `http.serve` at H3, `signal`/`computed`/`effect` at H5 — migrated to the
-            // registry's `NativeCtx` dispatch: `noeta-stdlib/src/{task,serve,reactive}.rs`,
-            // reached via `call_ctx_function`/`call_ctx_type_method`. Only the language-level
-            // collection builtins and `assert` remain here.)
+            } // (The whole `Builtin` orchestration family — `task` at higher-order-abi H0/H2,
+              // `http.serve` at H3, `signal`/`computed`/`effect` at H5 — migrated to the
+              // registry's `NativeCtx` dispatch: `noeta-stdlib/src/{task,serve,reactive}.rs`,
+              // reached via `call_ctx_function`/`call_ctx_type_method`. Only the language-level
+              // collection builtins and `assert` remain here.)
         }
     }
 
@@ -7562,7 +7575,10 @@ mod tests {
         );
         assert_eq!(noeta_jit_abi::RETAIN_HELPER, "noeta_jit_retain");
         assert_eq!(noeta_jit_abi::RELEASE_HELPER, "noeta_jit_release");
-        assert_eq!(noeta_jit_abi::RELEASE_VALUE_HELPER, "noeta_jit_release_value");
+        assert_eq!(
+            noeta_jit_abi::RELEASE_VALUE_HELPER,
+            "noeta_jit_release_value"
+        );
         assert_eq!(noeta_jit_abi::CALL_HELPER, "noeta_jit_call");
         assert_eq!(noeta_jit_abi::RETURN_HELPER, "noeta_jit_return");
         assert_eq!(noeta_jit_abi::PREPARE_CALL_HELPER, "noeta_jit_prepare_call");

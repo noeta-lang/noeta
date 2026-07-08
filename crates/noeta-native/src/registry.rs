@@ -268,6 +268,14 @@ pub struct ExtModule {
     pub ctx_functions: &'static [ExtFn],
     /// The shared dispatch for [`ExtModule::ctx_functions`] (`None` when the table is empty).
     pub ctx_dispatch: Option<crate::ctx::CtxDispatch>,
+    /// The **native-dependency ring** this module's implementation lives behind (package-manager
+    /// P1.0): the name of the optional Cargo feature gating its heavy native deps in the AOT runtime
+    /// archive (`std.http.client` → `Some("ring-http-client")`). `None` = always-on core (no
+    /// separable native dep tree). This is the **single source of truth** for the module→ring map:
+    /// `noeta build --native`'s footprint scan reads it off the registry to select the archive's
+    /// features (DCE Axis B), retiring the hand-maintained `module_ring`/`fn_ring` tables the CLI
+    /// carried. The string must equal the `noeta-aot-runtime` Cargo feature that turns the ring on.
+    pub ring: Option<&'static str>,
 }
 
 impl ExtModule {
@@ -281,12 +289,17 @@ impl ExtModule {
         deep_marshal: false,
         ctx_functions: &[],
         ctx_dispatch: None,
+        ring: None,
     };
 }
 
 /// The [`ExtModule::DEFAULTS`] dispatch placeholder — reached only by a module that registers no
 /// plain functions (e.g. a ctx-only module), where any name is unknown by definition.
-fn no_dispatch(func: &str, _host: &mut dyn Host, _args: &[NativeValue]) -> Result<NativeOut, StdError> {
+fn no_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    _args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
     Err(StdError {
         kind: crate::ErrorKind::UnknownName,
         message: format!("no function `{func}`"),
@@ -390,6 +403,14 @@ impl ExtType {
 /// modules/types.
 pub trait Extension: Sync {
     fn name(&self) -> &'static str;
+    /// The namespace **root** this extension's modules live under — the first segment of every
+    /// qualified module path it owns (`std.math`, `std.http.client`). Defaults to [`Extension::name`]
+    /// (core's `"std"`); a package whose import namespace diverges from its package name overrides it.
+    /// Module identity is the full path, so two extensions with distinct roots never collide
+    /// (`std.http` vs `guzzle.http`).
+    fn root(&self) -> &'static str {
+        self.name()
+    }
     fn modules(&self) -> &'static [ExtModule];
     /// The extension's first-class value types. Default empty — a modules-only extension does
     /// not change.

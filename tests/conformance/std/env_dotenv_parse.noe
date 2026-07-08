@@ -1,0 +1,16 @@
+// `.env` support folded into the `env` module (F5): `env.parse` is the pure `.env` parser — no host
+// coupling, no precedence. Comments and blank lines are skipped, an `export ` prefix is stripped,
+// double-quoted values keep inner spaces, and a trailing ` #` on an unquoted value is an inline
+// comment. Keys come back sorted (BTreeMap), so both backends agree by construction.
+// expect: stdout "abc"
+// expect: stdout "hello world"
+// expect: stdout "localhost"
+// expect: stdout "[\"GREETING\", \"HOST\", \"TOKEN\"]"
+// expect: exit 0
+use std.{env}
+
+cfg = env.parse("# a comment\n\nexport TOKEN=abc\nGREETING=\"hello world\"\nHOST=localhost # inline\n");
+echo cfg["TOKEN"];
+echo cfg["GREETING"];
+echo cfg["HOST"];
+echo cfg.keys();

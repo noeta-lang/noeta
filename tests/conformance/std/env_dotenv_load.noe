@@ -1,0 +1,23 @@
+// `env.load` reads a `.env` through the filesystem capability (the sandbox Vfs, so it stays
+// deterministic and inside the differential), parses it, then overlays the ambient environment on
+// top — the cross-ecosystem `.env` precedence: an existing variable ALWAYS wins. Here the `.env`
+// sets `USER`, but the sandbox fixture's `USER=noeta` overrides it; the file's own `DATABASE_URL`
+// comes through, and ambient `HOME` is present in the merged map. `env.load()` with no argument
+// defaults to ".env".
+// expect: stdout "postgres://localhost/app"
+// expect: stdout "noeta"
+// expect: stdout "/home/sandbox"
+// expect: stdout "[\"DATABASE_URL\", \"HOME\", \"USER\"]"
+// expect: stdout "postgres://localhost/app"
+// expect: exit 0
+use std.{env, fs}
+
+fs.write(".env", "DATABASE_URL=postgres://localhost/app\nUSER=from_dotenv\n");
+
+cfg = env.load(".env");
+echo cfg["DATABASE_URL"];   // from the .env file
+echo cfg["USER"];           // ambient env wins over the file
+echo cfg["HOME"];           // ambient key present in the merged environment
+echo cfg.keys();            // file ∪ ambient, sorted
+
+echo env.load()["DATABASE_URL"];   // no argument -> defaults to ".env"

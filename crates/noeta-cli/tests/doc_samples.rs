@@ -83,7 +83,10 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
     let output = Command::cargo_bin("noeta")
         .expect("the `noeta` binary builds")
         // Hermetic startup cache — don't touch the developer's real ~/.cache/noeta during tests.
-        .env("NOETA_CACHE_DIR", concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"))
+        .env(
+            "NOETA_CACHE_DIR",
+            concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+        )
         .current_dir(&dir)
         .arg("run")
         .arg(&path)

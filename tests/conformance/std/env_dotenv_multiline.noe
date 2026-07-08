@@ -1,0 +1,16 @@
+// F5 follow-on: multi-line quoted values. A double- (or single-) quoted value may span physical
+// lines; the newlines are part of the value, and parsing resumes after the closing quote. Echoing a
+// value containing newlines prints it across lines, so the multi-line value's three lines are three
+// stdout lines here. Both backends agree.
+// expect: stdout "line1"
+// expect: stdout "line2"
+// expect: stdout "line3"
+// expect: stdout "3"
+// expect: stdout "after"
+// expect: exit 0
+use std.{env}
+
+cfg = env.parse("KEY=\"line1\nline2\nline3\"\nAFTER=after\n");
+echo cfg["KEY"];          // prints across three lines
+echo cfg["KEY"].split("\n").len();   // the value holds three newline-separated lines
+echo cfg["AFTER"];        // parsing resumed after the closing quote

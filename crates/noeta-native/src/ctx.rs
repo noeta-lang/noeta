@@ -18,10 +18,10 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crate::StdError;
 use crate::executor::ExternIo;
 use crate::host::Host;
 use crate::registry::{NativeOut, NativeValue};
-use crate::StdError;
 
 /// An opaque handle to one backend value held in the per-call slot table. Slots are **owned by
 /// the table**: every method returning a `Slot` mints a fresh one (methods never consume argument
@@ -208,8 +208,11 @@ pub trait NativeCtx {
     /// downcasts via [`crate::ExternValue::as_any`] and copies out what it needs (`http.serve`
     /// reads `Request::conn` and clones the handler's `NetResponse`). Errs if the slot does not
     /// hold an extern value; a wrong *concrete* type is the dispatch's own failed downcast.
-    fn with_extern(&mut self, slot: Slot, f: &mut dyn FnMut(&dyn crate::ExternValue))
-        -> CtxResult<()>;
+    fn with_extern(
+        &mut self,
+        slot: Slot,
+        f: &mut dyn FnMut(&dyn crate::ExternValue),
+    ) -> CtxResult<()>;
 
     // ----- Class 3: per-run extension state + the retained-value arena (H4) -----
 

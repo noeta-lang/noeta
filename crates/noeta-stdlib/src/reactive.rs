@@ -35,10 +35,10 @@ use std::cmp::Ordering;
 
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    ctx_arity, no_function_error, ArenaGetter, CtxError, CtxOut, ErrorKind, ExtState, ExternValue,
-    NativeCtx, Retained, Slot, StdError,
+    ArenaGetter, CtxError, CtxOut, ErrorKind, ExtState, ExternValue, NativeCtx, Retained, Slot,
+    StdError, ctx_arity, no_function_error,
 };
-use noeta_reactive::{NodeId, ReactiveGraph, MAX_FLUSH_STEPS};
+use noeta_reactive::{MAX_FLUSH_STEPS, NodeId, ReactiveGraph};
 
 pub const SIGNAL_TYPE_NAME: &str = "Signal";
 pub const COMPUTED_TYPE_NAME: &str = "Computed";
@@ -187,9 +187,9 @@ pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
             let ext = state.borrow();
             let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
             let node = ext.graph.signal(cell);
-            Ok(CtxOut::Out(NativeOut::Extern(noeta_native::ExternBox::new(
-                SignalBox { node, cell },
-            ))))
+            Ok(CtxOut::Out(NativeOut::Extern(
+                noeta_native::ExternBox::new(SignalBox { node, cell }),
+            )))
         }
         "computed" => {
             ctx_arity(func, args, 1)?;
@@ -205,9 +205,9 @@ pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
             let node = ext.graph.computed(body);
             // Created dirty — the memo gate is now closed until the first read.
             sync_gates(ctx, ext);
-            Ok(CtxOut::Out(NativeOut::Extern(noeta_native::ExternBox::new(
-                ComputedBox { node, body, memo },
-            ))))
+            Ok(CtxOut::Out(NativeOut::Extern(
+                noeta_native::ExternBox::new(ComputedBox { node, body, memo }),
+            )))
         }
         "effect" => {
             ctx_arity(func, args, 1)?;
@@ -221,9 +221,9 @@ pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
             if !ext.graph.is_flushing() {
                 drive_flush(ctx, ext)?;
             }
-            Ok(CtxOut::Out(NativeOut::Extern(noeta_native::ExternBox::new(
-                EffectBox { node, body },
-            ))))
+            Ok(CtxOut::Out(NativeOut::Extern(
+                noeta_native::ExternBox::new(EffectBox { node, body }),
+            )))
         }
         _ => Err(no_function_error("reactive", func).into()),
     }

@@ -150,7 +150,16 @@ Setup if missing: `rustup component add llvm-tools-preview && cargo install carg
 
 Commit as you go and always implement features in full, no stubs or todos unless deferring entire subsystems. When a task is clear, work independently and verify changes using the comprehensive test suite.
 
-This project is currently pre-alpha and not public, so you don't need to worry about pull requests, but do work in branches and worktrees as to not introduce conflicts with other agents working in parallel.
+This project is currently pre-alpha and not public, so you don't need to worry about pull requests.
+
+> [!IMPORTANT]
+> **ALWAYS create a new branch AND an isolated git worktree before editing any file — never work in the shared root checkout.** Many agent sessions run concurrently against this same repo. The root checkout `/home/niklas/Code/lang` floats between branches and is actively edited by other sessions; working there causes real collisions — a parallel session's `git add -A && git commit` will sweep your uncommitted files into *its* commit, and a stray `git reset --hard`/`git restore` destroys *their* live work.
+>
+> Start every task with:
+> ```
+> git worktree add -b <branch> .claude/worktrees/<name> <base>
+> ```
+> then `cd` into it and do all editing, building, and committing there (`<base>` is usually `main`, or another session's HEAD when continuing from it). If work has already leaked into the root, recover non-destructively: `git reset` (unstage only, never `--hard`), branch a worktree from the polluting commit, finish there, and `git restore` only your *own* stray files out of the root.
 
 > [!NOTE]
 > We follow conventional commits for all commit titles and PRs.

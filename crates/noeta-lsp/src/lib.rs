@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use noeta_ast::reflect::TypeRepr;
-use noeta_db::{LangDatabase, SourceProgram, Workspace};
+use noeta_db::{DepModule, LangDatabase, SourceProgram, Workspace};
 use noeta_lexer::TokenKind;
 use noeta_span::{SourceId, Span};
 use offsets::{Encoding, LineIndex};
@@ -61,10 +61,18 @@ use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 struct WorkspaceCache {
     workspace: Workspace,
     /// Per `SourceId`: the source's URI (index 0 = the entry). Maps a merged-program span back to
-    /// the file it belongs to, for cross-file diagnostics and navigation.
+    /// the file it belongs to, for cross-file diagnostics and navigation. Entry + siblings only —
+    /// the reuse fast-path compares this against a fresh sibling scan; dependency modules (which
+    /// don't change during editing) live in `dep_uris`/`dep_programs`.
     source_uris: Vec<String>,
     /// Per `SourceId`: the salsa input, for in-place text updates.
     programs: Vec<SourceProgram>,
+    /// Dependency-package modules (package-manager P2.1c), indexed by `SourceId - programs.len()`
+    /// (their ids continue past the siblings). Kept apart from `source_uris`/`programs` so the
+    /// per-keystroke reuse check and text-update loop stay over entry+siblings only, while
+    /// cross-package navigation still maps a dependency span back to its file.
+    dep_uris: Vec<String>,
+    dep_programs: Vec<SourceProgram>,
 }
 
 impl WorkspaceCache {
@@ -73,6 +81,16 @@ impl WorkspaceCache {
     fn entry(&self) -> SourceProgram {
         self.programs[0]
     }
+}
+
+/// The resolved dependency modules for a workspace (package-manager P2.1c): the salsa [`DepModule`]
+/// inputs the `Workspace` links, plus — parallel-indexed — each module's URI and salsa input so a
+/// cross-package definition span maps back to its file.
+#[derive(Debug, Default)]
+struct ResolvedDeps {
+    modules: Vec<DepModule>,
+    uris: Vec<String>,
+    programs: Vec<SourceProgram>,
 }
 
 /// The server's document state: the salsa database, the open editor buffers, and one cached
@@ -264,13 +282,20 @@ impl DocumentStore {
             .enumerate()
             .map(|(id, (u, text))| SourceProgram::new(&self.db, id as u32, u.clone(), text.clone()))
             .collect();
-        let workspace = Workspace::new(&self.db, programs[0], programs[1..].to_vec());
+        // Dependency packages (package-manager P2.1c): resolve the entry's deps and add each dep
+        // module as a `DepModule` input (SourceIds continue past the siblings), so cross-package
+        // `use <dep-key>.…` resolves in hover/goto/completion exactly as the CLI resolves it.
+        let deps = self.resolve_dep_modules(uri, programs.len() as u32);
+        let workspace =
+            Workspace::new(&self.db, programs[0], programs[1..].to_vec(), deps.modules);
         self.workspaces.insert(
             uri.to_string(),
             WorkspaceCache {
                 workspace,
                 source_uris: uris,
                 programs,
+                dep_uris: deps.uris,
+                dep_programs: deps.programs,
             },
         );
     }
@@ -306,6 +331,50 @@ impl DocumentStore {
             }
         }
         sources
+    }
+
+    /// Resolve the entry `uri`'s dependency packages into salsa [`DepModule`] inputs (package-manager
+    /// P2.1c), each source given a [`SourceId`] continuing from `first_id` (past entry + siblings) so
+    /// its spans stay distinct and map back to its file for cross-package navigation. Resolution
+    /// reuses the CLI's `noeta-pm` walk — path deps read locally, git deps served from the package
+    /// store (materialized by a prior CLI run) — so the editor sees the same cross-package program.
+    /// A resolution failure (a registry dep, an unfetched git dep) degrades to no dependencies rather
+    /// than breaking the workspace; the user still gets the entry's own analysis.
+    fn resolve_dep_modules(&self, uri: &str, first_id: u32) -> ResolvedDeps {
+        let mut deps = ResolvedDeps::default();
+        let Some(entry_path) = uri_to_path(uri) else {
+            return deps;
+        };
+        let Ok(packages) = noeta_pm::manifest::dependency_packages(&entry_path) else {
+            return deps;
+        };
+        let mut next_id = first_id;
+        for package in &packages {
+            let renames: Vec<String> = package
+                .dep_renames
+                .iter()
+                .flat_map(|(local, global)| [local.clone(), global.clone()])
+                .collect();
+            for module in &package.modules {
+                let src = SourceProgram::new(
+                    &self.db,
+                    next_id,
+                    module.name.clone(),
+                    module.text.clone(),
+                );
+                next_id += 1;
+                deps.modules.push(DepModule::new(
+                    &self.db,
+                    src,
+                    package.root.clone(),
+                    package.key.clone(),
+                    renames.clone(),
+                ));
+                deps.uris.push(path_to_uri(Path::new(&module.name)));
+                deps.programs.push(src);
+            }
+        }
+        deps
     }
 
     /// The `uri`'s own diagnostics (cross-module resolution, but only the entry file's own
@@ -753,8 +822,14 @@ impl DocumentStore {
         encoding: Encoding,
     ) -> Option<(String, Range)> {
         let idx = span.source.0 as usize;
-        let uri = cache.source_uris.get(idx)?.clone();
-        let program = *cache.programs.get(idx)?;
+        // Entry + siblings are indexed directly; a dependency module's SourceId continues past them
+        // (see `resolve_dep_modules`), so it maps into the dep arrays (package-manager P2.1c).
+        let (uri, program) = if idx < cache.programs.len() {
+            (cache.source_uris.get(idx)?.clone(), *cache.programs.get(idx)?)
+        } else {
+            let di = idx - cache.programs.len();
+            (cache.dep_uris.get(di)?.clone(), *cache.dep_programs.get(di)?)
+        };
         let index = LineIndex::new(program.text(&self.db));
         Some((uri, index.range(span, encoding)))
     }
@@ -2059,6 +2134,58 @@ mod tests {
         // `pub struct User` is on line 1 of models.noe (line 0 is the `namespace`).
         assert_eq!(range.start.line, 1);
         assert_eq!(range.start.character, 11); // after "pub struct "
+    }
+
+    #[test]
+    fn goto_definition_jumps_into_a_dependency_package() {
+        // package-manager P2.1c: with dependency resolution wired into the salsa workspace, a
+        // cross-package `use hi.hello.greeting` resolves in-editor — goto-definition on the call
+        // jumps into the dependency package's own source file.
+        let base = std::env::temp_dir().join("noeta_lsp_crosspkg");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        let lib = base.join("greetlib");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nhi = { path = \"../greetlib\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            lib.join("noeta.toml"),
+            "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            lib.join("hello.noe"),
+            "namespace greet.hello;\npub struct Greeter { n: int }\n",
+        )
+        .unwrap();
+
+        let entry_uri = path_to_uri(&app.join("main.noe"));
+        // The dependency's modules are addressed by their canonical path (the walk canonicalizes a
+        // path dep's directory), so build the expected URI the same way.
+        let hello_uri = path_to_uri(&lib.join("hello.noe").canonicalize().unwrap());
+        let mut store = DocumentStore::default();
+        store.open(
+            &entry_uri,
+            "use hi.hello.Greeter;\ng = Greeter { n: 1 }\n".to_string(),
+        );
+
+        // Cursor on `Greeter` in the constructor (line 1, char 4) jumps into the dependency source.
+        let (target_uri, _range) = store
+            .definition(
+                &entry_uri,
+                Position {
+                    line: 1,
+                    character: 4,
+                },
+                Encoding::Utf8,
+            )
+            .expect("cross-package type resolves to its dependency source");
+        assert_eq!(target_uri, hello_uri);
     }
 
     #[test]

@@ -71,7 +71,8 @@ impl KeyBuilder {
     /// Add one source file's contribution: a stable name (e.g. the file name) and its content bytes.
     /// The bytes are hashed immediately (so large sources aren't retained). Order-independent.
     pub fn source(&mut self, name: impl Into<String>, bytes: &[u8]) -> &mut Self {
-        self.sources.push((name.into(), Sha256::digest(bytes).to_vec()));
+        self.sources
+            .push((name.into(), Sha256::digest(bytes).to_vec()));
         self
     }
 
@@ -411,10 +412,8 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!(
-            "noeta-cache-test-{}-{tag}-{n}",
-            std::process::id()
-        ));
+        let d =
+            std::env::temp_dir().join(format!("noeta-cache-test-{}-{tag}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         d
     }
@@ -557,7 +556,10 @@ mod tests {
         let mut a = KeyBuilder::new();
         a.source("x.noe", b"x").tier("debug").tier("test");
         let mut c = KeyBuilder::new();
-        c.source("x.noe", b"x").tier("test").tier("debug").tier("test");
+        c.source("x.noe", b"x")
+            .tier("test")
+            .tier("debug")
+            .tier("test");
         assert_eq!(a.finish(), c.finish());
     }
 
@@ -589,7 +591,10 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter(|e| e.path().extension().is_some_and(|x| x == "tmp"))
             .collect();
-        assert!(tmp.is_empty(), "temp file should be renamed away, found {tmp:?}");
+        assert!(
+            tmp.is_empty(),
+            "temp file should be renamed away, found {tmp:?}"
+        );
     }
 
     #[test]

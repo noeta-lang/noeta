@@ -15,12 +15,12 @@
 
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    ctx_arity, no_function_error, panic_error, ArgKind, ArgSpec, AttrValue, CtxError, CtxOut,
-    CtxResult, EntryArg, EntryCall, ErrorKind, ExtCommand, NativeCtx, NativeValue, NetRequest,
-    NetResponse, Scalar, Slot, SpanId, SpanKind, SpanStatus, StdError, TraceContext,
+    ArgKind, ArgSpec, AttrValue, CtxError, CtxOut, CtxResult, EntryArg, EntryCall, ErrorKind,
+    ExtCommand, NativeCtx, NativeValue, NetRequest, NetResponse, Scalar, Slot, SpanId, SpanKind,
+    SpanStatus, StdError, TraceContext, ctx_arity, no_function_error, panic_error,
 };
 
-use crate::net::{request_header, request_path, Request, REQUEST_TYPE_NAME};
+use crate::net::{REQUEST_TYPE_NAME, Request, request_header, request_path};
 
 const REQUEST_SIG: SigType = SigType::Named(REQUEST_TYPE_NAME);
 
@@ -36,10 +36,10 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
 ];
 
 /// The `noeta serve` CLI subcommand (higher-order-abi H6) — the ergonomic entry point over an
-/// explicit `http.serve(...)` call: run the file's top-level setup, then synthesize and run
-/// `http.serve(<port>, fetch)`. The program supplies `fetch` and `use std.{http}`; a missing one
-/// surfaces as an ordinary check error. Single worker, cooperatively concurrent; runs until
-/// interrupted (Ctrl-C).
+/// explicit `server.serve(...)` call: run the file's top-level setup, then synthesize and run
+/// `server.serve(<port>, fetch)`. The program supplies `fetch` and `use std.http.server` (binding
+/// the local `server`); a missing one surfaces as an ordinary check error. Single worker,
+/// cooperatively concurrent; runs until interrupted (Ctrl-C).
 pub const SERVE_COMMAND: ExtCommand = ExtCommand {
     name: "serve",
     about: "Serve a program's HTTP handler (a top-level `fn fetch(req: Request): Response`)",
@@ -60,7 +60,7 @@ pub const SERVE_COMMAND: ExtCommand = ExtCommand {
         ctx.run_file(
             args.path("file"),
             Some(&EntryCall {
-                module: "http",
+                module: "server",
                 func: "serve",
                 args: vec![EntryArg::Int(port), EntryArg::Ident("fetch")],
             }),

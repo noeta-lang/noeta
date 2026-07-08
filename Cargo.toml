@@ -66,6 +66,9 @@ noeta-dap = { path = "crates/noeta-dap" }
 noeta-prof = { path = "crates/noeta-prof" }
 # Tooling: the `noeta fmt` canonical source formatter (lex+trivia → parse → AST → Doc → text)
 noeta-fmt = { path = "crates/noeta-fmt" }
+# Package manager (package-manager P2): manifest + transitive resolver + git/store/lock + registry
+# index. A library (not in the CLI binary) so `noeta-lsp`/`noeta-db` can resolve dependencies too.
+noeta-pm = { path = "crates/noeta-pm" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
 logos = "0.16"
@@ -107,6 +110,13 @@ assert_cmd = "2"
 predicates = "3"
 criterion = { version = "0.5", default-features = false }
 toml = "0.9"
+# The package manager's SemVer vocabulary (Phase 2): `[package] version` + `[dependencies]` version
+# requirements, and the PubGrub resolver's version type. The de-facto Cargo/crates.io implementation.
+semver = "1"
+# The dependency-resolution algorithm (Phase 2, user-chosen): PubGrub gives explainable conflict
+# reports matching the project's diagnostic bar. `OfflineDependencyProvider` resolves a pre-walked
+# in-memory graph, keeping the resolver pure + unit-testable (no network in the algorithm itself).
+pubgrub = "0.3"
 # Safe (unsafe-free API) checked byte↔`f32` reinterpret for the P-SIMD column kernels — the aligned
 # `&[u8]`→`&[f32]` view that unlocks autovectorized reductions without `unsafe` in our source.
 bytemuck = "1"

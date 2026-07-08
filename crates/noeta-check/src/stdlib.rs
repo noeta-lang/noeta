@@ -68,7 +68,10 @@ fn sig_to_type_bound(sig: &registry::SigType, bindings: &[Option<Type>]) -> Type
         // optionality is carried separately as the required-argument count, not in the type.
         SigType::Optional(inner) => sig_to_type_bound(inner, bindings),
         SigType::Fn(params, ret) => Type::Fn {
-            params: params.iter().map(|p| sig_to_type_bound(p, bindings)).collect(),
+            params: params
+                .iter()
+                .map(|p| sig_to_type_bound(p, bindings))
+                .collect(),
             ret: Box::new(sig_to_type_bound(ret, bindings)),
         },
         // A bounded var (p2p P2) substitutes exactly like a plain var; the bound is enforced
@@ -80,7 +83,9 @@ fn sig_to_type_bound(sig: &registry::SigType, bindings: &[Option<Type>]) -> Type
         // A generic extern-type instantiation (higher-order-abi H4): `cell.new(v: A) -> Cell<A>`.
         SigType::Generic(n, args) => Type::Named(
             (*n).to_string(),
-            args.iter().map(|a| sig_to_type_bound(a, bindings)).collect(),
+            args.iter()
+                .map(|a| sig_to_type_bound(a, bindings))
+                .collect(),
         ),
     }
 }
@@ -258,7 +263,6 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         _ => None,
     }
 }
-
 
 /// A `Sender<T>` endpoint (isolates I.1): `send(v)` enqueues `v` (async — suspends on a full buffer),
 /// returning `Future<void>`; `close()` marks the channel closed so a drained `recv` yields `none`.
@@ -601,7 +605,7 @@ pub(super) fn module_params(module: &str, name: &str, args: &[Type]) -> Option<V
     // `fs.list` (and its async twin, extern-types X6) takes an optional dir argument (0 or 1) —
     // not arity-checked. (Both are registered with a fixed signature for dispatch, so this skip
     // must precede the registry lookup.)
-    if module == "fs" && (name == "list" || name == "list_async") {
+    if registry::module_name(module) == "fs" && (name == "list" || name == "list_async") {
         return None;
     }
     // Migrated modules: parameter types come from the native-extension registry.
@@ -616,7 +620,7 @@ pub(super) fn module_params(module: &str, name: &str, args: &[Type]) -> Option<V
     }
     // Not in the registry: the `vec` bulk `*_all` kernels (per-backend, deferred with vec/quat's
     // eventual eviction to a package).
-    Some(match (module, name) {
+    Some(match (registry::module_name(module), name) {
         ("vec", "add_all" | "sub_all" | "dot_all" | "scale_all") => vec![Type::Dyn, Type::Dyn],
         ("vec", "length_all") => vec![Type::Dyn],
         _ => return None,
@@ -690,7 +694,7 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
         });
     }
     // Not in the registry: the `vec` bulk `*_all` kernels (per-backend).
-    Some(match (module, name) {
+    Some(match (registry::module_name(module), name) {
         ("vec", "add_all" | "sub_all" | "scale_all") => args.first().cloned().unwrap_or(Type::Dyn),
         ("vec", "dot_all" | "length_all") => list(Type::F32),
         _ => return None,

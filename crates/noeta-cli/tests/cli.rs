@@ -32,7 +32,10 @@ fn lang() -> Command {
     // ~/.cache/noeta. One per-test-target dir is safe to share across all tests — entries are keyed
     // by source + binary identity, and the atomic per-pid store handles the parallel test processes.
     // Tests that exercise the cache directly override this with their own dir.
-    cmd.env("NOETA_CACHE_DIR", concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"));
+    cmd.env(
+        "NOETA_CACHE_DIR",
+        concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+    );
     cmd
 }
 
@@ -185,7 +188,8 @@ fn startup_cache_is_semantically_invisible() {
 
     for &(name, src) in programs {
         let file = temp_program(&format!("cache_inv_{name}"), src);
-        let cache_dir = PathBuf::from(concat!(env!("CARGO_TARGET_TMPDIR"), "/cache-inv")).join(name);
+        let cache_dir =
+            PathBuf::from(concat!(env!("CARGO_TARGET_TMPDIR"), "/cache-inv")).join(name);
         let _ = std::fs::remove_dir_all(&cache_dir);
 
         // One observation of (stdout, stderr, exit code). `use_cache` selects the cached path (a
@@ -226,7 +230,10 @@ fn startup_cache_is_semantically_invisible() {
                     .count()
             })
             .unwrap_or(0);
-        assert_eq!(entries, 1, "{name}: the cold run should populate exactly one cache entry");
+        assert_eq!(
+            entries, 1,
+            "{name}: the cold run should populate exactly one cache entry"
+        );
 
         let _ = std::fs::remove_dir_all(&cache_dir);
     }
@@ -1797,7 +1804,10 @@ fn temp_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
 
 #[test]
 fn check_clean_file_succeeds() {
-    let file = temp_program("check_clean", "fn add(a: int, b: int): int { return a + b }\necho add(2, 3)\n");
+    let file = temp_program(
+        "check_clean",
+        "fn add(a: int, b: int): int { return a + b }\necho add(2, 3)\n",
+    );
     lang()
         .arg("check")
         .arg(&file)
@@ -1860,7 +1870,10 @@ fn check_shared_erroring_module_is_reported_once() {
     let dir = temp_dir(
         "check_shared",
         &[
-            ("m.noe", "namespace App.M;\npub fn boom(): int { return 1 + true }\n"),
+            (
+                "m.noe",
+                "namespace App.M;\npub fn boom(): int { return 1 + true }\n",
+            ),
             ("main1.noe", "use App.M.{boom}\necho boom()\n"),
             ("main2.noe", "use App.M.{boom}\necho boom()\n"),
         ],
@@ -1915,7 +1928,10 @@ fn check_json_emits_a_machine_readable_report_on_stdout() {
 
 #[test]
 fn check_json_clean_is_an_empty_diagnostics_array() {
-    let file = temp_program("check_json_ok", "fn id(n: int): int { return n }\necho id(1)\n");
+    let file = temp_program(
+        "check_json_ok",
+        "fn id(n: int): int { return n }\necho id(1)\n",
+    );
     let out = lang()
         .arg("check")
         .arg("--format")
@@ -1987,4 +2003,474 @@ fn fmt_declines_unparseable_source() {
         .assert()
         .code(1)
         .stderr(predicate::str::contains("does not parse"));
+}
+
+// --- package manager: path dependencies (P2.1) --------------------------------------------------
+
+/// Lay out an app + a dependency package under a unique base dir, returning the app's entry path.
+/// The app keys the dependency `hi`; the package's own root namespace segment is `greet` (from
+/// `acme/greet`), so the loader re-roots `greet.*` → `hi.*` (key ≠ root exercises the rewrite).
+fn path_dep_project(name: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("greetlib");
+    std::fs::create_dir_all(&app).expect("mk app");
+    std::fs::create_dir_all(&lib).expect("mk lib");
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nhi = { path = \"../greetlib\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "use hi.hello.greeting;\necho greeting();\n").unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    // The package's public fn calls a helper in a *second* package module — a package-internal
+    // cross-reference the consumer never names, which must still resolve (closed-unit linking).
+    std::fs::write(
+        lib.join("hello.noe"),
+        "namespace greet.hello;\nuse greet.util.punct;\n\
+         pub fn greeting(): string { return punct(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("util.noe"),
+        "namespace greet.util;\npub fn punct(): string { return \"hi from the dependency\"; }\n",
+    )
+    .unwrap();
+    app.join("main.noe")
+}
+
+#[test]
+fn a_path_dependency_resolves_and_runs() {
+    let entry = path_dep_project("pm_pathdep_run");
+    lang()
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hi from the dependency"));
+}
+
+#[test]
+fn noeta_check_resolves_cross_package_use() {
+    // `noeta check` must see dependency packages too (package-manager P2.1c), so a cross-package
+    // `use` that references a real exported symbol checks clean rather than erroring.
+    let entry = path_dep_project("pm_check_crosspkg");
+    lang().arg("check").arg(&entry).assert().success();
+
+    // And a reference to a *missing* dependency export is a real error (the dep is genuinely linked,
+    // not opaquely stubbed away).
+    let dir = entry.parent().unwrap();
+    std::fs::write(dir.join("main.noe"), "use hi.hello.nope;\necho nope();\n").unwrap();
+    lang().arg("check").arg(dir.join("main.noe")).assert().failure();
+}
+
+#[test]
+fn a_transitive_path_dependency_resolves_and_runs() {
+    // app → mid → low, each a path package. `mid` keys its own dependency `deep` (≠ low's root
+    // segment `low`), so the graph walk must rewrite mid's internal `use deep.base.leaf` to low's
+    // global segment for it to link — a transitive reference the app never names (P2.4).
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_transitive_run");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let mid = base.join("midlib");
+    let low = base.join("lowlib");
+    for d in [&app, &mid, &low] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nmid = { path = \"../midlib\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "use mid.api.top;\necho top();\n").unwrap();
+    std::fs::write(
+        mid.join("noeta.toml"),
+        "[package]\nname = \"acme/mid\"\nversion = \"1.0.0\"\n\
+         [dependencies]\ndeep = { path = \"../lowlib\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        mid.join("api.noe"),
+        "namespace mid.api;\nuse deep.base.leaf;\npub fn top(): string { return leaf(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        low.join("noeta.toml"),
+        "[package]\nname = \"acme/low\"\nversion = \"2.3.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        low.join("base.noe"),
+        "namespace low.base;\npub fn leaf(): string { return \"deep transitive value\"; }\n",
+    )
+    .unwrap();
+
+    lang()
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("deep transitive value"));
+}
+
+#[test]
+fn a_version_conflict_is_reported() {
+    // app depends on two packages that each pull a third at *different* versions — our flat link
+    // model permits one version per package, so this is an explainable conflict (P2.4).
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_version_conflict");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let a = base.join("a");
+    let b = base.join("b");
+    let c1 = base.join("c1");
+    let c2 = base.join("c2");
+    for d in [&app, &a, &b, &c1, &c2] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\na = { path = \"../a\" }\nb = { path = \"../b\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+    // a and b both depend on acme/shared, but at different on-disk versions.
+    std::fs::write(
+        a.join("noeta.toml"),
+        "[package]\nname = \"acme/a\"\nversion = \"1.0.0\"\n\
+         [dependencies]\ns = { path = \"../c1\" }\n",
+    )
+    .unwrap();
+    std::fs::write(a.join("a.noe"), "namespace a.x;\npub fn f(): int { return 1; }\n").unwrap();
+    std::fs::write(
+        b.join("noeta.toml"),
+        "[package]\nname = \"acme/b\"\nversion = \"1.0.0\"\n\
+         [dependencies]\ns = { path = \"../c2\" }\n",
+    )
+    .unwrap();
+    std::fs::write(b.join("b.noe"), "namespace b.x;\npub fn g(): int { return 2; }\n").unwrap();
+    std::fs::write(
+        c1.join("noeta.toml"),
+        "[package]\nname = \"acme/shared\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(c1.join("s.noe"), "namespace shared.core;\npub fn h(): int { return 3; }\n")
+        .unwrap();
+    std::fs::write(
+        c2.join("noeta.toml"),
+        "[package]\nname = \"acme/shared\"\nversion = \"2.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(c2.join("s.noe"), "namespace shared.core;\npub fn h(): int { return 4; }\n")
+        .unwrap();
+
+    lang()
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("acme/shared"));
+}
+
+#[test]
+fn a_published_package_resolves_as_a_registry_dependency() {
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_registry_e2e");
+    let _ = std::fs::remove_dir_all(&base);
+    let repo = base.join("greet_repo");
+    let app = base.join("app");
+    let reg = base.join("registry");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+
+    // The package to publish: a tagged git repo with a [package] identity.
+    git_in(&["init", "-q"], &repo);
+    std::fs::write(
+        repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.2.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("hello.noe"),
+        "namespace greet.hello;\npub fn greeting(): string { return \"hello from the registry\"; }\n",
+    )
+    .unwrap();
+    git_in(&["add", "."], &repo);
+    git_in(&["commit", "-q", "-m", "release"], &repo);
+    git_in(&["tag", "v1.2.0"], &repo);
+
+    // Publish it to the (local/offline) registry index.
+    lang()
+        .current_dir(&repo)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["publish", "--git", repo.to_str().unwrap(), "--tag", "v1.2.0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("published `acme/greet` 1.2.0"));
+
+    // A consumer depends on it by version, naming the registry package (decoupled from the key).
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "use gc.hello.greeting;\necho greeting();\n").unwrap();
+
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello from the registry"));
+}
+
+#[test]
+fn a_registry_dependency_without_a_package_is_an_error() {
+    // A bare registry requirement names no package identity, so it can't be resolved — the error
+    // points the user to add `package = "company/pkg"` (P2.5).
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_registrydep");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nhi = \"^1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(base.join("main.noe"), "echo 1;\n").unwrap();
+    lang()
+        .arg("run")
+        .arg(base.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("names no package"));
+}
+
+// --- package manager: git-tag dependencies (P2.3) -----------------------------------------------
+
+/// Run a `git` command in `cwd`, asserting success (identity env set so commits work in CI).
+fn git_in(args: &[&str], cwd: &std::path::Path) {
+    let ok = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    assert!(ok, "git {args:?} failed");
+}
+
+fn git_available() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn a_git_tag_dependency_is_fetched_and_run() {
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_gitdep_run");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let dep_repo = base.join("greetlib_repo");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&dep_repo).unwrap();
+
+    // A local tagged package repo (root segment `greet`, from acme/greet).
+    git_in(&["init", "-q"], &dep_repo);
+    std::fs::write(
+        dep_repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dep_repo.join("hello.noe"),
+        "namespace greet.hello;\npub fn greeting(): string { return \"hi from a git dep\"; }\n",
+    )
+    .unwrap();
+    git_in(&["add", "."], &dep_repo);
+    git_in(&["commit", "-q", "-m", "release"], &dep_repo);
+    git_in(&["tag", "v1.0.0"], &dep_repo);
+
+    // The app depends on it by git URL (a local path is a valid git URL), keyed `hi`.
+    std::fs::write(
+        app.join("noeta.toml"),
+        format!(
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nhi = {{ git = \"{}\", tag = \"v1.0.0\" }}\n",
+            dep_repo.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "use hi.hello.greeting;\necho greeting();\n").unwrap();
+
+    // Isolate the package store under the test's cache dir (set by `lang()`), so the fetch is hermetic.
+    lang()
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hi from a git dep"));
+}
+
+#[test]
+fn noeta_add_edits_the_manifest_and_resolves() {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_add");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("lib");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&lib).unwrap();
+    // The app starts with no dependencies; a comment must survive the edit.
+    std::fs::write(
+        app.join("noeta.toml"),
+        "# my app\n[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "use hi.core.v;\necho v();\n").unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(lib.join("m.noe"), "namespace lib.core;\npub fn v(): int { return 42; }\n")
+        .unwrap();
+
+    lang()
+        .current_dir(&app)
+        .args(["add", "hi", "--path", "../lib"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added `hi`"));
+
+    let manifest = std::fs::read_to_string(app.join("noeta.toml")).unwrap();
+    assert!(manifest.contains("# my app"), "comment preserved: {manifest}");
+    assert!(manifest.contains("hi = { path = \"../lib\" }"), "dep added: {manifest}");
+    assert!(app.join("noeta.lock").is_file(), "lock written");
+
+    // The added dependency actually resolves and runs.
+    lang().arg("run").arg(app.join("main.noe")).assert().success().stdout("42\n");
+}
+
+#[test]
+fn noeta_update_rewrites_the_lock() {
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_update");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let dep_repo = base.join("uplib_repo");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&dep_repo).unwrap();
+    git_in(&["init", "-q"], &dep_repo);
+    std::fs::write(
+        dep_repo.join("noeta.toml"),
+        "[package]\nname = \"acme/up\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(dep_repo.join("m.noe"), "namespace up.core;\npub fn v(): int { return 7; }\n")
+        .unwrap();
+    git_in(&["add", "."], &dep_repo);
+    git_in(&["commit", "-q", "-m", "r"], &dep_repo);
+    git_in(&["tag", "v1.0.0"], &dep_repo);
+    std::fs::write(
+        app.join("noeta.toml"),
+        format!(
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nu = {{ git = \"{}\", tag = \"v1.0.0\" }}\n",
+            dep_repo.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "use u.core.v;\necho v();\n").unwrap();
+
+    lang()
+        .current_dir(&app)
+        .arg("update")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("updated noeta.lock"));
+    assert!(app.join("noeta.lock").is_file());
+}
+
+#[test]
+fn a_git_dependency_is_pinned_and_reproduces_offline() {
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_gitdep_lock");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let dep_repo = base.join("pinlib_repo");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&dep_repo).unwrap();
+
+    git_in(&["init", "-q"], &dep_repo);
+    std::fs::write(
+        dep_repo.join("noeta.toml"),
+        "[package]\nname = \"acme/pinned\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dep_repo.join("m.noe"),
+        "namespace pinned.core;\npub fn val(): string { return \"pinned offline value\"; }\n",
+    )
+    .unwrap();
+    git_in(&["add", "."], &dep_repo);
+    git_in(&["commit", "-q", "-m", "release"], &dep_repo);
+    git_in(&["tag", "v1.0.0"], &dep_repo);
+
+    std::fs::write(
+        app.join("noeta.toml"),
+        format!(
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\np = {{ git = \"{}\", tag = \"v1.0.0\" }}\n",
+            dep_repo.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "use p.core.val;\necho val();\n").unwrap();
+
+    // First run: resolves, fetches, and writes the lock.
+    lang()
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pinned offline value"));
+
+    // The lock pins the git source + commit SHA.
+    let lock = std::fs::read_to_string(app.join("noeta.lock")).expect("lock written");
+    assert!(lock.contains("acme/pinned"), "lock names the package: {lock}");
+    assert!(lock.contains("source = \"git\""), "lock records the git source: {lock}");
+    assert!(lock.contains("sha = "), "lock pins a commit SHA: {lock}");
+
+    // Delete the remote repo entirely; the pinned tree already lives in the store, so a second run
+    // reproduces with no network access at all (offline).
+    std::fs::remove_dir_all(&dep_repo).unwrap();
+    lang()
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("pinned offline value"));
 }

@@ -1,0 +1,16 @@
+// F5 follow-on: shell-style default/alternate operators inside `${...}` interpolation.
+// `${VAR:-word}` uses word when VAR is unset or empty; `${VAR:+word}` uses word only when VAR is set.
+// (The `\$` here escapes Noeta's own `${expr}` interpolation so the literal `${...}` reaches the .env
+// parser.) Pure `env.parse`, so both backends agree by construction.
+// expect: stdout "prod/api"
+// expect: stdout "8080"
+// expect: stdout "on"
+// expect: stdout "kept"
+// expect: exit 0
+use std.{env}
+
+cfg = env.parse("HOST=prod\nURL=\${HOST:-localhost}/api\nPORT=\${MISSING:-8080}\nFLAG=\${HOST:+on}\nKEEP=\${GONE-kept}\n");
+echo cfg["URL"];    // HOST is set → its value wins over the default
+echo cfg["PORT"];   // MISSING is unset → the :- default
+echo cfg["FLAG"];   // HOST is set → the :+ alternate
+echo cfg["KEEP"];   // GONE is unset → the `-` default

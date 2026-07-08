@@ -68,6 +68,131 @@ pub struct RawModule {
     pub text: String,
 }
 
+/// Load and link the program rooted at `entry_path` **with its dependency packages** — the
+/// dependency-aware twin of [`load`] (package-manager P2.1). The entry's siblings resolve as before;
+/// each [`DepPackage`]'s modules are additionally re-rooted and linked in. An `io::Error` is only for
+/// a failure to read the entry file itself.
+pub fn load_with_deps(
+    entry_path: &Path,
+    deps: &[DepPackage],
+) -> io::Result<Result<Linked, Vec<LoadDiagnostic>>> {
+    let text = std::fs::read_to_string(entry_path)?;
+    let name = entry_path.display().to_string();
+    let siblings = read_siblings(entry_path);
+    Ok(link_with_deps(&name, &text, &siblings, deps))
+}
+
+/// Read every `.noe` file **under `dir` recursively** as a [`RawModule`], in sorted order (so
+/// SourceId assignment stays deterministic). A dependency package is a directory *tree*, not the
+/// single flat directory the entry's siblings live in, so this walks subdirectories. Names are the
+/// files' display paths (for diagnostics). Unreadable files are skipped.
+pub fn read_package_sources(dir: &Path) -> io::Result<Vec<RawModule>> {
+    let mut paths = Vec::new();
+    collect_noe_files(dir, &mut paths)?;
+    paths.sort();
+    Ok(paths
+        .into_iter()
+        .filter_map(|p| {
+            let text = std::fs::read_to_string(&p).ok()?;
+            Some(RawModule {
+                name: p.display().to_string(),
+                text,
+            })
+        })
+        .collect())
+}
+
+/// Recursively gather `.noe` file paths under `dir` into `out`. A subdirectory that can't be read is
+/// skipped (best-effort), matching the sibling scan's tolerance.
+fn collect_noe_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            let _ = collect_noe_files(&path, out);
+        } else if path.is_file() && path.extension().is_some_and(|ext| ext == "noe") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// A dependency package's sources, to be linked into the entry under the consumer's import root
+/// (package-manager P2.1, model R1). `root` is the package's own namespace root segment (the
+/// `package` half of its `[package] name`); `key` is the consumer's dependency-table key. The loader
+/// **re-roots** the package's modules from `root` to `key` — rewriting the leading segment of each
+/// module's `namespace` and its intra-package `use`s — so the consumer addresses the package as
+/// `use <key>.<sub>.Name` while the package's own imports (written against `root`) keep resolving.
+///
+/// Unlike a sibling, a dependency module's own `use`s **drive** imports (a package is a closed unit:
+/// its internal cross-references must resolve), whereas same-app siblings stay pure decl-sources — so
+/// wiring dependencies never changes single-package linking.
+///
+/// **Transitive dependencies** (package-manager P2.4). A package's own modules import *its own*
+/// dependencies by *its own* local keys (`use jsonlib.parse.X`), which collide across packages (two
+/// packages may both key a dep `jsonlib` pointing at different packages). `dep_renames` disambiguates:
+/// it maps each of this package's local dependency keys to the **globally-unique segment** the resolver
+/// assigned the package that key resolves to, so every `use` leading segment in the flat pool addresses
+/// exactly one package. For a leaf/direct dependency with no dependencies of its own it is empty, so
+/// single-level linking is byte-for-byte unchanged. `key` is this package's own global segment (the
+/// consumer's dep-key for a direct dependency, a synthesized unique segment for a transitive-only one).
+#[derive(Debug)]
+pub struct DepPackage {
+    pub key: String,
+    pub root: String,
+    pub modules: Vec<RawModule>,
+    /// This package's local dependency keys → the global segment of the package each resolves to
+    /// (transitive linking, P2.4). Empty for a leaf package; then re-rooting is just `root` → `key`.
+    pub dep_renames: std::collections::BTreeMap<String, String>,
+}
+
+/// Re-root a namespace/use path in place: replace its leading segment per the rules
+/// (package-manager P2.1/P2.4). If the leading segment is the package's own `root`, it becomes the
+/// package's global `key`; otherwise, if it is one of the package's local dependency keys, it becomes
+/// that dependency's global segment (`renames`). A path leading with anything else — `std`, or a
+/// malformed package path — is left untouched.
+fn reroot_path(
+    path: &mut [String],
+    root: &str,
+    key: &str,
+    renames: &std::collections::BTreeMap<String, String>,
+) {
+    let Some(head) = path.first_mut() else {
+        return;
+    };
+    if head.as_str() == root {
+        *head = key.to_string();
+    } else if let Some(global) = renames.get(head.as_str()) {
+        *head = global.clone();
+    }
+}
+
+/// Re-root a dependency module's `namespace` (its match key) and `use` paths (its import drivers).
+/// The `namespace` only ever leads with the package's own root, so it is rewritten `root` → `key`; a
+/// `use` may lead with the package root (an intra-package reference) or one of the package's local
+/// dependency keys (a transitive reference), both handled by [`reroot_path`]. Touches only those two
+/// statement kinds — both are consumed *during* linking (matching / import-driving) and never appear
+/// in the merged declaration output — so re-rooting cannot alter what a package contributes, only how
+/// it's addressed.
+///
+/// Public so a salsa-based linker (`noeta-db`) can re-root a dependency's parsed [`Program`] before
+/// feeding it to [`link_parsed_with_deps`] — the CLI's [`link_with_deps`] does this inline, but the
+/// db builds `Program`s through its own memoized parse and re-roots them itself (package-manager
+/// P2.1c).
+pub fn reroot_program(
+    program: &mut Program,
+    root: &str,
+    key: &str,
+    renames: &std::collections::BTreeMap<String, String>,
+) {
+    for stmt in &mut program.stmts {
+        match stmt {
+            Stmt::Namespace { path, .. } => reroot_path(path, root, key, renames),
+            Stmt::Use { path, .. } => reroot_path(path, root, key, renames),
+            _ => {}
+        }
+    }
+}
+
 /// The raw [`Source`]s of a workspace: the entry plus its sibling module files, each with its own
 /// [`SourceId`] (entry = 0, siblings 1..) assigned identically to [`link`]. Lexing/parsing happen
 /// downstream, so this only reads and labels files — it feeds the salsa module graph (`noeta-db`,
@@ -182,6 +307,90 @@ pub fn link(
     })
 }
 
+/// Link the entry against its sibling modules **and its dependency packages** (package-manager P2.1).
+/// Each [`DepPackage`]'s modules are parsed, re-rooted from the package's own root segment to the
+/// consumer's dependency key ([`reroot_program`]), and linked as a closed unit (their own `use`s
+/// drive imports). SourceIds continue past the siblings (entry = 0, siblings `1..=S`, dependency
+/// modules after), so every declaration's spans and diagnostics still render against their own file.
+/// A dependency module that fails to lex/parse is skipped (its `Source` is still retained so the
+/// `SourceMap` indices line up), mirroring the sibling policy.
+pub fn link_with_deps(
+    entry_name: &str,
+    entry_text: &str,
+    siblings: &[RawModule],
+    deps: &[DepPackage],
+) -> Result<Linked, Vec<LoadDiagnostic>> {
+    let entry = Source::new(SourceId(0), entry_name, entry_text);
+    let entry_lexed = lex(&entry);
+    let entry_parsed = parse(&entry, &entry_lexed.tokens);
+    let entry_diags: Vec<Diagnostic> = entry_lexed
+        .diagnostics
+        .iter()
+        .chain(entry_parsed.diagnostics.iter())
+        .cloned()
+        .collect();
+    if !entry_diags.is_empty() {
+        return Err(entry_diags
+            .into_iter()
+            .map(|diagnostic| LoadDiagnostic {
+                source: entry.clone(),
+                diagnostic,
+            })
+            .collect());
+    }
+
+    let mut next_id: u32 = 1;
+    let mut sources: Vec<Source> = vec![entry.clone()];
+
+    // Parse the siblings (pure decl-sources), assigning SourceIds `1..=S`.
+    let mut sibling_programs: Vec<Program> = Vec::new();
+    for raw in siblings {
+        let source = Source::new(SourceId(next_id), raw.name.as_str(), raw.text.as_str());
+        next_id += 1;
+        let parsed = parse_clean(&source);
+        sources.push(source);
+        if let Some(program) = parsed {
+            sibling_programs.push(program);
+        }
+    }
+
+    // Parse + re-root each dependency package's modules, continuing the SourceId sequence.
+    let mut dep_programs: Vec<Program> = Vec::new();
+    for dep in deps {
+        for raw in &dep.modules {
+            let source = Source::new(SourceId(next_id), raw.name.as_str(), raw.text.as_str());
+            next_id += 1;
+            let parsed = parse_clean(&source);
+            sources.push(source);
+            if let Some(mut program) = parsed {
+                reroot_program(&mut program, &dep.root, &dep.key, &dep.dep_renames);
+                dep_programs.push(program);
+            }
+        }
+    }
+
+    let sibling_refs: Vec<&Program> = sibling_programs.iter().collect();
+    let dep_refs: Vec<&Program> = dep_programs.iter().collect();
+    let program =
+        link_parsed_with_deps(&entry, &entry_parsed.program, &sibling_refs, &dep_refs)?;
+    Ok(Linked {
+        program,
+        entry,
+        sources: SourceMap::new(sources),
+    })
+}
+
+/// Lex + parse a source, yielding its [`Program`] only if both are clean (a module that fails to
+/// parse cannot be resolved against and is skipped). The shared helper behind [`link`]'s sibling
+/// loop and [`link_with_deps`].
+fn parse_clean(source: &Source) -> Option<Program> {
+    let lexed = lex(source);
+    (lexed.diagnostics.is_empty())
+        .then(|| parse(source, &lexed.tokens))
+        .filter(|parsed| parsed.diagnostics.is_empty())
+        .map(|parsed| parsed.program)
+}
+
 /// Resolve and merge an *already-parsed* entry against already-parsed candidate modules — the pure
 /// linking core shared by [`link`] (which lexes/parses first) and the salsa module-graph query
 /// (`noeta-db`, M1.9.3), which feeds it programs straight from the memoized `ast` queries. `entry`
@@ -194,8 +403,51 @@ pub fn link_parsed(
     entry_program: &Program,
     modules: &[&Program],
 ) -> Result<Program, Vec<LoadDiagnostic>> {
+    link_core(entry, entry_program, modules, &[])
+}
+
+/// The cross-package variant (package-manager P2.1): like [`link_parsed`], but `dep_modules` are the
+/// re-rooted source modules of the entry's dependency packages. They are **both** resolution
+/// candidates *and* import drivers — a package is a closed unit, so its own `use`s (already re-rooted
+/// to the consumer's key) resolve its internal cross-references, unlike same-app siblings which stay
+/// pure decl-sources. `dep_modules` must already be re-rooted (see [`reroot_program`]); the caller
+/// ([`link_with_deps`]) does that. Every std import inside a dependency (`use std.…`) resolves against
+/// no module here and is retained (deduped) so the compiler binds it downstream, exactly as an
+/// entry's std imports are.
+pub fn link_parsed_with_deps(
+    entry: &Source,
+    entry_program: &Program,
+    siblings: &[&Program],
+    dep_modules: &[&Program],
+) -> Result<Program, Vec<LoadDiagnostic>> {
+    // Dependency modules join the resolution pool; only they (not siblings) also drive imports.
+    let pool: Vec<&Program> = siblings.iter().chain(dep_modules).copied().collect();
+    link_core(entry, entry_program, &pool, dep_modules)
+}
+
+/// Where a merged top-level name came from — its local declaration, or the namespace an import
+/// pulled it from. Lets two `use`s that name the **same** declaration (the entry and a dependency
+/// module both importing `webclient.client.Client`) merge it once, while a genuine clash (same name,
+/// different namespace, or an import shadowing a local) is still an E0020 collision.
+enum Origin {
+    Local,
+    Import(Vec<String>),
+}
+
+/// The shared linking core: resolve the entry's imports (and any `dep_drivers`' imports) against the
+/// `pool`, merging each resolved declaration once and retaining every unresolved `use` (deduped) for
+/// the compiler's downstream binding. `dep_drivers` is empty for single-package linking, so that path
+/// is unchanged bar one refinement: a duplicate *identical* import (same namespace + name) is now
+/// skipped rather than flagged, which a closed dependency unit needs and no well-formed program relied
+/// on erroring.
+fn link_core(
+    entry: &Source,
+    entry_program: &Program,
+    pool: &[&Program],
+    dep_drivers: &[&Program],
+) -> Result<Program, Vec<LoadDiagnostic>> {
     // A module contributes only if it declares a namespace to resolve against.
-    let module_views: Vec<ModuleView> = modules
+    let module_views: Vec<ModuleView> = pool
         .iter()
         .filter_map(|prog| {
             module_namespace(prog).map(|namespace| ModuleView {
@@ -205,69 +457,118 @@ pub fn link_parsed(
         })
         .collect();
 
-    // The entry's own top-level declaration names, pre-scanned so an import colliding with a local
-    // declaration is caught regardless of source order. As each import resolves, its name joins the
-    // set; a name that fails to insert (a duplicate) is a collision — a second import of the same
-    // name, or one that shadows a local declaration. The merged reference would be ambiguous.
-    let mut declared: HashSet<String> = entry_program
+    // Every merged top-level name → its origin. Seeded with the entry's own declarations (each
+    // `Local`); an import that would shadow a local, or clash with a differently-sourced import, is a
+    // collision. An import that re-names an already-merged declaration from the *same* namespace is a
+    // no-op (the closed-unit dedup).
+    let mut origins: std::collections::HashMap<String, Origin> = entry_program
         .stmts
         .iter()
         .filter_map(decl_name)
-        .map(str::to_string)
+        .map(|n| (n.to_string(), Origin::Local))
         .collect();
 
-    // Resolve the entry's imports against the module namespaces, pulling each resolved name's
-    // real declaration and trimming it from the `use` so the runtime makes no opaque stub for it.
     let mut imported: Vec<Stmt> = Vec::new();
-    let mut linked_stmts: Vec<Stmt> = Vec::with_capacity(entry_program.stmts.len());
     let mut errors: Vec<LoadDiagnostic> = Vec::new();
+    // Retained (unresolved) imports — std imports and opaque-stub fallbacks — deduped by (path, name)
+    // across the entry and every dependency so a shared `use std.…` isn't bound twice.
+    let mut seen_retained: HashSet<(Vec<String>, String)> = HashSet::new();
+    let mut dep_retained: Vec<Stmt> = Vec::new();
+    let mut entry_stmts: Vec<Stmt> = Vec::with_capacity(entry_program.stmts.len());
+
+    // Resolve one `use`'s names against the pool. Resolved names merge their declaration (deduped by
+    // origin); unresolved names are collected for retention. Returns the still-unresolved names.
+    let mut drive_use = |path: &[String],
+                         names: &[UseName],
+                         imported: &mut Vec<Stmt>,
+                         errors: &mut Vec<LoadDiagnostic>|
+     -> Vec<UseName> {
+        let mut unresolved = Vec::new();
+        for name in names {
+            match resolve(&module_views, path, &name.name) {
+                Resolution::Resolved(decl) => match origins.get(&name.name) {
+                    None => {
+                        origins.insert(name.name.clone(), Origin::Import(path.to_vec()));
+                        imported.push(*decl);
+                    }
+                    // Same declaration re-imported (same namespace) — merge once, ignore the rest.
+                    Some(Origin::Import(p)) if p.as_slice() == path => {}
+                    // A different declaration under the same name — ambiguous.
+                    Some(_) => errors.push(collision_error(entry, path, name)),
+                },
+                Resolution::NoModule => unresolved.push(name.clone()),
+                Resolution::Private => {
+                    errors.push(import_error(entry, path, name, Visibility::Private))
+                }
+                Resolution::Missing => {
+                    errors.push(import_error(entry, path, name, Visibility::Missing))
+                }
+            }
+        }
+        unresolved
+    };
+
+    // The entry: its `use`s drive imports; its other statements are the program's tail (in order).
     for stmt in &entry_program.stmts {
         match stmt {
             Stmt::Use { path, names, span } => {
-                let mut unresolved: Vec<UseName> = Vec::new();
-                for name in names {
-                    match resolve(&module_views, path, &name.name) {
-                        Resolution::Resolved(decl) => {
-                            if declared.insert(name.name.clone()) {
-                                imported.push(*decl);
-                            } else {
-                                errors.push(collision_error(entry, path, name));
-                            }
-                        }
-                        // No module declares this namespace: fall back to the opaque stub (M0).
-                        Resolution::NoModule => unresolved.push(name.clone()),
-                        // The namespace exists but does not export the name — a hard error: a
-                        // private declaration is not importable, and an absent one is a typo.
-                        Resolution::Private => {
-                            errors.push(import_error(entry, path, name, Visibility::Private))
-                        }
-                        Resolution::Missing => {
-                            errors.push(import_error(entry, path, name, Visibility::Missing))
-                        }
-                    }
-                }
-                // Keep the `use` only for names no module provided (opaque-stub fallback).
-                if !unresolved.is_empty() {
-                    linked_stmts.push(Stmt::Use {
+                let unresolved = drive_use(path, names, &mut imported, &mut errors);
+                let fresh = retain_fresh(&mut seen_retained, path, unresolved);
+                if !fresh.is_empty() {
+                    entry_stmts.push(Stmt::Use {
                         path: path.clone(),
-                        names: unresolved,
+                        names: fresh,
                         span: *span,
                     });
                 }
             }
-            other => linked_stmts.push(other.clone()),
+            other => entry_stmts.push(other.clone()),
         }
     }
+
+    // Each dependency module's `use`s also drive imports (closed unit); their unresolved remainder
+    // (std imports) is retained up front, ahead of the entry's statements.
+    for driver in dep_drivers {
+        for stmt in &driver.stmts {
+            if let Stmt::Use { path, names, span } = stmt {
+                let unresolved = drive_use(path, names, &mut imported, &mut errors);
+                let fresh = retain_fresh(&mut seen_retained, path, unresolved);
+                if !fresh.is_empty() {
+                    dep_retained.push(Stmt::Use {
+                        path: path.clone(),
+                        names: fresh,
+                        span: *span,
+                    });
+                }
+            }
+        }
+    }
+
     if !errors.is_empty() {
         return Err(errors);
     }
 
+    // Merged declarations, then dependency std-imports, then the entry's own statements.
     let mut stmts = imported;
-    stmts.append(&mut linked_stmts);
+    stmts.append(&mut dep_retained);
+    stmts.append(&mut entry_stmts);
     Ok(Program {
         stmts,
         span: entry_program.span,
     })
+}
+
+/// Filter `names` down to those not yet retained under `path`, recording the fresh ones — so a
+/// `use std.…` shared by the entry and several dependencies is retained exactly once.
+fn retain_fresh(
+    seen: &mut HashSet<(Vec<String>, String)>,
+    path: &[String],
+    names: Vec<UseName>,
+) -> Vec<UseName> {
+    names
+        .into_iter()
+        .filter(|n| seen.insert((path.to_vec(), n.name.clone())))
+        .collect()
 }
 
 /// A candidate module viewed for resolution: its declared namespace path and a borrow of its
@@ -393,6 +694,157 @@ mod tests {
             name: name.to_string(),
             text: text.to_string(),
         }
+    }
+
+    // --- cross-package linking (package-manager P2.1) -----------------------------------------
+
+    fn has_class(linked: &Linked, name: &str) -> bool {
+        linked
+            .program
+            .stmts
+            .iter()
+            .any(|s| matches!(s, Stmt::Class(c) if c.name == name))
+    }
+
+    #[test]
+    fn a_dependency_package_is_imported_under_the_consumer_key() {
+        // Package `guzzle/http` (root segment `http`) exposes `http.client.Client`; the consumer
+        // keys it `webclient` and imports `use webclient.client.Client` — the loader re-roots
+        // `http.*` → `webclient.*`.
+        let dep = DepPackage {
+            key: "webclient".to_string(),
+            root: "http".to_string(),
+            modules: vec![module(
+                "client.noe",
+                "namespace http.client;\npub class Client {\n  base: string\n}\n",
+            )],
+            dep_renames: Default::default(),
+        };
+        let entry = "use webclient.client.Client;\nc = Client { base: \"x\" };\n";
+        let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
+        assert!(has_class(&linked, "Client"));
+        // The consumer's `use` resolved — no opaque stub remains for it.
+        assert!(
+            !linked
+                .program
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::Use { path, .. } if path == &["webclient".to_string(), "client".to_string()]))
+        );
+    }
+
+    #[test]
+    fn a_package_internal_import_resolves_after_reroot() {
+        // The dependency's own module imports a sibling of the same package (`use http.models.Body`);
+        // re-rooting rewrites it to `use webclient.models.Body`, and — because a dependency module's
+        // `use`s drive imports — `Body` is pulled in even though the consumer never named it.
+        let dep = DepPackage {
+            key: "webclient".to_string(),
+            root: "http".to_string(),
+            modules: vec![
+                module(
+                    "client.noe",
+                    "namespace http.client;\nuse http.models.Body;\npub class Client {\n  body: Body\n}\n",
+                ),
+                module(
+                    "models.noe",
+                    "namespace http.models;\npub class Body {\n  text: string\n}\n",
+                ),
+            ],
+            dep_renames: Default::default(),
+        };
+        let entry = "use webclient.client.Client;\nc = Client { body: Body { text: \"hi\" } };\n";
+        let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
+        assert!(has_class(&linked, "Client"));
+        assert!(has_class(&linked, "Body"), "the package-internal Body must be linked in");
+    }
+
+    #[test]
+    fn two_packages_sharing_a_root_coexist_under_distinct_keys() {
+        // Both packages have root segment `http` (e.g. `a/http` and `b/http`); distinct keys keep
+        // them apart — the collision the dep-key decoupling exists to prevent.
+        let a = DepPackage {
+            key: "alpha".to_string(),
+            root: "http".to_string(),
+            modules: vec![module(
+                "a.noe",
+                "namespace http.core;\npub class Ping {\n  n: int\n}\n",
+            )],
+            dep_renames: Default::default(),
+        };
+        let b = DepPackage {
+            key: "beta".to_string(),
+            root: "http".to_string(),
+            modules: vec![module(
+                "b.noe",
+                "namespace http.core;\npub class Pong {\n  n: int\n}\n",
+            )],
+            dep_renames: Default::default(),
+        };
+        let entry = "use alpha.core.Ping;\nuse beta.core.Pong;\np = Ping { n: 1 };\nq = Pong { n: 2 };\n";
+        let linked = link_with_deps("main.noe", entry, &[], &[a, b]).unwrap();
+        assert!(has_class(&linked, "Ping"));
+        assert!(has_class(&linked, "Pong"));
+    }
+
+    #[test]
+    fn a_transitive_dependency_resolves_through_dep_renames() {
+        // The consumer depends on `app` (root `app`), which itself depends on a package it keys
+        // `jsonlib` (root `json`). The resolver gives the transitive package the global segment
+        // `pkg_json`, so `app`'s internal `use jsonlib.parse.Value` must be rewritten to
+        // `use pkg_json.parse.Value` — even though the consumer never mentions `jsonlib`/`pkg_json`.
+        let mut app_renames = std::collections::BTreeMap::new();
+        app_renames.insert("jsonlib".to_string(), "pkg_json".to_string());
+        let app = DepPackage {
+            key: "app".to_string(),
+            root: "app".to_string(),
+            modules: vec![module(
+                "widget.noe",
+                "namespace app.core;\nuse jsonlib.parse.Value;\npub class Widget {\n  v: Value\n}\n",
+            )],
+            dep_renames: app_renames,
+        };
+        let json = DepPackage {
+            key: "pkg_json".to_string(),
+            root: "json".to_string(),
+            modules: vec![module(
+                "parse.noe",
+                "namespace json.parse;\npub class Value {\n  n: int\n}\n",
+            )],
+            dep_renames: Default::default(),
+        };
+        let entry = "use app.core.Widget;\nw = Widget { v: Value { n: 1 } };\n";
+        let linked = link_with_deps("main.noe", entry, &[], &[app, json]).unwrap();
+        assert!(has_class(&linked, "Widget"));
+        assert!(
+            has_class(&linked, "Value"),
+            "the transitive package's Value must link in via the dep-key rewrite"
+        );
+    }
+
+    #[test]
+    fn a_dependency_std_import_is_retained_for_the_compiler() {
+        // A package that `use`s `std.*` internally: the loader can't resolve std (not a module), so
+        // the `use std.math.sqrt` is retained in the merged program for the compiler to bind.
+        let dep = DepPackage {
+            key: "geo".to_string(),
+            root: "shapes".to_string(),
+            modules: vec![module(
+                "circle.noe",
+                "namespace shapes.circle;\nuse std.math.sqrt;\npub fn area(r: float): float { return 3.14 * r * r; }\n",
+            )],
+            dep_renames: Default::default(),
+        };
+        let entry = "use geo.circle.area;\necho area(2.0);\n";
+        let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
+        // `use std.math.sqrt` survives (retained) so the native-module resolver still sees it.
+        assert!(
+            linked.program.stmts.iter().any(|s| matches!(
+                s,
+                Stmt::Use { path, .. } if path == &["std".to_string(), "math".to_string()]
+            )),
+            "the dependency's std import must be retained"
+        );
     }
 
     #[test]

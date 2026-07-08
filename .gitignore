@@ -22,6 +22,7 @@
 /log.txt
 /scratch.txt
 /data.bin
+/.env
 
 # VS Code extension build artifacts
 editors/vscode-noeta/*.vsix

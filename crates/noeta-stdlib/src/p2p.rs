@@ -15,7 +15,7 @@
 //! determinism story are what P1 proves.
 
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType, SpawnBox};
-use noeta_native::{no_function_error, type_error, Host, NativeValue, StdError};
+use noeta_native::{Host, NativeValue, StdError, no_function_error, type_error};
 
 const MESSAGE_SIG: SigType = SigType::Union(&[SigType::String, SigType::Bytes]);
 

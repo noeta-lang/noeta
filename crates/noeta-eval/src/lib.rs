@@ -1542,18 +1542,20 @@ impl Interpreter {
         // `use std.{json, ...}` binds each recognized name to its Ring 2 native module; a selective
         // member import (`use std.math.sqrt`) binds each member to a `(module, func)` module-function
         // value; other imports (and unrecognized `std` names) fall back to the opaque-stub binding.
-        let is_std = path == ["std"];
-        let selective_module = (path.len() == 2 && path[0] == "std")
-            .then(|| path[1].as_str())
+        let rooted = !path.is_empty() && noeta_stdlib::registry::is_extension_root(&path[0]);
+        let selective_module = (path.len() >= 2 && rooted)
+            .then(|| path.join("."))
             .filter(|m| noeta_stdlib::registry::find_module(m).is_some());
         for imported in names {
-            let value = if is_std && noeta_stdlib::registry::find_module(&imported.name).is_some()
-            {
-                Value::NativeModule(imported.name.clone())
-            } else if let Some(module) = selective_module
+            // A plain (`use std.{json}`) or nested (`use std.http.client`) module import: the module
+            // *value* carries the root-qualified identity; the bound name stays the last segment.
+            let qualified = format!("{}.{}", path.join("."), imported.name);
+            let value = if rooted && noeta_stdlib::registry::find_module(&qualified).is_some() {
+                Value::NativeModule(qualified)
+            } else if let Some(module) = &selective_module
                 && noeta_stdlib::registry::is_module_function(module, &imported.name)
             {
-                Value::ModuleFn(module.to_string(), imported.name.clone())
+                Value::ModuleFn(module.clone(), imported.name.clone())
             } else {
                 Value::Type(Rc::new(TypeDef {
                     name: imported.name.clone(),
@@ -2667,7 +2669,8 @@ impl Interpreter {
         }
         // `vec`'s bulk `*_all` kernels are the only unmigrated native functions and stay per-backend;
         // every other reachable name is registered, so anything else here is an unknown function.
-        if module == "vec" {
+        // `module` is the root-qualified identity, so match on its bare name (`std.vec` → `vec`).
+        if noeta_stdlib::registry::module_name(module) == "vec" {
             return self.call_vec(func, args, span);
         }
         let error = noeta_stdlib::no_function_error(name, func);
@@ -3305,7 +3308,6 @@ impl Interpreter {
         }
     }
 
-
     fn call_closure(&mut self, closure: &Rc<Closure>, args: Vec<Value>, span: Span) -> Eval<Value> {
         let required = required_count(&closure.defaults);
         if args.len() < required || args.len() > closure.params.len() {
@@ -3572,11 +3574,10 @@ impl Interpreter {
                     };
                     Err(self.runtime_error(DiagnosticCode::Panic, span, message))
                 }
-            }
-            // (The whole `Builtin` orchestration family — `task` at higher-order-abi H0/H2,
-            // `http.serve` at H3, `signal`/`computed`/`effect` at H5 — migrated to the
-            // registry's `NativeCtx` dispatch: `noeta-stdlib/src/{task,serve,reactive}.rs`;
-            // the drive loops there are shared with the VM.)
+            } // (The whole `Builtin` orchestration family — `task` at higher-order-abi H0/H2,
+              // `http.serve` at H3, `signal`/`computed`/`effect` at H5 — migrated to the
+              // registry's `NativeCtx` dispatch: `noeta-stdlib/src/{task,serve,reactive}.rs`;
+              // the drive loops there are shared with the VM.)
         }
     }
 

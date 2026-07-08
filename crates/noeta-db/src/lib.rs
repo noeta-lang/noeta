@@ -251,20 +251,94 @@ pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
 // never recomputes another's parse. That is the incremental boundary M2's hot reload builds on.
 
 /// A multi-file program: the entry source plus its sibling module sources, each a memoized
-/// [`SourceProgram`] input. Mutating any one source invalidates exactly the queries that read it.
+/// [`SourceProgram`] input, and — for a package (package-manager P2.1c) — its resolved dependency
+/// packages' modules. Mutating any one source invalidates exactly the queries that read it.
 #[salsa::input(debug)]
 pub struct Workspace {
     pub entry: SourceProgram,
     #[returns(ref)]
     pub modules: Vec<SourceProgram>,
+    /// The resolved dependency packages' modules (empty for a lone/sibling-only workspace). Each
+    /// carries its re-root info; [`linked`] re-roots and links them as closed units.
+    #[returns(ref)]
+    pub dep_modules: Vec<DepModule>,
+}
+
+/// One dependency package module in a salsa [`Workspace`] (package-manager P2.1c): its source input
+/// plus the re-root info [`linked`] applies before merging it (`root`→`key`, then each of the
+/// package's local dependency keys → the target package's global segment). `renames` is a **flat**
+/// list of `[local0, global0, local1, global1, …]` pairs — a `BTreeMap` is not a salsa input field
+/// type, so the query rebuilds it (see [`reroot_map`]).
+#[salsa::input(debug)]
+pub struct DepModule {
+    pub src: SourceProgram,
+    #[returns(ref)]
+    pub root: String,
+    #[returns(ref)]
+    pub key: String,
+    #[returns(ref)]
+    pub renames: Vec<String>,
+}
+
+/// A dependency package's sources + re-root info, the ergonomic input to [`workspace_with_deps`]
+/// (package-manager P2.1c). Mirrors `noeta_loader::DepPackage` but with already-labeled [`Source`]s.
+#[derive(Debug)]
+pub struct DepSources {
+    pub root: String,
+    pub key: String,
+    pub renames: Vec<(String, String)>,
+    pub modules: Vec<Source>,
 }
 
 /// Build a [`Workspace`] input from the entry [`Source`] and its sibling module sources (as
-/// produced by `noeta_loader::read_workspace`). Each becomes a [`SourceProgram`] input.
+/// produced by `noeta_loader::read_workspace`). Each becomes a [`SourceProgram`] input; no
+/// dependency packages (use [`workspace_with_deps`] for those).
 pub fn workspace(db: &LangDatabase, entry: &Source, modules: &[Source]) -> Workspace {
     let entry_input = source_program(db, entry);
     let module_inputs = modules.iter().map(|s| source_program(db, s)).collect();
-    Workspace::new(db, entry_input, module_inputs)
+    Workspace::new(db, entry_input, module_inputs, Vec::new())
+}
+
+/// Build a [`Workspace`] that also links **dependency packages** (package-manager P2.1c): each dep
+/// module becomes a [`DepModule`] input carrying its re-root info, so cross-package
+/// `use <dep-key>.…` resolves in the salsa graph exactly as in the CLI's `load_with_deps`.
+pub fn workspace_with_deps(
+    db: &LangDatabase,
+    entry: &Source,
+    modules: &[Source],
+    deps: &[DepSources],
+) -> Workspace {
+    let entry_input = source_program(db, entry);
+    let module_inputs = modules.iter().map(|s| source_program(db, s)).collect();
+    let mut dep_inputs = Vec::new();
+    for dep in deps {
+        let renames = flatten_renames(&dep.renames);
+        for src in &dep.modules {
+            let sp = source_program(db, src);
+            dep_inputs.push(DepModule::new(
+                db,
+                sp,
+                dep.root.clone(),
+                dep.key.clone(),
+                renames.clone(),
+            ));
+        }
+    }
+    Workspace::new(db, entry_input, module_inputs, dep_inputs)
+}
+
+/// Flatten a rename map to the `[local0, global0, …]` pairs a [`DepModule`] stores.
+fn flatten_renames(map: &[(String, String)]) -> Vec<String> {
+    map.iter()
+        .flat_map(|(local, global)| [local.clone(), global.clone()])
+        .collect()
+}
+
+/// Rebuild the leading-segment rename map from a [`DepModule`]'s flat `renames` pairs.
+fn reroot_map(flat: &[String]) -> std::collections::BTreeMap<String, String> {
+    flat.chunks_exact(2)
+        .map(|pair| (pair[0].clone(), pair[1].clone()))
+        .collect()
 }
 
 /// Resolve and merge the workspace: the entry's imports against the modules' declared namespaces,
@@ -302,7 +376,41 @@ pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> LinkedProgram {
         }
     }
 
-    match noeta_loader::link_parsed(&entry_source, &entry_ast.0.program, &module_programs) {
+    // Dependency-package modules (package-manager P2.1c): re-rooted clones (owned, because the
+    // rewrite mutates the parsed AST) that drive their own imports as closed units — the salsa twin
+    // of the CLI's `link_with_deps`. Depends on each dep module's `ast`, so editing a path-dependency
+    // source re-links, but leaves sibling parses untouched.
+    let mut dep_programs: Vec<Program> = Vec::new();
+    for &dm in ws.dep_modules(db) {
+        let src = dm.src(db);
+        let toks = tokens(db, src);
+        let parsed = ast(db, src);
+        if toks.0.diagnostics.is_empty() && parsed.0.diagnostics.is_empty() {
+            let mut program = parsed.0.program.clone();
+            noeta_loader::reroot_program(
+                &mut program,
+                dm.root(db),
+                dm.key(db),
+                &reroot_map(dm.renames(db)),
+            );
+            dep_programs.push(program);
+        }
+    }
+
+    // No dependencies → the exact single-package path (byte-for-byte unchanged); otherwise the
+    // deps-aware linker with the re-rooted dep programs as candidates and import drivers.
+    let result = if dep_programs.is_empty() {
+        noeta_loader::link_parsed(&entry_source, &entry_ast.0.program, &module_programs)
+    } else {
+        let dep_refs: Vec<&Program> = dep_programs.iter().collect();
+        noeta_loader::link_parsed_with_deps(
+            &entry_source,
+            &entry_ast.0.program,
+            &module_programs,
+            &dep_refs,
+        )
+    };
+    match result {
         Ok(program) => LinkedProgram(Ok(program)),
         Err(load) => LinkedProgram(Err(load.into_iter().map(|d| d.diagnostic).collect())),
     }
@@ -531,7 +639,7 @@ mod tests {
         let entry_src = source_program(&db, &entry);
         let a_src = source_program(&db, &a);
         let b_src = source_program(&db, &b);
-        let ws = Workspace::new(&db, entry_src, vec![a_src, b_src]);
+        let ws = Workspace::new(&db, entry_src, vec![a_src, b_src], Vec::new());
 
         assert!(linked(&db, ws).0.is_ok());
         let a_ast_before = ast(&db, a_src) as *const Ast;
@@ -549,5 +657,37 @@ mod tests {
         );
         // The link itself re-runs (it depends on every module) and stays well-formed.
         assert!(linked(&db, ws).0.is_ok());
+    }
+
+    #[test]
+    fn workspace_with_deps_resolves_cross_package_use() {
+        // package-manager P2.1c: a dependency package keyed `hi` (its own root segment is `greet`)
+        // links into the salsa graph; the entry's `use hi.hello.greeting` resolves after re-root.
+        let db = LangDatabase::default();
+        let entry = Source::new(
+            SourceId(0),
+            "main.noe",
+            "use hi.hello.greeting;\necho greeting();\n",
+        );
+        let dep = DepSources {
+            root: "greet".to_string(),
+            key: "hi".to_string(),
+            renames: Vec::new(),
+            modules: vec![Source::new(
+                SourceId(1),
+                "hello.noe",
+                "namespace greet.hello;\npub fn greeting(): string { return \"hi\"; }\n",
+            )],
+        };
+        let ws = workspace_with_deps(&db, &entry, &[], std::slice::from_ref(&dep));
+        let linked = linked(&db, ws);
+        assert!(linked.0.is_ok(), "cross-package use must resolve: {:?}", linked.0);
+        // The dependency's `greeting` fn was merged into the linked program (and its `use` no longer
+        // survives as an unresolved import).
+        let program = linked.0.as_ref().unwrap();
+        assert!(
+            program.stmts.iter().any(|s| format!("{s:?}").contains("greeting")),
+            "the dependency's greeting declaration must be linked in"
+        );
     }
 }

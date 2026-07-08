@@ -1,0 +1,20 @@
+// F5 follow-on: `${VAR}` / `$VAR` interpolation. `env.parse` (pure) resolves against earlier keys in
+// the same file; single-quoted values are literal (no interpolation); `\$` is a literal `$`. `env.load`
+// additionally resolves against the ambient environment, which wins — here the sandbox fixture's
+// `USER=noeta` fills `${USER}`. Both backends agree by construction.
+// expect: stdout "/app/bin"
+// expect: stdout "${BASE}"
+// expect: stdout "cost is $5"
+// expect: stdout "hi noeta"
+// expect: exit 0
+// NB: `\$` here escapes NOETA's own `${expr}` string interpolation, so the literal text `${BASE}`
+// (etc.) reaches the .env parser — which is what does the dotenv-side interpolation.
+use std.{env, fs}
+
+p = env.parse("BASE=/app\nBIN=\${BASE}/bin\nRAW='\${BASE}'\nESC=cost is \\$5\n");
+echo p["BIN"];    // ${BASE} expands to the earlier key
+echo p["RAW"];    // single-quoted: literal, not interpolated
+echo p["ESC"];    // \$ is a literal dollar
+
+fs.write(".env", "GREETING=hi \${USER}\n");
+echo env.load(".env")["GREETING"];   // ${USER} resolves from the ambient fixture (noeta)

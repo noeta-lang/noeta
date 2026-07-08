@@ -20,12 +20,12 @@ use std::any::Any;
 use std::cmp::Ordering;
 use std::fmt;
 
+use noeta_crdt::Mergeable;
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    arity_error, no_function_error, no_method_error, type_error, ErrorKind, ExternValue, Host,
-    NativeValue, Scalar, StdError,
+    ErrorKind, ExternValue, Host, NativeValue, Scalar, StdError, arity_error, no_function_error,
+    no_method_error, type_error,
 };
-use noeta_crdt::Mergeable;
 
 pub const GCOUNTER_TYPE_NAME: &str = "GCounter";
 pub const PNCOUNTER_TYPE_NAME: &str = "PnCounter";
@@ -416,7 +416,7 @@ pub fn from_bytes_like(like: &dyn ExternValue, bytes: &[u8]) -> Option<Box<dyn E
     None
 }
 
-// --- Registration handles (referenced from `registry::STD_MODULES` / `STD_TYPES`) ---------------
+// --- Registration handles (referenced from `registry`'s `P2P_MODULES` / `P2P_TYPES`) ------------
 
 /// The `ExtType` method-dispatch entry for each CRDT — paired with its `*_METHODS` table when the
 /// type is registered.

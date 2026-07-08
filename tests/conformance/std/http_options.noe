@@ -9,22 +9,22 @@
 // expect: stdout "{"body":"","method":"PATCH","path":"/echo"}"
 // expect: stdout "{"k":"v"}"
 // expect: exit 0
-use std.{http}
+use std.http.client
 
 // Headers on a bodyless verb (arg index 1), echoed sorted by the /headers route.
-echo http.get("https://svc.test/headers", {"x-b": "2", "x-a": "1"}).body()
+echo client.get("https://svc.test/headers", {"x-b": "2", "x-a": "1"}).body()
 
 // QUERY — body-carrying; /echo shows the uppercased method.
-echo http.query("https://svc.test/echo", "q=1").body()
+echo client.query("https://svc.test/echo", "q=1").body()
 
 // Headers on a body verb (arg index 2).
-echo http.post("https://svc.test/headers", "b", {"authorization": "Bearer t"}).body()
+echo client.post("https://svc.test/headers", "b", {"authorization": "Bearer t"}).body()
 
 // request with a custom verb + headers (headers ignored by the /echo route).
-echo http.request("PATCH", "https://svc.test/echo", {"x": "y"}).body()
+echo client.request("PATCH", "https://svc.test/echo", {"x": "y"}).body()
 
 // Optional headers work on the async twins too.
 async fn run(): void {
-    echo http.get_async("https://svc.test/headers", {"k": "v"}).await.body()
+    echo client.get_async("https://svc.test/headers", {"k": "v"}).await.body()
 }
 run().await

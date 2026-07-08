@@ -32,7 +32,9 @@ use noeta_parser::{parse, parse_fragment};
 use noeta_span::{Source, SourceId, SourceMap, Span};
 use noeta_vm::{SessionOutput, VmBackend, VmSession};
 
-mod manifest;
+// The package manager (package-manager P2) now lives in the `noeta-pm` library so `noeta-lsp` and
+// `noeta-db` resolve dependencies through the same code; the CLI names its modules unqualified.
+use noeta_pm::{graph, lock, manifest, registry};
 
 #[derive(Parser)]
 #[command(name = "noeta", version, about = "The Noeta toolchain")]
@@ -259,6 +261,42 @@ enum Command {
         #[arg(long)]
         stdin: bool,
     },
+    /// Add a dependency to the nearest `noeta.toml` and refresh `noeta.lock` (package-manager P2.4).
+    /// Exactly one source must be given: `--path`, `--git` (with `--tag`), or `--version` (registry).
+    /// The manifest edit preserves your formatting and comments; the dependency is then resolved so
+    /// the lockfile is updated (a git source is fetched now, so a typo'd URL/tag fails fast).
+    Add {
+        /// The import root you will `use` the dependency under (an identifier): `use <key>.…`.
+        key: String,
+        /// A local path dependency (relative to the manifest).
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// A git repository URL (requires `--tag`).
+        #[arg(long)]
+        git: Option<String>,
+        /// The git tag (a released version) to pin — used with `--git`.
+        #[arg(long)]
+        tag: Option<String>,
+        /// A registry SemVer requirement, e.g. `^1.2` (registry resolution lands in P2.5).
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// Re-resolve dependencies and rewrite `noeta.lock` (package-manager P2.4): a git tag is
+    /// re-fetched at the remote and re-pinned to its current commit SHA, so `update` picks up a
+    /// moved tag that a locked build would otherwise reproduce from the old commit.
+    Update,
+    /// Publish this package to the registry index (package-manager P2.5). Records this package's
+    /// `[package]` name + version → its git coordinates so others can depend on it by version. This
+    /// is the **client stub**: it writes to the local/offline index (`NOETA_REGISTRY_DIR`); the
+    /// hosted registry service is built and operated separately.
+    Publish {
+        /// The git repository URL the release's source lives at.
+        #[arg(long)]
+        git: String,
+        /// The git tag for this release (defaults to `v<version>`).
+        #[arg(long)]
+        tag: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -292,8 +330,8 @@ fn main() -> ExitCode {
     {
         return ext_command_dispatch(ext, sub);
     }
-    let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches)
-        .unwrap_or_else(|err| err.exit());
+    let cli =
+        <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
     match cli.command {
         Command::Run {
             file,
@@ -352,7 +390,159 @@ fn main() -> ExitCode {
             check,
             stdin,
         } => cmd_fmt(&files, check, stdin),
+        Command::Add {
+            key,
+            path,
+            git,
+            tag,
+            version,
+        } => cmd_add(&key, path.as_deref(), git.as_deref(), tag.as_deref(), version.as_deref()),
+        Command::Update => cmd_update(),
+        Command::Publish { git, tag } => cmd_publish(&git, tag.as_deref()),
     }
+}
+
+/// `noeta add <key> --path/--git+--tag/--version` — add a dependency to the nearest `noeta.toml`,
+/// then resolve so `noeta.lock` reflects it (package-manager P2.4d).
+fn cmd_add(
+    key: &str,
+    path: Option<&std::path::Path>,
+    git: Option<&str>,
+    tag: Option<&str>,
+    version: Option<&str>,
+) -> ExitCode {
+    // Exactly one source form.
+    let value_toml = match (path, git, version) {
+        (Some(p), None, None) => format!("{{ path = {} }}", toml_string(&p.display().to_string())),
+        (None, Some(url), None) => {
+            let Some(tag) = tag else {
+                eprintln!("lang: `--git` requires `--tag` (sources are git + tagged releases only)");
+                return ExitCode::from(2);
+            };
+            format!(
+                "{{ git = {}, tag = {} }}",
+                toml_string(url),
+                toml_string(tag)
+            )
+        }
+        (None, None, Some(req)) => toml_string(req),
+        (None, None, None) => {
+            eprintln!("lang: give a source — `--path`, `--git` (+ `--tag`), or `--version`");
+            return ExitCode::from(2);
+        }
+        _ => {
+            eprintln!("lang: give exactly one source — `--path`, `--git`, or `--version`");
+            return ExitCode::from(2);
+        }
+    };
+    if git.is_none() && tag.is_some() {
+        eprintln!("lang: `--tag` only applies to a `--git` dependency");
+        return ExitCode::from(2);
+    }
+
+    let manifest_path = match locate_manifest() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    if let Err(err) = manifest::add_dependency(&manifest_path, key, &value_toml) {
+        eprintln!("lang: {err}");
+        return ExitCode::from(1);
+    }
+    // Resolve so the new dependency is fetched and the lock is refreshed; a bad URL/tag/path fails
+    // here (the manifest edit already succeeded — the entry stays so the user can fix it).
+    match graph::resolve_graph(&manifest_path) {
+        Ok(_) => {
+            println!("added `{key}` to {}", manifest_path.display());
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("lang: added `{key}`, but resolving it failed: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `noeta update` — discard the current pins and re-resolve, rewriting `noeta.lock` (P2.4d). Removing
+/// the lock forces the graph walk to re-`ls-remote` each git tag and re-pin its current commit SHA.
+fn cmd_update() -> ExitCode {
+    let manifest_path = match locate_manifest() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let dir = manifest_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let _ = std::fs::remove_file(dir.join(lock::LOCK_NAME));
+    match graph::resolve_graph(&manifest_path) {
+        Ok(graph) => {
+            if graph.locked.is_empty() {
+                println!("no dependencies to update");
+            } else {
+                println!("updated {} ({} package(s))", lock::LOCK_NAME, graph.locked.len());
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("lang: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `noeta publish --git <url> [--tag <tag>]` — record this package's identity + version → git
+/// coordinates in the registry index (package-manager P2.5, client stub). The tag defaults to
+/// `v<version>`. Writes to the local/offline index; the hosted registry is operated separately.
+fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
+    let manifest_path = match locate_manifest() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let (name, version) = match manifest::current_package(&manifest_path) {
+        Ok(pkg) => pkg,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let tag = tag.map(str::to_string).unwrap_or_else(|| format!("v{version}"));
+    let index = match registry::LocalIndex::open() {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let coords = registry::GitCoords {
+        url: git.to_string(),
+        tag: tag.clone(),
+    };
+    match registry::Index::publish(&index, &name, &version, &coords) {
+        Ok(()) => {
+            println!("published `{name}` {version} → {git}#{tag}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("lang: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Find the nearest `noeta.toml` from the current directory, or print a diagnostic and return a
+/// non-zero exit code (shared by `noeta add`/`update`).
+fn locate_manifest() -> Result<PathBuf, ExitCode> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    manifest::find(&cwd).ok_or_else(|| {
+        eprintln!(
+            "lang: no `{}` found at or above `{}`",
+            manifest::MANIFEST_NAME,
+            cwd.display()
+        );
+        ExitCode::from(1)
+    })
+}
+
+/// Quote a string as a TOML basic string for a manifest value we write (`noeta add`).
+fn toml_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// `noeta cache <path|info|clear>` — inspect or clear the transparent startup cache.
@@ -795,11 +985,7 @@ fn try_run_stapled() -> Option<ExitCode> {
     file.read_exact(&mut blob).ok()?;
     // A shipped `--exe` artifact is invoked directly, so its real process argv (`[<binary>, <args…>]`)
     // is exactly the program's argument vector — pass it straight through to `args.all()`.
-    Some(cmd_run_bundle(
-        &exe_path,
-        &blob,
-        std::env::args().collect(),
-    ))
+    Some(cmd_run_bundle(&exe_path, &blob, std::env::args().collect()))
 }
 
 fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a Diagnostic>) {
@@ -953,7 +1139,18 @@ fn cmd_check(
 
     let mut unreadable = false;
     for entry in &entries {
-        match noeta_loader::load(entry) {
+        // Resolve the entry's dependency packages so a cross-package `use <dep-key>.…` type-checks
+        // accurately under `noeta check`, matching `run` (package-manager P2.1c). A resolution
+        // failure is reported like an unreadable file — it doesn't abort the whole check.
+        let deps = match graph::resolve_graph(entry) {
+            Ok(graph) => graph.packages,
+            Err(err) => {
+                eprintln!("lang: {}: {err}", entry.display());
+                unreadable = true;
+                continue;
+            }
+        };
+        match noeta_loader::load_with_deps(entry, &deps) {
             Err(err) => {
                 // One unreadable file does not abort the whole run — record it and keep checking the
                 // rest, so `check` reports as much as it can in a single pass.
@@ -1108,7 +1305,10 @@ fn ext_command_dispatch(
             ),
             noeta_stdlib::ArgKind::Int { default } => parsed.push_int(
                 spec.name,
-                matches.get_one::<i64>(spec.name).copied().unwrap_or(default),
+                matches
+                    .get_one::<i64>(spec.name)
+                    .copied()
+                    .unwrap_or(default),
             ),
         }
     }
@@ -1132,7 +1332,16 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         use noeta_ast::{Expr, Stmt};
         use noeta_span::Span;
 
-        let mut linked = match noeta_loader::load(file) {
+        // Resolve dependency packages so `noeta serve` (and any entry-call command) sees the same
+        // cross-package `use <dep-key>.…` the plain `run` path does (package-manager P2.1c).
+        let deps = match graph::resolve_graph(file) {
+            Ok(graph) => graph.packages,
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return 2;
+            }
+        };
+        let mut linked = match noeta_loader::load_with_deps(file, &deps) {
             Err(err) => {
                 eprintln!("lang: cannot read {}: {err}", file.display());
                 return 2;
@@ -1167,7 +1376,10 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                 .args
                 .iter()
                 .map(|arg| match arg {
-                    noeta_stdlib::EntryArg::Int(value) => Expr::Int { value: *value, span: sp },
+                    noeta_stdlib::EntryArg::Int(value) => Expr::Int {
+                        value: *value,
+                        span: sp,
+                    },
                     noeta_stdlib::EntryArg::Ident(name) => ident(name),
                 })
                 .collect();
@@ -1176,7 +1388,10 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                 args,
                 span: sp,
             };
-            linked.program.stmts.push(Stmt::Expr { expr: call, span: sp });
+            linked.program.stmts.push(Stmt::Expr {
+                expr: call,
+                span: sp,
+            });
         }
 
         if let Some(banner) = banner {
@@ -1300,7 +1515,9 @@ fn compile_whole_file(
     // The active tier set is the union of any `--profile`'s live tiers (from `noeta.toml`) and any
     // explicit `--tier` flags, resolved before loading so a bad profile fails fast.
     let mut active: Vec<String> = match profile {
-        Some(name) => manifest::resolve_active_tiers(file, name).map_err(CompileFailure::Message)?,
+        Some(name) => {
+            manifest::resolve_active_tiers(file, name).map_err(CompileFailure::Message)?
+        }
         None => Vec::new(),
     };
     for tier in tiers {
@@ -1309,8 +1526,12 @@ fn compile_whole_file(
         }
     }
 
+    // The entry's dependency packages (package-manager P2.1): their sources feed both the cache key
+    // (so a dep change never serves stale bytecode) and the loader (so `use <dep-key>.…` resolves).
+    let deps = manifest::dependency_packages(file).map_err(CompileFailure::Message)?;
+
     // Startup cache (M3): on a hit, return the cached module — load/check/compile all skipped.
-    let cache = open_startup_cache(file, &active, no_cache);
+    let cache = open_startup_cache(file, &active, &deps, no_cache);
     if let Some(slot) = &cache
         && let Some(blob) = slot.cache.load(&slot.key)
         && let Ok(module) = noeta_bundle::read(&blob)
@@ -1322,8 +1543,9 @@ fn compile_whole_file(
     }
 
     // Miss: load + link (sibling `.noe` modules the entry `use`s are resolved and merged; a lone file
-    // links to itself), activate any dev-tiers, type-check, and compile to bytecode.
-    let linked = match noeta_loader::load(file) {
+    // links to itself; dependency packages re-rooted under their keys), activate any dev-tiers,
+    // type-check, and compile to bytecode.
+    let linked = match noeta_loader::load_with_deps(file, &deps) {
         Err(err) => {
             return Err(CompileFailure::Unreadable(format!(
                 "cannot read {}: {err}",
@@ -1405,6 +1627,7 @@ fn run_compiled_module(
 fn open_startup_cache(
     file: &std::path::Path,
     active: &[String],
+    deps: &[noeta_loader::DepPackage],
     no_cache: bool,
 ) -> Option<CacheSlot> {
     if no_cache || std::env::var_os("NOETA_NO_CACHE").is_some() {
@@ -1414,8 +1637,9 @@ fn open_startup_cache(
     // would reuse stale bytecode. If we can't obtain it, we must not cache.
     let binary = noeta_cache::binary_identity()?;
     // Read the entry + sibling sources (no lex/parse) — both the key material and, on a hit, the
-    // SourceMap for rendering. SourceIds here match `noeta_loader::load`'s assignment (entry = 0,
-    // sorted siblings 1..), so a cached module's spans resolve correctly against this map.
+    // SourceMap for rendering. SourceIds here match `noeta_loader::load_with_deps`'s assignment
+    // (entry = 0, sorted siblings 1.., then each dependency's modules in order), so a cached module's
+    // spans — including those from merged dependency declarations — resolve against this map.
     let workspace = noeta_loader::read_workspace(file).ok()?;
     let mut key = noeta_cache::KeyBuilder::new();
     // Which file is the *entry* is part of the key, not just the source set: a directory of
@@ -1430,6 +1654,20 @@ fn open_startup_cache(
     for module in &workspace.modules {
         key.source(source_key_name(module), module.text().as_bytes());
     }
+    // Dependency packages are part of the compiled program: fold each dependency's key→root binding
+    // (re-rooting changes the linked program even when the sources are byte-identical) and every
+    // module's source text into the key, so any dependency change invalidates the cache.
+    for dep in deps {
+        key.source(format!("<dep {}>", dep.key), dep.root.as_bytes());
+        // The transitive key-rewrite map is part of what re-rooting produces: two builds with
+        // byte-identical dep sources but different transitive wiring link to different programs.
+        for (local, global) in &dep.dep_renames {
+            key.source(format!("<rename {} {local}>", dep.key), global.as_bytes());
+        }
+        for module in &dep.modules {
+            key.source(&module.name, module.text.as_bytes());
+        }
+    }
     key.runtime_version(noeta_bundle::RUNTIME_VERSION)
         .binary_identity(binary);
     for tier in active {
@@ -1438,9 +1676,19 @@ fn open_startup_cache(
     let key = key.finish();
 
     let cache = noeta_cache::Cache::open()?;
+    // Rebuild the exact Source sequence `link_with_deps` assigns SourceIds to, so a cached module's
+    // spans resolve. `read_workspace` already gave entry (id 0) + siblings; the dependency modules
+    // continue the ids in the same order the loader parses them.
     let mut sources = Vec::with_capacity(1 + workspace.modules.len());
     sources.push(workspace.entry);
     sources.extend(workspace.modules);
+    let mut next_id = sources.len() as u32;
+    for dep in deps {
+        for module in &dep.modules {
+            sources.push(Source::new(SourceId(next_id), &module.name, &module.text));
+            next_id += 1;
+        }
+    }
     Some(CacheSlot {
         cache,
         key,
@@ -1733,17 +1981,25 @@ fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
     // A whole-module value (`use std.{http}`): the program holds the module and can call *any* of its
     // functions dynamically (member calls lower to `CallMethod` on the value, whose receiver isn't
     // statically pinned), so a module that owns a native-dep ring is selected conservatively.
+    // Module identities are root-qualified (`std.http`); the ring tables key on the module name, so
+    // strip the root before looking up. A turbofish's module is the source receiver (a local name,
+    // unrooted) and passes through `module_name` unchanged.
+    // The module→ring map is the registry's now (package-manager P1.0): each `ExtModule` declares its
+    // `ring`, so both the whole-module and precisely-named forms funnel through one registry lookup —
+    // no CLI-side table to keep in sync with the stdlib. `ring_of` accepts a root-qualified path, a
+    // bare name, or a turbofish's bound local alike.
     let note_module = |name: &str, rings: &mut BTreeSet<String>| {
-        if let Some(ring) = module_ring(name) {
+        if let Some(ring) = noeta_stdlib::registry::ring_of(name) {
             rings.insert(ring.to_string());
         }
     };
-    // A precisely-named function (`use std.http.get`, or a turbofish `TypedModuleCall`): the exact function is
-    // known, so a ring can be selected only when a function that actually needs it is referenced. This
-    // is what lets a *client/server split* pay off — a program that names only `http.serve`/
-    // `http.response` selects no client ring and sheds reqwest, while `http.get` selects it.
-    let note_fn = |m: &str, func: &str, rings: &mut BTreeSet<String>| {
-        if let Some(ring) = fn_ring(m, func) {
+    // A precisely-named function (`use std.http.client.get`, or a turbofish `TypedModuleCall`): post
+    // the `std.http` client/server split the client/server distinction lives in the *module* identity,
+    // so a named function selects exactly its module's ring — the same `ring_of` lookup as a whole
+    // module. This is what lets the split pay off: a program naming only `http.server` functions
+    // selects no client ring and sheds reqwest, while any `http.client` reference selects it.
+    let note_fn = |m: &str, _func: &str, rings: &mut BTreeSet<String>| {
+        if let Some(ring) = noeta_stdlib::registry::ring_of(m) {
             rings.insert(ring.to_string());
         }
     };
@@ -1757,54 +2013,15 @@ fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
             }
         }
         for op in &chunk.code {
-            if let Op::TypedModuleCall { module: m, func, .. } = op {
+            if let Op::TypedModuleCall {
+                module: m, func, ..
+            } = op
+            {
                 note_fn(module.name(*m), module.name(*func), &mut rings);
             }
         }
     }
     rings.into_iter().collect()
-}
-
-/// The `noeta-aot-runtime` ring a *whole-module* reference selects — conservative, since the value can
-/// reach any of the module's functions. `http` maps to the outbound client (its reqwest/TLS tree is
-/// the ~5 MB payload), because a `use std.{http}` value could call `http.get`. A module with no row
-/// is always-on core or a not-yet-gated ring: never stripped. See the package-manager note below —
-/// splitting `http` into client/server modules would make even the whole-module case precise.
-#[cfg(feature = "jit")]
-fn module_ring(name: &str) -> Option<&'static str> {
-    match name {
-        "http" => Some("ring-http-client"),
-        _ => None,
-    }
-}
-
-/// The ring a *precisely-named* function selects. Only the outbound-client functions of `http` pull
-/// reqwest; its `response` builder (pure) and `serve` (inbound, tokio — always compiled) do not, so a
-/// program that references only those selects no client ring. Sound by construction: a real client
-/// call always surfaces as one of these names (or as a whole-module value, handled above), so reqwest
-/// is never stripped from a program that can reach it.
-#[cfg(feature = "jit")]
-fn fn_ring(module: &str, func: &str) -> Option<&'static str> {
-    const HTTP_CLIENT_FNS: &[&str] = &[
-        "get",
-        "head",
-        "delete",
-        "post",
-        "put",
-        "query",
-        "request",
-        "get_async",
-        "head_async",
-        "delete_async",
-        "post_async",
-        "put_async",
-        "query_async",
-        "request_async",
-    ];
-    match module {
-        "http" if HTTP_CLIENT_FNS.contains(&func) => Some("ring-http-client"),
-        _ => None,
-    }
 }
 
 /// Locate the AOT runtime staticlib (`libnoeta_aot.a`) and the native system libraries it must be
@@ -3235,19 +3452,21 @@ mod tests {
 
     #[cfg(feature = "jit")]
     #[test]
-    fn aot_ring_features_detects_http_through_every_lowering() {
-        use noeta_bytecode::{Const, NameId, Op};
-        use noeta_span::Span;
+    fn aot_ring_features_selects_http_client_but_not_server() {
+        use noeta_bytecode::Const;
         let client = vec!["ring-http-client".to_string()];
 
-        // `use std.{http}` → a whole-module value: conservative (could call any http fn) → client ring.
-        let via_module = module_with(vec![Const::NativeModule("http".into())], vec![], vec![]);
+        // `use std.http.client` → a whole-module value. Post-split (P0.3b) this is *precise*: the
+        // client module owns reqwest, so the whole-module reference selects the client ring. Module
+        // identities are root-qualified (`std.http.client`), as the compiler now emits them.
+        let via_module =
+            module_with(vec![Const::NativeModule("std.http.client".into())], vec![], vec![]);
         assert_eq!(aot_ring_features(&via_module), client);
 
-        // `use std.http.get` → a selective import of a *client* function → client ring.
+        // `use std.http.client.get` → a selective import of a client function → client ring.
         let client_fn = module_with(
             vec![Const::ModuleFn {
-                module: "http".into(),
+                module: "std.http.client".into(),
                 func: "get".into(),
             }],
             vec![],
@@ -3255,41 +3474,23 @@ mod tests {
         );
         assert_eq!(aot_ring_features(&client_fn), client);
 
-        // The client/server split payoff: a selective import of only *server* functions
-        // (`use std.http.{serve, response}`) selects NO client ring — reqwest is shed.
+        // The split payoff: a `use std.http.server` program — whole module *or* its `response`/`serve`
+        // functions — selects NO client ring, so reqwest is shed from the archive.
+        let server_module =
+            module_with(vec![Const::NativeModule("std.http.server".into())], vec![], vec![]);
+        assert!(aot_ring_features(&server_module).is_empty());
         let server_fn = module_with(
-            vec![
-                Const::ModuleFn {
-                    module: "http".into(),
-                    func: "serve".into(),
-                },
-                Const::ModuleFn {
-                    module: "http".into(),
-                    func: "response".into(),
-                },
-            ],
+            vec![Const::ModuleFn {
+                module: "std.http.server".into(),
+                func: "response".into(),
+            }],
             vec![],
             vec![],
         );
         assert!(aot_ring_features(&server_fn).is_empty());
 
-        // The fully-qualified / turbofish call form → a `TypedModuleCall` naming module + func (names[0], [1]).
-        let via_extcall = module_with(
-            vec![],
-            vec![Op::TypedModuleCall {
-                dst: 0,
-                module: NameId(0),
-                func: NameId(1),
-                args: Box::new([]),
-                recipe: None,
-                span: Span::empty_at(0),
-            }],
-            vec!["http".to_string(), "get".to_string()],
-        );
-        assert_eq!(aot_ring_features(&via_extcall), client);
-
         // A program that only touches an always-on core / not-yet-gated module selects no ring.
-        let non_http = module_with(vec![Const::NativeModule("math".into())], vec![], vec![]);
+        let non_http = module_with(vec![Const::NativeModule("std.math".into())], vec![], vec![]);
         assert!(aot_ring_features(&non_http).is_empty());
     }
 }

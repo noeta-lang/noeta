@@ -229,10 +229,16 @@ the host's entropy capability — exactly reproducible in the deterministic sand
 entropy under `noeta run`. The digest functions are pure: the same input gives the same digest
 everywhere (the conformance suite pins the published NIST/RFC vectors).
 
-## `http`
+## `http.client` and `http.server`
 
-An HTTP client. Each verb performs a request and returns a `Response`; the `*_async` twins return
-a `Future<Response>` for concurrent work.
+HTTP is two modules: **`std.http.client`** (outbound requests) and **`std.http.server`** (an inbound
+server). They are split so a program that only *serves* never links the client's reqwest/TLS stack,
+and a program that only *calls out* never links the server — each `use` pulls exactly what it needs.
+
+### Client: `http.client`
+
+`use std.http.client` binds `client`. Each verb performs a request and returns a `Response`; the
+`*_async` twins return a `Future<Response>` for concurrent work.
 
 | Function | Signature | Notes |
 |---|---|---|
@@ -247,9 +253,10 @@ Every verb takes an **optional** trailing `headers: Map<string, string>`. `Respo
 `header(name) -> string?` (case-insensitive).
 
 ```noeta ignore
-use std.{http, json}
+use std.http.client
+use std.json
 
-resp = http.get("https://api.example.com/users/1", {"authorization": "Bearer " ~ token})
+resp = client.get("https://api.example.com/users/1", {"authorization": "Bearer " ~ token})
 if resp.ok() {
     user = json.parse::<User>(resp.body())
     echo user.name
@@ -258,19 +265,19 @@ if resp.ok() {
 }
 
 // POST a JSON body; QUERY for a body-carrying read.
-http.post("https://api.example.com/users", json.stringify(payload), {"content-type": "application/json"})
-found = http.query("https://api.example.com/search", json.stringify(filter))
+client.post("https://api.example.com/users", json.stringify(payload), {"content-type": "application/json"})
+found = client.query("https://api.example.com/search", json.stringify(filter))
 ```
 
 Concurrent fan-out: `all` (from `std.task`) awaits a batch of futures together, returning their
 results in input order (see [Concurrency](Concurrency)):
 
 ```noeta ignore
-use std.{http}
+use std.http.client
 use std.task.{all}
 codes = all([
-    http.get_async("https://a.example"),
-    http.get_async("https://b.example"),
+    client.get_async("https://a.example"),
+    client.get_async("https://b.example"),
 ])
 echo [codes[0].status(), codes[1].status()].join(",")
 ```
@@ -282,9 +289,10 @@ the request, `…/headers` echoes the request headers — so tests are reproduci
 server. A program that needs real data runs on the real host. (Examples above are `ignore`d in the
 doc-test gate precisely because they would otherwise reach the network.)
 
-### Serving: `http.serve`
+### Server: `http.server`
 
-`http.serve(port, handler)` binds a listener on `port` and drives an inbound HTTP server: for each
+`use std.http.server` binds `server`. `server.serve(port, handler)` binds a listener on `port` and
+drives an inbound HTTP server: for each
 connection it calls `handler(request)` and writes back the `Response` the handler returns. The
 handler is a `(Request) -> Response`, **sync or async** — an `async` handler `await`s freely, and the
 server dispatches connections **concurrently** (a slow handler yields while others make progress),
@@ -292,28 +300,28 @@ all on Noeta's own async runtime. A handler that errors becomes a `500`; the ser
 
 | Type / function | Signature | Notes |
 |---|---|---|
-| `http.serve` | `serve(port: int, handler: (Request) -> Response) -> void` | Binds `0.0.0.0:port`; serves until the process stops. |
-| `http.response` | `response(status: int, body?: string\|bytes, headers?: Map<string, string>) -> Response` | The reply builder a handler uses. |
+| `server.serve` | `serve(port: int, handler: (Request) -> Response) -> void` | Binds `0.0.0.0:port`; serves until the process stops. |
+| `server.response` | `response(status: int, body?: string\|bytes, headers?: Map<string, string>) -> Response` | The reply builder a handler uses. |
 | `Request` methods | `method() -> string`, `path() -> string`, `query(name) -> string?`, `header(name) -> string?` (case-insensitive), `body() -> string`, `body_bytes() -> bytes` | Read the inbound request. |
 | `Response.with_header` | `with_header(name, value) -> Response` | Copy-modify — returns a new response (a `Response` is immutable). |
 
 ```noeta ignore
-use std.{http}
+use std.http.server
 
 fn fetch(req: Request): Response {
     if req.path() == "/health" {
-        return http.response(200, "ok")
+        return server.response(200, "ok")
     }
-    return http.response(404, "not found")
+    return server.response(404, "not found")
 }
 
-http.serve(8080, fetch)
+server.serve(8080, fetch)
 ```
 
-**`noeta serve`.** Rather than call `http.serve` yourself, run `noeta serve app.noe --port 8080`: the
-file defines a top-level `fn fetch(req: Request): Response` (and `use std.{http}`), and the command
-runs its top-level setup, then serves that handler until interrupted (Ctrl-C). It is the ergonomic
-entry point over an explicit `http.serve(...)` call — the same mechanism underneath.
+**`noeta serve`.** Rather than call `server.serve` yourself, run `noeta serve app.noe --port 8080`:
+the file defines a top-level `fn fetch(req: Request): Response` (and `use std.http.server`), and the
+command runs its top-level setup, then serves that handler until interrupted (Ctrl-C). It is the
+ergonomic entry point over an explicit `server.serve(...)` call — the same mechanism underneath.
 
 **Routers and middleware are ordinary code.** Because a handler is a first-class `(Request) ->
 Response`, a router is just a handler that dispatches on `req.path()`, and middleware is a function
@@ -321,7 +329,7 @@ Response`, a router is just a handler that dispatches on `req.path()`, and middl
 needed; you compose them into the single handler you serve.
 
 **Sandbox vs. real.** Under `noeta run` / `noeta serve` the server binds a real socket. Under the
-deterministic sandbox (tests) `http.serve` instead drives a fixed, documented **request script**
+deterministic sandbox (tests) `server.serve` instead drives a fixed, documented **request script**
 through the handler and returns — so a served program is reproducible and terminates in-oracle,
 the inbound mirror of the client's pure responder.
 

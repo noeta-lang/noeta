@@ -97,7 +97,8 @@ fn handle_order(id: int): void {
 Once telemetry is configured, the runtime opens spans for you at the boundaries that matter — no code
 changes:
 
-- **Server requests.** Every connection `http.serve` accepts is wrapped in a **SERVER** span named
+- **Server requests.** Every connection the bundled server (`server.serve`, from `std.http.server`)
+  accepts is wrapped in a **SERVER** span named
   `"{method} {route}"`, parented on the inbound `traceparent` (so it continues the caller's trace),
   carrying `http.request.method` / `url.path` / `http.response.status_code`, timed across the handler,
   and marked an error only on a `5xx`. Your handler's own spans nest *under* it — one connected trace
@@ -139,7 +140,7 @@ span = telemetry.span_from("consume", inbound_traceparent)
 
 ## See also
 
-- [Concurrency](Concurrency) — `http.serve`, channels, isolates (the boundaries auto-instrumentation traces).
+- [Concurrency](Concurrency) — `server.serve`, channels, isolates (the boundaries auto-instrumentation traces).
 - [Profiling](Profiling) — the dev-time flamegraph tool (the *other* observability half).
 - [Standard-Library Modules](Standard-Library-Modules#telemetry) — the module in the stdlib reference.
 - [Native Extensions](Native-Extensions) — the `Telemetry` Host capability and the higher-order seam the SDK dispatches through.

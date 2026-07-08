@@ -99,9 +99,9 @@ fn attr<'a>(span: &'a SpanData, key: &str) -> Option<&'a AttrValue> {
 #[test]
 fn serve_emits_one_server_span_per_request() {
     let spans = emitted_spans(
-        "use std.{http}\n\
-         fn fetch(req: Request): Response { return http.response(200, \"ok\") }\n\
-         http.serve(8080, fetch)\n",
+        "use std.http.server\n\
+         fn fetch(req: Request): Response { return server.response(200, \"ok\") }\n\
+         server.serve(8080, fetch)\n",
     );
 
     let names: Vec<&str> = spans.iter().map(|s| s.name.as_str()).collect();
@@ -123,9 +123,9 @@ fn serve_emits_one_server_span_per_request() {
 #[test]
 fn serve_span_carries_http_attributes() {
     let spans = emitted_spans(
-        "use std.{http}\n\
-         fn fetch(req: Request): Response { return http.response(201, \"made\") }\n\
-         http.serve(8080, fetch)\n",
+        "use std.http.server\n\
+         fn fetch(req: Request): Response { return server.response(201, \"made\") }\n\
+         server.serve(8080, fetch)\n",
     );
     let echo = &spans[2]; // POST /echo
     assert_eq!(
@@ -145,13 +145,14 @@ fn serve_span_carries_http_attributes() {
 #[test]
 fn handler_spans_nest_under_the_server_span() {
     let spans = emitted_spans(
-        "use std.{http, telemetry}\n\
+        "use std.http.server\n\
+         use std.{telemetry}\n\
          fn fetch(req: Request): Response {\n\
          \x20   body = fn(): int { return 1 }\n\
          \x20   telemetry.with_span(\"db\", body)\n\
-         \x20   return http.response(200, \"ok\")\n\
+         \x20   return server.response(200, \"ok\")\n\
          }\n\
-         http.serve(8080, fetch)\n",
+         server.serve(8080, fetch)\n",
     );
     let db: Vec<_> = spans.iter().filter(|s| s.name == "db").collect();
     let servers: Vec<_> = spans.iter().filter(|s| s.kind == SpanKind::Server).collect();
@@ -171,15 +172,16 @@ fn handler_spans_nest_under_the_server_span() {
 #[test]
 fn interleaved_handlers_keep_their_own_context() {
     let spans = emitted_spans(
-        "use std.{http, telemetry}\n\
+        "use std.http.server\n\
+         use std.{telemetry}\n\
          use std.task.{sleep}\n\
          async fn fetch(req: Request): Response {\n\
          \x20   sleep(5).await\n\
          \x20   body = fn(): int { return 1 }\n\
          \x20   telemetry.with_span(\"work\", body)\n\
-         \x20   return http.response(200, \"ok\")\n\
+         \x20   return server.response(200, \"ok\")\n\
          }\n\
-         http.serve(8080, fetch)\n",
+         server.serve(8080, fetch)\n",
     );
     let work: Vec<_> = spans.iter().filter(|s| s.name == "work").collect();
     let servers: Vec<_> = spans.iter().filter(|s| s.kind == SpanKind::Server).collect();
@@ -208,7 +210,8 @@ fn interleaved_handlers_keep_their_own_context() {
 #[test]
 fn handler_spawned_task_inherits_the_server_span() {
     let spans = emitted_spans(
-        "use std.{http, telemetry}\n\
+        "use std.http.server\n\
+         use std.{telemetry}\n\
          async fn bg(): int {\n\
          \x20   s = telemetry.span(\"bg\")\n\
          \x20   s.end()\n\
@@ -220,9 +223,9 @@ fn handler_spawned_task_inherits_the_server_span() {
          \x20       h = spawn bg()\n\
          \x20       done = h.await\n\
          \x20   }\n\
-         \x20   return http.response(200, \"ok\")\n\
+         \x20   return server.response(200, \"ok\")\n\
          }\n\
-         http.serve(8080, fetch)\n",
+         server.serve(8080, fetch)\n",
     );
     let bg: Vec<_> = spans.iter().filter(|s| s.name == "bg").collect();
     let servers: Vec<_> = spans.iter().filter(|s| s.kind == SpanKind::Server).collect();
@@ -336,12 +339,12 @@ fn channel_seeded_consumer_spans_parent_under_the_producer() {
 #[test]
 fn serve_span_status_reflects_5xx_only() {
     let spans = emitted_spans(
-        "use std.{http}\n\
+        "use std.http.server\n\
          fn fetch(req: Request): Response {\n\
-         \x20   if req.path() == \"/health\" { return http.response(503, \"down\") }\n\
-         \x20   return http.response(200, \"ok\")\n\
+         \x20   if req.path() == \"/health\" { return server.response(503, \"down\") }\n\
+         \x20   return server.response(200, \"ok\")\n\
          }\n\
-         http.serve(8080, fetch)\n",
+         server.serve(8080, fetch)\n",
     );
     // span[1] is `GET /health` → 503 → Error; the rest are 200 → Unset.
     assert_eq!(spans[1].name, "GET /health");

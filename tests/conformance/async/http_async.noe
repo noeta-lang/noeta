@@ -1,4 +1,4 @@
-// std.http async twins (http arc H3): `http.*_async` return `Future<Response>`. On the real host
+// std.http async twins (http arc H3): `client.*_async` return `Future<Response>`. On the real host
 // each drives a genuine reqwest future on the executor's runtime (RealBody::Async); under the
 // sandbox they resolve deterministically at spawn via the same responder, so the differential
 // pins them. No backend code changed — the descriptor is handed out by the Network capability's
@@ -10,11 +10,11 @@
 // expect: stdout "{"body":"yo","method":"POST","path":"/echo"}"
 // expect: stdout "{"body":"","method":"PATCH","path":"/echo"}"
 // expect: exit 0
-use std.{http}
+use std.http.client
 use std.task.{all}
 
 async fn run(): void {
-    r = http.get_async("https://svc.test/echo").await
+    r = client.get_async("https://svc.test/echo").await
     echo r.status()
     echo r.body()
     echo r is Response
@@ -22,13 +22,13 @@ async fn run(): void {
     // Concurrent fan-out: three requests in flight together (real host), resolved deterministically
     // at spawn (sandbox); `all` awaits them into a list in input order.
     codes = all([
-        http.get_async("https://svc.test/status/201"),
-        http.get_async("https://svc.test/status/202"),
-        http.get_async("https://svc.test/status/203"),
+        client.get_async("https://svc.test/status/201"),
+        client.get_async("https://svc.test/status/202"),
+        client.get_async("https://svc.test/status/203"),
     ])
     echo [codes[0].status(), codes[1].status(), codes[2].status()].join(",")
 
-    echo http.post_async("https://svc.test/echo", "yo").await.body()
-    echo http.request_async("PATCH", "https://svc.test/echo").await.body()
+    echo client.post_async("https://svc.test/echo", "yo").await.body()
+    echo client.request_async("PATCH", "https://svc.test/echo").await.body()
 }
 run().await
