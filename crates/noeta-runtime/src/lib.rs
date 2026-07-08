@@ -115,6 +115,10 @@ struct RealTelemetry {
     next_span: u64,
     /// In-flight spans by handle, ended entries removed.
     live: HashMap<SpanId, SpanData>,
+    /// Remote-interned contexts (T5d): pseudo-handles for contexts that arrived over a channel /
+    /// isolate boundary. Read by `tel_span_context`; everything else no-ops on them. Bounded by
+    /// live seeds (`tel_release_remote` frees replaced ones).
+    remote: HashMap<SpanId, TraceContext>,
     /// The configured OTLP exporter, or `None` when no endpoint is set (the null sink).
     #[cfg(feature = "telemetry")]
     exporter: Option<telemetry::OtlpExporter>,
@@ -128,6 +132,7 @@ impl RealTelemetry {
         RealTelemetry {
             next_span: 1,
             live: HashMap::new(),
+            remote: HashMap::new(),
             #[cfg(feature = "telemetry")]
             exporter: telemetry::OtlpExporter::from_env(),
             #[cfg(feature = "telemetry")]
@@ -915,6 +920,9 @@ impl Telemetry for RealHost {
     }
 
     fn tel_span_context(&mut self, span: SpanId) -> TraceContext {
+        if let Some(remote) = self.tel.remote.get(&span) {
+            return *remote;
+        }
         self.tel.live.get(&span).map_or(
             TraceContext {
                 trace_id: [0u8; 16],
@@ -923,6 +931,22 @@ impl Telemetry for RealHost {
             },
             |s| s.context,
         )
+    }
+
+    fn tel_intern_remote(&mut self, context: TraceContext) -> SpanId {
+        // Ids share the span counter, so a remote handle can never collide with a live span.
+        let id = self.tel.next_span;
+        self.tel.next_span += 1;
+        self.tel.remote.insert(id, context);
+        id
+    }
+
+    fn tel_is_remote(&self, span: SpanId) -> bool {
+        self.tel.remote.contains_key(&span)
+    }
+
+    fn tel_release_remote(&mut self, span: SpanId) {
+        self.tel.remote.remove(&span);
     }
 }
 

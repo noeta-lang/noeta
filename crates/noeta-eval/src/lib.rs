@@ -1061,7 +1061,10 @@ fn traced_same(a: &Value, b: &Value) -> bool {
 /// Mirrors the VM's `Channel`; both backends run the identical FIFO + block-on-full/empty logic, so
 /// the differential holds by construction.
 struct Channel {
-    buffer: std::collections::VecDeque<Value>,
+    /// Each queued message also carries the sender's trace context (native-otel T5d, `None` when
+    /// telemetry is off or no span was active) — the automatic-propagation envelope, mirroring the
+    /// VM's `Channel::Local`.
+    buffer: std::collections::VecDeque<(Value, Option<noeta_stdlib::TraceContext>)>,
     capacity: usize,
     closed: bool,
 }
@@ -3625,6 +3628,39 @@ impl Interpreter {
         polled
     }
 
+    /// The sender's trace context to ride an outbound channel message (native-otel T5d) — the
+    /// VM's helper, mirrored: `None` (one bool test) when telemetry is off or no span is active.
+    fn outbound_trace_context(&mut self) -> Option<noeta_stdlib::TraceContext> {
+        if !self.host.tel_enabled() {
+            return None;
+        }
+        let top = *self.ctx_current.last()?;
+        Some(self.host.tel_span_context(top))
+    }
+
+    /// Seed the receiving strand's context from a dequeued message's (native-otel T5d) — the VM's
+    /// helper, mirrored: only when the strand is at top level (empty, or exactly one remote seed,
+    /// which is replaced and released); real active spans are never hijacked.
+    fn seed_context_from_message(&mut self, context: Option<noeta_stdlib::TraceContext>) {
+        let at_top = match self.ctx_current.as_slice() {
+            [] => true,
+            [only] => self.host.tel_is_remote(*only),
+            _ => false,
+        };
+        if !at_top {
+            return;
+        }
+        if let [old] = self.ctx_current.as_slice() {
+            let old = *old;
+            self.host.tel_release_remote(old);
+            self.ctx_current.clear();
+        }
+        if let Some(ctx) = context {
+            let seed = self.host.tel_intern_remote(ctx);
+            self.ctx_current.push(seed);
+        }
+    }
+
     fn poll_once_inner(&mut self, future: &Value, span: Span) -> Eval<Option<Value>> {
         match future {
             Value::Timer(deadline) => {
@@ -3686,7 +3722,10 @@ impl Interpreter {
                 }
                 if chan.buffer.len() < chan.capacity {
                     let value = (**value).clone();
-                    self.channels[id.index()].buffer.push_back(value);
+                    // The sender's trace context rides the message (T5d) — the VM's envelope,
+                    // mirrored.
+                    let context = self.outbound_trace_context();
+                    self.channels[id.index()].buffer.push_back((value, context));
                     self.channel_progress += 1;
                     Ok(Some(Value::Unit))
                 } else {
@@ -3697,7 +3736,9 @@ impl Interpreter {
             // once the channel is closed and drained, else suspend (pending) on an empty open buffer.
             Value::ChannelRecv(id) => {
                 let id = *id;
-                if let Some(value) = self.channels[id.index()].buffer.pop_front() {
+                if let Some((value, context)) = self.channels[id.index()].buffer.pop_front() {
+                    // Seed the receiving strand from the message's context (T5d).
+                    self.seed_context_from_message(context);
                     self.channel_progress += 1;
                     Ok(Some(builtin_enum("Option", "some", vec![value])))
                 } else if self.channels[id.index()].closed {

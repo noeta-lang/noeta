@@ -290,6 +290,47 @@ fn with_span_async_abort_ends_the_span_with_error() {
     assert!(job.end_unix_ms.is_some(), "ended despite the abort");
 }
 
+/// T5d — automatic channel propagation, end to end: the producer sends inside its span (context
+/// rides the envelope), the consumer — spawned with an EMPTY context — is seeded on recv, and a
+/// real span it then creates parents under the *producer's* span, across strands, with zero user
+/// threading. The message type stays `int`.
+#[test]
+fn channel_seeded_consumer_spans_parent_under_the_producer() {
+    let spans = emitted_spans(
+        "use std.{telemetry}\n\
+         (tx, rx) = channel::<int>(1)\n\
+         async fn produce(): int {\n\
+         \x20   tx.send(7).await\n\
+         \x20   tx.close()\n\
+         \x20   return 0\n\
+         }\n\
+         async fn consume(): int {\n\
+         \x20   r = rx.recv().await\n\
+         \x20   work = telemetry.span(\"work\")\n\
+         \x20   work.end()\n\
+         \x20   return match r { some(x) => x, none => 0 }\n\
+         }\n\
+         async fn run(): int {\n\
+         \x20   mut got = 0\n\
+         \x20   concurrent {\n\
+         \x20       h = spawn consume()\n\
+         \x20       telemetry.with_span(\"produce\", produce).await\n\
+         \x20       got = h.await\n\
+         \x20   }\n\
+         \x20   return got\n\
+         }\n\
+         echo run().await\n",
+    );
+    let produce = spans.iter().find(|s| s.name == "produce").unwrap();
+    let work = spans.iter().find(|s| s.name == "work").unwrap();
+    let parent = work.parent.expect("the seeded consumer's span has a parent");
+    assert_eq!(
+        parent, produce.context,
+        "the consumer's span parents under the producer's, across the channel"
+    );
+    assert_eq!(work.context.trace_id, produce.context.trace_id, "one trace");
+}
+
 /// A `5xx` reply marks its span an error (OTel HTTP convention); a `2xx`/`4xx` leaves it unset. Here
 /// the handler answers `/health` with `503` and everything else `200`.
 #[test]

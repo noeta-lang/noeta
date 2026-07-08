@@ -190,4 +190,24 @@ pub trait Telemetry {
     /// isolate / the wire. An unknown span yields a fresh all-zero-ish context (the SDK only asks
     /// about spans it holds live).
     fn tel_span_context(&mut self, span: SpanId) -> TraceContext;
+
+    /// Intern a **remote** [`TraceContext`] as a local [`SpanId`]-shaped handle (native-otel T5d).
+    /// A span handle is per-host, so a context arriving from another isolate (or riding a channel
+    /// message) cannot be a live span here — this mints a pseudo-handle whose
+    /// [`Self::tel_span_context`] returns exactly the interned context, letting remote parents
+    /// live uniformly in the backends' `u64` task-local context stacks (automatic propagation
+    /// seeds one at the stack base). The mutation/end methods are no-ops on it (it is not live).
+    /// Interning the same context twice may return the same handle.
+    fn tel_intern_remote(&mut self, context: TraceContext) -> SpanId;
+
+    /// Whether `span` is a remote-interned handle ([`Self::tel_intern_remote`]) rather than a live
+    /// span — the receive-side seeding rule's test: a strand whose context is exactly one remote
+    /// seed is "at top level" and may be re-seeded by the next message; a real active span never
+    /// is.
+    fn tel_is_remote(&self, span: SpanId) -> bool;
+
+    /// Release a remote-interned handle (a seed replaced by the next message's). Keeps a
+    /// queue-worker's interned-context table bounded by live strands, not by messages processed.
+    /// Releasing a non-remote or already-released id is a no-op.
+    fn tel_release_remote(&mut self, span: SpanId);
 }

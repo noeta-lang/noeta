@@ -155,6 +155,42 @@ impl<'m> Vm<'m> {
         polled
     }
 
+    /// The sender's trace context to ride an outbound channel message (native-otel T5d): the
+    /// current strand's active span's W3C context — `None` (one bool test) when telemetry is off
+    /// or no span is active, so untraced programs pay nothing per send.
+    fn outbound_trace_context(&mut self) -> Option<noeta_stdlib::TraceContext> {
+        if !self.host.tel_enabled() {
+            return None;
+        }
+        let top = *self.ctx_current.last()?;
+        Some(self.host.tel_span_context(top))
+    }
+
+    /// Seed the receiving strand's context from a dequeued message's (native-otel T5d) — but only
+    /// when the strand is **at top level**: an empty context, or exactly one remote seed left by a
+    /// previous message (replaced, and released so a queue-worker's interned table stays bounded).
+    /// A strand inside real active spans is never hijacked; a context-less message at top level
+    /// *clears* a stale seed (work caused by an untraced producer starts a fresh trace).
+    fn seed_context_from_message(&mut self, context: Option<noeta_stdlib::TraceContext>) {
+        let at_top = match self.ctx_current.as_slice() {
+            [] => true,
+            [only] => self.host.tel_is_remote(*only),
+            _ => false,
+        };
+        if !at_top {
+            return;
+        }
+        if let [old] = self.ctx_current.as_slice() {
+            let old = *old;
+            self.host.tel_release_remote(old);
+            self.ctx_current.clear();
+        }
+        if let Some(ctx) = context {
+            let seed = self.host.tel_intern_remote(ctx);
+            self.ctx_current.push(seed);
+        }
+    }
+
     fn poll_once_inner(&mut self, future: Value, span: Span) -> Result<Poll, Abort> {
         // A real-thread isolate future (I.4b): harvest the worker's marshalled result if it has landed.
         if let Some(id) = future.isolate_future_id() {
@@ -222,10 +258,13 @@ impl<'m> Vm<'m> {
                         ));
                     }
                     if buffer.len() < *capacity {
+                        // The sender's trace context rides the message (T5d) — automatic
+                        // propagation without touching the message type.
+                        let context = self.outbound_trace_context();
                         let Channel::Local { buffer, .. } = &mut self.channels[id] else {
                             unreachable!("just matched Local");
                         };
-                        buffer.push_back(msg); // ownership transfers to the queue
+                        buffer.push_back((msg, context)); // ownership transfers to the queue
                         self.channel_progress += 1;
                         return Ok(Poll::Ready(Value::unit()));
                     }
@@ -260,7 +299,9 @@ impl<'m> Vm<'m> {
                                     ));
                                 }
                             };
-                            if core.try_send(wire) {
+                            // The sender's trace context crosses the thread with the payload (T5d).
+                            let context = self.outbound_trace_context();
+                            if core.try_send(wire, context) {
                                 release(msg);
                                 self.channel_progress += 1;
                                 return Ok(Poll::Ready(Value::unit()));
@@ -283,7 +324,9 @@ impl<'m> Vm<'m> {
                         let Channel::Local { buffer, .. } = &mut self.channels[id] else {
                             unreachable!("just matched Local");
                         };
-                        let msg = buffer.pop_front().expect("non-empty");
+                        let (msg, context) = buffer.pop_front().expect("non-empty");
+                        // Seed the receiving strand from the message's context (T5d).
+                        self.seed_context_from_message(context);
                         self.channel_progress += 1;
                         return Ok(Poll::Ready(make_some(msg)));
                     }
@@ -296,8 +339,10 @@ impl<'m> Vm<'m> {
                 Channel::Shared(core) => {
                     let core = Arc::clone(core);
                     match core.try_recv() {
-                        isolate::RecvState::Got(wire) => {
+                        isolate::RecvState::Got(wire, context) => {
                             let value = isolate::rebuild(&wire, &self.shapes, &mut self.channels);
+                            // Seed the receiving strand from the message's context (T5d).
+                            self.seed_context_from_message(context);
                             self.channel_progress += 1;
                             return Ok(Poll::Ready(make_some(value)));
                         }
@@ -512,9 +557,14 @@ impl<'m> Vm<'m> {
             .as_ref()
             .expect("parallel VM has a factory")
             .clone();
+        // The spawner's trace context crosses with the args (T5d): the worker interns it as its
+        // root seed, so the isolate's spans continue this trace — real-path parity with the
+        // cooperative task inheritance (T5a).
+        let trace = self.outbound_trace_context();
         let (tx, rx) = std::sync::mpsc::channel();
         let thread_handle = std::thread::spawn(move || {
-            let msg = run_isolate_worker(&module, &factory, proto, iso_args, wire_globals, span);
+            let msg =
+                run_isolate_worker(&module, &factory, proto, iso_args, wire_globals, trace, span);
             let _ = tx.send(msg);
             // The result landing is cross-thread progress: wake the parent's parked scheduler
             // (P-PAR S3) so it harvests immediately instead of sleeping out its stall quantum.

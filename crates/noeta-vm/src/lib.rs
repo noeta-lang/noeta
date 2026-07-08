@@ -1695,9 +1695,12 @@ struct IsolateFailure {
 /// so shipping a `Sender`/`Receiver` into a worker shares one queue. Send/recv still *poll*
 /// cooperatively (Pending on full/empty), never blocking a thread — a producer/consumer across
 /// isolate threads makes progress by each thread's scheduler re-polling the shared queue.
+/// Each queued message also carries the **sender's trace context** (native-otel T5d, `None` when
+/// telemetry is off or the sender had no active span) — the automatic-propagation envelope: recv
+/// seeds the receiving strand's context from it, so message *types* stay tracing-free.
 enum Channel {
     Local {
-        buffer: std::collections::VecDeque<Value>,
+        buffer: std::collections::VecDeque<(Value, Option<noeta_stdlib::TraceContext>)>,
         capacity: usize,
         closed: bool,
     },
@@ -2488,7 +2491,7 @@ impl<'m> Vm<'m> {
         // `Shared` channel (I.4c) holds `Wire` copies, not heap `Value`s, so dropping it frees cleanly.
         for chan in std::mem::take(&mut self.channels) {
             if let Channel::Local { buffer, .. } = chan {
-                for msg in buffer {
+                for (msg, _) in buffer {
                     self.release_value(msg);
                 }
             }
@@ -2576,11 +2579,22 @@ fn run_isolate_worker(
     proto: u32,
     iso_args: Vec<isolate::IsoArg>,
     wire_globals: Vec<(u32, isolate::Wire)>,
+    trace: Option<noeta_stdlib::TraceContext>,
     span: Span,
 ) -> Result<isolate::Wire, IsolateFailure> {
     noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
     let (host, executor) = factory();
     let mut wvm = Vm::load(module, host, executor);
+    // Inherit the spawner's trace context across the thread boundary (native-otel T5d): the worker
+    // has its OWN host (span handles don't transfer), so the W3C context is interned as a remote
+    // seed at the worker's root — its spans then continue the spawner's trace, exactly as a
+    // cooperative task inherits via its Task context (T5a). Real-path parity with the sandbox.
+    if let Some(ctx) = trace
+        && wvm.host.tel_enabled()
+    {
+        let seed = wvm.host.tel_intern_remote(ctx);
+        wvm.ctx_current.push(seed);
+    }
     wvm.parallel_isolates = true;
     wvm.isolate_module = Some(Arc::clone(module));
     wvm.isolate_factory = Some(factory.clone());
@@ -2651,7 +2665,7 @@ fn run_isolate_worker(
     }
     for chan in std::mem::take(&mut wvm.channels) {
         if let Channel::Local { buffer, .. } = chan {
-            for msg in buffer {
+            for (msg, _) in buffer {
                 wvm.release_value(msg);
             }
         }

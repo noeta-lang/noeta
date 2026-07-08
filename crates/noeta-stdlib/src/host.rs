@@ -65,6 +65,10 @@ struct TelRecorder {
     next_trace: u64,
     live: BTreeMap<SpanId, SpanData>,
     recorded: Vec<SpanData>,
+    /// Remote-interned contexts (T5d): pseudo-handles minted by `tel_intern_remote` for contexts
+    /// that arrived over a channel/isolate boundary. Not spans — `tel_span_context` reads them,
+    /// everything else no-ops. Bounded by live seeds (`tel_release_remote` frees replaced ones).
+    remote: BTreeMap<SpanId, TraceContext>,
     /// An optional external sink that also receives every ended span. `None` in every normal run;
     /// installed by [`SandboxHost::set_span_sink`] so a caller that only sees the host by value (it
     /// is moved into the VM and dropped at teardown) can still observe the spans a program emitted.
@@ -101,6 +105,7 @@ impl SandboxHost {
                 next_trace: 1,
                 live: BTreeMap::new(),
                 recorded: Vec::new(),
+                remote: BTreeMap::new(),
                 sink: None,
             },
         }
@@ -415,6 +420,9 @@ impl Telemetry for SandboxHost {
     }
 
     fn tel_span_context(&mut self, span: SpanId) -> TraceContext {
+        if let Some(remote) = self.tel.remote.get(&span) {
+            return *remote;
+        }
         self.tel.live.get(&span).map_or(
             TraceContext {
                 trace_id: [0u8; 16],
@@ -423,6 +431,22 @@ impl Telemetry for SandboxHost {
             },
             |s| s.context,
         )
+    }
+
+    fn tel_intern_remote(&mut self, context: TraceContext) -> SpanId {
+        // Ids share the span counter, so a remote handle can never collide with a live span.
+        let id = self.tel.next_span;
+        self.tel.next_span += 1;
+        self.tel.remote.insert(id, context);
+        id
+    }
+
+    fn tel_is_remote(&self, span: SpanId) -> bool {
+        self.tel.remote.contains_key(&span)
+    }
+
+    fn tel_release_remote(&mut self, span: SpanId) {
+        self.tel.remote.remove(&span);
     }
 }
 
