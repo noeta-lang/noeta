@@ -189,8 +189,16 @@ flags) and dispatches unmatched names to registered commands (`cargo clippy` mod
   (200k no-op bodies ≈ 45ns/item seam cost), any real body dilutes it below ~5%. Learned: the
   per-item `free` discipline is what keeps the slot table window-sized and cache-hot — skipping
   frees grew it to 400k cold entries and doubled the fixture.
-- **H3** — migrate **http.serve**: shared serve loop over ctx; delete `Builtin::Serve` + both
-  intercepts + the checker special case. http_server corpus green.
+- **H3 ✅ DONE** — `http.serve` migrated: shared accept→dispatch→reply loop in
+  `noeta-stdlib/src/serve.rs`, first exerciser of the recover-from-Abort pattern (handler abort
+  → 500, loop continues; listener abort propagates). `NativeCtx` grew `drive` (backend's own
+  await loop — channel/isolate terms intact — for the reply write), `option_payload` (the
+  accept outcome), `with_extern` (borrow-shaped extern access for `Request::conn` / the
+  handler's `NetResponse`). serve now has a real signature — `serve(int, Fn(Request) -> dyn)`
+  — so handler shape is statically checked (previously unvalidated). Deleted: `Builtin::Serve`
+  (both enums + both ~140-line arms), both intercepts, the checker special case. Gate: suite
+  green, real-host smoke (probe + requests), loopback-throughput A/B overlaps fully (per-request
+  seam cost ≪ TCP round-trip).
 - **H4** — Class-3 machinery: per-run `ExtState` + retained-value arena (leak-oracle/cycle-
   collector integration, teardown ordering); generic extern types + ctx-form method dispatch.
   Proven by a small dogfood before reactive lands on it.
