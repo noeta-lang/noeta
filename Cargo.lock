@@ -1942,6 +1942,7 @@ dependencies = [
  "noeta-fmt",
  "noeta-lexer",
  "noeta-parser",
+ "noeta-pm",
  "noeta-span",
  "salsa",
  "tokio",

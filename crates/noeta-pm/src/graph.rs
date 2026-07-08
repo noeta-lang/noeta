@@ -221,7 +221,11 @@ impl Walker<'_> {
     ) -> Result<(PathBuf, ResolvedSource), String> {
         match dep {
             Dependency::Path { path } => {
-                let dir = base_dir.join(path);
+                // Canonicalize the joined directory so module names/spans (and the editor URIs built
+                // from them) are clean absolute paths, not `…/app/../dep/…`. The manifest-relative
+                // `path` is kept verbatim in the lock entry.
+                let joined = base_dir.join(path);
+                let dir = joined.canonicalize().unwrap_or(joined);
                 Ok((
                     dir,
                     ResolvedSource::Path {

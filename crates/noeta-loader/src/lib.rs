@@ -173,7 +173,12 @@ fn reroot_path(
 /// statement kinds — both are consumed *during* linking (matching / import-driving) and never appear
 /// in the merged declaration output — so re-rooting cannot alter what a package contributes, only how
 /// it's addressed.
-fn reroot_program(
+///
+/// Public so a salsa-based linker (`noeta-db`) can re-root a dependency's parsed [`Program`] before
+/// feeding it to [`link_parsed_with_deps`] — the CLI's [`link_with_deps`] does this inline, but the
+/// db builds `Program`s through its own memoized parse and re-roots them itself (package-manager
+/// P2.1c).
+pub fn reroot_program(
     program: &mut Program,
     root: &str,
     key: &str,
