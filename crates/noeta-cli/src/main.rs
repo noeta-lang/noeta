@@ -1471,8 +1471,10 @@ fn emit_native(
         return cleanup(ExitCode::from(2));
     }
 
-    // 2. Locate the runtime archive + the system libs it must link with, then `cc`-link.
-    let (archive, libs) = match resolve_aot_runtime() {
+    // 2. Locate the runtime archive + the system libs it must link with, then `cc`-link. The archive
+    // is built with only the stdlib rings this program uses, so unused rings' native deps are dropped.
+    let rings = aot_ring_features(module);
+    let (archive, libs) = match resolve_aot_runtime(&rings) {
         Ok(pair) => pair,
         Err(err) => {
             eprintln!("lang: {err}");
@@ -1529,15 +1531,69 @@ fn emit_native(
     ExitCode::from(2)
 }
 
-/// Locate the AOT runtime staticlib (`libnoeta_aot.a`) and the native system libraries it must be
-/// linked against.
-/// Priority: an explicit `NOETA_AOT_RUNTIME_LIB` (paired with `NOETA_AOT_LINK_LIBS`,
-/// space-separated) — the packaged/hermetic path — else build it from the workspace with `cargo
-/// rustc … --print native-static-libs` (interim: needs cargo + the source tree), which both produces
-/// the archive and prints the exact link line. Packaging the archive for a shipped toolchain (so
-/// `--native` works outside the workspace) is a later distribution decision.
+/// The stdlib rings the program actually needs, as `noeta-aot-runtime` cargo features — derived from
+/// the native modules it references. `noeta build --native` builds the runtime archive with exactly
+/// these features, so the linker drops every unused ring's native dependency tree (DCE Axis B — e.g.
+/// an http-free program sheds reqwest + its ~5 MB TLS stack).
+///
+/// A native module surfaces in the bytecode three ways, all covered here (missing one would build a
+/// binary that stubs out a ring the program actually calls):
+/// - `Const::NativeModule(name)` — `use std.{http}` loads the whole module as a value, then member
+///   calls (`http.get_async(...)`) dispatch on it via `CallMethod` (no `ExtCall`).
+/// - `Const::ModuleFn { module, .. }` — a selective import (`use std.http.get`).
+/// - `Op::ExtCall { module, .. }` — the fully-qualified / turbofish call form (`json.parse::<T>`).
+///
+/// Conservative by construction: a module with **no** ring row here is always-on core (Ring-1
+/// string/list/map/set, the pure builders) or a ring not yet gated — either way it stays in the
+/// default feature set and is never stripped. Only a module with an explicit row can turn its ring
+/// off, so an unrecognized or newly-added module can never be silently dropped.
 #[cfg(feature = "jit")]
-fn resolve_aot_runtime() -> Result<(std::path::PathBuf, Vec<String>), String> {
+fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
+    use noeta_bytecode::{Const, Op};
+    use std::collections::BTreeSet;
+    let mut used: BTreeSet<&str> = BTreeSet::new();
+    for chunk in &module.protos {
+        for c in &chunk.consts {
+            match c {
+                Const::NativeModule(name) => {
+                    used.insert(name);
+                }
+                Const::ModuleFn { module: m, .. } => {
+                    used.insert(m);
+                }
+                _ => {}
+            }
+        }
+        for op in &chunk.code {
+            if let Op::ExtCall { module: m, .. } = op {
+                used.insert(module.name(*m));
+            }
+        }
+    }
+    // Module name → the `noeta-aot-runtime` feature that gates it. Add a row when a ring becomes
+    // feature-gated; `http` (the outbound client + its reqwest/TLS tree) is the first.
+    let mut rings = BTreeSet::new();
+    for m in &used {
+        if let Some(ring) = match *m {
+            "http" => Some("ring-http"),
+            _ => None,
+        } {
+            rings.insert(ring.to_string());
+        }
+    }
+    rings.into_iter().collect()
+}
+
+/// Locate the AOT runtime staticlib (`libnoeta_aot.a`) and the native system libraries it must be
+/// linked against, built with exactly the stdlib `rings` the program needs (DCE Axis B).
+/// Priority: an explicit `NOETA_AOT_RUNTIME_LIB` (paired with `NOETA_AOT_LINK_LIBS`,
+/// space-separated) — the packaged/hermetic path, which supplies its own ring set so `rings` is
+/// ignored — else build it from the workspace with `cargo rustc --no-default-features --features
+/// <rings> … --print native-static-libs` (interim: needs cargo + the source tree), which both
+/// produces the archive and prints the exact link line. Packaging the archive for a shipped toolchain
+/// (so `--native` works outside the workspace) is a later distribution decision.
+#[cfg(feature = "jit")]
+fn resolve_aot_runtime(rings: &[String]) -> Result<(std::path::PathBuf, Vec<String>), String> {
     if let Ok(path) = std::env::var("NOETA_AOT_RUNTIME_LIB") {
         let libs = std::env::var("NOETA_AOT_LINK_LIBS")
             .ok()
@@ -1547,17 +1603,23 @@ fn resolve_aot_runtime() -> Result<(std::path::PathBuf, Vec<String>), String> {
     }
 
     // Interim workspace build: one `cargo rustc` compiles the staticlib and prints its
-    // native-static-libs note. Combined stdout+stderr is captured so we can parse the note.
+    // native-static-libs note. `--no-default-features --features <rings>` links only the rings the
+    // program uses; the `aot` runtime support is a hard dep feature, so it survives regardless.
+    let mut args = vec![
+        "rustc",
+        "-p",
+        "noeta-aot-runtime",
+        "--release",
+        "--no-default-features",
+    ];
+    let joined = rings.join(",");
+    if !joined.is_empty() {
+        args.push("--features");
+        args.push(&joined);
+    }
+    args.extend(["--", "--print", "native-static-libs"]);
     let output = std::process::Command::new("cargo")
-        .args([
-            "rustc",
-            "-p",
-            "noeta-aot-runtime",
-            "--release",
-            "--",
-            "--print",
-            "native-static-libs",
-        ])
+        .args(&args)
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .output()
@@ -2916,5 +2978,70 @@ mod tests {
         assert!(!unclosed_delimiters(&toks("}")));
         // Braces inside a template string are one token — they never miscount.
         assert!(!unclosed_delimiters(&toks("echo \"drop ${id}\";")));
+    }
+
+    /// A one-proto module whose const pool + code carry `entries` — enough to exercise the ring scan.
+    #[cfg(feature = "jit")]
+    fn module_with(consts: Vec<noeta_bytecode::Const>, code: Vec<noeta_bytecode::Op>) -> noeta_bytecode::Module {
+        let mut chunk = noeta_bytecode::Chunk::placeholder();
+        chunk.consts = consts;
+        chunk.code = code;
+        noeta_bytecode::Module {
+            protos: vec![chunk],
+            shapes: Vec::new(),
+            packed_schemas: Vec::new(),
+            map_packed_sites: Vec::new(),
+            methods: Vec::new(),
+            destructors: Vec::new(),
+            field_defaults: Vec::new(),
+            comparable_derives: Vec::new(),
+            tojson_derives: Vec::new(),
+            destruct_reachable: Vec::new(),
+            cache_slots: 0,
+            reflection: Default::default(),
+            type_reprs: Vec::new(),
+            names: vec!["http".to_string()],
+            global_names: Vec::new(),
+        }
+    }
+
+    #[cfg(feature = "jit")]
+    #[test]
+    fn aot_ring_features_detects_http_through_every_lowering() {
+        use noeta_bytecode::{Const, NameId, Op};
+        use noeta_span::Span;
+
+        // `use std.{http}` → a whole-module value const.
+        let via_module = module_with(vec![Const::NativeModule("http".into())], vec![]);
+        assert_eq!(aot_ring_features(&via_module), vec!["ring-http".to_string()]);
+
+        // `use std.http.get` → a selective-import function const.
+        let via_fn = module_with(
+            vec![Const::ModuleFn {
+                module: "http".into(),
+                func: "get".into(),
+            }],
+            vec![],
+        );
+        assert_eq!(aot_ring_features(&via_fn), vec!["ring-http".to_string()]);
+
+        // The fully-qualified / turbofish call form → an `ExtCall` naming the module (names[0]).
+        let via_extcall = module_with(
+            vec![],
+            vec![Op::ExtCall {
+                dst: 0,
+                module: NameId(0),
+                func: NameId(0),
+                args: Box::new([]),
+                recipe: None,
+                span: Span::empty_at(0),
+            }],
+        );
+        assert_eq!(aot_ring_features(&via_extcall), vec!["ring-http".to_string()]);
+
+        // A program that only touches an always-on core / not-yet-gated module selects no ring — so
+        // the archive keeps the full default set and nothing is stripped that could be needed.
+        let non_http = module_with(vec![Const::NativeModule("math".into())], vec![]);
+        assert!(aot_ring_features(&non_http).is_empty());
     }
 }
