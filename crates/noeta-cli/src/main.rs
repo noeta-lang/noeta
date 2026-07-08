@@ -1316,8 +1316,12 @@ fn compile_whole_file(
         }
     }
 
+    // The entry's dependency packages (package-manager P2.1): their sources feed both the cache key
+    // (so a dep change never serves stale bytecode) and the loader (so `use <dep-key>.…` resolves).
+    let deps = manifest::dependency_packages(file).map_err(CompileFailure::Message)?;
+
     // Startup cache (M3): on a hit, return the cached module — load/check/compile all skipped.
-    let cache = open_startup_cache(file, &active, no_cache);
+    let cache = open_startup_cache(file, &active, &deps, no_cache);
     if let Some(slot) = &cache
         && let Some(blob) = slot.cache.load(&slot.key)
         && let Ok(module) = noeta_bundle::read(&blob)
@@ -1329,8 +1333,9 @@ fn compile_whole_file(
     }
 
     // Miss: load + link (sibling `.noe` modules the entry `use`s are resolved and merged; a lone file
-    // links to itself), activate any dev-tiers, type-check, and compile to bytecode.
-    let linked = match noeta_loader::load(file) {
+    // links to itself; dependency packages re-rooted under their keys), activate any dev-tiers,
+    // type-check, and compile to bytecode.
+    let linked = match noeta_loader::load_with_deps(file, &deps) {
         Err(err) => {
             return Err(CompileFailure::Unreadable(format!(
                 "cannot read {}: {err}",
@@ -1412,6 +1417,7 @@ fn run_compiled_module(
 fn open_startup_cache(
     file: &std::path::Path,
     active: &[String],
+    deps: &[noeta_loader::DepPackage],
     no_cache: bool,
 ) -> Option<CacheSlot> {
     if no_cache || std::env::var_os("NOETA_NO_CACHE").is_some() {
@@ -1421,8 +1427,9 @@ fn open_startup_cache(
     // would reuse stale bytecode. If we can't obtain it, we must not cache.
     let binary = noeta_cache::binary_identity()?;
     // Read the entry + sibling sources (no lex/parse) — both the key material and, on a hit, the
-    // SourceMap for rendering. SourceIds here match `noeta_loader::load`'s assignment (entry = 0,
-    // sorted siblings 1..), so a cached module's spans resolve correctly against this map.
+    // SourceMap for rendering. SourceIds here match `noeta_loader::load_with_deps`'s assignment
+    // (entry = 0, sorted siblings 1.., then each dependency's modules in order), so a cached module's
+    // spans — including those from merged dependency declarations — resolve against this map.
     let workspace = noeta_loader::read_workspace(file).ok()?;
     let mut key = noeta_cache::KeyBuilder::new();
     // Which file is the *entry* is part of the key, not just the source set: a directory of
@@ -1437,6 +1444,15 @@ fn open_startup_cache(
     for module in &workspace.modules {
         key.source(source_key_name(module), module.text().as_bytes());
     }
+    // Dependency packages are part of the compiled program: fold each dependency's key→root binding
+    // (re-rooting changes the linked program even when the sources are byte-identical) and every
+    // module's source text into the key, so any dependency change invalidates the cache.
+    for dep in deps {
+        key.source(format!("<dep {}>", dep.key), dep.root.as_bytes());
+        for module in &dep.modules {
+            key.source(&module.name, module.text.as_bytes());
+        }
+    }
     key.runtime_version(noeta_bundle::RUNTIME_VERSION)
         .binary_identity(binary);
     for tier in active {
@@ -1445,9 +1461,19 @@ fn open_startup_cache(
     let key = key.finish();
 
     let cache = noeta_cache::Cache::open()?;
+    // Rebuild the exact Source sequence `link_with_deps` assigns SourceIds to, so a cached module's
+    // spans resolve. `read_workspace` already gave entry (id 0) + siblings; the dependency modules
+    // continue the ids in the same order the loader parses them.
     let mut sources = Vec::with_capacity(1 + workspace.modules.len());
     sources.push(workspace.entry);
     sources.extend(workspace.modules);
+    let mut next_id = sources.len() as u32;
+    for dep in deps {
+        for module in &dep.modules {
+            sources.push(Source::new(SourceId(next_id), &module.name, &module.text));
+            next_id += 1;
+        }
+    }
     Some(CacheSlot {
         cache,
         key,

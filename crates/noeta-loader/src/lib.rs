@@ -68,6 +68,54 @@ pub struct RawModule {
     pub text: String,
 }
 
+/// Load and link the program rooted at `entry_path` **with its dependency packages** — the
+/// dependency-aware twin of [`load`] (package-manager P2.1). The entry's siblings resolve as before;
+/// each [`DepPackage`]'s modules are additionally re-rooted and linked in. An `io::Error` is only for
+/// a failure to read the entry file itself.
+pub fn load_with_deps(
+    entry_path: &Path,
+    deps: &[DepPackage],
+) -> io::Result<Result<Linked, Vec<LoadDiagnostic>>> {
+    let text = std::fs::read_to_string(entry_path)?;
+    let name = entry_path.display().to_string();
+    let siblings = read_siblings(entry_path);
+    Ok(link_with_deps(&name, &text, &siblings, deps))
+}
+
+/// Read every `.noe` file **under `dir` recursively** as a [`RawModule`], in sorted order (so
+/// SourceId assignment stays deterministic). A dependency package is a directory *tree*, not the
+/// single flat directory the entry's siblings live in, so this walks subdirectories. Names are the
+/// files' display paths (for diagnostics). Unreadable files are skipped.
+pub fn read_package_sources(dir: &Path) -> io::Result<Vec<RawModule>> {
+    let mut paths = Vec::new();
+    collect_noe_files(dir, &mut paths)?;
+    paths.sort();
+    Ok(paths
+        .into_iter()
+        .filter_map(|p| {
+            let text = std::fs::read_to_string(&p).ok()?;
+            Some(RawModule {
+                name: p.display().to_string(),
+                text,
+            })
+        })
+        .collect())
+}
+
+/// Recursively gather `.noe` file paths under `dir` into `out`. A subdirectory that can't be read is
+/// skipped (best-effort), matching the sibling scan's tolerance.
+fn collect_noe_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            let _ = collect_noe_files(&path, out);
+        } else if path.is_file() && path.extension().is_some_and(|ext| ext == "noe") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
 /// A dependency package's sources, to be linked into the entry under the consumer's import root
 /// (package-manager P2.1, model R1). `root` is the package's own namespace root segment (the
 /// `package` half of its `[package] name`); `key` is the consumer's dependency-table key. The loader

@@ -92,8 +92,6 @@ impl PackageName {
 
     /// The package's **root namespace segment** — the `package` half. A consumer's dependency-table
     /// key re-roots the package's modules from this segment at link time.
-    // Consumed by the cross-package loader in P2.1 (the re-root step); parsed + validated here.
-    #[allow(dead_code)]
     pub fn root(&self) -> &str {
         &self.package
     }
@@ -149,6 +147,72 @@ pub fn resolve_active_tiers(entry: &Path, profile: &str) -> Result<Vec<String>, 
     let manifest =
         Manifest::parse(&text).map_err(|err| format!("invalid `{}`: {err}", path.display()))?;
     manifest.active_tiers(profile)
+}
+
+/// Gather the entry's **dependency packages** as loader [`DepPackage`]s (package-manager P2.1):
+/// discover the nearest `noeta.toml`, and for each `[dependencies]` entry read its sources so the
+/// loader can link them under the consumer's key. No manifest, or no `[dependencies]`, yields an empty
+/// list (a bare script has no deps). Only `path` dependencies resolve today; a `git`/registry
+/// dependency errors with a pointer to the lockfile/store work (P2.3+) rather than silently linking
+/// nothing.
+///
+/// Each path dependency must itself carry a `[package]` table — its `package` name segment is the
+/// **root** the loader re-roots to the consumer's dependency key. The path is resolved relative to the
+/// manifest's directory.
+pub fn dependency_packages(entry: &Path) -> Result<Vec<noeta_loader::DepPackage>, String> {
+    let dir = entry.parent().unwrap_or_else(|| Path::new("."));
+    let Some(manifest_path) = find(dir) else {
+        return Ok(Vec::new());
+    };
+    let text = std::fs::read_to_string(&manifest_path)
+        .map_err(|err| format!("cannot read `{}`: {err}", manifest_path.display()))?;
+    let manifest =
+        Manifest::parse(&text).map_err(|err| format!("invalid `{}`: {err}", manifest_path.display()))?;
+    let manifest_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+
+    let mut packages = Vec::new();
+    for (key, dep) in manifest.dependencies() {
+        let path = match dep {
+            Dependency::Path { path } => path,
+            Dependency::Git { .. } | Dependency::Registry { .. } => {
+                return Err(format!(
+                    "dependency `{key}` is a git/registry dependency — resolving these needs the \
+                     package store + `noeta.lock` (package-manager P2.3+); only `path` \
+                     dependencies work today"
+                ));
+            }
+        };
+        let dep_dir = manifest_dir.join(path);
+        let dep_manifest_path = dep_dir.join(MANIFEST_NAME);
+        let dep_text = std::fs::read_to_string(&dep_manifest_path).map_err(|err| {
+            format!(
+                "path dependency `{key}` at `{}`: cannot read its `{MANIFEST_NAME}`: {err}",
+                dep_dir.display()
+            )
+        })?;
+        let dep_manifest = Manifest::parse(&dep_text)
+            .map_err(|err| format!("path dependency `{key}`: invalid `{MANIFEST_NAME}`: {err}"))?;
+        let pkg = dep_manifest.package().ok_or_else(|| {
+            format!(
+                "path dependency `{key}` at `{}` has no `[package]` table (needed for its \
+                 namespace root)",
+                dep_dir.display()
+            )
+        })?;
+        let root = pkg.name.root().to_string();
+        let modules = noeta_loader::read_package_sources(&dep_dir).map_err(|err| {
+            format!(
+                "path dependency `{key}`: cannot read sources under `{}`: {err}",
+                dep_dir.display()
+            )
+        })?;
+        packages.push(noeta_loader::DepPackage {
+            key: key.clone(),
+            root,
+            modules,
+        });
+    }
+    Ok(packages)
 }
 
 /// Resolve the [`FmtConfig`] for a target directory: discover the nearest `noeta.toml`, read its
@@ -237,15 +301,11 @@ impl Manifest {
     }
 
     /// The package's identity, if it declares a `[package]` table (a bare entry script has none).
-    // Both accessors are consumed starting P2.1 (path deps → the loader) / P2.3 (fetch + store);
-    // P2.0 lands the parsed, validated shape first.
-    #[allow(dead_code)]
     pub fn package(&self) -> Option<&PackageMeta> {
         self.package.as_ref()
     }
 
     /// The declared dependencies, keyed by local **import root** (the dependency-table key).
-    #[allow(dead_code)]
     pub fn dependencies(&self) -> &BTreeMap<String, Dependency> {
         &self.dependencies
     }

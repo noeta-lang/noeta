@@ -73,10 +73,24 @@ A typed `Dependency` enum + `PackageMeta`; unit tests over each form + malformed
 The load-bearing language slice, and the first that needs **no** network/resolver — a `path` dep is a
 local source tree, so the whole cross-package linking mechanism is exercised deterministically.
 
-- **2.1a — loader accepts an extra rooted-module set.** Generalize `noeta-loader` so candidate modules
-  come not only from the entry's directory siblings but from an explicit list of *(dep-root, package
-  source tree)* entries, with the namespace re-rooting from §"design decision". Pure, in-memory
-  testable (drive `link` with synthetic packages).
+- **2.1a — loader accepts dependency packages. ✅ DONE.** `noeta-loader` gains `DepPackage`
+  (key + package root + modules), `reroot_program` (rewrite leading `namespace`/`use` segment
+  root→key), and `link_with_deps`/`link_parsed_with_deps` — dependency modules are both resolution
+  candidates *and* import drivers (closed unit), with origin-tracking dedup and std-import retention.
+  `link`/`link_parsed` unchanged for existing callers; 4 unit tests; full corpus differential-green.
+- **2.1b — CLI run/build path wired. ✅ DONE.** `manifest::dependency_packages` builds `DepPackage`s
+  from the manifest's **path** deps (each dep's own `[package]` gives its root; sources read
+  recursively — a package is a tree); `compile_whole_file` feeds them to `load_with_deps` **and** the
+  startup-cache key + `SourceMap` (so a dep change never serves stale bytecode, and merged-dep spans
+  render). A git/registry dep errors with a pointer to P2.3+. 2 CLI integration tests (re-root run +
+  git-dep error); manual e2e confirmed (key ≠ root re-roots; package-internal cross-ref resolves).
+- **2.1c — remaining consumers (follow-on, surfaced not silently dropped).** The **salsa/LSP** path
+  (`noeta-db` Workspace + LSP `discover_sources`) and **`run_file`** (`noeta serve`) + **conformance**
+  mirrors do **not** yet feed dependency sources — so the editor won't resolve cross-package `use` and
+  `noeta serve` won't see deps. CLI `run`/`build`/`dump` (the primary path) do. Tracked for 2.1c.
+
+<details><summary>Original 2.1b consumer survey (all injection points)</summary>
+
 - **2.1b — feed dependency sources at all three consumers** (survey-confirmed injection points; the
   sibling scan is duplicated, so all must learn about deps or a stale artifact diverges):
   - **CLI** — `noeta_loader::load` (main.rs:1333) + the startup-cache key `read_workspace`
@@ -91,6 +105,8 @@ local source tree, so the whole cross-package linking mechanism is exercised det
     rather than each re-implementing out-of-directory discovery.
 - Conformance: a path-dep package exporting a type/fn, imported and used; re-root collision cases;
   differential-green over the merged program.
+
+</details>
 
 ### 2.2 — SemVer + PubGrub resolver (pure, in-memory)
 

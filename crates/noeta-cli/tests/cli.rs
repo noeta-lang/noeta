@@ -2004,3 +2004,74 @@ fn fmt_declines_unparseable_source() {
         .code(1)
         .stderr(predicate::str::contains("does not parse"));
 }
+
+// --- package manager: path dependencies (P2.1) --------------------------------------------------
+
+/// Lay out an app + a dependency package under a unique base dir, returning the app's entry path.
+/// The app keys the dependency `hi`; the package's own root namespace segment is `greet` (from
+/// `acme/greet`), so the loader re-roots `greet.*` → `hi.*` (key ≠ root exercises the rewrite).
+fn path_dep_project(name: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("greetlib");
+    std::fs::create_dir_all(&app).expect("mk app");
+    std::fs::create_dir_all(&lib).expect("mk lib");
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nhi = { path = \"../greetlib\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "use hi.hello.greeting;\necho greeting();\n").unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    // The package's public fn calls a helper in a *second* package module — a package-internal
+    // cross-reference the consumer never names, which must still resolve (closed-unit linking).
+    std::fs::write(
+        lib.join("hello.noe"),
+        "namespace greet.hello;\nuse greet.util.punct;\n\
+         pub fn greeting(): string { return punct(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("util.noe"),
+        "namespace greet.util;\npub fn punct(): string { return \"hi from the dependency\"; }\n",
+    )
+    .unwrap();
+    app.join("main.noe")
+}
+
+#[test]
+fn a_path_dependency_resolves_and_runs() {
+    let entry = path_dep_project("pm_pathdep_run");
+    lang()
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hi from the dependency"));
+}
+
+#[test]
+fn a_git_dependency_reports_it_is_not_yet_resolvable() {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_gitdep");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nhi = { git = \"https://example.com/acme/greet\", tag = \"v1.0.0\" }\n",
+    )
+    .unwrap();
+    std::fs::write(base.join("main.noe"), "echo 1;\n").unwrap();
+    lang()
+        .arg("run")
+        .arg(base.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("git/registry dependency"));
+}
