@@ -47,42 +47,89 @@ pub fn not_found_error(key: &str) -> StdError {
 /// convention (Node `dotenv.config()`, python-dotenv `load_dotenv()`).
 pub const DEFAULT_DOTENV_PATH: &str = ".env";
 
-/// Parse the text of a `.env` file into a sorted key→value map — the pure core of `env.parse` and
-/// `env.load` (F5). Deliberately lenient in the dotenv tradition: malformed lines are skipped rather
-/// than raising, so a stray line never fails a whole load.
+/// Parse the text of a `.env` file into a sorted key→value map — the pure entry point of `env.parse`
+/// (no interpolation base). See [`parse_dotenv_with_env`] for the `env.load` form that resolves
+/// `${VAR}` against the ambient environment.
+pub fn parse_dotenv(text: &str) -> BTreeMap<String, String> {
+    parse_dotenv_with_env(text, &BTreeMap::new())
+}
+
+/// Parse a `.env` file, resolving `${VAR}` / `$VAR` interpolation against `base` (the ambient
+/// environment for `env.load`; empty for the pure `env.parse`) in addition to variables defined
+/// earlier in the same file. Deliberately lenient in the dotenv tradition: malformed lines are
+/// skipped rather than raising, so a stray line never fails a whole load.
 ///
 /// ## Supported grammar (the widely-shared `.env` subset)
 /// - `KEY=VALUE` lines; the key is `[A-Za-z_][A-Za-z0-9_.]*`, split on the first `=`.
 /// - `#` full-line comments and blank lines are skipped.
 /// - An optional `export ` prefix (bash compatibility) is stripped.
-/// - **Single-quoted** values (`'...'`) are literal — no escape processing, no trimming inside.
-/// - **Double-quoted** values (`"..."`) expand `\n \t \r \\ \"` and are taken verbatim otherwise.
-/// - **Unquoted** values are whitespace-trimmed, with a trailing ` #` starting an inline comment.
-///
-/// `${VAR}` interpolation and multi-line quoted values are deliberately out of scope for now (see
-/// `plans/followups/slice-f5-dotenv.md`); they can layer on without changing this signature.
+/// - **Single-quoted** values (`'...'`) are literal — no escapes, no trimming, **no interpolation**.
+/// - **Double-quoted** values (`"..."`) expand `\n \t \r \\ \"` and interpolate `${VAR}` / `$VAR`.
+/// - **Unquoted** values are whitespace-trimmed, with a trailing ` #` starting an inline comment,
+///   and interpolate `${VAR}` / `$VAR`.
+/// - **Multi-line** double- and single-quoted values may span physical lines (the newlines are part
+///   of the value) up to the closing quote.
+/// - `${VAR}` and `$VAR` resolve to `base` first, then earlier same-file keys, then the empty string
+///   (matching dotenv-expand: the ambient environment wins). `\$` is a literal `$`.
 ///
 /// The result is a [`BTreeMap`] so iteration order is sorted and deterministic, mirroring
 /// [`sandbox_vars`] and `env.keys()`.
-pub fn parse_dotenv(text: &str) -> BTreeMap<String, String> {
-    let mut vars = BTreeMap::new();
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
+pub fn parse_dotenv_with_env(
+    text: &str,
+    base: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut vars: BTreeMap<String, String> = BTreeMap::new();
+    let lines: Vec<&str> = text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            i += 1;
             continue;
         }
         // `export KEY=VALUE` — strip the shell-compat prefix if present.
-        let line = line.strip_prefix("export ").map_or(line, str::trim_start);
-        let Some((key, value)) = line.split_once('=') else {
-            continue; // no `=`: not an assignment, skip.
+        let assign = trimmed
+            .strip_prefix("export ")
+            .map_or(trimmed, str::trim_start);
+        let Some((key, rest)) = assign.split_once('=') else {
+            i += 1; // no `=`: not an assignment, skip.
+            continue;
         };
         let key = key.trim();
         if !is_env_key(key) {
-            continue; // malformed key: skip rather than raise.
+            i += 1; // malformed key: skip rather than raise.
+            continue;
         }
-        vars.insert(key.to_string(), parse_value(value.trim_start()));
+        let (kind, raw, consumed) = read_value(rest.trim_start(), &lines, i);
+        // Interpolate against `base` first (ambient wins), then the keys defined so far. Scoped so
+        // the immutable borrow of `vars` ends before the insert below.
+        let value = {
+            let resolve = |name: &str| -> String {
+                base.get(name)
+                    .or_else(|| vars.get(name))
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            match kind {
+                ValueKind::Single => raw, // literal: no escapes, no interpolation
+                ValueKind::Double => expand(&raw, &resolve, true),
+                ValueKind::Unquoted => expand(&raw, &resolve, false),
+            }
+        };
+        vars.insert(key.to_string(), value);
+        i += consumed;
     }
     vars
+}
+
+/// The three value syntaxes, which differ in escape and interpolation handling.
+enum ValueKind {
+    /// `'...'` — literal, verbatim.
+    Single,
+    /// `"..."` — C-escapes + interpolation.
+    Double,
+    /// bare — interpolation only.
+    Unquoted,
 }
 
 /// A syntactically valid environment-variable name: `[A-Za-z_][A-Za-z0-9_.]*`, non-empty. `.` is
@@ -96,28 +143,51 @@ fn is_env_key(key: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
 }
 
-/// Interpret the right-hand side of a `KEY=` assignment per the quoting rules above. `value` has
-/// already had leading whitespace trimmed.
-fn parse_value(value: &str) -> String {
-    // Single-quoted: literal, no escapes, no trimming — take everything to the closing quote.
-    if let Some(rest) = value.strip_prefix('\'')
-        && let Some(end) = rest.find('\'')
-    {
-        return rest[..end].to_string();
+/// Read one value starting at `start.trim_start()` on `lines[i]`, extending across physical lines for
+/// an unterminated quote. Returns the value's kind, its raw inner text (quotes stripped, multi-line
+/// joined with `\n`, but not yet escape/interpolation-expanded), and how many lines it consumed.
+fn read_value(first: &str, lines: &[&str], i: usize) -> (ValueKind, String, usize) {
+    if let Some(inner) = first.strip_prefix('\'') {
+        let (raw, consumed) = read_multiline(inner, lines, i, |s| s.find('\''));
+        (ValueKind::Single, raw, consumed)
+    } else if let Some(inner) = first.strip_prefix('"') {
+        let (raw, consumed) = read_multiline(inner, lines, i, find_closing_double_quote);
+        (ValueKind::Double, raw, consumed)
+    } else {
+        // Unquoted: an inline ` #` comment ends the value; then trim trailing whitespace.
+        let end = first.find(" #").unwrap_or(first.len());
+        (ValueKind::Unquoted, first[..end].trim_end().to_string(), 1)
     }
-    // Double-quoted: find the closing quote (skipping any escaped `\"`), then expand escapes.
-    if let Some(rest) = value.strip_prefix('"')
-        && let Some(end) = find_closing_double_quote(rest)
-    {
-        return expand_double_quoted(&rest[..end]);
+}
+
+/// Assemble a quoted value that may span lines. `find_close` locates the closing quote within a
+/// single line; if it isn't on the first line, subsequent lines are appended (joined by `\n`) until
+/// one contains it. An unterminated quote yields whatever was accumulated (lenient).
+fn read_multiline(
+    first_inner: &str,
+    lines: &[&str],
+    i: usize,
+    find_close: impl Fn(&str) -> Option<usize>,
+) -> (String, usize) {
+    if let Some(end) = find_close(first_inner) {
+        return (first_inner[..end].to_string(), 1);
     }
-    // Unquoted: an inline ` #` comment ends the value; then trim trailing whitespace.
-    let end = value.find(" #").unwrap_or(value.len());
-    value[..end].trim_end().to_string()
+    let mut buf = first_inner.to_string();
+    let mut j = i + 1;
+    while j < lines.len() {
+        buf.push('\n');
+        if let Some(end) = find_close(lines[j]) {
+            buf.push_str(&lines[j][..end]);
+            return (buf, j - i + 1);
+        }
+        buf.push_str(lines[j]);
+        j += 1;
+    }
+    (buf, j - i) // unterminated: consume to end of input
 }
 
 /// The byte offset of the closing `"` of a double-quoted value, skipping any `\"` escape, or `None`
-/// if the quote is never closed.
+/// if the quote is never closed on this line.
 fn find_closing_double_quote(rest: &str) -> Option<usize> {
     let mut escaped = false;
     for (i, c) in rest.char_indices() {
@@ -132,30 +202,82 @@ fn find_closing_double_quote(rest: &str) -> Option<usize> {
     None
 }
 
-/// Expand the recognised escapes inside a double-quoted value. Unknown escapes keep the backslash,
-/// matching the lenient dotenv behaviour.
-fn expand_double_quoted(inner: &str) -> String {
+/// Expand a value's inner text: `${VAR}` / `$VAR` interpolation (via `resolve`) plus, when
+/// `c_escapes` is set (double-quoted values), the `\n \t \r \\ \"` escapes. `\$` is always a literal
+/// `$` (so interpolation can be escaped in both quoted and unquoted values); an unknown escape keeps
+/// its backslash, matching lenient dotenv behaviour.
+fn expand(inner: &str, resolve: &dyn Fn(&str) -> String, c_escapes: bool) -> String {
+    let chars: Vec<char> = inner.chars().collect();
     let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' && i + 1 < chars.len() {
+            let n = chars[i + 1];
+            if n == '$' {
+                out.push('$'); // escaped interpolation → literal `$`
+                i += 2;
+                continue;
+            }
+            if c_escapes {
+                let mapped = match n {
+                    'n' => Some('\n'),
+                    't' => Some('\t'),
+                    'r' => Some('\r'),
+                    '\\' => Some('\\'),
+                    '"' => Some('"'),
+                    _ => None,
+                };
+                if let Some(m) = mapped {
+                    out.push(m);
+                    i += 2;
+                    continue;
+                }
+            }
+            out.push('\\'); // unknown escape: keep the backslash
+            i += 1;
             continue;
         }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some('\\') => out.push('\\'),
-            Some('"') => out.push('"'),
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
+        if c == '$' {
+            if let Some((name, next)) = read_var_ref(&chars, i) {
+                out.push_str(&resolve(&name));
+                i = next;
+                continue;
             }
-            None => out.push('\\'),
+            out.push('$'); // a bare `$` with no following name/brace
+            i += 1;
+            continue;
         }
+        out.push(c);
+        i += 1;
     }
     out
+}
+
+/// Parse a `${NAME}` or `$NAME` reference starting at `chars[i] == '$'`, returning the variable name
+/// and the index just past the reference, or `None` if `$` is not followed by a name or `{…}`.
+fn read_var_ref(chars: &[char], i: usize) -> Option<(String, usize)> {
+    // `${NAME}` — the name is everything up to the closing brace (so `.`-namespaced keys work).
+    if chars.get(i + 1) == Some(&'{') {
+        let close = (i + 2..chars.len()).find(|&j| chars[j] == '}')?;
+        return Some((chars[i + 2..close].iter().collect(), close + 1));
+    }
+    // `$NAME` — a bare `[A-Za-z_][A-Za-z0-9_]*` run.
+    let start = i + 1;
+    let mut j = start;
+    while j < chars.len() {
+        let c = chars[j];
+        let ok = if j == start {
+            c.is_ascii_alphabetic() || c == '_'
+        } else {
+            c.is_ascii_alphanumeric() || c == '_'
+        };
+        if !ok {
+            break;
+        }
+        j += 1;
+    }
+    (j > start).then(|| (chars[start..j].iter().collect(), j))
 }
 
 #[cfg(test)]
@@ -212,5 +334,46 @@ mod tests {
     fn unquoted_trims_and_drops_inline_comment() {
         let vars = parse_dotenv("HOST=localhost   # the dev host");
         assert_eq!(vars["HOST"], "localhost");
+    }
+
+    #[test]
+    fn interpolates_earlier_same_file_vars() {
+        let vars = parse_dotenv("BASE=/app\nBIN=${BASE}/bin\nBARE=$BASE!\n");
+        assert_eq!(vars["BIN"], "/app/bin");
+        assert_eq!(vars["BARE"], "/app!"); // `$BASE` bare form, `!` ends the name
+    }
+
+    #[test]
+    fn interpolates_from_base_which_wins_over_file() {
+        let base = BTreeMap::from([("USER".to_string(), "ambient".to_string())]);
+        let vars = parse_dotenv_with_env("USER=file\nGREETING=hi ${USER}\n", &base);
+        assert_eq!(vars["GREETING"], "hi ambient"); // base wins over the file's own USER
+    }
+
+    #[test]
+    fn undefined_interpolation_is_empty() {
+        let vars = parse_dotenv("X=[${NOPE}]");
+        assert_eq!(vars["X"], "[]");
+    }
+
+    #[test]
+    fn escaped_dollar_is_literal_and_single_quotes_do_not_interpolate() {
+        let base = BTreeMap::from([("V".to_string(), "x".to_string())]);
+        let vars = parse_dotenv_with_env("A=cost \\$5 not ${V}\nB='${V}'\n", &base);
+        assert_eq!(vars["A"], "cost $5 not x"); // `\$` literal, `${V}` expands
+        assert_eq!(vars["B"], "${V}"); // single-quoted: no interpolation
+    }
+
+    #[test]
+    fn double_quoted_value_spans_multiple_lines() {
+        let vars = parse_dotenv("KEY=\"line1\nline2\nline3\"\nAFTER=x\n");
+        assert_eq!(vars["KEY"], "line1\nline2\nline3");
+        assert_eq!(vars["AFTER"], "x"); // parsing resumes after the closing quote
+    }
+
+    #[test]
+    fn multiline_single_quote_is_literal_and_hash_is_not_a_comment() {
+        let vars = parse_dotenv("KEY='a\n# not a comment\nb'\n");
+        assert_eq!(vars["KEY"], "a\n# not a comment\nb");
     }
 }

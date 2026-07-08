@@ -1443,19 +1443,23 @@ fn env_dispatch(
                 Some(_) => want_str(func, args, 0)?,
                 None => crate::env::DEFAULT_DOTENV_PATH,
             };
+            // The ambient environment: both the interpolation base for `${VAR}` (ambient wins) and
+            // the overlay applied on top of the file (existing env wins on whole keys).
+            let mut ambient = std::collections::BTreeMap::new();
+            for key in host.env_keys() {
+                if let Some(value) = host.env_get(&key) {
+                    ambient.insert(key, value);
+                }
+            }
             // A missing `.env` is tolerated — the result is just the ambient environment.
             let mut merged = if host.fs_exists(path) {
-                crate::env::parse_dotenv(&host.fs_read(path)?)
+                crate::env::parse_dotenv_with_env(&host.fs_read(path)?, &ambient)
             } else {
                 std::collections::BTreeMap::new()
             };
             // Overlay the ambient environment on top so an existing variable always wins — the
             // cross-ecosystem `.env` precedence. The union is the full merged environment.
-            for key in host.env_keys() {
-                if let Some(value) = host.env_get(&key) {
-                    merged.insert(key, value);
-                }
-            }
+            merged.extend(ambient);
             Ok(str_map(merged))
         }
         _ => Err(no_function_error("env", func)),
