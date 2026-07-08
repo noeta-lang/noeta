@@ -158,6 +158,27 @@ impl DocumentStore {
         self.buffers.keys().cloned().collect()
     }
 
+    /// Format the whole document at `uri` into the canonical style, returning a single
+    /// full-document replacement edit — or `None` if the document is not open, or an empty edit list
+    /// if it is already canonical. Style is the nearest `noeta.toml` `[fmt]` config (defaults if
+    /// none); a source that does not parse (or an internal safety abort) yields no edits, leaving the
+    /// buffer untouched. The same `noeta_fmt` engine as `noeta fmt`, so editor and CLI agree.
+    fn format_document(&self, uri: &str, encoding: Encoding) -> Option<Vec<TextEdit>> {
+        let text = self.buffers.get(uri)?;
+        let config = uri_to_path(uri)
+            .and_then(|p| p.parent().map(noeta_fmt::FmtConfig::discover))
+            .unwrap_or_default();
+        let formatted = noeta_fmt::format_source(uri, text, &config).ok()?;
+        if formatted == *text {
+            return Some(Vec::new()); // already canonical — no edit, no churn
+        }
+        let end = LineIndex::new(text).position(text.len() as u32, encoding);
+        Some(vec![TextEdit {
+            range: Range::new(Position::new(0, 0), end),
+            new_text: formatted,
+        }])
+    }
+
     /// Rebuild or update the workspace of every open document. Each open document is the entry of
     /// its own workspace; its modules are the sibling `.noe` files in the entry's directory, with
     /// open files taking their (unsaved) buffer content over disk.
@@ -1004,6 +1025,8 @@ impl LanguageServer for Backend {
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                 })),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                // Whole-document formatting via the shared `noeta fmt` engine.
+                document_formatting_provider: Some(OneOf::Left(true)),
                 // Compiler-accurate identifier highlighting, overlaid on the client's static grammar.
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
@@ -1061,6 +1084,16 @@ impl LanguageServer for Backend {
             }),
             range: Some(range),
         }))
+    }
+
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let edits = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.format_document(uri.as_str(), encoding)
+        };
+        Ok(edits)
     }
 
     async fn goto_definition(
@@ -1294,6 +1327,38 @@ mod tests {
         assert_eq!(store.buffers.len(), 1);
         let program = store.workspaces["file:///a.noe"].entry();
         assert_eq!(program.text(&store.db), "let x = 1");
+    }
+
+    #[test]
+    fn format_document_returns_a_full_replacement_edit() {
+        let mut store = DocumentStore::default();
+        store.open("file:///a.noe", "fn  f( a ){\n echo a\n}\n".to_string());
+        let edits = store
+            .format_document("file:///a.noe", Encoding::Utf16)
+            .expect("open document");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "fn f(a) {\n    echo a\n}\n");
+        // The edit replaces from the document start.
+        assert_eq!(edits[0].range.start, Position::new(0, 0));
+    }
+
+    #[test]
+    fn format_document_of_canonical_source_is_a_no_op() {
+        let mut store = DocumentStore::default();
+        store.open("file:///a.noe", "echo 1\n".to_string());
+        let edits = store
+            .format_document("file:///a.noe", Encoding::Utf16)
+            .expect("open document");
+        assert!(edits.is_empty(), "already-formatted source needs no edit");
+    }
+
+    #[test]
+    fn format_document_declines_unparseable_source() {
+        let mut store = DocumentStore::default();
+        store.open("file:///a.noe", "fn (".to_string());
+        // Broken source yields no edits (the LSP returns `None`), leaving the buffer untouched.
+        let edits = store.format_document("file:///a.noe", Encoding::Utf16);
+        assert!(edits.unwrap_or_default().is_empty());
     }
 
     #[test]

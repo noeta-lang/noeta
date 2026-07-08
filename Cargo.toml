@@ -60,6 +60,8 @@ noeta-lsp = { path = "crates/noeta-lsp" }
 noeta-dap = { path = "crates/noeta-dap" }
 # M2 dev tooling: the `noeta profile` dev profiler / flamegraph over the tier-0 production VM
 noeta-prof = { path = "crates/noeta-prof" }
+# Tooling: the `noeta fmt` canonical source formatter (lex+trivia → parse → AST → Doc → text)
+noeta-fmt = { path = "crates/noeta-fmt" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
 logos = "0.16"

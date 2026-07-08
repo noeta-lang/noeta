@@ -17,8 +17,9 @@ use crate::{
 };
 
 /// Core's "std" extension — the dogfood. Registers the Ring 2 modules through the same API a
-/// third-party extension would use. Modules migrate into [`STD_MODULES`] slice by slice; this
-/// first slice carries the scalar/host modules.
+/// third-party extension would use. Every `use std.*` module lives in [`STD_MODULES`] — the
+/// slice-by-slice migration (Phase A → higher-order-abi H5) is complete; there is no other
+/// registration path.
 #[derive(Debug, Clone, Copy)]
 pub struct StdExtension;
 
@@ -2195,9 +2196,8 @@ const STD_MODULES: &[ExtModule] = &[
         deep_marshal: true,
         ..ExtModule::DEFAULTS
     },
-    // The `task` concurrency module (higher-order-abi H0): its functions need the executor, so
-    // they live in the **ctx** table and dispatch through the `NativeCtx` seam. Migration is
-    // per-function — the names still in `VIRTUAL_MODULES` stay backend builtins until their phase.
+    // The `task` concurrency module (higher-order-abi H0/H2): its functions need the executor,
+    // so they live in the **ctx** table and dispatch through the `NativeCtx` seam.
     ExtModule {
         name: "task",
         ctx_functions: crate::task::TASK_CTX_FNS,

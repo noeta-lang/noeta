@@ -1698,6 +1698,7 @@ dependencies = [
  "noeta-compiler",
  "noeta-dap",
  "noeta-diagnostics",
+ "noeta-fmt",
  "noeta-lexer",
  "noeta-loader",
  "noeta-lsp",
@@ -1828,6 +1829,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-fmt"
+version = "0.0.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-diagnostics",
+ "noeta-lexer",
+ "noeta-parser",
+ "noeta-span",
+ "toml",
+]
+
+[[package]]
 name = "noeta-gc"
 version = "0.0.0"
 dependencies = [
@@ -1908,6 +1921,7 @@ dependencies = [
  "noeta-check",
  "noeta-db",
  "noeta-diagnostics",
+ "noeta-fmt",
  "noeta-lexer",
  "noeta-parser",
  "noeta-span",

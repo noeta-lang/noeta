@@ -16,5 +16,6 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "Ok", "Err", "some", "none", "panic",
     "assert",
     // `signal`/`computed`/`effect` left the prelude (P2a) for `use std.reactive`, and
-    // `sleep`/`all`/`race`/`map_bounded` (P2b) for `use std.task` (`registry::VIRTUAL_MODULES`).
+    // `sleep`/`all`/`race`/`map_bounded` (P2b) for `use std.task` — both ordinary registry
+    // modules since higher-order-abi (the interim virtual-module mechanism is gone).
 ];
