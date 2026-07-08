@@ -1,0 +1,8 @@
+// A `Cell<T>` carries its value type statically (generic extern types, higher-order-abi H4):
+// `cell.new(1)` is a `Cell<int>`, so `.set("x")` is rejected at check time exactly as a signal's
+// typed `set` is — the receiver's type argument seeds the method signature's variable.
+// expect: error E0007 at 8:1
+// expect: exit 1
+use std.{cell}
+c = cell.new(1)
+c.set("not an int")

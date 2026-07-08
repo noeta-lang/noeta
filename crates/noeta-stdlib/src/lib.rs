@@ -33,6 +33,7 @@
 // `noeta_stdlib::` path resolves unchanged.
 pub use noeta_native::*;
 
+pub mod cell;
 pub mod crypto;
 pub mod env;
 pub mod fs;
@@ -46,7 +47,10 @@ pub mod math;
 pub mod net;
 pub mod quat;
 pub mod random;
+pub mod reactive;
 pub mod registry;
+pub mod serve;
+pub mod task;
 pub mod vec3;
 
 // The stdlib-only surface (the ABI items above arrive via the `noeta_native::*` glob).

@@ -1,0 +1,25 @@
+// Arena RC exactness (higher-order-abi H4): a destructor-bearing value stored in a cell fires its
+// `destruct` at its true last reference — when `set` replaces it (the arena's release is
+// destructor-aware on both backends) — and a value still held at program end is released at
+// teardown, after the effect of normal execution but before global destruction completes the
+// residency-0 proof.
+// expect: stdout "made a"
+// expect: stdout "made b"
+// expect: stdout "dropped a"
+// expect: stdout "done"
+// expect: stdout "dropped b"
+// expect: exit 0
+use std.{cell}
+class Tracer {
+    pub name: string
+    destruct {
+        echo "dropped " ~ self.name
+    }
+}
+fn make(name: string): Tracer {
+    echo "made " ~ name
+    return Tracer { name: name }
+}
+c = cell.new(make("a"))
+c.set(make("b"))
+echo "done"

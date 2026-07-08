@@ -48,7 +48,6 @@ use noeta_compiler::{Unsupported, compile};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_gc::{collect_trace, release, retain};
 use noeta_object::{Shape, ShapeKind};
-use noeta_reactive::{NodeKind, ReactiveGraph};
 use noeta_span::Span;
 use noeta_value::{
     ChannelId, HeapKind, ScopeId, TaskId, Value, apply_binary, apply_binary_wide, apply_unary,
@@ -61,6 +60,7 @@ mod jit_service;
 mod values;
 pub(crate) use values::*;
 mod methods;
+mod native_ctx;
 mod scheduler;
 mod session;
 pub use session::{HostFactory, SessionOutput, VmSession};
@@ -815,14 +815,27 @@ struct Vm<'m> {
     /// unblocks a sibling as progress even when no task completes. Mirrors the tree-walker's fields.
     channels: Vec<Channel>,
     channel_progress: u64,
-    /// The reactive graph (reactivity S1): every `signal(v)`/`computed(fn)`/`effect(fn)` allocates a
-    /// node here; a `Reactive` handle value references one by [`NodeId`]. Held behind `Rc` so a flush
-    /// (`self.reactive.flush(|body| self.call_value(body, …))`) can borrow the graph and `self`
-    /// independently — the graph's own methods are `&self` (interior-mutable), so this sidesteps the
-    /// borrow conflict without `unsafe`. The graph stores [`GcVal`]s so its internal clones/drops keep
-    /// the VM's manual refcounts exact; it is cleared at program end so held values are released
-    /// (the leak oracle's residency returns to 0).
-    reactive: Rc<ReactiveGraph<GcVal>>,
+    /// The extensions' **retained-value arena** (higher-order-abi H4, Class 3): every `Some`
+    /// entry owns one reference to a language value an extension holds *across* dispatches
+    /// (`NativeCtx::retain`/`retained_get`/`retained_set`/`release_retained`); freed indices are
+    /// reused via `ext_arena_free`. The arena is a first-class **root set**: teardown feeds it
+    /// into the trace collector's roots and then releases every remaining entry (exactly the
+    /// reactive graph's treatment), so residency returns to 0 whatever the program forgot.
+    ext_arena: Vec<Option<Value>>,
+    ext_arena_free: Vec<u32>,
+    /// Per-run extension Rust state (`NativeCtx::state`, H4): plain data keyed by the
+    /// extension's own `'static` key, created on first access, dropped at VM drop. Language
+    /// values never live here — they go through the arena above.
+    ext_state: Vec<(&'static str, noeta_stdlib::ExtState)>,
+    /// Extern types whose **read gate** is currently closed (H5 perf): while a type is listed,
+    /// its declared `arena_getter` method takes the full ctx dispatch instead of the inlined
+    /// arena read. Almost always empty (the hot check is `is_empty()`); toggled by extensions
+    /// via `NativeCtx::set_read_gate` around tracking/dirty windows.
+    ext_closed_gates: Vec<&'static str>,
+    /// Spare ctx slot tables (H5 perf): a ctx dispatch pops one instead of allocating, and its
+    /// drop clears + returns it — a hot `set` loop then runs alloc-free. A stack, so ctx
+    /// re-entrancy (a called closure re-entering a dispatch) simply pops the next one.
+    ctx_table_pool: Vec<Vec<Option<Value>>>,
     /// Real OS-thread isolates (isolates I.4b), CLI-only / out-of-oracle. `parallel_isolates` selects
     /// the real path in the `Op::SpawnIsolate` handler; `isolate_module` is an `Arc` clone of the
     /// compiled module (`Send + Sync`) the entry point holds *alongside* the `&Module` borrow, so a
@@ -1653,63 +1666,6 @@ struct IsolateFailure {
     trace: Vec<TraceFrame>,
 }
 
-/// An owned reference to a VM [`Value`], with RAII refcounting — the element type the reactive graph
-/// (reactivity S1) stores. The VM's NaN-boxed `Value` is `Copy` and does **not** adjust its refcount
-/// on a bitwise clone, so a generic container that clones/drops `Value` internally would leak or
-/// double-free. Wrapping it makes `Clone` `retain` and `Drop` `release`, so every clone/drop the
-/// `ReactiveGraph` performs (memoizing a value, replacing a signal's content, disposing a node) stays
-/// refcount-exact for free — the leak oracle is the proof. Constructing a `GcVal` either takes over an
-/// already-owned reference ([`GcVal::owned`]) or takes a fresh reference to a borrowed value
-/// ([`GcVal::retained`]); [`GcVal::into_value`] hands the owned reference back out (e.g. into a
-/// register) without releasing it.
-struct GcVal(Value);
-
-impl GcVal {
-    /// Wrap a value we already own one reference to (a freshly built value, a call result). No retain.
-    /// (Used from S2/S3 when a `computed`/`effect` body's call result enters the graph.)
-    #[allow(dead_code)]
-    #[inline]
-    fn owned(v: Value) -> Self {
-        GcVal(v)
-    }
-
-    /// Take a new reference to a value owned elsewhere (e.g. a borrowed builtin argument we want the
-    /// graph to keep). Retains.
-    #[inline]
-    fn retained(v: Value) -> Self {
-        retain(v);
-        GcVal(v)
-    }
-
-    /// Hand the owned reference back out without releasing it (into a register / to `call_value`).
-    #[inline]
-    fn into_value(self) -> Value {
-        let v = self.0;
-        std::mem::forget(self);
-        v
-    }
-
-    /// Peek the underlying value without affecting ownership (e.g. to feed it into the GC root set).
-    #[inline]
-    fn get(&self) -> Value {
-        self.0
-    }
-}
-
-impl Clone for GcVal {
-    #[inline]
-    fn clone(&self) -> Self {
-        retain(self.0);
-        GcVal(self.0)
-    }
-}
-
-impl Drop for GcVal {
-    #[inline]
-    fn drop(&mut self) {
-        release(self.0);
-    }
-}
 
 /// A bounded channel's scheduler-owned state (isolates I.1): a FIFO queue of buffered messages, its
 /// capacity, and whether it has been closed. Endpoints are indices into [`Vm::channels`]; the queue is
@@ -1958,7 +1914,11 @@ impl<'m> Vm<'m> {
             scopes: Vec::new(),
             channels: Vec::new(),
             channel_progress: 0,
-            reactive: Rc::new(ReactiveGraph::new()),
+            ext_arena: Vec::new(),
+            ext_arena_free: Vec::new(),
+            ext_state: Vec::new(),
+            ext_closed_gates: Vec::new(),
+            ctx_table_pool: Vec::new(),
             parallel_isolates: false,
             isolate_module: None,
             isolate_factory: None,
@@ -2455,12 +2415,11 @@ impl<'m> Vm<'m> {
                 .copied()
                 .filter(|v| !v.is_unbound())
                 .collect();
-            // The reactive graph (reactivity S1) holds a `+1` reference to every signal's content and
-            // every computed/effect body, but a value reachable *only* through the graph is invisible to
-            // this mark-from-roots sweep. Feed those held values in as roots so the collector does not
-            // reclaim a still-referenced value out from under the graph (which `reactive.clear()` below
-            // would then double-free). The reactive analogue of scanning the channel buffers.
-            self.reactive.for_each_value(|gv| roots.push(gv.get()));
+            // The extensions' retained arena (higher-order-abi H4) holds a `+1` on every value
+            // an extension owns across dispatches — the same graph treatment: feed them in as
+            // roots so the sweep cannot reclaim a value the arena release below would then
+            // double-free.
+            roots.extend(self.ext_arena.iter().copied().flatten());
             let garbage = collect_trace(&roots);
             self.reclaim_cycle_garbage(garbage);
         }
@@ -2474,10 +2433,15 @@ impl<'m> Vm<'m> {
                 }
             }
         }
-        // Release every value held by the reactive graph (reactivity S1): signals never disposed by the
-        // program still own their content until here. Dropping the nodes fires each `GcVal`'s `Drop`, so
-        // residency returns to zero — the leak oracle's proof that the graph's refcounting is exact.
-        self.reactive.clear();
+        // Release every value still in the extensions' retained arena (higher-order-abi H4):
+        // values an extension held across dispatches and the program never released (an
+        // undisposed `Cell`, an undisposed signal — reactivity lives here too since H5).
+        // Destructor-aware, so
+        // residency returns to zero — the leak oracle's proof the arena's refcounting is exact.
+        for value in std::mem::take(&mut self.ext_arena).into_iter().flatten() {
+            self.release_value(value);
+        }
+        self.ext_arena_free.clear();
         // Destroy the globals at program end in reverse declaration order, running each
         // destructor on its last reference — the deterministic destruction the spec requires.
         for slot in self.global_order.clone().into_iter().rev() {
@@ -2626,7 +2590,11 @@ fn run_isolate_worker(
             }
         }
     }
-    wvm.reactive.clear();
+    // Release the worker's extension arena (per-isolate, higher-order-abi H4/H5): whatever its
+    // program's extensions still held — signals, cells — drops here, destructor-aware.
+    for value in std::mem::take(&mut wvm.ext_arena).into_iter().flatten() {
+        wvm.release_value(value);
+    }
     message
 }
 
@@ -3017,6 +2985,12 @@ impl<'m> Vm<'m> {
         // `self` field) so it neither borrows `self` in the loop nor leaks across runs; holding the
         // `&'static Shape` keeps the cached shape alive, so the pointer key can never alias a freed shape.
         let mut caches: Vec<Option<(&'static Shape, u32)>> =
+            vec![None; self.module.cache_slots as usize];
+        // Extern-method route cache (H5 perf): per `CallMethod` site, the resolved routing for an
+        // extern receiver, keyed by the extern type's name pointer (a registry `&'static str`, a
+        // stable identity). A hit is one heap probe + one pointer compare — no registry scans on
+        // the `signal.get()`/`.set()` hot paths.
+        let mut extern_caches: Vec<Option<(*const u8, crate::methods::ExternRoute)>> =
             vec![None; self.module.cache_slots as usize];
         // S3 dispatch window (P-VMT-DISP). The interpreter is two nested loops. The OUTER `'reload`
         // loop re-derives the active frame's register window — its base, prototype (`chunk`), and
@@ -4004,6 +3978,57 @@ impl<'m> Vm<'m> {
                             set_reg(regs, fbase, *dst, value);
                             pc += 1;
                             continue;
+                        }
+                        // An extern receiver routes through the per-site cache (H5 perf): a
+                        // declared arena read inlines to an arena load while its gate is open;
+                        // ctx methods go straight to their dispatch; anything else falls to the
+                        // shared by-value chain below.
+                        if hk == Some(HeapKind::Extern) {
+                            let ci = *cache as usize;
+                            let type_name = v.with_extern(|e| e.type_name());
+                            let route = match extern_caches[ci] {
+                                Some((key, route)) if key == type_name.as_ptr() => route,
+                                _ => {
+                                    let route =
+                                        crate::methods::resolve_extern_route(type_name, method);
+                                    extern_caches[ci] = Some((type_name.as_ptr(), route));
+                                    route
+                                }
+                            };
+                            let ctx_type = match route {
+                                crate::methods::ExternRoute::FastRead { type_name, project } => {
+                                    if args.is_empty()
+                                        && (self.ext_closed_gates.is_empty()
+                                            || !self.ext_closed_gates.contains(&type_name))
+                                    {
+                                        let retained = v.with_extern(|e| project(e));
+                                        let value = self.ext_arena[retained as usize]
+                                            .expect("a live arena entry");
+                                        retain(value);
+                                        set_reg(regs, fbase, *dst, value);
+                                        pc += 1;
+                                        continue;
+                                    }
+                                    // Gate closed (or a misuse the dispatch reports): full path.
+                                    Some(type_name)
+                                }
+                                crate::methods::ExternRoute::Ctx { type_name } => Some(type_name),
+                                // The shared by-value chain below owns this (incl. errors).
+                                crate::methods::ExternRoute::Plain => None,
+                            };
+                            if let Some(type_name) = ctx_type {
+                                let arg_values = ArgBuf::collect(args, regs, fbase);
+                                let value = self.call_ctx_type_method(
+                                    type_name,
+                                    v,
+                                    method,
+                                    arg_values.as_slice(),
+                                    *span,
+                                )?;
+                                set_reg(regs, fbase, *dst, value);
+                                pc += 1;
+                                continue;
+                            }
                         }
                         // An object dispatches to a user method through the type's method table;
                         // anything else falls to the built-in `count`/`enumerate` methods.
@@ -6484,53 +6509,9 @@ impl<'m> Vm<'m> {
         {
             return Ok(Value::make_channel_recv(id));
         }
-        // Reactive handle methods (reactivity S1/S2/S3): `signal.get()`/`.set(v)`/
-        // `.update(fn)`, `computed.get()`, and `effect.dispose()`. Each method is guarded
-        // by the node's `kind` (a `signal` is not disposable, a `computed` is read-only,
-        // an `effect` is not readable); an invalid pair falls through to the generic
-        // no-method runtime error below, exactly as any other unknown method on a
-        // built-in type. `get` on a `computed` recomputes a dirty body via
-        // `read_reactive`; on a `signal` it is a plain read (the callback never fires).
-        if hk == Some(HeapKind::Reactive)
-            && let Some((kind, node)) = v.reactive_parts()
-        {
-            match (kind, method) {
-                (NodeKind::Signal | NodeKind::Computed, "get") => {
-                    return self.read_reactive(node, span);
-                }
-                (NodeKind::Signal, "set") => {
-                    // The graph retains its own reference to the new content and
-                    // releases the old; the caller's reference is released by its normal
-                    // end-of-life. Then flush so subscribed effects rerun — but coalesce:
-                    // a set inside a running effect body only enqueues, the ongoing flush
-                    // picks it up (no nested flush). (reactivity S4)
-                    self.reactive.set(node, GcVal::retained(args[0]));
-                    if !self.reactive.is_flushing() {
-                        self.drive_flush(span)?;
-                    }
-                    return Ok(Value::unit());
-                }
-                (NodeKind::Signal, "update") => {
-                    // Read-modify-write: read the current value (owned), call the
-                    // updater with it (which consumes that reference), store the
-                    // result, then flush (coalescing inside a running flush, like set).
-                    let f = args[0];
-                    let current = self.read_reactive(node, span)?;
-                    let updated = self.call_value(f, vec![current], span)?;
-                    self.reactive.set(node, GcVal::owned(updated));
-                    if !self.reactive.is_flushing() {
-                        self.drive_flush(span)?;
-                    }
-                    return Ok(Value::unit());
-                }
-                (NodeKind::Effect, "dispose") => {
-                    // Unsubscribe and free the node; its stored body/content drop.
-                    self.reactive.dispose(node);
-                    return Ok(Value::unit());
-                }
-                _ => {}
-            }
-        }
+            // (The reactive handle methods lived here until higher-order-abi H5 — `Signal`/
+            // `Computed`/`Effect` are registry extern types now, dispatched through the ctx
+            // seam like any other; `get` inlines via the declared arena read.)
         // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file
         // handle above.
         if hk == Some(HeapKind::Iter)
@@ -6806,86 +6787,6 @@ impl<'m> Vm<'m> {
             }],
             regs,
         )
-    }
-
-    /// Read a reactive node, driving a `computed`'s recompute through [`call_value`](Self::call_value)
-    /// if it is dirty (reactivity S3). A `signal` read never enters the callback; a dirty `computed`
-    /// runs its body (and, transitively, any dirty computeds it reads), memoizing as it goes. The graph
-    /// is cloned out as an `Rc` first so its `&self` `read` can borrow it while the callback borrows
-    /// `self` for `call_value` (different objects, no aliasing). The returned [`GcVal`] owns one
-    /// reference (a signal's cloned content or a computed's fresh/memoized value); the caller transfers
-    /// it into a register via [`into_value`](GcVal::into_value). A body that aborts is captured
-    /// deterministically — the first abort stops further recomputes and propagates.
-    fn read_reactive(&mut self, node: noeta_reactive::NodeId, span: Span) -> Result<Value, Abort> {
-        let graph = Rc::clone(&self.reactive);
-        let mut aborted = false;
-        let result = graph.read(node, &mut |body: GcVal| -> GcVal {
-            if aborted {
-                return GcVal::owned(Value::unit());
-            }
-            // `body` owns the reference the graph cloned for this recompute; `call_value` only borrows
-            // the callee, so peek with `.get()` and let `body` drop (releasing it) at closure end.
-            match self.call_value(body.get(), Vec::new(), span) {
-                Ok(value) => GcVal::owned(value),
-                Err(Abort) => {
-                    aborted = true;
-                    GcVal::owned(Value::unit())
-                }
-            }
-        });
-        if aborted {
-            // `result` owns the placeholder unit reference from the aborted run; drop releases it.
-            drop(result);
-            Err(Abort)
-        } else {
-            Ok(result.into_value())
-        }
-    }
-
-    /// Run the reactive graph's pending effects to a fixpoint (reactivity S2), invoking each effect
-    /// body through [`call_value`](Self::call_value). Called after any `signal.set`/`.update` and on
-    /// `effect(...)` creation. The graph is cloned out as an `Rc` first so its `&self` `flush` can
-    /// borrow it while the run callback borrows `self` for `call_value` (different objects, no
-    /// aliasing). An effect body that aborts (a panic or `?`) is captured deterministically: the first
-    /// abort by flush order stops further bodies (subsequent runs no-op) and propagates — identically
-    /// on both backends, since the flush order is a pure function of the graph.
-    fn drive_flush(&mut self, span: Span) -> Result<(), Abort> {
-        let graph = Rc::clone(&self.reactive);
-        let mut aborted = false;
-        let overflowed = graph
-            .flush(&mut |body: GcVal| -> GcVal {
-                if aborted {
-                    return GcVal::owned(Value::unit());
-                }
-                // `body` owns the reference the graph cloned for this run. `call_value` only *borrows*
-                // the callee (it does not release it), so peek with `.get()` and let `body` drop —
-                // releasing that reference — when this closure returns. The stored body keeps its own.
-                match self.call_value(body.get(), Vec::new(), span) {
-                    Ok(result) => GcVal::owned(result),
-                    Err(Abort) => {
-                        aborted = true;
-                        GcVal::owned(Value::unit())
-                    }
-                }
-            })
-            .is_err();
-        // A body-driven abort (panic / `?`) takes priority — propagate it as itself. Otherwise, a
-        // non-converging flush (a self-reinforcing effect) becomes the reactive-cycle runtime error.
-        if aborted {
-            return Err(Abort);
-        }
-        if overflowed {
-            return Err(self.error(
-                DiagnosticCode::ReactiveCycle,
-                span,
-                format!(
-                    "reactive update did not converge after {} steps — an effect keeps changing a \
-                     signal it depends on",
-                    noeta_reactive::MAX_FLUSH_STEPS
-                ),
-            ));
-        }
-        Ok(())
     }
 
     /// Run a defaulted parameter's zero-argument thunk prototype to its value, on a fresh frame
@@ -7444,417 +7345,11 @@ impl<'m> Vm<'m> {
                     Err(self.error(DiagnosticCode::Panic, span, message))
                 }
             }
-            // `sleep(ms)` — a leaf timer future (Track A.2), ready once the executor clock reaches
-            // `now + ms`. Mirrors the tree-walker's `Builtin::Sleep`: the deadline is fixed at
-            // creation from the current logical clock. A non-int or negative `ms` is a `TypeMismatch`.
-            Builtin::Sleep => {
-                self.check_arity(builtin, args, 1, span)?;
-                let Some(ms) = args[0].as_int() else {
-                    return Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!("`sleep` expects an int (ms), found {}", args[0].display()),
-                    ));
-                };
-                if ms < 0 {
-                    return Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!("`sleep` expects a non-negative duration, found {ms}"),
-                    ));
-                }
-                Ok(Value::make_timer(self.executor.now() + ms as u64))
-            }
-            // `all(list)` — await every future concurrently, returning a `List<T>` of results in order
-            // (Track A.9). Drives the scheduler until each element is ready, collecting its (retained)
-            // result; the collected list is a fresh owned value.
-            Builtin::All => {
-                self.check_arity(builtin, args, 1, span)?;
-                if !args[0].is_list() {
-                    return Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`all` expects a list of futures, found {}",
-                            args[0].type_name()
-                        ),
-                    ));
-                }
-                let list = args[0];
-                let n = list.list_len().expect("a list has a length");
-                let mut results: Vec<Option<Value>> = vec![None; n];
-                loop {
-                    let wake_gen = isolate::WAKE.generation();
-                    let mut i = 0;
-                    while i < n {
-                        if results[i].is_none() {
-                            let h = list.list_get(i).expect("in bounds");
-                            if let Poll::Ready(v) = self.poll_once(h, span)? {
-                                results[i] = Some(v);
-                            }
-                        }
-                        i += 1;
-                    }
-                    if results.iter().all(Option::is_some) {
-                        let items = results.into_iter().map(|r| r.expect("all ready")).collect();
-                        return Ok(Value::list(items));
-                    }
-                    let progressed = self.poll_all_scopes_round(span)?;
-                    if !progressed
-                        && self.executor.advance().is_none()
-                        && !self.isolate_in_flight_wait(wake_gen)
-                    {
-                        for v in results.into_iter().flatten() {
-                            release(v);
-                        }
-                        return Err(self.error(
-                            DiagnosticCode::Panic,
-                            span,
-                            "async deadlock: `all` awaited futures with no pending timers"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-            // `race(list)` — await concurrently, returning the first ready result and cancelling the
-            // losing tasks (Track A.9 + A.8). Ties break deterministically by list order, so both
-            // backends agree.
-            Builtin::Race => {
-                self.check_arity(builtin, args, 1, span)?;
-                if !args[0].is_list() {
-                    return Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`race` expects a list of futures, found {}",
-                            args[0].type_name()
-                        ),
-                    ));
-                }
-                let list = args[0];
-                let n = list.list_len().expect("a list has a length");
-                if n == 0 {
-                    return Err(self.error(
-                        DiagnosticCode::Panic,
-                        span,
-                        "`race` requires at least one future".to_string(),
-                    ));
-                }
-                loop {
-                    let wake_gen = isolate::WAKE.generation();
-                    for i in 0..n {
-                        let h = list.list_get(i).expect("in bounds");
-                        if let Poll::Ready(v) = self.poll_once(h, span)? {
-                            for j in 0..n {
-                                if j != i {
-                                    let hj = list.list_get(j).expect("in bounds");
-                                    self.cancel_task(hj);
-                                }
-                            }
-                            return Ok(v);
-                        }
-                    }
-                    let progressed = self.poll_all_scopes_round(span)?;
-                    if !progressed
-                        && self.executor.advance().is_none()
-                        && !self.isolate_in_flight_wait(wake_gen)
-                    {
-                        return Err(self.error(
-                            DiagnosticCode::Panic,
-                            span,
-                            "async deadlock: `race` awaited futures with no pending timers"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-            // `map_bounded(items, n, f)` — apply async `f` to each item with at most `n` futures in
-            // flight, collecting results in item order (Track A.9). Keeps a sliding window: fill up to
-            // `n`, poll them (each first poll starts f's body), collect completions and top the window
-            // back up. Also drives any open `concurrent` scope so it composes with A.7.
-            Builtin::MapBounded => {
-                self.check_arity(builtin, args, 3, span)?;
-                if !args[0].is_list() {
-                    return Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`map_bounded` expects a list, found {}",
-                            args[0].type_name()
-                        ),
-                    ));
-                }
-                let Some(limit) = args[1].as_int() else {
-                    return Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`map_bounded` expects an int concurrency limit, found {}",
-                            args[1].type_name()
-                        ),
-                    ));
-                };
-                let items = args[0];
-                let f = args[2];
-                let window = limit.max(1) as usize;
-                let count = items.list_len().expect("a list has a length");
-                let mut results: Vec<Option<Value>> = vec![None; count];
-                let mut in_flight: Vec<(usize, Value)> = Vec::new();
-                let mut next = 0usize;
-                let mut done = 0usize;
-                // Release everything owned so far, for the early-exit paths.
-                macro_rules! cleanup {
-                    ($in_flight:expr, $results:expr) => {{
-                        for (_, fut) in $in_flight {
-                            release(fut);
-                        }
-                        for v in $results.into_iter().flatten() {
-                            release(v);
-                        }
-                    }};
-                }
-                loop {
-                    let wake_gen = isolate::WAKE.generation();
-                    while in_flight.len() < window && next < count {
-                        let item = items.list_get(next).expect("in bounds");
-                        retain(item);
-                        match self.call_value(f, vec![item], span) {
-                            Ok(fut) => in_flight.push((next, fut)),
-                            Err(abort) => {
-                                cleanup!(in_flight, results);
-                                return Err(abort);
-                            }
-                        }
-                        next += 1;
-                    }
-                    if done == count {
-                        let out = results.into_iter().map(|r| r.expect("all done")).collect();
-                        return Ok(Value::list(out));
-                    }
-                    let mut progressed = false;
-                    let mut k = 0;
-                    while k < in_flight.len() {
-                        let (idx, fut) = in_flight[k];
-                        match self.poll_once(fut, span) {
-                            Ok(Poll::Ready(v)) => {
-                                results[idx] = Some(v);
-                                release(fut);
-                                in_flight.remove(k);
-                                done += 1;
-                                progressed = true;
-                            }
-                            Ok(Poll::Pending) => k += 1,
-                            Err(abort) => {
-                                cleanup!(in_flight, results);
-                                return Err(abort);
-                            }
-                        }
-                    }
-                    if !self.scopes.is_empty() {
-                        progressed |= self.poll_all_scopes_round(span)?;
-                    }
-                    if !progressed
-                        && self.executor.advance().is_none()
-                        && !self.isolate_in_flight_wait(wake_gen)
-                    {
-                        cleanup!(in_flight, results);
-                        return Err(self.error(
-                            DiagnosticCode::Panic,
-                            span,
-                            "async deadlock: `map_bounded` stalled with no pending timers"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-            // `http.serve(port, handler)` — the inbound accept→dispatch→reply loop (http-server S3).
-            // **Concurrent (S3b):** each accepted connection's `handler(request)` is a task in a
-            // server-owned in-flight set the loop reaps; a slow (async) handler yields at its awaits
-            // while the next connection is accepted and other handlers advance — the cooperative Tier-1
-            // model (the accept future is polled alongside the handler futures each round, never
-            // drive-to-completion). Under the sandbox the accept leaf drives a finite request script
-            // and reports the listener closed, so the loop terminates in-oracle. The tree-walker mirror
-            // is its own `Builtin::Serve`; both poll in the identical order, so the interleaving is
-            // deterministic and agrees. RC: `make_async_io` allocates a heap ticket and `poll_once`
-            // retains a non-future pass-through, so every future is released after it resolves, exactly
-            // as `Op::RunFuture` does.
-            Builtin::Serve => {
-                self.check_arity(builtin, args, 2, span)?;
-                let Some(port) = args[0].as_int() else {
-                    return Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`http.serve` expects an int port, found {}",
-                            args[0].type_name()
-                        ),
-                    ));
-                };
-                let handler = args[1];
-                let addr = format!("0.0.0.0:{port}");
-                let listener = self
-                    .host
-                    .net_listen(&addr)
-                    .map_err(|e| self.error(stdlib_error_code(e.kind), span, e.message))?;
-                let server_error = || noeta_stdlib::NetResponse {
-                    status: 500,
-                    headers: Vec::new(),
-                    body: b"Internal Server Error".to_vec(),
-                };
-                // Reply on `conn` — an async leaf, driven to completion (a write is quick).
-                macro_rules! reply {
-                    ($conn:expr, $resp:expr) => {{
-                        let reply_io = self.host.net_reply($conn, $resp);
-                        let reply_id = self.executor.spawn_ext(&mut *self.host, reply_io);
-                        let reply_future = Value::make_async_io(reply_id);
-                        let unit = self.drive_future(reply_future, span)?;
-                        self.release_value(reply_future);
-                        release(unit);
-                    }};
-                }
-                let mut in_flight: Vec<(u64, Value)> = Vec::new();
-                let mut accept_future: Option<Value> = None;
-                let mut closing = false;
-                loop {
-                    // Keep one accept in flight while the listener is open.
-                    if !closing && accept_future.is_none() {
-                        let accept_io = self.host.net_accept(listener);
-                        let id = self.executor.spawn_ext(&mut *self.host, accept_io);
-                        accept_future = Some(Value::make_async_io(id));
-                    }
-                    let mut progressed = false;
-                    // Poll the pending accept; on a connection, spawn its handler task.
-                    if let Some(af) = accept_future.take() {
-                        match self.poll_once(af, span) {
-                            Ok(Poll::Ready(accepted)) => {
-                                self.release_value(af);
-                                progressed = true;
-                                let is_some = accepted
-                                    .shape()
-                                    .map(|s| {
-                                        s.name == "Option" && s.variant.as_deref() == Some("some")
-                                    })
-                                    .unwrap_or(false);
-                                if is_some {
-                                    // `Request` payload is shared by `enum_data`; keep it past
-                                    // releasing the `Option` enum that carried it.
-                                    let request = accepted
-                                        .enum_data()
-                                        .and_then(|d| d.into_iter().next())
-                                        .expect("some carries the request");
-                                    retain(request);
-                                    release(accepted);
-                                    let conn = if request.is_extern() {
-                                        request.with_extern(|e| {
-                                            e.as_any()
-                                                .downcast_ref::<noeta_stdlib::net::Request>()
-                                                .map(|r| r.conn)
-                                        })
-                                    } else {
-                                        None
-                                    }
-                                    .expect("accept yields a Request extern value");
-                                    // Spawn the handler (consumes the request reference). A sync handler
-                                    // returns the `Response`; an async one a `Future` polled below. A
-                                    // call-time error → 500 now.
-                                    match self.call_value(handler, vec![request], span) {
-                                        Ok(fut) => in_flight.push((conn, fut)),
-                                        Err(_) => reply!(conn, server_error()),
-                                    }
-                                } else {
-                                    // `none` → the listener closed; stop accepting and drain.
-                                    release(accepted);
-                                    closing = true;
-                                }
-                            }
-                            Ok(Poll::Pending) => accept_future = Some(af),
-                            Err(abort) => {
-                                self.release_value(af);
-                                return Err(abort);
-                            }
-                        }
-                    }
-                    // Reap: poll each in-flight handler; reply on completion, 500 on error.
-                    let mut k = 0;
-                    while k < in_flight.len() {
-                        let (conn, fut) = in_flight[k];
-                        let done = match self.poll_once(fut, span) {
-                            Ok(Poll::Ready(value)) => {
-                                // The future is spent; release it (as `Op::RunFuture` does).
-                                self.release_value(fut);
-                                let response = if value.is_extern() {
-                                    value
-                                        .with_extern(|e| {
-                                            e.as_any()
-                                                .downcast_ref::<noeta_stdlib::NetResponse>()
-                                                .cloned()
-                                        })
-                                        .unwrap_or_else(server_error)
-                                } else {
-                                    server_error()
-                                };
-                                release(value);
-                                reply!(conn, response);
-                                true
-                            }
-                            Ok(Poll::Pending) => false,
-                            Err(_) => {
-                                self.release_value(fut);
-                                reply!(conn, server_error());
-                                true
-                            }
-                        };
-                        if done {
-                            in_flight.remove(k);
-                            progressed = true;
-                        } else {
-                            k += 1;
-                        }
-                    }
-                    // Done when the listener closed and every handler has replied.
-                    if closing && in_flight.is_empty() && accept_future.is_none() {
-                        break;
-                    }
-                    // Let a handler's own `concurrent` tasks advance, then advance the clock if stalled.
-                    if !self.scopes.is_empty() {
-                        progressed |= self.poll_all_scopes_round(span)?;
-                    }
-                    if !progressed && self.executor.advance().is_none() {
-                        return Err(self.error(
-                            DiagnosticCode::Panic,
-                            span,
-                            "async deadlock: `http.serve` stalled with no pending work".to_string(),
-                        ));
-                    }
-                }
-                Ok(Value::unit())
-            }
-            Builtin::Signal => {
-                self.check_arity(builtin, args, 1, span)?;
-                // `signal(v)` — allocate a reactive cell holding `v`. The graph keeps its own
-                // (retained) reference; the register's reference is released by the caller as usual.
-                let id = self.reactive.signal(GcVal::retained(args[0]));
-                Ok(Value::make_reactive(NodeKind::Signal, id))
-            }
-            Builtin::Computed => {
-                self.check_arity(builtin, args, 1, span)?;
-                // `computed(fn)` — register a lazy derivation, retaining the body closure. Created dirty;
-                // it computes on first `.get()`, so nothing runs now (no flush).
-                let id = self.reactive.computed(GcVal::retained(args[0]));
-                Ok(Value::make_reactive(NodeKind::Computed, id))
-            }
-            Builtin::Effect => {
-                self.check_arity(builtin, args, 1, span)?;
-                // `effect(fn)` — register the effect (created queued), retaining the body closure, then
-                // flush to run it once now (subscribing it to the signals it reads). If we are already
-                // inside a flush (an effect created within another effect's body), the ongoing flush
-                // drains it — do not nest. (reactivity S4)
-                let id = self.reactive.effect(GcVal::retained(args[0]));
-                if !self.reactive.is_flushing() {
-                    self.drive_flush(span)?;
-                }
-                Ok(Value::make_reactive(NodeKind::Effect, id))
-            }
+            // (The whole `Builtin` orchestration family — `task` at higher-order-abi H0/H2,
+            // `http.serve` at H3, `signal`/`computed`/`effect` at H5 — migrated to the
+            // registry's `NativeCtx` dispatch: `noeta-stdlib/src/{task,serve,reactive}.rs`,
+            // reached via `call_ctx_function`/`call_ctx_type_method`. Only the language-level
+            // collection builtins and `assert` remain here.)
         }
     }
 

@@ -9,6 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod command;
+pub mod ctx;
 pub mod executor;
 pub mod extern_value;
 pub mod host;
@@ -16,14 +18,18 @@ pub mod map_key;
 pub mod net;
 pub mod registry;
 
+pub use command::{ArgKind, ArgSpec, CommandCtx, EntryArg, EntryCall, ExtCommand, ParsedArgs};
+pub use ctx::{
+    ctx_arity, CtxDispatch, CtxError, CtxOut, CtxResult, ExtState, NativeCtx, Retained, Slot,
+};
 pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};
 pub use host::{Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, ReadSource, Rng};
 pub use map_key::{ExternKeyRef, MapKey};
 pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
 pub use registry::{
-    ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut, NativeValue, RetTy, Scalar,
-    SigType, TypeDispatch, TypeRecipe,
+    ArenaGetter, CtxTypeDispatch, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut,
+    NativeValue, RetTy, Scalar, SigType, TypeDispatch, TypeRecipe,
 };
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the
@@ -64,6 +70,14 @@ pub enum ErrorKind {
     UnknownName,
     /// A Ring 2 IO operation failed (e.g. reading a path absent from the sandbox).
     Io,
+    /// An unrecoverable runtime condition a dispatch raises deliberately (higher-order-abi H2) —
+    /// an async deadlock, an empty `race`. Maps onto the language's panic diagnostic, exactly as
+    /// the hand-written `Builtin` arms it replaces reported.
+    Panic,
+    /// A native-driven callback fixpoint failed to converge (higher-order-abi H5) — the reactive
+    /// flush's runaway guard (an effect that keeps changing a signal it depends on). Maps onto
+    /// the language's reactive-cycle diagnostic (E0045).
+    ReactiveCycle,
 }
 
 /// A stdlib misuse error. The `message` is rendered here so both backends report it
@@ -257,6 +271,16 @@ pub fn no_function_error(module: &str, func: &str) -> StdError {
     StdError {
         kind: ErrorKind::UnknownName,
         message: format!("module `{module}` has no function `{func}`"),
+    }
+}
+
+/// Build a deliberate panic (→ the language's panic diagnostic) with a message the dispatch
+/// renders in full — deadlocks, an empty `race`, and the other unrecoverable conditions the
+/// migrated `Builtin` arms reported as panics (higher-order-abi H2).
+pub fn panic_error(message: impl Into<String>) -> StdError {
+    StdError {
+        kind: ErrorKind::Panic,
+        message: message.into(),
     }
 }
 

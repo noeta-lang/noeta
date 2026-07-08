@@ -11,6 +11,45 @@ use noeta_value::Value;
 
 use crate::*;
 
+/// The per-call-site routing decision for a method on an extern receiver (H5 perf), cached in
+/// `Op::CallMethod`'s route cache keyed by the extern type's interned name pointer.
+#[derive(Clone, Copy)]
+pub(crate) enum ExternRoute {
+    /// A declared arena read ([`noeta_stdlib::ExtType`]`::arena_getter`): inline to an arena
+    /// load while the type's gate is open; the full ctx dispatch while closed.
+    FastRead {
+        type_name: &'static str,
+        project: fn(&dyn noeta_stdlib::ExternValue) -> u32,
+    },
+    /// A ctx-table method — straight to the type's ctx dispatch.
+    Ctx { type_name: &'static str },
+    /// The plain by-value dispatch (including unknown methods — the shared error path).
+    Plain,
+}
+
+/// Resolve the route for `method` on the extern type `type_name` — the uncached registry walk a
+/// route-cache miss performs.
+#[cold]
+pub(crate) fn resolve_extern_route(type_name: &str, method: &str) -> ExternRoute {
+    let Some(ext) = noeta_stdlib::registry::find_type(type_name) else {
+        return ExternRoute::Plain;
+    };
+    if let Some((getter, project)) = ext.arena_getter
+        && getter == method
+    {
+        return ExternRoute::FastRead {
+            type_name: ext.name,
+            project,
+        };
+    }
+    if ext.ctx_methods.iter().any(|m| m.name == method) {
+        return ExternRoute::Ctx {
+            type_name: ext.name,
+        };
+    }
+    ExternRoute::Plain
+}
+
 impl<'m> Vm<'m> {
     /// A Ring 1 list method (`reverse`/`contains`/`join`). Mirrors the tree-walker's
     /// `call_list_method`; the result is a freshly-owned value (refcount 1). The receiver's
@@ -332,30 +371,9 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
-        // A virtual module's functions (`reactive.signal(...)`, prelude-redesign P2) are builtins —
-        // they need the executor/reactive graph the registry seam cannot reach — so a qualified call
-        // intercepts here, ahead of registry dispatch, exactly like `fs.*_async`. The tree-walker
-        // mirrors this in its own `call_native_module`.
-        if noeta_stdlib::registry::is_virtual_module(module) {
-            let Some(builtin) = noeta_stdlib::registry::virtual_module_function(module, func)
-                .then(|| Builtin::from_name(func))
-                .flatten()
-            else {
-                return Err(self.error(
-                    DiagnosticCode::UnknownName,
-                    span,
-                    format!("module `{module}` has no function `{func}`"),
-                ));
-            };
-            return self.call_builtin(builtin, args, span);
-        }
-        // `http.serve(port, handler)` (http-server S3) — a builtin, not a registry function: the
-        // handler is a closure (which the `NativeValue` seam cannot carry) and the loop needs the
-        // executor + inbound Network capability. Intercept it ahead of `http`'s registry functions
-        // (which stay registry-dispatched). The tree-walker mirrors this.
-        if module == "http" && func == "serve" {
-            return self.call_builtin(Builtin::Serve, args, span);
-        }
+        // (The virtual-module intercept died with higher-order-abi H5: `task` migrated at H0/H2,
+        // `http.serve` at H3, and `reactive` — the last virtual module — at H5. Every std module
+        // now dispatches through the registry arms below.)
         // A function registered in the native-extension registry dispatches through the shared
         // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host
         // threaded in), and materialize the `NativeOut` result (the result shape supplied from the
@@ -381,6 +399,13 @@ impl<'m> Vm<'m> {
                 Ok(out) => Ok(materialize_ext(out, sig.ret, args)),
                 Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
             };
+        }
+        // A registered **higher-order** function (higher-order-abi H0) dispatches through the
+        // `NativeCtx` seam: opaque slots + backend re-entry instead of marshalled values. Checked
+        // after the plain table — plain functions vastly outnumber ctx ones, and the two name
+        // sets are disjoint, so order is behavior-neutral and keeps the common path lean.
+        if noeta_stdlib::registry::find_ctx_function(module, func).is_some() {
+            return self.call_ctx_function(module, func, args, span);
         }
         // `vec`'s bulk `*_all` kernels are the only unmigrated native functions and stay per-backend;
         // every other reachable name is registered, so anything else here is an unknown function.
@@ -659,6 +684,10 @@ impl<'m> Vm<'m> {
     /// [`noeta_stdlib::ExtType`]'s shared dispatch — project the arguments, run the one shared
     /// body (host threaded in, receiver `&mut`), materialize the result. Mirrors the
     /// tree-walker's `call_extern_method`, so the two backends agree by construction.
+    ///
+    /// (The `Op::CallMethod` handler short-circuits extern receivers through the per-site route
+    /// cache before reaching this chain — H5 perf; this entry stays for the non-op paths and
+    /// resolves the same [`ExternRoute`] decisions uncached.)
     pub(crate) fn call_extern_method(
         &mut self,
         recv: Value,
@@ -666,6 +695,39 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
+        // ONE heap access + ONE registry lookup resolves everything the routing below needs
+        // (H5 perf): the type entry, and — for a declared **gated arena read**
+        // (`ExtType::arena_getter`) — the projected retained id.
+        let (ext, fast_read) = recv.with_extern(|e| {
+            let ext = noeta_stdlib::registry::find_type(e.type_name());
+            let fast = ext.and_then(|t| {
+                let (getter, project) = t.arena_getter?;
+                (getter == method).then(|| project(e))
+            });
+            (ext, fast)
+        });
+        // The fast read: while the type's read gate is open — the overwhelmingly common state —
+        // the whole call is an arena load + retain, no ctx machinery, which is what keeps a
+        // `get()` hot loop at intercept speed.
+        if let Some(retained) = fast_read
+            && args.is_empty()
+            && (self.ext_closed_gates.is_empty()
+                || !self
+                    .ext_closed_gates
+                    .contains(&ext.expect("fast read implies a type").name))
+        {
+            let value = self.ext_arena[retained as usize].expect("a live arena entry");
+            retain(value);
+            return Ok(value);
+        }
+        // A type's **higher-order** methods (higher-order-abi H4) route through the ctx seam —
+        // they call closures back and reach the retained arena, which the plain by-value
+        // dispatch below cannot. Name sets are disjoint, so routing is per-method.
+        if let Some(ext) = ext
+            && ext.ctx_methods.iter().any(|m| m.name == method)
+        {
+            return self.call_ctx_type_method(ext.name, recv, method, args, span);
+        }
         let nargs: Vec<noeta_stdlib::NativeValue> =
             args.iter().map(|a| marshal_native_arg(*a)).collect();
         let host = &mut *self.host;

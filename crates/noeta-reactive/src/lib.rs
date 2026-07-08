@@ -181,6 +181,15 @@ struct Inner<V> {
     /// subscribe. A stack (not a single slot) because reading a dirty `computed` inside another
     /// node's body recomputes it, nesting a frame.
     computing: Vec<NodeId>,
+    /// How many live `Computed` nodes are currently dirty (H5): maintained on every clean↔dirty
+    /// transition so a client can gate a memo-read fast path on "no memo anywhere is stale"
+    /// without scanning.
+    dirty_computeds: usize,
+    /// Scratch buffers (H5 perf): the flush swaps `round_scratch` with the queue each round and
+    /// the dirty walk reuses `dirty_scratch` as its worklist, so a 1M-set hot loop performs no
+    /// per-cycle allocations in here.
+    round_scratch: Vec<NodeId>,
+    dirty_scratch: Vec<NodeId>,
     /// Effects dirtied since the last flush, awaiting a run. Drained (and sorted for determinism) per
     /// flush round.
     queue: Vec<NodeId>,
@@ -237,39 +246,58 @@ impl<V> Inner<V> {
     fn end_compute(&mut self, node: NodeId, result: Option<V>) {
         let popped = self.computing.pop();
         debug_assert_eq!(popped, Some(node), "unbalanced begin/end_compute");
-        let n = &mut self.nodes[node.index()];
-        if n.kind == NodeKind::Computed {
-            n.content = result;
+        let was_dirty_computed = {
+            let n = &mut self.nodes[node.index()];
+            let was = n.kind == NodeKind::Computed && n.dirty;
+            if n.kind == NodeKind::Computed {
+                n.content = result;
+            }
+            n.dirty = false;
+            was
+        };
+        if was_dirty_computed {
+            self.dirty_computeds -= 1;
         }
-        n.dirty = false;
     }
 
     /// Propagate a change out of `node`: dirty every dependent `computed` (lazily — mark, do not run)
     /// and queue every dependent `effect`. The `dirty`/`queued` guards make this walk visit each
     /// transitively-affected node once, so a diamond enqueues its sink effect a single time.
     fn mark_dirty_subscribers(&mut self, node: NodeId) {
-        let subscribers = self.nodes[node.index()].subscribers.clone();
-        for sub in subscribers {
-            let n = &mut self.nodes[sub.index()];
-            match n.kind {
-                NodeKind::Computed => {
-                    if !n.dirty {
-                        n.dirty = true;
-                        self.mark_dirty_subscribers(sub);
+        // An explicit worklist over indexed reads (no subscriber-vec clone, no recursion): the
+        // visit ORDER differs from the old depth-first recursion, but the visited SET is
+        // identical (the dirty/queued guards dedupe), and the flush sorts each round — so
+        // effect execution order is unchanged. Alloc-free via the reused scratch.
+        let mut work = std::mem::take(&mut self.dirty_scratch);
+        work.clear();
+        work.push(node);
+        while let Some(current) = work.pop() {
+            let sub_count = self.nodes[current.index()].subscribers.len();
+            for i in 0..sub_count {
+                let sub = self.nodes[current.index()].subscribers[i];
+                let n = &mut self.nodes[sub.index()];
+                match n.kind {
+                    NodeKind::Computed => {
+                        if !n.dirty {
+                            n.dirty = true;
+                            self.dirty_computeds += 1;
+                            work.push(sub);
+                        }
                     }
-                }
-                NodeKind::Effect => {
-                    if !n.queued {
-                        n.queued = true;
-                        n.dirty = true;
-                        self.queue.push(sub);
+                    NodeKind::Effect => {
+                        if !n.queued {
+                            n.queued = true;
+                            n.dirty = true;
+                            self.queue.push(sub);
+                        }
                     }
-                }
-                NodeKind::Signal => {
-                    debug_assert!(false, "a signal cannot be a subscriber (it has no sources)");
+                    NodeKind::Signal => {
+                        debug_assert!(false, "a signal cannot be a subscriber (it has no sources)");
+                    }
                 }
             }
         }
+        self.dirty_scratch = work;
     }
 }
 
@@ -308,6 +336,9 @@ impl<V: Clone> ReactiveGraph<V> {
                 nodes: Vec::new(),
                 free: Vec::new(),
                 computing: Vec::new(),
+                dirty_computeds: 0,
+                round_scratch: Vec::new(),
+                dirty_scratch: Vec::new(),
                 queue: Vec::new(),
                 flushing: false,
             }),
@@ -347,6 +378,7 @@ impl<V: Clone> ReactiveGraph<V> {
         node.live = true;
         node.dirty = true;
         node.body = Some(body);
+        inner.dirty_computeds += 1;
         Self::alloc(&mut inner, node)
     }
 
@@ -452,6 +484,16 @@ impl<V: Clone> ReactiveGraph<V> {
         inner.mark_dirty_subscribers(node);
     }
 
+    /// Signal that `node`'s value changed **without replacing its stored `V`** — dirtying and
+    /// queuing exactly as [`set`](Self::set) does. For a client whose `V` is a stable *handle* to
+    /// externally-stored content (the higher-order-abi extension stores arena-cell ids and
+    /// updates the cell in place, H5): the handle never changes, only the content behind it.
+    pub fn touch(&self, node: NodeId) {
+        let mut inner = self.inner.borrow_mut();
+        debug_assert!(inner.nodes[node.index()].live, "touch of a disposed node");
+        inner.mark_dirty_subscribers(node);
+    }
+
     /// Run all queued effects to a fixpoint. Each round drains the queue in ascending [`NodeId`] order
     /// (the determinism guarantee), runs each effect's body via `run`, and repeats if running them
     /// queued more (an effect that `set`s a signal — its set enqueues into *this* flush rather than
@@ -474,16 +516,21 @@ impl<V: Clone> ReactiveGraph<V> {
     fn flush_loop(&self, run: &mut dyn FnMut(V) -> V) -> Result<(), FlushOverflow> {
         let mut steps: u32 = 0;
         loop {
-            // Drain this round's queue under a transient borrow, sorted for a deterministic order.
+            // Drain this round's queue under a transient borrow, sorted for a deterministic
+            // order. The round buffer is swapped with a reused scratch (both keep their
+            // capacity), so a hot set→flush loop allocates nothing here.
             let mut round: Vec<NodeId> = {
                 let mut inner = self.inner.borrow_mut();
                 if inner.queue.is_empty() {
                     return Ok(());
                 }
-                std::mem::take(&mut inner.queue)
+                let mut scratch = std::mem::take(&mut inner.round_scratch);
+                scratch.clear();
+                std::mem::swap(&mut scratch, &mut inner.queue);
+                scratch
             };
             round.sort_unstable();
-            for effect in round {
+            for &effect in &round {
                 // Clear queued/get body under a transient borrow; skip if disposed mid-flush.
                 let body = {
                     let mut inner = self.inner.borrow_mut();
@@ -505,6 +552,8 @@ impl<V: Clone> ReactiveGraph<V> {
                     return Err(FlushOverflow);
                 }
             }
+            // Hand the round buffer's capacity back for the next round/flush.
+            self.inner.borrow_mut().round_scratch = round;
         }
     }
 
@@ -549,6 +598,12 @@ impl<V: Clone> ReactiveGraph<V> {
             }
         }
         // Drop values, clear flags, mark the slot free.
+        {
+            let n = &inner.nodes[node.index()];
+            if n.kind == NodeKind::Computed && n.dirty {
+                inner.dirty_computeds -= 1;
+            }
+        }
         let n = &mut inner.nodes[node.index()];
         n.live = false;
         n.dirty = false;
@@ -590,6 +645,9 @@ impl<V: Clone> ReactiveGraph<V> {
         inner.free.clear();
         inner.computing.clear();
         inner.queue.clear();
+        inner.dirty_computeds = 0;
+        inner.round_scratch.clear();
+        inner.dirty_scratch.clear();
     }
 
     /// The number of live nodes — for the leak assertion in tests (create N, dispose N, expect 0).
@@ -601,6 +659,18 @@ impl<V: Clone> ReactiveGraph<V> {
     /// The kind of `node` (test/introspection helper).
     pub fn kind(&self, node: NodeId) -> NodeKind {
         self.inner.borrow().nodes[node.index()].kind
+    }
+
+    /// Whether some node is currently (re)computing — a dependency read right now would record an
+    /// edge (H5): a client's inlined-read fast path must be OFF while this is true.
+    pub fn tracking(&self) -> bool {
+        !self.inner.borrow().computing.is_empty()
+    }
+
+    /// How many live `Computed` nodes are dirty (H5): a client's memo-read fast path must be OFF
+    /// while any memo is stale.
+    pub fn dirty_computed_count(&self) -> usize {
+        self.inner.borrow().dirty_computeds
     }
 }
 

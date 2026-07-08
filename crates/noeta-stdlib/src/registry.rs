@@ -32,6 +32,10 @@ impl Extension for StdExtension {
     fn types(&self) -> &'static [ExtType] {
         STD_TYPES
     }
+    fn commands(&self) -> &'static [noeta_native::ExtCommand] {
+        // `noeta serve` (higher-order-abi H6) — contributed here, not a core CLI verb.
+        &[crate::serve::SERVE_COMMAND]
+    }
 }
 
 /// Core's extern types: `Uuid` (X2 — pure, byte-ordered, key-capable) and `FileHandle` (X3 —
@@ -42,30 +46,77 @@ const STD_TYPES: &[ExtType] = &[
         methods: UUID_METHODS,
         dispatch: uuid_method_dispatch,
         key_capable: true,
+        ..ExtType::DEFAULTS
     },
     ExtType {
         name: "FileHandle",
         methods: FILE_HANDLE_METHODS,
         dispatch: file_handle_dispatch,
         key_capable: false,
+        ..ExtType::DEFAULTS
     },
     ExtType {
         name: crate::crypto::HASHER_TYPE_NAME,
         methods: HASHER_METHODS,
         dispatch: hasher_method_dispatch,
         key_capable: false, // `update` mutates — a hasher can never key a map
+        ..ExtType::DEFAULTS
     },
     ExtType {
         name: crate::net::RESPONSE_TYPE_NAME,
         methods: RESPONSE_METHODS,
         dispatch: response_method_dispatch,
         key_capable: false, // a response is not a map key
+        ..ExtType::DEFAULTS
     },
     ExtType {
         name: crate::net::REQUEST_TYPE_NAME,
         methods: REQUEST_METHODS,
         dispatch: request_method_dispatch,
         key_capable: false, // an inbound request is not a map key
+        ..ExtType::DEFAULTS
+    },
+    // `Cell<T>` (higher-order-abi H4) — the generic, Class-3 corner of the matrix: all methods
+    // higher-order (ctx table), the held value in the retained arena; `get` is a declared
+    // always-open arena read (H5), so the backend inlines it.
+    ExtType {
+        name: crate::cell::CELL_TYPE_NAME,
+        ctx_methods: crate::cell::CELL_CTX_METHODS,
+        // A shim closure picks the `dyn` instantiation of the generic dispatch (the fn-pointer
+        // table needs the higher-ranked trait-object lifetime a turbofish cannot name).
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::cell::cell_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        arena_getter: Some(crate::cell::CELL_ARENA_GETTER),
+        ..ExtType::DEFAULTS
+    },
+    // The reactive handles (higher-order-abi H5): generic extern types over the per-run graph
+    // state; `get` on both readable kinds is a declared arena read behind the extension's gate.
+    ExtType {
+        name: crate::reactive::SIGNAL_TYPE_NAME,
+        ctx_methods: crate::reactive::SIGNAL_CTX_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::reactive::signal_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        arena_getter: Some(crate::reactive::SIGNAL_ARENA_GETTER),
+        ..ExtType::DEFAULTS
+    },
+    ExtType {
+        name: crate::reactive::COMPUTED_TYPE_NAME,
+        ctx_methods: crate::reactive::COMPUTED_CTX_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::reactive::computed_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        arena_getter: Some(crate::reactive::COMPUTED_ARENA_GETTER),
+        ..ExtType::DEFAULTS
+    },
+    ExtType {
+        name: crate::reactive::EFFECT_TYPE_NAME,
+        ctx_methods: crate::reactive::EFFECT_CTX_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::reactive::effect_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        ..ExtType::DEFAULTS
     },
 ];
 
@@ -171,6 +222,41 @@ pub fn find_function(module: &str, func: &str) -> Option<&'static ExtFn> {
         .find(|f| f.name == func)
 }
 
+/// Find a registered **higher-order** function's signature (higher-order-abi H0) — the ctx-table
+/// twin of [`find_function`]. The backends route a matched name through the `NativeCtx` seam.
+pub fn find_ctx_function(module: &str, func: &str) -> Option<&'static ExtFn> {
+    find_module(module)?
+        .ctx_functions
+        .iter()
+        .find(|f| f.name == func)
+}
+
+/// A function's signature from **either** table — what the checker and name resolution consult
+/// (they don't care how a call dispatches, only that the name exists and what it types as).
+pub fn find_function_sig(module: &str, func: &str) -> Option<&'static ExtFn> {
+    find_function(module, func).or_else(|| find_ctx_function(module, func))
+}
+
+/// Dispatch a registered higher-order function through the module's [`crate::CtxDispatch`]
+/// (higher-order-abi H0). Mirrors [`dispatch`] for the ctx table.
+pub fn dispatch_ctx(
+    module: &str,
+    func: &str,
+    ctx: &mut dyn crate::NativeCtx,
+    args: &[crate::Slot],
+) -> Result<crate::CtxOut, crate::CtxError> {
+    match find_module(module).and_then(|m| m.ctx_dispatch) {
+        Some(d) => d(func, ctx, args),
+        None => Err(no_function_error(module, func).into()),
+    }
+}
+
+/// Every extension-contributed CLI subcommand (higher-order-abi H6), for the CLI's dynamic
+/// wiring and its unmatched-name dispatch.
+pub fn commands() -> impl Iterator<Item = &'static noeta_native::ExtCommand> {
+    extensions().iter().flat_map(|e| e.commands())
+}
+
 /// Find a registered extern type by name (extern-types X1).
 pub fn find_type(name: &str) -> Option<&'static ExtType> {
     extensions()
@@ -185,6 +271,36 @@ pub fn find_type_method(type_name: &str, method: &str) -> Option<&'static ExtFn>
         .methods
         .iter()
         .find(|m| m.name == method)
+}
+
+/// Find a registered extern type's **higher-order** method signature (higher-order-abi H4) —
+/// methods that dispatch through the ctx seam ([`ExtType::ctx_dispatch`]).
+pub fn find_type_ctx_method(type_name: &str, method: &str) -> Option<&'static ExtFn> {
+    find_type(type_name)?
+        .ctx_methods
+        .iter()
+        .find(|m| m.name == method)
+}
+
+/// A type method's signature from **either** table — what the checker consults (it doesn't care
+/// how a call dispatches). The type-method twin of [`find_function_sig`].
+pub fn find_type_method_sig(type_name: &str, method: &str) -> Option<&'static ExtFn> {
+    find_type_method(type_name, method).or_else(|| find_type_ctx_method(type_name, method))
+}
+
+/// Route a **higher-order** method call to its type's ctx dispatch (higher-order-abi H4) — the
+/// type-method twin of [`dispatch_ctx`].
+pub fn dispatch_ctx_method(
+    type_name: &str,
+    method: &str,
+    ctx: &mut dyn crate::NativeCtx,
+    recv: crate::Slot,
+    args: &[crate::Slot],
+) -> Result<crate::CtxOut, crate::CtxError> {
+    match find_type(type_name).and_then(|t| t.ctx_dispatch) {
+        Some(d) => d(method, ctx, recv, args),
+        None => Err(crate::no_method_error(type_name, method).into()),
+    }
 }
 
 /// Dispatch a method on an extern receiver through its registered [`ExtType`]. Returns the
@@ -205,44 +321,19 @@ pub fn dispatch_method(
     (ext.dispatch)(recv, method, host, args)
 }
 
-/// The **virtual** std modules (prelude-redesign P2): importable module names whose functions are
-/// interpreter/VM *builtins* rather than registry natives — they need the executor or the reactive
-/// graph, which the registry seam (`ModuleDispatch` = value-in/value-out + `Host`) deliberately
-/// cannot reach. They gate name resolution only: a selective import (`use std.reactive.{signal}`)
-/// binds the named builtin as a first-class value, and a qualified call (`reactive.signal(0)`)
-/// intercepts in each backend's `call_native_module` *ahead of* registry dispatch — the same
-/// pattern `fs.*_async` uses.
-/// (`task` is named `task` rather than `async` because `async` is a keyword — `use std.async.…`
-/// would not parse; decided with the user at P2b.)
-/// (`id` was virtual at P2c; the id-entropy arc de-virtualized it — the counter moved into the
-/// Host's [`crate::host::Ids`] capability, so `next_id`/`uuid`/`uuid_v7` are ordinary registry
-/// functions and both backends share one dispatch.)
-pub const VIRTUAL_MODULES: &[(&str, &[&str])] = &[
-    ("reactive", &["signal", "computed", "effect"]),
-    ("task", &["sleep", "all", "race", "map_bounded"]),
-];
-
-/// Whether `name` is a virtual std module (importable, but not registry-backed).
-pub fn is_virtual_module(name: &str) -> bool {
-    VIRTUAL_MODULES.iter().any(|(m, _)| *m == name)
-}
-
-/// Whether `<module>.<func>` names a virtual-module builtin (`("reactive", "signal")` → true).
-pub fn virtual_module_function(module: &str, func: &str) -> bool {
-    VIRTUAL_MODULES
-        .iter()
-        .any(|(m, fns)| *m == module && fns.contains(&func))
-}
+// (The **virtual-module** mechanism — prelude-redesign P2's `VIRTUAL_MODULES` table, backend
+// `call_native_module` intercepts, and compiler `Builtin` bindings for selective imports — died
+// with higher-order-abi H5: `task` migrated at H0/H2, `http.serve` at H3, and `reactive`, the
+// last entry, at H5. Every std module is registry-backed now; the whole `Builtin` orchestration
+// family dispatches through the `NativeCtx` seam.)
 
 /// Whether `<module>.<func>` names a callable std-module function — the single predicate the
 /// checker and both backends share to decide what a selective member import (`use std.<mod>.<fn>`)
-/// binds, so all three agree by construction. Covers every registered function, the virtual-module
-/// builtins, plus the handful of non-registry ones that still dispatch through a per-backend
-/// fallback (the `vec` bulk `*_all` kernels and `fs.list`, both pending `vec`/`fs` refinements —
-/// see `noeta-check::stdlib`).
+/// binds, so all three agree by construction. Covers every registered function plus the handful
+/// of non-registry ones that still dispatch through a per-backend fallback (the `vec` bulk
+/// `*_all` kernels and `fs.list`, both pending `vec`/`fs` refinements — see `noeta-check::stdlib`).
 pub fn is_module_function(module: &str, func: &str) -> bool {
-    find_function(module, func).is_some()
-        || virtual_module_function(module, func)
+    find_function_sig(module, func).is_some()
         || matches!(
             (module, func),
             (
@@ -2019,30 +2110,35 @@ const STD_MODULES: &[ExtModule] = &[
         functions: MATH_FNS,
         dispatch: math_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "random",
         functions: RANDOM_FNS,
         dispatch: random_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "time",
         functions: TIME_FNS,
         dispatch: time_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "id",
         functions: ID_FNS,
         dispatch: id_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "crypto",
         functions: CRYPTO_FNS,
         dispatch: crypto_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "http",
@@ -2051,36 +2147,45 @@ const STD_MODULES: &[ExtModule] = &[
         // The optional `headers` argument is a `Map` — needs the deep marshalling that surfaces
         // it as `NativeValue::Map` (http arc H5). url/body strings project fine either way.
         deep_marshal: true,
+        // `serve` — the accept→dispatch→reply loop (higher-order-abi H3): a higher-order
+        // orchestrator (closure handler, many futures in flight), so it lives in the ctx table.
+        ctx_functions: crate::serve::HTTP_CTX_FNS,
+        ctx_dispatch: Some(crate::serve::http_ctx_dispatch),
     },
     ExtModule {
         name: "env",
         functions: ENV_FNS,
         dispatch: env_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "args",
         functions: ARGS_FNS,
         dispatch: args_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "fs",
         functions: FS_FNS,
         dispatch: fs_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "vec",
         functions: VEC_FNS,
         dispatch: vec_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "quat",
         functions: QUAT_FNS,
         dispatch: quat_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
     },
     ExtModule {
         name: "json",
@@ -2088,8 +2193,83 @@ const STD_MODULES: &[ExtModule] = &[
         dispatch: json_dispatch,
         // `json.stringify` introspects an arbitrary value, so its arguments are marshalled deeply.
         deep_marshal: true,
+        ..ExtModule::DEFAULTS
+    },
+    // The `task` concurrency module (higher-order-abi H0): its functions need the executor, so
+    // they live in the **ctx** table and dispatch through the `NativeCtx` seam. Migration is
+    // per-function — the names still in `VIRTUAL_MODULES` stay backend builtins until their phase.
+    ExtModule {
+        name: "task",
+        ctx_functions: crate::task::TASK_CTX_FNS,
+        ctx_dispatch: Some(crate::task::task_ctx_dispatch),
+        ..ExtModule::DEFAULTS
+    },
+    // `cell` (higher-order-abi H4) — the Class-3 proving module: `cell.new(v)` retains the value
+    // in the per-run arena and hands back a `Cell<T>` extern handle.
+    ExtModule {
+        name: "cell",
+        ctx_functions: crate::cell::CELL_CTX_FNS,
+        ctx_dispatch: Some(|func, ctx, args| crate::cell::cell_ctx_dispatch(func, ctx, args)),
+        ..ExtModule::DEFAULTS
+    },
+    // `reactive` (higher-order-abi H5) — the last virtual module, now fully registry-backed:
+    // creation retains the value/body into the arena and hands back a generic extern handle.
+    ExtModule {
+        name: "reactive",
+        ctx_functions: crate::reactive::REACTIVE_CTX_FNS,
+        ctx_dispatch: Some(|func, ctx, args| {
+            crate::reactive::reactive_ctx_dispatch(func, ctx, args)
+        }),
+        ..ExtModule::DEFAULTS
     },
 ];
+
+/// Compiled-in fast route for ctx **functions** (H5 perf): the same generic dispatch fns the
+/// dyn table stores, instantiated over the backend's **concrete** ctx so every small ctx op
+/// (arena read/write, slot bookkeeping, closure call) inlines — the Rust generics/dyn duality
+/// applied to the extension ABI. `None` = the module is not compiled in (a future
+/// dynamically-loaded extension); the caller falls back to the dyn table, which behaves
+/// identically, just without the inlining.
+#[inline]
+pub fn static_dispatch_ctx<C: crate::NativeCtx + ?Sized>(
+    module: &str,
+    func: &str,
+    ctx: &mut C,
+    args: &[crate::Slot],
+) -> Option<Result<crate::CtxOut, crate::CtxError>> {
+    match module {
+        "cell" => Some(crate::cell::cell_ctx_dispatch(func, ctx, args)),
+        "reactive" => Some(crate::reactive::reactive_ctx_dispatch(func, ctx, args)),
+        _ => None,
+    }
+}
+
+/// Compiled-in fast route for ctx **type methods** (H5 perf) — the type-method twin of
+/// [`static_dispatch_ctx`].
+#[inline]
+pub fn static_dispatch_ctx_method<C: crate::NativeCtx + ?Sized>(
+    type_name: &str,
+    method: &str,
+    ctx: &mut C,
+    recv: crate::Slot,
+    args: &[crate::Slot],
+) -> Option<Result<crate::CtxOut, crate::CtxError>> {
+    match type_name {
+        crate::cell::CELL_TYPE_NAME => Some(crate::cell::cell_ctx_method_dispatch(
+            method, ctx, recv, args,
+        )),
+        crate::reactive::SIGNAL_TYPE_NAME => Some(crate::reactive::signal_ctx_method_dispatch(
+            method, ctx, recv, args,
+        )),
+        crate::reactive::COMPUTED_TYPE_NAME => Some(crate::reactive::computed_ctx_method_dispatch(
+            method, ctx, recv, args,
+        )),
+        crate::reactive::EFFECT_TYPE_NAME => Some(crate::reactive::effect_ctx_method_dispatch(
+            method, ctx, recv, args,
+        )),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2335,8 +2515,7 @@ mod tests {
         assert_eq!(&v7[14..15], "7");
         let ms = u64::from_str_radix(&v7[..13].replace('-', ""), 16).unwrap();
         assert_eq!(ms, crate::host::SANDBOX_EPOCH_MS);
-        // `id` left the virtual table — it is an ordinary registry module now.
-        assert!(!is_virtual_module("id"));
+        // `id` is an ordinary registry module (the virtual table itself died at H5).
         assert!(find_function("id", "uuid_v7").is_some());
         // The `Uuid` extern type is registered with its method table, and `parse` round-trips
         // (`none` on malformed input).

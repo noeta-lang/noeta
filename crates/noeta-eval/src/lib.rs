@@ -21,6 +21,7 @@ pub mod drop_audit;
 mod ids;
 mod ir;
 mod leak;
+mod native_ctx;
 mod ops;
 mod value;
 
@@ -346,34 +347,9 @@ pub enum Builtin {
     /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
     /// The assertion primitive `@test` blocks rest on (object-model slice 6).
     Assert,
-    /// `sleep(ms)` — a leaf timer future (Track A.2) ready once the executor clock reaches
-    /// `now + ms`. The first future that can report `Pending`.
-    Sleep,
-    /// `all(list)` — await every future concurrently, returning their results as a `List<T>` in
-    /// order (Track A.9).
-    All,
-    /// `race(list)` — await concurrently, returning the first result and cancelling the losers
-    /// (Track A.9 + cooperative cancellation A.8).
-    Race,
-    /// `map_bounded(items, n, f)` — apply async `f` to each item, at most `n` concurrently, results
-    /// as a `List<B>` in item order (Track A.9).
-    MapBounded,
-    /// `http.serve(port, handler)` — bind an inbound listener and run the accept→handle→reply loop
-    /// (http-server S3), calling `handler(request)` per connection and replying with its `Response`.
-    /// Under the sandbox the loop drives a finite request script and terminates; on the real host it
-    /// serves until the listener closes. A handler error becomes a 500. Reaches the Host's inbound
-    /// Network capability + the executor, which registry dispatch cannot.
-    Serve,
-    /// `signal(v)` — create a reactive cell holding `v` (reactivity S1); the tree-walker twin of the
-    /// VM's `Builtin::Signal`. Returns a `Signal<T>` handle read/updated via the interpreter's graph.
-    Signal,
-    /// `computed(fn)` — create a lazy, memoized derivation (reactivity S3); the tree-walker twin of the
-    /// VM's `Builtin::Computed`. Returns a `Computed<T>` whose `.get()` recomputes only when a
-    /// dependency it read has changed.
-    Computed,
-    /// `effect(fn)` — register a side effect (reactivity S2); the tree-walker twin of the VM's
-    /// `Builtin::Effect`. Runs `fn` immediately, tracks the signals it reads, and reruns on change.
-    Effect,
+    // (The whole orchestration family — `task` at higher-order-abi H0/H2, `http.serve` at H3,
+    // `signal`/`computed`/`effect` at H5 — migrated onto the registry's `NativeCtx` dispatch,
+    // `noeta-stdlib/src/{task,serve,reactive}.rs`.)
 }
 
 impl Builtin {
@@ -388,30 +364,6 @@ impl Builtin {
             Builtin::MakeSome => "some",
             Builtin::Panic => "panic",
             Builtin::Assert => "assert",
-            Builtin::Sleep => "sleep",
-            Builtin::All => "all",
-            Builtin::Race => "race",
-            Builtin::MapBounded => "map_bounded",
-            Builtin::Serve => "serve",
-            Builtin::Signal => "signal",
-            Builtin::Computed => "computed",
-            Builtin::Effect => "effect",
-        }
-    }
-
-    /// The builtin behind a **virtual-module** function name (`use std.reactive.{signal}` →
-    /// `Builtin::Signal`, prelude-redesign P2) — the names `registry::VIRTUAL_MODULES` exports.
-    /// The bytecode compiler resolves the same names through its own `Builtin::from_name`.
-    fn from_virtual_name(name: &str) -> Option<Builtin> {
-        match name {
-            "signal" => Some(Builtin::Signal),
-            "computed" => Some(Builtin::Computed),
-            "effect" => Some(Builtin::Effect),
-            "sleep" => Some(Builtin::Sleep),
-            "all" => Some(Builtin::All),
-            "race" => Some(Builtin::Race),
-            "map_bounded" => Some(Builtin::MapBounded),
-            _ => None,
         }
     }
 
@@ -1120,13 +1072,14 @@ struct Interpreter {
     /// round — a channel op that unblocks a sibling is progress even when no task *completes*.
     channels: Vec<Channel>,
     channel_progress: u64,
-    /// The reactive graph (reactivity S1): the tree-walker twin of the VM's `reactive` field. Every
-    /// `signal(v)`/`computed(fn)`/`effect(fn)` allocates a node here; a `Reactive` handle references
-    /// one by [`NodeId`]. Held behind `Rc` so a flush can borrow the graph and the interpreter
-    /// independently (the graph's methods are `&self`, interior-mutable). The stored values are plain
-    /// `Value`s — `Rc`-shared, so the graph's clones/drops are refcount-correct for free, no wrapper
-    /// needed (unlike the VM's `GcVal`). Cleared at program end so held values drop.
-    reactive: std::rc::Rc<noeta_reactive::ReactiveGraph<Value>>,
+    /// The extensions' retained-value arena (higher-order-abi H4) — the tree-walker twin of the
+    /// VM's `ext_arena`. Entries are `Rc` clones, so ownership is automatic (dropping the
+    /// interpreter drops whatever the program never released, mirroring the VM's teardown
+    /// release); freed indices are reused via `ext_arena_free`.
+    ext_arena: Vec<Option<Value>>,
+    ext_arena_free: Vec<u32>,
+    /// Per-run extension Rust state (`NativeCtx::state`, H4), keyed by the extension's own key.
+    ext_state: Vec<(&'static str, noeta_stdlib::ExtState)>,
     /// The shared reflection artifact (attribute manifest + type registry), built from the program
     /// by the *same* `noeta_ast::reflect::build` the VM uses — so `attributes_of` materializes
     /// identical values in both backends. Populated at the start of `run`.
@@ -1206,7 +1159,9 @@ impl Interpreter {
             scopes: Vec::new(),
             channels: Vec::new(),
             channel_progress: 0,
-            reactive: std::rc::Rc::new(noeta_reactive::ReactiveGraph::new()),
+            ext_arena: Vec::new(),
+            ext_arena_free: Vec::new(),
+            ext_state: Vec::new(),
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
             call_sites: Vec::new(),
@@ -1548,25 +1503,11 @@ impl Interpreter {
         let is_std = path == ["std"];
         let selective_module = (path.len() == 2 && path[0] == "std")
             .then(|| path[1].as_str())
-            .filter(|m| {
-                noeta_stdlib::registry::find_module(m).is_some()
-                    || noeta_stdlib::registry::is_virtual_module(m)
-            });
+            .filter(|m| noeta_stdlib::registry::find_module(m).is_some());
         for imported in names {
-            let value = if is_std
-                && (noeta_stdlib::registry::find_module(&imported.name).is_some()
-                    || noeta_stdlib::registry::is_virtual_module(&imported.name))
+            let value = if is_std && noeta_stdlib::registry::find_module(&imported.name).is_some()
             {
                 Value::NativeModule(imported.name.clone())
-            } else if let Some(module) = selective_module
-                && noeta_stdlib::registry::virtual_module_function(module, &imported.name)
-            {
-                // A virtual-module member (`use std.reactive.{signal}`, P2a): the function IS a
-                // builtin, so bind the first-class builtin value — the old prelude binding, gated.
-                Value::Builtin(
-                    Builtin::from_virtual_name(&imported.name)
-                        .expect("every virtual-module function is a named builtin"),
-                )
             } else if let Some(module) = selective_module
                 && noeta_stdlib::registry::is_module_function(module, &imported.name)
             {
@@ -2230,54 +2171,9 @@ impl Interpreter {
             self.expect_std_arity(name, &args, 0, span)?;
             return Ok(Value::ChannelRecv(*id));
         }
-        // Reactive handle methods (reactivity S1/S2/S3): `signal.get()`/`.set(v)`/`.update(fn)`,
-        // `computed.get()`, and `effect.dispose()` — the tree-walker twin of the VM's dispatch. Each
-        // method is guarded by the node's `kind` (a `signal` is not disposable, a `computed` is
-        // read-only, an `effect` is not readable); an invalid pair falls through to the generic
-        // no-method runtime error below, exactly as any other unknown method on a built-in type.
-        // `get` on a `computed` recomputes a dirty body via `read_reactive`; on a `signal` it is a
-        // plain read (the callback never fires).
-        if let Value::Reactive(kind, node) = &receiver {
-            use noeta_reactive::NodeKind;
-            let kind = *kind;
-            let node = *node;
-            match (kind, name) {
-                (NodeKind::Signal | NodeKind::Computed, "get") => {
-                    self.expect_std_arity(name, &args, 0, span)?;
-                    return self.read_reactive(node, span);
-                }
-                (NodeKind::Signal, "set") => {
-                    self.expect_std_arity(name, &args, 1, span)?;
-                    let value = args.into_iter().next().unwrap();
-                    self.reactive.set(node, value);
-                    // Coalesce: a set inside a running effect body only enqueues — the ongoing flush
-                    // picks it up. Only a top-level set drives a fresh flush. (reactivity S4)
-                    if !self.reactive.is_flushing() {
-                        self.drive_flush(span)?;
-                    }
-                    return Ok(Value::Unit);
-                }
-                (NodeKind::Signal, "update") => {
-                    self.expect_std_arity(name, &args, 1, span)?;
-                    // Read-modify-write: read the current value, call the updater with it, store the
-                    // result, then flush (coalescing inside a running flush, like `set`).
-                    let f = args.into_iter().next().unwrap();
-                    let current = self.read_reactive(node, span)?;
-                    let updated = self.call(f, vec![current], span)?;
-                    self.reactive.set(node, updated);
-                    if !self.reactive.is_flushing() {
-                        self.drive_flush(span)?;
-                    }
-                    return Ok(Value::Unit);
-                }
-                (NodeKind::Effect, "dispose") => {
-                    self.expect_std_arity(name, &args, 0, span)?;
-                    self.reactive.dispose(node);
-                    return Ok(Value::Unit);
-                }
-                _ => {}
-            }
-        }
+        // (The reactive handle methods lived here until higher-order-abi H5 — `Signal`/
+        // `Computed`/`Effect` are registry extern types now, dispatched through the ctx
+        // seam like any other. Mirrors the VM.)
         // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file handle above.
         if let Value::Iter(state) = &receiver
             && let Some(method) = noeta_stdlib::IterMethod::from_name(name)
@@ -2683,29 +2579,15 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
-        // A virtual module's functions (`reactive.signal(...)`, prelude-redesign P2) are builtins —
-        // they need the executor/reactive graph the registry seam cannot reach — so a qualified call
-        // intercepts here, ahead of registry dispatch, exactly like `fs.*_async`. Mirrors the VM.
-        if noeta_stdlib::registry::is_virtual_module(module) {
-            let Some(builtin) = noeta_stdlib::registry::virtual_module_function(module, func)
-                .then(|| Builtin::from_virtual_name(func))
-                .flatten()
-            else {
-                return Err(self.runtime_error(
-                    DiagnosticCode::UnknownName,
-                    span,
-                    format!("module `{module}` has no function `{func}`"),
-                ));
-            };
-            return self.call_builtin(builtin, args.to_vec(), span);
-        }
-        // `http.serve(port, handler)` (http-server S3) — a builtin, not a registry function: the
-        // handler is a closure (which the `NativeValue` seam cannot carry) and the loop needs the
-        // executor + inbound Network capability. Intercept it here, ahead of `http`'s registry
-        // functions (which stay registry-dispatched). Mirrors the VM.
-        if module == "http" && func == "serve" {
-            return self.call_builtin(Builtin::Serve, args.to_vec(), span);
-        }
+        // A virtual-module function (`reactive.signal(...)`, prelude-redesign P2) is a builtin —
+        // it needs the executor/reactive graph the plain registry seam cannot reach — so a
+        // qualified call intercepts here, ahead of registry dispatch, exactly like `fs.*_async`.
+        // Per-**function**, not per-module (higher-order-abi H0): a module migrates onto the ctx
+        // seam name by name (`task.sleep` is registered, `task.all` still virtual), so unmatched
+        // names fall through to the registry arms and the shared unknown-function error below.
+        // (The virtual-module intercept died with higher-order-abi H5: `task` migrated at H0/H2,
+        // `http.serve` at H3, and `reactive` — the last virtual module — at H5. Every std module
+        // now dispatches through the registry arms below. Mirrors the VM.)
         // A function registered in the native-extension registry dispatches through the shared
         // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host
         // threaded in), and materialize the `NativeOut` result (the result shape supplied from the
@@ -2733,6 +2615,13 @@ impl Interpreter {
                     Err(self.runtime_error(std_error_code(error.kind), span, error.message))
                 }
             };
+        }
+        // A registered **higher-order** function (higher-order-abi H0) dispatches through the
+        // `NativeCtx` seam: opaque slots + backend re-entry instead of marshalled values. Checked
+        // after the plain table — plain functions vastly outnumber ctx ones, and the two name
+        // sets are disjoint, so order is behavior-neutral and keeps the common path lean.
+        if noeta_stdlib::registry::find_ctx_function(module, func).is_some() {
+            return self.call_ctx_function(module, func, args, span);
         }
         // `vec`'s bulk `*_all` kernels are the only unmigrated native functions and stay per-backend;
         // every other reachable name is registered, so anything else here is an unknown function.
@@ -2952,6 +2841,14 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
+        // A type's **higher-order** methods (higher-order-abi H4) route through the ctx seam —
+        // they call closures back and reach the retained arena, which the plain by-value
+        // dispatch below cannot. Name sets are disjoint, so routing is per-method.
+        let type_name = cell.borrow().type_name();
+        if noeta_stdlib::registry::find_type_ctx_method(type_name, name).is_some() {
+            let recv = Value::Extern(Rc::clone(cell));
+            return self.call_ctx_type_method(type_name, recv, name, args, span);
+        }
         let nargs: Vec<noeta_stdlib::NativeValue> = args.iter().map(marshal_native_arg).collect();
         // `cell` is an independent `Rc`, so borrowing it and `self.host` at once is fine (the
         // FileHandle discipline).
@@ -3366,73 +3263,6 @@ impl Interpreter {
         }
     }
 
-    /// Read a reactive node, driving a `computed`'s recompute through [`call`](Self::call) if it is
-    /// dirty (reactivity S3) — the tree-walker twin of the VM's `Vm::read_reactive`. A `signal` read
-    /// never enters the callback (nothing to run); a dirty `computed` runs its body (and, transitively,
-    /// any dirty computeds it reads), memoizing as it goes. The graph is cloned out as an `Rc` so its
-    /// `&self` `read` can borrow it while the callback borrows `self` for `call`. A body that aborts is
-    /// captured deterministically — the first abort stops further recomputes and propagates.
-    fn read_reactive(&mut self, node: noeta_reactive::NodeId, span: Span) -> Eval<Value> {
-        let graph = std::rc::Rc::clone(&self.reactive);
-        let mut abort: Option<Unwind> = None;
-        let value = graph.read(node, &mut |body: Value| -> Value {
-            if abort.is_some() {
-                return Value::Unit;
-            }
-            match self.call(body, Vec::new(), span) {
-                Ok(value) => value,
-                Err(unwind) => {
-                    abort = Some(unwind);
-                    Value::Unit
-                }
-            }
-        });
-        match abort {
-            Some(unwind) => Err(unwind),
-            None => Ok(value),
-        }
-    }
-
-    /// Run the reactive graph's pending effects to a fixpoint (reactivity S2) — the tree-walker twin of
-    /// the VM's `Vm::drive_flush`. Invokes each effect body through [`call`](Self::call). The graph is
-    /// cloned out as an `Rc` so its `&self` `flush` can borrow it while the run callback borrows `self`
-    /// for `call`. The first effect body to abort (by the deterministic flush order) stops further
-    /// bodies and propagates, identically to the VM.
-    fn drive_flush(&mut self, span: Span) -> Eval<()> {
-        let graph = std::rc::Rc::clone(&self.reactive);
-        let mut abort: Option<Unwind> = None;
-        let overflowed = graph
-            .flush(&mut |body: Value| -> Value {
-                if abort.is_some() {
-                    return Value::Unit;
-                }
-                match self.call(body, Vec::new(), span) {
-                    Ok(value) => value,
-                    Err(unwind) => {
-                        abort = Some(unwind);
-                        Value::Unit
-                    }
-                }
-            })
-            .is_err();
-        // A body-driven abort (panic / `?`) takes priority — surface it as itself. Otherwise, a
-        // non-converging flush (a self-reinforcing effect) becomes the reactive-cycle runtime error.
-        if let Some(unwind) = abort {
-            return Err(unwind);
-        }
-        if overflowed {
-            return Err(self.runtime_error(
-                DiagnosticCode::ReactiveCycle,
-                span,
-                format!(
-                    "reactive update did not converge after {} steps — an effect keeps changing a \
-                     signal it depends on",
-                    noeta_reactive::MAX_FLUSH_STEPS
-                ),
-            ));
-        }
-        Ok(())
-    }
 
     fn call_closure(&mut self, closure: &Rc<Closure>, args: Vec<Value>, span: Span) -> Eval<Value> {
         let required = required_count(&closure.defaults);
@@ -3701,352 +3531,10 @@ impl Interpreter {
                     Err(self.runtime_error(DiagnosticCode::Panic, span, message))
                 }
             }
-            // `sleep(ms)` — a leaf timer future (Track A.2). Its deadline is fixed at creation from the
-            // current logical clock; awaiting it advances the clock to that deadline. A negative or
-            // non-int `ms` is a `TypeMismatch` (checked identically in the VM).
-            Builtin::Sleep => {
-                self.expect_arity(builtin, &args, 1, span)?;
-                let Value::Int(ms) = args[0] else {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!("`sleep` expects an int (ms), found {}", args[0].display()),
-                    ));
-                };
-                if ms < 0 {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!("`sleep` expects a non-negative duration, found {ms}"),
-                    ));
-                }
-                Ok(Value::Timer(self.executor.now() + ms as u64))
-            }
-            // `all(list)` — await every future concurrently, results as a `List<T>` in order (A.9).
-            Builtin::All => {
-                self.expect_arity(builtin, &args, 1, span)?;
-                let Value::List(repr) = &args[0] else {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`all` expects a list of futures, found {}",
-                            args[0].type_name()
-                        ),
-                    ));
-                };
-                let handles: Vec<Value> = (0..repr.len())
-                    .map(|i| repr.get(i).expect("in bounds"))
-                    .collect();
-                let n = handles.len();
-                let mut results: Vec<Option<Value>> = vec![None; n];
-                loop {
-                    for i in 0..n {
-                        if results[i].is_none()
-                            && let Some(v) = self.poll_once(&handles[i], span)?
-                        {
-                            results[i] = Some(v);
-                        }
-                    }
-                    if results.iter().all(Option::is_some) {
-                        let items: Vec<Value> =
-                            results.into_iter().map(|r| r.expect("all ready")).collect();
-                        return Ok(Value::list(items));
-                    }
-                    let progressed = self.poll_all_scopes_round(span)?;
-                    if !progressed && self.executor.advance().is_none() {
-                        return Err(self.runtime_error(
-                            DiagnosticCode::Panic,
-                            span,
-                            "async deadlock: `all` awaited futures with no pending timers"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-            // `race(list)` — await concurrently, first result wins, losers cancelled (A.9 + A.8).
-            Builtin::Race => {
-                self.expect_arity(builtin, &args, 1, span)?;
-                let Value::List(repr) = &args[0] else {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`race` expects a list of futures, found {}",
-                            args[0].type_name()
-                        ),
-                    ));
-                };
-                let handles: Vec<Value> = (0..repr.len())
-                    .map(|i| repr.get(i).expect("in bounds"))
-                    .collect();
-                let n = handles.len();
-                if n == 0 {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::Panic,
-                        span,
-                        "`race` requires at least one future".to_string(),
-                    ));
-                }
-                loop {
-                    for i in 0..n {
-                        if let Some(v) = self.poll_once(&handles[i], span)? {
-                            for (j, hj) in handles.iter().enumerate() {
-                                if j != i {
-                                    self.cancel_task(hj);
-                                }
-                            }
-                            return Ok(v);
-                        }
-                    }
-                    let progressed = self.poll_all_scopes_round(span)?;
-                    if !progressed && self.executor.advance().is_none() {
-                        return Err(self.runtime_error(
-                            DiagnosticCode::Panic,
-                            span,
-                            "async deadlock: `race` awaited futures with no pending timers"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-            // `map_bounded(items, n, f)` — apply async `f` to each item, at most `n` in flight, results
-            // in item order (Track A.9). The tree-walker mirror of the VM's sliding window.
-            Builtin::MapBounded => {
-                self.expect_arity(builtin, &args, 3, span)?;
-                let Value::List(repr) = &args[0] else {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`map_bounded` expects a list, found {}",
-                            args[0].type_name()
-                        ),
-                    ));
-                };
-                let Value::Int(limit) = args[1] else {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`map_bounded` expects an int concurrency limit, found {}",
-                            args[1].type_name()
-                        ),
-                    ));
-                };
-                let items: Vec<Value> = (0..repr.len())
-                    .map(|i| repr.get(i).expect("in bounds"))
-                    .collect();
-                let f = args[2].clone();
-                let window = limit.max(1) as usize;
-                let count = items.len();
-                let mut results: Vec<Option<Value>> = vec![None; count];
-                let mut in_flight: Vec<(usize, Value)> = Vec::new();
-                let mut next = 0usize;
-                let mut done = 0usize;
-                loop {
-                    while in_flight.len() < window && next < count {
-                        let fut = self.call(f.clone(), vec![items[next].clone()], span)?;
-                        in_flight.push((next, fut));
-                        next += 1;
-                    }
-                    if done == count {
-                        let out: Vec<Value> =
-                            results.into_iter().map(|r| r.expect("all done")).collect();
-                        return Ok(Value::list(out));
-                    }
-                    let mut progressed = false;
-                    let mut k = 0;
-                    while k < in_flight.len() {
-                        let (idx, fut) = (in_flight[k].0, in_flight[k].1.clone());
-                        if let Some(v) = self.poll_once(&fut, span)? {
-                            results[idx] = Some(v);
-                            in_flight.remove(k);
-                            done += 1;
-                            progressed = true;
-                        } else {
-                            k += 1;
-                        }
-                    }
-                    if !self.scopes.is_empty() {
-                        progressed |= self.poll_all_scopes_round(span)?;
-                    }
-                    if !progressed && self.executor.advance().is_none() {
-                        return Err(self.runtime_error(
-                            DiagnosticCode::Panic,
-                            span,
-                            "async deadlock: `map_bounded` stalled with no pending timers"
-                                .to_string(),
-                        ));
-                    }
-                }
-            }
-            // `http.serve(port, handler)` — the inbound accept→dispatch→reply loop (http-server S3).
-            // **Concurrent (S3b):** each accepted connection's `handler(request)` is a task in a
-            // server-owned in-flight set the loop reaps; a slow (async) handler yields at its awaits
-            // while the next connection is accepted and other handlers advance — the cooperative Tier-1
-            // model (the accept future is polled alongside the handler futures each round, never
-            // drive-to-completion). Under the sandbox the accept leaf drives a finite request script
-            // and reports the listener closed, so the loop terminates in-oracle; on the real host it
-            // serves until the socket closes. The tree-walker mirror of the VM's `Builtin::Serve`;
-            // both poll in the identical order, so the interleaving is deterministic and agrees.
-            Builtin::Serve => {
-                self.expect_arity(builtin, &args, 2, span)?;
-                let Value::Int(port) = args[0] else {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`http.serve` expects an int port, found {}",
-                            args[0].type_name()
-                        ),
-                    ));
-                };
-                let handler = args[1].clone();
-                let addr = format!("0.0.0.0:{port}");
-                let listener = self
-                    .host
-                    .net_listen(&addr)
-                    .map_err(|e| self.runtime_error(std_error_code(e.kind), span, e.message))?;
-                // The reply for a handler that errors or returns a non-`Response`.
-                let server_error = || noeta_stdlib::NetResponse {
-                    status: 500,
-                    headers: Vec::new(),
-                    body: b"Internal Server Error".to_vec(),
-                };
-                // Reply on `conn` (an async leaf, driven to completion — a write is quick).
-                let reply = |me: &mut Self, conn: u64, response: noeta_stdlib::NetResponse| {
-                    let reply_io = me.host.net_reply(conn, response);
-                    let reply_id = me.executor.spawn_ext(&mut *me.host, reply_io);
-                    me.drive_future(Value::AsyncIo(reply_id), span).map(|_| ())
-                };
-                let mut in_flight: Vec<(u64, Value)> = Vec::new();
-                let mut accept_future: Option<Value> = None;
-                let mut closing = false;
-                loop {
-                    // Keep one accept in flight while the listener is open.
-                    if !closing && accept_future.is_none() {
-                        let accept_io = self.host.net_accept(listener);
-                        let id = self.executor.spawn_ext(&mut *self.host, accept_io);
-                        accept_future = Some(Value::AsyncIo(id));
-                    }
-                    let mut progressed = false;
-                    // Poll the pending accept; on a connection, spawn its handler task.
-                    if let Some(af) = accept_future.take() {
-                        match self.poll_once(&af, span)? {
-                            Some(accepted) => {
-                                progressed = true;
-                                match &accepted {
-                                    Value::Enum(e)
-                                        if e.enum_name == "Option" && e.variant == "some" =>
-                                    {
-                                        let request = e
-                                            .data
-                                            .first()
-                                            .cloned()
-                                            .expect("some carries the request");
-                                        let conn = match &request {
-                                            Value::Extern(cell) => cell
-                                                .borrow()
-                                                .as_any()
-                                                .downcast_ref::<noeta_stdlib::net::Request>()
-                                                .map(|r| r.conn),
-                                            _ => None,
-                                        }
-                                        .expect("accept yields a Request extern value");
-                                        // Spawn the handler. A sync handler returns the `Response`
-                                        // immediately; an async one a `Future` polled below. A call-time
-                                        // error → 500 now.
-                                        match self.call(handler.clone(), vec![request], span) {
-                                            Ok(fut) => in_flight.push((conn, fut)),
-                                            Err(_) => reply(self, conn, server_error())?,
-                                        }
-                                    }
-                                    // `none` → the listener closed; stop accepting and drain.
-                                    _ => closing = true,
-                                }
-                            }
-                            None => accept_future = Some(af),
-                        }
-                    }
-                    // Reap: poll each in-flight handler; reply on completion, 500 on error.
-                    let mut k = 0;
-                    while k < in_flight.len() {
-                        let (conn, fut) = (in_flight[k].0, in_flight[k].1.clone());
-                        let done = match self.poll_once(&fut, span) {
-                            Ok(Some(value)) => {
-                                let response = match &value {
-                                    Value::Extern(cell) => cell
-                                        .borrow()
-                                        .as_any()
-                                        .downcast_ref::<noeta_stdlib::NetResponse>()
-                                        .cloned()
-                                        .unwrap_or_else(server_error),
-                                    _ => server_error(),
-                                };
-                                reply(self, conn, response)?;
-                                true
-                            }
-                            Ok(None) => false,
-                            Err(_) => {
-                                reply(self, conn, server_error())?;
-                                true
-                            }
-                        };
-                        if done {
-                            in_flight.remove(k);
-                            progressed = true;
-                        } else {
-                            k += 1;
-                        }
-                    }
-                    // Done when the listener closed and every handler has replied.
-                    if closing && in_flight.is_empty() && accept_future.is_none() {
-                        break;
-                    }
-                    // Let a handler's own `concurrent` tasks advance, then advance the clock if stalled.
-                    if !self.scopes.is_empty() {
-                        progressed |= self.poll_all_scopes_round(span)?;
-                    }
-                    if !progressed && self.executor.advance().is_none() {
-                        return Err(self.runtime_error(
-                            DiagnosticCode::Panic,
-                            span,
-                            "async deadlock: `http.serve` stalled with no pending work".to_string(),
-                        ));
-                    }
-                }
-                Ok(Value::Unit)
-            }
-            Builtin::Signal => {
-                self.expect_arity(builtin, &args, 1, span)?;
-                // `signal(v)` — allocate a reactive cell holding `v`. `args` is owned here, so the
-                // value moves straight into the graph (an `Rc` clone keeps it live).
-                let value = args.into_iter().next().unwrap();
-                let id = self.reactive.signal(value);
-                Ok(Value::Reactive(noeta_reactive::NodeKind::Signal, id))
-            }
-            Builtin::Computed => {
-                self.expect_arity(builtin, &args, 1, span)?;
-                // `computed(fn)` — register a lazy derivation, storing the body closure. It is created
-                // dirty and computes on first `.get()`; no flush now (nothing eager runs).
-                let body = args.into_iter().next().unwrap();
-                let id = self.reactive.computed(body);
-                Ok(Value::Reactive(noeta_reactive::NodeKind::Computed, id))
-            }
-            Builtin::Effect => {
-                self.expect_arity(builtin, &args, 1, span)?;
-                // `effect(fn)` — register the effect (created queued), storing the body closure, then
-                // flush to run it once now (subscribing it to the signals it reads). If we are already
-                // inside a flush (an effect created within another effect's body), the ongoing flush
-                // drains it — do not nest. (reactivity S4)
-                let body = args.into_iter().next().unwrap();
-                let id = self.reactive.effect(body);
-                if !self.reactive.is_flushing() {
-                    self.drive_flush(span)?;
-                }
-                Ok(Value::Reactive(noeta_reactive::NodeKind::Effect, id))
-            }
+            // (The whole `Builtin` orchestration family — `task` at higher-order-abi H0/H2,
+            // `http.serve` at H3, `signal`/`computed`/`effect` at H5 — migrated to the
+            // registry's `NativeCtx` dispatch: `noeta-stdlib/src/{task,serve,reactive}.rs`;
+            // the drive loops there are shared with the VM.)
         }
     }
 
@@ -4811,7 +4299,6 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
         | Value::AsyncIo(_)
         | Value::Sender(_)
         | Value::Receiver(_)
-        | Value::Reactive(..)
         | Value::ChannelSend(..)
         | Value::ChannelRecv(_) => TypeRepr::Dyn,
     }
@@ -5195,6 +4682,8 @@ fn std_error_code(kind: noeta_stdlib::ErrorKind) -> DiagnosticCode {
         noeta_stdlib::ErrorKind::Bounds => DiagnosticCode::IndexOutOfBounds,
         noeta_stdlib::ErrorKind::UnknownName => DiagnosticCode::UnknownName,
         noeta_stdlib::ErrorKind::Io => DiagnosticCode::IoError,
+        noeta_stdlib::ErrorKind::Panic => DiagnosticCode::Panic,
+        noeta_stdlib::ErrorKind::ReactiveCycle => DiagnosticCode::ReactiveCycle,
     }
 }
 
@@ -5305,9 +4794,6 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
         | Value::ChannelRecv(_) => NativeValue::Str("<future>".to_string()),
         Value::Sender(_) => NativeValue::Str("<sender>".to_string()),
         Value::Receiver(_) => NativeValue::Str("<receiver>".to_string()),
-        Value::Reactive(kind, _) => {
-            NativeValue::Str(format!("<{}>", kind.type_name().to_ascii_lowercase()))
-        }
         Value::Pending => NativeValue::Str("<pending>".to_string()),
         // An enum/struct *type* value has no JSON analog; its quoted display form, like the VM.
         Value::EnumType(_) | Value::Type(_) => NativeValue::Str(value.display()),

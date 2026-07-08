@@ -26,36 +26,23 @@ pub(super) const FUTURE: &str = "Future";
 pub(super) const SENDER: &str = "Sender";
 pub(super) const RECEIVER: &str = "Receiver";
 
-/// Reserved built-in type name for a reactive cell (reactivity S1). `signal(v: T)` yields a
-/// `Signal<T>` carrying its value type as its single argument; `.get()` reads `T`, `.set(v: T)`
-/// updates it, `.update(fn(T) -> T)` reads-modifies-writes it.
-pub(super) const SIGNAL: &str = "Signal";
-
-/// Reserved built-in type name for a lazy memoized derivation (reactivity S3). `computed(fn() -> T)`
-/// yields a `Computed<T>` carrying the closure's return type as its single argument; `.get()` reads
-/// `T` (recomputing on read only when a dependency changed). Read-only — no `.set`/`.update`.
-pub(super) const COMPUTED: &str = "Computed";
-
-/// Reserved built-in type name for a reactive side effect (reactivity S2). `effect(fn)` yields an
-/// `Effect` (no type argument — it produces no value); `.dispose()` unsubscribes it.
-pub(super) const EFFECT: &str = "Effect";
-
 /// Every checker-native reserved type name (extern-types X1): the `Named` types whose method
 /// tables live in THIS file because their values are backend builtins coupled to the executor or
 /// reactive graph. Together with the registry's extern types (`registry::find_type`) these form
 /// the E0049 reservation set — a user declaration of any of them is rejected.
-pub(super) const NATIVE_TYPE_NAMES: &[&str] =
-    &[ITERATOR, FUTURE, SENDER, RECEIVER, SIGNAL, COMPUTED, EFFECT];
+pub(super) const NATIVE_TYPE_NAMES: &[&str] = &[ITERATOR, FUTURE, SENDER, RECEIVER];
 
 /// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. Every module — `json` included
 /// (B4) — comes from the native-extension registry now; only the `vec` bulk `*_all` kernels keep a
 /// small per-backend fallback in `module_params`/`module_return`.
 pub(super) fn is_std_module(name: &str) -> bool {
-    registry::find_module(name).is_some() || registry::is_virtual_module(name)
+    registry::find_module(name).is_some()
 }
 
-/// Map the registry's neutral [`registry::SigType`] onto a checker [`Type`].
-fn sig_to_type(sig: &registry::SigType) -> Type {
+/// Map a [`registry::SigType`] onto a checker [`Type`] under call-site variable `bindings`
+/// (higher-order-abi H1): `Var(n)` becomes its bound type, or a gradual hole when the call's
+/// arguments never determined it — permissive, never a wrong concrete type.
+fn sig_to_type_bound(sig: &registry::SigType, bindings: &[Option<Type>]) -> Type {
     use registry::SigType;
     match sig {
         SigType::Int => Type::Int,
@@ -66,16 +53,98 @@ fn sig_to_type(sig: &registry::SigType) -> Type {
         SigType::Bytes => Type::Bytes,
         SigType::Unit => Type::Unit,
         SigType::Dyn => Type::Dyn,
-        SigType::List(t) => list(sig_to_type(t)),
-        SigType::Option(t) => opt(sig_to_type(t)),
-        SigType::Map(k, v) => Type::Map(Box::new(sig_to_type(k)), Box::new(sig_to_type(v))),
-        SigType::Future(t) => Type::Named(FUTURE.to_string(), vec![sig_to_type(t)]),
+        SigType::List(t) => list(sig_to_type_bound(t, bindings)),
+        SigType::Option(t) => opt(sig_to_type_bound(t, bindings)),
+        SigType::Map(k, v) => Type::Map(
+            Box::new(sig_to_type_bound(k, bindings)),
+            Box::new(sig_to_type_bound(v, bindings)),
+        ),
+        SigType::Future(t) => Type::Named(FUTURE.to_string(), vec![sig_to_type_bound(t, bindings)]),
         SigType::Named(n) => Type::Named((*n).to_string(), vec![]),
-        SigType::Union(members) => Type::union(members.iter().map(sig_to_type)),
+        SigType::Union(members) => {
+            Type::union(members.iter().map(|m| sig_to_type_bound(m, bindings)))
+        }
         // A trailing-optional param's type IS the wrapped type when present (http arc H4); the
         // optionality is carried separately as the required-argument count, not in the type.
-        SigType::Optional(inner) => sig_to_type(inner),
+        SigType::Optional(inner) => sig_to_type_bound(inner, bindings),
+        SigType::Fn(params, ret) => Type::Fn {
+            params: params.iter().map(|p| sig_to_type_bound(p, bindings)).collect(),
+            ret: Box::new(sig_to_type_bound(ret, bindings)),
+        },
+        SigType::Var(n) => bindings
+            .get(*n as usize)
+            .and_then(Clone::clone)
+            .unwrap_or(Type::Unknown),
+        // A generic extern-type instantiation (higher-order-abi H4): `cell.new(v: A) -> Cell<A>`.
+        SigType::Generic(n, args) => Type::Named(
+            (*n).to_string(),
+            args.iter().map(|a| sig_to_type_bound(a, bindings)).collect(),
+        ),
     }
+}
+
+/// Bind a declared signature's type variables from the call's actual argument types
+/// (higher-order-abi H1): walk each parameter structurally against its argument, binding each
+/// `Var(n)` at its **first** occurrence with a determined type. Substituting the bindings back
+/// into the parameters makes a *second* occurrence of the same variable a concrete expectation —
+/// so `all(List<Future<T>>)` given `List<Future<int>>` types as `List<int>`, and a `map_bounded`
+/// closure must accept the list's element type. Structural mismatches bind nothing (the ordinary
+/// param check reports them); an undetermined variable stays a hole.
+fn bind_params(params: &[registry::SigType], args: &[Type]) -> Vec<Option<Type>> {
+    let mut bindings = Vec::new();
+    for (sig, arg) in params.iter().zip(args) {
+        bind_sig(sig, arg, &mut bindings);
+    }
+    bindings
+}
+
+fn bind_sig(sig: &registry::SigType, arg: &Type, bindings: &mut Vec<Option<Type>>) {
+    use registry::SigType;
+    match (sig, arg) {
+        (SigType::Var(n), t) => {
+            let i = *n as usize;
+            if bindings.len() <= i {
+                bindings.resize(i + 1, None);
+            }
+            // First determined occurrence wins; a hole never binds (a later concrete one may).
+            if bindings[i].is_none() && *t != Type::Unknown {
+                bindings[i] = Some(t.clone());
+            }
+        }
+        (SigType::List(s), Type::List(t)) | (SigType::Option(s), Type::Option(t)) => {
+            bind_sig(s, t, bindings)
+        }
+        (SigType::Map(k, v), Type::Map(ak, av)) => {
+            bind_sig(k, ak, bindings);
+            bind_sig(v, av, bindings);
+        }
+        (SigType::Future(s), Type::Named(n, targs)) if n == FUTURE => {
+            if let Some(t) = targs.first() {
+                bind_sig(s, t, bindings);
+            }
+        }
+        (SigType::Fn(ps, r), Type::Fn { params, ret }) => {
+            for (p, a) in ps.iter().zip(params) {
+                bind_sig(p, a, bindings);
+            }
+            bind_sig(r, ret, bindings);
+        }
+        (SigType::Optional(s), t) => bind_sig(s, t, bindings),
+        (SigType::Generic(n, sargs), Type::Named(an, aargs)) if n == an => {
+            for (s, a) in sargs.iter().zip(aargs) {
+                bind_sig(s, a, bindings);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Seed variable bindings for an extern-type **method** from the receiver's type arguments
+/// (higher-order-abi H4): `Var(i)` = the receiver's i-th argument, so `Cell<int>.get() -> Var(0)`
+/// recovers `int` and `.set(v: Var(0))` demands one. Call arguments may bind later variables via
+/// the ordinary [`bind_sig`] walk on top of this seed.
+fn receiver_bindings(receiver_args: &[Type]) -> Vec<Option<Type>> {
+    receiver_args.iter().cloned().map(Some).collect()
 }
 
 fn list(t: Type) -> Type {
@@ -86,19 +155,6 @@ fn set(t: Type) -> Type {
 }
 fn opt(t: Type) -> Type {
     Type::Option(Box::new(t))
-}
-
-/// Given the type of an `all`/`race` argument — expected to be `List<Future<T>>` — extract `T`
-/// (Track A.9). A hole for anything that is not a list of futures (the prelude stays permissive; a
-/// genuine misuse surfaces at runtime, as with the other prelude builtins).
-fn future_elem(arg: Option<&Type>) -> Type {
-    match arg {
-        Some(Type::List(elem)) => match elem.as_ref() {
-            Type::Named(n, targs) if n == FUTURE => targs.first().cloned().unwrap_or(Type::Unknown),
-            _ => Type::Unknown,
-        },
-        _ => Type::Unknown,
-    }
 }
 
 /// The return type of a method call on a **built-in** receiver kind (`receiver.name(args)`), or
@@ -130,20 +186,14 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         Type::Named(n, args) if n == RECEIVER => {
             receiver_method(name, args.first().unwrap_or(&Type::Dyn))
         }
-        Type::Named(n, args) if n == SIGNAL => {
-            signal_method(name, args.first().unwrap_or(&Type::Dyn))
-        }
-        Type::Named(n, args) if n == COMPUTED => {
-            computed_method(name, args.first().unwrap_or(&Type::Dyn))
-        }
-        Type::Named(n, _) if n == EFFECT => effect_method(name),
         // A registered extern type's methods come from its `ExtType` signature table
         // (extern-types X1) — the registry is the single source, so a new native type never
-        // edits this file.
-        Type::Named(n, _) if registry::find_type(n).is_some() => {
-            let sig = registry::find_type_method(n, name)?;
+        // edits this file. A generic extern type's method signatures reference the receiver's
+        // type arguments as `Var(i)` (H4): `Cell<int>.get()` is `int`.
+        Type::Named(n, targs) if registry::find_type(n).is_some() => {
+            let sig = registry::find_type_method_sig(n, name)?;
             Some(match sig.ret {
-                registry::RetTy::Concrete(s) => sig_to_type(&s),
+                registry::RetTy::Concrete(s) => sig_to_type_bound(&s, &receiver_bindings(targs)),
                 _ => Type::Dyn,
             })
         }
@@ -151,32 +201,6 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
     }
 }
 
-/// A `Signal<T>` cell (reactivity S1/S2): `get()` reads the current value `T`; `set(v: T)` updates it;
-/// `update(fn(T) -> T)` reads-modifies-writes it. `set`/`update` yield nothing.
-fn signal_method(name: &str, elem: &Type) -> Option<Type> {
-    Some(match name {
-        "get" => elem.clone(),
-        "set" | "update" => Type::Unit,
-        _ => return None,
-    })
-}
-
-/// A `Computed<T>` derivation (reactivity S3): `get()` reads the current value `T`, recomputing lazily
-/// if a dependency changed. Read-only — there is deliberately no `set`/`update`.
-fn computed_method(name: &str, elem: &Type) -> Option<Type> {
-    Some(match name {
-        "get" => elem.clone(),
-        _ => return None,
-    })
-}
-
-/// An `Effect` (reactivity S2): `dispose()` unsubscribes the effect so it stops rerunning.
-fn effect_method(name: &str) -> Option<Type> {
-    Some(match name {
-        "dispose" => Type::Unit,
-        _ => return None,
-    })
-}
 
 /// A `Sender<T>` endpoint (isolates I.1): `send(v)` enqueues `v` (async — suspends on a full buffer),
 /// returning `Future<void>`; `close()` marks the channel closed so a drained `recv` yields `none`.
@@ -386,35 +410,18 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
             "recv" => vec![],
             _ => return None,
         }),
-        // `Signal<T>` (reactivity S1): `get()` takes nothing; `set(v: T)` takes the value type, so a
-        // mistyped update is rejected statically.
-        Type::Named(n, args) if n == SIGNAL => {
-            let elem = args.first().cloned().unwrap_or(Type::Dyn);
-            Some(match name {
-                "get" => vec![],
-                "set" => vec![elem.clone()],
-                // `update(fn(T) -> T)` — a closure from the value type to itself.
-                "update" => vec![Type::Fn {
-                    params: vec![elem.clone()],
-                    ret: Box::new(elem),
-                }],
-                _ => return None,
-            })
-        }
-        // `Computed<T>` (reactivity S3): `get()` takes nothing. Read-only.
-        Type::Named(n, _) if n == COMPUTED => Some(match name {
-            "get" => vec![],
-            _ => return None,
-        }),
-        Type::Named(n, _) if n == EFFECT => Some(match name {
-            "dispose" => vec![],
-            _ => return None,
-        }),
         // A registered extern type's method parameters come from its `ExtType` signature table
-        // (extern-types X1), like `method_return`.
-        Type::Named(n, _) if registry::find_type(n).is_some() => {
-            let sig = registry::find_type_method(n, name)?;
-            Some(sig.params.iter().map(sig_to_type).collect())
+        // (extern-types X1), like `method_return`, with the receiver's type arguments seeding
+        // any variables (H4): `Cell<int>.set(v)` demands an `int`.
+        Type::Named(n, targs) if registry::find_type(n).is_some() => {
+            let sig = registry::find_type_method_sig(n, name)?;
+            let bindings = receiver_bindings(targs);
+            Some(
+                sig.params
+                    .iter()
+                    .map(|p| sig_to_type_bound(p, &bindings))
+                    .collect(),
+            )
         }
         _ => None,
     }
@@ -425,7 +432,7 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
 /// fallback), whose params are all required. Runs alongside [`module_params`] so the arity gate
 /// admits `http.get(url)` as well as `http.get(url, headers)`.
 pub(super) fn module_required(module: &str, name: &str) -> Option<usize> {
-    registry::find_function(module, name).map(|f| registry::SigType::required_count(f.params))
+    registry::find_function_sig(module, name).map(|f| registry::SigType::required_count(f.params))
 }
 
 /// The required-argument count of a registered extern type's method (http arc H4); `None` for a
@@ -434,7 +441,7 @@ pub(super) fn method_required(receiver: &Type, name: &str) -> Option<usize> {
     if let Type::Named(n, _) = receiver
         && registry::find_type(n).is_some()
     {
-        return registry::find_type_method(n, name)
+        return registry::find_type_method_sig(n, name)
             .map(|sig| registry::SigType::required_count(sig.params));
     }
     None
@@ -528,8 +535,11 @@ fn map_params(name: &str, key: &Type, val: &Type) -> Option<Vec<Type>> {
 
 /// The parameter types a Ring 2 module function expects, or `None` if unknown. Numeric-polymorphic
 /// parameters (`math.abs`/`min`/`max`, and any numeric position) are typed `dyn` so an `int` or
-/// `float` argument is accepted without a spurious mismatch.
-pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
+/// `float` argument is accepted without a spurious mismatch. `args` — the call's actual argument
+/// types — feed the signature's type variables (higher-order-abi H1): the params come back with
+/// each `Var` substituted by its first-occurrence binding, so the ordinary argument check enforces
+/// the repeated-variable positions.
+pub(super) fn module_params(module: &str, name: &str, args: &[Type]) -> Option<Vec<Type>> {
     // `fs.list` (and its async twin, extern-types X6) takes an optional dir argument (0 or 1) —
     // not arity-checked. (Both are registered with a fixed signature for dispatch, so this skip
     // must precede the registry lookup.)
@@ -537,8 +547,14 @@ pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
         return None;
     }
     // Migrated modules: parameter types come from the native-extension registry.
-    if let Some(f) = registry::find_function(module, name) {
-        return Some(f.params.iter().map(sig_to_type).collect());
+    if let Some(f) = registry::find_function_sig(module, name) {
+        let bindings = bind_params(f.params, args);
+        return Some(
+            f.params
+                .iter()
+                .map(|p| sig_to_type_bound(p, &bindings))
+                .collect(),
+        );
     }
     // Not in the registry: the `vec` bulk `*_all` kernels (per-backend, deferred with vec/quat's
     // eventual eviction to a package).
@@ -590,66 +606,24 @@ pub(super) fn index_return(receiver: &Type) -> Option<Type> {
 
 /// The return type of a Ring 2 module call `module.name(args)`, or `None` if unknown.
 pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<Type> {
-    // The virtual `reactive` module (prelude-redesign P2a): its functions are backend builtins, so
-    // their types live here rather than in the registry. `signal(v: T) -> Signal<T>` (the value
-    // type rides as the single type arg so `.get()` recovers `T` and `.set()` requires `T`);
-    // `computed(fn() -> T) -> Computed<T>`; `effect(fn() -> void) -> Effect`.
-    if module == "reactive" {
-        return match name {
-            "signal" => Some(Type::Named(
-                SIGNAL.to_string(),
-                vec![args.first().cloned().unwrap_or(Type::Unknown)],
-            )),
-            "computed" => Some(Type::Named(
-                COMPUTED.to_string(),
-                vec![match args.first() {
-                    Some(Type::Fn { ret, .. }) => (**ret).clone(),
-                    _ => Type::Unknown,
-                }],
-            )),
-            "effect" => Some(Type::Named(EFFECT.to_string(), vec![])),
-            _ => None,
-        };
-    }
-    // (`id` was virtual here until the id-entropy arc de-virtualized it — `next_id`/`uuid`/
-    // `uuid_v7` now type through the registry fallback below like any migrated module.)
-    // The virtual `task` module (prelude-redesign P2b): the concurrency combinators.
-    // `sleep(ms) -> Future<void>` (Track A.2) — awaiting it suspends until the executor clock
-    // reaches the deadline; `all(List<Future<T>>) -> List<T>` (results in order);
-    // `race(List<Future<T>>) -> T` (first result, losers cancelled);
-    // `map_bounded(List<A>, int, Fn(A) -> Future<B>) -> List<B>` (≤n in flight). (Track A.9.)
-    if module == "task" {
-        return match name {
-            "sleep" => Some(Type::Named(FUTURE.to_string(), vec![Type::Unit])),
-            "all" => Some(list(future_elem(args.first()))),
-            "race" => Some(future_elem(args.first())),
-            "map_bounded" => Some(match args.get(2) {
-                Some(Type::Fn { ret, .. }) => match ret.as_ref() {
-                    Type::Named(n, targs) if n == FUTURE => {
-                        list(targs.first().cloned().unwrap_or(Type::Unknown))
-                    }
-                    _ => list(Type::Unknown),
-                },
-                _ => list(Type::Unknown),
-            }),
-            _ => None,
-        };
-    }
-    // `http.serve(port, handler)` (http-server S3): a builtin (the handler is a closure the registry
-    // seam cannot carry), so it is typed here rather than via an `ExtFn`. It runs the accept loop and
-    // yields nothing. Like the `task`/`reactive` builtins, its arguments are not strictly validated
-    // against a declared signature (`module_params` returns `None` for it — the handler's own body is
-    // still checked); strict `handler: (Request) -> Response` validation is a follow-on.
-    if module == "http" && name == "serve" {
-        return Some(Type::Unit);
-    }
+    // (The `reactive` arm lived here until higher-order-abi H5 — `signal`/`computed`/`effect`
+    // now type through the registry fallback below, their `T`s recovered by `SigType::Generic`
+    // + `Var` bind-and-substitute, and the handle methods through the extern-type tables.)
+    // (`id` was virtual here until the id-entropy arc de-virtualized it, and `task` until
+    // higher-order-abi H0/H2 — the whole module now types through the registry fallback below,
+    // its combinators' `T`s recovered by the `SigType::Var` bind-and-substitute.)
+    // (`http.serve` was special-cased here until higher-order-abi H3 — it now types through the
+    // registry fallback below like any ctx function, with a real declared signature: the port is
+    // an `int` and the handler a `Fn(Request) -> dyn`, so a wrong handler shape is finally a
+    // static error.)
     // Migrated modules: the result type comes from the registry's `RetTy`. `SameAsArg(i)` carries the
     // i-th argument's type (`vec.add(v, w): typeof v`); `NumericPreserving` is the `math.abs`/min/max
-    // kind-preserving rule; `Concrete` maps directly.
-    if let Some(f) = registry::find_function(module, name) {
+    // kind-preserving rule; `Concrete` maps directly, with any signature type variables bound from
+    // the argument types (higher-order-abi H1) — `all(List<Future<T>>) -> List<T>` recovers `T`.
+    if let Some(f) = registry::find_function_sig(module, name) {
         use registry::RetTy;
         return Some(match f.ret {
-            RetTy::Concrete(s) => sig_to_type(&s),
+            RetTy::Concrete(s) => sig_to_type_bound(&s, &bind_params(f.params, args)),
             RetTy::SameAsArg(i) => args.get(i).cloned().unwrap_or(Type::Dyn),
             RetTy::NumericPreserving => numeric_preserving(args),
             // The call-site-typed turbofish form lands in Phase B; until then no registered function
@@ -674,5 +648,109 @@ fn numeric_preserving(args: &[Type]) -> Type {
         Type::Float
     } else {
         Type::Unknown // unknown args → numeric hole (gradual), not the `dyn` escape
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The H1 bind-and-substitute machinery, exercised directly: no *registered* function uses
+    //! `SigType::Fn`/`Var` until the H2 task-combinator migration, so these pin the semantics the
+    //! migration will rely on — first-occurrence binding, substitution into repeated positions,
+    //! and the unbound-variable hole.
+
+    use super::*;
+    use registry::SigType;
+
+    const VAR_A: SigType = SigType::Var(0);
+    const VAR_B: SigType = SigType::Var(1);
+    const FUT_A: SigType = SigType::Future(&VAR_A);
+    const FUT_B: SigType = SigType::Future(&VAR_B);
+    /// `all(fs: List<Future<A>>) -> List<A>`.
+    const ALL_PARAMS: &[SigType] = &[SigType::List(&FUT_A)];
+    const ALL_RET: SigType = SigType::List(&VAR_A);
+    /// `map_bounded(items: List<A>, n: int, f: Fn(A) -> Future<B>) -> List<B>`.
+    const MB_PARAMS: &[SigType] = &[
+        SigType::List(&VAR_A),
+        SigType::Int,
+        SigType::Fn(&[VAR_A], &FUT_B),
+    ];
+    const MB_RET: SigType = SigType::List(&VAR_B);
+
+    fn fut(t: Type) -> Type {
+        Type::Named(FUTURE.to_string(), vec![t])
+    }
+    fn func(params: Vec<Type>, ret: Type) -> Type {
+        Type::Fn {
+            params,
+            ret: Box::new(ret),
+        }
+    }
+
+    #[test]
+    fn var_binds_through_list_of_futures_and_substitutes_into_return() {
+        let args = [list(fut(Type::Int))];
+        let bindings = bind_params(ALL_PARAMS, &args);
+        assert_eq!(sig_to_type_bound(&ALL_RET, &bindings), list(Type::Int));
+        // The substituted param is the concrete expectation the argument check enforces.
+        assert_eq!(
+            sig_to_type_bound(&ALL_PARAMS[0], &bindings),
+            list(fut(Type::Int))
+        );
+    }
+
+    #[test]
+    fn first_occurrence_wins_so_a_mismatched_closure_param_is_flagged_not_adopted() {
+        // items: List<string> binds A=string; the closure wrongly takes int — the substituted
+        // third param demands `Fn(string) -> Future<bool>`, so the mismatch lands on the closure
+        // argument rather than silently retyping A.
+        let args = [
+            list(Type::String),
+            Type::Int,
+            func(vec![Type::Int], fut(Type::Bool)),
+        ];
+        let bindings = bind_params(MB_PARAMS, &args);
+        assert_eq!(
+            sig_to_type_bound(&MB_PARAMS[2], &bindings),
+            func(vec![Type::String], fut(Type::Bool))
+        );
+        // B still binds from the closure's actual return: the result type stays useful.
+        assert_eq!(sig_to_type_bound(&MB_RET, &bindings), list(Type::Bool));
+    }
+
+    #[test]
+    fn variable_bound_inside_a_closure_return_reaches_the_result() {
+        let args = [
+            list(Type::Int),
+            Type::Int,
+            func(vec![Type::Int], fut(Type::String)),
+        ];
+        let bindings = bind_params(MB_PARAMS, &args);
+        assert_eq!(sig_to_type_bound(&MB_RET, &bindings), list(Type::String));
+    }
+
+    #[test]
+    fn unbound_variable_is_a_gradual_hole_never_a_wrong_type() {
+        // No argument (arity error path) and a structurally foreign argument both leave the
+        // variable undetermined: the return is a hole, and so is the substituted param position.
+        for args in [&[][..], &[Type::Bytes][..]] {
+            let bindings = bind_params(ALL_PARAMS, args);
+            assert_eq!(sig_to_type_bound(&ALL_RET, &bindings), list(Type::Unknown));
+        }
+    }
+
+    #[test]
+    fn a_hole_argument_does_not_bind_but_a_later_concrete_occurrence_does() {
+        // items: List<Unknown> (e.g. an empty list literal) must not pin A to Unknown — the
+        // closure's concrete param type still gets to determine it.
+        let args = [
+            list(Type::Unknown),
+            Type::Int,
+            func(vec![Type::Float], fut(Type::Bool)),
+        ];
+        let bindings = bind_params(MB_PARAMS, &args);
+        assert_eq!(
+            sig_to_type_bound(&MB_PARAMS[2], &bindings),
+            func(vec![Type::Float], fut(Type::Bool))
+        );
     }
 }

@@ -1,0 +1,20 @@
+// H-BENCH: flush fan-out — 200 effects subscribed to one signal, 10k sets = 2M effect-body
+// runs through the flush queue. Gates H5: stresses the flush loop's queue handling and per-body
+// ctx.call overhead rather than the set itself.
+use std.reactive.{signal, effect}
+
+s = signal(0)
+mut sum = 0
+mut e = 0
+while e < 200 {
+    effect(fn() {
+        sum = sum + s.get()
+    })
+    e = e + 1
+}
+mut i = 1
+while i <= 10000 {
+    s.set(i)
+    i = i + 1
+}
+echo "sum=${sum}"

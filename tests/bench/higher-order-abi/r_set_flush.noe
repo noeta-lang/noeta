@@ -1,0 +1,16 @@
+// H-BENCH: hot signal writes with one subscribed effect — 1M `.set()`s, each driving a flush
+// that reruns the effect body. Gates the H5 flush-loop migration (today: drive_flush in the
+// backend; after: the flush loop lives in the extension's set dispatch, bodies run via ctx.call).
+use std.reactive.{signal, effect}
+
+s = signal(0)
+mut seen = 0
+effect(fn() {
+    seen = seen + s.get()
+})
+mut i = 1
+while i <= 1000000 {
+    s.set(i)
+    i = i + 1
+}
+echo "seen=${seen}"

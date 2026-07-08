@@ -1,0 +1,23 @@
+// `Cell.update(f)` (higher-order-abi H4) — the higher-order method: applies `f` to the held value,
+// stores the result, and returns it. The closure runs *inside* the extension's dispatch via the ctx
+// call-back seam, and may itself re-enter the extension — reading another cell, creating one, even
+// updating the same cell (the inner write is then overwritten by the outer update's result, since
+// the outer result is stored after `f` returns).
+// expect: stdout "6"
+// expect: stdout "6"
+// expect: stdout "16"
+// expect: stdout "100"
+// expect: stdout "3"
+// expect: exit 0
+use std.{cell}
+a = cell.new(5)
+echo a.update(fn (n: int): int { return n + 1 })
+echo a.get()
+scale = cell.new(10)
+echo a.update(fn (n: int): int { return n + scale.get() })
+inner = a.update(fn (n: int): int {
+    a.set(100);
+    echo a.get();
+    return 3
+})
+echo inner

@@ -69,34 +69,10 @@ pub enum Builtin {
     /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
     /// The assertion primitive the test runner's `@test` blocks (object-model slice 6) rest on.
     Assert,
-    /// `sleep(ms)` — produce a leaf timer future (Track A.2) that becomes ready once the executor's
-    /// logical clock reaches `now + ms`. The first future that can actually report `Pending`.
-    Sleep,
-    /// `all(list)` — await every future in `list` concurrently, returning a `List<T>` of their
-    /// results in order (Track A.9). Drives the scheduler until all are ready.
-    All,
-    /// `race(list)` — await the futures in `list` concurrently, returning the first result and
-    /// **cancelling** the losing tasks (Track A.9 + cooperative cancellation A.8).
-    Race,
-    /// `map_bounded(items, n, f)` — apply the async `f` to each item, at most `n` in flight at once,
-    /// returning the results as a `List<B>` in item order (Track A.9, bounded-parallelism map).
-    MapBounded,
-    /// `signal(v)` — create a reactive cell holding `v` (reactivity S1). Returns a `Signal<T>` handle
-    /// whose `.get()`/`.set(v)` read and update it through the VM's reactive graph.
-    Signal,
-    /// `computed(fn)` — create a lazy, memoized derivation (reactivity S3). Returns a `Computed<T>`
-    /// handle whose `.get()` recomputes the body only when a dependency it read has changed, and
-    /// returns the memo otherwise.
-    Computed,
-    /// `effect(fn)` — register a side effect (reactivity S2). Runs `fn` immediately, tracking which
-    /// signals it reads, and reruns it whenever one of them changes. Returns an `Effect` handle with
-    /// `.dispose()`.
-    Effect,
-    /// `http.serve(port, handler)` — bind an inbound listener and run the accept→handle→reply loop
-    /// (http-server S3), calling `handler(request)` per connection. Reached by an intercept in
-    /// `call_native_module` on the qualified `http.serve` call (not a bare-name prelude builtin), so
-    /// it needs the executor + inbound Network capability that registry dispatch cannot reach.
-    Serve,
+    // (The whole orchestration family — `task` at higher-order-abi H0/H2, `http.serve` at H3,
+    // `signal`/`computed`/`effect` at H5 — migrated onto the registry's `NativeCtx` dispatch,
+    // `noeta-stdlib/src/{task,serve,reactive}.rs`. Only the language-level collection builtins
+    // and `assert` remain.)
 }
 
 impl Builtin {
@@ -108,14 +84,6 @@ impl Builtin {
             Builtin::Filter => "filter",
             Builtin::Sum => "sum",
             Builtin::Assert => "assert",
-            Builtin::Sleep => "sleep",
-            Builtin::All => "all",
-            Builtin::Race => "race",
-            Builtin::MapBounded => "map_bounded",
-            Builtin::Signal => "signal",
-            Builtin::Computed => "computed",
-            Builtin::Effect => "effect",
-            Builtin::Serve => "serve",
         }
     }
 
@@ -127,13 +95,6 @@ impl Builtin {
             "filter" => Some(Builtin::Filter),
             "sum" => Some(Builtin::Sum),
             "assert" => Some(Builtin::Assert),
-            "sleep" => Some(Builtin::Sleep),
-            "all" => Some(Builtin::All),
-            "race" => Some(Builtin::Race),
-            "map_bounded" => Some(Builtin::MapBounded),
-            "signal" => Some(Builtin::Signal),
-            "computed" => Some(Builtin::Computed),
-            "effect" => Some(Builtin::Effect),
             _ => None,
         }
     }

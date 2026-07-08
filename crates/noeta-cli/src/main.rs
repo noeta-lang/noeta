@@ -233,19 +233,9 @@ enum Command {
         #[arg(long)]
         lines: bool,
     },
-    /// Serve a program's HTTP handler. The file defines a top-level `fn fetch(req: Request):
-    /// Response` (sync or async) and `use std.{http}`; `noeta serve` runs the file's top-level
-    /// setup, then binds a listener and drives the handler — the ergonomic entry point over an
-    /// explicit `http.serve(...)` call. Runs until interrupted (Ctrl-C). Single worker,
-    /// cooperatively concurrent (a slow async handler yields while others progress); multi-core
-    /// worker isolates are a follow-on.
-    Serve {
-        /// Path to a `.noe` file exporting a `fetch` handler.
-        file: PathBuf,
-        /// The TCP port to bind (default 8080); the listener binds all interfaces (`0.0.0.0`).
-        #[arg(long, default_value_t = 8080)]
-        port: u16,
-    },
+    // (`Serve` was a variant here until higher-order-abi H6 — `noeta serve` is now an
+    // extension-contributed command, `noeta-stdlib/src/serve.rs::SERVE_COMMAND`, wired
+    // dynamically in `main`.)
     /// Inspect or clear the transparent startup cache (M3). `noeta run`/`dump`/`build` cache each
     /// compile under `~/.cache/noeta/` so a repeated run of unchanged sources skips the front-end;
     /// caching is on by default (disable per-run with `--no-cache`, or everywhere with
@@ -274,7 +264,22 @@ fn main() -> ExitCode {
     if let Some(code) = try_run_stapled() {
         return code;
     }
-    match Cli::parse().command {
+    // Extension-contributed subcommands (higher-order-abi H6): augment the derive-built CLI with
+    // each registered command (so `noeta --help` lists them and each gets real clap parsing),
+    // then dispatch a matched name to its extension `run` — the in-process `cargo clippy` model.
+    let mut cli = <Cli as clap::CommandFactory>::command();
+    for ext in noeta_stdlib::registry::commands() {
+        cli = cli.subcommand(ext_command_clap(ext));
+    }
+    let matches = cli.get_matches();
+    if let Some((name, sub)) = matches.subcommand()
+        && let Some(ext) = noeta_stdlib::registry::commands().find(|c| c.name == name)
+    {
+        return ext_command_dispatch(ext, sub);
+    }
+    let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches)
+        .unwrap_or_else(|err| err.exit());
+    match cli.command {
         Command::Run {
             file,
             tier,
@@ -326,7 +331,6 @@ fn main() -> ExitCode {
             out,
             lines,
         } => cmd_profile(&file, instrument, hz, every, format.as_deref(), out, lines),
-        Command::Serve { file, port } => cmd_serve(&file, port),
         Command::Cache { action } => cmd_cache(&action),
     }
 }
@@ -894,75 +898,131 @@ fn noe_files(root: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
-/// `noeta serve <FILE> [--port N]` — the ergonomic HTTP-server entry point (http-server S4). The
-/// file exports a top-level `fn fetch(req: Request): Response` (sync or async) and `use std.{http}`;
-/// this runs the file's top-level setup, then synthesizes and runs `http.serve(<port>, fetch)`,
-/// which binds `0.0.0.0:<port>` and drives the handler over the real host until interrupted
-/// (Ctrl-C). Single worker, cooperatively concurrent — a slow async handler yields while others
-/// progress. (Multi-core worker isolates are a follow-on; see `plans/http-server`.) Layering the
-/// serve call on top of the loaded program means the mechanism is the exact same `http.serve` a
-/// program can call directly — the command only supplies the entry convention and the port.
-fn cmd_serve(file: &std::path::Path, port: u16) -> ExitCode {
-    use noeta_ast::{Expr, Stmt};
-    use noeta_span::Span;
+/// Build the clap subcommand for an extension-contributed command (higher-order-abi H6) from
+/// its declared [`noeta_stdlib::ArgSpec`]s — real help text and validation, same as a core verb.
+fn ext_command_clap(ext: &'static noeta_stdlib::ExtCommand) -> clap::Command {
+    let mut cmd = clap::Command::new(ext.name).about(ext.about);
+    for spec in ext.args {
+        cmd = cmd.arg(match spec.kind {
+            noeta_stdlib::ArgKind::Path => clap::Arg::new(spec.name)
+                .help(spec.help)
+                .required(true)
+                .value_parser(clap::value_parser!(PathBuf)),
+            // The default is applied at dispatch (clap's builder `default_value` wants an
+            // owned-string feature we don't enable); the spec's help text names it.
+            noeta_stdlib::ArgKind::Int { .. } => clap::Arg::new(spec.name)
+                .long(spec.name)
+                .help(spec.help)
+                .value_parser(clap::value_parser!(i64)),
+        });
+    }
+    cmd
+}
 
-    let mut linked = match noeta_loader::load(file) {
-        Err(err) => {
-            eprintln!("lang: cannot read {}: {err}", file.display());
-            return ExitCode::from(2);
+/// Dispatch a matched extension command: collect its declared args from the clap matches and run
+/// it against the CLI's [`noeta_stdlib::CommandCtx`] driver.
+fn ext_command_dispatch(
+    ext: &'static noeta_stdlib::ExtCommand,
+    matches: &clap::ArgMatches,
+) -> ExitCode {
+    let mut parsed = noeta_stdlib::ParsedArgs::default();
+    for spec in ext.args {
+        match spec.kind {
+            noeta_stdlib::ArgKind::Path => parsed.push_path(
+                spec.name,
+                matches
+                    .get_one::<PathBuf>(spec.name)
+                    .expect("a required path argument is always present")
+                    .clone(),
+            ),
+            noeta_stdlib::ArgKind::Int { default } => parsed.push_int(
+                spec.name,
+                matches.get_one::<i64>(spec.name).copied().unwrap_or(default),
+            ),
         }
-        Ok(Err(load_diagnostics)) => {
-            let mut stderr = io::stderr();
-            for ld in &load_diagnostics {
-                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+    }
+    ExitCode::from((ext.run)(&mut CliCommandCtx, &parsed))
+}
+
+/// The CLI's [`noeta_stdlib::CommandCtx`] driver (higher-order-abi H6): load + check a program
+/// file and run it on the real host, optionally appending a synthesized trailing entry call —
+/// exactly what the hardcoded `cmd_serve` did, generalized over [`noeta_stdlib::EntryCall`].
+/// Layering the entry on the loaded program means the mechanism is the exact same registered
+/// function a program can call directly; the command only supplies the entry convention.
+struct CliCommandCtx;
+
+impl noeta_stdlib::CommandCtx for CliCommandCtx {
+    fn run_file(
+        &mut self,
+        file: &std::path::Path,
+        entry: Option<&noeta_stdlib::EntryCall>,
+        banner: Option<&str>,
+    ) -> u8 {
+        use noeta_ast::{Expr, Stmt};
+        use noeta_span::Span;
+
+        let mut linked = match noeta_loader::load(file) {
+            Err(err) => {
+                eprintln!("lang: cannot read {}: {err}", file.display());
+                return 2;
             }
-            return ExitCode::from(1);
-        }
-        Ok(Ok(linked)) => linked,
-    };
+            Ok(Err(load_diagnostics)) => {
+                let mut stderr = io::stderr();
+                for ld in &load_diagnostics {
+                    let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+                }
+                return 1;
+            }
+            Ok(Ok(linked)) => linked,
+        };
 
-    // Synthesize `http.serve(<port>, fetch)` as a trailing top-level statement. The program supplies
-    // `fetch` and `use std.{http}` (any handler builds responses with `http.response`, so `http` is
-    // already imported); a missing `fetch`/`http` surfaces as an ordinary check error. A synthetic
-    // span (offset 0) is fine — this node is compiler-generated, never the subject of a diagnostic
-    // the user needs to locate.
-    let sp = Span::empty_at(0);
-    let ident = |name: &str| Expr::Ident {
-        name: name.to_string(),
-        span: sp,
-    };
-    let serve = Expr::Member {
-        receiver: Box::new(ident("http")),
-        name: "serve".to_string(),
-        name_span: sp,
-        span: sp,
-    };
-    let call = Expr::Call {
-        callee: Box::new(serve),
-        args: vec![
-            Expr::Int {
-                value: i64::from(port),
+        // Synthesize `<module>.<func>(<args>)` as a trailing top-level statement. The program
+        // supplies any identifiers the call names (`fetch`); a missing one surfaces as an
+        // ordinary check error. A synthetic span (offset 0) is fine — this node is
+        // compiler-generated, never the subject of a diagnostic the user needs to locate.
+        if let Some(entry) = entry {
+            let sp = Span::empty_at(0);
+            let ident = |name: &str| Expr::Ident {
+                name: name.to_string(),
                 span: sp,
-            },
-            ident("fetch"),
-        ],
-        span: sp,
-    };
-    linked.program.stmts.push(Stmt::Expr {
-        expr: call,
-        span: sp,
-    });
+            };
+            let callee = Expr::Member {
+                receiver: Box::new(ident(entry.module)),
+                name: entry.func.to_string(),
+                name_span: sp,
+                span: sp,
+            };
+            let args = entry
+                .args
+                .iter()
+                .map(|arg| match arg {
+                    noeta_stdlib::EntryArg::Int(value) => Expr::Int { value: *value, span: sp },
+                    noeta_stdlib::EntryArg::Ident(name) => ident(name),
+                })
+                .collect();
+            let call = Expr::Call {
+                callee: Box::new(callee),
+                args,
+                span: sp,
+            };
+            linked.program.stmts.push(Stmt::Expr { expr: call, span: sp });
+        }
 
-    eprintln!("noeta serve: listening on http://0.0.0.0:{port} (Ctrl-C to stop)");
-    // `serve` injects an `http.serve(...)` call before compiling, so its module differs from `run`'s
-    // for the same source — it must never share the startup cache's `(source+tiers)` key, and stays on
-    // the uncached `run_program` path (it's also long-lived, so it would barely benefit). It takes no
-    // program pass-through args; the served program sees the real process argv.
-    exit_code(run_program(
-        &linked.program,
-        &linked.sources,
-        std::env::args().collect(),
-    ))
+        if let Some(banner) = banner {
+            eprintln!("{banner}");
+        }
+        // An entry call injected before compiling means the module differs from `run`'s for the
+        // same source — a command run must never share the startup cache's `(source+tiers)` key,
+        // and stays on the uncached `run_program` path (commands like `serve` are also
+        // long-lived, so they would barely benefit). Commands take no program pass-through args;
+        // the program sees the real process argv.
+        u8::try_from(run_program(
+            &linked.program,
+            &linked.sources,
+            std::env::args().collect(),
+        ))
+        .unwrap_or(1)
+    }
 }
 
 /// Run a `.noeb` bundle (P-AOT L1.2): decode the module from the versioned container and execute it

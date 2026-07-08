@@ -150,6 +150,26 @@ pub enum SigType {
     /// backend change and no default-value machinery is needed. Convention: once a parameter is
     /// `Optional`, every following parameter is too.
     Optional(&'static SigType),
+    /// A function/closure parameter (higher-order-abi H1) — `task.map_bounded(items, n,
+    /// f: Fn([A]) -> Future<B>)`. The checker maps it onto the language's structural `Type::Fn`;
+    /// the dispatch receives the closure as an opaque ctx slot and invokes it via
+    /// [`crate::NativeCtx::call`], so `NativeValue` never grows a closure variant.
+    Fn(&'static [SigType], &'static SigType),
+    /// A signature-level type variable (higher-order-abi H1) — `task.all(fs: List<Future<Var(0)>>)
+    /// -> List<Var(0)>`. The checker binds each variable at its first structural occurrence in the
+    /// call's argument types and substitutes the bindings into the remaining parameters and the
+    /// return, replacing the hand-written per-function checker arms the `Builtin` family needed.
+    /// For an extern-type **method**, the receiver's type arguments seed the variables first
+    /// (`Cell<T>.get() -> Var(0)` recovers `T`), then the call's arguments bind the rest.
+    /// An unbound variable is a gradual hole (`Unknown`), never a wrong concrete type.
+    Var(u8),
+    /// A **generic nominal instantiation** (higher-order-abi H4) — a generic extern type in a
+    /// signature position: `cell.new(v: Var(0)) -> Generic("Cell", &[Var(0)])` types as
+    /// `Cell<T>` with `T` bound from the argument. The plain [`SigType::Named`] stays the
+    /// monomorphic form. (Type arguments are a static-checker artifact — at runtime an extern
+    /// value reflects as its bare nominal name, exactly as the reactive handles it generalizes
+    /// reflected as `dyn`.)
+    Generic(&'static str, &'static [SigType]),
 }
 
 impl SigType {
@@ -235,6 +255,36 @@ pub struct ExtModule {
     /// the scalar/`vec`/`quat` modules keep the cheap flat marshalling, so their hot path is
     /// untouched. The module declares its own need here so the backends stay data-driven.
     pub deep_marshal: bool,
+    /// The module's **higher-order** functions (higher-order-abi H0): signatures whose calls route
+    /// to [`ExtModule::ctx_dispatch`] with opaque slot arguments instead of marshalled values —
+    /// for functions that take closures, drive the executor, or orchestrate futures. Same
+    /// signature vocabulary as [`ExtModule::functions`]; a name appears in exactly one table.
+    pub ctx_functions: &'static [ExtFn],
+    /// The shared dispatch for [`ExtModule::ctx_functions`] (`None` when the table is empty).
+    pub ctx_dispatch: Option<crate::ctx::CtxDispatch>,
+}
+
+impl ExtModule {
+    /// Field defaults for the optional capabilities, so a module literal only names what it uses:
+    /// `ExtModule { name, functions, dispatch, deep_marshal, ..ExtModule::DEFAULTS }`. A future
+    /// capability field lands here once instead of in every registration.
+    pub const DEFAULTS: ExtModule = ExtModule {
+        name: "",
+        functions: &[],
+        dispatch: no_dispatch,
+        deep_marshal: false,
+        ctx_functions: &[],
+        ctx_dispatch: None,
+    };
+}
+
+/// The [`ExtModule::DEFAULTS`] dispatch placeholder — reached only by a module that registers no
+/// plain functions (e.g. a ctx-only module), where any name is unknown by definition.
+fn no_dispatch(func: &str, _host: &mut dyn Host, _args: &[NativeValue]) -> Result<NativeOut, StdError> {
+    Err(StdError {
+        kind: crate::ErrorKind::UnknownName,
+        message: format!("no function `{func}`"),
+    })
 }
 
 /// A type's method dispatch (extern-types X1): given the receiver, the method name, the host
@@ -249,10 +299,32 @@ pub type TypeDispatch = fn(
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError>;
 
+/// A type's **higher-order** method dispatch (higher-order-abi H4): like [`TypeDispatch`], but
+/// the receiver and arguments arrive as opaque ctx slots and the body may re-enter the backend —
+/// call closures, reach per-run state, read/write the retained arena. What `Cell.update(f)` and
+/// the reactive handle methods need. The receiver slot is not consumed; downcast its plain data
+/// via [`crate::NativeCtx::with_extern`].
+pub type CtxTypeDispatch = fn(
+    method: &str,
+    ctx: &mut dyn crate::NativeCtx,
+    recv: crate::Slot,
+    args: &[crate::Slot],
+) -> Result<crate::CtxOut, crate::CtxError>;
+
+/// An [`ExtType::arena_getter`] declaration: the method name plus the projection reading the
+/// [`crate::Retained`] id off the extern box.
+pub type ArenaGetter = (&'static str, fn(&dyn crate::ExternValue) -> crate::Retained);
+
 /// A first-class value type contributed by an extension (extern-types X1): a reserved type name,
 /// its instance-method signatures, their shared dispatch, and the key capability the checker
 /// reads. The value behavior itself (equality, ordering, hash, display) lives on the
 /// [`crate::ExternValue`] impl the type's constructors box up.
+///
+/// A **generic** extern type (`Cell<T>`, higher-order-abi H4) declares nothing extra here: its
+/// constructor's return names the instantiation ([`SigType::Generic`]) and its method signatures
+/// reference the receiver's type arguments as [`SigType::Var`] (`Var(0)` = first argument) — the
+/// checker seeds the variables from the receiver's static type. At runtime the value is tagged
+/// with the bare nominal name only.
 #[derive(Debug, Clone, Copy)]
 pub struct ExtType {
     /// The surface type name (`Uuid`). Reserved: a user declaration of this name is E0049.
@@ -264,6 +336,41 @@ pub struct ExtType {
     /// methods, [`crate::ExternValue::cmp_value`] is a total order over the kind, and
     /// [`crate::ExternValue::hash_value`] is stable and content-derived.
     pub key_capable: bool,
+    /// The type's **higher-order** method signatures (H4) — calls route to
+    /// [`ExtType::ctx_dispatch`] with slot arguments. Disjoint from `methods` by name.
+    pub ctx_methods: &'static [ExtFn],
+    pub ctx_dispatch: Option<CtxTypeDispatch>,
+    /// Hot-path declaration (H5 perf): `Some((method, project))` marks `method` — one of the
+    /// `ctx_methods` — as a **gated arena read**: its entire observable behavior is "return the
+    /// receiver's retained arena entry", where `project` reads the [`crate::Retained`] id off
+    /// the extern box. While the type's **read gate** is open (the default), the backend inlines
+    /// the read at the call site — arena load + retain, no ctx dispatch — which is what keeps a
+    /// `signal.get()`/`cell.get()` hot loop at intercept speed. The extension closes the gate
+    /// ([`crate::NativeCtx::set_read_gate`]) for exactly the windows where the full dispatch
+    /// does *more* than the plain read (dependency tracking while an effect body runs; a dirty
+    /// memo), and calls fall back to the ordinary ctx dispatch — which must behave identically
+    /// to the fast path whenever the gate is open. The declaration is semantic, not an
+    /// optimization hint: every tier (interpreter now, JIT later) may compile it.
+    pub arena_getter: Option<ArenaGetter>,
+}
+
+impl ExtType {
+    /// Literal-shortening defaults (`..ExtType::DEFAULTS`), mirroring [`ExtModule::DEFAULTS`]:
+    /// a plain-data extern type declares no higher-order surface.
+    pub const DEFAULTS: ExtType = ExtType {
+        name: "",
+        methods: &[],
+        dispatch: |_, method, _, _| {
+            Err(StdError {
+                kind: crate::ErrorKind::UnknownName,
+                message: format!("internal: no method dispatch registered (method `{method}`)"),
+            })
+        },
+        key_capable: false,
+        ctx_methods: &[],
+        ctx_dispatch: None,
+        arena_getter: None,
+    };
 }
 
 /// A bundle of native modules and types registered into the language. Core implements this once
@@ -275,6 +382,10 @@ pub trait Extension: Sync {
     /// The extension's first-class value types. Default empty — a modules-only extension does
     /// not change.
     fn types(&self) -> &'static [ExtType] {
+        &[]
+    }
+    /// The extension's CLI subcommands (higher-order-abi H6). Default empty.
+    fn commands(&self) -> &'static [crate::ExtCommand] {
         &[]
     }
 }

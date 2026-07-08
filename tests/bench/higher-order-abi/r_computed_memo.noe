@@ -1,0 +1,26 @@
+// H-BENCH: computed reads — 4M memo-hit `.get()`s (no invalidation), then 500k
+// invalidate-recompute cycles (set + get). Gates H5: the memo-hit path is the hottest reactive
+// read; the recompute path exercises ctx.call for the body plus dependency retracking.
+use std.reactive.{signal, computed}
+
+n = signal(3)
+sq = computed(fn() {
+    return n.get() * n.get()
+})
+
+// memo hits
+mut total = 0
+mut i = 0
+while i < 4000000 {
+    total = total + sq.get()
+    i = i + 1
+}
+
+// invalidate + recompute cycles
+mut j = 1
+while j <= 500000 {
+    n.set(j)
+    total = total + sq.get()
+    j = j + 1
+}
+echo "total=${total}"

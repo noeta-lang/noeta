@@ -130,11 +130,24 @@ The typed form supports nested structs, `List<T>`, `Map`, and optional fields (a
 
 ## `reactive`
 
-Server-side reactivity ([Reactivity](Reactivity)): `signal(v: T) -> Signal<T>` (a mutable cell), `computed(fn() -> T) -> Computed<T>` (a lazy memoized derivation), `effect(fn) -> Effect` (a side effect that reruns when a signal it read changes). These are interpreter builtins behind an import gate — `use std.reactive.{signal, computed, effect}` (or the qualified `reactive.signal(0)`).
+Server-side reactivity ([Reactivity](Reactivity)): `signal(v: T) -> Signal<T>` (a mutable cell), `computed(fn() -> T) -> Computed<T>` (a lazy memoized derivation), `effect(fn) -> Effect` (a side effect that reruns when a signal it read changes). Registered through the native-extension registry like every other module — `use std.reactive.{signal, computed, effect}` (or the qualified `reactive.signal(0)`); see [Native Extensions](Native-Extensions) for the higher-order seam they dispatch through.
 
 ## `task`
 
 The concurrency combinators ([Concurrency](Concurrency)): `sleep(ms) -> Future<void>`, `all(List<Future<T>>) -> List<T>`, `race(List<Future<T>>) -> T` (losers cancelled), `map_bounded(items, n, f) -> List<B>` (≤ n in flight). Named `task` — `async` is a keyword and cannot appear in a `use` path.
+
+## `cell`
+
+A shared, mutable, identity-carrying box: `cell.new(v: T) -> Cell<T>` holds one value; `.get() -> T` reads it, `.set(v: T)` replaces it, `.update(fn(T) -> T) -> T` reads-modifies-writes and returns the new value. Copies of the handle alias the one box (reference semantics — the point of a cell), and equality is identity: two cells over equal values are still different cells.
+
+```noeta
+use std.{cell}
+c = cell.new(1)
+alias = c
+c.set(2)
+echo alias.get()                                     // 2
+echo c.update(fn(n) => n * 10)                       // 20
+```
 
 ## `id`
 
