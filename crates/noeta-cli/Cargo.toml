@@ -31,10 +31,9 @@ noeta-lsp = { workspace = true }
 noeta-dap = { workspace = true }
 noeta-prof = { workspace = true }
 noeta-fmt = { workspace = true }
+noeta-pm = { workspace = true }
 clap = { workspace = true }
 toml = { workspace = true }
-semver = { workspace = true }
-pubgrub = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

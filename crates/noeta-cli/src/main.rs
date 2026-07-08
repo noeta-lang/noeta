@@ -32,20 +32,9 @@ use noeta_parser::{parse, parse_fragment};
 use noeta_span::{Source, SourceId, SourceMap, Span};
 use noeta_vm::{SessionOutput, VmBackend, VmSession};
 
-mod manifest;
-// The PubGrub resolver (P2.2) is the pure algorithm; the transitive graph walk (P2.4) runs it as the
-// authoritative selection/validation pass over the materialized dependency versions.
-mod resolve;
-// The content-addressed package store (P2.3a) — holds fetched git dependency trees.
-mod store;
-// Git-tag dependency fetch (P2.3b) — wired into dependency resolution (P2.3c).
-mod git;
-// Transitive dependency resolution (P2.4) — the graph walk over path+git sources.
-mod graph;
-// The reproducible dependency pin — `noeta.lock` (P2.4c).
-mod lock;
-// The package registry index (P2.5) — name→git-coords lookup in front of the git machinery.
-mod registry;
+// The package manager (package-manager P2) now lives in the `noeta-pm` library so `noeta-lsp` and
+// `noeta-db` resolve dependencies through the same code; the CLI names its modules unqualified.
+use noeta_pm::{graph, lock, manifest, registry};
 
 #[derive(Parser)]
 #[command(name = "noeta", version, about = "The Noeta toolchain")]

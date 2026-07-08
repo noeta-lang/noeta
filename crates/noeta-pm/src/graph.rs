@@ -36,6 +36,7 @@ use crate::store::{Store, hash_tree};
 
 /// The resolved dependency graph: the packages the loader links (each a re-rooted [`DepPackage`]),
 /// plus the pinned coordinates for the lockfile (P2.4c).
+#[derive(Debug)]
 pub struct ResolvedGraph {
     /// One entry per resolved package identity, ready for [`noeta_loader::link_with_deps`], sorted by
     /// global segment for a deterministic link + cache order.

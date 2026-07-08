@@ -1,0 +1,19 @@
+[package]
+name = "noeta-pm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+noeta-cache = { workspace = true }
+noeta-check = { workspace = true }
+noeta-loader = { workspace = true }
+noeta-fmt = { workspace = true }
+semver = { workspace = true }
+pubgrub = { workspace = true }
+toml = { workspace = true }
+
+[lints]
+workspace = true

@@ -37,7 +37,7 @@ const LOCK_VERSION: i64 = 1;
 
 /// A read lockfile: the pins a build consults to reproduce (package-manager P2.4c). Missing or
 /// unreadable → [`Lock::empty`] (the walk then resolves from scratch).
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Lock {
     /// `(git url, tag)` → pinned commit SHA.
     git_pins: BTreeMap<(String, String), String>,

@@ -66,6 +66,9 @@ noeta-dap = { path = "crates/noeta-dap" }
 noeta-prof = { path = "crates/noeta-prof" }
 # Tooling: the `noeta fmt` canonical source formatter (lex+trivia → parse → AST → Doc → text)
 noeta-fmt = { path = "crates/noeta-fmt" }
+# Package manager (package-manager P2): manifest + transitive resolver + git/store/lock + registry
+# index. A library (not in the CLI binary) so `noeta-lsp`/`noeta-db` can resolve dependencies too.
+noeta-pm = { path = "crates/noeta-pm" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
 logos = "0.16"

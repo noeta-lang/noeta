@@ -1703,14 +1703,13 @@ dependencies = [
  "noeta-loader",
  "noeta-lsp",
  "noeta-parser",
+ "noeta-pm",
  "noeta-prof",
  "noeta-runtime",
  "noeta-span",
  "noeta-stdlib",
  "noeta-vm",
  "predicates",
- "pubgrub",
- "semver",
  "serde",
  "serde_json",
  "toml",
@@ -1977,6 +1976,19 @@ dependencies = [
  "noeta-lexer",
  "noeta-span",
  "proptest",
+]
+
+[[package]]
+name = "noeta-pm"
+version = "0.0.0"
+dependencies = [
+ "noeta-cache",
+ "noeta-check",
+ "noeta-fmt",
+ "noeta-loader",
+ "pubgrub",
+ "semver",
+ "toml",
 ]
 
 [[package]]

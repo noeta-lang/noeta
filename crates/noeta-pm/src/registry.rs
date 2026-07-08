@@ -76,6 +76,7 @@ pub fn resolve_coords(
 /// A file-backed [`Index`] (package-manager P2.5): one TOML file per package under a directory, used
 /// offline and in tests. Located at `NOETA_REGISTRY_DIR` if set, else `<cache>/registry`. The hosted
 /// registry replaces this with an HTTP client of the same [`Index`] shape.
+#[derive(Debug)]
 pub struct LocalIndex {
     dir: PathBuf,
 }
