@@ -37,6 +37,9 @@ mod manifest;
 // need version selection (P2.3+). Landed + unit-tested first, isolated from IO.
 #[allow(dead_code)]
 mod resolve;
+// The content-addressed package store (P2.3a); consumed once git fetch lands (P2.3c).
+#[allow(dead_code)]
+mod store;
 
 #[derive(Parser)]
 #[command(name = "noeta", version, about = "The Noeta toolchain")]
