@@ -1,4 +1,4 @@
-//! `std.telemetry` — the tracing SDK surface (native OTEL, T1–T2).
+//! `std.telemetry` — the tracing SDK surface (native OTEL, T1–T3).
 //!
 //! A facade over the [`Telemetry`](noeta_native::Telemetry) Host capability. The span tree and
 //! export live host-side (the sandbox recorder / the real OTLP exporter); this module owns only the
@@ -12,11 +12,19 @@
 //!   the span — **even if `body` aborts** (it records an error status and re-propagates). Returns
 //!   `body`'s value.
 //! - `current_context() -> str` is the current active span's W3C `traceparent` (empty when none) —
-//!   the propagation read (cross-isolate/wire injection lands in T3).
-//! - `Span` methods `set_attribute`/`add_event`/`record_error`/`end` marshal to `host.tel_span_*`.
+//!   the propagation **inject** side (serialize onto a channel message / outbound header).
+//! - `span_from(name, traceparent) -> Span` is the propagation **extract** side: it starts a span
+//!   whose parent is the remote context parsed from `traceparent`, continuing the inbound trace (a
+//!   malformed header parses to no-parent → a new root, the W3C forgiving-reader rule). This is what
+//!   crosses an isolate boundary — the `traceparent` is a plain string, so it rides a channel
+//!   message as-is; the receiving isolate calls `span_from` to continue the same trace.
+//! - `Span` methods `set_attribute`/`add_event`/`record_error`/`end` marshal to `host.tel_span_*`;
+//!   `Span.context() -> str` reads a *held* span's own `traceparent` (inject a specific span, not
+//!   just the active one).
 //!
-//! `span`/`with_span`/`current_context` reach the active stack, so they route through the `NativeCtx`
-//! seam; the `Span` methods only touch the host, so they stay plain dispatch.
+//! `span`/`with_span`/`current_context`/`span_from` reach the active stack and/or start spans, so
+//! they route through the `NativeCtx` seam; the `Span` methods only touch the host, so they stay
+//! plain dispatch.
 
 use std::any::Any;
 use std::cmp::Ordering;
@@ -64,6 +72,11 @@ pub const TELEMETRY_CTX_FNS: &[ExtFn] = &[
         params: &[],
         ret: RetTy::Concrete(SigType::String),
     },
+    ExtFn {
+        name: "span_from",
+        params: &[SigType::String, SigType::String],
+        ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
+    },
 ];
 
 /// The `Span` instance methods (plain dispatch — they only reach the host). The mutators chain
@@ -79,6 +92,11 @@ pub const SPAN_METHODS: &[ExtFn] = &[
         name: "add_event",
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
+    },
+    ExtFn {
+        name: "context",
+        params: &[],
+        ret: RetTy::Concrete(SigType::String),
     },
     ExtFn {
         name: "record_error",
@@ -186,6 +204,17 @@ pub fn telemetry_ctx_dispatch<C: NativeCtx + ?Sized>(
                 .unwrap_or_default();
             Ok(CtxOut::Out(NativeOut::Str(traceparent)))
         }
+        "span_from" => {
+            ctx_arity(func, args, 2)?;
+            let name = slot_str(ctx, args[0])?;
+            let traceparent = slot_str(ctx, args[1])?;
+            // The extract side of propagation: a malformed inbound header parses to `None` and the
+            // span becomes a new root (the W3C forgiving-reader rule), never an error. The remote
+            // parent overrides implicit parenting — this span continues the *inbound* trace.
+            let parent = TraceContext::parse(&traceparent);
+            let id = ctx.host().tel_span_start(&name, SpanKind::Internal, parent);
+            Ok(CtxOut::Out(NativeOut::Extern(ExternBox::new(Span { id }))))
+        }
         _ => Err(no_function_error("telemetry", func).into()),
     }
 }
@@ -215,6 +244,14 @@ pub fn span_method_dispatch(
             let name = want_str(method, args, 0)?;
             host.tel_span_add_event(id, name, Vec::new());
             Ok(span_value(id))
+        }
+        "context" => {
+            // This span's own W3C `traceparent` — the inject side for a *held* span (e.g. serialize
+            // it onto a channel message or an outbound header), distinct from the active-span read
+            // `telemetry.current_context()`.
+            want_arity(method, args, 0)?;
+            let context = host.tel_span_context(id);
+            Ok(NativeOut::Str(context.to_traceparent()))
         }
         "record_error" => {
             want_arity(method, args, 1)?;
@@ -361,6 +398,25 @@ mod tests {
         assert_eq!(spans[0].events.len(), 1);
         assert_eq!(spans[0].events[0].name, "cache.miss");
         assert_eq!(spans[0].status, SpanStatus::Error("boom".into()));
+    }
+
+    /// `Span.context()` returns the span's own W3C `traceparent`, and it round-trips through
+    /// [`TraceContext::parse`] back to the host-reported context — the inject/extract pair used for
+    /// cross-boundary propagation.
+    #[test]
+    fn span_context_round_trips_traceparent() {
+        let mut host = SandboxHost::new();
+        let id = host.tel_span_start("outbound", SpanKind::Internal, None);
+        let mut span = Span { id };
+
+        let out = span_method_dispatch(&mut span, "context", &mut host, &[]).unwrap();
+        let NativeOut::Str(traceparent) = out else {
+            panic!("context() returns a string");
+        };
+        let parsed = TraceContext::parse(&traceparent).expect("a live span's traceparent parses");
+        assert_eq!(parsed, host.tel_span_context(id));
+
+        span_method_dispatch(&mut span, "end", &mut host, &[]).unwrap();
     }
 
     #[test]
