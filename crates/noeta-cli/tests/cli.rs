@@ -243,6 +243,48 @@ fn run_missing_file_exits_2() {
         .stderr(predicate::str::contains("cannot read"));
 }
 
+// --- program argument pass-through (`noeta run FILE -- <args>`) --------------------
+//
+// The program reads its arguments with `args.all()`. On the real host this is the script path as
+// the program name (argv[0]) followed by any args given after `--`, mirroring what a shipped
+// `noeta build --exe` binary sees via the real process argv when invoked directly.
+
+/// A program that echoes its whole argument vector, one element per line.
+const ECHO_ARGS: &str = "use std.{args}\nfor a in args.all() {\n  echo a\n}\n";
+
+#[test]
+fn run_passes_through_args_after_dash_dash() {
+    let file = temp_program("run_args_passthrough", ECHO_ARGS);
+    // Everything after `--` reaches the program verbatim — including a hyphen-prefixed flag, which
+    // the `--` separator protects from being parsed as a `noeta` option.
+    lang()
+        .arg("run")
+        .arg(&file)
+        .arg("--")
+        .arg("--verbose")
+        .arg("input.txt")
+        .arg("two words")
+        .assert()
+        .success()
+        .stdout(format!(
+            "{}\n--verbose\ninput.txt\ntwo words\n",
+            file.display()
+        ));
+}
+
+#[test]
+fn run_without_passthrough_reports_only_the_program_name() {
+    // With no `--`, `args.all()` is just the program name (argv[0]) — the toolchain's own
+    // `noeta run` prefix never leaks into the program's view.
+    let file = temp_program("run_args_none", ECHO_ARGS);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(format!("{}\n", file.display()));
+}
+
 // --- real OS-thread isolates (isolates I.4b, out-of-oracle) ------------------------
 //
 // These run on the CLI's real (VM) path, where a channel-free `isolate f(args)` executes on its own
@@ -1843,4 +1885,46 @@ fn check_empty_directory_exits_2() {
         .failure()
         .code(2)
         .stderr(predicate::str::contains("no `.noe` files"));
+}
+
+#[test]
+fn check_json_emits_a_machine_readable_report_on_stdout() {
+    let file = temp_program("check_json_err", "echo 1 + true\n");
+    let out = lang()
+        .arg("check")
+        .arg("--format")
+        .arg("json")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        // The report goes to stdout; stderr carries no human diagnostics in JSON mode.
+        .stderr(predicate::str::is_empty());
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON report");
+    assert_eq!(report["files_checked"], 1);
+    assert_eq!(report["errors"], 1);
+    assert_eq!(report["warnings"], 0);
+    let diags = report["diagnostics"].as_array().unwrap();
+    assert_eq!(diags.len(), 1);
+    assert_eq!(diags[0]["code"], "E0007");
+    assert_eq!(diags[0]["severity"], "error");
+    assert_eq!(diags[0]["line"], 1);
+    assert!(diags[0]["file"].as_str().unwrap().ends_with("main.noe"));
+}
+
+#[test]
+fn check_json_clean_is_an_empty_diagnostics_array() {
+    let file = temp_program("check_json_ok", "fn id(n: int): int { return n }\necho id(1)\n");
+    let out = lang()
+        .arg("check")
+        .arg("--format")
+        .arg("json")
+        .arg(&file)
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON report");
+    assert_eq!(report["errors"], 0);
+    assert!(report["diagnostics"].as_array().unwrap().is_empty());
 }

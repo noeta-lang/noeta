@@ -401,5 +401,7 @@ impl Diagnostic {
     }
 }
 
+mod json;
 mod render;
+pub use json::{JsonDiagnostic, JsonLabel, JsonSpan, to_json};
 pub use render::{render, render_mapped};

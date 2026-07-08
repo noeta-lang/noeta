@@ -58,6 +58,8 @@ noeta-reactive = { path = "crates/noeta-reactive" }
 noeta-lsp = { path = "crates/noeta-lsp" }
 # M2 editor tooling: the `noeta dap` Debug Adapter Protocol server over the production VM
 noeta-dap = { path = "crates/noeta-dap" }
+# M2 dev tooling: the `noeta profile` dev profiler / flamegraph over the tier-0 production VM
+noeta-prof = { path = "crates/noeta-prof" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
 logos = "0.16"
@@ -86,6 +88,9 @@ serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 miniz_oxide = "0.8"
 serde_json = "1"
+# Flamegraph SVG rendering for `noeta profile` (folded stacks → self-contained SVG). Pure Rust, no
+# external `flamegraph.pl`/perl; `default-features = false` drops its CLI-binary deps.
+inferno = { version = "0.12", default-features = false }
 insta = "1"
 proptest = "1"
 # Append-only module storage for the debug console (tooling-unification T4): a fragment install

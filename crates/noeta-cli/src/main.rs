@@ -41,6 +41,13 @@ struct Cli {
     command: Command,
 }
 
+/// How `noeta check` renders its result: for a human terminal or as a machine-readable report.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputFormat {
+    Human,
+    Json,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Run a program file.
@@ -60,6 +67,12 @@ enum Command {
         /// write one. Equivalent to setting `NOETA_NO_CACHE`. Recompiles from source regardless.
         #[arg(long)]
         no_cache: bool,
+        /// Arguments passed through to the program, after a `--` separator:
+        /// `noeta run app.noe -- --verbose input.txt`. The program reads them with `args.all()`,
+        /// which — matching a shipped `noeta build --exe` binary run directly — reports the program
+        /// path as the first element followed by these arguments.
+        #[arg(last = true)]
+        args: Vec<String>,
     },
     /// Discover and run a program's `@test` blocks (object-model slice 6).
     Test {
@@ -160,6 +173,10 @@ enum Command {
         /// Activate the tiers a `noeta.toml` build profile makes live. Unioned with any `--tier`.
         #[arg(long)]
         profile: Option<String>,
+        /// Output format. `human` (default) renders diagnostics for a terminal; `json` emits a
+        /// single machine-readable report on stdout for tools (CI, editors, the MCP server).
+        #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
+        format: OutputFormat,
     },
     /// Start an interactive REPL. Entries type-check before running (an entry with a type error
     /// prints its `E0xxx` diagnostics and is skipped) — the default since session-checker C2/C5.
@@ -183,6 +200,39 @@ enum Command {
     /// Debug Adapter Protocol on stdin/stdout. Runs a program under the production VM (JIT unarmed
     /// for full introspection) with breakpoints, stepping, and variable inspection.
     Dap,
+    /// Profile a program and report where it spends its time. Runs the file under the production VM
+    /// tier-0 (JIT unarmed, so every frame is observable) and prints a profile to stderr; the
+    /// program's own stdout is forwarded verbatim. A dev-time tool, distinct from the `--profile`
+    /// build-tier flag on `run`/`test`/… (this profiles a program's *execution*, not build tiers).
+    Profile {
+        /// Path to a `.noe` file.
+        file: PathBuf,
+        /// Run the **instrumenting** profiler instead of sampling: exact per-function call counts +
+        /// self/total time (a table on stderr). Takes precedence over the sampling flags.
+        #[arg(long)]
+        instrument: bool,
+        /// Sampling rate in Hz for the wall-time flamegraph (default 1000). Ignored with
+        /// `--instrument` or `--every`.
+        #[arg(long)]
+        hz: Option<u32>,
+        /// Deterministic sampling: take one sample every N executed ops instead of on a wall clock —
+        /// a reproducible, op-weighted flamegraph (for stable diffs / tests). Ignored with
+        /// `--instrument`.
+        #[arg(long, value_name = "N")]
+        every: Option<u64>,
+        /// Output format. Sampling: `folded` (default), `svg` (flamegraph), `speedscope` (JSON for
+        /// speedscope.app). Instrumenting: `table` (default), `json`.
+        #[arg(long, value_name = "FMT")]
+        format: Option<String>,
+        /// Write the profile artifact to this file instead of stderr (recommended for `svg` /
+        /// `speedscope`). The program's own stdout is never touched.
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+        /// Attribute each flamegraph leaf to its **source line** (`fn:line`), not just the function —
+        /// so the hot *line* within a function is visible. Sampling only.
+        #[arg(long)]
+        lines: bool,
+    },
     /// Serve a program's HTTP handler. The file defines a top-level `fn fetch(req: Request):
     /// Response` (sync or async) and `use std.{http}`; `noeta serve` runs the file's top-level
     /// setup, then binds a listener and drives the handler — the ergonomic entry point over an
@@ -230,7 +280,8 @@ fn main() -> ExitCode {
             tier,
             profile,
             no_cache,
-        } => cmd_run(&file, &tier, &profile, no_cache),
+            args,
+        } => cmd_run(&file, &tier, &profile, no_cache, &args),
         Command::Test {
             file,
             fail_fast,
@@ -261,10 +312,20 @@ fn main() -> ExitCode {
             path,
             tier,
             profile,
-        } => cmd_check(&path, &tier, &profile),
+            format,
+        } => cmd_check(&path, &tier, &profile, format),
         Command::Repl { no_check, load } => cmd_repl(!no_check, load),
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),
+        Command::Profile {
+            file,
+            instrument,
+            hz,
+            every,
+            format,
+            out,
+            lines,
+        } => cmd_profile(&file, instrument, hz, every, format.as_deref(), out, lines),
         Command::Serve { file, port } => cmd_serve(&file, port),
         Command::Cache { action } => cmd_cache(&action),
     }
@@ -359,6 +420,49 @@ fn cmd_dap() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Profile a program: run it tier-0 under the production VM and report where it spends its time.
+/// Sampling (wall-time flamegraph) is the default; `--instrument` selects the exact per-function
+/// profiler; `--every N` makes sampling deterministic (op-weighted).
+#[allow(clippy::too_many_arguments)]
+fn cmd_profile(
+    file: &std::path::Path,
+    instrument: bool,
+    hz: Option<u32>,
+    every: Option<u64>,
+    format: Option<&str>,
+    out: Option<PathBuf>,
+    lines: bool,
+) -> ExitCode {
+    let mode = if instrument {
+        noeta_prof::Mode::Instrument
+    } else if let Some(every) = every {
+        noeta_prof::Mode::Sample {
+            clock: noeta_prof::SampleClock::Ops { every },
+            lines,
+        }
+    } else {
+        noeta_prof::Mode::Sample {
+            clock: noeta_prof::SampleClock::Wall {
+                hz: hz.unwrap_or(1000),
+            },
+            lines,
+        }
+    };
+    let format = match format {
+        Some(s) => match noeta_prof::Format::parse(s) {
+            Some(f) => Some(f),
+            None => {
+                eprintln!(
+                    "lang: unknown --format '{s}' (expected folded, svg, speedscope, table, or json)"
+                );
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    noeta_prof::run(file, mode, format, out)
+}
+
 /// For a tier runner: whether its `tier` is live under `--profile`. `Ok(true)` when no profile was
 /// given (the runner always runs); `Ok(false)` when a profile was given but does not make `tier`
 /// live (the runner should no-op); `Err` on a profile-resolution failure (a fatal error the caller
@@ -379,7 +483,7 @@ fn tier_active_in_profile(
 /// Type-check and run a program, writing stdout to the real stdout and rendering any diagnostics to
 /// stderr — each against the source its span belongs to (via the `SourceMap`). Returns the process
 /// exit code. `program` is the loaded program, possibly after dev-tier activation (`cmd_run`).
-fn run_program(program: &noeta_ast::Program, sources: &SourceMap) -> i32 {
+fn run_program(program: &noeta_ast::Program, sources: &SourceMap, args: Vec<String>) -> i32 {
     // The loader already lexed + parsed (and reported any lex/parse errors); type-check then run.
     // One `check_all` produces both the gate diagnostics and the `type_of` site map the backend
     // needs, so the checker runs exactly once (it previously ran again inside the backend).
@@ -389,7 +493,7 @@ fn run_program(program: &noeta_ast::Program, sources: &SourceMap) -> i32 {
         return 1;
     }
 
-    match execute_real_host(program, &checked) {
+    match execute_real_host(program, &checked, args) {
         Ok((result, trace)) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();
@@ -451,10 +555,12 @@ fn compile_real(
 fn execute_real_host(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
+    args: Vec<String>,
 ) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), String> {
-    Ok(run_module_real_host(std::sync::Arc::new(compile_real(
-        program, checked,
-    )?)))
+    Ok(run_module_real_host(
+        std::sync::Arc::new(compile_real(program, checked)?),
+        args,
+    ))
 }
 
 /// Run an already-compiled [`Module`] against the real host — the shared execution core of
@@ -462,15 +568,21 @@ fn execute_real_host(
 /// module directly with no source to compile.
 fn run_module_real_host(
     module: std::sync::Arc<noeta_bytecode::Module>,
+    args: Vec<String>,
 ) -> (noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>) {
     // A factory that mints a fresh real host + wall-clock executor per isolate (isolates I.4b): the
     // main program gets one, and each real-thread `isolate f(args)` gets its own so a worker's disk /
     // clock / async state is independent. Injected here (not in `noeta-vm`) so the VM crate needs no
     // `noeta-runtime`/tokio dependency. A worker that cannot start its runtime panics the worker thread,
-    // which surfaces as an isolate failure at the `.await`.
-    let factory: noeta_vm::IsolateFactory = std::sync::Arc::new(|| {
-        let host: Box<dyn noeta_stdlib::Host> =
-            Box::new(noeta_runtime::RealHost::new().expect("cannot start an isolate's runtime"));
+    // which surfaces as an isolate failure at the `.await`. The program argument vector (from
+    // `noeta run … -- <args>`) is cloned into every isolate's host so a worker's `args.all()` agrees
+    // with the main program's.
+    let factory: noeta_vm::IsolateFactory = std::sync::Arc::new(move || {
+        let host: Box<dyn noeta_stdlib::Host> = Box::new(
+            noeta_runtime::RealHost::new()
+                .expect("cannot start an isolate's runtime")
+                .with_args(args.clone()),
+        );
         let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
             noeta_runtime::RealExecutor::new().expect("cannot start an isolate's async executor"),
         );
@@ -506,7 +618,13 @@ fn try_run_stapled() -> Option<ExitCode> {
     file.seek(SeekFrom::Start(blob_start)).ok()?;
     let mut blob = vec![0u8; blob_len];
     file.read_exact(&mut blob).ok()?;
-    Some(cmd_run_bundle(&exe_path, &blob))
+    // A shipped `--exe` artifact is invoked directly, so its real process argv (`[<binary>, <args…>]`)
+    // is exactly the program's argument vector — pass it straight through to `args.all()`.
+    Some(cmd_run_bundle(
+        &exe_path,
+        &blob,
+        std::env::args().collect(),
+    ))
 }
 
 fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a Diagnostic>) {
@@ -525,11 +643,23 @@ fn emit_diagnostics_mapped<'a>(
     let _ = io::stderr().write_all(render_mapped(sources, diagnostics).as_bytes());
 }
 
+/// The argument vector a `noeta run` presents to the program via `args.all()`: the entry path as the
+/// program name (argv[0]) followed by any pass-through args given after `--`. This mirrors a shipped
+/// `noeta build --exe` binary, whose `args.all()` is the real process argv (`[<binary>, <args…>]`)
+/// when invoked directly — so a program observes the identical argv from source or as an executable.
+fn program_args(entry: &std::path::Path, passthrough: &[String]) -> Vec<String> {
+    let mut args = Vec::with_capacity(passthrough.len() + 1);
+    args.push(entry.display().to_string());
+    args.extend(passthrough.iter().cloned());
+    args
+}
+
 fn cmd_run(
     file: &std::path::Path,
     tiers: &[String],
     profile: &Option<String>,
     no_cache: bool,
+    args: &[String],
 ) -> ExitCode {
     // P-AOT L1.2: a `.noeb` bundle runs directly — no source, no compile. Sniff the magic (cheap,
     // and we need the bytes to load it anyway); anything else is source, handled below. Tiers are a
@@ -544,15 +674,31 @@ fn cmd_run(
             );
             return ExitCode::from(2);
         }
-        return cmd_run_bundle(file, &bytes);
+        return cmd_run_bundle(file, &bytes, program_args(file, args));
     }
 
     // Everything else — resolve tiers, consult the startup cache, and (on a miss) load → check →
-    // compile — is the shared whole-file pipeline. On success run the module; on failure report it.
+    // compile — is the shared whole-file pipeline. On success run the module with the program's
+    // pass-through args; on failure report it.
     match compile_whole_file(file, tiers, profile, no_cache) {
-        Ok(compiled) => run_compiled_module(compiled.module, &compiled.sources),
+        Ok(compiled) => {
+            run_compiled_module(compiled.module, &compiled.sources, program_args(file, args))
+        }
         Err(failure) => failure.report(),
     }
+}
+
+/// The `--format json` report: the whole outcome of a `noeta check` run in one serializable object.
+#[derive(serde::Serialize)]
+struct CheckReport {
+    /// The number of `.noe` files checked (entries walked).
+    files_checked: usize,
+    /// The number of unique error-severity diagnostics.
+    errors: usize,
+    /// The number of unique warning-severity diagnostics.
+    warnings: usize,
+    /// Every unique diagnostic, resolved to files + line/column (see [`noeta_diagnostics::to_json`]).
+    diagnostics: Vec<noeta_diagnostics::JsonDiagnostic>,
 }
 
 /// `noeta check [PATH]` — statically validate source without running or building it: parse every
@@ -566,7 +712,16 @@ fn cmd_run(
 /// guarantees a library module no single entry imports is still parsed and type-checked. A module
 /// shared by several entries is therefore linked (and its diagnostics produced) once per importer;
 /// diagnostics are deduplicated globally by their source file + span + code so each is reported once.
-fn cmd_check(path: &std::path::Path, tiers: &[String], profile: &Option<String>) -> ExitCode {
+///
+/// With `--format json` the whole result is emitted as one machine-readable object on stdout (for
+/// CI, editors, and the MCP server) instead of human-rendered diagnostics on stderr; the exit code
+/// is identical in both modes.
+fn cmd_check(
+    path: &std::path::Path,
+    tiers: &[String],
+    profile: &Option<String>,
+    format: OutputFormat,
+) -> ExitCode {
     use noeta_diagnostics::Severity;
 
     // The active tier set — resolved once and applied to every file — is the union of a `--profile`'s
@@ -603,20 +758,22 @@ fn cmd_check(path: &std::path::Path, tiers: &[String], profile: &Option<String>)
     // Deduplicate diagnostics across every entry's workspace. `SourceId`s are workspace-local (each
     // load restarts them at 0), so the key is the *file name* the diagnostic renders against plus its
     // byte span and code — never the id. The map's key order (name, then offset, then code) is also
-    // the render order, so output is deterministic. Value keeps the owning `Source` so each renders
-    // against the right file with the single-source renderer.
-    let mut diags: std::collections::BTreeMap<(String, u32, u32, &'static str), (Source, Diagnostic)> =
+    // the render order, so output is deterministic. Each value keeps the workspace's `SourceMap`
+    // (shared via `Rc` so a workspace's diagnostics don't each clone it) so a diagnostic — and any of
+    // its cross-file labels — resolves against the right source in both the human and JSON paths.
+    type MapDiag = (std::rc::Rc<SourceMap>, Diagnostic);
+    let mut diags: std::collections::BTreeMap<(String, u32, u32, &'static str), MapDiag> =
         std::collections::BTreeMap::new();
-    let mut fold = |source: &Source, diag: &Diagnostic| {
+    let mut fold = |sources: &std::rc::Rc<SourceMap>, diag: &Diagnostic| {
         let key = (
-            source.name().to_string(),
+            sources.source(diag.span.source).name().to_string(),
             diag.span.start,
             diag.span.end,
             diag.code.code(),
         );
         diags
             .entry(key)
-            .or_insert_with(|| (source.clone(), diag.clone()));
+            .or_insert_with(|| (std::rc::Rc::clone(sources), diag.clone()));
     };
 
     let mut unreadable = false;
@@ -629,48 +786,77 @@ fn cmd_check(path: &std::path::Path, tiers: &[String], profile: &Option<String>)
                 unreadable = true;
             }
             Ok(Err(load_diagnostics)) => {
-                // Lex/parse errors — each already carries the source it renders against.
+                // Lex/parse errors — each carries the single source it renders against. Wrap it in a
+                // one-element `SourceMap` (any `SourceId` resolves back to that source), matching how
+                // `cmd_run` renders load diagnostics single-source.
                 for ld in &load_diagnostics {
-                    fold(&ld.source, &ld.diagnostic);
+                    let sources = std::rc::Rc::new(SourceMap::new(vec![ld.source.clone()]));
+                    fold(&sources, &ld.diagnostic);
                 }
             }
             Ok(Ok(linked)) => {
                 // Activate the resolved dev-tiers before checking, as `run`/`build`/`dump` do; with no
                 // active tiers the program is checked as-is. Tier-activation diagnostics resolve
                 // against the same workspace sources.
-                if active_refs.is_empty() {
-                    for d in &noeta_check::check_all(&linked.program).diagnostics {
-                        fold(linked.sources.source(d.span.source), d);
-                    }
+                let sources = std::rc::Rc::new(linked.sources);
+                let program_diags = if active_refs.is_empty() {
+                    noeta_check::check_all(&linked.program).diagnostics
                 } else {
                     let activated = noeta_check::activate_tiers(&linked.program, &active_refs);
-                    for d in &activated.diagnostics {
-                        fold(linked.sources.source(d.span.source), d);
-                    }
-                    for d in &noeta_check::check_all(&activated.program).diagnostics {
-                        fold(linked.sources.source(d.span.source), d);
-                    }
+                    let mut ds = activated.diagnostics;
+                    ds.extend(noeta_check::check_all(&activated.program).diagnostics);
+                    ds
+                };
+                for d in &program_diags {
+                    fold(&sources, d);
                 }
             }
         }
     }
 
-    // Render every unique diagnostic against its own source (single-source renderer, color disabled),
-    // then a summary line. Errors gate the exit code; warnings/notes print but pass.
-    let mut stderr = io::stderr();
+    // Count severities once (independent of output format): errors gate the exit code, warnings print
+    // but pass.
     let mut errors = 0usize;
     let mut warnings = 0usize;
-    for (source, diag) in diags.values() {
+    for (_, diag) in diags.values() {
         match diag.severity {
             Severity::Error => errors += 1,
             Severity::Warning => warnings += 1,
             Severity::Note => {}
         }
-        let _ = stderr.write_all(render(source, diag).as_bytes());
     }
     let n = entries.len();
-    let files = if n == 1 { "file" } else { "files" };
-    eprintln!("checked {n} {files}: {errors} error(s), {warnings} warning(s)");
+
+    match format {
+        OutputFormat::Human => {
+            // Render each unique diagnostic against its workspace sources (color disabled), then a
+            // summary line — all to stderr, as the other commands do.
+            let mut stderr = io::stderr();
+            for (sources, diag) in diags.values() {
+                let _ = stderr.write_all(render_mapped(sources, std::iter::once(diag)).as_bytes());
+            }
+            let files = if n == 1 { "file" } else { "files" };
+            eprintln!("checked {n} {files}: {errors} error(s), {warnings} warning(s)");
+        }
+        OutputFormat::Json => {
+            // A single machine-readable report on stdout, so a tool can pipe `noeta check --format
+            // json` and parse it. Operational `cannot read` errors stay on stderr; the exit code
+            // still reflects them.
+            let report = CheckReport {
+                files_checked: n,
+                errors,
+                warnings,
+                diagnostics: diags
+                    .values()
+                    .map(|(sources, diag)| noeta_diagnostics::to_json(sources, diag))
+                    .collect(),
+            };
+            match serde_json::to_string_pretty(&report) {
+                Ok(json) => println!("{json}"),
+                Err(err) => eprintln!("lang: cannot serialize check report: {err}"),
+            }
+        }
+    }
 
     if errors > 0 {
         ExitCode::from(1)
@@ -768,10 +954,15 @@ fn cmd_serve(file: &std::path::Path, port: u16) -> ExitCode {
     });
 
     eprintln!("noeta serve: listening on http://0.0.0.0:{port} (Ctrl-C to stop)");
-    // `serve` injects an `http.serve(...)` call into the program before compiling, so its module
-    // differs from `run`'s for the same source — it must never share the startup cache's
-    // `(source+tiers)` key, and is left uncached (and long-lived, so it barely benefits anyway).
-    exit_code(run_program(&linked.program, &linked.sources))
+    // `serve` injects an `http.serve(...)` call before compiling, so its module differs from `run`'s
+    // for the same source — it must never share the startup cache's `(source+tiers)` key, and stays on
+    // the uncached `run_program` path (it's also long-lived, so it would barely benefit). It takes no
+    // program pass-through args; the served program sees the real process argv.
+    exit_code(run_program(
+        &linked.program,
+        &linked.sources,
+        std::env::args().collect(),
+    ))
 }
 
 /// Run a `.noeb` bundle (P-AOT L1.2): decode the module from the versioned container and execute it
@@ -779,7 +970,7 @@ fn cmd_serve(file: &std::path::Path, port: u16) -> ExitCode {
 /// or type-check (both happened at build time). A runtime abort's diagnostics/trace carry spans but
 /// the bundle ships no source text, so they render against a synthetic empty source (message + code
 /// + location show; no code snippet) — the honest cost of a source-free artifact.
-fn cmd_run_bundle(file: &std::path::Path, bytes: &[u8]) -> ExitCode {
+fn cmd_run_bundle(file: &std::path::Path, bytes: &[u8], args: Vec<String>) -> ExitCode {
     let module = match noeta_bundle::read(bytes) {
         Ok(module) => module,
         Err(err) => {
@@ -792,13 +983,9 @@ fn cmd_run_bundle(file: &std::path::Path, bytes: &[u8]) -> ExitCode {
         file.display().to_string(),
         "",
     )]);
-    run_compiled_module(std::sync::Arc::new(module), &sources)
+    run_compiled_module(std::sync::Arc::new(module), &sources, args)
 }
 
-/// Run an already-compiled [`Module`] on the real host and render its output — the shared tail of the
-/// `.noeb` bundle runner and the startup-cache *hit* path (both have a module with no source to
-/// compile). Diagnostics/trace render against `sources` (real workspace sources on a cache hit; a
-/// synthetic empty source for a source-free bundle).
 /// A resolved startup-cache slot: an open cache, the content key for this program, and the workspace
 /// `SourceMap` (so a cache hit renders diagnostics against real source without re-parsing). Built by
 /// [`open_startup_cache`], consumed by [`compile_whole_file`].
@@ -960,11 +1147,16 @@ fn compile_whole_file(
     Ok(Compiled { module, sources })
 }
 
+/// Run an already-compiled [`Module`] on the real host and render its output — the shared tail of the
+/// `.noeb` bundle runner and the startup-cache *hit* path (both have a module with no source to
+/// compile). `args` is the program's argv (see [`program_args`]). Diagnostics/trace render against
+/// `sources` (real workspace sources on a cache hit; a synthetic empty source for a source-free bundle).
 fn run_compiled_module(
     module: std::sync::Arc<noeta_bytecode::Module>,
     sources: &SourceMap,
+    args: Vec<String>,
 ) -> ExitCode {
-    let (result, trace) = run_module_real_host(module);
+    let (result, trace) = run_module_real_host(module, args);
     print!("{}", result.stdout);
     let _ = io::stdout().flush();
     emit_diagnostics_mapped(sources, result.diagnostics.iter());
@@ -1818,8 +2010,9 @@ fn run_one_test(setup: &[Stmt], case: &TestCase, span: Span) -> TestOutcome {
     }
 
     // `@test`/`@bench` compile a *separate* module per case (a different granularity than the
-    // whole-file startup cache), so they don't participate in it — see `plans/startup-cache`.
-    match execute_real_host(&program, &checked) {
+    // whole-file startup cache), so they don't participate in it — see `plans/startup-cache`. They
+    // have no program pass-through args; a test sees the real process argv.
+    match execute_real_host(&program, &checked, std::env::args().collect()) {
         // The `@test` runner reports the failing diagnostic; the trace is a `noeta run` affordance.
         Ok((result, _trace)) => {
             let passed = result.exit_code == 0 && result.diagnostics.is_empty();

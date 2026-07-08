@@ -29,8 +29,11 @@ noeta-runtime = { workspace = true }
 noeta-stdlib = { workspace = true }
 noeta-lsp = { workspace = true }
 noeta-dap = { workspace = true }
+noeta-prof = { workspace = true }
 clap = { workspace = true }
 toml = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [features]
 # The shipped `lang` binary is JIT-enabled by default (milestone P-JIT): real-host `lang run`/

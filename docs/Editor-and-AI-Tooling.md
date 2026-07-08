@@ -50,6 +50,12 @@ harness, so all three tools read one source of truth.
 a debug console that is effectively a REPL over the paused program (closures included). It debugs
 the **production VM** — same bytecode, JIT unarmed. See [Debugging](Debugging).
 
+## Profiling
+
+`noeta profile` reports where a program spends its time — an exact per-function call-count/self-time
+table (`--instrument`) or a wall-time **flamegraph** (folded / SVG / speedscope). Same production VM,
+tier-0, and — like the debugger — outside the differential oracle. See [Profiling](Profiling).
+
 ## The agentic MCP surface (roadmap)
 
 The remaining planned piece. The compiler already builds a queryable **reflection manifest** of a

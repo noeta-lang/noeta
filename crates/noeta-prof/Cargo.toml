@@ -1,0 +1,30 @@
+[package]
+name = "noeta-prof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The profiler drives the *production* compile+run pipeline (the same path `noeta run` takes), but
+# tier-0 (JIT unarmed) so every frame is interpreter-executed and observable — exactly the tier
+# decision `noeta dap` makes. Mirrors the DAP crate's dependency set (reuses the loader, checker,
+# compiler, and VM directly — not the salsa IDE queries the LSP uses). No debug compile is needed:
+# function names + line tables are always-emitted cold metadata on every `Chunk`.
+noeta-span = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-ast = { workspace = true }
+noeta-loader = { workspace = true }
+noeta-check = { workspace = true }
+noeta-compiler = { workspace = true }
+noeta-bytecode = { workspace = true }
+noeta-vm = { workspace = true }
+noeta-stdlib = { workspace = true }
+noeta-runtime = { workspace = true }
+# Emit formats: speedscope JSON (serde_json) and an SVG flamegraph (inferno, from folded stacks).
+serde_json = { workspace = true }
+inferno = { workspace = true }
+
+[lints]
+workspace = true

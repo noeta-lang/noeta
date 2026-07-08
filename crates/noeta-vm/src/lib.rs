@@ -80,6 +80,22 @@ pub trait Debugger: Send {
     fn before_op(&mut self, proto: u32, pc: usize, view: &DebugView) -> DebugAction;
 }
 
+/// A profiler observing tier-0 execution (the `noeta profile` engine implements it). Like the
+/// [`Debugger`] it is consulted **before each instruction** — the same seam — but it never pauses
+/// and returns nothing: it reads the live stack ([`DebugView`]) and accumulates its own
+/// counters/timings/samples. Instrumenting collectors diff the frame depth to detect call
+/// enter/exit; a sampling collector snapshots the stack when a tick is pending. Only installed on
+/// the profile run path (JIT unarmed); a normal run leaves it `None` and pays one predicted branch
+/// per op. It is handed back to the caller after the run so the concrete collector's results can be
+/// reclaimed (via [`ProfileHook::into_any`]).
+pub trait ProfileHook: Send {
+    /// Called before each interpreted instruction with a read-only view of the live call stack. The
+    /// hook does its own timing/counting and must not block.
+    fn before_op(&mut self, view: &DebugView);
+    /// Downcast hatch: reclaim the concrete collector (and its accumulated results) after the run.
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any>;
+}
+
 /// What the VM does after consulting the [`Debugger`] for an instruction.
 #[derive(Debug)]
 pub enum DebugAction {
@@ -168,6 +184,21 @@ impl<'a> DebugView<'a> {
     /// Number of live frames on the call stack.
     pub fn depth(&self) -> usize {
         self.frames.len()
+    }
+
+    /// The prototype index of the frame at call-stack index `i` — a stable per-function key (into
+    /// `Module::protos`) the profiler uses to accumulate per-function counters and to intern a
+    /// sampled stack, without materializing the frame's whole [`DebugFrame`].
+    pub fn proto_at(&self, i: usize) -> u32 {
+        self.frames[i].proto
+    }
+
+    /// The program counter of the frame at call-stack index `i`. For the innermost frame this is the
+    /// instruction about to run (synced by the profiler/debugger consult before the view is built);
+    /// the profiler's line-attribution mode captures the leaf's pc here and resolves it to a source
+    /// line (via the prototype's line table) after the run.
+    pub fn pc_at(&self, i: usize) -> usize {
+        self.frames[i].pc
     }
 
     /// The frame at call-stack index `i` (`0` = bottom `main`, `depth()-1` = innermost).
@@ -369,6 +400,31 @@ impl VmBackend {
         let result = run_and_teardown(&mut vm, mode);
         let trace = std::mem::take(&mut vm.abort_trace);
         (result, trace)
+    }
+
+    /// Run a module **tier-0 under a profiler** (`noeta profile`): the JIT is never armed and a
+    /// [`ProfileHook`] is consulted before every instruction (the same seam the debugger uses, minus
+    /// the pause). Returns the run result, the hook handed back — so the concrete collector's
+    /// accumulated counters/samples can be reclaimed via [`ProfileHook::into_any`] — and any abort
+    /// trace. Mirrors [`VmBackend::run_module_debug`] with a profiler in place of the debugger.
+    pub fn run_module_profiled(
+        &self,
+        module: &Module,
+        host: Box<dyn noeta_stdlib::Host>,
+        executor: Box<dyn noeta_stdlib::Executor>,
+        profiler: Box<dyn ProfileHook>,
+    ) -> (RunResult, Box<dyn ProfileHook>, Vec<TraceFrame>) {
+        let mode = noeta_value::CollectorMode::Trace;
+        noeta_value::set_collector_mode(mode);
+        let mut vm = Vm::load(module, host, executor);
+        vm.profiler = Some(profiler);
+        let result = run_and_teardown(&mut vm, mode);
+        let profiler = vm
+            .profiler
+            .take()
+            .expect("the profiler stays attached for the whole run");
+        let trace = std::mem::take(&mut vm.abort_trace);
+        (result, profiler, trace)
     }
 
     /// Execute a module with **real OS-thread isolates** (isolates I.4b), CLI-only / out-of-oracle.
@@ -872,6 +928,10 @@ struct Vm<'m> {
     /// The attached debugger (`noeta dap`), consulted before every instruction. `None` on every
     /// non-debug run (production, differential, salsa), where it costs one predicted branch per op.
     debugger: Option<Box<dyn Debugger>>,
+    /// The attached profiler (`noeta profile`), consulted before every instruction on the same seam
+    /// as `debugger` but without pausing. `None` on every non-profile run, where it costs one
+    /// predicted branch per op. Never armed together with the JIT (a profile run pins tier-0).
+    profiler: Option<Box<dyn ProfileHook>>,
     /// The **abort traceback**: the call stack captured as a fatal abort unwinds, innermost frame
     /// first. Appended by [`Vm::run`]'s error path — each (possibly re-entrant) run contributes its
     /// own frame stack as the abort climbs — and handed out by the host-facing entry points for the
@@ -1942,6 +2002,7 @@ impl<'m> Vm<'m> {
             #[cfg(feature = "jit")]
             jit_drain_at_exit: false,
             debugger: None,
+            profiler: None,
             abort_trace: Vec::new(),
         }
     }
@@ -3059,6 +3120,21 @@ impl<'m> Vm<'m> {
                 };
             }
             loop {
+                // Profiler seam (`noeta profile`): before each instruction, let the attached profiler
+                // observe the live stack (it diffs frame depth to detect call enter/exit, or samples
+                // when a tick is pending). `None` on every non-profile run — one predicted branch. The
+                // frame's `pc` is synced first so the view resolves the right current line. It never
+                // pauses, so unlike the debugger it needs no take/restore: it borrows only the frame
+                // stack + registers (dispatch params, not `self`) and `module` (a local reference).
+                if let Some(prof) = self.profiler.as_mut() {
+                    frames[top].pc = pc;
+                    let view = DebugView {
+                        module,
+                        frames: &frames[..],
+                        regs: &regs[..],
+                    };
+                    prof.before_op(&view);
+                }
                 // Debugger seam (`noeta dap`): before each instruction, let the attached debugger map
                 // `(proto, pc)` to a source line and pause if a breakpoint/step/entry condition holds.
                 // `None` on every non-debug run — one predicted branch. The frame's `pc` is synced
