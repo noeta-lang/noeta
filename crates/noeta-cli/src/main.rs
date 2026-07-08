@@ -1743,17 +1743,22 @@ fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
     // Module identities are root-qualified (`std.http`); the ring tables key on the module name, so
     // strip the root before looking up. A turbofish's module is the source receiver (a local name,
     // unrooted) and passes through `module_name` unchanged.
+    // The module→ring map is the registry's now (package-manager P1.0): each `ExtModule` declares its
+    // `ring`, so both the whole-module and precisely-named forms funnel through one registry lookup —
+    // no CLI-side table to keep in sync with the stdlib. `ring_of` accepts a root-qualified path, a
+    // bare name, or a turbofish's bound local alike.
     let note_module = |name: &str, rings: &mut BTreeSet<String>| {
-        if let Some(ring) = module_ring(noeta_stdlib::registry::module_name(name)) {
+        if let Some(ring) = noeta_stdlib::registry::ring_of(name) {
             rings.insert(ring.to_string());
         }
     };
-    // A precisely-named function (`use std.http.get`, or a turbofish `TypedModuleCall`): the exact function is
-    // known, so a ring can be selected only when a function that actually needs it is referenced. This
-    // is what lets a *client/server split* pay off — a program that names only `http.serve`/
-    // `http.response` selects no client ring and sheds reqwest, while `http.get` selects it.
-    let note_fn = |m: &str, func: &str, rings: &mut BTreeSet<String>| {
-        if let Some(ring) = fn_ring(noeta_stdlib::registry::module_name(m), func) {
+    // A precisely-named function (`use std.http.client.get`, or a turbofish `TypedModuleCall`): post
+    // the `std.http` client/server split the client/server distinction lives in the *module* identity,
+    // so a named function selects exactly its module's ring — the same `ring_of` lookup as a whole
+    // module. This is what lets the split pay off: a program naming only `http.server` functions
+    // selects no client ring and sheds reqwest, while any `http.client` reference selects it.
+    let note_fn = |m: &str, _func: &str, rings: &mut BTreeSet<String>| {
+        if let Some(ring) = noeta_stdlib::registry::ring_of(m) {
             rings.insert(ring.to_string());
         }
     };
@@ -1776,32 +1781,6 @@ fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
         }
     }
     rings.into_iter().collect()
-}
-
-/// The `noeta-aot-runtime` ring a *whole-module* reference selects — conservative, since the value can
-/// reach any of the module's functions. `http` maps to the outbound client (its reqwest/TLS tree is
-/// the ~5 MB payload), because a `use std.{http}` value could call `http.get`. A module with no row
-/// is always-on core or a not-yet-gated ring: never stripped. See the package-manager note below —
-/// splitting `http` into client/server modules would make even the whole-module case precise.
-#[cfg(feature = "jit")]
-fn module_ring(name: &str) -> Option<&'static str> {
-    match name {
-        // Post-split (P0.3b) the module identity already separates client from server: the whole
-        // `http.client` module pulls reqwest, `http.server` pulls none. So a whole-module value is
-        // now *precise* — no conservative over-selection, and no per-function list needed.
-        "http.client" => Some("ring-http-client"),
-        _ => None,
-    }
-}
-
-/// The ring a *precisely-named* function selects (a selective import `use std.http.client.get`, or a
-/// turbofish). Post-split (P0.3b) the client/server distinction lives in the *module* identity, not
-/// the function name, so a selectively-imported function selects exactly its module's ring — no
-/// per-function list. Sound by construction: a client call names a `http.client` function (or a
-/// whole-module value), so reqwest is never stripped from a program that can reach it.
-#[cfg(feature = "jit")]
-fn fn_ring(module: &str, _func: &str) -> Option<&'static str> {
-    module_ring(module)
 }
 
 /// Locate the AOT runtime staticlib (`libnoeta_aot.a`) and the native system libraries it must be

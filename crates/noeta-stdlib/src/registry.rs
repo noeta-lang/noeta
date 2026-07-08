@@ -268,6 +268,18 @@ pub fn module_name(module: &str) -> &str {
     module.split_once('.').map_or(module, |(_root, name)| name)
 }
 
+/// The native-dependency **ring** a module identity resolves to, or `None` for always-on core
+/// (package-manager P1.0). This is the registry-backed replacement for the CLI's hand-maintained
+/// `module_ring`/`fn_ring` tables: `noeta build --native`'s footprint scan calls this to select the
+/// AOT archive's Cargo features. Accepts any module identity [`find_module`] accepts — a
+/// root-qualified path (`"std.http.client"`), a bare name (`"http.client"`, `"json"`), or a bound
+/// local (turbofish receiver) — so the three bytecode forms the scan walks all funnel through one
+/// lookup. An unrecognized identity is `None` (conservative: never strips a ring for a module the
+/// registry doesn't own).
+pub fn ring_of(module: &str) -> Option<&'static str> {
+    find_module(module).and_then(|m| m.ring)
+}
+
 /// Whether `root` is the namespace root of some registered extension (`"std"` today; a package's
 /// root once the manifest populates the registry). The generalization of the hard-coded `path[0]
 /// == "std"` module-import check — a `use <root>.…` import binds a native module iff this holds.
@@ -2293,6 +2305,10 @@ const STD_MODULES: &[ExtModule] = &[
         // The optional `headers` argument is a `Map` — needs the deep marshalling that surfaces
         // it as `NativeValue::Map` (http arc H5). url/body strings project fine either way.
         deep_marshal: true,
+        // The reqwest/TLS tree (~3 MB) rides behind this ring — a tailored AOT archive links it only
+        // when the program can reach a client function (package-manager P1.0). Single source of truth
+        // for the module→ring map the footprint scan reads.
+        ring: Some("ring-http-client"),
         ..ExtModule::DEFAULTS
     },
     ExtModule {
@@ -2305,6 +2321,9 @@ const STD_MODULES: &[ExtModule] = &[
         deep_marshal: true,
         ctx_functions: crate::serve::HTTP_CTX_FNS,
         ctx_dispatch: Some(crate::serve::http_ctx_dispatch),
+        // The inbound serve loop rides tokio (already linked for `fs`) — no separable native dep, so
+        // no ring. A `use std.http.server` program links no reqwest, precisely (P0.3b split).
+        ring: None,
     },
     ExtModule {
         name: "env",

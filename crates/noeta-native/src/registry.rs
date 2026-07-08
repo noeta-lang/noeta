@@ -268,6 +268,14 @@ pub struct ExtModule {
     pub ctx_functions: &'static [ExtFn],
     /// The shared dispatch for [`ExtModule::ctx_functions`] (`None` when the table is empty).
     pub ctx_dispatch: Option<crate::ctx::CtxDispatch>,
+    /// The **native-dependency ring** this module's implementation lives behind (package-manager
+    /// P1.0): the name of the optional Cargo feature gating its heavy native deps in the AOT runtime
+    /// archive (`std.http.client` → `Some("ring-http-client")`). `None` = always-on core (no
+    /// separable native dep tree). This is the **single source of truth** for the module→ring map:
+    /// `noeta build --native`'s footprint scan reads it off the registry to select the archive's
+    /// features (DCE Axis B), retiring the hand-maintained `module_ring`/`fn_ring` tables the CLI
+    /// carried. The string must equal the `noeta-aot-runtime` Cargo feature that turns the ring on.
+    pub ring: Option<&'static str>,
 }
 
 impl ExtModule {
@@ -281,6 +289,7 @@ impl ExtModule {
         deep_marshal: false,
         ctx_functions: &[],
         ctx_dispatch: None,
+        ring: None,
     };
 }
 
