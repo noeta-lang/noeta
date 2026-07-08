@@ -241,9 +241,25 @@ so tracing calls in un-configured programs are ~free (the perf gate below).
   closures (E0040), so pure-SDK spans can't straddle suspensions — task context is observable only
   through serve seeding until T5c; `with_span` over an async body still ends at future construction
   (deferred to T5c: needs a completion hook).
-- **T5c–e — deferred tail (confirm before pickup).** (c) **async task spans** + a future-completion
-  hook (also fixes `with_span`-over-async-body duration); (d) isolate-message context propagation
-  (in); (e) **reactive-flush spans behind an opt-in flag** (per-signal-flush tracing is too noisy by
+- **T5c ✅ DONE (`1e2c183`) — the future-completion hook.** `with_span` over an **async** body is now
+  correct: the span follows the future instead of ending at (lazy) construction. Core mechanism:
+  **traced futures** behind `NativeCtx::trace_future(future, span)` — each backend holds one
+  reference per registered step future (identity: NaN-box bits / `Rc::ptr_eq`), runs every poll of
+  it under `registering context + span` (the task-swap discipline applied to a bare future — one
+  `is_empty()` branch when unused), and ends the span where the scheduler sees Ready/abort (abort →
+  "span body aborted" status). Entries feed collector roots + release at teardown like `ext_arena`
+  (an abandoned future leaks nothing — pinned). Only step futures trace, same line on both backends;
+  other flavors fall back to end-at-construction. *Verify:* the formerly-impossible per-task
+  isolation `.noe` now runs in the ordinary differential (spans survive suspensions → observable);
+  sink-parity tests pin duration-by-recording-order, cross-suspension nesting, and the abort arm;
+  corpus 512 + leak 377 + **JIT differential 512** + clippy green. *Perf gate:* pinned A/B vs the
+  pre-T5a baseline (cumulative T5a+b+c): `pingpong_coop` −0.0%, `fanout_n0` −1.0` — flat. *Sandbox
+  quirk (documented in-test):* the host's logical wall clock doesn't advance with executor timers, so
+  sandbox durations read 0 across `sleep`s; the real host shares one clock.
+- **T5d–e — deferred (own follow-ons).** (d) **automatic** isolate-message context propagation — the
+  runtime smuggles the traceparent in the channel/Wire envelope so the receiving isolate is
+  pre-seeded (pure sugar: the explicit string form works and is conformance-tested since T3);
+  (e) **reactive-flush spans behind an opt-in flag** (per-signal-flush tracing is too noisy by
   default).
 - **T6 — docs + close-out.** `docs/Observability.md` (or `Telemetry.md`) — the SDK surface, config,
   the profiler-vs-OTEL split, the differential/bundle stances; CLI/sidebar/roadmap cross-links;
