@@ -943,13 +943,19 @@ fn compile_whole_file(
         Err(err) => return Err(CompileFailure::Message(err)),
     };
 
-    // Populate the cache, best-effort. Synchronous: encoding + writing the blob is trivial next to
-    // the compile we just paid, and a failure (read-only dir, disk full) never touches the outcome.
-    // Then bound the cache's size (oldest-first eviction) so it can't grow without limit — also only
-    // on this already-slow miss path, and also best-effort.
+    // Populate the cache, best-effort, then bound its size (oldest-first eviction) so it can't grow
+    // without limit. Both run only on this already-slow miss path. Synchronous — encoding + writing
+    // is trivial next to the compile we just paid — and the whole block is **panic-isolated**:
+    // `store`/`prune` only ever return `Err` (already discarded), but `noeta_bundle::write`'s postcard
+    // encode carries an `.expect` that could (practically never) panic, and a cache write must never
+    // be able to abort an otherwise-successful run. A panic here still prints (surfacing the real bug)
+    // but is caught and swallowed. `AssertUnwindSafe`: on unwind we observe none of the captured state
+    // (`slot`/`module` are only read, and discarded), so there is no broken invariant to leak.
     if let Some(slot) = &cache {
-        let _ = slot.cache.store(&slot.key, &noeta_bundle::write(&module));
-        let _ = slot.cache.prune_to(noeta_cache::max_bytes());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = slot.cache.store(&slot.key, &noeta_bundle::write(&module));
+            let _ = slot.cache.prune_to(noeta_cache::max_bytes());
+        }));
     }
     Ok(Compiled { module, sources })
 }
