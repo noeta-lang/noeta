@@ -12,6 +12,7 @@ The `noeta` binary is the whole toolchain. It has eight subcommands:
 | [`noeta doc`](Documentation-and-Tiers) | Extract `@doc { … }` prose to stdout. |
 | [`noeta lsp`](Editor-and-AI-Tooling) | The language server, over stdio (started by your editor, not by hand). |
 | [`noeta dap`](Debugging) | The debug adapter, over stdio (started by your editor's debug UI, not by hand). |
+| [`noeta profile`](Profiling) | Profile a program — a hot-function table or a flamegraph. |
 
 Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 

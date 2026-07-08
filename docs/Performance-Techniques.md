@@ -60,7 +60,15 @@ Honestly noted, so the picture is complete:
 - **A `gc-arena` tracing path** for destructor-free classes.
 - **Explicit SIMD intrinsics** (`Simd<T, N>` + const generics) as a later track — the current approach deliberately relies on layout + autovectorization instead.
 
+## Finding the hot spots
+
+Before optimizing, measure: [`noeta profile`](Profiling) reports where a program spends its time — an
+exact per-function call-count/self-time table (`--instrument`) or a wall-time **flamegraph** (SVG /
+speedscope). It profiles the production VM tier-0, so it shows the language-level shape of a run
+(which function/line is hot); see [Profiling](Profiling) for what tier-0 does and does not reflect.
+
 ## See also
 
+- [Profiling](Profiling) — find where time goes (hot-function table / flamegraph).
 - [The Virtual Machine](The-Virtual-Machine) · [Memory Management](Memory-Management) — the two biggest performance stories, in depth.
 - [Fixed-Width Integers](Fixed-Width-Integers) — the packed value types the numeric layout builds on.
