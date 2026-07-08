@@ -36,10 +36,81 @@ pub const MANIFEST_NAME: &str = "noeta.toml";
 /// (and their dependency resolution) exist.
 const BUILTIN_PROVIDER: &str = "std";
 
-/// A parsed `noeta.toml`: its build profiles, each a (possibly inheriting) tier provider-map.
+/// A parsed `noeta.toml`: the package's identity (`[package]`, absent for a bare script), its
+/// declared dependencies (`[dependencies]`, keyed by **import root**), and its build profiles.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
+    package: Option<PackageMeta>,
+    dependencies: BTreeMap<String, Dependency>,
     profiles: BTreeMap<String, Profile>,
+}
+
+/// The `[package]` table — a package's global identity and version (package-manager P2.0). Absent for
+/// a bare entry script that declares no `[package]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackageMeta {
+    /// The global identity `company/package` — what the registry indexes and git coords map to.
+    pub name: PackageName,
+    pub version: semver::Version,
+    /// The language edition, if pinned (reserved; not yet consumed).
+    pub edition: Option<String>,
+}
+
+/// A global package identity `company/package` (package-manager P2.0). The slash is deliberately
+/// **not** an identifier, so this global id is decoupled from the local import root (the
+/// dependency-table key) — mirroring Rust's `foo = { package = "real-name" }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageName {
+    pub company: String,
+    pub package: String,
+}
+
+impl PackageName {
+    /// Parse `company/package`: exactly one `/`, each side a non-empty identifier
+    /// (`[A-Za-z_][A-Za-z0-9_]*`). The `package` half is the package's **root namespace segment** —
+    /// what a consumer's dep-key re-roots at the package boundary (see phase-2 plan).
+    pub fn parse(s: &str) -> Result<PackageName, String> {
+        let (company, package) = s.split_once('/').ok_or_else(|| {
+            format!("package name `{s}` must be `company/package` (missing `/`)")
+        })?;
+        if package.contains('/') {
+            return Err(format!(
+                "package name `{s}` must have exactly one `/` (found more)"
+            ));
+        }
+        if !is_identifier(company) || !is_identifier(package) {
+            return Err(format!(
+                "package name `{s}`: `company` and `package` must each be identifiers \
+                 (letters, digits, `_`; not starting with a digit)"
+            ));
+        }
+        Ok(PackageName {
+            company: company.to_string(),
+            package: package.to_string(),
+        })
+    }
+
+    /// The package's **root namespace segment** — the `package` half. A consumer's dependency-table
+    /// key re-roots the package's modules from this segment at link time.
+    // Consumed by the cross-package loader in P2.1 (the re-root step); parsed + validated here.
+    #[allow(dead_code)]
+    pub fn root(&self) -> &str {
+        &self.package
+    }
+}
+
+/// One `[dependencies]` entry's **source** (package-manager P2.0). The table *key* is the local import
+/// root (an identifier), decoupled from the resolved package's global `company/package` identity.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Dependency {
+    /// A local source tree — `dep = { path = "…" }`. Needs no network or resolver (P2.1).
+    Path { path: PathBuf },
+    /// A git repository pinned to a **tag** (= a released version) — `dep = { git = "…", tag = "…" }`.
+    /// Sources are git + tagged releases only (user decision); the lockfile pins the resolved SHA.
+    Git { url: String, tag: String },
+    /// A registry dependency by SemVer requirement — `dep = "^1.2"` or `dep = { version = "^1.2" }`.
+    /// The registry index resolves the name→git-coords (P2.5).
+    Registry { req: semver::VersionReq },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -102,10 +173,16 @@ impl Manifest {
     /// profile-level keys are ignored, leaving room for later codegen knobs.
     pub fn parse(text: &str) -> Result<Manifest, String> {
         let table: toml::Table = text.parse().map_err(|err| format!("{err}"))?;
+        let package = parse_package(&table)?;
+        let dependencies = parse_dependencies(&table)?;
         let mut profiles = BTreeMap::new();
 
         let Some(profiles_value) = table.get("profiles") else {
-            return Ok(Manifest { profiles });
+            return Ok(Manifest {
+                package,
+                dependencies,
+                profiles,
+            });
         };
         let profiles_table = profiles_value
             .as_table()
@@ -152,7 +229,25 @@ impl Manifest {
             profiles.insert(name.clone(), Profile { extends, tiers });
         }
 
-        Ok(Manifest { profiles })
+        Ok(Manifest {
+            package,
+            dependencies,
+            profiles,
+        })
+    }
+
+    /// The package's identity, if it declares a `[package]` table (a bare entry script has none).
+    // Both accessors are consumed starting P2.1 (path deps → the loader) / P2.3 (fetch + store);
+    // P2.0 lands the parsed, validated shape first.
+    #[allow(dead_code)]
+    pub fn package(&self) -> Option<&PackageMeta> {
+        self.package.as_ref()
+    }
+
+    /// The declared dependencies, keyed by local **import root** (the dependency-table key).
+    #[allow(dead_code)]
+    pub fn dependencies(&self) -> &BTreeMap<String, Dependency> {
+        &self.dependencies
     }
 
     /// The active tier names for `profile`, merging inherited tiers (`extends`) under this profile's
@@ -194,6 +289,130 @@ impl Manifest {
     }
 }
 
+/// Parse the optional `[package]` table into a [`PackageMeta`]. Absent table → `None` (a bare entry
+/// script). A present table requires `name` (`company/package`) and `version` (SemVer); `edition` is
+/// optional. Unknown keys are ignored (room for later fields).
+fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
+    let Some(value) = table.get("package") else {
+        return Ok(None);
+    };
+    let pkg = value.as_table().ok_or("`package` must be a table")?;
+    let name_str = pkg
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or("`package` must have a string `name` (`\"company/package\"`)")?;
+    let name = PackageName::parse(name_str)?;
+    let version_str = pkg
+        .get("version")
+        .and_then(|v| v.as_str())
+        .ok_or("`package` must have a string `version` (SemVer, e.g. `\"1.2.0\"`)")?;
+    let version = semver::Version::parse(version_str)
+        .map_err(|err| format!("`package.version` `{version_str}` is not valid SemVer: {err}"))?;
+    let edition = match pkg.get("edition") {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
+                .ok_or("`package.edition` must be a string")?
+                .to_string(),
+        ),
+    };
+    Ok(Some(PackageMeta {
+        name,
+        version,
+        edition,
+    }))
+}
+
+/// Parse the optional `[dependencies]` table. Each key is a local **import root** (must be an
+/// identifier — it becomes a `use <key>.…` path segment); each value is one dependency source.
+fn parse_dependencies(table: &toml::Table) -> Result<BTreeMap<String, Dependency>, String> {
+    let Some(value) = table.get("dependencies") else {
+        return Ok(BTreeMap::new());
+    };
+    let deps = value.as_table().ok_or("`dependencies` must be a table")?;
+    let mut out = BTreeMap::new();
+    for (key, value) in deps {
+        if !is_identifier(key) {
+            return Err(format!(
+                "dependency key `{key}` must be an identifier (it is the local import root — \
+                 `use {key}.…`)"
+            ));
+        }
+        out.insert(key.clone(), parse_dependency(key, value)?);
+    }
+    Ok(out)
+}
+
+/// Parse one dependency value: a bare SemVer string (`dep = "^1.2"`, the registry shorthand) or a
+/// table with exactly one source key — `path`, `git` (+ required `tag`), or `version`.
+fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String> {
+    if let Some(req) = value.as_str() {
+        let req = semver::VersionReq::parse(req).map_err(|err| {
+            format!("dependency `{key}` version requirement `{req}` is not valid SemVer: {err}")
+        })?;
+        return Ok(Dependency::Registry { req });
+    }
+    let table = value.as_table().ok_or_else(|| {
+        format!("dependency `{key}` must be a SemVer string or a table (`{{ path/git/version = … }}`)")
+    })?;
+    let has = |k: &str| table.contains_key(k);
+    match (has("path"), has("git"), has("version")) {
+        (true, false, false) => {
+            let path = table["path"]
+                .as_str()
+                .ok_or_else(|| format!("dependency `{key}`: `path` must be a string"))?;
+            Ok(Dependency::Path {
+                path: PathBuf::from(path),
+            })
+        }
+        (false, true, false) => {
+            let url = table["git"]
+                .as_str()
+                .ok_or_else(|| format!("dependency `{key}`: `git` must be a string"))?;
+            let tag = table
+                .get("tag")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    format!(
+                        "dependency `{key}`: a `git` dependency requires a string `tag` \
+                         (sources are git + tagged releases only)"
+                    )
+                })?;
+            Ok(Dependency::Git {
+                url: url.to_string(),
+                tag: tag.to_string(),
+            })
+        }
+        (false, false, true) => {
+            let req = table["version"]
+                .as_str()
+                .ok_or_else(|| format!("dependency `{key}`: `version` must be a string"))?;
+            let req = semver::VersionReq::parse(req).map_err(|err| {
+                format!("dependency `{key}` version requirement `{req}` is not valid SemVer: {err}")
+            })?;
+            Ok(Dependency::Registry { req })
+        }
+        (false, false, false) => Err(format!(
+            "dependency `{key}` table must name a source: `path`, `git` (+ `tag`), or `version`"
+        )),
+        _ => Err(format!(
+            "dependency `{key}` names more than one source — use exactly one of `path`, `git`, \
+             or `version`"
+        )),
+    }
+}
+
+/// Whether `s` is a Noeta identifier (`[A-Za-z_][A-Za-z0-9_]*`) — the shape a package-name segment
+/// and a dependency import-root key must both have.
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// The provider package for a tier entry: a bare string (`test = "std"`) or a table whose `package`
 /// key carries it (`bench = { package = "std", samples = 100 }`); other table keys are profile-level
 /// options, ignored for now.
@@ -227,6 +446,125 @@ fn builtin_tier_list() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- `[package]` + `[dependencies]` (package-manager P2.0) ---------------------------------
+
+    #[test]
+    fn parses_a_package_table() {
+        let m = Manifest::parse(
+            "[package]\n\
+             name = \"acme/widgets\"\n\
+             version = \"1.4.2\"\n\
+             edition = \"2026\"\n",
+        )
+        .expect("valid");
+        let pkg = m.package().expect("package present");
+        assert_eq!(pkg.name.company, "acme");
+        assert_eq!(pkg.name.package, "widgets");
+        assert_eq!(pkg.name.root(), "widgets");
+        assert_eq!(pkg.version, semver::Version::parse("1.4.2").unwrap());
+        assert_eq!(pkg.edition.as_deref(), Some("2026"));
+    }
+
+    #[test]
+    fn a_bare_script_has_no_package() {
+        let m = Manifest::parse("[profiles.dev.tiers]\ntest = \"std\"\n").expect("valid");
+        assert!(m.package().is_none());
+        assert!(m.dependencies().is_empty());
+    }
+
+    #[test]
+    fn package_name_requires_company_slash_package() {
+        assert!(Manifest::parse("[package]\nname = \"widgets\"\nversion = \"1.0.0\"\n").is_err());
+        assert!(
+            Manifest::parse("[package]\nname = \"a/b/c\"\nversion = \"1.0.0\"\n").is_err()
+        );
+        assert!(Manifest::parse("[package]\nname = \"1bad/x\"\nversion = \"1.0.0\"\n").is_err());
+    }
+
+    #[test]
+    fn package_version_must_be_semver() {
+        assert!(Manifest::parse("[package]\nname = \"a/b\"\nversion = \"not-semver\"\n").is_err());
+    }
+
+    #[test]
+    fn parses_the_three_dependency_forms() {
+        let m = Manifest::parse(
+            "[dependencies]\n\
+             local = { path = \"../local\" }\n\
+             http = { git = \"https://example.com/guzzle/http\", tag = \"v1.2.0\" }\n\
+             json = { version = \"^1.2\" }\n\
+             shorthand = \"^0.4\"\n",
+        )
+        .expect("valid");
+        let deps = m.dependencies();
+        assert_eq!(
+            deps["local"],
+            Dependency::Path {
+                path: PathBuf::from("../local")
+            }
+        );
+        assert_eq!(
+            deps["http"],
+            Dependency::Git {
+                url: "https://example.com/guzzle/http".to_string(),
+                tag: "v1.2.0".to_string(),
+            }
+        );
+        assert_eq!(
+            deps["json"],
+            Dependency::Registry {
+                req: semver::VersionReq::parse("^1.2").unwrap()
+            }
+        );
+        assert_eq!(
+            deps["shorthand"],
+            Dependency::Registry {
+                req: semver::VersionReq::parse("^0.4").unwrap()
+            }
+        );
+    }
+
+    #[test]
+    fn a_git_dependency_requires_a_tag() {
+        assert!(
+            Manifest::parse("[dependencies]\nhttp = { git = \"https://x/y\" }\n").is_err()
+        );
+    }
+
+    #[test]
+    fn a_dependency_names_exactly_one_source() {
+        assert!(
+            Manifest::parse(
+                "[dependencies]\nx = { path = \"../p\", version = \"^1\" }\n"
+            )
+            .is_err()
+        );
+        assert!(Manifest::parse("[dependencies]\nx = {}\n").is_err());
+    }
+
+    #[test]
+    fn a_dependency_key_must_be_an_identifier() {
+        // The key is the local import root (`use bad-key.…` is not a valid path).
+        assert!(Manifest::parse("[dependencies]\n\"bad-key\" = \"^1\"\n").is_err());
+    }
+
+    #[test]
+    fn package_and_dependencies_and_profiles_coexist() {
+        let m = Manifest::parse(
+            "[package]\n\
+             name = \"acme/app\"\n\
+             version = \"0.1.0\"\n\
+             [dependencies]\n\
+             http = { git = \"https://x/guzzle/http\", tag = \"v1.0.0\" }\n\
+             [profiles.dev.tiers]\n\
+             test = \"std\"\n",
+        )
+        .expect("valid");
+        assert_eq!(m.package().unwrap().name.company, "acme");
+        assert!(m.dependencies().contains_key("http"));
+        assert_eq!(m.active_tiers("dev").unwrap(), vec!["test"]);
+    }
 
     #[test]
     fn parses_and_resolves_a_simple_profile() {
