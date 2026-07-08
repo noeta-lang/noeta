@@ -386,7 +386,7 @@ impl Printer<'_> {
             Rvalue::Invoke {
                 recv, name, args, ..
             } => format!("invoke({}, {}, {})", atom(recv), atom(name), atom(args)),
-            Rvalue::ExtCall {
+            Rvalue::TypedModuleCall {
                 module, func, args, ..
             } => {
                 let args: Vec<String> = args.iter().map(atom).collect();

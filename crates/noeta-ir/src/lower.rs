@@ -80,8 +80,8 @@ pub struct LoweringSites<'a> {
     /// A `list[i].field` member read whose span is here (the index receiver is a built-in `List`) fuses
     /// to a single [`Rvalue::IndexField`], reading a packed element's field without materializing it.
     pub index_field_sites: &'a HashSet<Span>,
-    /// Call-site-typed native-call recipes (`json.parse::<T>`), baked into [`Rvalue::ExtCall`].
-    pub ext_call_sites: &'a HashMap<Span, noeta_native::TypeRecipe>,
+    /// Call-site-typed native-call recipes (`json.parse::<T>`), baked into [`Rvalue::TypedModuleCall`].
+    pub typed_module_call_sites: &'a HashMap<Span, noeta_native::TypeRecipe>,
     /// `for` spans whose iterable is statically an `Iterator<T>` → the lowered [`Stmt::For`] streams
     /// via `next()` rather than snapshotting a list (Track I.2).
     pub for_stream_sites: &'a HashSet<Span>,
@@ -124,7 +124,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
         LoweringSites {
             packed_list_sites: &packed,
             index_field_sites: &index,
-            ext_call_sites: &ext,
+            typed_module_call_sites: &ext,
             for_stream_sites: &stream,
             width_sites: &width,
             construction_sites: &construction,
@@ -1313,10 +1313,10 @@ impl Lowerer<'_> {
                     .collect::<Result<Vec<_>, _>>()?;
                 // The recipe was resolved by the checker at this span (the same channel the other
                 // typed sites use); `None` means `T` had no decoding (already a checker error).
-                let recipe = self.sites.ext_call_sites.get(span).cloned();
+                let recipe = self.sites.typed_module_call_sites.get(span).cloned();
                 Ok(self.emit(
                     out,
-                    Rvalue::ExtCall {
+                    Rvalue::TypedModuleCall {
                         module,
                         func: func.clone(),
                         args,

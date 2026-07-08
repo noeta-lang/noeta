@@ -1698,6 +1698,7 @@ dependencies = [
  "noeta-compiler",
  "noeta-dap",
  "noeta-diagnostics",
+ "noeta-fmt",
  "noeta-lexer",
  "noeta-loader",
  "noeta-lsp",
@@ -1759,6 +1760,15 @@ dependencies = [
  "predicates",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "noeta-crdt"
+version = "0.0.0"
+dependencies = [
+ "postcard",
+ "proptest",
+ "serde",
 ]
 
 [[package]]
@@ -1825,6 +1835,18 @@ dependencies = [
  "noeta-span",
  "noeta-stdlib",
  "proptest",
+]
+
+[[package]]
+name = "noeta-fmt"
+version = "0.0.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-diagnostics",
+ "noeta-lexer",
+ "noeta-parser",
+ "noeta-span",
+ "toml",
 ]
 
 [[package]]
@@ -1916,6 +1938,7 @@ dependencies = [
  "noeta-check",
  "noeta-db",
  "noeta-diagnostics",
+ "noeta-fmt",
  "noeta-lexer",
  "noeta-parser",
  "noeta-span",
@@ -2005,6 +2028,7 @@ dependencies = [
  "equivalent",
  "hmac",
  "md-5",
+ "noeta-crdt",
  "noeta-native",
  "noeta-reactive",
  "serde_json",

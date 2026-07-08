@@ -177,15 +177,57 @@ pub trait Env {
     fn args(&self) -> Vec<String>;
 }
 
+/// **Peer-to-peer sync** capability (p2p P1) — the local-first stack's transport seam (§9.15). A
+/// program `publish`es a message to a **topic** and `poll`s a topic for a message another peer
+/// published; the messages are opaque bytes (p2panda, the eventual real backer, is deliberately
+/// data-type-agnostic — CRDT state serializes to bytes and rides this seam in a later slice).
+///
+/// Determinism is the mirror of [`Network`]'s inbound side: the sandbox is a **deterministic
+/// in-process broker** — `publish` enqueues to a per-topic FIFO, `poll` dequeues, `None` once a
+/// topic drains — so a program that publishes then receives terminates in-oracle and both backends
+/// agree. A real host would replace the broker with the p2panda gossip network (P3), non-
+/// deterministic and CLI-only; until then it uses the same in-process broker (single-node loopback,
+/// no real transport — cross-node/cross-isolate delivery is a later slice, like the HTTP server's
+/// multi-core story).
+pub trait P2p {
+    /// Publish `message` to `topic` — enqueue it for delivery to peers subscribed to the topic
+    /// (in the sandbox/loopback broker, to this node's own topic queue).
+    fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError>;
+
+    /// The next pending message on `topic`, or `None` if none is available — the non-blocking leaf
+    /// the async `p2p.receive` descriptor resolves through (deterministic FIFO in the sandbox). A
+    /// real async transport would override [`Self::p2p_receive`]; this stays the resolve-at-spawn
+    /// default, the same "serial degradation for free" the fs/net leaves rely on.
+    fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, StdError>;
+
+    /// Build the async receive descriptor for `topic` — the p2p mirror of
+    /// [`Network::net_accept`]. Default: a [`crate::p2p::ReceiveIo`] resolving through
+    /// [`Self::p2p_poll`] at spawn (deterministic in the sandbox; serial on any host). A real
+    /// gossip transport would override it with a genuine subscription future.
+    fn p2p_receive(&self, topic: String) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::p2p::ReceiveIo { topic })
+    }
+
+    /// Subscribe to `topic`, returning a subscription id whose cursor starts at the beginning of
+    /// the topic log (p2p P2). Unlike the topic-level [`Self::p2p_poll`] (one implicit reader),
+    /// each subscription has an **independent** cursor — genuine broadcast, so several replicas on
+    /// one topic each receive every message. A `synced_signal` holds one for its topic.
+    fn p2p_subscribe(&mut self, topic: &str) -> u64;
+
+    /// The next message for subscription `sub` (advancing only its cursor), or `None` once it has
+    /// caught up — what `synced_signal.sync()` drains to merge peers' states.
+    fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError>;
+}
+
 /// Every host-coupled effect the interpreters perform, behind one swappable seam — the union of the
-/// seven capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Entropy`], [`Ids`],
-/// [`Network`]). Backends hold a `Box<dyn Host>` and reach any capability through it; a consumer
-/// that needs only one (a read handle → [`FileReader`], the RNG dispatch → [`Rng`], …) depends on
-/// that trait instead, so a partial host (e.g. a read-only test double) implements exactly what it
-/// supports rather than stubbing the rest.
+/// eight capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Entropy`], [`Ids`],
+/// [`Network`], [`P2p`]). Backends hold a `Box<dyn Host>` and reach any capability through it; a
+/// consumer that needs only one (a read handle → [`FileReader`], the RNG dispatch → [`Rng`], …)
+/// depends on that trait instead, so a partial host (e.g. a read-only test double) implements
+/// exactly what it supports rather than stubbing the rest.
 ///
 /// Object-safe on purpose (IO is never a hot path, so the dynamic dispatch is immaterial). The
-/// blanket impl means any type providing all seven capabilities *is* a `Host` automatically — there
+/// blanket impl means any type providing all eight capabilities *is* a `Host` automatically — there
 /// is nothing extra to implement.
-pub trait Host: FileSystem + Rng + Clock + Env + Entropy + Ids + Network {}
-impl<T: FileSystem + Rng + Clock + Env + Entropy + Ids + Network> Host for T {}
+pub trait Host: FileSystem + Rng + Clock + Env + Entropy + Ids + Network + P2p {}
+impl<T: FileSystem + Rng + Clock + Env + Entropy + Ids + Network + P2p> Host for T {}

@@ -32,6 +32,7 @@
 //! Positions are converted encoding-aware (see [`offsets`]).
 
 mod completion;
+mod inlay;
 mod offsets;
 mod resolve;
 mod semtokens;
@@ -158,6 +159,76 @@ impl DocumentStore {
         self.buffers.keys().cloned().collect()
     }
 
+    /// Format the whole document at `uri` into the canonical style, returning a single
+    /// full-document replacement edit — or `None` if the document is not open, or an empty edit list
+    /// if it is already canonical. Style is the nearest `noeta.toml` `[fmt]` config (defaults if
+    /// none); a source that does not parse (or an internal safety abort) yields no edits, leaving the
+    /// buffer untouched. The same `noeta_fmt` engine as `noeta fmt`, so editor and CLI agree.
+    fn format_document(&self, uri: &str, encoding: Encoding) -> Option<Vec<TextEdit>> {
+        let text = self.buffers.get(uri)?;
+        let config = uri_to_path(uri)
+            .and_then(|p| p.parent().map(noeta_fmt::FmtConfig::discover))
+            .unwrap_or_default();
+        let formatted = noeta_fmt::format_source(uri, text, &config).ok()?;
+        if formatted == *text {
+            return Some(Vec::new()); // already canonical — no edit, no churn
+        }
+        let end = LineIndex::new(text).position(text.len() as u32, encoding);
+        Some(vec![TextEdit {
+            range: Range::new(Position::new(0, 0), end),
+            new_text: formatted,
+        }])
+    }
+
+    /// On-type formatting: reformat just the top-level statement containing `position` (e.g. the
+    /// block the user just closed with `}`). Returns `None` unless the whole document parses and the
+    /// statement is not already canonical — so it is quiet while code is mid-typed and never edits
+    /// unsafely (the same AST-preserving guarantee as [`Self::format_document`]).
+    fn format_on_type(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<Vec<TextEdit>> {
+        let text = self.buffers.get(uri)?;
+        let config = uri_to_path(uri)
+            .and_then(|p| p.parent().map(noeta_fmt::FmtConfig::discover))
+            .unwrap_or_default();
+        let index = LineIndex::new(text);
+        let offset = index.offset(position, encoding);
+        let (start, end, new_text) = noeta_fmt::format_stmt_at(uri, text, offset, &config)?;
+        Some(vec![TextEdit {
+            range: Range::new(
+                index.position(start, encoding),
+                index.position(end, encoding),
+            ),
+            new_text,
+        }])
+    }
+
+    /// Range ("Format Selection") formatting: reformat the top-level statements overlapping `range`,
+    /// each expanded to a whole statement. `None` unless the whole document parses and something in
+    /// the selection would change — same AST-preserving safety as the other formatting entry points.
+    fn format_range(&self, uri: &str, range: Range, encoding: Encoding) -> Option<Vec<TextEdit>> {
+        let text = self.buffers.get(uri)?;
+        let config = uri_to_path(uri)
+            .and_then(|p| p.parent().map(noeta_fmt::FmtConfig::discover))
+            .unwrap_or_default();
+        let index = LineIndex::new(text);
+        let start = index.offset(range.start, encoding);
+        let end = index.offset(range.end, encoding);
+        let edits = noeta_fmt::format_range(uri, text, start, end, &config)?;
+        Some(
+            edits
+                .into_iter()
+                .map(|(s, e, new_text)| TextEdit {
+                    range: Range::new(index.position(s, encoding), index.position(e, encoding)),
+                    new_text,
+                })
+                .collect(),
+        )
+    }
+
     /// Rebuild or update the workspace of every open document. Each open document is the entry of
     /// its own workspace; its modules are the sibling `.noe` files in the entry's directory, with
     /// open files taking their (unsaved) buffer content over disk.
@@ -254,6 +325,40 @@ impl DocumentStore {
             .cloned()
             .collect();
         Some((diags, cache.entry().text(db).clone()))
+    }
+
+    /// Inlay **type hints** for the visible `range` of `uri`: the inferred type of every
+    /// un-annotated binding *declaration*, positioned right after the binding's name — rendered
+    /// with the same `expr_types` spelling hover shows, so the inline text and the hover can never
+    /// disagree. `None` if the document is unknown; an unlinkable workspace degrades to the entry's
+    /// own AST (hints for within-file bindings keep working while a sibling is broken).
+    fn inlay_hints(
+        &self,
+        uri: &str,
+        range: Range,
+        encoding: Encoding,
+    ) -> Option<Vec<(Position, String, inlay::HintKind)>> {
+        let cache = self.workspaces.get(uri)?;
+        let db = &self.db;
+        let entry = cache.entry();
+        let index = LineIndex::new(entry.text(db));
+        let start = index.offset(range.start, encoding);
+        let end = index.offset(range.end, encoding);
+
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, entry);
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        let ide = noeta_db::linked_checked_ide(db, cache.workspace);
+        Some(
+            inlay::type_hints(program, &ide.expr_types, SourceId::FIRST)
+                .into_iter()
+                .filter(|hint| start <= hint.offset && hint.offset <= end)
+                .map(|hint| (index.position(hint.offset, encoding), hint.label, hint.kind))
+                .collect(),
+        )
     }
 
     /// The type at `position` for hover: the **smallest** `expr_types` span in the entry file that
@@ -989,6 +1094,9 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                // Inlay type hints (rust-analyzer style): inferred types after un-annotated
+                // binding names. Labels are complete at production — no resolve round-trip.
+                inlay_hint_provider: Some(OneOf::Left(true)),
                 signature_help_provider: Some(SignatureHelpOptions {
                     // `(` opens a call, `,` moves to the next argument.
                     trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
@@ -1004,6 +1112,15 @@ impl LanguageServer for Backend {
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                 })),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                // Whole-document formatting via the shared `noeta fmt` engine.
+                document_formatting_provider: Some(OneOf::Left(true)),
+                // Range ("Format Selection") formatting over the same engine.
+                document_range_formatting_provider: Some(OneOf::Left(true)),
+                // On-type formatting: reformat the just-closed block when the user types `}`.
+                document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
+                    first_trigger_character: "}".to_string(),
+                    more_trigger_character: None,
+                }),
                 // Compiler-accurate identifier highlighting, overlaid on the client's static grammar.
                 semantic_tokens_provider: Some(
                     SemanticTokensServerCapabilities::SemanticTokensOptions(
@@ -1044,6 +1161,36 @@ impl LanguageServer for Backend {
         Ok(())
     }
 
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let hints = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.inlay_hints(uri.as_str(), params.range, encoding)
+        };
+        Ok(hints.map(|hints| {
+            hints
+                .into_iter()
+                .map(|(position, label, kind)| InlayHint {
+                    position,
+                    label: InlayHintLabel::String(label),
+                    kind: Some(match kind {
+                        inlay::HintKind::Type => InlayHintKind::TYPE,
+                        inlay::HintKind::Parameter => InlayHintKind::PARAMETER,
+                    }),
+                    text_edits: None,
+                    tooltip: None,
+                    // A type label starts `: ` glued to the name it follows; a parameter label
+                    // `n:` precedes its argument. Neither wants leading padding; both want a
+                    // space on the right.
+                    padding_left: Some(false),
+                    padding_right: Some(true),
+                    data: None,
+                })
+                .collect()
+        }))
+    }
+
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let position_params = params.text_document_position_params;
         let uri = position_params.text_document.uri;
@@ -1061,6 +1208,44 @@ impl LanguageServer for Backend {
             }),
             range: Some(range),
         }))
+    }
+
+    async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let edits = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.format_document(uri.as_str(), encoding)
+        };
+        Ok(edits)
+    }
+
+    async fn range_formatting(
+        &self,
+        params: DocumentRangeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        let range = params.range;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let edits = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.format_range(uri.as_str(), range, encoding)
+        };
+        Ok(edits)
+    }
+
+    async fn on_type_formatting(
+        &self,
+        params: DocumentOnTypeFormattingParams,
+    ) -> Result<Option<Vec<TextEdit>>> {
+        let position = params.text_document_position.position;
+        let uri = params.text_document_position.text_document.uri;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let edits = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.format_on_type(uri.as_str(), position, encoding)
+        };
+        Ok(edits)
     }
 
     async fn goto_definition(
@@ -1297,6 +1482,78 @@ mod tests {
     }
 
     #[test]
+    fn format_document_returns_a_full_replacement_edit() {
+        let mut store = DocumentStore::default();
+        store.open("file:///a.noe", "fn  f( a ){\n echo a\n}\n".to_string());
+        let edits = store
+            .format_document("file:///a.noe", Encoding::Utf16)
+            .expect("open document");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "fn f(a) {\n    echo a\n}\n");
+        // The edit replaces from the document start.
+        assert_eq!(edits[0].range.start, Position::new(0, 0));
+    }
+
+    #[test]
+    fn format_document_of_canonical_source_is_a_no_op() {
+        let mut store = DocumentStore::default();
+        store.open("file:///a.noe", "echo 1\n".to_string());
+        let edits = store
+            .format_document("file:///a.noe", Encoding::Utf16)
+            .expect("open document");
+        assert!(edits.is_empty(), "already-formatted source needs no edit");
+    }
+
+    #[test]
+    fn format_document_declines_unparseable_source() {
+        let mut store = DocumentStore::default();
+        store.open("file:///a.noe", "fn (".to_string());
+        // Broken source yields no edits (the LSP returns `None`), leaving the buffer untouched.
+        let edits = store.format_document("file:///a.noe", Encoding::Utf16);
+        assert!(edits.unwrap_or_default().is_empty());
+    }
+
+    #[test]
+    fn format_on_type_reformats_the_closed_block() {
+        let mut store = DocumentStore::default();
+        // Cursor at end of line 1 (just after the fn's `}`), UTF-16.
+        store.open("file:///a.noe", "fn  f( a ){\n    echo a\n}\n".to_string());
+        let edits = store
+            .format_on_type("file:///a.noe", Position::new(2, 1), Encoding::Utf16)
+            .expect("a parseable doc reformats the enclosing statement");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "fn f(a) {\n    echo a\n}");
+        assert_eq!(edits[0].range.start, Position::new(0, 0));
+    }
+
+    #[test]
+    fn format_range_reformats_the_selected_statement() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///a.noe",
+            "fn  a(){\n echo 1\n}\nfn  b(){\n echo 2\n}\n".to_string(),
+        );
+        // Select all of the first fn (lines 0–2).
+        let range = Range::new(Position::new(0, 0), Position::new(2, 1));
+        let edits = store
+            .format_range("file:///a.noe", range, Encoding::Utf16)
+            .expect("reformats the selection");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "fn a() {\n    echo 1\n}");
+    }
+
+    #[test]
+    fn format_on_type_is_quiet_mid_typing() {
+        let mut store = DocumentStore::default();
+        store.open("file:///a.noe", "fn f() {\n".to_string()); // unbalanced, mid-type
+        assert!(
+            store
+                .format_on_type("file:///a.noe", Position::new(1, 0), Encoding::Utf16)
+                .is_none()
+        );
+    }
+
+    #[test]
     fn change_mutates_the_same_input_in_place() {
         let mut store = DocumentStore::default();
         store.open("file:///a.noe", "old".to_string());
@@ -1326,6 +1583,162 @@ mod tests {
         store.close("file:///a.noe");
         assert!(store.buffers.is_empty());
         assert!(store.workspaces.is_empty());
+    }
+
+    /// All inlay hints for a document as `(line, label)` pairs, whole-file range, UTF-16.
+    fn hints_of(store: &DocumentStore, uri: &str) -> Vec<(u32, String)> {
+        store
+            .inlay_hints(
+                uri,
+                Range::new(Position::new(0, 0), Position::new(9999, 0)),
+                Encoding::Utf16,
+            )
+            .expect("document is open")
+            .into_iter()
+            .map(|(position, label, _)| (position.line, label))
+            .collect()
+    }
+
+    #[test]
+    fn inlay_hints_show_inferred_types_for_unannotated_declarations_only() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///hints.noe",
+            "mut xs = [1, 2, 3]\n\
+             count: int = 3\n\
+             mut s = \"hi\"\n\
+             xs = [4]\n\
+             fn f(n: int): int {\n    \
+             mut doubled = n * 2\n    \
+             return doubled\n}\n"
+                .to_string(),
+        );
+        let hints = hints_of(&store, "file:///hints.noe");
+        // Un-annotated declarations get their inferred type — top level and inside fn bodies.
+        assert!(
+            hints.contains(&(0, ": List<int>".to_string())),
+            "list binding: {hints:?}"
+        );
+        assert!(
+            hints.contains(&(2, ": string".to_string())),
+            "string binding: {hints:?}"
+        );
+        assert!(
+            hints.contains(&(5, ": int".to_string())),
+            "fn-body binding: {hints:?}"
+        );
+        // An ANNOTATED binding shows nothing (the type is already on screen), and a REASSIGNMENT
+        // is a use, not a declaration.
+        assert!(
+            !hints.iter().any(|(line, _)| *line == 1),
+            "annotated binding must not hint: {hints:?}"
+        );
+        assert!(
+            !hints.iter().any(|(line, _)| *line == 3),
+            "reassignment must not hint: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn inlay_hints_cover_closure_bodies_and_respect_the_range() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///closure.noe",
+            "mut total = 0\n\
+             [1, 2, 3].map(fn(x: int) {\n    \
+             mut bumped = x + 1;\n    \
+             return bumped;\n})\n"
+                .to_string(),
+        );
+        let all = hints_of(&store, "file:///closure.noe");
+        assert!(
+            all.contains(&(0, ": int".to_string())),
+            "top-level binding: {all:?}"
+        );
+        assert!(
+            all.contains(&(2, ": int".to_string())),
+            "closure-body binding: {all:?}"
+        );
+        // The range filter: asking only for line 0 drops the closure-body hint.
+        let first_line_only = store
+            .inlay_hints(
+                "file:///closure.noe",
+                Range::new(Position::new(0, 0), Position::new(0, 99)),
+                Encoding::Utf16,
+            )
+            .expect("document is open");
+        assert!(
+            first_line_only.iter().all(|(p, _, _)| p.line == 0),
+            "range filter: {first_line_only:?}"
+        );
+        assert!(!first_line_only.is_empty());
+    }
+
+    #[test]
+    fn inlay_hints_type_closure_parameters_and_name_call_arguments() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///params.noe",
+            "fn scale(factor: int, offset: int): int { return factor + offset }\n\
+             mut r = scale(2, 3)\n\
+             mut offset = 1\n\
+             mut s = scale(4, offset)\n\
+             fn apply(op: (int) -> int, n: int): int { return op(n) }\n\
+             apply(fn(x) => x + 1, 3)\n\
+             mut doubled = [10, 20].map(fn(y) => y * 2)\n\
+             mut f = fn(x) => x + 1\n"
+                .to_string(),
+        );
+        let hints = hints_of(&store, "file:///params.noe");
+        // Call arguments carry the parameter's name...
+        assert!(
+            hints.contains(&(1, "factor:".to_string())),
+            "first arg names its param: {hints:?}"
+        );
+        assert!(
+            hints.contains(&(1, "offset:".to_string())),
+            "second arg names its param: {hints:?}"
+        );
+        // ...except an argument that IS an identifier with the parameter's own name.
+        assert!(
+            hints
+                .iter()
+                .filter(|(line, label)| *line == 3 && label == "offset:")
+                .count()
+                == 0,
+            "same-named identifier arg shows nothing: {hints:?}"
+        );
+        assert!(
+            hints.contains(&(3, "factor:".to_string())),
+            "the other arg on that line still hints: {hints:?}"
+        );
+        // A closure argument's parameter shows its inferred type — flowed bidirectionally from a
+        // USER function's typed fn parameter (line 5: the only hint is the closure's `x`)...
+        assert!(
+            hints.contains(&(5, ": int".to_string())),
+            "user-fn closure param: {hints:?}"
+        );
+        // ...and from a BUILTIN method's element type (the dyn-closure gap, fixed): `y: int` AND
+        // the refined binding `doubled: List<int>` on line 6.
+        assert!(
+            hints
+                .iter()
+                .filter(|(line, label)| *line == 6 && label == ": int")
+                .count()
+                == 1,
+            "builtin-method closure param: {hints:?}"
+        );
+        assert!(
+            hints.contains(&(6, ": List<int>".to_string())),
+            "refined map result: {hints:?}"
+        );
+        // A standalone closure's UNINFERRED parameter shows nothing.
+        assert!(
+            !hints
+                .iter()
+                .any(|(line, label)| *line == 7 && label == ": dyn"),
+            "uninferred closure param must not hint: {hints:?}"
+        );
     }
 
     /// Create a fresh temp directory with the given `(filename, content)` files on disk, for the

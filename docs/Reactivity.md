@@ -119,4 +119,4 @@ Every reactive node belongs to the program's implicit scope; all of them are rec
 
 ## What's next
 
-This is the reactive **core**. The layers that consume it — WebSocket minimal-diff push / LiveView-style UI, reactive persistence, hot-module reload, and CRDT-synced signals — are deferred to when their prerequisites (the bundled HTTP/WS server, the DB layer, the p2p stack) land. The core already exposes which computeds changed in a flush, the hook the diff layer will build on.
+This is the reactive **core**. One layer that consumes it has landed: **CRDT-synced signals** — reactive state several peers edit concurrently, converging without coordination — see [Local-First & P2P](Local-First-and-P2P). The others (WebSocket minimal-diff push / LiveView-style UI, reactive persistence, hot-module reload) are deferred to when their prerequisites (the bundled HTTP/WS server, the DB layer) land. The core already exposes which computeds changed in a flush, the hook the diff layer will build on.

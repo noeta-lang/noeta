@@ -319,6 +319,44 @@ fn generic_call_violating_a_bound_is_reported() {
     assert_eq!(codes(src), ["E0025"]);
 }
 
+// --- The `Mergeable` bound (p2p P2): CRDT extern types satisfy it, nothing else does, and it is
+//     intrinsic (not user-implementable). The bound is seeded from the extension registry.
+
+#[test]
+fn crdt_types_satisfy_the_mergeable_bound() {
+    // Every registered CRDT satisfies `T: Mergeable` through a generic function call — the seed
+    // from the extension registry plus the ordinary bound check.
+    let src = "use std.{crdt}\n\
+               fn store<T: Mergeable>(v: T): T { return v; }\n\
+               echo store(crdt.gcounter());\n\
+               echo store(crdt.pncounter());\n\
+               echo store(crdt.gset());\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn a_non_crdt_violates_the_mergeable_bound() {
+    // A plain value has no convergence story, so it cannot satisfy `Mergeable`: `E0025`.
+    let src = "fn store<T: Mergeable>(v: T): T { return v; }\n\
+               echo store(42);\n";
+    assert_eq!(codes(src), ["E0025"]);
+}
+
+#[test]
+fn mergeable_is_intrinsic_so_a_user_impl_is_rejected() {
+    // `Mergeable` is a built-in capability of the CRDT types, not something a user type may claim —
+    // otherwise a non-convergent value would pass the checker but have no runtime merge: `E0015`.
+    let src = "class Thing {\n  x: int\n  impl Mergeable {}\n}\n";
+    assert_eq!(codes(src), ["E0015"]);
+}
+
+#[test]
+fn mergeable_cannot_be_derived() {
+    // Nor is it derivable (its behavior is not field-wise synthesizable): `E0014`.
+    let src = "@derive(Mergeable)\nclass Thing { x: int }\n";
+    assert_eq!(codes(src), ["E0014"]);
+}
+
 #[test]
 fn generic_call_argument_mismatch_after_binding_is_reported() {
     // The first argument pins `T = int`; the second (`string`) is checked against `int`: `E0007`.

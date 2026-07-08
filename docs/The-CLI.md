@@ -1,6 +1,6 @@
 # The `noeta` CLI
 
-The `noeta` binary is the whole toolchain. It has eight subcommands:
+The `noeta` binary is the whole toolchain. Its main subcommands:
 
 | Command | Purpose |
 |---|---|
@@ -13,11 +13,34 @@ The `noeta` binary is the whole toolchain. It has eight subcommands:
 | [`noeta lsp`](Editor-and-AI-Tooling) | The language server, over stdio (started by your editor, not by hand). |
 | [`noeta dap`](Debugging) | The debug adapter, over stdio (started by your editor's debug UI, not by hand). |
 | [`noeta profile`](Profiling) | Profile a program — a hot-function table or a flamegraph. |
+| [`noeta fmt`](#noeta-fmt) | Format `.noe` source into the canonical style (files/dirs, `--check`, `--stdin`). |
 
 Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
 > [!NOTE]
-> There is intentionally no `build`, `fmt`, or `check` subcommand yet. The language-conformance/differential harness that developers use is a *separate* dev binary (`noeta-conformance`), deliberately kept out of the shipped CLI so the `test` verb stays free for your program's own tests. Editor tooling is on [Editor & AI Tooling](Editor-and-AI-Tooling); the debugger on [Debugging](Debugging).
+> The language-conformance/differential harness that developers use is a *separate* dev binary (`noeta-conformance`), deliberately kept out of the shipped CLI so the `test` verb stays free for your program's own tests. Editor tooling is on [Editor & AI Tooling](Editor-and-AI-Tooling); the debugger on [Debugging](Debugging).
+
+## `noeta fmt`
+
+Formats `.noe` source into the canonical style — the same layout no matter how the code was written (like `gofmt`/`rustfmt`). It is a **canonical reformatter** guarded by a safety check: the formatted output is re-parsed and compared to the original, so formatting can never change what a program means; if anything looks off, the file is left untouched.
+
+```
+noeta fmt [PATHS...]   # format files, or every .noe under a directory, in place (atomic)
+noeta fmt --check ...  # write nothing; list any file that is not already formatted, exit 1 (CI)
+noeta fmt --stdin      # read source on stdin, write the formatted result to stdout (format-on-save)
+```
+
+Style is read from a `[fmt]` table in the nearest `noeta.toml`, or built-in defaults:
+
+```toml
+[fmt]
+wrap             = false      # false (default) keeps your line breaks; true = width-driven wrapping
+line_width       = 100        # column budget, used only when wrap = true
+match_arm_arrows = "compact"  # "compact" (default) or "align" (column-align match `=>`)
+sort_imports     = false      # false (default); true alphabetizes each comment-free run of `use`
+```
+
+With `wrap = false` (the default) the formatter preserves the line breaks you wrote and only normalizes indentation, spacing, and blank lines — so a tidy file is left essentially as-is. Trailing `;` and comments are always preserved; when `wrap = true`, wrapped lists get a trailing comma. Editors format with the same engine: the VS Code extension turns on **format-on-save** and **format-on-type** (reformatting a block when you type its closing `}`) for `.noe` files by default.
 
 ---
 

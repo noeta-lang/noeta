@@ -13,12 +13,11 @@ use noeta_span::{Source, Span};
 /// The lexical category of a token. Declarative `logos` definitions keep the lexer
 /// fast and the token set legible. `logos` resolves overlaps by longest match (so `==`
 /// beats `=`) and gives literal `#[token]`s priority over regexes (so `mut` is a
-/// keyword, not an identifier). Whitespace and line comments are skipped.
+/// keyword, not an identifier). Whitespace is skipped; comments are lexed as tokens and
+/// then dropped by [`lex`] (so the parser never sees them), but retained by
+/// [`lex_with_trivia`] for the formatter.
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq)]
 #[logos(skip r"[ \t\r\n]+")]
-// Line comments (the conformance `// expect:` headers are these). `allow_greedy`
-// acknowledges the `[^\n]*` tail; it stops at the newline, so it is bounded per line.
-#[logos(skip(r"//[^\n]*", allow_greedy = true))]
 pub enum TokenKind {
     // Keywords
     #[token("echo")]
@@ -326,9 +325,16 @@ pub enum TokenKind {
     /// a `*/` before the outer one closes), so `logos` cannot skip them with a regex; [`lex`] sees
     /// this token, scans to the matching close, and drops the whole span (no token is emitted). It
     /// therefore never appears in the token stream. A single `/` is [`Slash`](TokenKind::Slash) and a
-    /// `//` line comment is skipped by `logos`, so those are unaffected (longest-match picks `/*`).
+    /// `//` line comment is [`LineComment`](TokenKind::LineComment) (longest-match picks `/*`).
     #[token("/*")]
     BlockCommentOpen,
+    /// A `// …` line comment, to end of line. Lexed as a token (longest-match beats `/` and `/*`),
+    /// then **dropped by [`lex`]** so the parser never sees it; [`lex_with_trivia`] keeps it as a
+    /// [`Comment`]. The conformance `// expect:` headers are these.
+    // `allow_greedy` acknowledges the `[^\n]*` tail; it stops at the newline, so it is bounded per
+    // line (the same shape the previous `#[logos(skip(...))]` line-comment rule used).
+    #[regex(r"//[^\n]*", allow_greedy = true)]
+    LineComment,
 }
 
 impl TokenKind {
@@ -434,6 +440,7 @@ impl TokenKind {
             TokenKind::At => "At",
             TokenKind::DocText => "DocText",
             TokenKind::BlockCommentOpen => "BlockCommentOpen",
+            TokenKind::LineComment => "LineComment",
         }
     }
 
@@ -539,6 +546,7 @@ impl TokenKind {
             TokenKind::At => "`@`",
             TokenKind::DocText => "a `@doc` text body",
             TokenKind::BlockCommentOpen => "`/*`",
+            TokenKind::LineComment => "`//`",
         }
     }
 }
@@ -550,24 +558,66 @@ pub struct Token {
     pub span: Span,
 }
 
+/// A comment recovered from the source. Comments are *trivia* — they carry no token and never reach
+/// the parser — so they are collected only by [`lex_with_trivia`], for the formatter to reattach.
+/// The span indexes the full comment (including its `//` or `/* … */` delimiters); the consumer
+/// slices the source for the text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Comment {
+    pub span: Span,
+    pub kind: CommentKind,
+}
+
+/// Whether a [`Comment`] is a `// …` line comment or a `/* … */` block comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentKind {
+    Line,
+    Block,
+}
+
 /// The result of lexing: the token stream and any diagnostics produced along the way.
 /// Lexing is error-tolerant — it always returns a (possibly partial) stream.
+///
+/// `comments` is empty from [`lex`] (the compile path never pays for trivia) and populated only by
+/// [`lex_with_trivia`].
 #[derive(Debug, Clone, Default)]
 pub struct Lexed {
     pub tokens: Vec<Token>,
     pub diagnostics: Vec<Diagnostic>,
+    pub comments: Vec<Comment>,
 }
 
-/// Lex a source file into a token stream.
+/// Lex a source file into a token stream, discarding comments (the compile path). Byte-for-byte
+/// identical token output to lexing with trivia collection off — the parser never sees a comment.
 pub fn lex(source: &Source) -> Lexed {
+    lex_impl(source, false)
+}
+
+/// Lex a source file, additionally collecting every comment into [`Lexed::comments`] (the formatter
+/// path). The token stream is identical to [`lex`]'s; only trivia recovery is added.
+pub fn lex_with_trivia(source: &Source) -> Lexed {
+    lex_impl(source, true)
+}
+
+fn lex_impl(source: &Source, collect_trivia: bool) -> Lexed {
     let mut tokens = Vec::new();
     let mut diagnostics = Vec::new();
+    let mut comments = Vec::new();
     let text = source.text();
     let mut lexer = TokenKind::lexer(text);
 
     while let Some(result) = lexer.next() {
         let span = Span::from(lexer.span());
         match result {
+            Ok(TokenKind::LineComment) => {
+                // Trivia: dropped from the token stream; kept for the formatter when collecting.
+                if collect_trivia {
+                    comments.push(Comment {
+                        span,
+                        kind: CommentKind::Line,
+                    });
+                }
+            }
             Ok(TokenKind::LBrace) if opens_doc_block(text, &tokens) => {
                 // A `@doc {` (object-model slice 6f): capture the brace-delimited body **verbatim**
                 // as one `DocText` token instead of tokenizing it, so arbitrary prose/markdown never
@@ -605,12 +655,24 @@ pub fn lex(source: &Source) -> Lexed {
                 // A `/* … */` block comment (nesting). Scan from just after the `/*` to the matching
                 // close and drop the whole span — no token is emitted, exactly like a line comment.
                 // An unterminated comment consumes to end-of-input and reports a diagnostic.
-                match block_comment_end(text, span.end) {
-                    Some(end) => lexer.bump((end - span.end) as usize),
+                let (comment_end, terminated) = match block_comment_end(text, span.end) {
+                    Some(end) => {
+                        lexer.bump((end - span.end) as usize);
+                        (end, true)
+                    }
                     None => {
                         diagnostics.push(unterminated_block_comment(span));
                         lexer.bump(text.len() - span.end as usize);
+                        (text.len() as u32, false)
                     }
+                };
+                // Retain even an unterminated comment when collecting: the formatter refuses to
+                // reformat sources with lex diagnostics, but keeping the span costs nothing.
+                if collect_trivia && terminated {
+                    comments.push(Comment {
+                        span: Span::new(span.start, comment_end),
+                        kind: CommentKind::Block,
+                    });
                 }
             }
             Ok(kind) => tokens.push(Token { kind, span }),
@@ -623,6 +685,7 @@ pub fn lex(source: &Source) -> Lexed {
     Lexed {
         tokens,
         diagnostics,
+        comments,
     }
 }
 
@@ -875,6 +938,41 @@ mod tests {
         (source, lexed)
     }
 
+    /// Opt-in throughput check (F1): confirm that lexing comments as dropped tokens did not regress
+    /// the hot `lex` path. Compares a comment-heavy source against the same source with comments
+    /// stripped; the ratio must stay modest. Ignored by default (timings are noisy in CI); run with
+    /// `cargo test -p noeta-lexer -- --ignored --nocapture lex_comment_overhead`.
+    #[test]
+    #[ignore = "timing-sensitive; run explicitly"]
+    fn lex_comment_overhead_is_small() {
+        let mut with_comments = String::new();
+        let mut without = String::new();
+        for i in 0..2000 {
+            with_comments.push_str(&format!("x = {i} + {i}; // comment number {i}\n"));
+            without.push_str(&format!("x = {i} + {i};\n"));
+        }
+        let src_c = Source::new(SourceId::FIRST, "c", with_comments);
+        let src_p = Source::new(SourceId::FIRST, "p", without);
+
+        let time = |s: &Source| {
+            let start = std::time::Instant::now();
+            let mut n = 0usize;
+            for _ in 0..200 {
+                n += lex(s).tokens.len();
+            }
+            (start.elapsed(), n)
+        };
+        let (t_plain, _) = time(&src_p);
+        let (t_comments, _) = time(&src_c);
+        eprintln!("lex plain={t_plain:?} with-comments={t_comments:?}");
+        // Comment-bearing source lexes the same real tokens plus dropped comment tokens; it must not
+        // cost dramatically more than the comment-free source.
+        assert!(
+            t_comments.as_secs_f64() < t_plain.as_secs_f64() * 2.0 + 0.01,
+            "comment lexing regressed: plain={t_plain:?} comments={t_comments:?}"
+        );
+    }
+
     #[test]
     fn lexes_echo_string() {
         let (source, lexed) = lex_str("echo \"hello\";");
@@ -1000,6 +1098,59 @@ mod tests {
                 TokenKind::Semicolon
             ]
         );
+        // `lex` never surfaces comments.
+        assert!(lexed.comments.is_empty());
+    }
+
+    #[test]
+    fn lex_with_trivia_captures_comments_with_spans() {
+        let text = "// lead\necho \"x\"; // trail\n/* block */\n";
+        let source = Source::new(SourceId(0), "t", text);
+        let lexed = lex_with_trivia(&source);
+        assert!(lexed.diagnostics.is_empty());
+
+        let comments: Vec<(CommentKind, &str)> = lexed
+            .comments
+            .iter()
+            .map(|c| (c.kind, &text[c.span.start as usize..c.span.end as usize]))
+            .collect();
+        assert_eq!(
+            comments,
+            vec![
+                (CommentKind::Line, "// lead"),
+                (CommentKind::Line, "// trail"),
+                (CommentKind::Block, "/* block */"),
+            ]
+        );
+    }
+
+    #[test]
+    fn trivia_collection_never_changes_the_token_stream() {
+        // The parser must see identical tokens whether or not trivia is collected.
+        for text in [
+            "echo 1 // c\n",
+            "/* a */ fn f() { return 2 }",
+            "x = \"http://not-a-comment\"; // real\n",
+            "/* nested /* inner */ still */ echo 3",
+            "echo 4",
+        ] {
+            let source = Source::new(SourceId(0), "t", text);
+            let plain = lex(&source);
+            let trivia = lex_with_trivia(&source);
+            assert_eq!(
+                plain.tokens, trivia.tokens,
+                "token stream diverged for {text:?}"
+            );
+            assert!(plain.comments.is_empty());
+        }
+    }
+
+    #[test]
+    fn block_comment_inside_string_is_not_a_comment() {
+        // A `//`/`/*` inside a string literal is part of the string token, never trivia.
+        let source = Source::new(SourceId(0), "t", "x = \"a // b /* c */ d\"");
+        let lexed = lex_with_trivia(&source);
+        assert!(lexed.comments.is_empty(), "{:?}", lexed.comments);
     }
 
     #[test]

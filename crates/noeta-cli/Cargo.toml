@@ -30,6 +30,7 @@ noeta-stdlib = { workspace = true }
 noeta-lsp = { workspace = true }
 noeta-dap = { workspace = true }
 noeta-prof = { workspace = true }
+noeta-fmt = { workspace = true }
 clap = { workspace = true }
 toml = { workspace = true }
 serde = { workspace = true }

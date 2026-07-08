@@ -130,9 +130,9 @@ pub struct Sites {
     /// The packed-`List` construction-site map (see [`resolve_packed_list_sites`]).
     pub packed_list_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`): the turbofish `T` resolved into a
-    /// [`noeta_stdlib::TypeRecipe`] the lowering bakes into `Rvalue::ExtCall`. A pure function of the
+    /// [`noeta_stdlib::TypeRecipe`] the lowering bakes into `Rvalue::TypedModuleCall`. A pure function of the
     /// program, like the other site maps.
-    pub ext_call_sites: HashMap<Span, noeta_stdlib::TypeRecipe>,
+    pub typed_module_call_sites: HashMap<Span, noeta_stdlib::TypeRecipe>,
     /// `map(...)` call spans whose result element type is packed → the result element's layout. The
     /// VM's `map` builtin builds a flat result at these sites (P-PACK 2.6 category B); invisible to
     /// `RunResult`, so the eval reference may ignore it and stay boxed.
@@ -634,8 +634,8 @@ struct SiteMaps {
     packed_list_sites: HashMap<Span, noeta_ast::reflect::PackedLayout>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`), keyed by the `Expr::TypedModuleCall`
     /// span → the turbofish `T` resolved into a [`noeta_stdlib::TypeRecipe`]. Both backends harvest
-    /// this on the same program, so the lowering bakes identical recipes into `Rvalue::ExtCall`.
-    ext_call_sites: HashMap<Span, noeta_stdlib::TypeRecipe>,
+    /// this on the same program, so the lowering bakes identical recipes into `Rvalue::TypedModuleCall`.
+    typed_module_call_sites: HashMap<Span, noeta_stdlib::TypeRecipe>,
     /// `map(list, fn)` call spans whose result element type is a `@packed` struct (P-PACK 2.6
     /// category B), keyed by the whole-call span → the result element's [`PackedLayout`]. The VM's
     /// `map` builtin consults this to build a flat result instead of N boxed objects; like the other
@@ -678,7 +678,7 @@ impl SiteMaps {
             type_of_sites: self.type_of_sites,
             construction_sites: self.construction_sites,
             packed_list_sites: self.packed_list_sites,
-            ext_call_sites: self.ext_call_sites,
+            typed_module_call_sites: self.typed_module_call_sites,
             map_packed_sites: self.map_packed_sites,
             index_field_sites: self.index_field_sites,
             for_stream_sites: self.for_stream_sites,
@@ -964,6 +964,23 @@ impl Checker {
         self.register_type_enum();
         self.register_semantic_prelude();
         self.register_test_attributes();
+        self.seed_extern_type_traits();
+    }
+
+    /// Seed the built-in traits that **extern types** declare through the extension registry (p2p
+    /// P2) into the trait-impl table — the extern-type analogue of processing a user type's
+    /// `@derive`/`impl`. This is what makes `satisfies(GCounter, Mergeable)` true, so a
+    /// `T: Mergeable` bound accepts a CRDT. Runs at prelude time, once, from every construction
+    /// path; only registry-declared (intrinsic) traits appear here, so it cannot let a user type
+    /// masquerade as one.
+    fn seed_extern_type_traits(&mut self) {
+        for ext in noeta_stdlib::registry::extensions() {
+            for ty in ext.types() {
+                if !ty.traits.is_empty() {
+                    self.record_trait_impls(ty.name, ty.traits.iter().copied());
+                }
+            }
+        }
     }
 
     /// Register the built-in **test-metadata attributes** (object-model slice 6h) as prelude
@@ -2790,6 +2807,18 @@ impl Checker {
             .help("only built-in traits can be implemented (e.g. `Add`, `Equatable`, `Display`)");
             return;
         };
+        if t.intrinsic() {
+            self.error(
+                DiagnosticCode::InvalidImpl,
+                trait_span,
+                format!("`{trait_name}` cannot be implemented"),
+            )
+            .help(format!(
+                "`{trait_name}` is a built-in capability satisfied only by the runtime types that \
+                 provide it (e.g. the CRDT types for `Mergeable`), not by a user `impl`"
+            ));
+            return;
+        }
         let Some((req_name, req_arity)) = t.required_method() else {
             return; // a marker trait (e.g. `Clone`, `Attribute`) imposes no hand-written method
         };
@@ -2991,7 +3020,21 @@ impl Checker {
     /// below adopt the concrete type and [`Self::subsume`] enforces `actual <: expected`. Only a
     /// genuinely open position (e.g. `echo`) passes `Unknown`, where `check` reduces to bare
     /// [`Self::synth`].
+    /// Check `expr` against `expected` (bidirectional position). Thin wrapper over
+    /// [`Self::check_inner`] that, on the IDE path, records the result into the `expr_types`
+    /// index — check-position expressions (an absorbed closure, an annotation-driven literal)
+    /// previously never recorded, so hover and inlay hints missed them.
     fn check(&mut self, expr: &Expr, expected: &Type, env: &mut Env) -> Type {
+        let ty = self.check_inner(expr, expected, env);
+        if self.record_expr_types
+            && let Some(repr) = type_to_repr_top(&ty, &self.type_kinds)
+        {
+            self.sites.expr_types.insert(expr.span(), repr);
+        }
+        ty
+    }
+
+    fn check_inner(&mut self, expr: &Expr, expected: &Type, env: &mut Env) -> Type {
         match expr {
             // A list literal absorbs an expected `List<T>`: check each element against `T`.
             Expr::List { items, span } if matches!(expected, Type::List(_)) => {
@@ -3085,26 +3128,41 @@ impl Checker {
                 // against `env` before the parameter frame is pushed.
                 self.validate_param_defaults(params, env);
                 env.push(HashMap::new());
-                for (i, p) in params.iter().enumerate() {
+                // Each parameter's bound type: an explicit annotation wins, else the expectation.
+                // KEPT for the closure's own type below — returning `param_type` here used to
+                // forget the absorption, leaving the recorded closure `(dyn) -> R` even when the
+                // parameters were known (the dyn-closure gap's second half).
+                let bound: Vec<Type> = params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| {
+                        p.ty.as_ref()
+                            .map(Type::from_ref)
+                            .or_else(|| expected_params.get(i).cloned())
+                            .unwrap_or(Type::Unknown)
+                    })
+                    .collect();
+                for (p, pty) in params.iter().zip(&bound) {
                     self.check_reserved_name(&p.name, p.name_span);
-                    let pty = p.ty.as_ref().map(Type::from_ref).unwrap_or_else(|| {
-                        expected_params.get(i).cloned().unwrap_or(Type::Unknown)
-                    });
-                    bind(env, &p.name, pty);
+                    bind(env, &p.name, pty.clone());
                 }
                 // An explicit return annotation is the body's expected type and the closure's return
                 // type; it must also satisfy the context's expected return. Without one the expected
-                // return drives the body, as before. (Arrow or block — `closure_body_type` handles
-                // both.)
+                // return drives the body — UNLESS that expectation is `dyn`, the builtin "any
+                // result" shape (`map` expects `(T) -> dyn`): checking against `dyn` would erase the
+                // body's real type and starve the call-site refinements (`xs.map(f) → List<R>`), so
+                // the body is inferred instead; `dyn` accepts whatever comes out.
                 let declared = ann.as_ref().map(Type::from_ref);
-                let body_expected = declared.clone().unwrap_or_else(|| (**ret).clone());
-                let body_ty = self.closure_body_type(body, Some(&body_expected), env);
+                let body_expected = declared
+                    .clone()
+                    .or_else(|| (!matches!(**ret, Type::Dyn)).then(|| (**ret).clone()));
+                let body_ty = self.closure_body_type(body, body_expected.as_ref(), env);
                 env.pop();
                 if let Some(declared) = &declared {
                     self.subsume(declared, ret, *closure_span);
                 }
                 Type::Fn {
-                    params: params.iter().map(param_type).collect(),
+                    params: bound,
                     ret: Box::new(declared.unwrap_or(body_ty)),
                 }
             }
@@ -3358,7 +3416,17 @@ impl Checker {
             Expr::Call {
                 callee, args, span, ..
             } => {
-                let arg_types: Vec<Type> = args.iter().map(|a| self.synth(a, env)).collect();
+                // Bidirectional closure arguments (the dyn-closure gap): a closure's parameter
+                // types come from the CALLEE's resolved signature, so closure arguments are
+                // deferred (placeholder `Unknown`) and typed by `synth_call` once the signature is
+                // known. Everything else synthesizes as before.
+                let arg_types: Vec<Type> = args
+                    .iter()
+                    .map(|a| match a {
+                        Expr::Closure { .. } => Type::Unknown,
+                        _ => self.synth(a, env),
+                    })
+                    .collect();
                 self.synth_call(callee, &arg_types, args, *span, env)
             }
             Expr::Closure {
@@ -3919,7 +3987,7 @@ impl Checker {
                 // is an error here.
                 match self.type_to_recipe(&t) {
                     Some(recipe) => {
-                        self.sites.ext_call_sites.insert(*span, recipe);
+                        self.sites.typed_module_call_sites.insert(*span, recipe);
                     }
                     None => {
                         self.error(
@@ -4322,10 +4390,62 @@ impl Checker {
         }
     }
 
+    /// Finalize the deferred closure arguments of a call once the callee's parameter types are
+    /// known (the dyn-closure gap): a `Fn`-typed parameter checks the closure against it — the
+    /// absorption arm adopts the parameter types and, for a `-> dyn` expectation, infers the body's
+    /// real return — anything else synthesizes standalone (the pre-deferral behavior). Idempotent:
+    /// a closure some earlier branch already typed (never `Unknown`) is left alone.
+    fn finalize_closure_args(
+        &mut self,
+        params: &[Type],
+        args: &mut [Type],
+        arg_exprs: &[Expr],
+        env: &mut Env,
+    ) {
+        for (i, expr) in arg_exprs.iter().enumerate() {
+            if !matches!(expr, Expr::Closure { .. }) {
+                continue;
+            }
+            let Some(slot) = args.get_mut(i) else {
+                continue;
+            };
+            if !matches!(slot, Type::Unknown) {
+                continue;
+            }
+            *slot = match params.get(i) {
+                Some(expected @ Type::Fn { .. }) => self.check(expr, expected, env),
+                _ => self.synth(expr, env),
+            };
+        }
+    }
+
     fn synth_call(
         &mut self,
         callee: &Expr,
         args: &[Type],
+        arg_exprs: &[Expr],
+        call_span: Span,
+        env: &mut Env,
+    ) -> Type {
+        let mut args = args.to_vec();
+        let ret = self.synth_call_inner(callee, &mut args, arg_exprs, call_span, env);
+        // Safety net for the deferred closure arguments: any closure no resolution branch
+        // finalized (an unknown callee, a deferred receiver, a variadic prelude call) is
+        // synthesized standalone here, so its body is always checked (diagnostics, hover index)
+        // exactly as before the deferral existed. A closure's type is never `Unknown` once typed,
+        // so the placeholder is an unambiguous marker.
+        for (i, expr) in arg_exprs.iter().enumerate() {
+            if matches!(expr, Expr::Closure { .. }) && matches!(args.get(i), Some(Type::Unknown)) {
+                self.synth(expr, env);
+            }
+        }
+        ret
+    }
+
+    fn synth_call_inner(
+        &mut self,
+        callee: &Expr,
+        args: &mut [Type],
         arg_exprs: &[Expr],
         call_span: Span,
         env: &mut Env,
@@ -4348,10 +4468,12 @@ impl Checker {
                             arg_exprs,
                             span,
                             &[],
+                            env,
                         );
                     }
                     let params = sig.params.clone();
                     let ret = sig.ret.clone();
+                    self.finalize_closure_args(&params, args, arg_exprs, env);
                     self.check_args(&params, required, args, arg_exprs, span, name);
                     return ret;
                 }
@@ -4364,14 +4486,18 @@ impl Checker {
                     if let Some(params) = stdlib::module_params(&module, &func, args) {
                         let required =
                             stdlib::module_required(&module, &func).unwrap_or(params.len());
+                        self.finalize_closure_args(&params, args, arg_exprs, env);
                         self.check_args(&params, required, args, arg_exprs, span, &func);
                     }
+                    self.check_module_bounds(&module, &func, args, span);
                     return stdlib::module_return(&module, &func, args).unwrap_or(Type::Unknown);
                 }
                 // Prelude functions are polymorphic/variadic — their result is typed, but their
                 // arguments are not arity-checked here. (The packed-result note the free `map`
                 // recorded here moved to the list-method `map` arm in `synth_call`'s Member case —
-                // the free form left the prelude, P1.2.)
+                // the free form left the prelude, P1.2.) Closure arguments synthesize standalone
+                // first, so a payload-typed result (`some(fn…)`) sees the real closure type.
+                self.finalize_closure_args(&[], args, arg_exprs, env);
                 stdlib::prelude_return(name, args).unwrap_or(Type::Unknown)
             }
             Expr::Member { receiver, name, .. } => {
@@ -4396,6 +4522,8 @@ impl Checker {
                 if let Expr::Ident { name: tn, .. } = receiver.as_ref()
                     && self.is_enum_variant(tn, name)
                 {
+                    // Payload types bind the enum's generics, so a closure payload must be real.
+                    self.finalize_closure_args(&[], args, arg_exprs, env);
                     return self.enum_construction_type(tn, name, args, call_span);
                 }
                 // `module.func(args)` — a Ring 2 stdlib module call.
@@ -4404,8 +4532,10 @@ impl Checker {
                 {
                     if let Some(params) = stdlib::module_params(m, name, args) {
                         let required = stdlib::module_required(m, name).unwrap_or(params.len());
+                        self.finalize_closure_args(&params, args, arg_exprs, env);
                         self.check_args(&params, required, args, arg_exprs, span, name);
                     }
+                    self.check_module_bounds(m, name, args, span);
                     return stdlib::module_return(m, name, args).unwrap_or(Type::Unknown);
                 }
                 // `Type.assoc(args)` — an associated function / static call on a known user type
@@ -4442,7 +4572,7 @@ impl Checker {
                     }
                     // A static call: the type arguments are not known from a bare type name, so the
                     // method's own arguments instantiate any parameters (`Box.new(1)` infers `int`).
-                    return self.call_user_method(name, &sig, args, arg_exprs, span, &[]);
+                    return self.call_user_method(name, &sig, args, arg_exprs, span, &[], env);
                 }
                 // `receiver.method(args)` — a built-in method, a user method, or (on a `dyn`/hole
                 // receiver) a runtime-dispatched call that stays deferred.
@@ -4472,8 +4602,16 @@ impl Checker {
                         );
                         return sig.ret.clone();
                     }
-                    return self.call_user_method(name, &sig, args, arg_exprs, span, recv_args);
+                    return self
+                        .call_user_method(name, &sig, args, arg_exprs, span, recv_args, env);
                 }
+                // THE dyn-closure gap's primary site: a builtin method's parameter types carry
+                // the receiver's element type (`List<int>.map` expects `(int) -> dyn`), so the
+                // deferred closure argument finalizes against them here — its parameters adopt the
+                // element type, its body infers a real return, and the `map` refinements below see
+                // a precise `Fn` instead of a context-free one.
+                let builtin_params = stdlib::method_params(&recv, name).unwrap_or_default();
+                self.finalize_closure_args(&builtin_params, args, arg_exprs, env);
                 self.check_method_args(&recv, name, args, arg_exprs, span);
                 // A bit intrinsic on a fixed-width receiver (Tier W5) must act within the width, not
                 // the erased i64 (`(1u8).leading_zeros() == 7`), so mark the **call** span (the one
@@ -4605,14 +4743,16 @@ impl Checker {
         ty
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn call_user_method(
         &mut self,
         name: &str,
         sig: &FnSig,
-        args: &[Type],
+        args: &mut [Type],
         arg_exprs: &[Expr],
         span: Span,
         recv_args: &[Type],
+        env: &mut Env,
     ) -> Type {
         if let Some(generic) = &sig.generic {
             return self.check_generic_call(
@@ -4623,9 +4763,12 @@ impl Checker {
                 arg_exprs,
                 span,
                 recv_args,
+                env,
             );
         }
-        self.check_args(&sig.params, sig.required, args, arg_exprs, span, name);
+        let params = sig.params.clone();
+        self.finalize_closure_args(&params, args, arg_exprs, env);
+        self.check_args(&params, sig.required, args, arg_exprs, span, name);
         sig.ret.clone()
     }
 
@@ -4967,10 +5110,11 @@ impl Checker {
         name: &str,
         generic: &GenericInfo,
         required: usize,
-        args: &[Type],
+        args: &mut [Type],
         arg_exprs: &[Expr],
         span: Span,
         recv_args: &[Type],
+        env: &mut Env,
     ) -> Type {
         let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
         if args.len() < required || args.len() > generic.raw_params.len() {
@@ -4998,9 +5142,29 @@ impl Checker {
             .zip(recv_args.iter().cloned())
             .filter(|(_, t)| !t.defers_to_runtime())
             .collect();
-        for (i, (raw, arg)) in generic.raw_params.iter().zip(args).enumerate() {
-            bind_type_params(raw, arg, &tps, &mut subst);
+        for (i, raw) in generic.raw_params.iter().enumerate() {
+            if i >= args.len() {
+                // Omitted trailing defaults — already checked at the declaration.
+                break;
+            }
+            // A deferred closure argument finalizes against the raw parameter with everything
+            // bound SO FAR substituted in — `fn each<T>(xs: List<T>, f: (T) -> unit)` has `T`
+            // pinned by `xs` before `f` is looked at — and its now-known type (the inferred
+            // return especially) then binds any parameter the earlier arguments did not
+            // (`fn pick<T>(f: () -> T): T`).
+            if let Some(expr @ Expr::Closure { .. }) = arg_exprs.get(i)
+                && matches!(args[i], Type::Unknown)
+            {
+                let expected = erase_type_params(apply_subst(raw, &subst), &tps);
+                args[i] = match &expected {
+                    Type::Fn { .. } => self.check(expr, &expected, env),
+                    _ => self.synth(expr, env),
+                };
+            }
+            let arg = args[i].clone();
+            bind_type_params(raw, &arg, &tps, &mut subst);
             let expected = apply_subst(raw, &subst);
+            let arg = &arg;
             // A bare literal adapts into a fixed-width parameter here too (P-NUM-SYM) — whether the
             // parameter is a concrete `u8`/`f32`/`f64` or a type variable already bound to one
             // (`g(200u8, 200)` binds `T = u8`, so the second `200` narrows). Tried before the
@@ -5029,6 +5193,14 @@ impl Checker {
                     continue;
                 };
                 if !self.satisfies(concrete, t) {
+                    let help = if t.intrinsic() {
+                        format!(
+                            "`{bound}` is a built-in capability — only the runtime types that \
+                             provide it (the CRDT types for `Mergeable`) satisfy this bound"
+                        )
+                    } else {
+                        format!("`{concrete}` must `@derive` or `impl {bound}` to be used here")
+                    };
                     self.error(
                         DiagnosticCode::TraitBoundNotSatisfied,
                         span,
@@ -5037,9 +5209,7 @@ impl Checker {
                                  parameter `{pname}` of `{name}`"
                         ),
                     )
-                    .help(format!(
-                        "`{concrete}` must `@derive` or `impl {bound}` to be used here"
-                    ));
+                    .help(help);
                 }
             }
         }
@@ -5058,6 +5228,35 @@ impl Checker {
             return self.trait_impls.get(n).is_some_and(|s| s.contains(&t));
         }
         builtin_satisfies(ty, t)
+    }
+
+    /// Enforce the **trait bounds** on a registry function's bounded type variables (p2p P2): each
+    /// bound var is bound to a concrete type by the call's arguments (`module_var_bounds`), and that
+    /// type must satisfy the named trait or it is `E0025`. An undetermined var yields nothing
+    /// (gradual). This is the registry-call twin of the user-generic bound check.
+    fn check_module_bounds(&mut self, module: &str, func: &str, args: &[Type], span: Span) {
+        for (concrete, bound) in stdlib::module_var_bounds(module, func, args) {
+            let Some(t) = BuiltinTrait::from_name(bound) else {
+                continue;
+            };
+            if self.satisfies(&concrete, t) {
+                continue;
+            }
+            let help = if t.intrinsic() {
+                format!(
+                    "`{bound}` is a built-in capability — only the runtime types that provide it \
+                     (the CRDT types `GCounter`/`PnCounter`/`GSet`) satisfy this bound"
+                )
+            } else {
+                format!("`{concrete}` must `@derive` or `impl {bound}`")
+            };
+            self.error(
+                DiagnosticCode::TraitBoundNotSatisfied,
+                span,
+                format!("type `{concrete}` does not satisfy the bound `{bound}`"),
+            )
+            .help(help);
+        }
     }
 
     /// The return type of a method call `recv.name(...)`: a built-in method, a user-declared
@@ -5800,7 +5999,10 @@ fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
                     String | Bool | Unit | List(_) | Map(..) | Set(_) | Option(_) | Result(..)
                 )
         }
-        // No built-in type satisfies these marker/protocol traits without an explicit `impl`.
+        // No built-in *primitive* type satisfies these marker/protocol traits without an explicit
+        // `impl`. `Mergeable` in particular is satisfied only by the CRDT extern types, which are
+        // `Type::Named` and so resolve through the seeded `trait_impls` table in `satisfies`, never
+        // reaching here — no primitive is ever `Mergeable`.
         Bt::Clone
         | Bt::Serialize
         | Bt::Index
@@ -5809,7 +6011,8 @@ fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
         | Bt::Callable
         | Bt::Members
         | Bt::DynamicCall
-        | Bt::TryAdd => false,
+        | Bt::TryAdd
+        | Bt::Mergeable => false,
     }
 }
 

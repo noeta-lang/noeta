@@ -547,7 +547,7 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             f(name);
             f(args);
         }
-        Rvalue::ExtCall { args, .. } => args.iter().for_each(&mut *f),
+        Rvalue::TypedModuleCall { args, .. } => args.iter().for_each(&mut *f),
         // No operands (or handled elsewhere).
         Rvalue::Closure { .. } | Rvalue::AttributesOf { .. } | Rvalue::RolesOf { .. } => {}
     }

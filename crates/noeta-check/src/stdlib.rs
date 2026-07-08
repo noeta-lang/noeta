@@ -71,7 +71,9 @@ fn sig_to_type_bound(sig: &registry::SigType, bindings: &[Option<Type>]) -> Type
             params: params.iter().map(|p| sig_to_type_bound(p, bindings)).collect(),
             ret: Box::new(sig_to_type_bound(ret, bindings)),
         },
-        SigType::Var(n) => bindings
+        // A bounded var (p2p P2) substitutes exactly like a plain var; the bound is enforced
+        // separately at the call site (see `module_var_bounds`).
+        SigType::Var(n) | SigType::BoundedVar(n, _) => bindings
             .get(*n as usize)
             .and_then(Clone::clone)
             .unwrap_or(Type::Unknown),
@@ -101,7 +103,7 @@ fn bind_params(params: &[registry::SigType], args: &[Type]) -> Vec<Option<Type>>
 fn bind_sig(sig: &registry::SigType, arg: &Type, bindings: &mut Vec<Option<Type>>) {
     use registry::SigType;
     match (sig, arg) {
-        (SigType::Var(n), t) => {
+        (SigType::Var(n), t) | (SigType::BoundedVar(n, _), t) => {
             let i = *n as usize;
             if bindings.len() <= i {
                 bindings.resize(i + 1, None);
@@ -145,6 +147,62 @@ fn bind_sig(sig: &registry::SigType, arg: &Type, bindings: &mut Vec<Option<Type>
 /// the ordinary [`bind_sig`] walk on top of this seed.
 fn receiver_bindings(receiver_args: &[Type]) -> Vec<Option<Type>> {
     receiver_args.iter().cloned().map(Some).collect()
+}
+
+/// The **trait bounds** on a registry function's bounded type variables (p2p P2), each paired with
+/// the concrete type the call's arguments bound it to — for the checker to enforce (`E0025`). A
+/// bound whose variable the arguments left undetermined (a gradual hole) yields nothing: no
+/// information, so no error. `synced_signal(initial: BoundedVar(0, "Mergeable"), …)` called with a
+/// `GCounter` argument yields `[(GCounter, "Mergeable")]`; called with `int`, `[(int, "Mergeable")]`
+/// — which the caller then rejects.
+pub(super) fn module_var_bounds(
+    module: &str,
+    name: &str,
+    args: &[Type],
+) -> Vec<(Type, &'static str)> {
+    let Some(f) = registry::find_function_sig(module, name) else {
+        return Vec::new();
+    };
+    let bindings = bind_params(f.params, args);
+    let mut bounded = Vec::new();
+    for p in f.params {
+        collect_bounded_vars(p, &mut bounded);
+    }
+    bounded
+        .into_iter()
+        .filter_map(|(index, trait_name)| {
+            bindings
+                .get(index as usize)
+                .and_then(Clone::clone)
+                .map(|ty| (ty, trait_name))
+        })
+        .collect()
+}
+
+/// Collect every `(var index, trait name)` from the `BoundedVar`s reachable in `sig` (including
+/// nested positions — `List<BoundedVar>`, a closure parameter, …), so a bound is enforced wherever
+/// it is declared.
+fn collect_bounded_vars(sig: &registry::SigType, out: &mut Vec<(u8, &'static str)>) {
+    use registry::SigType;
+    match sig {
+        SigType::BoundedVar(n, trait_name) => out.push((*n, trait_name)),
+        SigType::List(t) | SigType::Option(t) | SigType::Future(t) | SigType::Optional(t) => {
+            collect_bounded_vars(t, out)
+        }
+        SigType::Map(k, v) => {
+            collect_bounded_vars(k, out);
+            collect_bounded_vars(v, out);
+        }
+        SigType::Fn(params, ret) => {
+            for p in *params {
+                collect_bounded_vars(p, out);
+            }
+            collect_bounded_vars(ret, out);
+        }
+        SigType::Union(members) => members.iter().for_each(|m| collect_bounded_vars(m, out)),
+        SigType::Generic(_, targs) => targs.iter().for_each(|a| collect_bounded_vars(a, out)),
+        _ => {}
+    }
 }
 
 fn list(t: Type) -> Type {

@@ -244,6 +244,21 @@ enum Command {
         #[command(subcommand)]
         action: CacheAction,
     },
+    /// Format `.noe` source into the canonical style. By default rewrites each file in place
+    /// (atomically); a directory argument formats every `.noe` beneath it. Style is read from the
+    /// nearest `noeta.toml` `[fmt]` table (or built-in defaults). Files that do not parse are left
+    /// untouched and reported; a formatted file is guaranteed to preserve the program's meaning.
+    Fmt {
+        /// Files or directories to format in place. Omit when using `--stdin`.
+        files: Vec<PathBuf>,
+        /// Do not write. List each file that is not already canonically formatted and exit non-zero
+        /// if any exist (for CI).
+        #[arg(long)]
+        check: bool,
+        /// Read source from stdin and write the formatted result to stdout (editor "format on save").
+        #[arg(long)]
+        stdin: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -332,6 +347,11 @@ fn main() -> ExitCode {
             lines,
         } => cmd_profile(&file, instrument, hz, every, format.as_deref(), out, lines),
         Command::Cache { action } => cmd_cache(&action),
+        Command::Fmt {
+            files,
+            check,
+            stdin,
+        } => cmd_fmt(&files, check, stdin),
     }
 }
 
@@ -465,6 +485,157 @@ fn cmd_profile(
         None => None,
     };
     noeta_prof::run(file, mode, format, out)
+}
+
+/// `noeta fmt` — format `.noe` source into the canonical style. Rewrites the given files (or every
+/// `.noe` under the given directories) in place by default; `--check` writes nothing and lists any
+/// file that is not already formatted (exit 1, for CI); `--stdin` reads stdin and writes the result
+/// to stdout. Style comes from the nearest `noeta.toml` `[fmt]` table. Files that do not parse are
+/// left untouched and reported; the safety gate inside `noeta_fmt::format_source` guarantees a
+/// written file never changes meaning. In-place writes are atomic (temp file + rename) and skipped
+/// when the content is already canonical.
+fn cmd_fmt(paths: &[PathBuf], check: bool, stdin: bool) -> ExitCode {
+    if stdin {
+        return cmd_fmt_stdin();
+    }
+    if paths.is_empty() {
+        eprintln!("noeta fmt: no files given (use `--stdin` to format standard input)");
+        return ExitCode::FAILURE;
+    }
+
+    // Expand any directory argument into the `.noe` files beneath it.
+    let mut files = Vec::new();
+    for path in paths {
+        if path.is_dir() {
+            collect_noe_files(path, &mut files);
+        } else {
+            files.push(path.clone());
+        }
+    }
+
+    let mut failed = false; // a parse or IO error on any file
+    let mut would_change = false; // `--check`: some file is not already formatted
+
+    for file in &files {
+        let dir = file.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let config = match manifest::resolve_fmt_config(dir) {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("noeta fmt: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let original = match std::fs::read_to_string(file) {
+            Ok(text) => text,
+            Err(err) => {
+                eprintln!("noeta fmt: cannot read `{}`: {err}", file.display());
+                failed = true;
+                continue;
+            }
+        };
+
+        match noeta_fmt::format_source(&file.to_string_lossy(), &original, &config) {
+            Ok(formatted) => {
+                if formatted == original {
+                    continue; // already canonical — no write, no churn
+                }
+                if check {
+                    would_change = true;
+                    println!("{}", file.display());
+                } else if let Err(err) = atomic_write(file, &formatted) {
+                    eprintln!("noeta fmt: cannot write `{}`: {err}", file.display());
+                    failed = true;
+                }
+            }
+            Err(err) => {
+                report_fmt_error(&file.display().to_string(), &err);
+                failed = true;
+            }
+        }
+    }
+
+    if failed || (check && would_change) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Recursively collect every `.noe` file under `dir` (skipping dot-directories like `.git`).
+fn collect_noe_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        eprintln!("noeta fmt: cannot read directory `{}`", dir.display());
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let hidden = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.'));
+            if !hidden {
+                collect_noe_files(&path, out);
+            }
+        } else if path.extension().is_some_and(|e| e == "noe") {
+            out.push(path);
+        }
+    }
+}
+
+/// Write `contents` to `path` atomically: write a sibling temp file, then rename over the target, so
+/// a crash mid-write never leaves a truncated source file.
+fn atomic_write(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("out");
+    let tmp = dir.join(format!(".{name}.fmt-tmp"));
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Format stdin → stdout with the config discovered from the current directory.
+fn cmd_fmt_stdin() -> ExitCode {
+    let text = match io::read_to_string(io::stdin()) {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("noeta fmt: cannot read stdin: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let config = match manifest::resolve_fmt_config(&dir) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("noeta fmt: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match noeta_fmt::format_source("<stdin>", &text, &config) {
+        Ok(formatted) => {
+            print!("{formatted}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            report_fmt_error("<stdin>", &err);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Print a one-line reason a file could not be formatted (leaving it untouched).
+fn report_fmt_error(name: &str, err: &noeta_fmt::FmtError) {
+    use noeta_fmt::FmtError;
+    match err {
+        FmtError::Parse(diags) => {
+            eprintln!(
+                "{name}: not formatted — source does not parse ({} diagnostic(s))",
+                diags.len()
+            );
+        }
+        FmtError::Safety(why) => {
+            eprintln!("{name}: not formatted — internal safety check failed: {why}");
+        }
+    }
 }
 
 /// For a tier runner: whether its `tier` is live under `--profile`. `Ok(true)` when no profile was
@@ -1247,6 +1418,11 @@ fn open_startup_cache(
     // sorted siblings 1..), so a cached module's spans resolve correctly against this map.
     let workspace = noeta_loader::read_workspace(file).ok()?;
     let mut key = noeta_cache::KeyBuilder::new();
+    // Which file is the *entry* is part of the key, not just the source set: a directory of
+    // dir-flat modules compiles to a different program per entry, so `noeta run a.noe` and
+    // `noeta run b.noe` in one directory must not collide (they would otherwise share the same
+    // sorted source set and the second would run the first's cached bytecode).
+    key.entry(source_key_name(&workspace.entry));
     key.source(
         source_key_name(&workspace.entry),
         workspace.entry.text().as_bytes(),
@@ -1539,9 +1715,9 @@ fn emit_native(
 /// A native module surfaces in the bytecode three ways, all covered here (missing one would build a
 /// binary that stubs out a ring the program actually calls):
 /// - `Const::NativeModule(name)` — `use std.{http}` loads the whole module as a value, then member
-///   calls (`http.get_async(...)`) dispatch on it via `CallMethod` (no `ExtCall`).
+///   calls (`http.get_async(...)`) dispatch on it via `CallMethod` (no `TypedModuleCall`).
 /// - `Const::ModuleFn { module, .. }` — a selective import (`use std.http.get`).
-/// - `Op::ExtCall { module, .. }` — the fully-qualified / turbofish call form (`json.parse::<T>`).
+/// - `Op::TypedModuleCall { module, .. }` — the fully-qualified / turbofish call form (`json.parse::<T>`).
 ///
 /// Conservative by construction: a module with **no** ring row here is always-on core (Ring-1
 /// string/list/map/set, the pure builders) or a ring not yet gated — either way it stays in the
@@ -1562,7 +1738,7 @@ fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
             rings.insert(ring.to_string());
         }
     };
-    // A precisely-named function (`use std.http.get`, or a turbofish `ExtCall`): the exact function is
+    // A precisely-named function (`use std.http.get`, or a turbofish `TypedModuleCall`): the exact function is
     // known, so a ring can be selected only when a function that actually needs it is referenced. This
     // is what lets a *client/server split* pay off — a program that names only `http.serve`/
     // `http.response` selects no client ring and sheds reqwest, while `http.get` selects it.
@@ -1581,7 +1757,7 @@ fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
             }
         }
         for op in &chunk.code {
-            if let Op::ExtCall { module: m, func, .. } = op {
+            if let Op::TypedModuleCall { module: m, func, .. } = op {
                 note_fn(module.name(*m), module.name(*func), &mut rings);
             }
         }
@@ -3097,10 +3273,10 @@ mod tests {
         );
         assert!(aot_ring_features(&server_fn).is_empty());
 
-        // The fully-qualified / turbofish call form → an `ExtCall` naming module + func (names[0], [1]).
+        // The fully-qualified / turbofish call form → a `TypedModuleCall` naming module + func (names[0], [1]).
         let via_extcall = module_with(
             vec![],
-            vec![Op::ExtCall {
+            vec![Op::TypedModuleCall {
                 dst: 0,
                 module: NameId(0),
                 func: NameId(1),

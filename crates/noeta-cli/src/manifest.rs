@@ -26,6 +26,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use noeta_check::BUILTIN_TIERS;
+use noeta_fmt::FmtConfig;
 
 /// The manifest file name, discovered at or above the entry file's directory.
 pub const MANIFEST_NAME: &str = "noeta.toml";
@@ -77,6 +78,22 @@ pub fn resolve_active_tiers(entry: &Path, profile: &str) -> Result<Vec<String>, 
     let manifest =
         Manifest::parse(&text).map_err(|err| format!("invalid `{}`: {err}", path.display()))?;
     manifest.active_tiers(profile)
+}
+
+/// Resolve the [`FmtConfig`] for a target directory: discover the nearest `noeta.toml`, read its
+/// optional `[fmt]` table, and overlay any values on the defaults. A missing manifest or missing
+/// `[fmt]` table yields [`FmtConfig::default`] (so `noeta fmt` works with zero configuration).
+/// Returns `Err` only when a present `[fmt]` table is malformed (wrong types / unknown arrow style),
+/// so a typo surfaces rather than being silently ignored.
+pub fn resolve_fmt_config(start_dir: &Path) -> Result<FmtConfig, String> {
+    let Some(path) = find(start_dir) else {
+        return Ok(FmtConfig::default());
+    };
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
+    // The `[fmt]` grammar lives in `noeta-fmt` (shared with the LSP formatter); the CLI adds the
+    // manifest path to any error.
+    FmtConfig::from_toml(&text).map_err(|err| format!("invalid `{}`: {err}", path.display()))
 }
 
 impl Manifest {

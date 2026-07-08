@@ -17,8 +17,9 @@ use crate::{
 };
 
 /// Core's "std" extension — the dogfood. Registers the Ring 2 modules through the same API a
-/// third-party extension would use. Modules migrate into [`STD_MODULES`] slice by slice; this
-/// first slice carries the scalar/host modules.
+/// third-party extension would use. Every `use std.*` module lives in [`STD_MODULES`] — the
+/// slice-by-slice migration (Phase A → higher-order-abi H5) is complete; there is no other
+/// registration path.
 #[derive(Debug, Clone, Copy)]
 pub struct StdExtension;
 
@@ -115,6 +116,39 @@ const STD_TYPES: &[ExtType] = &[
         ctx_methods: crate::reactive::EFFECT_CTX_METHODS,
         ctx_dispatch: Some(|method, ctx, recv, args| {
             crate::reactive::effect_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        ..ExtType::DEFAULTS
+    },
+    // The CRDT value types (p2p P0): plain-data, immutable, content-equal extern values wrapping
+    // the `noeta-crdt` convergence core. All pure — no arena, no ctx seam, not key-capable.
+    ExtType {
+        name: crate::crdt::GCOUNTER_TYPE_NAME,
+        methods: crate::crdt::GCOUNTER_METHODS,
+        dispatch: crate::crdt::GCOUNTER_DISPATCH,
+        traits: crate::crdt::CRDT_TRAITS,
+        ..ExtType::DEFAULTS
+    },
+    ExtType {
+        name: crate::crdt::PNCOUNTER_TYPE_NAME,
+        methods: crate::crdt::PNCOUNTER_METHODS,
+        dispatch: crate::crdt::PNCOUNTER_DISPATCH,
+        traits: crate::crdt::CRDT_TRAITS,
+        ..ExtType::DEFAULTS
+    },
+    ExtType {
+        name: crate::crdt::GSET_TYPE_NAME,
+        methods: crate::crdt::GSET_METHODS,
+        dispatch: crate::crdt::GSET_DISPATCH,
+        traits: crate::crdt::CRDT_TRAITS,
+        ..ExtType::DEFAULTS
+    },
+    // `SyncedSignal<T>` (p2p P2) — a signal node in the shared reactive graph holding a CRDT; its
+    // methods reach the arena + graph + P2p host, so they live in the ctx table.
+    ExtType {
+        name: crate::synced::SYNCED_SIGNAL_TYPE_NAME,
+        ctx_methods: crate::synced::SYNCED_CTX_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::synced::synced_ctx_method_dispatch(method, ctx, recv, args)
         }),
         ..ExtType::DEFAULTS
     },
@@ -2069,7 +2103,7 @@ const QUAT_FNS: &[ExtFn] = &[
 // --- `json`: parse (dynamic) + stringify, over the recursive value seam ------------------------
 //
 // `json.parse(text)` decodes into a dynamic value tree (`NativeOut::Map`/`List`/scalars); the
-// turbofish form `json.parse::<T>(text)` is a separate call-site-typed path (`Op::ExtCall` + a
+// turbofish form `json.parse::<T>(text)` is a separate call-site-typed path (`Op::TypedModuleCall` + a
 // `TypeRecipe`), not this dynamic dispatch. `json.stringify(value)` serializes a **deeply**
 // marshalled argument (the module sets `deep_marshal`) through the shared `json::stringify`.
 
@@ -2195,9 +2229,8 @@ const STD_MODULES: &[ExtModule] = &[
         deep_marshal: true,
         ..ExtModule::DEFAULTS
     },
-    // The `task` concurrency module (higher-order-abi H0): its functions need the executor, so
-    // they live in the **ctx** table and dispatch through the `NativeCtx` seam. Migration is
-    // per-function — the names still in `VIRTUAL_MODULES` stay backend builtins until their phase.
+    // The `task` concurrency module (higher-order-abi H0/H2): its functions need the executor,
+    // so they live in the **ctx** table and dispatch through the `NativeCtx` seam.
     ExtModule {
         name: "task",
         ctx_functions: crate::task::TASK_CTX_FNS,
@@ -2222,6 +2255,29 @@ const STD_MODULES: &[ExtModule] = &[
         }),
         ..ExtModule::DEFAULTS
     },
+    // `crdt` (p2p P0) — the CRDT constructors; a plain value-in/value-out module like `math`.
+    ExtModule {
+        name: "crdt",
+        functions: crate::crdt::CRDT_FNS,
+        dispatch: crate::crdt::crdt_dispatch,
+        ..ExtModule::DEFAULTS
+    },
+    // `p2p` (p2p P1) — publish/receive over the `P2p` host capability. `publish` is a plain host
+    // effect; `receive` returns a `Future<?bytes>` via `NativeOut::Spawn`, like `fs.read_async`.
+    ExtModule {
+        name: "p2p",
+        functions: crate::p2p::P2P_FNS,
+        dispatch: crate::p2p::p2p_dispatch,
+        ..ExtModule::DEFAULTS
+    },
+    // `synced` (p2p P2) — `synced_signal(initial, topic)`, a CRDT-backed signal in the reactive
+    // graph. A ctx module (it owns arena values + drives the graph), like `reactive`.
+    ExtModule {
+        name: "synced",
+        ctx_functions: crate::synced::SYNCED_CTX_FNS,
+        ctx_dispatch: Some(|func, ctx, args| crate::synced::synced_ctx_dispatch(func, ctx, args)),
+        ..ExtModule::DEFAULTS
+    },
 ];
 
 /// Compiled-in fast route for ctx **functions** (H5 perf): the same generic dispatch fns the
@@ -2240,6 +2296,7 @@ pub fn static_dispatch_ctx<C: crate::NativeCtx + ?Sized>(
     match module {
         "cell" => Some(crate::cell::cell_ctx_dispatch(func, ctx, args)),
         "reactive" => Some(crate::reactive::reactive_ctx_dispatch(func, ctx, args)),
+        "synced" => Some(crate::synced::synced_ctx_dispatch(func, ctx, args)),
         _ => None,
     }
 }
@@ -2267,6 +2324,9 @@ pub fn static_dispatch_ctx_method<C: crate::NativeCtx + ?Sized>(
         crate::reactive::EFFECT_TYPE_NAME => Some(crate::reactive::effect_ctx_method_dispatch(
             method, ctx, recv, args,
         )),
+        crate::synced::SYNCED_SIGNAL_TYPE_NAME => Some(
+            crate::synced::synced_ctx_method_dispatch(method, ctx, recv, args),
+        ),
         _ => None,
     }
 }

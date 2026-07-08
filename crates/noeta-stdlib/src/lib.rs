@@ -34,6 +34,7 @@
 pub use noeta_native::*;
 
 pub mod cell;
+pub mod crdt;
 pub mod crypto;
 pub mod env;
 pub mod fs;
@@ -45,11 +46,13 @@ pub mod json;
 pub mod map_key;
 pub mod math;
 pub mod net;
+pub mod p2p;
 pub mod quat;
 pub mod random;
 pub mod reactive;
 pub mod registry;
 pub mod serve;
+pub mod synced;
 pub mod task;
 pub mod vec3;
 

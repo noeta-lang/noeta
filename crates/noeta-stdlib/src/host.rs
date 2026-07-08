@@ -6,7 +6,7 @@
 //! it stays with the modules ([`crate::fs`], [`crate::random`], [`crate::net`]) whose state it holds.
 
 pub use noeta_native::host::{
-    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, ReadSource, Rng,
+    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, P2p, ReadSource, Rng,
 };
 
 use crate::StdError;
@@ -43,6 +43,10 @@ pub struct SandboxHost {
     /// most one listener — a differential program calls `http.serve` once — so a single slot
     /// suffices; a second `net_listen` re-arms it.
     inbound: Option<InboundState>,
+    /// The p2p broker (p2p P1/P2): the deterministic in-process pub/sub log that is the sandbox's
+    /// whole "network", so a publish/receive-or-sync program is byte-identical across backends and
+    /// terminates in-oracle once its topics drain.
+    p2p: noeta_native::P2pBroker,
 }
 
 /// The sandbox's inbound-server state: the fixed request script (see
@@ -69,6 +73,7 @@ impl SandboxHost {
             env: env::sandbox_vars(),
             args: env::sandbox_args(),
             inbound: None,
+            p2p: noeta_native::P2pBroker::default(),
         }
     }
 }
@@ -240,6 +245,25 @@ impl Network for SandboxHost {
             .transcript
             .push((conn, response));
         Ok(())
+    }
+}
+
+impl P2p for SandboxHost {
+    fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
+        self.p2p.publish(topic, message);
+        Ok(())
+    }
+
+    fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, StdError> {
+        Ok(self.p2p.poll_default(topic))
+    }
+
+    fn p2p_subscribe(&mut self, topic: &str) -> u64 {
+        self.p2p.subscribe(topic)
+    }
+
+    fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
+        Ok(self.p2p.poll_sub(sub))
     }
 }
 

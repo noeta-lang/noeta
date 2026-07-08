@@ -16,6 +16,7 @@ noeta-db = { workspace = true }
 # (the dangling `.` otherwise drops the statement, so the receiver never gets a type).
 noeta-parser = { workspace = true }
 noeta-check = { workspace = true }
+noeta-fmt = { workspace = true }
 # For the `Setter` trait — the salsa-generated `set_text` on `SourceProgram` needs it in scope.
 salsa = { workspace = true }
 # tokio: the workspace pin gives us rt/io-util/time; the server also needs the stdio driver

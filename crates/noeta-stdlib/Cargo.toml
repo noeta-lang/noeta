@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 noeta-native = { workspace = true }
 noeta-reactive = { workspace = true }
+noeta-crdt = { workspace = true }
 serde_json = { workspace = true }
 bytemuck = { workspace = true }
 uuid = { workspace = true }

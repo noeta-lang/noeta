@@ -163,6 +163,12 @@ pub enum SigType {
     /// (`Cell<T>.get() -> Var(0)` recovers `T`), then the call's arguments bind the rest.
     /// An unbound variable is a gradual hole (`Unknown`), never a wrong concrete type.
     Var(u8),
+    /// A **trait-bounded** type variable (p2p P2) — like [`SigType::Var`] for binding and
+    /// substitution, but the type bound to it must satisfy the named built-in trait or the call is
+    /// a static error (E0025). `synced_signal(initial: BoundedVar(0, "Mergeable"), …)` is the first
+    /// use: only a CRDT may be synced, enforced at compile time. The checker maps the trait name
+    /// through `BuiltinTrait::from_name` and reuses its ordinary bound-satisfaction check.
+    BoundedVar(u8, &'static str),
     /// A **generic nominal instantiation** (higher-order-abi H4) — a generic extern type in a
     /// signature position: `cell.new(v: Var(0)) -> Generic("Cell", &[Var(0)])` types as
     /// `Cell<T>` with `T` bound from the argument. The plain [`SigType::Named`] stays the
@@ -352,6 +358,11 @@ pub struct ExtType {
     /// to the fast path whenever the gate is open. The declaration is semantic, not an
     /// optimization hint: every tier (interpreter now, JIT later) may compile it.
     pub arena_getter: Option<ArenaGetter>,
+    /// The **built-in traits this type declares** (p2p P2) — the extern-type analogue of a user
+    /// type's `@derive`/`impl`. The checker seeds these into its trait-impl table so a
+    /// `T: Mergeable` bound (or any built-in-trait bound) is satisfied by this type. The CRDT types
+    /// declare `["Mergeable"]`; a non-built-in name is ignored. Default empty.
+    pub traits: &'static [&'static str],
 }
 
 impl ExtType {
@@ -370,6 +381,7 @@ impl ExtType {
         ctx_methods: &[],
         ctx_dispatch: None,
         arena_getter: None,
+        traits: &[],
     };
 }
 
