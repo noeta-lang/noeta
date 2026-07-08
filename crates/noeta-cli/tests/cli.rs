@@ -123,6 +123,48 @@ fn run_missing_file_exits_2() {
         .stderr(predicate::str::contains("cannot read"));
 }
 
+// --- program argument pass-through (`noeta run FILE -- <args>`) --------------------
+//
+// The program reads its arguments with `args.all()`. On the real host this is the script path as
+// the program name (argv[0]) followed by any args given after `--`, mirroring what a shipped
+// `noeta build --exe` binary sees via the real process argv when invoked directly.
+
+/// A program that echoes its whole argument vector, one element per line.
+const ECHO_ARGS: &str = "use std.{args}\nfor a in args.all() {\n  echo a\n}\n";
+
+#[test]
+fn run_passes_through_args_after_dash_dash() {
+    let file = temp_program("run_args_passthrough", ECHO_ARGS);
+    // Everything after `--` reaches the program verbatim — including a hyphen-prefixed flag, which
+    // the `--` separator protects from being parsed as a `noeta` option.
+    lang()
+        .arg("run")
+        .arg(&file)
+        .arg("--")
+        .arg("--verbose")
+        .arg("input.txt")
+        .arg("two words")
+        .assert()
+        .success()
+        .stdout(format!(
+            "{}\n--verbose\ninput.txt\ntwo words\n",
+            file.display()
+        ));
+}
+
+#[test]
+fn run_without_passthrough_reports_only_the_program_name() {
+    // With no `--`, `args.all()` is just the program name (argv[0]) — the toolchain's own
+    // `noeta run` prefix never leaks into the program's view.
+    let file = temp_program("run_args_none", ECHO_ARGS);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(format!("{}\n", file.display()));
+}
+
 // --- real OS-thread isolates (isolates I.4b, out-of-oracle) ------------------------
 //
 // These run on the CLI's real (VM) path, where a channel-free `isolate f(args)` executes on its own

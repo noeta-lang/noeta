@@ -79,6 +79,13 @@ pub struct RealHost {
     /// Monotonic, thread-safe id source for `conns` (accept futures run concurrently on the
     /// executor).
     next_conn: Arc<AtomicU64>,
+    /// The program's argument vector reported through `args.all()` (M2.2). Defaults to the real
+    /// process argv (`std::env::args()`), which is exactly what a shipped `noeta build --exe` binary
+    /// wants when invoked directly. `noeta run app.noe -- a b c` overrides it via
+    /// [`RealHost::with_args`] with `[app.noe, a, b, c]`, so a program sees the identical argv whether
+    /// run from source or shipped as an executable — the toolchain's own `noeta run` prefix never
+    /// leaks into the program.
+    args: Vec<String>,
 }
 
 /// One inbound listener's shared state. The socket is bound at `net_listen` (runtime-free, via
@@ -113,7 +120,17 @@ impl RealHost {
             next_listener: 0,
             conns: Arc::new(Mutex::new(HashMap::new())),
             next_conn: Arc::new(AtomicU64::new(0)),
+            args: std::env::args().collect(),
         })
+    }
+
+    /// Override the argument vector this host reports through `args.all()`. Used by
+    /// `noeta run … -- <args>` to present the program with `[<script path>, <pass-through args…>]`
+    /// in place of the toolchain's process argv (`noeta run …`). Consuming-builder style so the
+    /// per-isolate factory can clone the vector into each fresh host it mints.
+    pub fn with_args(mut self, args: Vec<String>) -> RealHost {
+        self.args = args;
+        self
     }
 
     /// The sorted base names of the entries in directory `dir` — the real-disk analogue of the
@@ -694,7 +711,7 @@ impl Env for RealHost {
     }
 
     fn args(&self) -> Vec<String> {
-        std::env::args().collect()
+        self.args.clone()
     }
 }
 

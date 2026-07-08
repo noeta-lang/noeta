@@ -63,6 +63,12 @@ enum Command {
         /// `--profile dev`. Unioned with any `--tier`.
         #[arg(long)]
         profile: Option<String>,
+        /// Arguments passed through to the program, after a `--` separator:
+        /// `noeta run app.noe -- --verbose input.txt`. The program reads them with `args.all()`,
+        /// which — matching a shipped `noeta build --exe` binary run directly — reports the program
+        /// path as the first element followed by these arguments.
+        #[arg(last = true)]
+        args: Vec<String>,
     },
     /// Discover and run a program's `@test` blocks (object-model slice 6).
     Test {
@@ -218,7 +224,8 @@ fn main() -> ExitCode {
             file,
             tier,
             profile,
-        } => cmd_run(&file, &tier, &profile),
+            args,
+        } => cmd_run(&file, &tier, &profile, &args),
         Command::Test {
             file,
             fail_fast,
@@ -290,7 +297,7 @@ fn tier_active_in_profile(
 /// Type-check and run a program, writing stdout to the real stdout and rendering any diagnostics to
 /// stderr — each against the source its span belongs to (via the `SourceMap`). Returns the process
 /// exit code. `program` is the loaded program, possibly after dev-tier activation (`cmd_run`).
-fn run_program(program: &noeta_ast::Program, sources: &SourceMap) -> i32 {
+fn run_program(program: &noeta_ast::Program, sources: &SourceMap, args: Vec<String>) -> i32 {
     // The loader already lexed + parsed (and reported any lex/parse errors); type-check then run.
     // One `check_all` produces both the gate diagnostics and the `type_of` site map the backend
     // needs, so the checker runs exactly once (it previously ran again inside the backend).
@@ -300,7 +307,7 @@ fn run_program(program: &noeta_ast::Program, sources: &SourceMap) -> i32 {
         return 1;
     }
 
-    match execute_real_host(program, &checked) {
+    match execute_real_host(program, &checked, args) {
         Ok((result, trace)) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();
@@ -362,10 +369,12 @@ fn compile_real(
 fn execute_real_host(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
+    args: Vec<String>,
 ) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), String> {
-    Ok(run_module_real_host(std::sync::Arc::new(compile_real(
-        program, checked,
-    )?)))
+    Ok(run_module_real_host(
+        std::sync::Arc::new(compile_real(program, checked)?),
+        args,
+    ))
 }
 
 /// Run an already-compiled [`Module`] against the real host — the shared execution core of
@@ -373,15 +382,21 @@ fn execute_real_host(
 /// module directly with no source to compile.
 fn run_module_real_host(
     module: std::sync::Arc<noeta_bytecode::Module>,
+    args: Vec<String>,
 ) -> (noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>) {
     // A factory that mints a fresh real host + wall-clock executor per isolate (isolates I.4b): the
     // main program gets one, and each real-thread `isolate f(args)` gets its own so a worker's disk /
     // clock / async state is independent. Injected here (not in `noeta-vm`) so the VM crate needs no
     // `noeta-runtime`/tokio dependency. A worker that cannot start its runtime panics the worker thread,
-    // which surfaces as an isolate failure at the `.await`.
-    let factory: noeta_vm::IsolateFactory = std::sync::Arc::new(|| {
-        let host: Box<dyn noeta_stdlib::Host> =
-            Box::new(noeta_runtime::RealHost::new().expect("cannot start an isolate's runtime"));
+    // which surfaces as an isolate failure at the `.await`. The program argument vector (from
+    // `noeta run … -- <args>`) is cloned into every isolate's host so a worker's `args.all()` agrees
+    // with the main program's.
+    let factory: noeta_vm::IsolateFactory = std::sync::Arc::new(move || {
+        let host: Box<dyn noeta_stdlib::Host> = Box::new(
+            noeta_runtime::RealHost::new()
+                .expect("cannot start an isolate's runtime")
+                .with_args(args.clone()),
+        );
         let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
             noeta_runtime::RealExecutor::new().expect("cannot start an isolate's async executor"),
         );
@@ -417,7 +432,13 @@ fn try_run_stapled() -> Option<ExitCode> {
     file.seek(SeekFrom::Start(blob_start)).ok()?;
     let mut blob = vec![0u8; blob_len];
     file.read_exact(&mut blob).ok()?;
-    Some(cmd_run_bundle(&exe_path, &blob))
+    // A shipped `--exe` artifact is invoked directly, so its real process argv (`[<binary>, <args…>]`)
+    // is exactly the program's argument vector — pass it straight through to `args.all()`.
+    Some(cmd_run_bundle(
+        &exe_path,
+        &blob,
+        std::env::args().collect(),
+    ))
 }
 
 fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a Diagnostic>) {
@@ -436,7 +457,23 @@ fn emit_diagnostics_mapped<'a>(
     let _ = io::stderr().write_all(render_mapped(sources, diagnostics).as_bytes());
 }
 
-fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -> ExitCode {
+/// The argument vector a `noeta run` presents to the program via `args.all()`: the entry path as the
+/// program name (argv[0]) followed by any pass-through args given after `--`. This mirrors a shipped
+/// `noeta build --exe` binary, whose `args.all()` is the real process argv (`[<binary>, <args…>]`)
+/// when invoked directly — so a program observes the identical argv from source or as an executable.
+fn program_args(entry: &std::path::Path, passthrough: &[String]) -> Vec<String> {
+    let mut args = Vec::with_capacity(passthrough.len() + 1);
+    args.push(entry.display().to_string());
+    args.extend(passthrough.iter().cloned());
+    args
+}
+
+fn cmd_run(
+    file: &std::path::Path,
+    tiers: &[String],
+    profile: &Option<String>,
+    args: &[String],
+) -> ExitCode {
     // P-AOT L1.2: a `.noeb` bundle runs directly — no source, no compile. Sniff the magic (cheap,
     // and we need the bytes to load it anyway); anything else is source, handled below. Tiers are a
     // *build*-time concern (they are already baked into the bundle), so `--tier`/`--profile` on a
@@ -450,7 +487,7 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
             );
             return ExitCode::from(2);
         }
-        return cmd_run_bundle(file, &bytes);
+        return cmd_run_bundle(file, &bytes, program_args(file, args));
     }
 
     // The active tier set is the union of any `--profile`'s live tiers (from `noeta.toml`) and any
@@ -484,7 +521,11 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
             // as-is and every tier block is stripped at lowering (the default). Activation borrows
             // nothing from the run, so an owned activated program is produced only when needed.
             if active.is_empty() {
-                return exit_code(run_program(&linked.program, &linked.sources));
+                return exit_code(run_program(
+                    &linked.program,
+                    &linked.sources,
+                    program_args(file, args),
+                ));
             }
             let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
             let activated = noeta_check::activate_tiers(&linked.program, &active_refs);
@@ -492,7 +533,11 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
                 emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
                 return ExitCode::from(1);
             }
-            exit_code(run_program(&activated.program, &linked.sources))
+            exit_code(run_program(
+                &activated.program,
+                &linked.sources,
+                program_args(file, args),
+            ))
         }
         Ok(Err(load_diagnostics)) => {
             let mut stderr = io::stderr();
@@ -770,7 +815,12 @@ fn cmd_serve(file: &std::path::Path, port: u16) -> ExitCode {
     });
 
     eprintln!("noeta serve: listening on http://0.0.0.0:{port} (Ctrl-C to stop)");
-    exit_code(run_program(&linked.program, &linked.sources))
+    // `noeta serve` takes no program pass-through args; the served program sees the real process argv.
+    exit_code(run_program(
+        &linked.program,
+        &linked.sources,
+        std::env::args().collect(),
+    ))
 }
 
 /// Run a `.noeb` bundle (P-AOT L1.2): decode the module from the versioned container and execute it
@@ -778,7 +828,7 @@ fn cmd_serve(file: &std::path::Path, port: u16) -> ExitCode {
 /// or type-check (both happened at build time). A runtime abort's diagnostics/trace carry spans but
 /// the bundle ships no source text, so they render against a synthetic empty source (message + code
 /// + location show; no code snippet) — the honest cost of a source-free artifact.
-fn cmd_run_bundle(file: &std::path::Path, bytes: &[u8]) -> ExitCode {
+fn cmd_run_bundle(file: &std::path::Path, bytes: &[u8], args: Vec<String>) -> ExitCode {
     let module = match noeta_bundle::read(bytes) {
         Ok(module) => module,
         Err(err) => {
@@ -791,7 +841,7 @@ fn cmd_run_bundle(file: &std::path::Path, bytes: &[u8]) -> ExitCode {
         file.display().to_string(),
         "",
     )]);
-    let (result, trace) = run_module_real_host(std::sync::Arc::new(module));
+    let (result, trace) = run_module_real_host(std::sync::Arc::new(module), args);
     print!("{}", result.stdout);
     let _ = io::stdout().flush();
     emit_diagnostics_mapped(&sources, result.diagnostics.iter());
@@ -1691,7 +1741,8 @@ fn run_one_test(setup: &[Stmt], case: &TestCase, span: Span) -> TestOutcome {
         };
     }
 
-    match execute_real_host(&program, &checked) {
+    // The `@test` runner has no program pass-through args; a test sees the real process argv.
+    match execute_real_host(&program, &checked, std::env::args().collect()) {
         // The `@test` runner reports the failing diagnostic; the trace is a `noeta run` affordance.
         Ok((result, _trace)) => {
             let passed = result.exit_code == 0 && result.diagnostics.is_empty();
