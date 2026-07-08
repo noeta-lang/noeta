@@ -41,6 +41,30 @@ the JIT compiler is simply the capability that is *never* needed at AOT runtime.
 
 ### Axis A — dead **compiler** elimination (HIGH value ~20 MB, LOW risk)
 
+**✅ DONE (A1 `6b11b79`, A2 `1447a76`) — but with a CORRECTED value story (measured 2026-07-08).**
+The `aot` feature no longer pulls Cranelift: an isolated `cargo rustc -p noeta-aot-runtime` archive
+has **0 Cranelift symbols** (was ~20 MB of compiler); noeta-vm builds clean under both `aot`-only and
+`jit`; 147 jit tests + native AOT differential green. Implemented with an internal `jit-rt` feature
+(enabled by both `jit` and `aot`) gating the runtime-support surface; `jit` adds the compiler on top.
+
+**HONEST CORRECTION — A2 does NOT shrink the shipped binary.** The premise ("~20 MB of Cranelift sits
+in every AOT binary") was extrapolated from measuring the *CLI* binary (which needs the compiler),
+never an actual AOT binary — and it was wrong. Measured: linking a native binary against the
+cranelift-*ful* archive (538 cranelift syms) vs the cranelift-*free* archive both produce a
+**byte-identical 12,244,495-byte binary with 0 cranelift symbols**. Standard static-archive member
+selection already drops the unreferenced Cranelift `.o` members — nothing in the AOT binary's
+reachable graph (`main → run_module_aot → bind_aot_dispatch + helpers`) touches `Jit::compile`.
+So A2's real, non-zero value is **build-time + dependency hygiene**: the isolated aot-runtime archive
+no longer *compiles* ~20 MB of Cranelift, so the first `noeta build --native` (which builds that
+archive) is faster and the pure-AOT dependency closure is clean. Worth keeping (right architecture,
+real dev-time win), but not a binary-size lever.
+
+**Where the binary weight actually is (measured on the 12.24 MB `jit_promo.noe` native binary — a
+program that never imports `std.http`):** the http/network stack is linked anyway —
+rustls 453 K + ring 407 K + hyper 250 K + h2 219 K + tokio 200 K + reqwest 171 K ≈ **1.7 MB+**
+(undercount; 1411 rustls/reqwest/hyper symbols present) — because `STD_MODULES` roots every ring's
+`*_dispatch` fn. **This is Axis B, and it is confirmed the real binary-size lever.**
+
 An AOT binary binds a static dispatch table and runs with `self.jit == None` (L3.2b(2)); Cranelift is
 dead weight. noeta-vm's references into `noeta_jit::` split cleanly:
 
