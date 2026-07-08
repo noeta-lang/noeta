@@ -18,6 +18,7 @@ pub mod map_key;
 pub mod net;
 pub mod p2p;
 pub mod registry;
+pub mod telemetry;
 
 pub use command::{ArgKind, ArgSpec, CommandCtx, EntryArg, EntryCall, ExtCommand, ParsedArgs};
 pub use ctx::{
@@ -34,6 +35,9 @@ pub use p2p::{P2pBroker, ReceiveIo};
 pub use registry::{
     ArenaGetter, CtxTypeDispatch, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut,
     NativeValue, RetTy, Scalar, SigType, TypeDispatch, TypeRecipe,
+};
+pub use telemetry::{
+    AttrValue, SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, Telemetry, TraceContext,
 };
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the

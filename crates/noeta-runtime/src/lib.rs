@@ -24,10 +24,15 @@
 pub mod executor;
 pub use executor::RealExecutor;
 
+#[cfg(feature = "telemetry")]
+mod telemetry;
+
+use compact_str::CompactString;
 use noeta_stdlib::net::accept_outcome;
 use noeta_stdlib::{
-    Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, NativeOut, NetRequest,
-    NetResponse, Network, P2p, ReadSource, RealBody, Rng, StdError,
+    AttrValue, Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, NativeOut,
+    NetRequest, NetResponse, Network, P2p, ReadSource, RealBody, Rng, SpanData, SpanEvent, SpanId,
+    SpanKind, SpanStatus, StdError, Telemetry, TraceContext,
 };
 // Only the outbound-client (`ring-http-client`) path builds an `ExternBox` response body.
 #[cfg(feature = "ring-http-client")]
@@ -96,6 +101,39 @@ pub struct RealHost {
     /// transport (p2panda gossip, cross-node) is P3; until then the real host is a single-node
     /// loopback broker, so `noeta run` of a p2p program works locally without a network.
     p2p: noeta_stdlib::P2pBroker,
+    /// Telemetry state (native OTEL): in-flight spans + (behind the `telemetry` feature) the OTLP
+    /// exporter and its span buffer. Per-isolate, like everything else on `RealHost`.
+    tel: RealTelemetry,
+}
+
+/// `RealHost`'s telemetry state. In-flight spans are tracked even with the `telemetry` feature off
+/// (so `tel_span_context` and parenting stay correct); only the OTLP export path is gated.
+#[derive(Debug)]
+struct RealTelemetry {
+    /// Opaque span-handle counter (the [`SpanId`] map key). The W3C `span_id` *bytes* are real
+    /// entropy, drawn per span — the handle is just a local key.
+    next_span: u64,
+    /// In-flight spans by handle, ended entries removed.
+    live: HashMap<SpanId, SpanData>,
+    /// The configured OTLP exporter, or `None` when no endpoint is set (the null sink).
+    #[cfg(feature = "telemetry")]
+    exporter: Option<telemetry::OtlpExporter>,
+    /// Ended spans awaiting export (flushed at [`telemetry::FLUSH_THRESHOLD`] or on teardown).
+    #[cfg(feature = "telemetry")]
+    buffer: Vec<SpanData>,
+}
+
+impl RealTelemetry {
+    fn new() -> RealTelemetry {
+        RealTelemetry {
+            next_span: 1,
+            live: HashMap::new(),
+            #[cfg(feature = "telemetry")]
+            exporter: telemetry::OtlpExporter::from_env(),
+            #[cfg(feature = "telemetry")]
+            buffer: Vec::new(),
+        }
+    }
 }
 
 /// One inbound listener's shared state. The socket is bound at `net_listen` (runtime-free, via
@@ -133,6 +171,7 @@ impl RealHost {
             next_conn: Arc::new(AtomicU64::new(0)),
             args: std::env::args().collect(),
             p2p: noeta_stdlib::P2pBroker::default(),
+            tel: RealTelemetry::new(),
         })
     }
 
@@ -774,6 +813,155 @@ impl Env for RealHost {
 
     fn args(&self) -> Vec<String> {
         self.args.clone()
+    }
+}
+
+impl Telemetry for RealHost {
+    fn tel_span_start(
+        &mut self,
+        name: &str,
+        kind: SpanKind,
+        parent: Option<TraceContext>,
+    ) -> SpanId {
+        let handle = self.tel.next_span;
+        self.tel.next_span += 1;
+        // Real entropy for the W3C ids (a root mints a fresh 16-byte trace id; a child inherits its
+        // parent's). Predictable/colliding ids across processes would be wrong for real traces.
+        let span_id = self.entropy_u64().to_be_bytes();
+        let trace_id = match parent {
+            Some(p) => p.trace_id,
+            None => {
+                let hi = self.entropy_u64().to_be_bytes();
+                let lo = self.entropy_u64().to_be_bytes();
+                let mut t = [0u8; 16];
+                t[..8].copy_from_slice(&hi);
+                t[8..].copy_from_slice(&lo);
+                t
+            }
+        };
+        let now = self.clock_unix_ms();
+        let context = TraceContext {
+            trace_id,
+            span_id,
+            sampled: true,
+        };
+        self.tel.live.insert(
+            handle,
+            SpanData {
+                name: name.into(),
+                kind,
+                context,
+                parent,
+                start_unix_ms: now,
+                end_unix_ms: None,
+                attributes: Vec::new(),
+                events: Vec::new(),
+                status: SpanStatus::Unset,
+            },
+        );
+        handle
+    }
+
+    fn tel_span_set_attr(&mut self, span: SpanId, key: &str, value: AttrValue) {
+        if let Some(s) = self.tel.live.get_mut(&span) {
+            match s.attributes.iter_mut().find(|(k, _)| k == key) {
+                Some(slot) => slot.1 = value,
+                None => s.attributes.push((key.into(), value)),
+            }
+        }
+    }
+
+    fn tel_span_add_event(
+        &mut self,
+        span: SpanId,
+        name: &str,
+        attrs: Vec<(CompactString, AttrValue)>,
+    ) {
+        let now = self.clock_unix_ms();
+        if let Some(s) = self.tel.live.get_mut(&span) {
+            s.events.push(SpanEvent {
+                name: name.into(),
+                unix_ms: now,
+                attributes: attrs,
+            });
+        }
+    }
+
+    fn tel_span_set_status(&mut self, span: SpanId, status: SpanStatus) {
+        if let Some(s) = self.tel.live.get_mut(&span) {
+            s.status = status;
+        }
+    }
+
+    fn tel_span_end(&mut self, span: SpanId) {
+        let now = self.clock_unix_ms();
+        if let Some(mut s) = self.tel.live.remove(&span) {
+            s.end_unix_ms = Some(now);
+            self.record_ended_span(s);
+        }
+    }
+
+    fn tel_span_context(&mut self, span: SpanId) -> TraceContext {
+        self.tel.live.get(&span).map_or(
+            TraceContext {
+                trace_id: [0u8; 16],
+                span_id: [0u8; 8],
+                sampled: false,
+            },
+            |s| s.context,
+        )
+    }
+}
+
+impl RealHost {
+    /// Route an ended span to the exporter (feature on + endpoint configured) or drop it (null
+    /// sink / feature off). Buffers and flushes in minimal batches.
+    #[cfg(feature = "telemetry")]
+    fn record_ended_span(&mut self, span: SpanData) {
+        if self.tel.exporter.is_none() {
+            return; // null sink — no endpoint configured
+        }
+        self.tel.buffer.push(span);
+        if self.tel.buffer.len() >= telemetry::FLUSH_THRESHOLD {
+            self.flush_telemetry();
+        }
+    }
+
+    #[cfg(not(feature = "telemetry"))]
+    fn record_ended_span(&mut self, _span: SpanData) {}
+
+    /// Export the buffered spans as one OTLP/JSON POST, on the host's runtime. Best-effort: an
+    /// export failure never affects the program (telemetry is a side effect).
+    #[cfg(feature = "telemetry")]
+    fn flush_telemetry(&mut self) {
+        let Some(exporter) = self.tel.exporter.as_ref() else {
+            self.tel.buffer.clear();
+            return;
+        };
+        if self.tel.buffer.is_empty() {
+            return;
+        }
+        let body = exporter.request_body(&self.tel.buffer);
+        let endpoint = exporter.traces_endpoint.clone();
+        let headers = exporter.headers.clone();
+        let http = self.http.clone();
+        let _ = self.runtime.block_on(async move {
+            let mut req = http.post(&endpoint).json(&body);
+            for (k, v) in &headers {
+                req = req.header(k.as_str(), v.as_str());
+            }
+            req.send().await
+        });
+        self.tel.buffer.clear();
+    }
+}
+
+// Flush any buffered spans when the host (isolate) is torn down. Runs before the `runtime` field
+// drops (explicit `Drop::drop` precedes field drops), so `block_on` is still valid here.
+#[cfg(feature = "telemetry")]
+impl Drop for RealHost {
+    fn drop(&mut self) {
+        self.flush_telemetry();
     }
 }
 

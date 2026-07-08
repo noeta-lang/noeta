@@ -2003,10 +2003,12 @@ version = "0.0.0"
 name = "noeta-runtime"
 version = "0.0.0"
 dependencies = [
+ "compact_str",
  "criterion",
  "getrandom 0.3.4",
  "noeta-stdlib",
  "reqwest",
+ "serde_json",
  "tokio",
 ]
 

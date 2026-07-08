@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 noeta-stdlib = { workspace = true }
+compact_str = { workspace = true }
 tokio = { workspace = true }
 getrandom = { workspace = true }
 # The outbound HTTP client (the `Network::net_fetch`/`net_spawn` capability on `RealHost`). Optional
@@ -15,13 +16,21 @@ getrandom = { workspace = true }
 # stack (rustls/ring/hyper/h2) — dropped by `noeta build --native`'s per-ring footprint selection
 # (DCE Axis B). Default-on: the toolchain and every non-tailored build keep the full client.
 reqwest = { workspace = true, optional = true }
+# Native OTEL (`telemetry` feature): the real host's OTLP/HTTP-JSON span exporter is hand-rolled
+# over reqwest + serde_json — deliberately NOT `opentelemetry-otlp` (which drags tonic/prost), so a
+# telemetry build adds no protobuf/gRPC tree. Optional so a non-telemetry build links none of it.
+serde_json = { workspace = true, optional = true }
 
 [features]
-default = ["ring-http-client"]
+default = ["ring-http-client", "telemetry"]
 # The `std.http` outbound-client ring: pulls reqwest into `RealHost`. Off ⇒ `net_fetch` is a stub
 # that errors (never reached — a program that doesn't import `std.http` never calls it), and reqwest
 # is absent from the link.
 ring-http-client = ["dep:reqwest"]
+# Native OTEL span export. Pulls reqwest (its own use, independent of the http-client ring) + json.
+# On by default for the dev toolchain; `--no-default-features` drops it, and AOT footprint selection
+# links it only when the program imports `std.telemetry`.
+telemetry = ["dep:serde_json", "dep:reqwest", "reqwest/json"]
 
 [dev-dependencies]
 criterion = { workspace = true }
