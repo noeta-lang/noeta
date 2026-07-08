@@ -283,19 +283,17 @@ fn tier_active_in_profile(
 /// Type-check and run a program, writing stdout to the real stdout and rendering any diagnostics to
 /// stderr — each against the source its span belongs to (via the `SourceMap`). Returns the process
 /// exit code. `program` is the loaded program, possibly after dev-tier activation (`cmd_run`).
-fn run_program(program: &noeta_ast::Program, sources: &SourceMap, cache: Option<&CacheSlot>) -> i32 {
+fn run_program(program: &noeta_ast::Program, sources: &SourceMap) -> i32 {
     // The loader already lexed + parsed (and reported any lex/parse errors); type-check then run.
     // One `check_all` produces both the gate diagnostics and the `type_of` site map the backend
     // needs, so the checker runs exactly once (it previously ran again inside the backend).
     let checked = noeta_check::check_all(program);
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(sources, checked.diagnostics.iter());
-        // A program that does not check clean is never run, so it is never cached — a cache hit
-        // therefore always corresponds to a clean check, and the hit path can skip checking.
         return 1;
     }
 
-    match execute_real_host(program, &checked, cache) {
+    match execute_real_host(program, &checked) {
         Ok((result, trace)) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();
@@ -357,45 +355,10 @@ fn compile_real(
 fn execute_real_host(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
-    cache: Option<&CacheSlot>,
 ) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), String> {
-    let module = std::sync::Arc::new(compile_real(program, checked)?);
-    // Transparent startup cache (M3): on a miss we've just compiled the module — encode + write it
-    // to the cache concurrently with running it, so populating the cache adds ~no latency (the write
-    // overlaps execution). The `Module` is immutable shared data, so the writer thread reading it
-    // while the VM runs it is safe. Join before returning so the cache is durably written before the
-    // process can exit; the write is best-effort (a failure never touches the run's outcome).
-    let writer = cache.map(|slot| spawn_cache_write(slot, &module));
-    let out = run_module_real_host(module);
-    if let Some(writer) = writer {
-        let _ = writer.join();
-    }
-    Ok(out)
-}
-
-/// A resolved startup-cache slot for one invocation: an open cache, the content key for this
-/// program, and the workspace `SourceMap` (so a cache hit can render diagnostics against real source
-/// without re-parsing). Present only when caching is enabled and the cache opened.
-struct CacheSlot {
-    cache: noeta_cache::Cache,
-    key: noeta_cache::CacheKey,
-    sources: SourceMap,
-}
-
-/// Encode a freshly-compiled module to a `.noeb` blob and store it under `slot.key`, on a background
-/// thread. Returns the handle so the caller can join it before exit. Best-effort throughout: any
-/// encode/write failure is swallowed (the cache is an optimization, never a correctness dependency).
-fn spawn_cache_write(
-    slot: &CacheSlot,
-    module: &std::sync::Arc<noeta_bytecode::Module>,
-) -> thread::JoinHandle<()> {
-    let cache = slot.cache.clone();
-    let key = slot.key.clone();
-    let module = module.clone();
-    thread::spawn(move || {
-        let blob = noeta_bundle::write(&module);
-        let _ = cache.store(&key, &blob);
-    })
+    Ok(run_module_real_host(std::sync::Arc::new(compile_real(
+        program, checked,
+    )?)))
 }
 
 /// Run an already-compiled [`Module`] against the real host — the shared execution core of
@@ -488,70 +451,11 @@ fn cmd_run(
         return cmd_run_bundle(file, &bytes);
     }
 
-    // The active tier set is the union of any `--profile`'s live tiers (from `noeta.toml`) and any
-    // explicit `--tier` flags, resolved before loading so a bad profile fails fast.
-    let mut active: Vec<String> = match profile {
-        Some(name) => match manifest::resolve_active_tiers(file, name) {
-            Ok(tiers) => tiers,
-            Err(err) => {
-                eprintln!("lang: {err}");
-                return ExitCode::from(1);
-            }
-        },
-        None => Vec::new(),
-    };
-    for tier in tiers {
-        if !active.contains(tier) {
-            active.push(tier.clone());
-        }
-    }
-
-    // Transparent startup cache (M3): build the content key from the raw workspace (entry + sibling
-    // sources) + runtime version + binary identity + active tiers. On a hit, run the cached compiled
-    // module directly — the whole front-end (load → check → compile) is skipped. On a miss, the slot
-    // is threaded through so `execute_real_host` populates the cache after compiling.
-    let cache = open_startup_cache(file, &active, no_cache);
-    if let Some(slot) = &cache
-        && let Some(blob) = slot.cache.load(&slot.key)
-        && let Ok(module) = noeta_bundle::read(&blob)
-    {
-        return run_compiled_module(std::sync::Arc::new(module), &slot.sources);
-    }
-
-    // Load + link the program: sibling `.noe` modules the entry `use`s are resolved and merged
-    // (M1.9); a lone file with no sibling modules links to exactly itself.
-    match noeta_loader::load(file) {
-        Err(err) => {
-            eprintln!("lang: cannot read {}: {err}", file.display());
-            ExitCode::from(2)
-        }
-        Ok(Ok(linked)) => {
-            // Activate the resolved dev-tiers: inline their `@<tier> { … }` blocks (e.g. `@debug`)
-            // wherever they appear before checking/running. With no active tiers the program is run
-            // as-is and every tier block is stripped at lowering (the default). Activation borrows
-            // nothing from the run, so an owned activated program is produced only when needed.
-            if active.is_empty() {
-                return exit_code(run_program(&linked.program, &linked.sources, cache.as_ref()));
-            }
-            let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
-            let activated = noeta_check::activate_tiers(&linked.program, &active_refs);
-            if !activated.diagnostics.is_empty() {
-                emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
-                return ExitCode::from(1);
-            }
-            exit_code(run_program(
-                &activated.program,
-                &linked.sources,
-                cache.as_ref(),
-            ))
-        }
-        Ok(Err(load_diagnostics)) => {
-            let mut stderr = io::stderr();
-            for ld in &load_diagnostics {
-                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
-            }
-            ExitCode::from(1)
-        }
+    // Everything else — resolve tiers, consult the startup cache, and (on a miss) load → check →
+    // compile — is the shared whole-file pipeline. On success run the module; on failure report it.
+    match compile_whole_file(file, tiers, profile, no_cache) {
+        Ok(compiled) => run_compiled_module(compiled.module, &compiled.sources),
+        Err(failure) => failure.report(),
     }
 }
 
@@ -768,9 +672,10 @@ fn cmd_serve(file: &std::path::Path, port: u16) -> ExitCode {
     });
 
     eprintln!("noeta serve: listening on http://0.0.0.0:{port} (Ctrl-C to stop)");
-    // `serve` is a long-lived process: it compiles once at boot and amortizes over its lifetime, so
-    // the startup cache buys it almost nothing — left uncached in v1 (`plans/startup-cache`).
-    exit_code(run_program(&linked.program, &linked.sources, None))
+    // `serve` injects an `http.serve(...)` call into the program before compiling, so its module
+    // differs from `run`'s for the same source — it must never share the startup cache's
+    // `(source+tiers)` key, and is left uncached (and long-lived, so it barely benefits anyway).
+    exit_code(run_program(&linked.program, &linked.sources))
 }
 
 /// Run a `.noeb` bundle (P-AOT L1.2): decode the module from the versioned container and execute it
@@ -798,6 +703,158 @@ fn cmd_run_bundle(file: &std::path::Path, bytes: &[u8]) -> ExitCode {
 /// `.noeb` bundle runner and the startup-cache *hit* path (both have a module with no source to
 /// compile). Diagnostics/trace render against `sources` (real workspace sources on a cache hit; a
 /// synthetic empty source for a source-free bundle).
+/// A resolved startup-cache slot: an open cache, the content key for this program, and the workspace
+/// `SourceMap` (so a cache hit renders diagnostics against real source without re-parsing). Built by
+/// [`open_startup_cache`], consumed by [`compile_whole_file`].
+struct CacheSlot {
+    cache: noeta_cache::Cache,
+    key: noeta_cache::CacheKey,
+    sources: SourceMap,
+}
+
+/// A compiled whole-file program: the runnable module plus the sources its spans resolve against.
+struct Compiled {
+    module: std::sync::Arc<noeta_bytecode::Module>,
+    sources: SourceMap,
+}
+
+/// A whole-file compile failure, carrying what's needed to render it. [`report`](Self::report)
+/// prints it and yields the process exit code, matching each command's prior behavior.
+enum CompileFailure {
+    /// A message rendered as `lang: {0}` with exit 1 (profile resolution / compiler-internal error).
+    Message(String),
+    /// The entry file could not be read (exit 2).
+    Unreadable(String),
+    /// Load-time (lex/parse) diagnostics, each paired with its own source (exit 1).
+    Load(Vec<noeta_loader::LoadDiagnostic>),
+    /// Tier-activation or type-check diagnostics, rendered against `sources` (exit 1).
+    Diagnostics {
+        sources: SourceMap,
+        diagnostics: Vec<Diagnostic>,
+    },
+}
+
+impl CompileFailure {
+    /// Print the failure to stderr and return the process exit code.
+    fn report(&self) -> ExitCode {
+        match self {
+            CompileFailure::Message(msg) => {
+                eprintln!("lang: {msg}");
+                ExitCode::from(1)
+            }
+            CompileFailure::Unreadable(msg) => {
+                eprintln!("lang: {msg}");
+                ExitCode::from(2)
+            }
+            CompileFailure::Load(diagnostics) => {
+                let mut stderr = io::stderr();
+                for ld in diagnostics {
+                    let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+                }
+                ExitCode::from(1)
+            }
+            CompileFailure::Diagnostics {
+                sources,
+                diagnostics,
+            } => {
+                emit_diagnostics_mapped(sources, diagnostics.iter());
+                ExitCode::from(1)
+            }
+        }
+    }
+}
+
+/// The whole-file compile pipeline, shared by `run`/`dump`/`build` and cache-aware in one place: any
+/// command that wants "a source file → its runnable [`Module`]" goes through here, so the startup
+/// cache is applied exactly once rather than wired per command.
+///
+/// Resolves the active tier set (profile ∪ `--tier`), then consults the startup cache: on a **hit**
+/// the decoded module is returned directly (the whole front-end is skipped); on a **miss** it loads →
+/// activates tiers → type-checks → compiles, populates the cache (best-effort), and returns. Because
+/// `run`/`dump`/`build` all compile identically (same [`compile_real`]), they share cache entries —
+/// a `noeta build` warms the exact entry `noeta run` reads, and vice versa.
+///
+/// `serve` does **not** use this (it injects an `http.serve(...)` call, so its module differs for the
+/// same source and must never share the `(source+tiers)` key). `test`/`bench` do **not** either (they
+/// compile a separate module per `@test`/`@bench` case — a different granularity).
+fn compile_whole_file(
+    file: &std::path::Path,
+    tiers: &[String],
+    profile: &Option<String>,
+    no_cache: bool,
+) -> Result<Compiled, CompileFailure> {
+    // The active tier set is the union of any `--profile`'s live tiers (from `noeta.toml`) and any
+    // explicit `--tier` flags, resolved before loading so a bad profile fails fast.
+    let mut active: Vec<String> = match profile {
+        Some(name) => manifest::resolve_active_tiers(file, name).map_err(CompileFailure::Message)?,
+        None => Vec::new(),
+    };
+    for tier in tiers {
+        if !active.contains(tier) {
+            active.push(tier.clone());
+        }
+    }
+
+    // Startup cache (M3): on a hit, return the cached module — load/check/compile all skipped.
+    let cache = open_startup_cache(file, &active, no_cache);
+    if let Some(slot) = &cache
+        && let Some(blob) = slot.cache.load(&slot.key)
+        && let Ok(module) = noeta_bundle::read(&blob)
+    {
+        return Ok(Compiled {
+            module: std::sync::Arc::new(module),
+            sources: slot.sources.clone(),
+        });
+    }
+
+    // Miss: load + link (sibling `.noe` modules the entry `use`s are resolved and merged; a lone file
+    // links to itself), activate any dev-tiers, type-check, and compile to bytecode.
+    let linked = match noeta_loader::load(file) {
+        Err(err) => {
+            return Err(CompileFailure::Unreadable(format!(
+                "cannot read {}: {err}",
+                file.display()
+            )));
+        }
+        Ok(Err(load_diagnostics)) => return Err(CompileFailure::Load(load_diagnostics)),
+        Ok(Ok(linked)) => linked,
+    };
+    let sources = linked.sources;
+    // Activation inlines each `@<tier> { … }` block; with no active tiers the program runs as-is and
+    // every tier block is stripped at lowering (the default). Activation is only done when needed.
+    let program = if active.is_empty() {
+        linked.program
+    } else {
+        let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
+        let activated = noeta_check::activate_tiers(&linked.program, &active_refs);
+        if !activated.diagnostics.is_empty() {
+            return Err(CompileFailure::Diagnostics {
+                sources,
+                diagnostics: activated.diagnostics,
+            });
+        }
+        activated.program
+    };
+    let checked = noeta_check::check_all(&program);
+    if !checked.diagnostics.is_empty() {
+        return Err(CompileFailure::Diagnostics {
+            sources,
+            diagnostics: checked.diagnostics,
+        });
+    }
+    let module = match compile_real(&program, &checked) {
+        Ok(module) => std::sync::Arc::new(module),
+        Err(err) => return Err(CompileFailure::Message(err)),
+    };
+
+    // Populate the cache, best-effort. Synchronous: encoding + writing the blob is trivial next to
+    // the compile we just paid, and a failure (read-only dir, disk full) never touches the outcome.
+    if let Some(slot) = &cache {
+        let _ = slot.cache.store(&slot.key, &noeta_bundle::write(&module));
+    }
+    Ok(Compiled { module, sources })
+}
+
 fn run_compiled_module(
     module: std::sync::Arc<noeta_bytecode::Module>,
     sources: &SourceMap,
@@ -874,67 +931,15 @@ fn source_key_name(source: &Source) -> &str {
 /// inspecting codegen (which ops a construct lowers to, whether a reuse/in-place fast path fired,
 /// how names/constants are laid out). A type error prints diagnostics and exits non-zero, like `run`.
 fn cmd_dump(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -> ExitCode {
-    let mut active: Vec<String> = match profile {
-        Some(name) => match manifest::resolve_active_tiers(file, name) {
-            Ok(tiers) => tiers,
-            Err(err) => {
-                eprintln!("lang: {err}");
-                return ExitCode::from(1);
-            }
-        },
-        None => Vec::new(),
-    };
-    for tier in tiers {
-        if !active.contains(tier) {
-            active.push(tier.clone());
+    // Same whole-file compile as `run` (so the disassembly is exactly what the VM runs), and a cache
+    // participant — a cached module is byte-identical to a fresh compile, so the disassembly matches.
+    match compile_whole_file(file, tiers, profile, false) {
+        Ok(compiled) => {
+            print!("{}", compiled.module.disassemble());
+            let _ = io::stdout().flush();
+            ExitCode::SUCCESS
         }
-    }
-
-    match noeta_loader::load(file) {
-        Err(err) => {
-            eprintln!("lang: cannot read {}: {err}", file.display());
-            ExitCode::from(2)
-        }
-        Ok(Ok(linked)) => {
-            // Check + compile a (possibly tier-activated) program and print its disassembly.
-            let dump = |program: &Program| -> ExitCode {
-                let checked = noeta_check::check_all(program);
-                if !checked.diagnostics.is_empty() {
-                    emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
-                    return ExitCode::from(1);
-                }
-                match compile_real(program, &checked) {
-                    Ok(module) => {
-                        print!("{}", module.disassemble());
-                        let _ = io::stdout().flush();
-                        ExitCode::SUCCESS
-                    }
-                    Err(err) => {
-                        eprintln!("lang: {err}");
-                        ExitCode::from(1)
-                    }
-                }
-            };
-            if active.is_empty() {
-                dump(&linked.program)
-            } else {
-                let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
-                let activated = noeta_check::activate_tiers(&linked.program, &active_refs);
-                if !activated.diagnostics.is_empty() {
-                    emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
-                    ExitCode::from(1)
-                } else {
-                    dump(&activated.program)
-                }
-            }
-        }
-        Ok(Err(load_diagnostics)) => {
-            let mut stderr = io::stderr();
-            for ld in &load_diagnostics {
-                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
-            }
-            ExitCode::from(1)
-        }
+        Err(failure) => failure.report(),
     }
 }
 
@@ -956,70 +961,19 @@ fn cmd_build(
         eprintln!("lang: --exe and --native are mutually exclusive");
         return ExitCode::from(2);
     }
-    let mut active: Vec<String> = match profile {
-        Some(name) => match manifest::resolve_active_tiers(file, name) {
-            Ok(tiers) => tiers,
-            Err(err) => {
-                eprintln!("lang: {err}");
-                return ExitCode::from(1);
-            }
-        },
-        None => Vec::new(),
+    // Same whole-file compile + startup cache as `run`/`dump`. The emit format doesn't affect the
+    // module, so a `build` shares cache entries with a `run` of the same source — each warms the other.
+    let module = match compile_whole_file(file, tiers, profile, false) {
+        Ok(compiled) => compiled.module,
+        Err(failure) => return failure.report(),
     };
-    for tier in tiers {
-        if !active.contains(tier) {
-            active.push(tier.clone());
-        }
-    }
-
-    match noeta_loader::load(file) {
-        Err(err) => {
-            eprintln!("lang: cannot read {}: {err}", file.display());
-            ExitCode::from(2)
-        }
-        Ok(Ok(linked)) => {
-            // Check + compile a (possibly tier-activated) program and emit its artifact.
-            let build = |program: &Program| -> ExitCode {
-                let checked = noeta_check::check_all(program);
-                if !checked.diagnostics.is_empty() {
-                    emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
-                    return ExitCode::from(1);
-                }
-                let module = match compile_real(program, &checked) {
-                    Ok(module) => module,
-                    Err(err) => {
-                        eprintln!("lang: {err}");
-                        return ExitCode::from(1);
-                    }
-                };
-                if native {
-                    emit_native(file, out, &module)
-                } else if exe {
-                    emit_exe(file, out, &module)
-                } else {
-                    emit_bundle(file, out, &module)
-                }
-            };
-            if active.is_empty() {
-                build(&linked.program)
-            } else {
-                let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
-                let activated = noeta_check::activate_tiers(&linked.program, &active_refs);
-                if !activated.diagnostics.is_empty() {
-                    emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
-                    ExitCode::from(1)
-                } else {
-                    build(&activated.program)
-                }
-            }
-        }
-        Ok(Err(load_diagnostics)) => {
-            let mut stderr = io::stderr();
-            for ld in &load_diagnostics {
-                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
-            }
-            ExitCode::from(1)
-        }
+    let module = module.as_ref();
+    if native {
+        emit_native(file, out, module)
+    } else if exe {
+        emit_exe(file, out, module)
+    } else {
+        emit_bundle(file, out, module)
     }
 }
 
@@ -1758,9 +1712,9 @@ fn run_one_test(setup: &[Stmt], case: &TestCase, span: Span) -> TestOutcome {
         };
     }
 
-    // The `@test`/`@bench` runners compile each case per-invocation; startup-cache wiring for them is
-    // C2 (their active-tier sets key distinctly from `run`), so they pass `None` for now.
-    match execute_real_host(&program, &checked, None) {
+    // `@test`/`@bench` compile a *separate* module per case (a different granularity than the
+    // whole-file startup cache), so they don't participate in it — see `plans/startup-cache`.
+    match execute_real_host(&program, &checked) {
         // The `@test` runner reports the failing diagnostic; the trace is a `noeta run` affordance.
         Ok((result, _trace)) => {
             let passed = result.exit_code == 0 && result.diagnostics.is_empty();

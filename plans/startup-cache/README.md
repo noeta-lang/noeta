@@ -1,8 +1,9 @@
 # Transparent startup cache — skip the front-end on unchanged sources
 
-**Status: PLANNED, branch `startup-cache` (worktree, off `main`@`fe14117`).** Signed off 2026-07-07
-after a three-agent investigation of the run pipeline, the salsa DB, and the `.noeb` envelope. No code
-yet — C0 next.
+**Status: C0–C2 DONE, branch `startup-cache` (worktree, off `main`@`fe14117`).** Signed off 2026-07-07
+after a three-agent investigation of the run pipeline, the salsa DB, and the `.noeb` envelope.
+`run`/`dump`/`build` share a transparent cache through one `compile_whole_file` seam; C3 (differential
+guard + hermetic test dir) and C4 (hygiene + `cache clear`) remain.
 
 This delivers the M3 roadmap item *"startup cache"* in its **transparent** form. The AOT arc already
 shipped the *explicit* form (`noeta build` → a `.noeb` you run instead of source, which skips the
@@ -114,27 +115,45 @@ wrong bytecode):
 
 ## Slices
 
-- **C0 — cache-key + store module.** New `noeta-cache` crate (or a `cache.rs` in the CLI): XDG dir
-  resolution + `0700` create; `CacheKey` from (sorted source pairs, runtime version, binary identity,
-  tier set) → `sha2` hex; path helpers; atomic write (temp + rename); best-effort read. Unit tests for
-  key stability + directory/tier sensitivity + atomic write.
-- **C1 — wire into `cmd_run`.** Pre-scan key, lookup→`run_module_real_host` on hit, compile + background
-  write on miss. `NOETA_NO_CACHE` + `--no-cache`. Verify the 6000-line program drops from ~125 ms to
-  ~7 ms on the second run; verify a one-byte source edit and a sibling add/remove both force a recompile;
-  verify a `cargo build` of `noeta` forces a recompile (binary-identity gate).
-- **C2 — extend to `test`/`bench`.** Same hooks on those commands with their active-tier sets in the
-  key. Confirm `run`/`test`/`bench` of one file occupy three distinct cache entries.
-- **C3 — differential guard.** A conformance/CLI test asserting a cached second run produces
-  byte-identical stdout/exit to the uncached first run, across a representative corpus slice (the cache
-  must be *semantically invisible* — this is the regression wall).
+- **C0 — cache-key + store module. ✅ DONE (`3ba7e02`).** New `noeta-cache` crate (`sha2`-only, off the
+  compile DAG): XDG dir resolution + `0700` create; `CacheKey`/`KeyBuilder` from (per-source name+hash,
+  runtime version, binary identity, tier set) → `sha2` hex; `binary_identity()`; atomic store (temp +
+  rename); best-effort load; `clear()`. 12 unit tests.
+- **C1 — wire into `cmd_run`. ✅ DONE (`efcfae0`).** Key from `read_workspace`, lookup →
+  `run_module_real_host` on hit, compile + populate on miss; `--no-cache` + `NOETA_NO_CACHE`. Verified
+  133 ms → 7.7 ms (17×); source edit / sibling change / rebuilt binary each force a recompile;
+  `NOETA_NO_CACHE` never creates the dir.
+- **C2 — one natural seam, not per-command wiring. ✅ DONE.** Extract `compile_whole_file(file, tiers,
+  profile, no_cache) -> Result<Compiled, CompileFailure>` — resolve tiers → cache lookup → on miss
+  load/activate/check/compile/store — and route **`run`, `dump`, `build`** through it (each collapses to
+  "call the seam, use the `Module`"). Because all three compile identically (`compile_real`), they
+  **share cache entries**: a `build` warms the entry a `run` reads, and vice-versa (verified). Caching
+  now lives in exactly one place; adding it to a new whole-file command is free.
+  - **Scope correction (was "extend to `test`/`bench`").** `test`/`bench` compile a *separate* module
+    **per `@test`/`@bench` case** — a different granularity than one-module-per-file — so they do **not**
+    fit this seam and are **dropped from cache scope** (per-case caching is a possible later follow-on;
+    their shared cost is really the whole-file *check*, a different artifact). See non-goals.
+  - **Safety rule that makes a single hook correct.** The key is `(source + tiers)`, valid only for
+    commands whose program transform is identity-modulo-tiers. `serve` **injects** an `http.serve(...)`
+    call before compiling → different module for the same source → it must **never** share the key, and
+    stays on the uncached `run_program` path.
+- **C3 — differential guard.** A conformance/CLI test asserting a cached second run is byte-identical
+  (stdout/exit) to the uncached first run across a corpus slice — the *semantically-invisible* wall.
+  Also fold a temp `NOETA_CACHE_DIR` default into the CLI test harness so `cargo test` is hermetic and
+  never writes the developer's real `~/.cache/noeta`.
 - **C4 — hygiene + docs.** `noeta cache clear` (+ maybe `cache path`/`cache info`); a size cap or LRU/age
   sweep so the dir can't grow unbounded; wiki/CLI-help note. Log a one-line notice when a cap evicts
   (no silent truncation).
 
 ## Non-goals / deferred
 
-- **`serve` caching.** Long-lived; only boot latency to save. Trivial to add later (same hooks) if the
-  dev edit-restart loop wants it; not in v1.
+- **`serve` caching.** Long-lived (compiles once at boot, amortizes) *and* it injects a call before
+  compiling, so it can't share the plain `(source+tiers)` key. Excluded; would need a `serve:<port>`
+  key variant if ever wanted.
+- **`test`/`bench` caching.** They compile per-`@test`/`@bench` case, not one module per file, so the
+  whole-file cache doesn't apply. A future per-case cache (key `source+tiers+case-id`) or a cached
+  *checked-program* artifact (to skip the shared whole-file check) could revisit this if the test-loop
+  startup bites; out of scope now.
 - **Skipping compression in the cache blob.** Reusing `noeta_bundle::write` deflate+scrambles the
   payload — wasted CPU for a private cache. A `FLAG_RAW` fast path is a later micro-opt only if a
   profile shows it; v1 reuses the envelope verbatim for correctness + conformance coverage.
