@@ -1,6 +1,6 @@
 # Slice F5 — `.env` support folded into `std.env`
 
-Status: **in-progress**
+Status: **done**
 
 > **Follow-on to M2.2** (`plans/m2/slice-02-env-args.md`). **Determinism posture:** `env.parse` is pure (no host). `env.load` reads the file through the `FileSystem` capability (sandbox = deterministic in-memory Vfs) and overlays the sandbox env fixture — so both backends agree by construction and it stays fully inside the differential. No new host capability, no env mutation.
 
@@ -40,3 +40,17 @@ Returning a plain `Map<string, string>` (not a new value type, not a host mutati
 - Merged map **must** be sorted (`BTreeMap`) — the M2.2 determinism-leak lesson.
 - `load` overlays host on top of file, never the reverse — the whole point is "existing env wins."
 - Missing-file tolerance diverges from `fs.read`'s E0021: `load` guards with `fs_exists` and treats absence as "no overlay," it does not propagate an IO error.
+
+## Outcome (done)
+
+Landed `env.parse` / `env.load` as two new `ExtFn`s on the existing `env` module — no new host capability, no `env.set`, no backend or checker change (the checker reads the `Map<string,string>` return straight from the registry, and both backends already materialize `NativeOut::Map`).
+
+- **Parser** (`crates/noeta-stdlib/src/env.rs`, `parse_dotenv`): pure `&str -> BTreeMap<String,String>`. Comments/blanks skipped, `export ` prefix stripped, single-quoted literal, double-quoted with `\n \t \r \\ \"` expansion (escape-aware closing-quote scan), unquoted trimmed with inline ` #` comment stripping, malformed lines skipped. 6 unit tests.
+- **`env.parse(text)`** — the pure parser, surfaced.
+- **`env.load(path = ".env")`** — reads via `host.fs_read`/`fs_exists`, parses, then overlays the ambient environment (`env_keys`/`env_get`) on top so **existing env always wins**; returns the full merged environment, sorted. Optional path via `SigType::Optional` defaults to `.env`. A missing file returns the ambient-env map (no E0021). Added a `str_map` registry helper.
+
+**Verification:** parser unit tests 8/8; conformance corpus + `differential_backends_agree` green with the three new cases (`std/env_dotenv_parse`, `std/env_dotenv_load` — asserts host-wins precedence on `USER` and the default-path form — and `std/env_dotenv_load_missing`); `cargo test --workspace` 0 failed; `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt --all` applied; no new `unsafe`. Manual `noeta run` (RealHost) confirmed the real-env path also honours precedence (shell `USER` overrode the `.env`'s).
+
+**Landed commingled:** the dotenv code (`env.rs`, the `env`-module part of `registry.rs`, the three `.noe` cases, this plan in its in-progress state) was swept into the parallel package-manager commit `f96314d`; this branch (`env-dotenv`) continues from there. This slice's own commit finalizes the plan to done.
+
+**Follow-on left open (needs a nod before picking up):** `${VAR}` interpolation + multi-line quoted values — scoped out deliberately; can layer onto `parse_dotenv` without an API change.
