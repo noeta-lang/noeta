@@ -156,10 +156,11 @@ impl<'m> Vm<'m> {
     }
 
     /// The sender's trace context to ride an outbound channel message (native-otel T5d): the
-    /// current strand's active span's W3C context — `None` (one bool test) when telemetry is off
-    /// or no span is active, so untraced programs pay nothing per send.
+    /// current strand's active span's W3C context — `None` when telemetry is off or no span is
+    /// active. The enabled state is a bool cached at `Vm::load` (`tel_on` — it is fixed per host),
+    /// so an untraced program pays one predictable branch per send, not a virtual host call.
     fn outbound_trace_context(&mut self) -> Option<noeta_stdlib::TraceContext> {
-        if !self.host.tel_enabled() {
+        if !self.tel_on {
             return None;
         }
         let top = *self.ctx_current.last()?;
@@ -172,6 +173,11 @@ impl<'m> Vm<'m> {
     /// A strand inside real active spans is never hijacked; a context-less message at top level
     /// *clears* a stale seed (work caused by an untraced producer starts a fresh trace).
     fn seed_context_from_message(&mut self, context: Option<noeta_stdlib::TraceContext>) {
+        // Telemetry off ⇒ no message ever carries a context and seeding is pointless — one
+        // predictable branch per recv (mirrors the send side).
+        if !self.tel_on {
+            return;
+        }
         let at_top = match self.ctx_current.as_slice() {
             [] => true,
             [only] => self.host.tel_is_remote(*only),

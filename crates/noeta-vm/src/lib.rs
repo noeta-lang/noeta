@@ -816,6 +816,10 @@ struct Vm<'m> {
     /// tree-walker's field, but carries no observable-output semantics (context is telemetry-only),
     /// so the differential is indifferent to it by construction.
     ctx_current: Vec<u64>,
+    /// Whether telemetry is enabled, cached from the host at load (native-otel T5d perf): the
+    /// enabled state is fixed per host (env-derived at construction), and the channel send/recv
+    /// hot paths gate on it — a cached bool is one predictable branch instead of a virtual call.
+    tel_on: bool,
     /// **Traced futures** (native-otel T5c) — the future-completion hook behind
     /// `NativeCtx::trace_future`: each entry holds one retained reference to a step future whose
     /// polls run under its saved context and whose completion (or abort) ends its telemetry span.
@@ -1877,6 +1881,8 @@ impl<'m> Vm<'m> {
         host: Box<dyn noeta_stdlib::Host>,
         executor: Box<dyn noeta_stdlib::Executor>,
     ) -> Vm<'m> {
+        // Cached: fixed per host (see the `tel_on` field). Read before `host` moves into the Vm.
+        let tel_on = host.tel_enabled();
         let methods = module
             .methods
             .iter()
@@ -1953,6 +1959,7 @@ impl<'m> Vm<'m> {
             executor,
             scopes: Vec::new(),
             ctx_current: Vec::new(),
+            tel_on,
             traced_futures: Vec::new(),
             channels: Vec::new(),
             channel_progress: 0,
