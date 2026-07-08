@@ -306,11 +306,15 @@ impl Manifest {
                         ));
                     }
                     let provider = provider_of(name, tier, provider_value)?;
-                    if provider != BUILTIN_PROVIDER {
+                    // A tier's provider is the built-in stdlib (`"std"`) or a **declared
+                    // dependency** — named by its `[dependencies]` key, the same import root used
+                    // elsewhere (package-manager P2.6). An undeclared name is an error pointing the
+                    // user to add the dependency.
+                    if provider != BUILTIN_PROVIDER && !dependencies.contains_key(&provider) {
                         return Err(format!(
                             "profile `{name}`: tier `{tier}` names provider `{provider}`, which is \
-                             not available — no package system yet, so only `\"{BUILTIN_PROVIDER}\"` \
-                             is provided"
+                             neither the built-in `\"{BUILTIN_PROVIDER}\"` nor a declared \
+                             dependency — add `{provider}` to `[dependencies]` to provide this tier"
                         ));
                     }
                     tiers.insert(tier.clone(), provider);
@@ -343,6 +347,19 @@ impl Manifest {
         let mut chain = Vec::new();
         let merged = self.resolve(profile, &mut chain)?;
         Ok(merged.into_keys().collect())
+    }
+
+    /// The active tier → **provider** map for `profile` (package-manager P2.6): each live tier mapped
+    /// to the package providing it — the built-in `"std"` or a declared dependency's import-root key.
+    /// A future tier-execution layer reads this to dispatch a tier to its provider; today the
+    /// providers are validated (a resolved dependency is a valid provider) and surfaced here.
+    #[allow(dead_code)] // consumed by the tier-execution layer; validated + surfaced now
+    pub fn active_tier_providers(
+        &self,
+        profile: &str,
+    ) -> Result<BTreeMap<String, String>, String> {
+        let mut chain = Vec::new();
+        self.resolve(profile, &mut chain)
     }
 
     /// Resolve a profile's effective tier map by walking its `extends` chain base-first, overlaying
@@ -712,10 +729,26 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_provider_is_rejected() {
-        let err =
-            Manifest::parse("[profiles.dev.tiers]\nbench = \"criterion-lang\"\n").unwrap_err();
-        assert!(err.contains("not available"), "{err}");
+    fn an_undeclared_provider_is_rejected() {
+        // A provider that is neither `std` nor a declared dependency is an error.
+        let err = Manifest::parse("[profiles.dev.tiers]\nbench = \"criterion\"\n").unwrap_err();
+        assert!(err.contains("declared dependency"), "{err}");
+    }
+
+    #[test]
+    fn a_declared_dependency_may_provide_a_tier() {
+        // package-manager P2.6: a resolved dependency (`bench_kit`) is a valid tier provider.
+        let m = Manifest::parse(
+            "[dependencies]\n\
+             bench_kit = { path = \"../bench_kit\" }\n\
+             [profiles.dev.tiers]\n\
+             bench = \"bench_kit\"\n\
+             test = \"std\"\n",
+        )
+        .expect("valid");
+        let providers = m.active_tier_providers("dev").unwrap();
+        assert_eq!(providers["bench"], "bench_kit"); // provided by the dependency
+        assert_eq!(providers["test"], "std"); // still the built-in
     }
 
     #[test]
