@@ -746,9 +746,11 @@ struct Checker {
     /// map an instance's type arguments (`Box<int>`) back onto the declaration's parameters (`T`)
     /// and read a field/return as `int` rather than the bare parameter or `dyn` (S4.5).
     generic_types: HashMap<String, Vec<String>>,
-    /// Names bound to a Ring 2 stdlib module by a `use std.{…}` import (`json`, `fs`, …). A call
-    /// `m.f(args)` on such a name resolves through [`stdlib::module_return`].
-    modules: HashSet<String>,
+    /// Names bound to a native module by a `use std.{…}` import (`json`, `fs`, …) or a nested
+    /// import (`use std.http.client` → `client`), each mapped to the module's **root-qualified
+    /// identity** (`"std.json"`, `"std.http.client"`). A call `m.f(args)` on the bound name resolves
+    /// through [`stdlib::module_return`] against that identity.
+    modules: HashMap<String, String>,
     /// Names brought into scope bare by a selective member import (`use std.math.sqrt` → `sqrt`),
     /// each mapped to its `(module, func)`. A bare call `sqrt(args)` types through
     /// [`stdlib::module_return`] exactly like the qualified `math.sqrt(args)`.
@@ -1548,18 +1550,20 @@ impl Checker {
                 // any other imported name (whether the linker merged its declaration or left an
                 // opaque stub) is a legal referent for an annotation — registered as a known type.
                 Stmt::Use { path, names, .. } => {
-                    let is_std =
-                        path.len() == 1 && noeta_stdlib::registry::is_extension_root(&path[0]);
+                    let rooted =
+                        !path.is_empty() && noeta_stdlib::registry::is_extension_root(&path[0]);
                     // A selective member import `use <root>.<mod>.<fn>` — a two-segment path under a
                     // registered extension root whose second segment is a known module. Each name
-                    // binds as a bare function alias.
-                    let selective = (path.len() == 2
-                        && noeta_stdlib::registry::is_extension_root(&path[0]))
-                    .then(|| path[1].clone())
-                    .filter(|m| stdlib::is_std_module(m));
+                    // binds as a bare function alias against the module's root-qualified identity.
+                    let selective = (path.len() == 2 && rooted)
+                        .then(|| path.join("."))
+                        .filter(|m| stdlib::is_std_module(m));
                     for name in names {
-                        if is_std && stdlib::is_std_module(&name.name) {
-                            self.modules.insert(name.name.clone());
+                        // A plain (`use std.{json}`) or nested (`use std.http.client`) module import:
+                        // the path segments plus the imported name join to a registered module.
+                        let qualified = format!("{}.{}", path.join("."), name.name);
+                        if rooted && stdlib::is_std_module(&qualified) {
+                            self.modules.insert(name.name.clone(), qualified);
                         } else if let Some(module) = &selective {
                             if noeta_stdlib::registry::is_module_function(module, &name.name) {
                                 self.imported_fns
@@ -4529,17 +4533,19 @@ impl Checker {
                     self.finalize_closure_args(&[], args, arg_exprs, env);
                     return self.enum_construction_type(tn, name, args, call_span);
                 }
-                // `module.func(args)` — a Ring 2 stdlib module call.
+                // `module.func(args)` — a native module call; `m` is the bound local, `qm` its
+                // root-qualified identity (what the stdlib return-type tables key on).
                 if let Expr::Ident { name: m, .. } = receiver.as_ref()
-                    && self.modules.contains(m)
+                    && let Some(qm) = self.modules.get(m)
                 {
-                    if let Some(params) = stdlib::module_params(m, name, args) {
-                        let required = stdlib::module_required(m, name).unwrap_or(params.len());
+                    let qm = qm.clone();
+                    if let Some(params) = stdlib::module_params(&qm, name, args) {
+                        let required = stdlib::module_required(&qm, name).unwrap_or(params.len());
                         self.finalize_closure_args(&params, args, arg_exprs, env);
                         self.check_args(&params, required, args, arg_exprs, span, name);
                     }
-                    self.check_module_bounds(m, name, args, span);
-                    return stdlib::module_return(m, name, args).unwrap_or(Type::Unknown);
+                    self.check_module_bounds(&qm, name, args, span);
+                    return stdlib::module_return(&qm, name, args).unwrap_or(Type::Unknown);
                 }
                 // `Type.assoc(args)` — an associated function / static call on a known user type
                 // (`Box.new(1)`). Resolve to the type's method signature so the result is precisely

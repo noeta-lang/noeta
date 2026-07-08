@@ -240,12 +240,31 @@ pub fn extensions() -> &'static [&'static (dyn Extension + Sync)] {
     REGISTRY
 }
 
-/// Find a registered module by name.
+/// Find a registered module by its identity string — a **root-qualified path** (`"std.math"`,
+/// nested `"std.http.client"`) or a bare module name (`"math"`, from tests / legacy literal calls).
+/// A leading segment that names a registered extension root selects that root and matches the
+/// remainder against the module name; otherwise the whole string is matched as a bare name.
 pub fn find_module(name: &str) -> Option<&'static ExtModule> {
+    if let Some((root, module)) = name.split_once('.')
+        && is_extension_root(root)
+    {
+        return extensions()
+            .iter()
+            .filter(|e| e.root() == root)
+            .flat_map(|e| e.modules())
+            .find(|m| m.name == module);
+    }
     extensions()
         .iter()
         .flat_map(|e| e.modules())
         .find(|m| m.name == name)
+}
+
+/// The bare module name of a (possibly root-qualified) module identity: `"std.vec"` → `"vec"`,
+/// `"vec"` → `"vec"`. The transitional per-backend kernel sites (`vec`/`quat` bulk `*_all`, `fs.list`,
+/// `json.parse`) still match by bare name; they read it through this so a qualified identity resolves.
+pub fn bare_module_name(module: &str) -> &str {
+    module.rsplit('.').next().unwrap_or(module)
 }
 
 /// Whether `root` is the namespace root of some registered extension (`"std"` today; a package's
@@ -395,7 +414,7 @@ pub fn dispatch_method(
 pub fn is_module_function(module: &str, func: &str) -> bool {
     find_function_sig(module, func).is_some()
         || matches!(
-            (module, func),
+            (bare_module_name(module), func),
             (
                 "vec",
                 "add_all" | "sub_all" | "scale_all" | "dot_all" | "length_all"

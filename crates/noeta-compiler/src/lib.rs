@@ -87,24 +87,36 @@ fn unsupported<T>(reason: impl Into<String>) -> Result<T, Unsupported> {
     })
 }
 
-/// Whether `use <path>.{name}` imports a Ring 2 native module (`use std.{json}`) rather than a
-/// sibling-module declaration. Such names are bound as global values, not opaque types.
-fn is_native_module(path: &[String], name: &str) -> bool {
-    path.len() == 1
-        && noeta_stdlib::registry::is_extension_root(&path[0])
-        && noeta_stdlib::registry::find_module(name).is_some()
+/// The root-qualified identity of the module a `use <path>.{name}` would bind: the path segments and
+/// the imported name joined with `.` — `use std.{math}` → `"std.math"`, nested `use std.http.client`
+/// → `"std.http.client"`. For a *selective function* import (`use std.math.sqrt`) the same join
+/// instead names a function, so [`find_module`] on it returns `None` and the caller falls through.
+///
+/// [find_module]: noeta_stdlib::registry::find_module
+fn qualified_module(path: &[String], name: &str) -> String {
+    format!("{}.{}", path.join("."), name)
 }
 
-/// For a selective member import `use std.<mod>.<name>` — `path == ["std", <mod>]` where `<mod>` is a
-/// native module — the module name. Each imported `<name>` then binds as a bare global holding a
-/// [`Const::ModuleFn`], called (or passed) through the same `call_native_module` path as
-/// `<mod>.<name>(...)`. `None` for a plain module import (`use std.{math}`) or a non-std path.
-fn selective_import_module(path: &[String]) -> Option<&str> {
+/// Whether `use <path>.{name}` imports a native module (`use std.{json}`, nested `use std.http.client`)
+/// rather than a sibling-module declaration. Such names are bound as global values, not opaque types.
+/// The module's identity is the full root-qualified path (so `std.http` ≠ a third-party `guzzle.http`).
+fn is_native_module(path: &[String], name: &str) -> bool {
+    !path.is_empty()
+        && noeta_stdlib::registry::is_extension_root(&path[0])
+        && noeta_stdlib::registry::find_module(&qualified_module(path, name)).is_some()
+}
+
+/// For a selective member import `use <root>.<mod>.<name>` — a two-segment path under an extension
+/// root whose second segment is a native module — the module's **root-qualified** identity
+/// (`"std.math"`). Each imported `<name>` then binds as a bare global holding a [`Const::ModuleFn`],
+/// called through the same `call_native_module` path as `<mod>.<name>(...)`. `None` for a plain or
+/// nested module import, or a non-extension path.
+fn selective_import_module(path: &[String]) -> Option<String> {
     if path.len() == 2
         && noeta_stdlib::registry::is_extension_root(&path[0])
-        && noeta_stdlib::registry::find_module(&path[1]).is_some()
+        && noeta_stdlib::registry::find_module(&path.join(".")).is_some()
     {
-        Some(&path[1])
+        Some(path.join("."))
     } else {
         None
     }
@@ -1809,20 +1821,24 @@ impl<'m> FnCompiler<'m> {
                 let selective = selective_import_module(path);
                 for imported in names {
                     if is_native_module(path, &imported.name) {
+                        // The bound global keeps the imported name (the last segment); the module
+                        // *value* carries the root-qualified identity so its member calls dispatch
+                        // to the right module (`std.http.client` ≠ a third-party `guzzle.http.client`).
                         let value = self.alloc_reg();
-                        let k = self.add_const(Const::NativeModule(imported.name.clone()));
+                        let k = self
+                            .add_const(Const::NativeModule(qualified_module(path, &imported.name)));
                         self.code.push(Op::LoadConst { dst: value, k });
                         let global = self.module.intern_global(&imported.name);
                         self.code.push(Op::StoreGlobal { global, src: value });
-                    } else if let Some(module) = selective
+                    } else if let Some(module) = &selective
                         && noeta_stdlib::registry::is_module_function(module, &imported.name)
                     {
-                        // `use std.math.sqrt` — bind `sqrt` to a `(math, sqrt)` module-function value.
-                        // An unknown member is left unbound (the checker reports it); a bare call then
-                        // raises E0005 like any missing name.
+                        // `use std.math.sqrt` — bind `sqrt` to a `(std.math, sqrt)` module-function
+                        // value. An unknown member is left unbound (the checker reports it); a bare
+                        // call then raises E0005 like any missing name.
                         let value = self.alloc_reg();
                         let k = self.add_const(Const::ModuleFn {
-                            module: module.to_string(),
+                            module: module.clone(),
                             func: imported.name.clone(),
                         });
                         self.code.push(Op::LoadConst { dst: value, k });
