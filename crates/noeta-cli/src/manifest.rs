@@ -240,6 +240,9 @@ fn dep_package_from_dir(key: &str, dir: &Path) -> Result<noeta_loader::DepPackag
         key: key.to_string(),
         root,
         modules,
+        // Flat linking: this direct dependency's own transitive keys are populated by the graph
+        // walk (P2.4b); a leaf dependency needs none.
+        dep_renames: Default::default(),
     })
 }
 

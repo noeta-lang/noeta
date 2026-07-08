@@ -126,31 +126,63 @@ fn collect_noe_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> io::Resul
 /// Unlike a sibling, a dependency module's own `use`s **drive** imports (a package is a closed unit:
 /// its internal cross-references must resolve), whereas same-app siblings stay pure decl-sources — so
 /// wiring dependencies never changes single-package linking.
+///
+/// **Transitive dependencies** (package-manager P2.4). A package's own modules import *its own*
+/// dependencies by *its own* local keys (`use jsonlib.parse.X`), which collide across packages (two
+/// packages may both key a dep `jsonlib` pointing at different packages). `dep_renames` disambiguates:
+/// it maps each of this package's local dependency keys to the **globally-unique segment** the resolver
+/// assigned the package that key resolves to, so every `use` leading segment in the flat pool addresses
+/// exactly one package. For a leaf/direct dependency with no dependencies of its own it is empty, so
+/// single-level linking is byte-for-byte unchanged. `key` is this package's own global segment (the
+/// consumer's dep-key for a direct dependency, a synthesized unique segment for a transitive-only one).
 #[derive(Debug)]
 pub struct DepPackage {
     pub key: String,
     pub root: String,
     pub modules: Vec<RawModule>,
+    /// This package's local dependency keys → the global segment of the package each resolves to
+    /// (transitive linking, P2.4). Empty for a leaf package; then re-rooting is just `root` → `key`.
+    pub dep_renames: std::collections::BTreeMap<String, String>,
 }
 
-/// Re-root a namespace/use path in place: if its leading segment is the package's own `root`, replace
-/// it with the consumer's `key` (package-manager P2.1). A path that doesn't start with `root` (a
-/// reference to `std`, or a malformed package path) is left untouched.
-fn reroot_path(path: &mut [String], root: &str, key: &str) {
-    if path.first().map(String::as_str) == Some(root) {
-        path[0] = key.to_string();
+/// Re-root a namespace/use path in place: replace its leading segment per the rules
+/// (package-manager P2.1/P2.4). If the leading segment is the package's own `root`, it becomes the
+/// package's global `key`; otherwise, if it is one of the package's local dependency keys, it becomes
+/// that dependency's global segment (`renames`). A path leading with anything else — `std`, or a
+/// malformed package path — is left untouched.
+fn reroot_path(
+    path: &mut [String],
+    root: &str,
+    key: &str,
+    renames: &std::collections::BTreeMap<String, String>,
+) {
+    let Some(head) = path.first_mut() else {
+        return;
+    };
+    if head.as_str() == root {
+        *head = key.to_string();
+    } else if let Some(global) = renames.get(head.as_str()) {
+        *head = global.clone();
     }
 }
 
-/// Re-root a dependency module's `namespace` (its match key) and `use` paths (its import drivers)
-/// from the package root to the consumer's key. Touches only those two statement kinds — both are
-/// consumed *during* linking (matching / import-driving) and never appear in the merged declaration
-/// output — so re-rooting cannot alter what a package actually contributes, only how it's addressed.
-fn reroot_program(program: &mut Program, root: &str, key: &str) {
+/// Re-root a dependency module's `namespace` (its match key) and `use` paths (its import drivers).
+/// The `namespace` only ever leads with the package's own root, so it is rewritten `root` → `key`; a
+/// `use` may lead with the package root (an intra-package reference) or one of the package's local
+/// dependency keys (a transitive reference), both handled by [`reroot_path`]. Touches only those two
+/// statement kinds — both are consumed *during* linking (matching / import-driving) and never appear
+/// in the merged declaration output — so re-rooting cannot alter what a package contributes, only how
+/// it's addressed.
+fn reroot_program(
+    program: &mut Program,
+    root: &str,
+    key: &str,
+    renames: &std::collections::BTreeMap<String, String>,
+) {
     for stmt in &mut program.stmts {
         match stmt {
-            Stmt::Namespace { path, .. } => reroot_path(path, root, key),
-            Stmt::Use { path, .. } => reroot_path(path, root, key),
+            Stmt::Namespace { path, .. } => reroot_path(path, root, key, renames),
+            Stmt::Use { path, .. } => reroot_path(path, root, key, renames),
             _ => {}
         }
     }
@@ -326,7 +358,7 @@ pub fn link_with_deps(
             let parsed = parse_clean(&source);
             sources.push(source);
             if let Some(mut program) = parsed {
-                reroot_program(&mut program, &dep.root, &dep.key);
+                reroot_program(&mut program, &dep.root, &dep.key, &dep.dep_renames);
                 dep_programs.push(program);
             }
         }
@@ -681,6 +713,7 @@ mod tests {
                 "client.noe",
                 "namespace http.client;\npub class Client {\n  base: string\n}\n",
             )],
+            dep_renames: Default::default(),
         };
         let entry = "use webclient.client.Client;\nc = Client { base: \"x\" };\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
@@ -713,6 +746,7 @@ mod tests {
                     "namespace http.models;\npub class Body {\n  text: string\n}\n",
                 ),
             ],
+            dep_renames: Default::default(),
         };
         let entry = "use webclient.client.Client;\nc = Client { body: Body { text: \"hi\" } };\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
@@ -731,6 +765,7 @@ mod tests {
                 "a.noe",
                 "namespace http.core;\npub class Ping {\n  n: int\n}\n",
             )],
+            dep_renames: Default::default(),
         };
         let b = DepPackage {
             key: "beta".to_string(),
@@ -739,11 +774,47 @@ mod tests {
                 "b.noe",
                 "namespace http.core;\npub class Pong {\n  n: int\n}\n",
             )],
+            dep_renames: Default::default(),
         };
         let entry = "use alpha.core.Ping;\nuse beta.core.Pong;\np = Ping { n: 1 };\nq = Pong { n: 2 };\n";
         let linked = link_with_deps("main.noe", entry, &[], &[a, b]).unwrap();
         assert!(has_class(&linked, "Ping"));
         assert!(has_class(&linked, "Pong"));
+    }
+
+    #[test]
+    fn a_transitive_dependency_resolves_through_dep_renames() {
+        // The consumer depends on `app` (root `app`), which itself depends on a package it keys
+        // `jsonlib` (root `json`). The resolver gives the transitive package the global segment
+        // `pkg_json`, so `app`'s internal `use jsonlib.parse.Value` must be rewritten to
+        // `use pkg_json.parse.Value` — even though the consumer never mentions `jsonlib`/`pkg_json`.
+        let mut app_renames = std::collections::BTreeMap::new();
+        app_renames.insert("jsonlib".to_string(), "pkg_json".to_string());
+        let app = DepPackage {
+            key: "app".to_string(),
+            root: "app".to_string(),
+            modules: vec![module(
+                "widget.noe",
+                "namespace app.core;\nuse jsonlib.parse.Value;\npub class Widget {\n  v: Value\n}\n",
+            )],
+            dep_renames: app_renames,
+        };
+        let json = DepPackage {
+            key: "pkg_json".to_string(),
+            root: "json".to_string(),
+            modules: vec![module(
+                "parse.noe",
+                "namespace json.parse;\npub class Value {\n  n: int\n}\n",
+            )],
+            dep_renames: Default::default(),
+        };
+        let entry = "use app.core.Widget;\nw = Widget { v: Value { n: 1 } };\n";
+        let linked = link_with_deps("main.noe", entry, &[], &[app, json]).unwrap();
+        assert!(has_class(&linked, "Widget"));
+        assert!(
+            has_class(&linked, "Value"),
+            "the transitive package's Value must link in via the dep-key rewrite"
+        );
     }
 
     #[test]
@@ -757,6 +828,7 @@ mod tests {
                 "circle.noe",
                 "namespace shapes.circle;\nuse std.math.sqrt;\npub fn area(r: float): float { return 3.14 * r * r; }\n",
             )],
+            dep_renames: Default::default(),
         };
         let entry = "use geo.circle.area;\necho area(2.0);\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
