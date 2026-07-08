@@ -248,6 +248,12 @@ flags) and dispatches unmatched names to registered commands (`cargo clippy` mod
 
 ## Outcome
 
+**JIT verification (the risk-list item, closed 2026-07-08):** `noeta-jit` references no migrated
+construct (compile-proof), and the `--jit-differential` oracle — tier 0 vs forced tier 1 over
+the corpus, identical results + zero residency — passes post-migration: 502 matched, 0
+unsupported, 1008/1009 prototypes native, no leaks. The real-host benches ran under production
+tiering, so the reactive numbers were measured *with* JIT-compiled loops driving the new paths.
+
 The arc delivered everything it scoped: the entire hardcoded `Builtin` orchestration family —
 `task.sleep`/`all`/`race`/`map_bounded`, `http.serve`, `signal`/`computed`/`effect` — plus the
 `noeta serve` command now live in the dogfooded std extension, dispatched through seams any
