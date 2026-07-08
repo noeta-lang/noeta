@@ -234,10 +234,30 @@ flags) and dispatches unmatched names to registered commands (`cargo clippy` mod
   a no-op body). Gate verdict: **accepted by the user (2026-07-08)** — the fixture is a pure boundary-crossing stress test (no real workload resembles it; ~5M cycles/sec absolute), and reactive stays on the seam deliberately as the Class-3 machinery's resident stress test. Conformance 513/513
   (all 19 reactivity fixtures byte-exact), 1009 workspace tests, clippy silent; t_*/serve
   unchanged (borrowed seeds erased H2's residual: t_map_bounded now ±0%).
-- **H6** — extension commands: `ExtCommand`/`CommandCtx`, dynamic clap wiring, `noeta serve`
-  migrated out of the `Command` enum. CLI integration test green.
-- **H7** — docs (Native-Extensions.md rewrite — Deferred shrinks to freeze/publish +
-  raw-buffer + finalizers; wiki), plan outcome, memory.
+- **H6 ✅ DONE** — `ExtCommand` (name/about/`ArgSpec`s/run fn) + narrow `CommandCtx` (load +
+  check + run on the real host, optional synthesized `EntryCall` — AST synthesis stays
+  CLI-side); hybrid clap wiring (derive CLI augmented with registered commands: real help +
+  parsing, matched names dispatch to the extension). `noeta serve` = `SERVE_COMMAND` in the std
+  extension; the CLI `Serve` variant + `cmd_serve` deleted. Serve integration tests + real-host
+  smoke green.
+- **H7 ✅ DONE** — Native-Extensions.md rewritten (NativeCtx seam, Class-3 arena/state,
+  declared arena reads, extension commands; Deferred shrank to raw-buffer + finalizers +
+  freeze/publish); `std.cell` module docs added (sample gate-tested);
+  Standard-Library-Modules.md's stale "interpreter builtins" claim fixed; plan outcome +
+  memory updated.
+
+## Outcome
+
+The arc delivered everything it scoped: the entire hardcoded `Builtin` orchestration family —
+`task.sleep`/`all`/`race`/`map_bounded`, `http.serve`, `signal`/`computed`/`effect` — plus the
+`noeta serve` command now live in the dogfooded std extension, dispatched through seams any
+future extension can use. Both backends shed every reactive/serve/task special case
+(`Value::Reactive`, all intercepts, `drive_flush`×2, the `VIRTUAL_MODULES` mechanism, the
+checker's hand-written arms, the `noeta-reactive` dependency). New first-party surface:
+`std.cell` (`Cell<T>`). Perf: reads meet or beat the old intercepts (declared arena reads +
+route cache); write-cycle overhead measured, bounded, and accepted (split gate). Deliberate
+residue for the package-manager milestone: freezing/publishing the ABI, the dynamic registry,
+raw buffers, finalizers.
 
 Each phase = one or more green-gate commits (differential, leak-0 residency, corpus, doc
 samples). H2/H3 land before H4/H5 so the ctx seam is proven by simpler clients before the
