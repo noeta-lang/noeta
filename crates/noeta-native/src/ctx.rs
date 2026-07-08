@@ -73,8 +73,8 @@ pub type CtxDispatch =
 /// The backend capability a higher-order dispatch runs against. Implemented once per backend as
 /// a thin wrapper over the interpreter/VM plus the slot table.
 ///
-/// Growth points (later phases): option/enum inspection (http.serve's accept outcome, H3),
-/// per-run extension state + retained handles (Class 3, H4), a reactive-graph view (H5).
+/// Growth points (later phases): per-run extension state + retained handles (Class 3, H4), a
+/// reactive-graph view (H5).
 pub trait NativeCtx {
     /// The host capability seam — filesystem, clock, network, … (what a plain dispatch receives).
     fn host(&mut self) -> &mut dyn Host;
@@ -133,6 +133,13 @@ pub trait NativeCtx {
     /// pending the slot stays valid for the next round.
     fn poll(&mut self, future: Slot) -> CtxResult<Option<Slot>>;
 
+    /// Drive a future slot **to completion** — the backend's own await loop, with every
+    /// backend-specific progress term (`concurrent`-scope rounds, channel progress, clock,
+    /// external wakes) exactly as `expr.await` has them (H3). For orchestrating *many* futures
+    /// use [`NativeCtx::poll`] rounds; `drive` is for a quick leaf (`http.serve`'s reply write).
+    /// Spends the future slot like a ready poll; the result takes over its index.
+    fn drive(&mut self, future: Slot) -> CtxResult<Slot>;
+
     /// Cancel the task a future slot references (a `race` loser, H2): the scheduler stops polling
     /// it and its join treats it as done; a task that already completed keeps its result.
     /// Cooperative — the task never resumes past its last suspension. A non-task future is a
@@ -166,4 +173,18 @@ pub trait NativeCtx {
     /// (`"int"`, `"list"`, `"future"`, …) — for "found {…}" message parity with the migrated
     /// builtins.
     fn type_name(&mut self, slot: Slot) -> CtxResult<&'static str>;
+
+    /// If the slot holds an `Option::some`, mint its payload as a fresh slot; `None` for
+    /// anything else — `none` *or* a non-`Option` value (the permissive read the accept loops
+    /// use on an outcome that is `some(connection)` / `none = closed`, H3). The inspected slot
+    /// is untouched.
+    fn option_payload(&mut self, slot: Slot) -> CtxResult<Option<Slot>>;
+
+    /// Read a slot's **extern value** through a borrow — extern values live inside backend heap
+    /// cells, so access is callback-shaped rather than a returned reference. The callback
+    /// downcasts via [`crate::ExternValue::as_any`] and copies out what it needs (`http.serve`
+    /// reads `Request::conn` and clones the handler's `NetResponse`). Errs if the slot does not
+    /// hold an extern value; a wrong *concrete* type is the dispatch's own failed downcast.
+    fn with_extern(&mut self, slot: Slot, f: &mut dyn FnMut(&dyn crate::ExternValue))
+        -> CtxResult<()>;
 }

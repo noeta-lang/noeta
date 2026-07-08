@@ -180,6 +180,18 @@ impl NativeCtx for EvalCtx<'_> {
         }
     }
 
+    fn drive(&mut self, future: Slot) -> CtxResult<Slot> {
+        let value = self.get(future)?.clone();
+        match self.interp.drive_future(value, self.span) {
+            Ok(result) => {
+                // Spent like a ready poll: the result takes over the future's index in place.
+                self.slots[future as usize] = Some(result);
+                Ok(future)
+            }
+            Err(_) => Err(CtxError::Abort),
+        }
+    }
+
     fn cancel(&mut self, future: Slot) -> CtxResult<()> {
         let future = self.get(future)?.clone();
         self.interp.cancel_task(&future);
@@ -213,6 +225,33 @@ impl NativeCtx for EvalCtx<'_> {
 
     fn type_name(&mut self, slot: Slot) -> CtxResult<&'static str> {
         Ok(self.get(slot)?.type_name())
+    }
+
+    fn option_payload(&mut self, slot: Slot) -> CtxResult<Option<Slot>> {
+        let payload = match self.get(slot)? {
+            Value::Enum(e) if e.enum_name == "Option" && e.variant == "some" => {
+                e.data.first().cloned().expect("some carries a payload")
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(self.insert(payload)))
+    }
+
+    fn with_extern(
+        &mut self,
+        slot: Slot,
+        f: &mut dyn FnMut(&dyn noeta_stdlib::ExternValue),
+    ) -> CtxResult<()> {
+        match self.get(slot)? {
+            Value::Extern(cell) => {
+                f(&**cell.borrow());
+                Ok(())
+            }
+            _ => Err(CtxError::Std(noeta_stdlib::type_error(
+                "with_extern",
+                "extern value",
+            ))),
+        }
     }
 }
 

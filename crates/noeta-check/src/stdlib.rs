@@ -683,14 +683,10 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
     // (`id` was virtual here until the id-entropy arc de-virtualized it, and `task` until
     // higher-order-abi H0/H2 — the whole module now types through the registry fallback below,
     // its combinators' `T`s recovered by the `SigType::Var` bind-and-substitute.)
-    // `http.serve(port, handler)` (http-server S3): a builtin (the handler is a closure the registry
-    // seam cannot carry), so it is typed here rather than via an `ExtFn`. It runs the accept loop and
-    // yields nothing. Like the `task`/`reactive` builtins, its arguments are not strictly validated
-    // against a declared signature (`module_params` returns `None` for it — the handler's own body is
-    // still checked); strict `handler: (Request) -> Response` validation is a follow-on.
-    if module == "http" && name == "serve" {
-        return Some(Type::Unit);
-    }
+    // (`http.serve` was special-cased here until higher-order-abi H3 — it now types through the
+    // registry fallback below like any ctx function, with a real declared signature: the port is
+    // an `int` and the handler a `Fn(Request) -> dyn`, so a wrong handler shape is finally a
+    // static error.)
     // Migrated modules: the result type comes from the registry's `RetTy`. `SameAsArg(i)` carries the
     // i-th argument's type (`vec.add(v, w): typeof v`); `NumericPreserving` is the `math.abs`/min/max
     // kind-preserving rule; `Concrete` maps directly, with any signature type variables bound from

@@ -203,6 +203,20 @@ impl NativeCtx for VmCtx<'_, '_> {
         }
     }
 
+    fn drive(&mut self, future: Slot) -> CtxResult<Slot> {
+        let value = self.get(future)?;
+        match self.vm.drive_future(value, self.span) {
+            Ok(result) => {
+                // Spent like a ready poll: the result takes over the future's index in place.
+                let entry = &mut self.slots[future as usize];
+                let spent = entry.replace(result).expect("checked by get above");
+                self.vm.release_value(spent);
+                Ok(future)
+            }
+            Err(Abort) => Err(CtxError::Abort),
+        }
+    }
+
     fn cancel(&mut self, future: Slot) -> CtxResult<()> {
         let future = self.get(future)?;
         self.vm.cancel_task(future);
@@ -233,6 +247,40 @@ impl NativeCtx for VmCtx<'_, '_> {
 
     fn type_name(&mut self, slot: Slot) -> CtxResult<&'static str> {
         Ok(self.get(slot)?.type_name())
+    }
+
+    fn option_payload(&mut self, slot: Slot) -> CtxResult<Option<Slot>> {
+        let value = self.get(slot)?;
+        let is_some = value
+            .shape()
+            .map(|s| s.name == "Option" && s.variant.as_deref() == Some("some"))
+            .unwrap_or(false);
+        if !is_some {
+            return Ok(None);
+        }
+        // The payload is shared with the enum; the table takes its own reference.
+        let payload = value
+            .enum_data()
+            .and_then(|d| d.into_iter().next())
+            .expect("some carries a payload");
+        retain(payload);
+        Ok(Some(self.insert(payload)))
+    }
+
+    fn with_extern(
+        &mut self,
+        slot: Slot,
+        f: &mut dyn FnMut(&dyn noeta_stdlib::ExternValue),
+    ) -> CtxResult<()> {
+        let value = self.get(slot)?;
+        if !value.is_extern() {
+            return Err(CtxError::Std(noeta_stdlib::type_error(
+                "with_extern",
+                "extern value",
+            )));
+        }
+        value.with_extern(|e| f(e));
+        Ok(())
     }
 }
 

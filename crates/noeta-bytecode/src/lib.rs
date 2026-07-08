@@ -82,11 +82,8 @@ pub enum Builtin {
     /// signals it reads, and reruns it whenever one of them changes. Returns an `Effect` handle with
     /// `.dispose()`.
     Effect,
-    /// `http.serve(port, handler)` — bind an inbound listener and run the accept→handle→reply loop
-    /// (http-server S3), calling `handler(request)` per connection. Reached by an intercept in
-    /// `call_native_module` on the qualified `http.serve` call (not a bare-name prelude builtin), so
-    /// it needs the executor + inbound Network capability that registry dispatch cannot reach.
-    Serve,
+    // (`http.serve` was the `Serve` variant here until higher-order-abi H3 — migrated onto the
+    // registry's `NativeCtx` dispatch, `noeta-stdlib/src/serve.rs`.)
 }
 
 impl Builtin {
@@ -101,7 +98,6 @@ impl Builtin {
             Builtin::Signal => "signal",
             Builtin::Computed => "computed",
             Builtin::Effect => "effect",
-            Builtin::Serve => "serve",
         }
     }
 

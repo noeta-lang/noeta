@@ -2086,7 +2086,10 @@ const STD_MODULES: &[ExtModule] = &[
         // The optional `headers` argument is a `Map` — needs the deep marshalling that surfaces
         // it as `NativeValue::Map` (http arc H5). url/body strings project fine either way.
         deep_marshal: true,
-        ..ExtModule::DEFAULTS
+        // `serve` — the accept→dispatch→reply loop (higher-order-abi H3): a higher-order
+        // orchestrator (closure handler, many futures in flight), so it lives in the ctx table.
+        ctx_functions: crate::serve::HTTP_CTX_FNS,
+        ctx_dispatch: Some(crate::serve::http_ctx_dispatch),
     },
     ExtModule {
         name: "env",
