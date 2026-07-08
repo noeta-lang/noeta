@@ -138,25 +138,40 @@ feature-selection plumbing.
 
 Bundles are deflate-compressed to <2 KB (orders 1.6 K, hello 87 B), so this is polish, not headline —
 but it's where the README's "aggressiveness / `@reflectable`" decision lives. The dynamic-dispatch
-surface is narrower than it looks:
+surface is **much narrower than an earlier draft of this section claimed** (corrected 2026-07-08 by
+reading the ops):
 - **Statically-named edges** — `MakeClosure { proto }`, `CallMethod` (static method `NameId` at the
   site), **method-handle** materialization (`Type.method` names its `(type, method)` statically).
   All followable in a reachability pass; a method reachable only via a handle is *provably* reachable.
-- **Runtime-string dispatch** — `Op::Invoke` (`name: Reg`, `name_val.as_string()`),
-  `attributes_of(target)`, `roles_of()` key by string. Reflection's designed purpose; handles can't
-  replace it. Only three constructs make reachability statically-unknowable: `invoke` with a
-  non-literal name, `attributes_of` with a non-literal target, and `roles_of()` (reads the whole role
-  index). These are **detectable** in the bytecode.
+- **The reflection *metadata* queries are closed-world, not runtime strings.** `attributes_of::<T>()`
+  → `Op::AttributesOf { type_name }` — a **turbofish**, the attribute type resolved at compile time
+  ("closed-world" per the op doc), NOT a runtime target. `roles_of()` → `Op::RolesOf` — also
+  closed-world, but reads the **whole** role index. `type_of(value)` → `Op::TypeOf` — builds a
+  `TypeRepr` from the value's runtime *shape*, and doesn't read the attribute manifest at all. So
+  `attributes_of` is **not** an escape hatch (an earlier version of this doc wrongly listed it as one).
+- **The only genuine runtime-string dispatch is `Op::Invoke`** (`name: Reg`, `name_val.as_string()`) —
+  and it resolves against the **method table**, not `ReflectionInfo`, so it keeps *methods* reachable,
+  not attribute/role *metadata*.
+
+Net: the reflection-metadata reachability is essentially **static and closed-world**. The manifest is
+queried by attribute type (scan `Op::AttributesOf` names → keep only those `AttributeRecord`s);
+`Op::TypeOf` needs only shapes. The one remaining all-or-nothing query is `Op::RolesOf` (present ⇒
+keep all `RoleRecord`s). **Reflection refinement (tie to this axis): make `roles_of::<RoleEnum>()` a
+turbofish** mirroring `attributes_of::<T>()`, so the role index is queried by role-enum and DCE keeps
+only the queried enums' records — removing the last all-or-nothing case. Language-surface change, so
+it rides with the Axis C / reflection decision, not the module split.
 
 **Tier 0 (safe floor):** strip only unreachable free-function protos via the static edge set; keep
 all methods + all reflection. Zero risk.
-**Tier 1 (RECOMMENDED, sound):** additionally drop methods / type reflection records unreachable
-through the static edges **when the bytecode contains none of the three escape hatches** — the scan
-is the soundness gate; reflective programs keep their metadata automatically. No `@reflectable`, no
-language change.
-**Tier 2 (`@reflectable`, DEFER):** for programs that *do* dispatch reflectively but still want to
-strip. Needs a new language attribute + checker + migration and **changes semantics** for un-annotated
-types. A language-surface decision on its own — not folded in silently.
+**Tier 1 (RECOMMENDED, sound):** additionally drop unreachable methods, plus `AttributeRecord`s whose
+attribute type no `Op::AttributesOf` names, plus all `RoleRecord`s iff no `Op::RolesOf` is present
+(or, with the `roles_of::<RoleEnum>()` refinement, the unqueried enums'). The soundness gate is just
+`Op::Invoke` — a program that dispatches by runtime string keeps its methods conservatively. No
+`@reflectable`, no language change; the reflection *metadata* strip needs no gate at all (closed-world).
+**Tier 2 (`@reflectable`, DEFER — likely unnecessary):** would only add value for the residual
+`Op::Invoke` case (keeping method *code* a dynamic name might reach). Given how narrow that is, this
+may never be worth the new attribute + checker + migration + semantics change. Revisit only if a real
+`invoke`-heavy program shows measurable metadata bloat.
 
 ## Recommendation
 
@@ -176,7 +191,7 @@ carried); bench rule (A and B are build-time/size only, no hot path; C Tier 1 bu
 3. **A3** point `noeta-aot-runtime` at `aot`-only; rebuild archive; **measure size**; AOT differential green.
 4. **B1** feature-gate stdlib rings + RealHost capabilities; default features = all (workspace unchanged).
 5. **B2** `noeta build --native` footprint scan → per-program `--features`; archive cache; **measure size** on http-using vs http-free programs; AOT + base differential green over the full corpus.
-6. **C1** reachability pass (Tier 1 + escape-hatch gate); renumber + fixup; differentials green; report byte delta.
+6. **C1** reachability pass (Tier 1): strip unreachable protos + `AttributeRecord`s no `Op::AttributesOf` names + `RoleRecord`s if no `Op::RolesOf`; the only method-reachability gate is `Op::Invoke`. Renumber + fixup; differentials green; report byte delta. (Optional `roles_of::<RoleEnum>()` refinement is a separate language change.)
 7. Docs + memory; Tier 2 left explicitly open.
 
 Nothing pushed without authorization.
