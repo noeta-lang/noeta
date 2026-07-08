@@ -30,6 +30,13 @@ fn bad_slot() -> CtxError {
     })
 }
 
+fn bad_retained() -> CtxError {
+    CtxError::Std(StdError {
+        kind: noeta_stdlib::ErrorKind::UnknownName,
+        message: "internal: a native dispatch used a freed retained handle".to_string(),
+    })
+}
+
 impl<'i> EvalCtx<'i> {
     pub(crate) fn new(interp: &'i mut Interpreter, args: &[Value], span: Span) -> EvalCtx<'i> {
         EvalCtx {
@@ -253,9 +260,118 @@ impl NativeCtx for EvalCtx<'_> {
             ))),
         }
     }
+
+    // ----- Class 3 (H4): the interpreter twins of the VM's arena/state fields; entries are
+    // `Rc` clones, so ownership is automatic. -----
+
+    fn state(
+        &mut self,
+        key: &'static str,
+        init: fn() -> Box<dyn std::any::Any>,
+    ) -> noeta_stdlib::ExtState {
+        if let Some((_, state)) = self.interp.ext_state.iter().find(|(k, _)| *k == key) {
+            return state.clone();
+        }
+        let state: noeta_stdlib::ExtState = std::rc::Rc::new(std::cell::RefCell::new(init()));
+        self.interp.ext_state.push((key, state.clone()));
+        state
+    }
+
+    fn retain(&mut self, slot: Slot) -> CtxResult<noeta_stdlib::Retained> {
+        let value = self.get(slot)?.clone();
+        Ok(if let Some(index) = self.interp.ext_arena_free.pop() {
+            self.interp.ext_arena[index as usize] = Some(value);
+            index
+        } else {
+            self.interp.ext_arena.push(Some(value));
+            (self.interp.ext_arena.len() - 1) as noeta_stdlib::Retained
+        })
+    }
+
+    fn retained_get(&mut self, retained: noeta_stdlib::Retained) -> CtxResult<Slot> {
+        let value = self
+            .interp
+            .ext_arena
+            .get(retained as usize)
+            .and_then(Option::as_ref)
+            .cloned()
+            .ok_or_else(bad_retained)?;
+        Ok(self.insert(value))
+    }
+
+    fn retained_set(&mut self, retained: noeta_stdlib::Retained, slot: Slot) -> CtxResult<()> {
+        let new = self.get(slot)?.clone();
+        let old = match self.interp.ext_arena.get_mut(retained as usize) {
+            Some(entry @ Some(_)) => entry.replace(new).expect("checked above"),
+            _ => return Err(bad_retained()),
+        };
+        // Destructor-aware, like the VM's `release_value`: this may be the old value's last
+        // reference, and its `destruct` must fire now (deterministic destruction).
+        self.interp.destroy_value(old);
+        Ok(())
+    }
+
+    fn release_retained(&mut self, retained: noeta_stdlib::Retained) {
+        if let Some(value) = self
+            .interp
+            .ext_arena
+            .get_mut(retained as usize)
+            .and_then(Option::take)
+        {
+            self.interp.destroy_value(value);
+            self.interp.ext_arena_free.push(retained);
+        }
+    }
 }
 
 impl Interpreter {
+    /// Call a registered extern type's **higher-order method** (higher-order-abi H4) — the
+    /// tree-walker twin of the VM's `call_ctx_type_method`. The receiver rides as slot 0.
+    pub(crate) fn call_ctx_type_method(
+        &mut self,
+        type_name: &'static str,
+        recv: Value,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Eval<Value> {
+        let mut all = Vec::with_capacity(args.len() + 1);
+        all.push(recv);
+        all.extend_from_slice(args);
+        let mut ctx = EvalCtx::new(self, &all, span);
+        let arg_slots: Vec<Slot> = (1..all.len() as Slot).collect();
+        let outcome = noeta_stdlib::registry::dispatch_ctx_method(
+            type_name, method, &mut ctx, 0, &arg_slots,
+        );
+        match outcome {
+            Ok(CtxOut::Slot(slot)) => {
+                let result = ctx.take(slot);
+                drop(ctx);
+                match result {
+                    Ok(value) => Ok(value),
+                    Err(_) => Err(self.runtime_error(
+                        DiagnosticCode::Panic,
+                        span,
+                        format!("internal: `{type_name}.{method}` returned a freed slot"),
+                    )),
+                }
+            }
+            Ok(CtxOut::Out(out)) => {
+                drop(ctx);
+                let ret = noeta_stdlib::registry::find_type_ctx_method(type_name, method)
+                    .map(|f| f.ret)
+                    .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit));
+                Ok(materialize_ext(out, ret, &all))
+            }
+            Err(CtxError::Std(e)) => {
+                drop(ctx);
+                Err(self.runtime_error(std_error_code(e.kind), span, e.message))
+            }
+            // The abort's diagnostic is already recorded (the re-entry recorded it); propagate.
+            Err(CtxError::Abort) => Err(Unwind::Abort),
+        }
+    }
+
     /// Call a registered **higher-order** native function (higher-order-abi H0) — the tree-walker
     /// twin of the VM's `call_ctx_function`. The dispatch body is shared, so the backends agree
     /// by construction.

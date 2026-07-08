@@ -17,7 +17,9 @@ pub mod map_key;
 pub mod net;
 pub mod registry;
 
-pub use ctx::{ctx_arity, CtxDispatch, CtxError, CtxOut, CtxResult, NativeCtx, Slot};
+pub use ctx::{
+    ctx_arity, CtxDispatch, CtxError, CtxOut, CtxResult, ExtState, NativeCtx, Retained, Slot,
+};
 pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};
 pub use host::{Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, ReadSource, Rng};

@@ -12,7 +12,7 @@ class Box {
     fn new(n: int): Box { return Box { n: n }; }
 }
 
-struct Cell { mut n: int }
+struct Counter { mut n: int }
 
 mut b = Box.new(10);
 alias = b;       // shares the same instance
@@ -20,7 +20,7 @@ b.n = 20;        // in-place mutation of the shared class instance
 echo alias.n;    // 20 — the alias sees it
 echo b.n;        // 20
 
-mut c = Cell { n: 1 };
+mut c = Counter { n: 1 };
 snap = c;        // a value snapshot
 c.n = 9;         // copy-on-write: builds a new value, rebinds `c`
 echo snap.n;     // 1 — the snapshot keeps the old value

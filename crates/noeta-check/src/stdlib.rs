@@ -54,13 +54,6 @@ pub(super) fn is_std_module(name: &str) -> bool {
     registry::find_module(name).is_some() || registry::is_virtual_module(name)
 }
 
-/// Map the registry's neutral [`registry::SigType`] onto a checker [`Type`], variable-free
-/// signatures only — the common case. A signature using [`registry::SigType::Var`] goes through
-/// [`sig_to_type_bound`] with bindings from the call site; here a stray variable is a hole.
-fn sig_to_type(sig: &registry::SigType) -> Type {
-    sig_to_type_bound(sig, &[])
-}
-
 /// Map a [`registry::SigType`] onto a checker [`Type`] under call-site variable `bindings`
 /// (higher-order-abi H1): `Var(n)` becomes its bound type, or a gradual hole when the call's
 /// arguments never determined it — permissive, never a wrong concrete type.
@@ -97,6 +90,11 @@ fn sig_to_type_bound(sig: &registry::SigType, bindings: &[Option<Type>]) -> Type
             .get(*n as usize)
             .and_then(Clone::clone)
             .unwrap_or(Type::Unknown),
+        // A generic extern-type instantiation (higher-order-abi H4): `cell.new(v: A) -> Cell<A>`.
+        SigType::Generic(n, args) => Type::Named(
+            (*n).to_string(),
+            args.iter().map(|a| sig_to_type_bound(a, bindings)).collect(),
+        ),
     }
 }
 
@@ -147,8 +145,21 @@ fn bind_sig(sig: &registry::SigType, arg: &Type, bindings: &mut Vec<Option<Type>
             bind_sig(r, ret, bindings);
         }
         (SigType::Optional(s), t) => bind_sig(s, t, bindings),
+        (SigType::Generic(n, sargs), Type::Named(an, aargs)) if n == an => {
+            for (s, a) in sargs.iter().zip(aargs) {
+                bind_sig(s, a, bindings);
+            }
+        }
         _ => {}
     }
+}
+
+/// Seed variable bindings for an extern-type **method** from the receiver's type arguments
+/// (higher-order-abi H4): `Var(i)` = the receiver's i-th argument, so `Cell<int>.get() -> Var(0)`
+/// recovers `int` and `.set(v: Var(0))` demands one. Call arguments may bind later variables via
+/// the ordinary [`bind_sig`] walk on top of this seed.
+fn receiver_bindings(receiver_args: &[Type]) -> Vec<Option<Type>> {
+    receiver_args.iter().cloned().map(Some).collect()
 }
 
 fn list(t: Type) -> Type {
@@ -199,11 +210,12 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         Type::Named(n, _) if n == EFFECT => effect_method(name),
         // A registered extern type's methods come from its `ExtType` signature table
         // (extern-types X1) — the registry is the single source, so a new native type never
-        // edits this file.
-        Type::Named(n, _) if registry::find_type(n).is_some() => {
-            let sig = registry::find_type_method(n, name)?;
+        // edits this file. A generic extern type's method signatures reference the receiver's
+        // type arguments as `Var(i)` (H4): `Cell<int>.get()` is `int`.
+        Type::Named(n, targs) if registry::find_type(n).is_some() => {
+            let sig = registry::find_type_method_sig(n, name)?;
             Some(match sig.ret {
-                registry::RetTy::Concrete(s) => sig_to_type(&s),
+                registry::RetTy::Concrete(s) => sig_to_type_bound(&s, &receiver_bindings(targs)),
                 _ => Type::Dyn,
             })
         }
@@ -471,10 +483,17 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
             _ => return None,
         }),
         // A registered extern type's method parameters come from its `ExtType` signature table
-        // (extern-types X1), like `method_return`.
-        Type::Named(n, _) if registry::find_type(n).is_some() => {
-            let sig = registry::find_type_method(n, name)?;
-            Some(sig.params.iter().map(sig_to_type).collect())
+        // (extern-types X1), like `method_return`, with the receiver's type arguments seeding
+        // any variables (H4): `Cell<int>.set(v)` demands an `int`.
+        Type::Named(n, targs) if registry::find_type(n).is_some() => {
+            let sig = registry::find_type_method_sig(n, name)?;
+            let bindings = receiver_bindings(targs);
+            Some(
+                sig.params
+                    .iter()
+                    .map(|p| sig_to_type_bound(p, &bindings))
+                    .collect(),
+            )
         }
         _ => None,
     }
@@ -494,7 +513,7 @@ pub(super) fn method_required(receiver: &Type, name: &str) -> Option<usize> {
     if let Type::Named(n, _) = receiver
         && registry::find_type(n).is_some()
     {
-        return registry::find_type_method(n, name)
+        return registry::find_type_method_sig(n, name)
             .map(|sig| registry::SigType::required_count(sig.params));
     }
     None

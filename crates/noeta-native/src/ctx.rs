@@ -14,6 +14,10 @@
 //! so the differential holds by construction — the registry's core promise, extended to
 //! orchestration code. See `plans/higher-order-abi/README.md`.
 
+use std::any::Any;
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::executor::ExternIo;
 use crate::host::Host;
 use crate::registry::{NativeOut, NativeValue};
@@ -24,6 +28,22 @@ use crate::StdError;
 /// slots), [`NativeCtx::free`] releases one early (long loops must — the table otherwise lives to
 /// the end of the dispatch), and the backend releases whatever remains when the dispatch returns.
 pub type Slot = u32;
+
+/// An opaque handle to one language value held in the backend's **per-run retained arena**
+/// (Class 3, higher-order-abi H4) — how an extension owns values *across* dispatches. Unlike a
+/// [`Slot`] (per-call, auto-released), a `Retained` lives until [`NativeCtx::release_retained`]
+/// or program teardown. The extension stores these ids in its own state or inside extern boxes
+/// (`Cell` holds one; a reactive node holds one per signal) — the **values** stay backend-side,
+/// which is what makes them visible to the refcount discipline, the leak oracle, and the cycle
+/// collector, and is why extern boxes stay plain `Send` data.
+pub type Retained = u32;
+
+/// An extension's per-run Rust state, as handed out by [`NativeCtx::state`]. `Rc<RefCell<…>>`
+/// rather than a `&mut` borrow so a dispatch can hold its state *around* ctx re-entries — the
+/// discipline is: **drop the borrow before every `ctx.call`/`poll`** (a called closure may
+/// re-enter the same extension and borrow the same cell; the reactive flush loop is the shape
+/// this is designed for). Language values never go in here — they go in the retained arena.
+pub type ExtState = Rc<RefCell<Box<dyn Any>>>;
 
 /// Why a ctx operation failed.
 #[derive(Debug)]
@@ -187,4 +207,29 @@ pub trait NativeCtx {
     /// hold an extern value; a wrong *concrete* type is the dispatch's own failed downcast.
     fn with_extern(&mut self, slot: Slot, f: &mut dyn FnMut(&dyn crate::ExternValue))
         -> CtxResult<()>;
+
+    // ----- Class 3: per-run extension state + the retained-value arena (H4) -----
+
+    /// The dispatching extension's **per-run Rust state**, created by `init` on first access and
+    /// living until program teardown. `key` namespaces it (one per extension module/family —
+    /// `"std.cell"`, `"std.reactive"`). See [`ExtState`] for the borrow discipline around
+    /// re-entry. Plain data only — language values belong in the retained arena.
+    fn state(&mut self, key: &'static str, init: fn() -> Box<dyn Any>) -> ExtState;
+
+    /// Move a slot's value into the per-run **retained arena** — the extension now owns one
+    /// reference to it across dispatches (the slot itself stays valid and table-owned). The
+    /// arena is a root set the backend enumerates: the cycle collector traces it, teardown
+    /// releases whatever the program never released, and the leak oracle proves the exactness.
+    fn retain(&mut self, slot: Slot) -> CtxResult<Retained>;
+
+    /// Mint a fresh slot viewing a retained value (the arena keeps its reference) — the `get`.
+    fn retained_get(&mut self, retained: Retained) -> CtxResult<Slot>;
+
+    /// Replace a retained value with a slot's value — the `set`: the arena releases the old
+    /// value (running its destructor on last reference) and takes its own reference to the new.
+    fn retained_set(&mut self, retained: Retained, slot: Slot) -> CtxResult<()>;
+
+    /// Release a retained value and free its arena cell (the id may be reused). Releasing an
+    /// already-freed id is a no-op, so extension teardown paths need not track liveness.
+    fn release_retained(&mut self, retained: Retained);
 }

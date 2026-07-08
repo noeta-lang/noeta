@@ -1,0 +1,18 @@
+// std.cell (higher-order-abi H4) — the Class-3 proving client: `cell.new(v)` retains the value in
+// the extensions' per-run arena and yields a `Cell<T>` handle; `get`/`set` read and replace it.
+// Copies of the handle alias the one box (reference semantics — the point of a cell), and equality
+// is identity: two cells over equal values are still different cells.
+// expect: stdout "1"
+// expect: stdout "2"
+// expect: stdout "2"
+// expect: stdout "alias=true distinct=false"
+// expect: exit 0
+use std.{cell}
+a = cell.new(1)
+echo a.get()
+a.set(2)
+echo a.get()
+b = a
+echo b.get()
+c = cell.new(2)
+echo "alias=${a == b} distinct=${a == c}"

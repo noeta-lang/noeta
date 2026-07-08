@@ -663,6 +663,13 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
+        // A type's **higher-order** methods (higher-order-abi H4) route through the ctx seam —
+        // they call closures back and reach the retained arena, which the plain by-value
+        // dispatch below cannot. Name sets are disjoint, so routing is per-method.
+        let type_name = recv.with_extern(|e| e.type_name());
+        if noeta_stdlib::registry::find_type_ctx_method(type_name, method).is_some() {
+            return self.call_ctx_type_method(type_name, recv, method, args, span);
+        }
         let nargs: Vec<noeta_stdlib::NativeValue> =
             args.iter().map(|a| marshal_native_arg(*a)).collect();
         let host = &mut *self.host;

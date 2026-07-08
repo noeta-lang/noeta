@@ -31,7 +31,7 @@ Aliasing makes the difference concrete:
 class Box { pub mut n: int
     fn new(v: int): Box { return Box { n: v } }
 }
-struct Cell { mut n: int }
+struct Counter { mut n: int }
 
 // class: an alias sees in-place mutation
 mut b = Box.new(10)
@@ -40,7 +40,7 @@ b.n = 20
 echo alias.n         // 20
 
 // struct: a snapshot keeps the old value (copy-on-write)
-mut c = Cell { n: 1 }
+mut c = Counter { n: 1 }
 snap = c
 c.n = 9
 echo snap.n          // 1

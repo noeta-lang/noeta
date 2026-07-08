@@ -159,8 +159,17 @@ pub enum SigType {
     /// -> List<Var(0)>`. The checker binds each variable at its first structural occurrence in the
     /// call's argument types and substitutes the bindings into the remaining parameters and the
     /// return, replacing the hand-written per-function checker arms the `Builtin` family needed.
+    /// For an extern-type **method**, the receiver's type arguments seed the variables first
+    /// (`Cell<T>.get() -> Var(0)` recovers `T`), then the call's arguments bind the rest.
     /// An unbound variable is a gradual hole (`Unknown`), never a wrong concrete type.
     Var(u8),
+    /// A **generic nominal instantiation** (higher-order-abi H4) — a generic extern type in a
+    /// signature position: `cell.new(v: Var(0)) -> Generic("Cell", &[Var(0)])` types as
+    /// `Cell<T>` with `T` bound from the argument. The plain [`SigType::Named`] stays the
+    /// monomorphic form. (Type arguments are a static-checker artifact — at runtime an extern
+    /// value reflects as its bare nominal name, exactly as the reactive handles it generalizes
+    /// reflected as `dyn`.)
+    Generic(&'static str, &'static [SigType]),
 }
 
 impl SigType {
@@ -290,10 +299,28 @@ pub type TypeDispatch = fn(
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError>;
 
+/// A type's **higher-order** method dispatch (higher-order-abi H4): like [`TypeDispatch`], but
+/// the receiver and arguments arrive as opaque ctx slots and the body may re-enter the backend —
+/// call closures, reach per-run state, read/write the retained arena. What `Cell.update(f)` and
+/// the reactive handle methods need. The receiver slot is not consumed; downcast its plain data
+/// via [`crate::NativeCtx::with_extern`].
+pub type CtxTypeDispatch = fn(
+    method: &str,
+    ctx: &mut dyn crate::NativeCtx,
+    recv: crate::Slot,
+    args: &[crate::Slot],
+) -> Result<crate::CtxOut, crate::CtxError>;
+
 /// A first-class value type contributed by an extension (extern-types X1): a reserved type name,
 /// its instance-method signatures, their shared dispatch, and the key capability the checker
 /// reads. The value behavior itself (equality, ordering, hash, display) lives on the
 /// [`crate::ExternValue`] impl the type's constructors box up.
+///
+/// A **generic** extern type (`Cell<T>`, higher-order-abi H4) declares nothing extra here: its
+/// constructor's return names the instantiation ([`SigType::Generic`]) and its method signatures
+/// reference the receiver's type arguments as [`SigType::Var`] (`Var(0)` = first argument) — the
+/// checker seeds the variables from the receiver's static type. At runtime the value is tagged
+/// with the bare nominal name only.
 #[derive(Debug, Clone, Copy)]
 pub struct ExtType {
     /// The surface type name (`Uuid`). Reserved: a user declaration of this name is E0049.
@@ -305,6 +332,28 @@ pub struct ExtType {
     /// methods, [`crate::ExternValue::cmp_value`] is a total order over the kind, and
     /// [`crate::ExternValue::hash_value`] is stable and content-derived.
     pub key_capable: bool,
+    /// The type's **higher-order** method signatures (H4) — calls route to
+    /// [`ExtType::ctx_dispatch`] with slot arguments. Disjoint from `methods` by name.
+    pub ctx_methods: &'static [ExtFn],
+    pub ctx_dispatch: Option<CtxTypeDispatch>,
+}
+
+impl ExtType {
+    /// Literal-shortening defaults (`..ExtType::DEFAULTS`), mirroring [`ExtModule::DEFAULTS`]:
+    /// a plain-data extern type declares no higher-order surface.
+    pub const DEFAULTS: ExtType = ExtType {
+        name: "",
+        methods: &[],
+        dispatch: |_, method, _, _| {
+            Err(StdError {
+                kind: crate::ErrorKind::UnknownName,
+                message: format!("internal: no method dispatch registered (method `{method}`)"),
+            })
+        },
+        key_capable: false,
+        ctx_methods: &[],
+        ctx_dispatch: None,
+    };
 }
 
 /// A bundle of native modules and types registered into the language. Core implements this once

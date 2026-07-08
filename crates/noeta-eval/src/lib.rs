@@ -1104,6 +1104,14 @@ struct Interpreter {
     /// `Value`s — `Rc`-shared, so the graph's clones/drops are refcount-correct for free, no wrapper
     /// needed (unlike the VM's `GcVal`). Cleared at program end so held values drop.
     reactive: std::rc::Rc<noeta_reactive::ReactiveGraph<Value>>,
+    /// The extensions' retained-value arena (higher-order-abi H4) — the tree-walker twin of the
+    /// VM's `ext_arena`. Entries are `Rc` clones, so ownership is automatic (dropping the
+    /// interpreter drops whatever the program never released, mirroring the VM's teardown
+    /// release); freed indices are reused via `ext_arena_free`.
+    ext_arena: Vec<Option<Value>>,
+    ext_arena_free: Vec<u32>,
+    /// Per-run extension Rust state (`NativeCtx::state`, H4), keyed by the extension's own key.
+    ext_state: Vec<(&'static str, noeta_stdlib::ExtState)>,
     /// The shared reflection artifact (attribute manifest + type registry), built from the program
     /// by the *same* `noeta_ast::reflect::build` the VM uses — so `attributes_of` materializes
     /// identical values in both backends. Populated at the start of `run`.
@@ -1184,6 +1192,9 @@ impl Interpreter {
             channels: Vec::new(),
             channel_progress: 0,
             reactive: std::rc::Rc::new(noeta_reactive::ReactiveGraph::new()),
+            ext_arena: Vec::new(),
+            ext_arena_free: Vec::new(),
+            ext_state: Vec::new(),
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
             call_sites: Vec::new(),
@@ -2927,6 +2938,14 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
+        // A type's **higher-order** methods (higher-order-abi H4) route through the ctx seam —
+        // they call closures back and reach the retained arena, which the plain by-value
+        // dispatch below cannot. Name sets are disjoint, so routing is per-method.
+        let type_name = cell.borrow().type_name();
+        if noeta_stdlib::registry::find_type_ctx_method(type_name, name).is_some() {
+            let recv = Value::Extern(Rc::clone(cell));
+            return self.call_ctx_type_method(type_name, recv, name, args, span);
+        }
         let nargs: Vec<noeta_stdlib::NativeValue> = args.iter().map(marshal_native_arg).collect();
         // `cell` is an independent `Rc`, so borrowing it and `self.host` at once is fine (the
         // FileHandle discipline).

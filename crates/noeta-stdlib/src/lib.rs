@@ -33,6 +33,7 @@
 // `noeta_stdlib::` path resolves unchanged.
 pub use noeta_native::*;
 
+pub mod cell;
 pub mod crypto;
 pub mod env;
 pub mod fs;

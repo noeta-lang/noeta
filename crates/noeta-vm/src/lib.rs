@@ -732,6 +732,18 @@ struct Vm<'m> {
     /// the VM's manual refcounts exact; it is cleared at program end so held values are released
     /// (the leak oracle's residency returns to 0).
     reactive: Rc<ReactiveGraph<GcVal>>,
+    /// The extensions' **retained-value arena** (higher-order-abi H4, Class 3): every `Some`
+    /// entry owns one reference to a language value an extension holds *across* dispatches
+    /// (`NativeCtx::retain`/`retained_get`/`retained_set`/`release_retained`); freed indices are
+    /// reused via `ext_arena_free`. The arena is a first-class **root set**: teardown feeds it
+    /// into the trace collector's roots and then releases every remaining entry (exactly the
+    /// reactive graph's treatment), so residency returns to 0 whatever the program forgot.
+    ext_arena: Vec<Option<Value>>,
+    ext_arena_free: Vec<u32>,
+    /// Per-run extension Rust state (`NativeCtx::state`, H4): plain data keyed by the
+    /// extension's own `'static` key, created on first access, dropped at VM drop. Language
+    /// values never live here — they go through the arena above.
+    ext_state: Vec<(&'static str, noeta_stdlib::ExtState)>,
     /// Real OS-thread isolates (isolates I.4b), CLI-only / out-of-oracle. `parallel_isolates` selects
     /// the real path in the `Op::SpawnIsolate` handler; `isolate_module` is an `Arc` clone of the
     /// compiled module (`Send + Sync`) the entry point holds *alongside* the `&Module` borrow, so a
@@ -1797,6 +1809,9 @@ impl<'m> Vm<'m> {
             channels: Vec::new(),
             channel_progress: 0,
             reactive: Rc::new(ReactiveGraph::new()),
+            ext_arena: Vec::new(),
+            ext_arena_free: Vec::new(),
+            ext_state: Vec::new(),
             parallel_isolates: false,
             isolate_module: None,
             isolate_factory: None,
@@ -2280,6 +2295,11 @@ impl<'m> Vm<'m> {
             // reclaim a still-referenced value out from under the graph (which `reactive.clear()` below
             // would then double-free). The reactive analogue of scanning the channel buffers.
             self.reactive.for_each_value(|gv| roots.push(gv.get()));
+            // The extensions' retained arena (higher-order-abi H4) holds a `+1` on every value
+            // an extension owns across dispatches — the same graph treatment: feed them in as
+            // roots so the sweep cannot reclaim a value the arena release below would then
+            // double-free.
+            roots.extend(self.ext_arena.iter().copied().flatten());
             let garbage = collect_trace(&roots);
             self.reclaim_cycle_garbage(garbage);
         }
@@ -2297,6 +2317,14 @@ impl<'m> Vm<'m> {
         // program still own their content until here. Dropping the nodes fires each `GcVal`'s `Drop`, so
         // residency returns to zero — the leak oracle's proof that the graph's refcounting is exact.
         self.reactive.clear();
+        // Release every value still in the extensions' retained arena (higher-order-abi H4):
+        // values an extension held across dispatches and the program never released (an
+        // undisposed `Cell`, an undisposed signal once reactive migrates). Destructor-aware, so
+        // residency returns to zero — the leak oracle's proof the arena's refcounting is exact.
+        for value in std::mem::take(&mut self.ext_arena).into_iter().flatten() {
+            self.release_value(value);
+        }
+        self.ext_arena_free.clear();
         // Destroy the globals at program end in reverse declaration order, running each
         // destructor on its last reference — the deterministic destruction the spec requires.
         for slot in self.global_order.clone().into_iter().rev() {

@@ -182,6 +182,13 @@ impl Interpreter {
         // value kept alive only by an undisposed signal drops here — the tree-walker twin of the VM's
         // `vm.reactive.clear()`, keeping the leak oracle's residency at 0.
         self.reactive.clear();
+        // Release every value still in the extensions' retained arena (higher-order-abi H4) —
+        // destructor-aware, mirroring the VM's teardown release, so a `destruct`-bearing value
+        // left in an extension (an undisposed `Cell`) fires identically on both backends.
+        for value in std::mem::take(&mut self.ext_arena).into_iter().flatten() {
+            self.destroy_value(value);
+        }
+        self.ext_arena_free.clear();
         self.destroy_globals();
         // Reap cycles left after teardown so residency reaches 0: closure-capture cycles (Phase 6.3)
         // and reference-`class` field cycles (object-model slice 2c).

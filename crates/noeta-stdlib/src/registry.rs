@@ -42,30 +42,43 @@ const STD_TYPES: &[ExtType] = &[
         methods: UUID_METHODS,
         dispatch: uuid_method_dispatch,
         key_capable: true,
+        ..ExtType::DEFAULTS
     },
     ExtType {
         name: "FileHandle",
         methods: FILE_HANDLE_METHODS,
         dispatch: file_handle_dispatch,
         key_capable: false,
+        ..ExtType::DEFAULTS
     },
     ExtType {
         name: crate::crypto::HASHER_TYPE_NAME,
         methods: HASHER_METHODS,
         dispatch: hasher_method_dispatch,
         key_capable: false, // `update` mutates — a hasher can never key a map
+        ..ExtType::DEFAULTS
     },
     ExtType {
         name: crate::net::RESPONSE_TYPE_NAME,
         methods: RESPONSE_METHODS,
         dispatch: response_method_dispatch,
         key_capable: false, // a response is not a map key
+        ..ExtType::DEFAULTS
     },
     ExtType {
         name: crate::net::REQUEST_TYPE_NAME,
         methods: REQUEST_METHODS,
         dispatch: request_method_dispatch,
         key_capable: false, // an inbound request is not a map key
+        ..ExtType::DEFAULTS
+    },
+    // `Cell<T>` (higher-order-abi H4) — the generic, Class-3 corner of the matrix: all methods
+    // higher-order (ctx table), the held value in the retained arena.
+    ExtType {
+        name: crate::cell::CELL_TYPE_NAME,
+        ctx_methods: crate::cell::CELL_CTX_METHODS,
+        ctx_dispatch: Some(crate::cell::cell_ctx_method_dispatch),
+        ..ExtType::DEFAULTS
     },
 ];
 
@@ -214,6 +227,36 @@ pub fn find_type_method(type_name: &str, method: &str) -> Option<&'static ExtFn>
         .methods
         .iter()
         .find(|m| m.name == method)
+}
+
+/// Find a registered extern type's **higher-order** method signature (higher-order-abi H4) —
+/// methods that dispatch through the ctx seam ([`ExtType::ctx_dispatch`]).
+pub fn find_type_ctx_method(type_name: &str, method: &str) -> Option<&'static ExtFn> {
+    find_type(type_name)?
+        .ctx_methods
+        .iter()
+        .find(|m| m.name == method)
+}
+
+/// A type method's signature from **either** table — what the checker consults (it doesn't care
+/// how a call dispatches). The type-method twin of [`find_function_sig`].
+pub fn find_type_method_sig(type_name: &str, method: &str) -> Option<&'static ExtFn> {
+    find_type_method(type_name, method).or_else(|| find_type_ctx_method(type_name, method))
+}
+
+/// Route a **higher-order** method call to its type's ctx dispatch (higher-order-abi H4) — the
+/// type-method twin of [`dispatch_ctx`].
+pub fn dispatch_ctx_method(
+    type_name: &str,
+    method: &str,
+    ctx: &mut dyn crate::NativeCtx,
+    recv: crate::Slot,
+    args: &[crate::Slot],
+) -> Result<crate::CtxOut, crate::CtxError> {
+    match find_type(type_name).and_then(|t| t.ctx_dispatch) {
+        Some(d) => d(method, ctx, recv, args),
+        None => Err(crate::no_method_error(type_name, method).into()),
+    }
 }
 
 /// Dispatch a method on an extern receiver through its registered [`ExtType`]. Returns the
@@ -2141,6 +2184,14 @@ const STD_MODULES: &[ExtModule] = &[
         name: "task",
         ctx_functions: crate::task::TASK_CTX_FNS,
         ctx_dispatch: Some(crate::task::task_ctx_dispatch),
+        ..ExtModule::DEFAULTS
+    },
+    // `cell` (higher-order-abi H4) — the Class-3 proving module: `cell.new(v)` retains the value
+    // in the per-run arena and hands back a `Cell<T>` extern handle.
+    ExtModule {
+        name: "cell",
+        ctx_functions: crate::cell::CELL_CTX_FNS,
+        ctx_dispatch: Some(crate::cell::cell_ctx_dispatch),
         ..ExtModule::DEFAULTS
     },
 ];
