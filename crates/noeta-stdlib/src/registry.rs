@@ -119,6 +119,26 @@ const STD_TYPES: &[ExtType] = &[
         }),
         ..ExtType::DEFAULTS
     },
+    // The CRDT value types (p2p P0): plain-data, immutable, content-equal extern values wrapping
+    // the `noeta-crdt` convergence core. All pure — no arena, no ctx seam, not key-capable.
+    ExtType {
+        name: crate::crdt::GCOUNTER_TYPE_NAME,
+        methods: crate::crdt::GCOUNTER_METHODS,
+        dispatch: crate::crdt::GCOUNTER_DISPATCH,
+        ..ExtType::DEFAULTS
+    },
+    ExtType {
+        name: crate::crdt::PNCOUNTER_TYPE_NAME,
+        methods: crate::crdt::PNCOUNTER_METHODS,
+        dispatch: crate::crdt::PNCOUNTER_DISPATCH,
+        ..ExtType::DEFAULTS
+    },
+    ExtType {
+        name: crate::crdt::GSET_TYPE_NAME,
+        methods: crate::crdt::GSET_METHODS,
+        dispatch: crate::crdt::GSET_DISPATCH,
+        ..ExtType::DEFAULTS
+    },
 ];
 
 /// The `FileHandle` instance methods (extern-types X3) — the signatures the checker's
@@ -2220,6 +2240,13 @@ const STD_MODULES: &[ExtModule] = &[
         ctx_dispatch: Some(|func, ctx, args| {
             crate::reactive::reactive_ctx_dispatch(func, ctx, args)
         }),
+        ..ExtModule::DEFAULTS
+    },
+    // `crdt` (p2p P0) — the CRDT constructors; a plain value-in/value-out module like `math`.
+    ExtModule {
+        name: "crdt",
+        functions: crate::crdt::CRDT_FNS,
+        dispatch: crate::crdt::crdt_dispatch,
         ..ExtModule::DEFAULTS
     },
 ];

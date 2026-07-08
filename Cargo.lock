@@ -2018,6 +2018,7 @@ dependencies = [
  "equivalent",
  "hmac",
  "md-5",
+ "noeta-crdt",
  "noeta-native",
  "noeta-reactive",
  "serde_json",

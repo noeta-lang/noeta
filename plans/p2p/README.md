@@ -92,9 +92,13 @@ scripted-peer sandbox produces a stable, meaningful differential before building
 Same discipline as reactivity/http (core-first, transport-later, each slice green under both
 backends + leak oracle). Rough ordering, not committed:
 
-- **P0 — CRDT core, no network.** A `Mergeable` trait + one or two CRDT types (a counter, a
-  last-write-wins register, maybe a text/list). Pure, deterministic, fully differential-tested.
-  Proves the convergence layer in isolation. *No p2panda dependency yet.*
+- **P0 — CRDT core, no network. ✅ DONE.** New dep-free `noeta-crdt` crate (`Mergeable` trait +
+  `GCounter`/`PnCounter`/`GSet`, primitive state, immutable values, proptest lattice-law +
+  convergence coverage), surfaced as `std.crdt` value extern types (`crdt.{gcounter,pncounter,gset}`
+  + `.increment`/`.merge`/… ). Differential (508), leak-0, JIT-differential, and 6 `crdt/`
+  conformance cases green. Type-mismatched `merge` is a **static E0007** — a preview of P2's
+  compile-time `Mergeable` safety. *No p2panda dependency.* **Deferred to P2:** value-carrying CRDTs
+  (LWW-register, OR-Set), which need the retained-arena seam to hold arbitrary language values.
 - **P1 — the `P2p` host capability + sandbox script.** Add the 8th capability trait, the pure
   scripted-peer sandbox driver, and the leaf `ExternIo` for "next peer/sync event." Establishes the
   determinism story before any real transport. Validates §3's bet end-to-end on a toy program.

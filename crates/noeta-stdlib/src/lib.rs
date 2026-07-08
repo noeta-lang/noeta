@@ -34,6 +34,7 @@
 pub use noeta_native::*;
 
 pub mod cell;
+pub mod crdt;
 pub mod crypto;
 pub mod env;
 pub mod fs;
