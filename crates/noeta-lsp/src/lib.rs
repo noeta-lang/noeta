@@ -1560,7 +1560,8 @@ mod tests {
              mut offset = 1\n\
              mut s = scale(4, offset)\n\
              fn apply(op: (int) -> int, n: int): int { return op(n) }\n\
-             mut applied = apply(fn(x) => x + 1, 3)\n\
+             apply(fn(x) => x + 1, 3)\n\
+             mut doubled = [10, 20].map(fn(y) => y * 2)\n\
              mut f = fn(x) => x + 1\n"
                 .to_string(),
         );
@@ -1587,15 +1588,31 @@ mod tests {
             hints.contains(&(3, "factor:".to_string())),
             "the other arg on that line still hints: {hints:?}"
         );
-        // A context-typed closure's parameter shows its inferred type (the expected fn type of
-        // the user function's parameter, flowed bidirectionally into the literal)...
+        // A closure argument's parameter shows its inferred type — flowed bidirectionally from a
+        // USER function's typed fn parameter (line 5: the only hint is the closure's `x`)...
         assert!(
             hints.contains(&(5, ": int".to_string())),
-            "closure parameter type: {hints:?}"
+            "user-fn closure param: {hints:?}"
         );
-        // ...while a standalone closure's UNINFERRED parameter (`dyn`) shows nothing.
+        // ...and from a BUILTIN method's element type (the dyn-closure gap, fixed): `y: int` AND
+        // the refined binding `doubled: List<int>` on line 6.
         assert!(
-            !hints.contains(&(6, ": dyn".to_string())),
+            hints
+                .iter()
+                .filter(|(line, label)| *line == 6 && label == ": int")
+                .count()
+                == 1,
+            "builtin-method closure param: {hints:?}"
+        );
+        assert!(
+            hints.contains(&(6, ": List<int>".to_string())),
+            "refined map result: {hints:?}"
+        );
+        // A standalone closure's UNINFERRED parameter shows nothing.
+        assert!(
+            !hints
+                .iter()
+                .any(|(line, label)| *line == 7 && label == ": dyn"),
             "uninferred closure param must not hint: {hints:?}"
         );
     }
