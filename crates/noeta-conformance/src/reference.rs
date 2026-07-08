@@ -85,7 +85,7 @@ pub fn reference_run_with_host(
         noeta_ir::LoweringSites {
             packed_list_sites: &sites.packed_list_sites,
             index_field_sites: &sites.index_field_sites,
-            ext_call_sites: &sites.ext_call_sites,
+            typed_module_call_sites: &sites.typed_module_call_sites,
             for_stream_sites: &sites.for_stream_sites,
             width_sites: &sites.width_sites,
             construction_sites: &sites.construction_sites,

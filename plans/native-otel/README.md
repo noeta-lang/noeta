@@ -297,17 +297,22 @@ scheduler bug fixed en route (`ff9cbf4`, mid-poll re-entrancy). Deferred follow-
 reactive-flush spans (opt-in); **metrics + logs** signals; a real-collector smoke test; sampling
 policy.
 
-### ⚠️ Merge is NOT a fast-forward — rebase required
-Branched off `main @ 9bd38e1`; local `main` has since advanced ~40 commits to `a7f4223` (p2p arc
-P0–P2, aot-dce L3.4, fmt follow-ons, inlay-hints, **bidirectional closure-argument typing**
-`229ce32`). Rebase `native-otel` onto current `main` before merging. Known reconciliations:
-- **The T3 cache-collision fix (`9e4e01e`) DUPLICATES an already-merged fix** — `main`'s `5ffe924`
-  ("key on the entry file") added `KeyBuilder::entry(name)` (single-arg, key tag `v1`); mine added
-  `entry(name, bytes)` + tag `v1→v2`. Drop `9e4e01e` at rebase and adopt main's form (or fold the
-  content-bytes refinement into it) — they fix the same collision. The telemetry conformance dir
-  that *exposed* it stays valid either way.
-- **Bidirectional closure typing (`229ce32`)** may change how `with_span(name, Fn()->Var0)` / the
-  serve handler closures type-check — re-run the telemetry + serve suites after rebase.
+### ✅ Rebased onto current `main` (`a7f4223`)
+Was branched off `main @ 9bd38e1`; **rebased onto `a7f4223`** (p2p arc P0–P2, aot-dce L3.4, fmt
+follow-ons, inlay-hints, bidirectional closure typing). Now a clean FF/merge. Reconciliations applied:
+- **The T3 cache-collision fix (`9e4e01e`) was DROPPED** — `main`'s `5ffe924` ("key on the entry
+  file") already fixed it (`KeyBuilder::entry(name)`); confirmed no collision on the telemetry dir
+  under main's fix (the conformance repro passes cached). The telemetry `.noe` dir stays as coverage.
+- **`Host` union**: telemetry is the **9th** capability — `… + Network + P2p + crate::Telemetry`
+  (p2p landed its own "8th" on main). Both host impls carry `p2p` + `tel`.
+- **Runtime `telemetry` feature** reconciled with main's optional-reqwest (`ring-http-client`):
+  `telemetry = ["dep:serde_json", "dep:reqwest", "reqwest/json"]`, both in `default`.
+- **`ext_call_sites` → `typed_module_call_sites`** rename (`f7be2c2`) applied to `reference.rs`.
+- **Bidirectional closure typing (`229ce32`)** did NOT disturb `with_span(name, Fn()->Var0)` or the
+  serve closures — telemetry + serve suites re-verified green post-rebase.
+
+Post-rebase gate: differential **524** + leak **386** (residency 0) + **JIT differential 524** +
+telemetry (8 `.noe`) + serve sink-parity (9) + 88 stdlib + cache (15) + doc_samples + clippy — all green.
 
 ## Perf gate
 

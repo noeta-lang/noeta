@@ -27,10 +27,11 @@ default = ["ring-http-client", "telemetry"]
 # that errors (never reached — a program that doesn't import `std.http` never calls it), and reqwest
 # is absent from the link.
 ring-http-client = ["dep:reqwest"]
-# Native OTEL span export. Pulls reqwest (its own use, independent of the http-client ring) + json.
-# On by default for the dev toolchain; `--no-default-features` drops it, and AOT footprint selection
-# links it only when the program imports `std.telemetry`.
-telemetry = ["dep:serde_json", "dep:reqwest", "reqwest/json"]
+# Native OTEL span export. Reuses the `ring-http-client` reqwest client (`RealHost::http`) to POST
+# spans, so it pulls that ring, plus json + serde_json. On by default for the dev toolchain;
+# `--no-default-features` drops it, and AOT footprint selection links it only when a program imports
+# `std.telemetry`.
+telemetry = ["dep:serde_json", "ring-http-client", "reqwest/json"]
 
 [dev-dependencies]
 criterion = { workspace = true }
