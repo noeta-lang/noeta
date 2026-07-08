@@ -231,7 +231,7 @@ flags) and dispatches unmatched names to registered commands (`cargo clippy` mod
   `r_computed_memo` **+14.6%** ✓✓; writes ≤35% — `r_effect_fanout` **+29.2%** ✓, `r_set_flush`
   **+48.8% ✗** (~198ns per set→flush→effect→tracked-get cycle vs 133ns; ~+34% is the structural
   floor of the cycle's 3 boundary crossings at ~15ns each — the fixture is 100% seam-bound with
-  a no-op body). Gate verdict on r_set_flush = user decision, pending. Conformance 513/513
+  a no-op body). Gate verdict: **accepted by the user (2026-07-08)** — the fixture is a pure boundary-crossing stress test (no real workload resembles it; ~5M cycles/sec absolute), and reactive stays on the seam deliberately as the Class-3 machinery's resident stress test. Conformance 513/513
   (all 19 reactivity fixtures byte-exact), 1009 workspace tests, clippy silent; t_*/serve
   unchanged (borrowed seeds erased H2's residual: t_map_bounded now ±0%).
 - **H6** — extension commands: `ExtCommand`/`CommandCtx`, dynamic clap wiring, `noeta serve`
