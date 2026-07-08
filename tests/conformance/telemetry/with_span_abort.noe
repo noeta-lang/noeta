@@ -1,0 +1,14 @@
+// std.telemetry T2: `with_span` is abort-safe — a panic inside the body still ends the span (with an
+// error status, host-side) and RE-PROPAGATES; it never swallows the failure. Output before the panic
+// is kept; nothing after the `with_span` call runs.
+// expect: stdout "in span"
+// expect: error E0010 at 11:5
+// expect: exit 1
+use std.{telemetry}
+
+boom = fn(): int {
+    echo "in span"
+    panic("kaboom")
+}
+telemetry.with_span("work", boom)
+echo "unreachable"

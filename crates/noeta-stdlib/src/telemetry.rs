@@ -1,23 +1,41 @@
-//! `std.telemetry` — the tracing SDK surface (native OTEL, T1).
+//! `std.telemetry` — the tracing SDK surface (native OTEL, T1–T2).
 //!
-//! A thin facade over the [`Telemetry`](noeta_native::Telemetry) Host capability: `span(name)`
-//! starts a span and returns a [`Span`] extern value; the span's methods (`set_attribute`, `end`)
-//! marshal to `host.tel_span_*`. The span tree and export live host-side (the sandbox recorder / the
-//! real OTLP exporter), so this module is **stateless** — no `ExtState`, no retained arena (a span
-//! holds no language value, unlike a reactive signal). Implicit parenting and the scoped `with_span`
-//! form arrive in T2; a T1 `span()` is always a root.
+//! A facade over the [`Telemetry`](noeta_native::Telemetry) Host capability. The span tree and
+//! export live host-side (the sandbox recorder / the real OTLP exporter); this module owns only the
+//! **active-span stack** (per-run [`ExtState`]) that gives spans implicit parenting — exactly the
+//! design T0 chose (the host is a pure span factory/sink, context management is the SDK's job).
+//!
+//! - `span(name) -> Span` starts a span parented on the current active span (a root at top level)
+//!   and returns a [`Span`] handle the caller ends itself.
+//! - `with_span(name, body) -> A` is the **scoped** form (the no-RAII answer, Class-2 `ctx.call`):
+//!   it starts a span, makes it the active parent for the duration of `body`, runs `body`, then ends
+//!   the span — **even if `body` aborts** (it records an error status and re-propagates). Returns
+//!   `body`'s value.
+//! - `current_context() -> str` is the current active span's W3C `traceparent` (empty when none) —
+//!   the propagation read (cross-isolate/wire injection lands in T3).
+//! - `Span` methods `set_attribute`/`add_event`/`record_error`/`end` marshal to `host.tel_span_*`.
+//!
+//! `span`/`with_span`/`current_context` reach the active stack, so they route through the `NativeCtx`
+//! seam; the `Span` methods only touch the host, so they stay plain dispatch.
 
 use std::any::Any;
 use std::cmp::Ordering;
 
-use noeta_native::registry::{ExtFn, RetTy, SigType};
+use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    arity_error, no_function_error, no_method_error, type_error, AttrValue, ExternBox, ExternValue,
-    Host, NativeOut, NativeValue, Scalar, SpanId, SpanKind, StdError,
+    arity_error, ctx_arity, no_function_error, no_method_error, type_error, AttrValue, CtxError,
+    CtxOut, CtxResult, ExtState, ExternBox, ExternValue, Host, NativeCtx, NativeValue, Scalar, Slot,
+    SpanId, SpanKind, SpanStatus, StdError, TraceContext,
 };
 
 /// The reserved surface type name for a span handle. A user declaration of this name is E0049.
 pub const SPAN_TYPE_NAME: &str = "Span";
+
+/// The per-run extension state key (namespaces the active-span stack in the arena state map).
+const STATE_KEY: &str = "std.telemetry";
+
+/// `with_span`'s body return type variable — `with_span(name, Fn() -> A) -> A`.
+const VAR_A: SigType = SigType::Var(0);
 
 /// An OTel attribute value — the scalar union the surface accepts (a non-scalar is a compile-time
 /// type error, not a runtime one).
@@ -28,19 +46,43 @@ const ATTR_VALUE: SigType = SigType::Union(&[
     SigType::Bool,
 ]);
 
-/// `std.telemetry`'s module functions.
-pub const TELEMETRY_FNS: &[ExtFn] = &[ExtFn {
-    name: "span",
-    params: &[SigType::String],
-    ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
-}];
+/// `std.telemetry`'s functions — all higher-order (they reach the active-span stack, and `with_span`
+/// calls a closure), so they live in the ctx table.
+pub const TELEMETRY_CTX_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "span",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
+    },
+    ExtFn {
+        name: "with_span",
+        params: &[SigType::String, SigType::Fn(&[], &VAR_A)],
+        ret: RetTy::Concrete(VAR_A),
+    },
+    ExtFn {
+        name: "current_context",
+        params: &[],
+        ret: RetTy::Concrete(SigType::String),
+    },
+];
 
-/// The `Span` instance methods. `set_attribute` returns the span for chaining
-/// (`span.set_attribute("a", 1).set_attribute("b", 2)`); `end` finalizes it.
+/// The `Span` instance methods (plain dispatch — they only reach the host). The mutators chain
+/// (return the span), so `span.set_attribute("a", 1).add_event("hit")` reads left to right; `end`
+/// finalizes.
 pub const SPAN_METHODS: &[ExtFn] = &[
     ExtFn {
         name: "set_attribute",
         params: &[SigType::String, ATTR_VALUE],
+        ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
+    },
+    ExtFn {
+        name: "add_event",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
+    },
+    ExtFn {
+        name: "record_error",
+        params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Named(SPAN_TYPE_NAME)),
     },
     ExtFn {
@@ -92,24 +134,63 @@ impl ExternValue for Span {
     }
 }
 
-/// `std.telemetry` module dispatch.
-pub fn telemetry_dispatch(
+/// The per-run active-span stack (innermost last). Plain data — span ids, not language values —
+/// so it needs no retained arena and is not a GC root.
+#[derive(Default)]
+struct TelState {
+    active: Vec<SpanId>,
+}
+
+/// `std.telemetry` ctx dispatch. Generic over the ctx (`C: NativeCtx + ?Sized`) so a compiled-in
+/// backend inlines the small ctx ops, exactly as `cell`/`reactive` are.
+pub fn telemetry_ctx_dispatch<C: NativeCtx + ?Sized>(
     func: &str,
-    host: &mut dyn Host,
-    args: &[NativeValue],
-) -> Result<NativeOut, StdError> {
+    ctx: &mut C,
+    args: &[Slot],
+) -> Result<CtxOut, CtxError> {
     match func {
         "span" => {
-            want_arity(func, args, 1)?;
-            let name = want_str(func, args, 0)?;
-            let id = host.tel_span_start(name, SpanKind::Internal, None);
-            Ok(span_value(id))
+            ctx_arity(func, args, 1)?;
+            let name = slot_str(ctx, args[0])?;
+            let parent = current_parent(ctx);
+            let id = ctx.host().tel_span_start(&name, SpanKind::Internal, parent);
+            Ok(CtxOut::Out(NativeOut::Extern(ExternBox::new(Span { id }))))
         }
-        _ => Err(no_function_error("telemetry", func)),
+        "with_span" => {
+            ctx_arity(func, args, 2)?;
+            let name = slot_str(ctx, args[0])?;
+            let parent = current_parent(ctx);
+            let id = ctx.host().tel_span_start(&name, SpanKind::Internal, parent);
+            // Make the span the active parent for the body, then always pop — even on abort — so a
+            // failed body cannot leave a dangling active span for the next call.
+            push_active(ctx, id);
+            let result = ctx.call(args[1], &[]);
+            pop_active(ctx, id);
+            match result {
+                Ok(slot) => {
+                    ctx.host().tel_span_end(id);
+                    Ok(CtxOut::Slot(slot))
+                }
+                Err(err) => {
+                    ctx.host()
+                        .tel_span_set_status(id, SpanStatus::Error("span body aborted".into()));
+                    ctx.host().tel_span_end(id);
+                    Err(err)
+                }
+            }
+        }
+        "current_context" => {
+            ctx_arity(func, args, 0)?;
+            let traceparent = current_parent(ctx)
+                .map(|c| c.to_traceparent())
+                .unwrap_or_default();
+            Ok(CtxOut::Out(NativeOut::Str(traceparent)))
+        }
+        _ => Err(no_function_error("telemetry", func).into()),
     }
 }
 
-/// `Span` method dispatch.
+/// `Span` method dispatch (plain — the mutators only reach the host).
 pub fn span_method_dispatch(
     recv: &mut dyn ExternValue,
     method: &str,
@@ -129,12 +210,77 @@ pub fn span_method_dispatch(
             host.tel_span_set_attr(id, key, value);
             Ok(span_value(id))
         }
+        "add_event" => {
+            want_arity(method, args, 1)?;
+            let name = want_str(method, args, 0)?;
+            host.tel_span_add_event(id, name, Vec::new());
+            Ok(span_value(id))
+        }
+        "record_error" => {
+            want_arity(method, args, 1)?;
+            let message = want_str(method, args, 0)?;
+            host.tel_span_set_status(id, SpanStatus::Error(message.into()));
+            Ok(span_value(id))
+        }
         "end" => {
             want_arity(method, args, 0)?;
             host.tel_span_end(id);
             Ok(NativeOut::Unit)
         }
         _ => Err(no_method_error(SPAN_TYPE_NAME, method)),
+    }
+}
+
+// ----- active-span stack (per-run ExtState) -----
+
+fn tel_state<C: NativeCtx + ?Sized>(ctx: &mut C) -> ExtState {
+    ctx.state(STATE_KEY, || Box::new(TelState::default()))
+}
+
+/// The current active span (top of the stack), if any. `.copied()` yields an owned value, so the
+/// `ExtState` borrow ends with this expression — none is held across a later `ctx.host()`/`ctx.call`.
+fn active_top<C: NativeCtx + ?Sized>(ctx: &mut C) -> Option<SpanId> {
+    tel_state(ctx)
+        .borrow()
+        .downcast_ref::<TelState>()
+        .expect("telemetry state is a TelState")
+        .active
+        .last()
+        .copied()
+}
+
+fn push_active<C: NativeCtx + ?Sized>(ctx: &mut C, id: SpanId) {
+    let state = tel_state(ctx);
+    state
+        .borrow_mut()
+        .downcast_mut::<TelState>()
+        .expect("telemetry state is a TelState")
+        .active
+        .push(id);
+}
+
+/// Pop `id` if it is the current top (defensive against a re-entrant push imbalance).
+fn pop_active<C: NativeCtx + ?Sized>(ctx: &mut C, id: SpanId) {
+    let state = tel_state(ctx);
+    let mut borrow = state.borrow_mut();
+    let st = borrow
+        .downcast_mut::<TelState>()
+        .expect("telemetry state is a TelState");
+    if st.active.last() == Some(&id) {
+        st.active.pop();
+    }
+}
+
+/// The W3C context of the current active span — a new span's implicit parent.
+fn current_parent<C: NativeCtx + ?Sized>(ctx: &mut C) -> Option<TraceContext> {
+    let top = active_top(ctx)?;
+    Some(ctx.host().tel_span_context(top))
+}
+
+fn slot_str<C: NativeCtx + ?Sized>(ctx: &mut C, slot: Slot) -> CtxResult<String> {
+    match ctx.view(slot)? {
+        NativeValue::Str(s) => Ok(s),
+        _ => Err(type_error("telemetry", "string").into()),
     }
 }
 
@@ -173,66 +319,53 @@ fn want_attr(method: &str, args: &[NativeValue], index: usize) -> Result<AttrVal
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Telemetry; // the trait, so `tel_span_start` resolves on a concrete SandboxHost
     use crate::host::SandboxHost;
 
     fn str_arg(s: &str) -> NativeValue {
         NativeValue::Str(s.to_string())
     }
 
+    /// The plain `Span` method path (set_attribute/add_event/record_error/end) against a span the
+    /// host started directly — the ctx functions (`span`/`with_span`) are exercised through the
+    /// conformance differential (both backends), as every ctx dispatch is.
     #[test]
-    fn span_lifecycle_records_to_the_host() {
+    fn span_methods_marshal_to_the_recorder() {
         let mut host = SandboxHost::new();
+        let id = host.tel_span_start("request", SpanKind::Internal, None);
+        let mut span = Span { id };
 
-        // `telemetry.span("request")` mints a Span extern and a live (not-yet-recorded) span.
-        let out = telemetry_dispatch("span", &mut host, &[str_arg("request")]).unwrap();
-        let NativeOut::Extern(mut span) = out else {
-            panic!("span() should return a Span extern");
-        };
-        assert_eq!(span.0.type_name(), SPAN_TYPE_NAME);
-        assert!(
-            host.recorded_spans().is_empty(),
-            "a span is not recorded until end()"
-        );
-
-        // `set_attribute` chains (returns a Span); an int value goes through the union.
         let chained = span_method_dispatch(
-            &mut *span.0,
+            &mut span,
             "set_attribute",
             &mut host,
             &[str_arg("http.method"), str_arg("GET")],
         )
         .unwrap();
         assert!(matches!(chained, NativeOut::Extern(_)));
-        span_method_dispatch(
-            &mut *span.0,
-            "set_attribute",
-            &mut host,
-            &[str_arg("http.status"), NativeValue::Scalar(Scalar::Int(200))],
-        )
-        .unwrap();
-
-        // `end` finalizes; only now is it recorded.
+        span_method_dispatch(&mut span, "add_event", &mut host, &[str_arg("cache.miss")]).unwrap();
+        span_method_dispatch(&mut span, "record_error", &mut host, &[str_arg("boom")]).unwrap();
+        assert!(host.recorded_spans().is_empty(), "not recorded until end()");
         assert_eq!(
-            span_method_dispatch(&mut *span.0, "end", &mut host, &[]).unwrap(),
+            span_method_dispatch(&mut span, "end", &mut host, &[]).unwrap(),
             NativeOut::Unit
         );
+
         let spans = host.recorded_spans();
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].name, "request");
-        assert_eq!(spans[0].parent, None);
         assert_eq!(
             spans[0].attributes,
-            vec![
-                ("http.method".into(), AttrValue::Str("GET".into())),
-                ("http.status".into(), AttrValue::Int(200)),
-            ]
+            vec![("http.method".into(), AttrValue::Str("GET".into()))]
         );
+        assert_eq!(spans[0].events.len(), 1);
+        assert_eq!(spans[0].events[0].name, "cache.miss");
+        assert_eq!(spans[0].status, SpanStatus::Error("boom".into()));
     }
 
     #[test]
-    fn unknown_function_and_method_are_errors() {
+    fn unknown_method_is_an_error() {
         let mut host = SandboxHost::new();
-        assert!(telemetry_dispatch("nope", &mut host, &[str_arg("x")]).is_err());
         let mut span = Span { id: 1 };
         assert!(span_method_dispatch(&mut span, "nope", &mut host, &[]).is_err());
     }

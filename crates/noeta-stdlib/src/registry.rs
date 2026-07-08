@@ -2202,13 +2202,16 @@ const STD_MODULES: &[ExtModule] = &[
         deep_marshal: false,
         ..ExtModule::DEFAULTS
     },
-    // `telemetry` (native OTEL T1) — the tracing SDK facade: `span(name)` mints a `Span` handle
-    // over the `Telemetry` capability. Plain dispatch (no closures/state); the span tree lives
-    // host-side (recorder / OTLP exporter).
+    // `telemetry` (native OTEL T1–T2) — the tracing SDK facade. `span`/`with_span`/`current_context`
+    // reach the per-run active-span stack (and `with_span` calls a closure), so they are ctx
+    // functions; the `Span` type's own methods stay plain (they only touch the host). The span tree
+    // lives host-side (recorder / OTLP exporter).
     ExtModule {
         name: "telemetry",
-        functions: crate::telemetry::TELEMETRY_FNS,
-        dispatch: crate::telemetry::telemetry_dispatch,
+        ctx_functions: crate::telemetry::TELEMETRY_CTX_FNS,
+        ctx_dispatch: Some(|func, ctx, args| {
+            crate::telemetry::telemetry_ctx_dispatch(func, ctx, args)
+        }),
         ..ExtModule::DEFAULTS
     },
     ExtModule {
