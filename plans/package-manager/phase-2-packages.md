@@ -84,10 +84,15 @@ local source tree, so the whole cross-package linking mechanism is exercised det
   startup-cache key + `SourceMap` (so a dep change never serves stale bytecode, and merged-dep spans
   render). A git/registry dep errors with a pointer to P2.3+. 2 CLI integration tests (re-root run +
   git-dep error); manual e2e confirmed (key ≠ root re-roots; package-internal cross-ref resolves).
-- **2.1c — remaining consumers (follow-on, surfaced not silently dropped).** The **salsa/LSP** path
-  (`noeta-db` Workspace + LSP `discover_sources`) and **`run_file`** (`noeta serve`) + **conformance**
-  mirrors do **not** yet feed dependency sources — so the editor won't resolve cross-package `use` and
-  `noeta serve` won't see deps. CLI `run`/`build`/`dump` (the primary path) do. Tracked for 2.1c.
+- **2.1c — remaining consumers. ✅ DONE (bar conformance).** The package manager was **extracted into
+  the `noeta-pm` library** (out of the `noeta-cli` binary) so `noeta-lsp`/`noeta-db` can resolve deps.
+  `run_file` (`noeta serve`) and `noeta check` now feed deps (CLI side). The **salsa** `Workspace`
+  gained `dep_modules` (re-rooted in the `linked` query via the now-public `reroot_program`), and the
+  **LSP** resolves the entry's deps through `noeta-pm` and maps dep spans back to their files — so
+  hover/goto/completion resolve **cross-package** in-editor (`goto_definition_jumps_into_a_dependency_package`).
+  **Conformance** still uses the no-deps `workspace()` — its dep feed is meaningless until a
+  cross-package *fixture* exists (needs a fixture-schema extension); tracked, surfaced, not built
+  speculatively.
 
 <details><summary>Original 2.1b consumer survey (all injection points)</summary>
 
@@ -144,24 +149,40 @@ algorithmic core, isolated from IO.
 
 </details>
 
-### 2.4 — `noeta.lock` (reproducible pins)
+### 2.4 — Transitive resolution + `noeta.lock` (reproducible pins) ✅ DONE
 
-Resolve (2.2) over fetched manifests (2.3) → write `noeta.lock` pinning each package's name, version,
-git URL, commit SHA, content hash. A subsequent build **reads the lock and skips resolution** (fetch
-only what's missing, verify hashes) — reproducible by construction. `noeta update` re-resolves.
+- **2.4a ✅** loader `DepPackage.dep_renames` map + public `reroot_program`: a package's own
+  `use <its-dep-key>.…` rewrites to the resolver-assigned **globally-unique segment**, so transitive
+  packages link in the flat pool without key collisions. Empty for a leaf → single-level unchanged.
+- **2.4b ✅** `graph.rs`: a fetch-driven **transitive walk** of the path+git graph, deduped by package
+  identity, assigning each identity a global segment (direct dep keeps the consumer key;
+  transitive-only synthesizes a unique one). PubGrub (2.2) runs as the selection/validation pass over
+  the materialized versions; a same-identity-two-versions clash is an explainable conflict.
+- **2.4c ✅** `lock.rs` `noeta.lock` (TOML): pins identity/version/source/**commit SHA**/content hash.
+  A git dep is fetched **by its pinned SHA** (`git::fetch_pinned`) — an already-stored tree needs no
+  network (**offline**, reproducible); a moved tag is caught; git content-hash drift is rejected. The
+  lock is refreshed after resolve, rewritten only on change.
+- **2.4d ✅** `noeta add` (format/comment-preserving manifest edit, re-parsed before an atomic write,
+  then re-resolve) + `noeta update` (drop pins, re-resolve, re-pin SHAs).
 
-### 2.5 — Registry interface (design + client stub)
+### 2.5 — Registry interface (design + client stub) ✅ DONE
 
-Define the registry contract as a Rust trait: `resolve(name, constraint) -> [version → git coords]`
-and `publish(name, version, git-coords)`. A **client stub** (`noeta publish`) + a local/offline
-implementation for tests; the real service is built & hosted separately on Cloudflare (Workers +
-KV/D1). Registry-form deps (`{ version = "^1.2" }`) resolve name→git-coords through this interface.
+`registry.rs`: the `Index` trait (`versions(name) -> [(version, git coords)]` + `publish`), a
+file-backed `LocalIndex` (offline/tests, `NOETA_REGISTRY_DIR`), and `resolve_coords` (highest match).
+A registry dep now carries an optional `package = "company/pkg"` (the registry identity, decoupled
+from the import-root key); the graph walk resolves it through the index into git coords and
+materializes it via the shared git path. `noeta publish` records a release. The real service is built
+& hosted separately (Cloudflare). **Scope note:** joint PubGrub range co-resolution across several
+registry deps is wired-ready (`resolve.rs`) but not yet driven — git/path pins are exact, so the walk
+selects greedily and reports a conflict rather than backtracking; that depth arrives with the hosted
+registry (which serves per-version dep metadata cheaply enough to feed the whole candidate set).
 
-### 2.6 — Cross-package tier providers
+### 2.6 — Cross-package tier providers ✅ DONE
 
-Lift the `manifest.rs` "only `std`" provider restriction (`BUILTIN_PROVIDER`): a tier's provider may
-now be a resolved package. The `[profiles.*.tiers]` grammar already parses arbitrary providers and
-rejects non-`std` — this slice makes a resolved dependency a valid provider.
+Lifted the `manifest.rs` "only `std`" provider restriction: a tier's provider may now be a **declared
+dependency** (named by its `[dependencies]` key), validated against the manifest; an undeclared
+provider errors. `active_tier_providers` surfaces the resolved tier→provider map for a future
+tier-execution layer.
 
 ## Deferred to Phase 3 (surfaced)
 
