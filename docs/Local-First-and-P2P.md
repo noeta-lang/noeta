@@ -55,7 +55,8 @@ echo "${s.members()} has_z=${has_z}"             // ["x", "y", "z"] has_z=true
 
 **Methods.** Every CRDT has `.merge(other)` (returning the converged value) and a reader: `GCounter`/`PnCounter` expose `.value(): int`; `GSet` exposes `.contains(e): bool`, `.len(): int`, and `.members(): [string]`. Counters take `.increment(replica, by=1)` (and `PnCounter` also `.decrement(replica, by=1)`); a grow-only counter rejects a negative amount — use a `PnCounter` when you need to go down. `.merge` only accepts the *same* CRDT type, checked statically:
 
-```noeta
+```noeta error
+use std.{crdt}
 a = crdt.gcounter()
 b = crdt.gset()
 c = a.merge(b)   // compile error: argument of type `GSet` is not assignable to `GCounter`
@@ -93,7 +94,8 @@ Topics are independent broadcast channels: every subscriber sees every message, 
 
 A `synced_signal(initial, topic)` fuses the two: a reactive [signal](Reactivity) whose value is a CRDT and whose changes are shared over a p2p topic. Its value type must be `Mergeable` — i.e. a CRDT — which the compiler enforces, so you can never accidentally sync a value with no convergence story:
 
-```noeta
+```noeta error
+use std.synced.{synced_signal}
 synced_signal(42, "counter")   // compile error: `int` does not satisfy the bound `Mergeable`
 ```
 
