@@ -27,7 +27,13 @@ fn temp_program(name: &str, src: &str) -> PathBuf {
 }
 
 fn lang() -> Command {
-    Command::cargo_bin("noeta").expect("the `noeta` binary builds")
+    let mut cmd = Command::cargo_bin("noeta").expect("the `noeta` binary builds");
+    // Hermetic startup cache: keep `cargo test` from reading or writing the developer's real
+    // ~/.cache/noeta. One per-test-target dir is safe to share across all tests — entries are keyed
+    // by source + binary identity, and the atomic per-pid store handles the parallel test processes.
+    // Tests that exercise the cache directly override this with their own dir.
+    cmd.env("NOETA_CACHE_DIR", concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"));
+    cmd
 }
 
 // --- `run` ------------------------------------------------------------------------
@@ -110,6 +116,75 @@ fn run_reports_parse_error_and_exits_1() {
         .failure()
         .code(1)
         .stderr(predicate::str::contains("E0003"));
+}
+
+#[test]
+fn startup_cache_is_semantically_invisible() {
+    // The transparent startup cache (M3) must be *semantically invisible*: a warm run (cache hit —
+    // decode a stored module and run it) produces byte-identical stdout, stderr, and exit code to an
+    // uncached run (compile from source). Each program is observed three ways and all must agree:
+    //   - baseline: NOETA_NO_CACHE (never touches the cache),
+    //   - cold:     a fresh cache dir — a miss that compiles and populates,
+    //   - warm:     the same dir again — a hit, a wholly different code path.
+    // This is the regression wall for the cache; the timing win is verified elsewhere.
+    let programs: &[(&str, &str)] = &[
+        ("arith", "echo 1 + 2 * 3\n"),
+        ("string", "mut n = 21\necho \"n=${n * 2}\"\n"),
+        ("loop", "mut s = 0\nfor i in 0..10 { s = s + i }\necho s\n"),
+        ("func", "fn sq(n: int): int { return n * n }\necho sq(9)\n"),
+        ("list", "echo [1, 2, 3].len()\n"),
+        // Compiles + caches, then aborts at runtime (exit 1): proves the exit code and stderr trace
+        // survive a cache hit too, not just clean stdout.
+        ("panic", "echo \"before\"\npanic(\"boom\")\n"),
+    ];
+
+    for &(name, src) in programs {
+        let file = temp_program(&format!("cache_inv_{name}"), src);
+        let cache_dir = PathBuf::from(concat!(env!("CARGO_TARGET_TMPDIR"), "/cache-inv")).join(name);
+        let _ = std::fs::remove_dir_all(&cache_dir);
+
+        // One observation of (stdout, stderr, exit code). `use_cache` selects the cached path (a
+        // dedicated dir) or the NOETA_NO_CACHE baseline. `.assert()` does not fail on a non-zero
+        // exit, so the `panic` fixture is captured like any other.
+        let observe = |use_cache: bool| {
+            let mut cmd = lang();
+            cmd.arg("run").arg(&file);
+            if use_cache {
+                cmd.env_remove("NOETA_NO_CACHE")
+                    .env("NOETA_CACHE_DIR", &cache_dir);
+            } else {
+                cmd.env("NOETA_NO_CACHE", "1");
+            }
+            let out = cmd.assert().get_output().clone();
+            (out.stdout, out.stderr, out.status.code())
+        };
+
+        let baseline = observe(false);
+        let cold = observe(true); // miss → compile → populate
+        let warm = observe(true); // hit → decode → run
+
+        assert_eq!(
+            cold, baseline,
+            "{name}: cold (miss) run must match the uncached baseline"
+        );
+        assert_eq!(
+            warm, baseline,
+            "{name}: warm (cache-hit) run must match the uncached baseline"
+        );
+
+        // Every fixture here compiles (even `panic`, which fails only at runtime), so the cold run
+        // must have left an entry — proving the warm run was a genuine hit, not a silent no-op.
+        let entries = std::fs::read_dir(&cache_dir)
+            .map(|d| {
+                d.filter_map(Result::ok)
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "noeb"))
+                    .count()
+            })
+            .unwrap_or(0);
+        assert_eq!(entries, 1, "{name}: the cold run should populate exactly one cache entry");
+
+        let _ = std::fs::remove_dir_all(&cache_dir);
+    }
 }
 
 #[test]

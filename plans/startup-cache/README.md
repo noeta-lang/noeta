@@ -1,9 +1,9 @@
 # Transparent startup cache — skip the front-end on unchanged sources
 
-**Status: C0–C2 DONE, branch `startup-cache` (worktree, off `main`@`fe14117`).** Signed off 2026-07-07
+**Status: C0–C3 DONE, branch `startup-cache` (worktree, off `main`@`fe14117`).** Signed off 2026-07-07
 after a three-agent investigation of the run pipeline, the salsa DB, and the `.noeb` envelope.
-`run`/`dump`/`build` share a transparent cache through one `compile_whole_file` seam; C3 (differential
-guard + hermetic test dir) and C4 (hygiene + `cache clear`) remain.
+`run`/`dump`/`build` share a transparent cache through one `compile_whole_file` seam, guarded by a
+semantic-invisibility differential and hermetic tests; C4 (hygiene + `cache clear`) remains.
 
 This delivers the M3 roadmap item *"startup cache"* in its **transparent** form. The AOT arc already
 shipped the *explicit* form (`noeta build` → a `.noeb` you run instead of source, which skips the
@@ -137,10 +137,12 @@ wrong bytecode):
     commands whose program transform is identity-modulo-tiers. `serve` **injects** an `http.serve(...)`
     call before compiling → different module for the same source → it must **never** share the key, and
     stays on the uncached `run_program` path.
-- **C3 — differential guard.** A conformance/CLI test asserting a cached second run is byte-identical
-  (stdout/exit) to the uncached first run across a corpus slice — the *semantically-invisible* wall.
-  Also fold a temp `NOETA_CACHE_DIR` default into the CLI test harness so `cargo test` is hermetic and
-  never writes the developer's real `~/.cache/noeta`.
+- **C3 — differential guard + hermetic tests. ✅ DONE.** `startup_cache_is_semantically_invisible`
+  drives 6 fixtures (arith/string-interp/loop/func/list + a runtime `panic`) three ways — NOETA_NO_CACHE
+  baseline, cold miss, warm hit — and asserts byte-identical (stdout, stderr, exit code) all three ways,
+  plus exactly one cache entry after the cold run (proving the warm run is a real hit). The `lang()`
+  helper (and `doc_samples`) now pin `NOETA_CACHE_DIR` to `CARGO_TARGET_TMPDIR`, so `cargo test` never
+  touches the developer's real `~/.cache/noeta` (verified: it stays absent across a full run).
 - **C4 — hygiene + docs.** `noeta cache clear` (+ maybe `cache path`/`cache info`); a size cap or LRU/age
   sweep so the dir can't grow unbounded; wiki/CLI-help note. Log a one-line notice when a cap evicts
   (no silent truncation).
