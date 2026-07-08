@@ -26,10 +26,23 @@ doctest = false
 noeta-vm = { workspace = true, features = ["aot"] }
 noeta-bundle = { workspace = true }
 noeta-bytecode = { workspace = true }
-noeta-runtime = { workspace = true }
+# Direct path (not workspace inheritance) so we can set `default-features = false` — a workspace
+# member may not override the root's default-features when inheriting. This makes this crate's own
+# ring features the *only* thing that turns a stdlib ring (and its native deps) on; `noeta build
+# --native` selects them per-program (DCE Axis B).
+noeta-runtime = { path = "../noeta-runtime", default-features = false }
 noeta-stdlib = { workspace = true }
 noeta-span = { workspace = true }
 noeta-diagnostics = { workspace = true }
+
+[features]
+# All rings on by default — the plain archive is fully capable. `noeta build --native`'s footprint
+# scan builds this crate with `--no-default-features --features <used rings>` to shed the rest, and
+# the linker then drops each unreferenced ring's native dep tree. The `aot` runtime support (on
+# `noeta-vm`) is a hard dep feature above, so it survives `--no-default-features`.
+default = ["ring-http"]
+# The `std.http` outbound-client ring — forwards to reqwest in noeta-runtime.
+ring-http = ["noeta-runtime/ring-http"]
 
 # This crate is the one place the whole AOT scheme's `unsafe` lives: a C-ABI `main`, the reference to
 # the linker-defined `noeta_aot_dispatch` data symbol, and the `run_module_aot` binding call. Relax

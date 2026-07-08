@@ -26,9 +26,12 @@ pub use executor::RealExecutor;
 
 use noeta_stdlib::net::accept_outcome;
 use noeta_stdlib::{
-    Clock, Entropy, Env, ErrorKind, ExternBox, ExternIo, FileReader, FileSystem, Ids, NativeOut,
-    NetRequest, NetResponse, Network, ReadSource, RealBody, Rng, StdError,
+    Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, NativeOut, NetRequest,
+    NetResponse, Network, ReadSource, RealBody, Rng, StdError,
 };
+// Only the outbound-client (`ring-http`) path builds an `ExternBox` response body.
+#[cfg(feature = "ring-http")]
+use noeta_stdlib::ExternBox;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -64,6 +67,9 @@ pub struct RealHost {
     next_reader_id: u64,
     /// The real HTTP client for the `Network` capability (http arc H1). Cheap to clone (an inner
     /// `Arc`), holds the connection pool; built once per host. Requests are driven on `runtime`.
+    /// Present only under `ring-http` (DCE Axis B): a binary that never imports `std.http` links
+    /// without reqwest, so this field — and the TLS stack behind it — is gated out.
+    #[cfg(feature = "ring-http")]
     http: reqwest::Client,
     /// Inbound listeners (http-server S1), keyed by the id `net_listen` hands out. Each holds a
     /// bound socket; the tokio listener is created lazily on the executor's runtime at first accept
@@ -115,6 +121,7 @@ impl RealHost {
             ids: 1,
             readers: HashMap::new(),
             next_reader_id: 0,
+            #[cfg(feature = "ring-http")]
             http: reqwest::Client::new(),
             servers: HashMap::new(),
             next_listener: 0,
@@ -277,6 +284,7 @@ impl FileSystem for RealHost {
 /// Perform an HTTP request with reqwest, collecting the whole [`NetResponse`]. Shared by the sync
 /// path ([`RealHost::net_fetch`] via `block_on`) and the async path ([`HttpIo`] spawned on the
 /// executor's runtime), so both build the request and read the response identically.
+#[cfg(feature = "ring-http")]
 async fn reqwest_fetch(
     client: &reqwest::Client,
     request: NetRequest,
@@ -319,6 +327,7 @@ async fn reqwest_fetch(
 
 /// The real host's async network descriptor (http arc H3): its real body is a genuine reqwest
 /// future driven on the executor's runtime, so `http.*_async` requests fan out concurrently.
+#[cfg(feature = "ring-http")]
 #[derive(Debug)]
 struct HttpIo {
     request: NetRequest,
@@ -328,6 +337,7 @@ struct HttpIo {
     client: reqwest::Client,
 }
 
+#[cfg(feature = "ring-http")]
 impl ExternIo for HttpIo {
     fn run_sync(&mut self, _host: &mut dyn noeta_stdlib::Host) -> Result<NativeOut, StdError> {
         // Only reached if some executor lacks a real body path; the real executor uses `run_real`
@@ -355,11 +365,27 @@ impl Network for RealHost {
     /// `http.*` surface). A transport failure is an `ErrorKind::Io` error; an HTTP error *status*
     /// comes back as an ordinary [`NetResponse`].
     fn net_fetch(&mut self, request: NetRequest) -> Result<NetResponse, StdError> {
-        self.runtime.block_on(reqwest_fetch(&self.http, request))
+        #[cfg(feature = "ring-http")]
+        {
+            self.runtime.block_on(reqwest_fetch(&self.http, request))
+        }
+        // Without the `ring-http` ring the outbound client isn't linked. A program that never imports
+        // `std.http` never reaches here; a build that stripped the ring while the program *did* use it
+        // would be a footprint-selection bug, so this is a hard error rather than a silent no-op.
+        #[cfg(not(feature = "ring-http"))]
+        {
+            let _ = request;
+            Err(io_error(
+                "the HTTP client (std.http) is not built into this binary".to_string(),
+            ))
+        }
     }
 
     /// The async `http.*_async` surface: hand out a reqwest-backed descriptor whose real body runs
     /// concurrently on the executor's runtime (overriding the default serial-at-spawn descriptor).
+    /// Under `ring-http` only; without it the trait default routes async fetches through
+    /// [`Self::net_fetch`] (the stub above), matching the sync path.
+    #[cfg(feature = "ring-http")]
     fn net_spawn(&self, request: NetRequest) -> Box<dyn ExternIo> {
         Box::new(HttpIo {
             request,
