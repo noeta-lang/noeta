@@ -256,11 +256,26 @@ so tracing calls in un-configured programs are ~free (the perf gate below).
   pre-T5a baseline (cumulative T5a+b+c): `pingpong_coop` −0.0%, `fanout_n0` −1.0` — flat. *Sandbox
   quirk (documented in-test):* the host's logical wall clock doesn't advance with executor timers, so
   sandbox durations read 0 across `sleep`s; the real host shares one clock.
-- **T5d–e — deferred (own follow-ons).** (d) **automatic** isolate-message context propagation — the
-  runtime smuggles the traceparent in the channel/Wire envelope so the receiving isolate is
-  pre-seeded (pure sugar: the explicit string form works and is conformance-tested since T3);
-  (e) **reactive-flush spans behind an opt-in flag** (per-signal-flush tracing is too noisy by
-  default).
+- **T5d ✅ DONE (`6539e5d` + perf `e1eea38`) — automatic propagation over channels & isolates.**
+  Send **attaches**: an enabled sender's active-span `TraceContext` rides the message envelope
+  (local buffer `(Value, Option<TraceContext>)`, cross-thread `ChannelCore` `(Wire, …)`) — message
+  *types* stay tracing-free. Recv **seeds**: only a **top-level** strand (empty context, or exactly
+  one remote seed — replaced + released, bounding the table by strands not messages) is pre-seeded;
+  real active spans are never hijacked; a context-less message clears a stale seed. Real **isolates
+  inherit**: the spawner's context crosses with the args and is interned at the worker's root
+  (real-path parity with T5a's cooperative inheritance). Enabling ABI: **remote-interned contexts**
+  (`tel_intern_remote`/`tel_is_remote`/`tel_release_remote`) — span handles are per-host, so a
+  remote parent becomes a `SpanId`-shaped pseudo-handle whose `tel_span_context` returns the interned
+  W3C context, letting remote parents live uniformly in the `u64` context stacks; the SDK needed
+  zero changes. *Verify:* `channel_auto_propagation.noe` (ordinary differential; empty-context
+  consumer proves seeding ≠ inheritance; two traces replace per message) + a sink-parity test (a
+  seeded consumer's real span parents under the *producer's* span across strands); corpus 513 +
+  leak 378 + JIT differential 513 + 9 sink + clippy green. *Perf gate:* the naive per-send
+  `tel_enabled()` virtual call cost pingpong_coop **+3.2%** → cached as a `Vm` bool at load →
+  re-measured **+0.4% / −0.1%** (flat, cumulative T5a–d vs pre-T5a). T3's explicit string form
+  remains (interop with non-Noeta peers).
+- **T5e — deferred (own follow-on).** **Reactive-flush spans behind an opt-in flag** (per-signal-
+  flush tracing is too noisy by default).
 - **T6 — docs + close-out.** `docs/Observability.md` (or `Telemetry.md`) — the SDK surface, config,
   the profiler-vs-OTEL split, the differential/bundle stances; CLI/sidebar/roadmap cross-links;
   roadmap tick; memory.
