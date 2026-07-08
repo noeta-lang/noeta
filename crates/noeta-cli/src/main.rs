@@ -1740,8 +1740,11 @@ fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
     // A whole-module value (`use std.{http}`): the program holds the module and can call *any* of its
     // functions dynamically (member calls lower to `CallMethod` on the value, whose receiver isn't
     // statically pinned), so a module that owns a native-dep ring is selected conservatively.
+    // Module identities are root-qualified (`std.http`); the ring tables key on the module name, so
+    // strip the root before looking up. A turbofish's module is the source receiver (a local name,
+    // unrooted) and passes through `bare_module_name` unchanged.
     let note_module = |name: &str, rings: &mut BTreeSet<String>| {
-        if let Some(ring) = module_ring(name) {
+        if let Some(ring) = module_ring(noeta_stdlib::registry::bare_module_name(name)) {
             rings.insert(ring.to_string());
         }
     };
@@ -1750,7 +1753,7 @@ fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
     // is what lets a *client/server split* pay off — a program that names only `http.serve`/
     // `http.response` selects no client ring and sheds reqwest, while `http.get` selects it.
     let note_fn = |m: &str, func: &str, rings: &mut BTreeSet<String>| {
-        if let Some(ring) = fn_ring(m, func) {
+        if let Some(ring) = fn_ring(noeta_stdlib::registry::bare_module_name(m), func) {
             rings.insert(ring.to_string());
         }
     };
@@ -3251,13 +3254,14 @@ mod tests {
         let client = vec!["ring-http-client".to_string()];
 
         // `use std.{http}` → a whole-module value: conservative (could call any http fn) → client ring.
-        let via_module = module_with(vec![Const::NativeModule("http".into())], vec![], vec![]);
+        // Module identities are root-qualified (`std.http`), as the compiler now emits them.
+        let via_module = module_with(vec![Const::NativeModule("std.http".into())], vec![], vec![]);
         assert_eq!(aot_ring_features(&via_module), client);
 
         // `use std.http.get` → a selective import of a *client* function → client ring.
         let client_fn = module_with(
             vec![Const::ModuleFn {
-                module: "http".into(),
+                module: "std.http".into(),
                 func: "get".into(),
             }],
             vec![],
@@ -3270,11 +3274,11 @@ mod tests {
         let server_fn = module_with(
             vec![
                 Const::ModuleFn {
-                    module: "http".into(),
+                    module: "std.http".into(),
                     func: "serve".into(),
                 },
                 Const::ModuleFn {
-                    module: "http".into(),
+                    module: "std.http".into(),
                     func: "response".into(),
                 },
             ],
