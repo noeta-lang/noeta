@@ -172,10 +172,16 @@ so tracing calls in un-configured programs are ~free (the perf gate below).
   stdlib unit tests (OTLP/JSON shape, deterministic recorder, traceparent), conformance
   differential/leak/trace-parity, clippy, and both feature-on/`--no-default-features` builds — all
   green. No language surface yet (T1).
-- **T1 — manual tracing.** `std.telemetry` module: `span(name) -> Span` + `Span` extern type with
-  `set_attribute`/`end`. End-to-end from Noeta source. Conformance asserts recorded spans (name,
-  attrs, parent, ordering) via the sandbox recorder. *Gate:* differential/leak green (Span is a
-  heap extern value — leak oracle proves end releases it).
+- **T1 ✅ DONE (`89a037e`).** `std.telemetry` module: `span(name) -> Span` + `Span` extern type
+  (mutable/effectful, non-key, like `FileHandle`) with `set_attribute` (chaining) + `end`, marshalling
+  to `host.tel_span_*`. Plain dispatch (no closures/state), registered in `STD_MODULES`/`STD_TYPES`;
+  the checker **auto-derives every signature from the registry** and auto-reserves `Span` — **zero
+  `noeta-check` edits**. `set_attribute`'s value is a scalar union (`string|int|float|bool`), so a
+  non-scalar is a compile-time **E0007** and a user `struct Span` is **E0049** (both pinned as
+  diagnostics corpus entries). *Gate:* conformance differential (`basic_span.noe` runs identically on
+  both backends; leak-0 — the `Span` extern releases at scope end) + the two diagnostics entries; a
+  noeta-stdlib unit test drives dispatch and asserts on the sandbox recorder; 84 stdlib tests + clippy
+  green. Implicit parenting / active-span stack deferred to T2.
 - **T2 — ergonomics.** Scoped `with_span(name, body)` (Class-2 `ctx.call`, abort-safe end) +
   `add_event`/`record_error`/`set_status`. Nested spans parent correctly via `tel_activate`.
 - **T3 — W3C propagation.** `current_context()`/`span_from()`; inject/extract `traceparent`;
