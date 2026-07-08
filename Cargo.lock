@@ -2051,6 +2051,7 @@ dependencies = [
  "noeta-diagnostics",
  "noeta-gc",
  "noeta-jit",
+ "noeta-jit-abi",
  "noeta-lexer",
  "noeta-object",
  "noeta-parser",
