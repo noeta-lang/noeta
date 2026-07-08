@@ -54,6 +54,9 @@ noeta-native = { path = "crates/noeta-native" }
 noeta-runtime = { path = "crates/noeta-runtime" }
 # M2 reactivity core (signal/computed/effect graph — value-generic, backend-driven)
 noeta-reactive = { path = "crates/noeta-reactive" }
+# M3 CRDT convergence core (p2p/local-first P0): state-based merge algebra — dep-free, value-less,
+# the data-convergence layer of the local-first stack (§9.15), wrapped by `std.crdt`.
+noeta-crdt = { path = "crates/noeta-crdt" }
 # M2 editor tooling: the `noeta lsp` language server over the noeta-db salsa query graph
 noeta-lsp = { path = "crates/noeta-lsp" }
 # M2 editor tooling: the `noeta dap` Debug Adapter Protocol server over the production VM

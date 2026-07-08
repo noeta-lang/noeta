@@ -1763,6 +1763,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-crdt"
+version = "0.0.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "noeta-dap"
 version = "0.0.0"
 dependencies = [
