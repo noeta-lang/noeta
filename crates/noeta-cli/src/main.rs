@@ -33,6 +33,10 @@ use noeta_span::{Source, SourceId, SourceMap, Span};
 use noeta_vm::{SessionOutput, VmBackend, VmSession};
 
 mod manifest;
+// The PubGrub resolver (P2.2) is the pure algorithm; it's consumed once git/registry dependencies
+// need version selection (P2.3+). Landed + unit-tested first, isolated from IO.
+#[allow(dead_code)]
+mod resolve;
 
 #[derive(Parser)]
 #[command(name = "noeta", version, about = "The Noeta toolchain")]

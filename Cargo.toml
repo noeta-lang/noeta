@@ -110,6 +110,10 @@ toml = "0.9"
 # The package manager's SemVer vocabulary (Phase 2): `[package] version` + `[dependencies]` version
 # requirements, and the PubGrub resolver's version type. The de-facto Cargo/crates.io implementation.
 semver = "1"
+# The dependency-resolution algorithm (Phase 2, user-chosen): PubGrub gives explainable conflict
+# reports matching the project's diagnostic bar. `OfflineDependencyProvider` resolves a pre-walked
+# in-memory graph, keeping the resolver pure + unit-testable (no network in the algorithm itself).
+pubgrub = "0.3"
 # Safe (unsafe-free API) checked byte↔`f32` reinterpret for the P-SIMD column kernels — the aligned
 # `&[u8]`→`&[f32]` view that unlocks autovectorized reductions without `unsafe` in our source.
 bytemuck = "1"

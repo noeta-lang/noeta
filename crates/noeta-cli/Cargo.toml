@@ -34,6 +34,7 @@ noeta-fmt = { workspace = true }
 clap = { workspace = true }
 toml = { workspace = true }
 semver = { workspace = true }
+pubgrub = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
