@@ -10,6 +10,10 @@ rust-version.workspace = true
 noeta-ast = { workspace = true }
 noeta-bytecode = { workspace = true }
 noeta-value = { workspace = true }
+# The cranelift-free ABI surface (frame layout, CompiledFn, helper names, dispatch symbol) lives here
+# so an AOT binary can link the runtime support without Cranelift; re-exported below so every
+# `noeta_jit::*` path is unchanged.
+noeta-jit-abi = { workspace = true }
 cranelift-jit = "0.133"
 cranelift-object = "0.133"
 cranelift-module = "0.133"

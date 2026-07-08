@@ -1,0 +1,25 @@
+[package]
+name = "noeta-jit-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# The cranelift-free ABI contract shared between the JIT/AOT codegen (`noeta-jit`) and the runtime
+# that executes native bodies (`noeta-vm`'s helpers + AOT dispatch binding). Splitting it out lets an
+# **ahead-of-time** binary link the runtime support (frame layout, the `CompiledFn` type, the
+# `noeta_jit_*` helper names, the dispatch-table symbol) **without pulling in Cranelift** — an AOT
+# binary never JIT-compiles (`run_module_aot` binds a static table, `self.jit == None`), so the ~20 MB
+# compiler is dead weight. `noeta-jit` re-exports everything here, so every `noeta_jit::*` path is
+# unchanged.
+[dependencies]
+noeta-value = { workspace = true }
+
+# Same posture as noeta-jit: this crate defines the `extern "C"` `CompiledFn` ABI type, but declares
+# no `unsafe` itself. It re-states the workspace lints minus `unsafe_code = "forbid"` for symmetry.
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
