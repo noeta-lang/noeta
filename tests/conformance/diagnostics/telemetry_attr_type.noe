@@ -1,0 +1,7 @@
+// A `Span.set_attribute` value is a scalar union (`string | int | float | bool`, native OTEL T1):
+// passing a non-scalar is a static type error, not a runtime one — the "build it right" typing.
+// expect: error E0007 at 7:1
+// expect: exit 1
+use std.{telemetry}
+
+telemetry.span("x").set_attribute("bad", [1, 2]).end()

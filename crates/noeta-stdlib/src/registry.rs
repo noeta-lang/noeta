@@ -77,6 +77,15 @@ const STD_TYPES: &[ExtType] = &[
         key_capable: false, // an inbound request is not a map key
         ..ExtType::DEFAULTS
     },
+    // `Span` (native OTEL T1) — a mutable, effectful, host-coupled handle (like `FileHandle`): its
+    // methods reach the `Telemetry` capability by id. NOT key-capable (identifies a host resource).
+    ExtType {
+        name: crate::telemetry::SPAN_TYPE_NAME,
+        methods: crate::telemetry::SPAN_METHODS,
+        dispatch: crate::telemetry::span_method_dispatch,
+        key_capable: false,
+        ..ExtType::DEFAULTS
+    },
     // `Cell<T>` (higher-order-abi H4) — the generic, Class-3 corner of the matrix: all methods
     // higher-order (ctx table), the held value in the retained arena; `get` is a declared
     // always-open arena read (H5), so the backend inlines it.
@@ -2191,6 +2200,15 @@ const STD_MODULES: &[ExtModule] = &[
         functions: ENV_FNS,
         dispatch: env_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
+    },
+    // `telemetry` (native OTEL T1) — the tracing SDK facade: `span(name)` mints a `Span` handle
+    // over the `Telemetry` capability. Plain dispatch (no closures/state); the span tree lives
+    // host-side (recorder / OTLP exporter).
+    ExtModule {
+        name: "telemetry",
+        functions: crate::telemetry::TELEMETRY_FNS,
+        dispatch: crate::telemetry::telemetry_dispatch,
         ..ExtModule::DEFAULTS
     },
     ExtModule {
