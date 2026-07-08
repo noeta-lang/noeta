@@ -97,6 +97,38 @@ pub fn print_program(
     Ok(out)
 }
 
+/// Render a **single** statement (for on-type formatting of a just-completed block). The cursor is
+/// pre-advanced past every comment before the statement so only the statement's *own* (inner)
+/// comments are reattached; leading and trailing comments sit outside its span and are left in place.
+/// No trailing newline (the result replaces the statement's inline range).
+pub fn print_stmt(
+    stmt: &Stmt,
+    source: &str,
+    comments: &[Comment],
+    config: &FmtConfig,
+) -> Result<String, FmtError> {
+    let cursor = comments
+        .iter()
+        .take_while(|c| c.span.start < stmt.span().start)
+        .count();
+    let p = Printer {
+        source,
+        comments,
+        cursor: Cell::new(cursor),
+        config,
+    };
+    let doc = p.stmt(stmt)?;
+    let rendered = render(&doc, config.line_width);
+    let mut out = String::with_capacity(rendered.len());
+    for (i, line) in rendered.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        out.push_str(line.trim_end());
+    }
+    Ok(out)
+}
+
 struct Printer<'a> {
     source: &'a str,
     /// Every comment, in source order (from `lex_with_trivia`).
