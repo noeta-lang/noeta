@@ -98,7 +98,6 @@ pub enum HeapKind {
     ChannelSend,
     ChannelRecv,
     IsolateFuture,
-    Reactive,
 }
 
 /// The NaN-box bit layout (see [`Value::NANBOX`]), the ABI contract between this crate's value
@@ -965,24 +964,6 @@ impl Value {
     /// A **channel receiver endpoint** (isolates I.1). A GC leaf like [`Self::make_sender`].
     pub fn make_receiver(id: ChannelId) -> Value {
         heap::alloc(Payload::Receiver(id))
-    }
-
-    /// A **reactive handle** (reactivity S1): the value a `signal`/`computed`/`effect` builtin yields,
-    /// carrying its [`NodeId`](noeta_reactive::NodeId) into the VM's reactive graph tagged with its
-    /// [`NodeKind`](noeta_reactive::NodeKind). A GC leaf.
-    pub fn make_reactive(kind: noeta_reactive::NodeKind, id: noeta_reactive::NodeId) -> Value {
-        heap::alloc(Payload::Reactive(kind, id))
-    }
-
-    /// The `(kind, node id)` of a reactive handle, or `None` if this is not one.
-    pub fn reactive_parts(self) -> Option<(noeta_reactive::NodeKind, noeta_reactive::NodeId)> {
-        if !self.is_pointer() {
-            return None;
-        }
-        heap::with_payload(self, |p| match p {
-            Payload::Reactive(kind, id) => Some((*kind, *id)),
-            _ => None,
-        })
     }
 
     /// The channel id of a sender endpoint, or `None` if this is not one.
@@ -2305,11 +2286,6 @@ impl Value {
                 // Channel endpoints are opaque reference values (like an iterator/file handle).
                 Payload::Sender(_) => "<sender>".to_string(),
                 Payload::Receiver(_) => "<receiver>".to_string(),
-                // A reactive handle is an opaque reference value; it names itself by kind
-                // (`<signal>`/`<computed>`/`<effect>`), lowercased like the sibling handles above.
-                Payload::Reactive(kind, _) => {
-                    format!("<{}>", kind.type_name().to_ascii_lowercase())
-                }
                 // Handled by the early return at the top of `display`.
                 Payload::PackedList { .. } => unreachable!("packed list demoted before display"),
             })
@@ -2407,9 +2383,6 @@ impl Value {
                 // Channel endpoints have no JSON analog — their opaque display form.
                 Payload::Sender(_) => NativeValue::Str("<sender>".to_string()),
                 Payload::Receiver(_) => NativeValue::Str("<receiver>".to_string()),
-                Payload::Reactive(kind, _) => {
-                    NativeValue::Str(format!("<{}>", kind.type_name().to_ascii_lowercase()))
-                }
                 // Handled by the early return at the top.
                 Payload::PackedList { .. } => {
                     unreachable!("packed list demoted before to_native_deep")
@@ -2469,7 +2442,6 @@ impl Value {
             Payload::ChannelSend { .. } => HeapKind::ChannelSend,
             Payload::ChannelRecv { .. } => HeapKind::ChannelRecv,
             Payload::IsolateFuture { .. } => HeapKind::IsolateFuture,
-            Payload::Reactive { .. } => HeapKind::Reactive,
         }))
     }
 
@@ -2516,12 +2488,6 @@ impl Value {
                 "sender"
             } else if self.receiver_id().is_some() {
                 "receiver"
-            } else if let Some((kind, _)) = self.reactive_parts() {
-                match kind {
-                    noeta_reactive::NodeKind::Signal => "signal",
-                    noeta_reactive::NodeKind::Computed => "computed",
-                    noeta_reactive::NodeKind::Effect => "effect",
-                }
             } else if self.is_bytes() {
                 "bytes"
             } else if self.is_extern() {

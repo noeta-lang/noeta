@@ -13,7 +13,6 @@ noeta-backend = { workspace = true }
 noeta-bytecode = { workspace = true }
 noeta-compiler = { workspace = true }
 noeta-value = { workspace = true }
-noeta-reactive = { workspace = true }
 noeta-gc = { workspace = true }
 noeta-span = { workspace = true }
 noeta-object = { workspace = true }

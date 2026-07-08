@@ -129,7 +129,7 @@ pub fn cell_ctx_method_dispatch<C: NativeCtx + ?Sized>(
     match method {
         "get" => {
             ctx_arity(method, args, 0)?;
-            Ok(CtxOut::Slot(ctx.retained_get(retained)?))
+            Ok(CtxOut::Retained(retained))
         }
         "set" => {
             ctx_arity(method, args, 1)?;

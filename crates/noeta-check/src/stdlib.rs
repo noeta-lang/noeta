@@ -26,32 +26,17 @@ pub(super) const FUTURE: &str = "Future";
 pub(super) const SENDER: &str = "Sender";
 pub(super) const RECEIVER: &str = "Receiver";
 
-/// Reserved built-in type name for a reactive cell (reactivity S1). `signal(v: T)` yields a
-/// `Signal<T>` carrying its value type as its single argument; `.get()` reads `T`, `.set(v: T)`
-/// updates it, `.update(fn(T) -> T)` reads-modifies-writes it.
-pub(super) const SIGNAL: &str = "Signal";
-
-/// Reserved built-in type name for a lazy memoized derivation (reactivity S3). `computed(fn() -> T)`
-/// yields a `Computed<T>` carrying the closure's return type as its single argument; `.get()` reads
-/// `T` (recomputing on read only when a dependency changed). Read-only — no `.set`/`.update`.
-pub(super) const COMPUTED: &str = "Computed";
-
-/// Reserved built-in type name for a reactive side effect (reactivity S2). `effect(fn)` yields an
-/// `Effect` (no type argument — it produces no value); `.dispose()` unsubscribes it.
-pub(super) const EFFECT: &str = "Effect";
-
 /// Every checker-native reserved type name (extern-types X1): the `Named` types whose method
 /// tables live in THIS file because their values are backend builtins coupled to the executor or
 /// reactive graph. Together with the registry's extern types (`registry::find_type`) these form
 /// the E0049 reservation set — a user declaration of any of them is rejected.
-pub(super) const NATIVE_TYPE_NAMES: &[&str] =
-    &[ITERATOR, FUTURE, SENDER, RECEIVER, SIGNAL, COMPUTED, EFFECT];
+pub(super) const NATIVE_TYPE_NAMES: &[&str] = &[ITERATOR, FUTURE, SENDER, RECEIVER];
 
 /// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. Every module — `json` included
 /// (B4) — comes from the native-extension registry now; only the `vec` bulk `*_all` kernels keep a
 /// small per-backend fallback in `module_params`/`module_return`.
 pub(super) fn is_std_module(name: &str) -> bool {
-    registry::find_module(name).is_some() || registry::is_virtual_module(name)
+    registry::find_module(name).is_some()
 }
 
 /// Map a [`registry::SigType`] onto a checker [`Type`] under call-site variable `bindings`
@@ -201,13 +186,6 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         Type::Named(n, args) if n == RECEIVER => {
             receiver_method(name, args.first().unwrap_or(&Type::Dyn))
         }
-        Type::Named(n, args) if n == SIGNAL => {
-            signal_method(name, args.first().unwrap_or(&Type::Dyn))
-        }
-        Type::Named(n, args) if n == COMPUTED => {
-            computed_method(name, args.first().unwrap_or(&Type::Dyn))
-        }
-        Type::Named(n, _) if n == EFFECT => effect_method(name),
         // A registered extern type's methods come from its `ExtType` signature table
         // (extern-types X1) — the registry is the single source, so a new native type never
         // edits this file. A generic extern type's method signatures reference the receiver's
@@ -223,32 +201,6 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
     }
 }
 
-/// A `Signal<T>` cell (reactivity S1/S2): `get()` reads the current value `T`; `set(v: T)` updates it;
-/// `update(fn(T) -> T)` reads-modifies-writes it. `set`/`update` yield nothing.
-fn signal_method(name: &str, elem: &Type) -> Option<Type> {
-    Some(match name {
-        "get" => elem.clone(),
-        "set" | "update" => Type::Unit,
-        _ => return None,
-    })
-}
-
-/// A `Computed<T>` derivation (reactivity S3): `get()` reads the current value `T`, recomputing lazily
-/// if a dependency changed. Read-only — there is deliberately no `set`/`update`.
-fn computed_method(name: &str, elem: &Type) -> Option<Type> {
-    Some(match name {
-        "get" => elem.clone(),
-        _ => return None,
-    })
-}
-
-/// An `Effect` (reactivity S2): `dispose()` unsubscribes the effect so it stops rerunning.
-fn effect_method(name: &str) -> Option<Type> {
-    Some(match name {
-        "dispose" => Type::Unit,
-        _ => return None,
-    })
-}
 
 /// A `Sender<T>` endpoint (isolates I.1): `send(v)` enqueues `v` (async — suspends on a full buffer),
 /// returning `Future<void>`; `close()` marks the channel closed so a drained `recv` yields `none`.
@@ -458,30 +410,6 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
             "recv" => vec![],
             _ => return None,
         }),
-        // `Signal<T>` (reactivity S1): `get()` takes nothing; `set(v: T)` takes the value type, so a
-        // mistyped update is rejected statically.
-        Type::Named(n, args) if n == SIGNAL => {
-            let elem = args.first().cloned().unwrap_or(Type::Dyn);
-            Some(match name {
-                "get" => vec![],
-                "set" => vec![elem.clone()],
-                // `update(fn(T) -> T)` — a closure from the value type to itself.
-                "update" => vec![Type::Fn {
-                    params: vec![elem.clone()],
-                    ret: Box::new(elem),
-                }],
-                _ => return None,
-            })
-        }
-        // `Computed<T>` (reactivity S3): `get()` takes nothing. Read-only.
-        Type::Named(n, _) if n == COMPUTED => Some(match name {
-            "get" => vec![],
-            _ => return None,
-        }),
-        Type::Named(n, _) if n == EFFECT => Some(match name {
-            "dispose" => vec![],
-            _ => return None,
-        }),
         // A registered extern type's method parameters come from its `ExtType` signature table
         // (extern-types X1), like `method_return`, with the receiver's type arguments seeding
         // any variables (H4): `Cell<int>.set(v)` demands an `int`.
@@ -678,27 +606,9 @@ pub(super) fn index_return(receiver: &Type) -> Option<Type> {
 
 /// The return type of a Ring 2 module call `module.name(args)`, or `None` if unknown.
 pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<Type> {
-    // The virtual `reactive` module (prelude-redesign P2a): its functions are backend builtins, so
-    // their types live here rather than in the registry. `signal(v: T) -> Signal<T>` (the value
-    // type rides as the single type arg so `.get()` recovers `T` and `.set()` requires `T`);
-    // `computed(fn() -> T) -> Computed<T>`; `effect(fn() -> void) -> Effect`.
-    if module == "reactive" {
-        return match name {
-            "signal" => Some(Type::Named(
-                SIGNAL.to_string(),
-                vec![args.first().cloned().unwrap_or(Type::Unknown)],
-            )),
-            "computed" => Some(Type::Named(
-                COMPUTED.to_string(),
-                vec![match args.first() {
-                    Some(Type::Fn { ret, .. }) => (**ret).clone(),
-                    _ => Type::Unknown,
-                }],
-            )),
-            "effect" => Some(Type::Named(EFFECT.to_string(), vec![])),
-            _ => None,
-        };
-    }
+    // (The `reactive` arm lived here until higher-order-abi H5 — `signal`/`computed`/`effect`
+    // now type through the registry fallback below, their `T`s recovered by `SigType::Generic`
+    // + `Var` bind-and-substitute, and the handle methods through the extern-type tables.)
     // (`id` was virtual here until the id-entropy arc de-virtualized it, and `task` until
     // higher-order-abi H0/H2 — the whole module now types through the registry fallback below,
     // its combinators' `T`s recovered by the `SigType::Var` bind-and-substitute.)

@@ -7,7 +7,8 @@
 use noeta_diagnostics::DiagnosticCode;
 use noeta_span::Span;
 use noeta_stdlib::{
-    CtxError, CtxOut, CtxResult, ExternIo, NativeCtx, NativeOut, NativeValue, Slot, StdError,
+    CtxError, CtxOut, CtxResult, ExternIo, NativeCtx, NativeOut, NativeValue, Retained, Slot,
+    StdError,
 };
 
 use crate::{
@@ -18,7 +19,10 @@ use crate::{
 pub(crate) struct EvalCtx<'i> {
     interp: &'i mut Interpreter,
     /// The slot table (the VM twin's entries own manual references; here a slot owns its clone).
+    /// Entries below `seeded` are the call's arguments — mirroring the VM's borrowed-seed prefix:
+    /// never freed, `take` clones (parity: a seed slot stays readable after a take).
     slots: Vec<Option<Value>>,
+    seeded: u32,
     free_list: Vec<Slot>,
     span: Span,
 }
@@ -42,6 +46,7 @@ impl<'i> EvalCtx<'i> {
         EvalCtx {
             interp,
             slots: args.iter().cloned().map(Some).collect(),
+            seeded: args.len() as u32,
             free_list: Vec::new(),
             span,
         }
@@ -65,6 +70,12 @@ impl<'i> EvalCtx<'i> {
     }
 
     pub(crate) fn take(&mut self, slot: Slot) -> CtxResult<Value> {
+        // A seed stays readable after a take (the VM's borrowed prefix retains a copy out).
+        if slot < self.seeded {
+            return Ok(self.slots[slot as usize]
+                .clone()
+                .expect("seeds are never freed"));
+        }
         self.slots
             .get_mut(slot as usize)
             .and_then(Option::take)
@@ -98,6 +109,9 @@ impl NativeCtx for EvalCtx<'_> {
     }
 
     fn free(&mut self, slot: Slot) {
+        if slot < self.seeded {
+            return; // mirror the VM: seeds are never freed
+        }
         if self
             .slots
             .get_mut(slot as usize)
@@ -177,6 +191,10 @@ impl NativeCtx for EvalCtx<'_> {
         let value = self.get(future)?.clone();
         match self.interp.poll_once(&value, self.span) {
             Ok(Some(result)) => {
+                // A borrowed seed cannot be spent in place — fresh slot, like the VM.
+                if future < self.seeded {
+                    return Ok(Some(self.insert(result)));
+                }
                 // Ready spends the future slot; the result takes over its index in place (the
                 // VM twin's table-reclaim semantics).
                 self.slots[future as usize] = Some(result);
@@ -191,6 +209,9 @@ impl NativeCtx for EvalCtx<'_> {
         let value = self.get(future)?.clone();
         match self.interp.drive_future(value, self.span) {
             Ok(result) => {
+                if future < self.seeded {
+                    return Ok(self.insert(result));
+                }
                 // Spent like a ready poll: the result takes over the future's index in place.
                 self.slots[future as usize] = Some(result);
                 Ok(future)
@@ -329,6 +350,43 @@ impl NativeCtx for EvalCtx<'_> {
     // extension's contract ("the fast path and the full dispatch behave identically whenever
     // the gate is open") on every reactive/cell fixture. Gates are therefore meaningless here.
     fn set_read_gate(&mut self, _type_name: &'static str, _open: bool) {}
+
+    fn run_thunk(&mut self, body: Retained) -> CtxResult<()> {
+        let callee = self
+            .interp
+            .ext_arena
+            .get(body as usize)
+            .and_then(Option::as_ref)
+            .cloned()
+            .ok_or_else(bad_retained)?;
+        match self.interp.call(callee, Vec::new(), self.span) {
+            Ok(result) => {
+                self.interp.destroy_value(result);
+                Ok(())
+            }
+            Err(_) => Err(CtxError::Abort),
+        }
+    }
+
+    fn call_thunk_into(&mut self, body: Retained, dest: Retained) -> CtxResult<()> {
+        let callee = self
+            .interp
+            .ext_arena
+            .get(body as usize)
+            .and_then(Option::as_ref)
+            .cloned()
+            .ok_or_else(bad_retained)?;
+        let result = match self.interp.call(callee, Vec::new(), self.span) {
+            Ok(result) => result,
+            Err(_) => return Err(CtxError::Abort),
+        };
+        let old = match self.interp.ext_arena.get_mut(dest as usize) {
+            Some(entry @ Some(_)) => entry.replace(result).expect("checked above"),
+            _ => return Err(bad_retained()),
+        };
+        self.interp.destroy_value(old);
+        Ok(())
+    }
 }
 
 impl Interpreter {
@@ -365,6 +423,23 @@ impl Interpreter {
                         DiagnosticCode::Panic,
                         span,
                         format!("internal: `{type_name}.{method}` returned a freed slot"),
+                    )),
+                }
+            }
+            // A retained arena entry as the result (a `get` over a stable cell).
+            Ok(CtxOut::Retained(retained)) => {
+                drop(ctx);
+                match self
+                    .ext_arena
+                    .get(retained as usize)
+                    .and_then(Option::as_ref)
+                    .cloned()
+                {
+                    Some(value) => Ok(value),
+                    None => Err(self.runtime_error(
+                        DiagnosticCode::Panic,
+                        span,
+                        "internal: a native dispatch returned a freed retained handle".to_string(),
                     )),
                 }
             }
@@ -411,6 +486,23 @@ impl Interpreter {
                         DiagnosticCode::Panic,
                         span,
                         format!("internal: `{module}.{func}` returned a freed slot"),
+                    )),
+                }
+            }
+            // A retained arena entry as the result (a `get` over a stable cell).
+            Ok(CtxOut::Retained(retained)) => {
+                drop(ctx);
+                match self
+                    .ext_arena
+                    .get(retained as usize)
+                    .and_then(Option::as_ref)
+                    .cloned()
+                {
+                    Some(value) => Ok(value),
+                    None => Err(self.runtime_error(
+                        DiagnosticCode::Panic,
+                        span,
+                        "internal: a native dispatch returned a freed retained handle".to_string(),
                     )),
                 }
             }

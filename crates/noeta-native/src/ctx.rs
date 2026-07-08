@@ -76,11 +76,14 @@ pub fn ctx_arity(func: &str, args: &[Slot], expected: usize) -> CtxResult<()> {
     }
 }
 
-/// What a [`CtxDispatch`] returns: a slot whose value becomes the call's result verbatim, or a
+/// What a [`CtxDispatch`] returns: a slot whose value becomes the call's result verbatim, a
+/// **retained arena entry** whose current value becomes the result (the arena keeps its
+/// reference — the natural return of a `get` over a stable cell, with no slot traffic), or a
 /// neutral [`NativeOut`] the backend materializes (for plain data results).
 #[derive(Debug)]
 pub enum CtxOut {
     Slot(Slot),
+    Retained(Retained),
     Out(NativeOut),
 }
 
@@ -239,4 +242,16 @@ pub trait NativeCtx {
     /// recompute a memo, …); while open — the default — the backend inlines the read. Closing an
     /// already-closed gate (or opening an open one) is a no-op; gates are per-run, per-type.
     fn set_read_gate(&mut self, type_name: &'static str, open: bool);
+
+    /// Run a retained zero-argument thunk for its **effect**, discarding (and releasing) its
+    /// result — fused arena-load + call + release, no slot traffic (H5 perf: the reactive flush
+    /// loop's per-effect operation). An abort in the body propagates as [`CtxError::Abort`].
+    fn run_thunk(&mut self, body: Retained) -> CtxResult<()>;
+
+    /// Call a retained zero-argument thunk and store its result **into an existing arena cell**
+    /// (releasing the cell's old value, destructor-aware) — fused arena-load + call + in-place
+    /// store, no slot traffic (a `computed` recompute lands in its stable memo cell, which is
+    /// what its declared arena read projects). An abort in the body propagates; the cell is
+    /// untouched then.
+    fn call_thunk_into(&mut self, body: Retained, dest: Retained) -> CtxResult<()>;
 }

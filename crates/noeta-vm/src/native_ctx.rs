@@ -9,7 +9,8 @@
 use noeta_diagnostics::DiagnosticCode;
 use noeta_span::Span;
 use noeta_stdlib::{
-    CtxError, CtxOut, CtxResult, ExternIo, NativeCtx, NativeOut, NativeValue, Slot, StdError,
+    CtxError, CtxOut, CtxResult, ExternIo, NativeCtx, NativeOut, NativeValue, Retained, Slot,
+    StdError,
 };
 use noeta_gc::retain;
 use noeta_value::Value;
@@ -19,8 +20,12 @@ use crate::{isolate, stdlib_error_code, Abort, Poll, Vm};
 
 pub(crate) struct VmCtx<'c, 'm> {
     vm: &'c mut Vm<'m>,
-    /// The slot table: `Some` owns one reference; `None` is freed (index reusable via `free_list`).
+    /// The slot table. Entries below `seeded` are **borrowed** from the caller's registers (which
+    /// outlive the call) — no retain on entry, no release at drop (H5 perf: a hot `set(v)` pays
+    /// zero refcount traffic for its receiver + argument). Entries at/above `seeded` own one
+    /// reference each; `None` is freed (index reusable via `free_list`, which never holds a seed).
     slots: Vec<Option<Value>>,
+    seeded: u32,
     free_list: Vec<Slot>,
     span: Span,
 }
@@ -40,29 +45,29 @@ fn bad_retained() -> CtxError {
 }
 
 impl<'c, 'm> VmCtx<'c, 'm> {
-    /// Wrap the VM for one dispatch, seeding the table with the (borrowed) call arguments —
-    /// retained here, so the table's uniform "every entry owns a reference" invariant holds.
-    /// The table itself comes from the VM's pool (H5 perf), so a hot dispatch loop runs
-    /// alloc-free; re-entrant dispatches simply pop the next spare.
+    /// Wrap the VM for one dispatch, seeding the table with the caller's (borrowed) arguments —
+    /// NOT retained: the caller's registers own them and outlive the call (see `seeded`). The
+    /// table itself comes from the VM's pool (H5 perf), so a hot dispatch loop runs alloc-free;
+    /// re-entrant dispatches simply pop the next spare.
     pub(crate) fn new(vm: &'c mut Vm<'m>, args: &[Value], span: Span) -> VmCtx<'c, 'm> {
         let mut slots = vm.ctx_table_pool.pop().unwrap_or_default();
-        for &a in args {
-            retain(a);
-            slots.push(Some(a));
-        }
+        slots.extend(args.iter().map(|&a| Some(a)));
         VmCtx {
             vm,
             slots,
+            seeded: args.len() as u32,
             free_list: Vec::new(),
             span,
         }
     }
 
-    /// Seed one (borrowed) argument into the table — retained here, like `new`'s seeding loop.
-    /// Used by the type-method entry to place the receiver + args without an intermediate vec.
+    /// Seed one (borrowed) argument into the table — like `new`'s seeding, not retained. Used by
+    /// the type-method entry to place the receiver + args without an intermediate vec. Must only
+    /// be called before any non-seed insert (the borrowed prefix is `0..seeded`).
     pub(crate) fn insert_seed(&mut self, borrowed: Value) {
-        retain(borrowed);
+        debug_assert_eq!(self.slots.len(), self.seeded as usize, "seeds come first");
         self.slots.push(Some(borrowed));
+        self.seeded += 1;
     }
 
     /// Store an **owned** reference, minting its slot (freed indices are reused so a long serve
@@ -87,8 +92,14 @@ impl<'c, 'm> VmCtx<'c, 'm> {
     }
 
     /// Move a slot's value **out** of the table (for the dispatch's `CtxOut::Slot` result — the
-    /// one reference transfers to the caller).
+    /// one reference transfers to the caller). Taking a *seed* slot retains instead (the table
+    /// never owned it; the caller receives a fresh reference).
     pub(crate) fn take(&mut self, slot: Slot) -> CtxResult<Value> {
+        if slot < self.seeded {
+            let value = self.slots[slot as usize].expect("seeds are never freed");
+            retain(value);
+            return Ok(value);
+        }
         self.slots
             .get_mut(slot as usize)
             .and_then(Option::take)
@@ -98,10 +109,10 @@ impl<'c, 'm> VmCtx<'c, 'm> {
 
 impl Drop for VmCtx<'_, '_> {
     fn drop(&mut self) {
-        // Release every reference the dispatch left behind (its arguments, forgotten temps),
-        // then hand the emptied table back to the pool for the next dispatch.
+        // Release every reference the dispatch left behind (forgotten temps — the borrowed seed
+        // prefix is the caller's), then hand the emptied table back to the pool.
         let mut slots = std::mem::take(&mut self.slots);
-        for value in slots.drain(..).flatten() {
+        for value in slots.drain(..).skip(self.seeded as usize).flatten() {
             self.vm.release_value(value);
         }
         // Cap what we keep: a long-lived serve loop's table stays window-sized, but a one-off
@@ -137,6 +148,11 @@ impl NativeCtx for VmCtx<'_, '_> {
     }
 
     fn free(&mut self, slot: Slot) {
+        // A seed is the caller's — freeing it is a no-op (it dies with the call anyway), and its
+        // index never enters the free list (the borrowed prefix must stay intact).
+        if slot < self.seeded {
+            return;
+        }
         if let Some(value) = self.slots.get_mut(slot as usize).and_then(Option::take) {
             self.vm.release_value(value);
             self.free_list.push(slot);
@@ -214,6 +230,11 @@ impl NativeCtx for VmCtx<'_, '_> {
         let value = self.get(future)?;
         match self.vm.poll_once(value, self.span) {
             Ok(Poll::Ready(result)) => {
+                // A borrowed seed cannot be spent in place (the entry is the caller's) — the
+                // result gets a fresh owned slot instead.
+                if future < self.seeded {
+                    return Ok(Some(self.insert(result)));
+                }
                 // Ready spends the future slot (never re-polled); the result takes over its
                 // index in place — one write, no free-list churn, the table stays hot and tiny.
                 let entry = &mut self.slots[future as usize];
@@ -230,6 +251,10 @@ impl NativeCtx for VmCtx<'_, '_> {
         let value = self.get(future)?;
         match self.vm.drive_future(value, self.span) {
             Ok(result) => {
+                // A borrowed seed cannot be spent in place — fresh owned slot (see `poll`).
+                if future < self.seeded {
+                    return Ok(self.insert(result));
+                }
                 // Spent like a ready poll: the result takes over the future's index in place.
                 let entry = &mut self.slots[future as usize];
                 let spent = entry.replace(result).expect("checked by get above");
@@ -384,6 +409,53 @@ impl NativeCtx for VmCtx<'_, '_> {
             closed.push(type_name);
         }
     }
+
+    fn run_thunk(&mut self, body: Retained) -> CtxResult<()> {
+        let callee = self
+            .vm
+            .ext_arena
+            .get(body as usize)
+            .copied()
+            .flatten()
+            .ok_or_else(bad_retained)?;
+        // `call_value` borrows the callee (the arena keeps its reference) and returns an owned
+        // result — released here, no slot ever minted.
+        match self.vm.call_value(callee, Vec::new(), self.span) {
+            Ok(result) => {
+                self.vm.release_value(result);
+                Ok(())
+            }
+            Err(Abort) => Err(CtxError::Abort),
+        }
+    }
+
+    fn call_thunk_into(&mut self, body: Retained, dest: Retained) -> CtxResult<()> {
+        let callee = self
+            .vm
+            .ext_arena
+            .get(body as usize)
+            .copied()
+            .flatten()
+            .ok_or_else(bad_retained)?;
+        let result = match self.vm.call_value(callee, Vec::new(), self.span) {
+            Ok(result) => result,
+            Err(Abort) => return Err(CtxError::Abort),
+        };
+        // The owned result moves straight into the cell; the displaced value releases
+        // destructor-aware.
+        let Some(entry) = self
+            .vm
+            .ext_arena
+            .get_mut(dest as usize)
+            .filter(|e| e.is_some())
+        else {
+            self.vm.release_value(result);
+            return Err(bad_retained());
+        };
+        let old = entry.replace(result).expect("checked above");
+        self.vm.release_value(old);
+        Ok(())
+    }
 }
 
 impl<'m> Vm<'m> {
@@ -439,6 +511,22 @@ impl<'m> Vm<'m> {
                 }
             }
             // The overwhelmingly common data result of a mutator (`set`) — no shape/ret lookup.
+            // A retained arena entry as the result (a `get` over a stable cell): arena load +
+            // retain — the arena keeps its reference.
+            Ok(CtxOut::Retained(retained)) => {
+                drop(ctx);
+                match self.ext_arena.get(retained as usize).copied().flatten() {
+                    Some(value) => {
+                        retain(value);
+                        Ok(value)
+                    }
+                    None => Err(self.error(
+                        DiagnosticCode::Panic,
+                        span,
+                        "internal: a native dispatch returned a freed retained handle".to_string(),
+                    )),
+                }
+            }
             Ok(CtxOut::Out(noeta_stdlib::NativeOut::Unit)) => {
                 drop(ctx);
                 Ok(Value::unit())
@@ -491,6 +579,22 @@ impl<'m> Vm<'m> {
                         DiagnosticCode::Panic,
                         span,
                         format!("internal: `{module}.{func}` returned a freed slot"),
+                    )),
+                }
+            }
+            // A retained arena entry as the result (a `get` over a stable cell): arena load +
+            // retain — the arena keeps its reference.
+            Ok(CtxOut::Retained(retained)) => {
+                drop(ctx);
+                match self.ext_arena.get(retained as usize).copied().flatten() {
+                    Some(value) => {
+                        retain(value);
+                        Ok(value)
+                    }
+                    None => Err(self.error(
+                        DiagnosticCode::Panic,
+                        span,
+                        "internal: a native dispatch returned a freed retained handle".to_string(),
                     )),
                 }
             }

@@ -21,12 +21,11 @@ use noeta_bytecode::{Module, PackedFieldDef};
 use noeta_compiler::SessionCompiler;
 use noeta_diagnostics::Diagnostic;
 use noeta_object::{PackedKind, PackedSchema, Shape};
-use noeta_reactive::ReactiveGraph;
 use noeta_span::{SourceId, Span};
 use noeta_stdlib::{Executor, Host};
 use noeta_value::Value;
 
-use crate::{Channel, GcVal, Vm, release};
+use crate::{Channel, Vm, release};
 
 /// A factory for a fresh host + executor pair — the session builds one at construction and again on
 /// `:reset`, so a reset REPL starts against the same *kind* of environment (a real host, or the
@@ -42,7 +41,13 @@ pub(crate) struct SessionState {
     global_order: Vec<u32>,
     channels: Vec<Channel>,
     channel_progress: u64,
-    reactive: Rc<ReactiveGraph<GcVal>>,
+    /// The extensions' persistent runtime (higher-order-abi H4/H5): the retained-value arena
+    /// (signals' contents, cells) plus per-extension Rust state (the reactive graph) and gates —
+    /// what the pre-H5 `Rc<ReactiveGraph>` field carried, generalized.
+    ext_arena: Vec<Option<Value>>,
+    ext_arena_free: Vec<u32>,
+    ext_state: Vec<(&'static str, noeta_stdlib::ExtState)>,
+    ext_closed_gates: Vec<&'static str>,
     /// The `Rc`-wrapped derived tables grow by **append** (never rebuild), so an entry-1 aggregate and
     /// an entry-2 aggregate of the same type share `&'static Shape` identity — the invariant the reuse
     /// gate, packed-value ops, and inline caches assume within a single run. [`SessionState::sync_to`]
@@ -62,7 +67,10 @@ impl SessionState {
             global_order: Vec::new(),
             channels: Vec::new(),
             channel_progress: 0,
-            reactive: Rc::new(ReactiveGraph::new()),
+            ext_arena: Vec::new(),
+            ext_arena_free: Vec::new(),
+            ext_state: Vec::new(),
+            ext_closed_gates: Vec::new(),
             shapes: Vec::new(),
             packed_schemas: Vec::new(),
             type_reprs: Vec::new(),
@@ -125,7 +133,10 @@ impl<'m> Vm<'m> {
         vm.global_order = state.global_order;
         vm.channels = state.channels;
         vm.channel_progress = state.channel_progress;
-        vm.reactive = state.reactive;
+        vm.ext_arena = state.ext_arena;
+        vm.ext_arena_free = state.ext_arena_free;
+        vm.ext_state = state.ext_state;
+        vm.ext_closed_gates = state.ext_closed_gates;
         vm.shapes = state.shapes;
         vm.packed_schemas = state.packed_schemas;
         vm.type_reprs = state.type_reprs;
@@ -148,7 +159,10 @@ impl<'m> Vm<'m> {
             global_order: self.global_order,
             channels: self.channels,
             channel_progress: self.channel_progress,
-            reactive: self.reactive,
+            ext_arena: self.ext_arena,
+            ext_arena_free: self.ext_arena_free,
+            ext_state: self.ext_state,
+            ext_closed_gates: self.ext_closed_gates,
             shapes: self.shapes,
             packed_schemas: self.packed_schemas,
             type_reprs: self.type_reprs,

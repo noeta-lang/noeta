@@ -175,6 +175,7 @@ pub(crate) fn stdlib_error_code(kind: noeta_stdlib::ErrorKind) -> DiagnosticCode
         noeta_stdlib::ErrorKind::UnknownName => DiagnosticCode::UnknownName,
         noeta_stdlib::ErrorKind::Io => DiagnosticCode::IoError,
         noeta_stdlib::ErrorKind::Panic => DiagnosticCode::Panic,
+        noeta_stdlib::ErrorKind::ReactiveCycle => DiagnosticCode::ReactiveCycle,
     }
 }
 

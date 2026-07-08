@@ -347,19 +347,9 @@ pub enum Builtin {
     /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
     /// The assertion primitive `@test` blocks rest on (object-model slice 6).
     Assert,
-    /// (The whole `task` module — `sleep` at higher-order-abi H0, `all`/`race`/`map_bounded` at
-    /// H2 — migrated onto the registry's `NativeCtx` dispatch, `noeta-stdlib/src/task.rs`; and
-    /// `http.serve` at H3, `noeta-stdlib/src/serve.rs`.)
-    /// `signal(v)` — create a reactive cell holding `v` (reactivity S1); the tree-walker twin of the
-    /// VM's `Builtin::Signal`. Returns a `Signal<T>` handle read/updated via the interpreter's graph.
-    Signal,
-    /// `computed(fn)` — create a lazy, memoized derivation (reactivity S3); the tree-walker twin of the
-    /// VM's `Builtin::Computed`. Returns a `Computed<T>` whose `.get()` recomputes only when a
-    /// dependency it read has changed.
-    Computed,
-    /// `effect(fn)` — register a side effect (reactivity S2); the tree-walker twin of the VM's
-    /// `Builtin::Effect`. Runs `fn` immediately, tracks the signals it reads, and reruns on change.
-    Effect,
+    // (The whole orchestration family — `task` at higher-order-abi H0/H2, `http.serve` at H3,
+    // `signal`/`computed`/`effect` at H5 — migrated onto the registry's `NativeCtx` dispatch,
+    // `noeta-stdlib/src/{task,serve,reactive}.rs`.)
 }
 
 impl Builtin {
@@ -374,21 +364,6 @@ impl Builtin {
             Builtin::MakeSome => "some",
             Builtin::Panic => "panic",
             Builtin::Assert => "assert",
-            Builtin::Signal => "signal",
-            Builtin::Computed => "computed",
-            Builtin::Effect => "effect",
-        }
-    }
-
-    /// The builtin behind a **virtual-module** function name (`use std.reactive.{signal}` →
-    /// `Builtin::Signal`, prelude-redesign P2) — the names `registry::VIRTUAL_MODULES` exports.
-    /// The bytecode compiler resolves the same names through its own `Builtin::from_name`.
-    fn from_virtual_name(name: &str) -> Option<Builtin> {
-        match name {
-            "signal" => Some(Builtin::Signal),
-            "computed" => Some(Builtin::Computed),
-            "effect" => Some(Builtin::Effect),
-            _ => None,
         }
     }
 
@@ -1097,13 +1072,6 @@ struct Interpreter {
     /// round — a channel op that unblocks a sibling is progress even when no task *completes*.
     channels: Vec<Channel>,
     channel_progress: u64,
-    /// The reactive graph (reactivity S1): the tree-walker twin of the VM's `reactive` field. Every
-    /// `signal(v)`/`computed(fn)`/`effect(fn)` allocates a node here; a `Reactive` handle references
-    /// one by [`NodeId`]. Held behind `Rc` so a flush can borrow the graph and the interpreter
-    /// independently (the graph's methods are `&self`, interior-mutable). The stored values are plain
-    /// `Value`s — `Rc`-shared, so the graph's clones/drops are refcount-correct for free, no wrapper
-    /// needed (unlike the VM's `GcVal`). Cleared at program end so held values drop.
-    reactive: std::rc::Rc<noeta_reactive::ReactiveGraph<Value>>,
     /// The extensions' retained-value arena (higher-order-abi H4) — the tree-walker twin of the
     /// VM's `ext_arena`. Entries are `Rc` clones, so ownership is automatic (dropping the
     /// interpreter drops whatever the program never released, mirroring the VM's teardown
@@ -1191,7 +1159,6 @@ impl Interpreter {
             scopes: Vec::new(),
             channels: Vec::new(),
             channel_progress: 0,
-            reactive: std::rc::Rc::new(noeta_reactive::ReactiveGraph::new()),
             ext_arena: Vec::new(),
             ext_arena_free: Vec::new(),
             ext_state: Vec::new(),
@@ -1536,25 +1503,11 @@ impl Interpreter {
         let is_std = path == ["std"];
         let selective_module = (path.len() == 2 && path[0] == "std")
             .then(|| path[1].as_str())
-            .filter(|m| {
-                noeta_stdlib::registry::find_module(m).is_some()
-                    || noeta_stdlib::registry::is_virtual_module(m)
-            });
+            .filter(|m| noeta_stdlib::registry::find_module(m).is_some());
         for imported in names {
-            let value = if is_std
-                && (noeta_stdlib::registry::find_module(&imported.name).is_some()
-                    || noeta_stdlib::registry::is_virtual_module(&imported.name))
+            let value = if is_std && noeta_stdlib::registry::find_module(&imported.name).is_some()
             {
                 Value::NativeModule(imported.name.clone())
-            } else if let Some(module) = selective_module
-                && noeta_stdlib::registry::virtual_module_function(module, &imported.name)
-            {
-                // A virtual-module member (`use std.reactive.{signal}`, P2a): the function IS a
-                // builtin, so bind the first-class builtin value — the old prelude binding, gated.
-                Value::Builtin(
-                    Builtin::from_virtual_name(&imported.name)
-                        .expect("every virtual-module function is a named builtin"),
-                )
             } else if let Some(module) = selective_module
                 && noeta_stdlib::registry::is_module_function(module, &imported.name)
             {
@@ -2218,54 +2171,9 @@ impl Interpreter {
             self.expect_std_arity(name, &args, 0, span)?;
             return Ok(Value::ChannelRecv(*id));
         }
-        // Reactive handle methods (reactivity S1/S2/S3): `signal.get()`/`.set(v)`/`.update(fn)`,
-        // `computed.get()`, and `effect.dispose()` — the tree-walker twin of the VM's dispatch. Each
-        // method is guarded by the node's `kind` (a `signal` is not disposable, a `computed` is
-        // read-only, an `effect` is not readable); an invalid pair falls through to the generic
-        // no-method runtime error below, exactly as any other unknown method on a built-in type.
-        // `get` on a `computed` recomputes a dirty body via `read_reactive`; on a `signal` it is a
-        // plain read (the callback never fires).
-        if let Value::Reactive(kind, node) = &receiver {
-            use noeta_reactive::NodeKind;
-            let kind = *kind;
-            let node = *node;
-            match (kind, name) {
-                (NodeKind::Signal | NodeKind::Computed, "get") => {
-                    self.expect_std_arity(name, &args, 0, span)?;
-                    return self.read_reactive(node, span);
-                }
-                (NodeKind::Signal, "set") => {
-                    self.expect_std_arity(name, &args, 1, span)?;
-                    let value = args.into_iter().next().unwrap();
-                    self.reactive.set(node, value);
-                    // Coalesce: a set inside a running effect body only enqueues — the ongoing flush
-                    // picks it up. Only a top-level set drives a fresh flush. (reactivity S4)
-                    if !self.reactive.is_flushing() {
-                        self.drive_flush(span)?;
-                    }
-                    return Ok(Value::Unit);
-                }
-                (NodeKind::Signal, "update") => {
-                    self.expect_std_arity(name, &args, 1, span)?;
-                    // Read-modify-write: read the current value, call the updater with it, store the
-                    // result, then flush (coalescing inside a running flush, like `set`).
-                    let f = args.into_iter().next().unwrap();
-                    let current = self.read_reactive(node, span)?;
-                    let updated = self.call(f, vec![current], span)?;
-                    self.reactive.set(node, updated);
-                    if !self.reactive.is_flushing() {
-                        self.drive_flush(span)?;
-                    }
-                    return Ok(Value::Unit);
-                }
-                (NodeKind::Effect, "dispose") => {
-                    self.expect_std_arity(name, &args, 0, span)?;
-                    self.reactive.dispose(node);
-                    return Ok(Value::Unit);
-                }
-                _ => {}
-            }
-        }
+        // (The reactive handle methods lived here until higher-order-abi H5 — `Signal`/
+        // `Computed`/`Effect` are registry extern types now, dispatched through the ctx
+        // seam like any other. Mirrors the VM.)
         // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file handle above.
         if let Value::Iter(state) = &receiver
             && let Some(method) = noeta_stdlib::IterMethod::from_name(name)
@@ -2677,14 +2585,9 @@ impl Interpreter {
         // Per-**function**, not per-module (higher-order-abi H0): a module migrates onto the ctx
         // seam name by name (`task.sleep` is registered, `task.all` still virtual), so unmatched
         // names fall through to the registry arms and the shared unknown-function error below.
-        // Mirrors the VM.
-        if noeta_stdlib::registry::virtual_module_function(module, func) {
-            let builtin = Builtin::from_virtual_name(func)
-                .expect("every virtual-module function is a named builtin");
-            return self.call_builtin(builtin, args.to_vec(), span);
-        }
-        // (`http.serve` was intercepted here until higher-order-abi H3 — it now lives in `http`'s
-        // registry ctx table, `noeta-stdlib/src/serve.rs`, routed by the ctx arm below.)
+        // (The virtual-module intercept died with higher-order-abi H5: `task` migrated at H0/H2,
+        // `http.serve` at H3, and `reactive` — the last virtual module — at H5. Every std module
+        // now dispatches through the registry arms below. Mirrors the VM.)
         // A function registered in the native-extension registry dispatches through the shared
         // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host
         // threaded in), and materialize the `NativeOut` result (the result shape supplied from the
@@ -3360,73 +3263,6 @@ impl Interpreter {
         }
     }
 
-    /// Read a reactive node, driving a `computed`'s recompute through [`call`](Self::call) if it is
-    /// dirty (reactivity S3) — the tree-walker twin of the VM's `Vm::read_reactive`. A `signal` read
-    /// never enters the callback (nothing to run); a dirty `computed` runs its body (and, transitively,
-    /// any dirty computeds it reads), memoizing as it goes. The graph is cloned out as an `Rc` so its
-    /// `&self` `read` can borrow it while the callback borrows `self` for `call`. A body that aborts is
-    /// captured deterministically — the first abort stops further recomputes and propagates.
-    fn read_reactive(&mut self, node: noeta_reactive::NodeId, span: Span) -> Eval<Value> {
-        let graph = std::rc::Rc::clone(&self.reactive);
-        let mut abort: Option<Unwind> = None;
-        let value = graph.read(node, &mut |body: Value| -> Value {
-            if abort.is_some() {
-                return Value::Unit;
-            }
-            match self.call(body, Vec::new(), span) {
-                Ok(value) => value,
-                Err(unwind) => {
-                    abort = Some(unwind);
-                    Value::Unit
-                }
-            }
-        });
-        match abort {
-            Some(unwind) => Err(unwind),
-            None => Ok(value),
-        }
-    }
-
-    /// Run the reactive graph's pending effects to a fixpoint (reactivity S2) — the tree-walker twin of
-    /// the VM's `Vm::drive_flush`. Invokes each effect body through [`call`](Self::call). The graph is
-    /// cloned out as an `Rc` so its `&self` `flush` can borrow it while the run callback borrows `self`
-    /// for `call`. The first effect body to abort (by the deterministic flush order) stops further
-    /// bodies and propagates, identically to the VM.
-    fn drive_flush(&mut self, span: Span) -> Eval<()> {
-        let graph = std::rc::Rc::clone(&self.reactive);
-        let mut abort: Option<Unwind> = None;
-        let overflowed = graph
-            .flush(&mut |body: Value| -> Value {
-                if abort.is_some() {
-                    return Value::Unit;
-                }
-                match self.call(body, Vec::new(), span) {
-                    Ok(value) => value,
-                    Err(unwind) => {
-                        abort = Some(unwind);
-                        Value::Unit
-                    }
-                }
-            })
-            .is_err();
-        // A body-driven abort (panic / `?`) takes priority — surface it as itself. Otherwise, a
-        // non-converging flush (a self-reinforcing effect) becomes the reactive-cycle runtime error.
-        if let Some(unwind) = abort {
-            return Err(unwind);
-        }
-        if overflowed {
-            return Err(self.runtime_error(
-                DiagnosticCode::ReactiveCycle,
-                span,
-                format!(
-                    "reactive update did not converge after {} steps — an effect keeps changing a \
-                     signal it depends on",
-                    noeta_reactive::MAX_FLUSH_STEPS
-                ),
-            ));
-        }
-        Ok(())
-    }
 
     fn call_closure(&mut self, closure: &Rc<Closure>, args: Vec<Value>, span: Span) -> Eval<Value> {
         let required = required_count(&closure.defaults);
@@ -3695,38 +3531,10 @@ impl Interpreter {
                     Err(self.runtime_error(DiagnosticCode::Panic, span, message))
                 }
             }
-            // (The whole `task` module — H0/H2 — and `http.serve` — H3 — migrated to the
-            // registry's `NativeCtx` dispatch (`noeta-stdlib/src/{task,serve}.rs`, reached via
-            // `call_ctx_function`); the drive loops there are shared with the VM.)
-            Builtin::Signal => {
-                self.expect_arity(builtin, &args, 1, span)?;
-                // `signal(v)` — allocate a reactive cell holding `v`. `args` is owned here, so the
-                // value moves straight into the graph (an `Rc` clone keeps it live).
-                let value = args.into_iter().next().unwrap();
-                let id = self.reactive.signal(value);
-                Ok(Value::Reactive(noeta_reactive::NodeKind::Signal, id))
-            }
-            Builtin::Computed => {
-                self.expect_arity(builtin, &args, 1, span)?;
-                // `computed(fn)` — register a lazy derivation, storing the body closure. It is created
-                // dirty and computes on first `.get()`; no flush now (nothing eager runs).
-                let body = args.into_iter().next().unwrap();
-                let id = self.reactive.computed(body);
-                Ok(Value::Reactive(noeta_reactive::NodeKind::Computed, id))
-            }
-            Builtin::Effect => {
-                self.expect_arity(builtin, &args, 1, span)?;
-                // `effect(fn)` — register the effect (created queued), storing the body closure, then
-                // flush to run it once now (subscribing it to the signals it reads). If we are already
-                // inside a flush (an effect created within another effect's body), the ongoing flush
-                // drains it — do not nest. (reactivity S4)
-                let body = args.into_iter().next().unwrap();
-                let id = self.reactive.effect(body);
-                if !self.reactive.is_flushing() {
-                    self.drive_flush(span)?;
-                }
-                Ok(Value::Reactive(noeta_reactive::NodeKind::Effect, id))
-            }
+            // (The whole `Builtin` orchestration family — `task` at higher-order-abi H0/H2,
+            // `http.serve` at H3, `signal`/`computed`/`effect` at H5 — migrated to the
+            // registry's `NativeCtx` dispatch: `noeta-stdlib/src/{task,serve,reactive}.rs`;
+            // the drive loops there are shared with the VM.)
         }
     }
 
@@ -4491,7 +4299,6 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
         | Value::AsyncIo(_)
         | Value::Sender(_)
         | Value::Receiver(_)
-        | Value::Reactive(..)
         | Value::ChannelSend(..)
         | Value::ChannelRecv(_) => TypeRepr::Dyn,
     }
@@ -4876,6 +4683,7 @@ fn std_error_code(kind: noeta_stdlib::ErrorKind) -> DiagnosticCode {
         noeta_stdlib::ErrorKind::UnknownName => DiagnosticCode::UnknownName,
         noeta_stdlib::ErrorKind::Io => DiagnosticCode::IoError,
         noeta_stdlib::ErrorKind::Panic => DiagnosticCode::Panic,
+        noeta_stdlib::ErrorKind::ReactiveCycle => DiagnosticCode::ReactiveCycle,
     }
 }
 
@@ -4986,9 +4794,6 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
         | Value::ChannelRecv(_) => NativeValue::Str("<future>".to_string()),
         Value::Sender(_) => NativeValue::Str("<sender>".to_string()),
         Value::Receiver(_) => NativeValue::Str("<receiver>".to_string()),
-        Value::Reactive(kind, _) => {
-            NativeValue::Str(format!("<{}>", kind.type_name().to_ascii_lowercase()))
-        }
         Value::Pending => NativeValue::Str("<pending>".to_string()),
         // An enum/struct *type* value has no JSON analog; its quoted display form, like the VM.
         Value::EnumType(_) | Value::Type(_) => NativeValue::Str(value.display()),

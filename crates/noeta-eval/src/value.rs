@@ -131,12 +131,8 @@ pub enum Value {
     /// A **leaf channel-recv future** (isolates I.1): the twin of the VM's `Payload::ChannelRecv`.
     /// `rx.recv()` produces one, carrying the channel index.
     ChannelRecv(crate::ChannelId),
-    /// A **reactive handle** (reactivity S1): the tree-walker twin of the VM's `Payload::Reactive`.
-    /// The `Signal<T>`/`Computed<T>`/`Effect` value a `signal`/`computed`/`effect` builtin yields,
-    /// carrying a [`NodeId`](noeta_reactive::NodeId) into the interpreter's reactive graph tagged with
-    /// its [`NodeKind`](noeta_reactive::NodeKind). The node's stored values live in the graph (a plain
-    /// `Value` is `Rc`-shared, so storing/dropping in the graph is refcount-correct for free).
-    Reactive(noeta_reactive::NodeKind, noeta_reactive::NodeId),
+    // (`Reactive` lived here until higher-order-abi H5 — the handles are registry extern
+    // types now, their contents in the extensions' retained arena.)
 }
 
 /// The state machine behind a [`Value::Iter`] (Track I) — the tree-walker mirror of the VM's
@@ -749,7 +745,6 @@ impl Value {
             | Value::ChannelRecv(_) => "<future>".to_string(),
             Value::Sender(_) => "<sender>".to_string(),
             Value::Receiver(_) => "<receiver>".to_string(),
-            Value::Reactive(kind, _) => format!("<{}>", kind.type_name().to_ascii_lowercase()),
             Value::Pending => "<pending>".to_string(),
         }
     }
@@ -798,11 +793,6 @@ impl Value {
             | Value::ChannelRecv(_) => "future",
             Value::Sender(_) => "sender",
             Value::Receiver(_) => "receiver",
-            Value::Reactive(kind, _) => match kind {
-                noeta_reactive::NodeKind::Signal => "signal",
-                noeta_reactive::NodeKind::Computed => "computed",
-                noeta_reactive::NodeKind::Effect => "effect",
-            },
             Value::Pending => "pending",
         }
     }
@@ -847,9 +837,6 @@ impl fmt::Debug for Value {
             Value::AsyncIo(id) => write!(f, "AsyncIo({id})"),
             Value::Sender(id) => write!(f, "Sender({})", id.index()),
             Value::Receiver(id) => write!(f, "Receiver({})", id.index()),
-            Value::Reactive(kind, id) => {
-                write!(f, "Reactive({}, {})", kind.type_name(), id.index())
-            }
             Value::ChannelSend(id, value) => write!(f, "ChannelSend({}, {value:?})", id.index()),
             Value::ChannelRecv(id) => write!(f, "ChannelRecv({})", id.index()),
         }

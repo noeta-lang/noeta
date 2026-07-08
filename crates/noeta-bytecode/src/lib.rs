@@ -69,21 +69,10 @@ pub enum Builtin {
     /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
     /// The assertion primitive the test runner's `@test` blocks (object-model slice 6) rest on.
     Assert,
-    /// (The whole `task` module — `sleep` at higher-order-abi H0, `all`/`race`/`map_bounded` at
-    /// H2 — migrated onto the registry's `NativeCtx` dispatch, `noeta-stdlib/src/task.rs`.)
-    /// `signal(v)` — create a reactive cell holding `v` (reactivity S1). Returns a `Signal<T>` handle
-    /// whose `.get()`/`.set(v)` read and update it through the VM's reactive graph.
-    Signal,
-    /// `computed(fn)` — create a lazy, memoized derivation (reactivity S3). Returns a `Computed<T>`
-    /// handle whose `.get()` recomputes the body only when a dependency it read has changed, and
-    /// returns the memo otherwise.
-    Computed,
-    /// `effect(fn)` — register a side effect (reactivity S2). Runs `fn` immediately, tracking which
-    /// signals it reads, and reruns it whenever one of them changes. Returns an `Effect` handle with
-    /// `.dispose()`.
-    Effect,
-    // (`http.serve` was the `Serve` variant here until higher-order-abi H3 — migrated onto the
-    // registry's `NativeCtx` dispatch, `noeta-stdlib/src/serve.rs`.)
+    // (The whole orchestration family — `task` at higher-order-abi H0/H2, `http.serve` at H3,
+    // `signal`/`computed`/`effect` at H5 — migrated onto the registry's `NativeCtx` dispatch,
+    // `noeta-stdlib/src/{task,serve,reactive}.rs`. Only the language-level collection builtins
+    // and `assert` remain.)
 }
 
 impl Builtin {
@@ -95,9 +84,6 @@ impl Builtin {
             Builtin::Filter => "filter",
             Builtin::Sum => "sum",
             Builtin::Assert => "assert",
-            Builtin::Signal => "signal",
-            Builtin::Computed => "computed",
-            Builtin::Effect => "effect",
         }
     }
 
@@ -109,9 +95,6 @@ impl Builtin {
             "filter" => Some(Builtin::Filter),
             "sum" => Some(Builtin::Sum),
             "assert" => Some(Builtin::Assert),
-            "signal" => Some(Builtin::Signal),
-            "computed" => Some(Builtin::Computed),
-            "effect" => Some(Builtin::Effect),
             _ => None,
         }
     }

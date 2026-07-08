@@ -26,8 +26,8 @@ pub use host::{Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, 
 pub use map_key::{ExternKeyRef, MapKey};
 pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
 pub use registry::{
-    ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut, NativeValue, RetTy, Scalar,
-    SigType, TypeDispatch, TypeRecipe,
+    ArenaGetter, CtxTypeDispatch, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut,
+    NativeValue, RetTy, Scalar, SigType, TypeDispatch, TypeRecipe,
 };
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the
@@ -72,6 +72,10 @@ pub enum ErrorKind {
     /// an async deadlock, an empty `race`. Maps onto the language's panic diagnostic, exactly as
     /// the hand-written `Builtin` arms it replaces reported.
     Panic,
+    /// A native-driven callback fixpoint failed to converge (higher-order-abi H5) — the reactive
+    /// flush's runaway guard (an effect that keeps changing a signal it depends on). Maps onto
+    /// the language's reactive-cycle diagnostic (E0045).
+    ReactiveCycle,
 }
 
 /// A stdlib misuse error. The `message` is rendered here so both backends report it

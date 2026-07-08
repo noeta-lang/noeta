@@ -47,6 +47,7 @@ pub mod math;
 pub mod net;
 pub mod quat;
 pub mod random;
+pub mod reactive;
 pub mod registry;
 pub mod serve;
 pub mod task;

@@ -178,10 +178,6 @@ impl Interpreter {
             // A top-level `return`, a `?` short-circuit, or a runtime error stops the program.
             Ok(Flow::Return(_)) | Err(Unwind::Return(_)) | Err(Unwind::Abort) => {}
         }
-        // Release every value held by the reactive graph (reactivity S1) before global teardown, so a
-        // value kept alive only by an undisposed signal drops here — the tree-walker twin of the VM's
-        // `vm.reactive.clear()`, keeping the leak oracle's residency at 0.
-        self.reactive.clear();
         // Release every value still in the extensions' retained arena (higher-order-abi H4) —
         // destructor-aware, mirroring the VM's teardown release, so a `destruct`-bearing value
         // left in an extension (an undisposed `Cell`) fires identically on both backends.
