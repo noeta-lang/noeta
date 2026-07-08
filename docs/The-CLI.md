@@ -24,7 +24,7 @@ Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 ## `noeta run`
 
 ```
-noeta run [OPTIONS] <FILE>
+noeta run [OPTIONS] <FILE> [-- <ARGS>...]
 ```
 
 Loads, type-checks, and executes a `.noe` file on the **real host** — real `env`/`args`, real-disk IO, a per-isolate async runtime — using the bytecode VM. Any sibling `.noe` modules the entry file `use`s are resolved and merged automatically (see [Modules](Modules)).
@@ -37,6 +37,16 @@ Loads, type-checks, and executes a `.noe` file on the **real host** — real `en
 | `--profile <NAME>` | Activate the tiers a `noeta.toml` build profile makes live. Unioned with any `--tier`. |
 
 The active-tier set is the profile's live tiers ∪ any `--tier` flags, resolved *before* loading (a bad profile fails fast). With an empty active set — the default — every `@test`/`@bench`/`@doc`/`@debug` block strips away and the program runs as written. See [Documentation & Dev Tiers](Documentation-and-Tiers).
+
+**Passing arguments to the program**
+
+Everything after a `--` separator is passed straight through to the program, which reads it with `args.all()`:
+
+```console
+$ noeta run app.noe -- --verbose input.txt
+```
+
+The `--` protects hyphen-prefixed values from being parsed as `noeta`'s own options. `args.all()` reports the program path as the first element (argv[0]) followed by these arguments — the **same** vector the program sees when shipped as a `noeta build --exe` binary and invoked directly (`./app --verbose input.txt`), so no code changes between running from source and running as an executable.
 
 **Exit codes**
 

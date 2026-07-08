@@ -1700,6 +1700,8 @@ dependencies = [
  "noeta-stdlib",
  "noeta-vm",
  "predicates",
+ "serde",
+ "serde_json",
  "toml",
 ]
 
