@@ -82,7 +82,38 @@ dead weight. noeta-vm's references into `noeta_jit::` split cleanly:
 4. `noeta build --native` (the CLI) keeps `jit` — it *is* the compiler (`compile_module_aot` runs
    there); only the linked *runtime archive* sheds cranelift.
 
-### Axis B — per-ring stdlib elimination (HIGH value multi-MB, MODERATE work) — the "strip stdlib" row
+### Axis B — per-ring stdlib elimination (HIGH value multi-MB) — the "strip stdlib" row
+
+**✅ DELIVERED for the http ring (the ~5 MB one), automated & sound.**
+- `ring-http-client` (default-on) gates reqwest + its TLS tree in `noeta-runtime`'s `RealHost`
+  (`89a2c14`, renamed from `ring-http` in the client/server split). `net_fetch` is a hard-error stub
+  without it — never reached, since a program that can't name a client fn never calls it.
+- `noeta-aot-runtime` forwards the ring (default-features=false via a direct path dep); the `aot`
+  runtime support is a hard dep feature so it survives `--no-default-features`.
+- **Footprint scan** `aot_ring_features` (`b1065c9`) — `noeta build --native` derives the used rings
+  and builds the archive with exactly them (`cargo rustc --no-default-features --features <rings>`),
+  linker drops the rest. Reads all three lowerings (`NativeModule`/`ModuleFn` consts + `ExtCall`).
+- **Client/server split** (this slice): a whole-module `use std.{http}` value is conservative
+  (could call any fn → client ring), but a *precisely-named* reference (`use std.http.get`, or a
+  turbofish `ExtCall`) selects the client ring only for the outbound-client fns (`get`/`post`/…/
+  `_async`); `response`/`serve` select nothing. So `use std.http.{serve, response}` sheds reqwest.
+
+Measured (release native binaries, auto-selected):
+
+| program | binary | reqwest/rustls | note |
+|---|---|---|---|
+| non-http `jit_promo` | **7.24 MB** | 0 | ring dropped, −5.0 MB / −41% |
+| selective server `use std.http.response` | **5.67 MB** | 0 | split payoff — server sheds reqwest, runs (`200`) |
+| whole-import client `http_async` | 10.68 MB | 1074 | client keeps reqwest, real fetch path |
+
+**Known limitation → package-manager milestone (below):** a *whole-module* `use std.{http}` in a
+server program stays conservative (keeps reqwest), because the module value's member calls lower to
+`CallMethod` on a receiver that isn't statically pinned, and the sync client fns (`get`/`post`) are
+indistinguishable from `map.get`/user methods. The clean fix is splitting `std.http` into separate
+client/server *modules* so module-level detection is precise — see the carry-over note.
+
+Remaining rings (crypto ~60 K, id ~6 K) are deliberately **not** hand-gated — negligible size, and
+they generalize for free under the extension-split. Original per-ring plan (still the shape):
 
 1. **Feature-gate each ring** in `noeta-stdlib` (and the matching RealHost capability in
    `noeta-runtime`): each ring's deps become optional; the `STD_MODULES` entry + its `*_dispatch` fn
@@ -149,3 +180,43 @@ carried); bench rule (A and B are build-time/size only, no hot path; C Tier 1 bu
 7. Docs + memory; Tier 2 left explicitly open.
 
 Nothing pushed without authorization.
+
+## Package-manager milestone — DCE carry-over (do not miss)
+
+The footprint scan (`aot_ring_features` in `noeta-cli`) is the *interim* selector — a bytecode-derived
+guess. The package-manager milestone builds the general "select which extensions/rings link in"
+machinery (generate the `REGISTRY` slice from a manifest's native deps, compile the archive with
+them). When that lands, fold in the following — each is either a precision gap the manifest closes or
+a generalization the extension-split makes uniform:
+
+1. **Split `std.http` into client vs server *modules*.** Today the whole-module `use std.{http}` case
+   is conservative (keeps reqwest) because member calls lower to `CallMethod` on an unpinned receiver
+   and sync client fns (`get`/`post`) collide with `map.get`/user methods — so a server program that
+   imports the whole module can't be proven client-free. Splitting the surface (e.g. `std.http` =
+   outbound client; `std.http.server` / `std.serve` = `serve` + `response` + `Request`) makes
+   *module-level* detection precise, and lets a `ring-http-server` (inbound tokio — no reqwest)
+   separate cleanly from `ring-http-client` (reqwest). Until then, server programs should use
+   *selective* imports (`use std.http.{serve, response}`) to shed reqwest — the scan already handles
+   that soundly.
+2. **Add `ring-http-server`.** The inbound `RealHost` code (`net_listen`/`net_accept`/`net_reply`,
+   `servers`/`conns`, `ServerState`, `RealAcceptIo`) is currently always-compiled (cheap — tokio is
+   already linked for fs). Gate it for capability completeness once (1) makes the server signal
+   precise; near-zero bytes, but it finishes the client/server capability separation.
+3. **Gate the remaining rings** (`crypto` → sha*/bcrypt/hmac/subtle; `id` → uuid; and any future
+   heavy ring). Deliberately not hand-gated now (~65 KB total). Under the extension-split each ring is
+   an `Extension` unit you include/exclude wholesale, so gating becomes *uniform* (drop the extension
+   crate + its deps) instead of per-site `#[cfg]` — do it there, not by hand here.
+4. **Manifest drives selection; scan becomes a cross-check.** The package manager knows a program's
+   native deps from its manifest — authoritative and precise (no CallMethod ambiguity). Make the
+   manifest the source of truth for the archive feature set; keep `aot_ring_features` as a
+   belt-and-suspenders fallback for source-only `noeta build --native` (no manifest), or retire it.
+   The `module_ring`/`fn_ring` tables in `noeta-cli` are today's module→ring mapping — reconcile them
+   with whatever the extension registry exposes (ideally each `Extension`/`ExtModule` *declares* its
+   ring/feature, so the mapping isn't a hand-maintained table in the CLI).
+5. **Archive cache keyed by ring-set.** `resolve_aot_runtime` rebuilds `libnoeta_aot.a` per feature
+   set to the same path; a cache keyed by the sorted ring list avoids recompiling for repeat builds
+   with the same footprint. Pure perf; deferred.
+6. **`STD_MODULES` reshaping.** Per the higher-order-abi arc, `STD_MODULES` is std's private manifest
+   and is slated to be reshaped/removed as third-party extensions land. The ring feature-gating must
+   move with the entries — the gating property ("this ring's code + deps are behind a cfg / in a
+   separately-selectable unit") is what carries over, not the current table shape.

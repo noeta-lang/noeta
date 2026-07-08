@@ -17,11 +17,11 @@ getrandom = { workspace = true }
 reqwest = { workspace = true, optional = true }
 
 [features]
-default = ["ring-http"]
+default = ["ring-http-client"]
 # The `std.http` outbound-client ring: pulls reqwest into `RealHost`. Off ⇒ `net_fetch` is a stub
 # that errors (never reached — a program that doesn't import `std.http` never calls it), and reqwest
 # is absent from the link.
-ring-http = ["dep:reqwest"]
+ring-http-client = ["dep:reqwest"]
 
 [dev-dependencies]
 criterion = { workspace = true }

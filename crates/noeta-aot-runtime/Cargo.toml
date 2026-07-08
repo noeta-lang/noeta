@@ -40,9 +40,9 @@ noeta-diagnostics = { workspace = true }
 # scan builds this crate with `--no-default-features --features <used rings>` to shed the rest, and
 # the linker then drops each unreferenced ring's native dep tree. The `aot` runtime support (on
 # `noeta-vm`) is a hard dep feature above, so it survives `--no-default-features`.
-default = ["ring-http"]
+default = ["ring-http-client"]
 # The `std.http` outbound-client ring — forwards to reqwest in noeta-runtime.
-ring-http = ["noeta-runtime/ring-http"]
+ring-http-client = ["noeta-runtime/ring-http-client"]
 
 # This crate is the one place the whole AOT scheme's `unsafe` lives: a C-ABI `main`, the reference to
 # the linker-defined `noeta_aot_dispatch` data symbol, and the `run_module_aot` binding call. Relax
