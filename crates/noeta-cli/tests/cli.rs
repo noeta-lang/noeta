@@ -2261,6 +2261,87 @@ fn a_git_tag_dependency_is_fetched_and_run() {
 }
 
 #[test]
+fn noeta_add_edits_the_manifest_and_resolves() {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_add");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("lib");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&lib).unwrap();
+    // The app starts with no dependencies; a comment must survive the edit.
+    std::fs::write(
+        app.join("noeta.toml"),
+        "# my app\n[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "use hi.core.v;\necho v();\n").unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(lib.join("m.noe"), "namespace lib.core;\npub fn v(): int { return 42; }\n")
+        .unwrap();
+
+    lang()
+        .current_dir(&app)
+        .args(["add", "hi", "--path", "../lib"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added `hi`"));
+
+    let manifest = std::fs::read_to_string(app.join("noeta.toml")).unwrap();
+    assert!(manifest.contains("# my app"), "comment preserved: {manifest}");
+    assert!(manifest.contains("hi = { path = \"../lib\" }"), "dep added: {manifest}");
+    assert!(app.join("noeta.lock").is_file(), "lock written");
+
+    // The added dependency actually resolves and runs.
+    lang().arg("run").arg(app.join("main.noe")).assert().success().stdout("42\n");
+}
+
+#[test]
+fn noeta_update_rewrites_the_lock() {
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_update");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let dep_repo = base.join("uplib_repo");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&dep_repo).unwrap();
+    git_in(&["init", "-q"], &dep_repo);
+    std::fs::write(
+        dep_repo.join("noeta.toml"),
+        "[package]\nname = \"acme/up\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(dep_repo.join("m.noe"), "namespace up.core;\npub fn v(): int { return 7; }\n")
+        .unwrap();
+    git_in(&["add", "."], &dep_repo);
+    git_in(&["commit", "-q", "-m", "r"], &dep_repo);
+    git_in(&["tag", "v1.0.0"], &dep_repo);
+    std::fs::write(
+        app.join("noeta.toml"),
+        format!(
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nu = {{ git = \"{}\", tag = \"v1.0.0\" }}\n",
+            dep_repo.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "use u.core.v;\necho v();\n").unwrap();
+
+    lang()
+        .current_dir(&app)
+        .arg("update")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("updated noeta.lock"));
+    assert!(app.join("noeta.lock").is_file());
+}
+
+#[test]
 fn a_git_dependency_is_pinned_and_reproduces_offline() {
     if !git_available() {
         return;

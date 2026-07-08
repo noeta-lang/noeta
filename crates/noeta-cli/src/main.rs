@@ -270,6 +270,30 @@ enum Command {
         #[arg(long)]
         stdin: bool,
     },
+    /// Add a dependency to the nearest `noeta.toml` and refresh `noeta.lock` (package-manager P2.4).
+    /// Exactly one source must be given: `--path`, `--git` (with `--tag`), or `--version` (registry).
+    /// The manifest edit preserves your formatting and comments; the dependency is then resolved so
+    /// the lockfile is updated (a git source is fetched now, so a typo'd URL/tag fails fast).
+    Add {
+        /// The import root you will `use` the dependency under (an identifier): `use <key>.…`.
+        key: String,
+        /// A local path dependency (relative to the manifest).
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// A git repository URL (requires `--tag`).
+        #[arg(long)]
+        git: Option<String>,
+        /// The git tag (a released version) to pin — used with `--git`.
+        #[arg(long)]
+        tag: Option<String>,
+        /// A registry SemVer requirement, e.g. `^1.2` (registry resolution lands in P2.5).
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// Re-resolve dependencies and rewrite `noeta.lock` (package-manager P2.4): a git tag is
+    /// re-fetched at the remote and re-pinned to its current commit SHA, so `update` picks up a
+    /// moved tag that a locked build would otherwise reproduce from the old commit.
+    Update,
 }
 
 #[derive(Subcommand)]
@@ -363,7 +387,119 @@ fn main() -> ExitCode {
             check,
             stdin,
         } => cmd_fmt(&files, check, stdin),
+        Command::Add {
+            key,
+            path,
+            git,
+            tag,
+            version,
+        } => cmd_add(&key, path.as_deref(), git.as_deref(), tag.as_deref(), version.as_deref()),
+        Command::Update => cmd_update(),
     }
+}
+
+/// `noeta add <key> --path/--git+--tag/--version` — add a dependency to the nearest `noeta.toml`,
+/// then resolve so `noeta.lock` reflects it (package-manager P2.4d).
+fn cmd_add(
+    key: &str,
+    path: Option<&std::path::Path>,
+    git: Option<&str>,
+    tag: Option<&str>,
+    version: Option<&str>,
+) -> ExitCode {
+    // Exactly one source form.
+    let value_toml = match (path, git, version) {
+        (Some(p), None, None) => format!("{{ path = {} }}", toml_string(&p.display().to_string())),
+        (None, Some(url), None) => {
+            let Some(tag) = tag else {
+                eprintln!("lang: `--git` requires `--tag` (sources are git + tagged releases only)");
+                return ExitCode::from(2);
+            };
+            format!(
+                "{{ git = {}, tag = {} }}",
+                toml_string(url),
+                toml_string(tag)
+            )
+        }
+        (None, None, Some(req)) => toml_string(req),
+        (None, None, None) => {
+            eprintln!("lang: give a source — `--path`, `--git` (+ `--tag`), or `--version`");
+            return ExitCode::from(2);
+        }
+        _ => {
+            eprintln!("lang: give exactly one source — `--path`, `--git`, or `--version`");
+            return ExitCode::from(2);
+        }
+    };
+    if git.is_none() && tag.is_some() {
+        eprintln!("lang: `--tag` only applies to a `--git` dependency");
+        return ExitCode::from(2);
+    }
+
+    let manifest_path = match locate_manifest() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    if let Err(err) = manifest::add_dependency(&manifest_path, key, &value_toml) {
+        eprintln!("lang: {err}");
+        return ExitCode::from(1);
+    }
+    // Resolve so the new dependency is fetched and the lock is refreshed; a bad URL/tag/path fails
+    // here (the manifest edit already succeeded — the entry stays so the user can fix it).
+    match graph::resolve_graph(&manifest_path) {
+        Ok(_) => {
+            println!("added `{key}` to {}", manifest_path.display());
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("lang: added `{key}`, but resolving it failed: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `noeta update` — discard the current pins and re-resolve, rewriting `noeta.lock` (P2.4d). Removing
+/// the lock forces the graph walk to re-`ls-remote` each git tag and re-pin its current commit SHA.
+fn cmd_update() -> ExitCode {
+    let manifest_path = match locate_manifest() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let dir = manifest_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let _ = std::fs::remove_file(dir.join(lock::LOCK_NAME));
+    match graph::resolve_graph(&manifest_path) {
+        Ok(graph) => {
+            if graph.locked.is_empty() {
+                println!("no dependencies to update");
+            } else {
+                println!("updated {} ({} package(s))", lock::LOCK_NAME, graph.locked.len());
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("lang: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Find the nearest `noeta.toml` from the current directory, or print a diagnostic and return a
+/// non-zero exit code (shared by `noeta add`/`update`).
+fn locate_manifest() -> Result<PathBuf, ExitCode> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    manifest::find(&cwd).ok_or_else(|| {
+        eprintln!(
+            "lang: no `{}` found at or above `{}`",
+            manifest::MANIFEST_NAME,
+            cwd.display()
+        );
+        ExitCode::from(1)
+    })
+}
+
+/// Quote a string as a TOML basic string for a manifest value we write (`noeta add`).
+fn toml_string(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 /// `noeta cache <path|info|clear>` — inspect or clear the transparent startup cache.

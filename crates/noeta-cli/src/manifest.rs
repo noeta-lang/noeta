@@ -130,6 +130,63 @@ pub fn find(start_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Add a dependency `key = <value_toml>` to the `[dependencies]` table of the manifest at
+/// `manifest_path` (package-manager P2.4d, backing `noeta add`). `value_toml` is the raw TOML value
+/// (`{ path = "../x" }`, `{ git = "…", tag = "…" }`, or `"^1.2"`). The edit is **format-preserving**:
+/// the new entry is inserted under an existing `[dependencies]` header (or a new section is appended),
+/// leaving the rest of the file — comments, ordering, whitespace — untouched. The result is re-parsed
+/// before writing, so a malformed value or an unknown source never corrupts the manifest, and the
+/// write is atomic. Errors if `key` is not an identifier or is already a dependency.
+pub fn add_dependency(manifest_path: &Path, key: &str, value_toml: &str) -> Result<(), String> {
+    if !is_identifier(key) {
+        return Err(format!(
+            "dependency key `{key}` must be an identifier (it becomes the import root — `use {key}.…`)"
+        ));
+    }
+    let text = std::fs::read_to_string(manifest_path)
+        .map_err(|err| format!("cannot read `{}`: {err}", manifest_path.display()))?;
+    let manifest = Manifest::parse(&text)
+        .map_err(|err| format!("invalid `{}`: {err}", manifest_path.display()))?;
+    if manifest.dependencies().contains_key(key) {
+        return Err(format!("dependency `{key}` is already in the manifest"));
+    }
+
+    let entry = format!("{key} = {value_toml}");
+    let updated = insert_dependency_entry(&text, &entry);
+    // Re-parse the edited manifest so a bad value/source fails here rather than corrupting the file.
+    Manifest::parse(&updated).map_err(|err| {
+        format!("`noeta add {key}` would make `{MANIFEST_NAME}` invalid: {err}")
+    })?;
+
+    let dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = dir.join(format!(".{MANIFEST_NAME}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, &updated)
+        .and_then(|()| std::fs::rename(&tmp, manifest_path))
+        .map_err(|err| format!("cannot write `{}`: {err}", manifest_path.display()))
+}
+
+/// Insert `entry` (a `key = value` line) into `text`'s `[dependencies]` table: right after an
+/// existing `[dependencies]` header line, or — if there is none — as a new section appended at the
+/// end. Comments and the rest of the file are preserved (a purely textual edit).
+fn insert_dependency_entry(text: &str, entry: &str) -> String {
+    let mut lines: Vec<&str> = text.lines().collect();
+    if let Some(pos) = lines.iter().position(|l| l.trim() == "[dependencies]") {
+        lines.insert(pos + 1, entry);
+        let mut out = lines.join("\n");
+        if text.ends_with('\n') {
+            out.push('\n');
+        }
+        out
+    } else {
+        let mut out = text.to_string();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("\n[dependencies]\n{entry}\n"));
+        out
+    }
+}
+
 /// Resolve the active-tier set for `profile` from the `noeta.toml` discovered at or above `entry`'s
 /// directory: load the manifest, follow `extends`, and return the live tier names (sorted). Every
 /// failure — no manifest, parse error, unknown profile/tier, unavailable provider, inheritance
@@ -631,6 +688,49 @@ mod tests {
                 .unwrap_err()
                 .contains("unknown profile")
         );
+    }
+
+    // --- `noeta add` manifest editing (package-manager P2.4d) ----------------------------------
+
+    #[test]
+    fn insert_uses_an_existing_dependencies_table() {
+        let text = "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n\n[dependencies]\nx = \"^1\"\n";
+        let out = insert_dependency_entry(text, "y = { path = \"../y\" }");
+        // The new entry lands under the header, and both deps parse.
+        let m = Manifest::parse(&out).expect("valid");
+        assert!(m.dependencies().contains_key("x"));
+        assert!(m.dependencies().contains_key("y"));
+        assert!(out.contains("[dependencies]\ny = { path = \"../y\" }"));
+    }
+
+    #[test]
+    fn insert_appends_a_new_section_when_absent() {
+        let text = "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n";
+        let out = insert_dependency_entry(text, "y = \"^2\"");
+        let m = Manifest::parse(&out).expect("valid");
+        assert_eq!(
+            m.dependencies()["y"],
+            Dependency::Registry {
+                req: semver::VersionReq::parse("^2").unwrap()
+            }
+        );
+    }
+
+    #[test]
+    fn add_dependency_writes_and_rejects_duplicates() {
+        let dir = std::env::temp_dir().join("noeta_add_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(MANIFEST_NAME);
+        std::fs::write(&path, "[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").unwrap();
+
+        add_dependency(&path, "http", "{ git = \"https://x/y\", tag = \"v1.0.0\" }").unwrap();
+        let m = Manifest::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(matches!(m.dependencies()["http"], Dependency::Git { .. }));
+
+        // A second add of the same key is rejected (and a non-identifier key too).
+        assert!(add_dependency(&path, "http", "\"^1\"").is_err());
+        assert!(add_dependency(&path, "bad-key", "\"^1\"").is_err());
     }
 
     #[test]
