@@ -2166,8 +2166,65 @@ fn a_version_conflict_is_reported() {
 }
 
 #[test]
-fn a_registry_dependency_reports_it_is_not_yet_resolvable() {
-    // Registry deps need the registry index (P2.5); path + git deps work today.
+fn a_published_package_resolves_as_a_registry_dependency() {
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_registry_e2e");
+    let _ = std::fs::remove_dir_all(&base);
+    let repo = base.join("greet_repo");
+    let app = base.join("app");
+    let reg = base.join("registry");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+
+    // The package to publish: a tagged git repo with a [package] identity.
+    git_in(&["init", "-q"], &repo);
+    std::fs::write(
+        repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.2.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("hello.noe"),
+        "namespace greet.hello;\npub fn greeting(): string { return \"hello from the registry\"; }\n",
+    )
+    .unwrap();
+    git_in(&["add", "."], &repo);
+    git_in(&["commit", "-q", "-m", "release"], &repo);
+    git_in(&["tag", "v1.2.0"], &repo);
+
+    // Publish it to the (local/offline) registry index.
+    lang()
+        .current_dir(&repo)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["publish", "--git", repo.to_str().unwrap(), "--tag", "v1.2.0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("published `acme/greet` 1.2.0"));
+
+    // A consumer depends on it by version, naming the registry package (decoupled from the key).
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "use gc.hello.greeting;\necho greeting();\n").unwrap();
+
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello from the registry"));
+}
+
+#[test]
+fn a_registry_dependency_without_a_package_is_an_error() {
+    // A bare registry requirement names no package identity, so it can't be resolved — the error
+    // points the user to add `package = "company/pkg"` (P2.5).
     let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_registrydep");
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
@@ -2183,7 +2240,7 @@ fn a_registry_dependency_reports_it_is_not_yet_resolvable() {
         .arg(base.join("main.noe"))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("registry dependency"));
+        .stderr(predicate::str::contains("names no package"));
 }
 
 // --- package manager: git-tag dependencies (P2.3) -----------------------------------------------

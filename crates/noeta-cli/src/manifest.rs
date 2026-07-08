@@ -106,9 +106,15 @@ pub enum Dependency {
     /// A git repository pinned to a **tag** (= a released version) — `dep = { git = "…", tag = "…" }`.
     /// Sources are git + tagged releases only (user decision); the lockfile pins the resolved SHA.
     Git { url: String, tag: String },
-    /// A registry dependency by SemVer requirement — `dep = "^1.2"` or `dep = { version = "^1.2" }`.
-    /// The registry index resolves the name→git-coords (P2.5).
-    Registry { req: semver::VersionReq },
+    /// A registry dependency by SemVer requirement — `dep = "^1.2"` or
+    /// `dep = { version = "^1.2", package = "company/pkg" }`. The registry index resolves
+    /// name→git-coords (P2.5). `package` is the registry identity (decoupled from the import-root
+    /// key, like Rust's `foo = { package = "real" }`); it is **required** to resolve — the bare
+    /// shorthand leaves it `None` and errors at resolution with a pointer to add it.
+    Registry {
+        package: Option<PackageName>,
+        req: semver::VersionReq,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -128,6 +134,26 @@ pub fn find(start_dir: &Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// The `[package]` identity (`company/package`) and version of the manifest at `manifest_path`
+/// (package-manager P2.5, backing `noeta publish`). Errors when the manifest can't be read/parsed or
+/// declares no `[package]` (a bare script can't be published).
+pub fn current_package(manifest_path: &Path) -> Result<(String, semver::Version), String> {
+    let text = std::fs::read_to_string(manifest_path)
+        .map_err(|err| format!("cannot read `{}`: {err}", manifest_path.display()))?;
+    let manifest = Manifest::parse(&text)
+        .map_err(|err| format!("invalid `{}`: {err}", manifest_path.display()))?;
+    let pkg = manifest.package().ok_or_else(|| {
+        format!(
+            "`{}` has no `[package]` table — only a package (with a name + version) can be published",
+            manifest_path.display()
+        )
+    })?;
+    Ok((
+        format!("{}/{}", pkg.name.company, pkg.name.package),
+        pkg.version.clone(),
+    ))
 }
 
 /// Add a dependency `key = <value_toml>` to the `[dependencies]` table of the manifest at
@@ -411,7 +437,7 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
         let req = semver::VersionReq::parse(req).map_err(|err| {
             format!("dependency `{key}` version requirement `{req}` is not valid SemVer: {err}")
         })?;
-        return Ok(Dependency::Registry { req });
+        return Ok(Dependency::Registry { package: None, req });
     }
     let table = value.as_table().ok_or_else(|| {
         format!("dependency `{key}` must be a SemVer string or a table (`{{ path/git/version = … }}`)")
@@ -451,7 +477,17 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
             let req = semver::VersionReq::parse(req).map_err(|err| {
                 format!("dependency `{key}` version requirement `{req}` is not valid SemVer: {err}")
             })?;
-            Ok(Dependency::Registry { req })
+            // The registry identity (`company/package`) — decoupled from the import-root key.
+            let package = match table.get("package") {
+                None => None,
+                Some(v) => {
+                    let s = v
+                        .as_str()
+                        .ok_or_else(|| format!("dependency `{key}`: `package` must be a string"))?;
+                    Some(PackageName::parse(s).map_err(|err| format!("dependency `{key}`: {err}"))?)
+                }
+            };
+            Ok(Dependency::Registry { package, req })
         }
         (false, false, false) => Err(format!(
             "dependency `{key}` table must name a source: `path`, `git` (+ `tag`), or `version`"
@@ -575,12 +611,14 @@ mod tests {
         assert_eq!(
             deps["json"],
             Dependency::Registry {
+                package: None,
                 req: semver::VersionReq::parse("^1.2").unwrap()
             }
         );
         assert_eq!(
             deps["shorthand"],
             Dependency::Registry {
+                package: None,
                 req: semver::VersionReq::parse("^0.4").unwrap()
             }
         );
@@ -711,8 +749,31 @@ mod tests {
         assert_eq!(
             m.dependencies()["y"],
             Dependency::Registry {
+                package: None,
                 req: semver::VersionReq::parse("^2").unwrap()
             }
+        );
+    }
+
+    #[test]
+    fn a_registry_dependency_carries_an_optional_package_identity() {
+        let m = Manifest::parse(
+            "[dependencies]\nwebclient = { version = \"^1.2\", package = \"guzzle/http\" }\n",
+        )
+        .expect("valid");
+        match &m.dependencies()["webclient"] {
+            Dependency::Registry { package, req } => {
+                let package = package.as_ref().expect("package present");
+                assert_eq!(package.company, "guzzle");
+                assert_eq!(package.package, "http");
+                assert_eq!(req, &semver::VersionReq::parse("^1.2").unwrap());
+            }
+            other => panic!("expected a registry dependency, got {other:?}"),
+        }
+        // A malformed identity is rejected at parse time.
+        assert!(
+            Manifest::parse("[dependencies]\nx = { version = \"^1\", package = \"nope\" }\n")
+                .is_err()
         );
     }
 

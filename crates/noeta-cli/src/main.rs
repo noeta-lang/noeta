@@ -44,6 +44,8 @@ mod git;
 mod graph;
 // The reproducible dependency pin — `noeta.lock` (P2.4c).
 mod lock;
+// The package registry index (P2.5) — name→git-coords lookup in front of the git machinery.
+mod registry;
 
 #[derive(Parser)]
 #[command(name = "noeta", version, about = "The Noeta toolchain")]
@@ -294,6 +296,18 @@ enum Command {
     /// re-fetched at the remote and re-pinned to its current commit SHA, so `update` picks up a
     /// moved tag that a locked build would otherwise reproduce from the old commit.
     Update,
+    /// Publish this package to the registry index (package-manager P2.5). Records this package's
+    /// `[package]` name + version → its git coordinates so others can depend on it by version. This
+    /// is the **client stub**: it writes to the local/offline index (`NOETA_REGISTRY_DIR`); the
+    /// hosted registry service is built and operated separately.
+    Publish {
+        /// The git repository URL the release's source lives at.
+        #[arg(long)]
+        git: String,
+        /// The git tag for this release (defaults to `v<version>`).
+        #[arg(long)]
+        tag: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -395,6 +409,7 @@ fn main() -> ExitCode {
             version,
         } => cmd_add(&key, path.as_deref(), git.as_deref(), tag.as_deref(), version.as_deref()),
         Command::Update => cmd_update(),
+        Command::Publish { git, tag } => cmd_publish(&git, tag.as_deref()),
     }
 }
 
@@ -474,6 +489,45 @@ fn cmd_update() -> ExitCode {
             } else {
                 println!("updated {} ({} package(s))", lock::LOCK_NAME, graph.locked.len());
             }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("lang: {err}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `noeta publish --git <url> [--tag <tag>]` — record this package's identity + version → git
+/// coordinates in the registry index (package-manager P2.5, client stub). The tag defaults to
+/// `v<version>`. Writes to the local/offline index; the hosted registry is operated separately.
+fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
+    let manifest_path = match locate_manifest() {
+        Ok(p) => p,
+        Err(code) => return code,
+    };
+    let (name, version) = match manifest::current_package(&manifest_path) {
+        Ok(pkg) => pkg,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let tag = tag.map(str::to_string).unwrap_or_else(|| format!("v{version}"));
+    let index = match registry::LocalIndex::open() {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let coords = registry::GitCoords {
+        url: git.to_string(),
+        tag: tag.clone(),
+    };
+    match registry::Index::publish(&index, &name, &version, &coords) {
+        Ok(()) => {
+            println!("published `{name}` {version} → {git}#{tag}");
             ExitCode::SUCCESS
         }
         Err(err) => {

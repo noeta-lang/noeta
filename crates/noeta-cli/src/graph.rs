@@ -109,6 +109,7 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
         instances: BTreeMap::new(),
         store: None,
         lock: &lock,
+        index: None,
     };
     let mut root_edges = BTreeMap::new();
     walker.walk(manifest.dependencies(), &manifest_dir, &mut root_edges)?;
@@ -130,6 +131,7 @@ struct Walker<'a> {
     instances: BTreeMap<String, Instance>,
     store: Option<Store>,
     lock: &'a crate::lock::Lock,
+    index: Option<crate::registry::LocalIndex>,
 }
 
 impl Walker<'_> {
@@ -226,30 +228,51 @@ impl Walker<'_> {
                     },
                 ))
             }
-            Dependency::Git { url, tag } => {
-                // If the lock pins this url@tag to a SHA, fetch by it — an already-stored tree needs
-                // no network at all (offline, reproducible); otherwise resolve the tag at the remote.
-                let pin = self.lock.git_pin(url, tag).map(str::to_string);
-                let store = self.store()?;
-                let fetched = match &pin {
-                    Some(sha) => crate::git::fetch_pinned(url, tag, sha, store),
-                    None => crate::git::fetch(url, tag, store),
-                }
-                .map_err(|err| format!("dependency `{key}`: {err}"))?;
-                Ok((
-                    fetched.path,
-                    ResolvedSource::Git {
-                        url: url.clone(),
-                        tag: tag.clone(),
-                        sha: fetched.sha,
-                    },
-                ))
+            Dependency::Git { url, tag } => self.fetch_git(key, url, tag),
+            Dependency::Registry { package, req } => {
+                // Resolve the registry identity + requirement to git coordinates, then materialize
+                // exactly as a `git` dependency (the registry is a name→coords index, not a store).
+                let package = package.as_ref().ok_or_else(|| {
+                    format!(
+                        "dependency `{key}` is a registry dependency but names no package — add \
+                         `package = \"company/pkg\"` (the registry identity, decoupled from the \
+                         import-root key)"
+                    )
+                })?;
+                let name = format!("{}/{}", package.company, package.package);
+                let index = self.index()?;
+                let (_version, coords) = crate::registry::resolve_coords(index, &name, req)
+                    .map_err(|err| format!("dependency `{key}`: {err}"))?;
+                self.fetch_git(key, &coords.url, &coords.tag)
             }
-            Dependency::Registry { .. } => Err(format!(
-                "dependency `{key}` is a registry dependency — resolving name→git-coords needs the \
-                 registry index (package-manager P2.5); use a `path` or `git` dependency today"
-            )),
         }
+    }
+
+    /// Materialize a git `url`@`tag` into the store, honoring the lockfile pin (package-manager P2.4).
+    /// Shared by a direct `git` dependency and a resolved registry dependency. If the lock pins the
+    /// SHA and its tree is stored, no network is touched (offline); otherwise the tag is resolved at
+    /// the remote.
+    fn fetch_git(
+        &mut self,
+        key: &str,
+        url: &str,
+        tag: &str,
+    ) -> Result<(PathBuf, ResolvedSource), String> {
+        let pin = self.lock.git_pin(url, tag).map(str::to_string);
+        let store = self.store()?;
+        let fetched = match &pin {
+            Some(sha) => crate::git::fetch_pinned(url, tag, sha, store),
+            None => crate::git::fetch(url, tag, store),
+        }
+        .map_err(|err| format!("dependency `{key}`: {err}"))?;
+        Ok((
+            fetched.path,
+            ResolvedSource::Git {
+                url: url.to_string(),
+                tag: tag.to_string(),
+                sha: fetched.sha,
+            },
+        ))
     }
 
     /// The package store, opened on first use (only a git dependency needs it).
@@ -262,6 +285,14 @@ impl Walker<'_> {
             })?);
         }
         Ok(self.store.as_ref().expect("just opened"))
+    }
+
+    /// The registry index, opened on first use (only a registry dependency needs it).
+    fn index(&mut self) -> Result<&crate::registry::LocalIndex, String> {
+        if self.index.is_none() {
+            self.index = Some(crate::registry::LocalIndex::open()?);
+        }
+        Ok(self.index.as_ref().expect("just opened"))
     }
 }
 
