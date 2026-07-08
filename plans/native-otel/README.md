@@ -219,12 +219,31 @@ so tracing calls in un-configured programs are ~free (the perf gate below).
   path) and asserts the 5 emitted SERVER spans; http_server differential unchanged; 88 stdlib + full
   corpus differential/leak + clippy green; runtime builds telemetry on/off. **Handler-internal span
   nesting deferred to T5** (needs per-task async context — decided with the user).
-- **T5 — deeper auto-instrumentation + per-task async context.** The **active-span context becomes
-  per-task** (each task/future carries its own stack, not one global LIFO), which is the prerequisite
-  for two things: (a) **handler-internal spans nesting under the T4 SERVER span** into one trace per
-  request (deferred here from T4 by design — the serve loop is cooperatively concurrent, so a global
-  LIFO mis-parents across `await`s); (b) **async task spans** + isolate-message context propagation
-  (in). Plus **reactive-flush spans behind an opt-in flag** (per-signal-flush tracing is too noisy by
+- **T5a ✅ DONE (`269e1cd`) + T5b ✅ DONE (`2bccb3b`) — per-task context + handler nesting.** The
+  active-span stack became the backend's **task-local context**: an opaque `u64` stack on
+  `Vm`/`Interpreter` (`ctx_current`, the root strand's cell) + a saved stack per `Task`, swapped in
+  around each poll of the task's step (`poll_all_scopes_round`; paired `mem::swap`s nest like
+  parentheses across re-entrant rounds) and **snapshot-inherited at `spawn`**. Four new `NativeCtx`
+  ops (`context_top/push/pop/swap`); `std.telemetry` sheds `TelState`/`ExtState` entirely. **T5b**:
+  `http.serve` seeds each connection's context with its SERVER span and swaps it around every handler
+  call/poll (handler futures are manually polled — `context_swap`'s purpose), completing T4's
+  headline: handler `with_span`s nest under their request, `spawn`ed tasks inherit it, interleaved
+  handlers are isolated. *Verify:* sink-oracle tests for nesting, **interleaved isolation** (5
+  suspended handlers resume into their own contexts; parents form a bijection onto the 5 SERVER
+  spans), and spawn inheritance — each program also runs on the **tree-walker** with its own sink and
+  the recorded spans must be **byte-identical** (`reference_run_with_host`, the telemetry twin of the
+  differential). *Perf gate:* pinned interleaved A/B vs the pre-T5a baseline on the scheduler-floor
+  benches — `pingpong_coop` +1.0%, `fanout_n0` +0.5% (within noise; a first pingpong pass read −7.1%,
+  i.e. layout noise dominates). **En route, found & fixed a pre-existing scheduler bug (`ff9cbf4`)**:
+  a `concurrent` join inside a spawned task's body re-polled the mid-poll task → stack overflow in
+  BOTH backends; the new `polling` guard skips mid-poll tasks (regression pinned:
+  `tests/conformance/async/nested_concurrent_in_task.noe`). Notes: `with_span` bodies are sync
+  closures (E0040), so pure-SDK spans can't straddle suspensions — task context is observable only
+  through serve seeding until T5c; `with_span` over an async body still ends at future construction
+  (deferred to T5c: needs a completion hook).
+- **T5c–e — deferred tail (confirm before pickup).** (c) **async task spans** + a future-completion
+  hook (also fixes `with_span`-over-async-body duration); (d) isolate-message context propagation
+  (in); (e) **reactive-flush spans behind an opt-in flag** (per-signal-flush tracing is too noisy by
   default).
 - **T6 — docs + close-out.** `docs/Observability.md` (or `Telemetry.md`) — the SDK surface, config,
   the profiler-vs-OTEL split, the differential/bundle stances; CLI/sidebar/roadmap cross-links;
