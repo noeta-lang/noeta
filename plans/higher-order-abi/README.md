@@ -214,13 +214,26 @@ flags) and dispatches unmatched names to registered commands (`cargo clippy` mod
   mismatch, destructor exactness through set-replace + teardown). `Cell` reserved (one doc
   sample + one fixture renamed their own `Cell` → `Counter`). No `Wire::Extern` exists, so
   cells cannot cross isolates. Full gate green.
-- **H5** — migrate **std.reactive fully**: the graph becomes extension state (`noeta-reactive`
-  becomes the extension's internal data structure over `Retained`); `Signal<T>`/`Computed<T>`/
-  `Effect` = generic extern types; handle methods via ctx-form dispatch; flush loop + coalescing
-  + E0045 guard inside the `set`/creation dispatches. **Delete from both backends:**
-  `Value::Reactive`, `read_reactive`, `drive_flush`, the `NodeKind` method intercepts, the
-  `Rc<ReactiveGraph>` fields, the reactive `VIRTUAL_MODULES` entry and checker arms. Reactive
-  corpus + **benches** green (perf-gated; method inline-cache is the mitigation path).
+- **H5 ✅ DONE** (one gate caveat, below) — **std.reactive fully migrated**: the graph is
+  extension state over **stable arena cells** (a signal's content cell, a computed's memo cell,
+  immutable body cells — the graph stores only ids, never displaces a value; dirtying =
+  `touch()`); `Signal<T>`/`Computed<T>` = generic extern types with **declared arena reads**
+  behind the extension-synced gate ("no body running, no stale memo, no flush"); flush/
+  coalescing/E0045 = ordinary Rust in the dispatches (`ErrorKind::ReactiveCycle`). REPL session
+  persistence generalized (ext arena/state/gates replace the graph field). **Everything deleted
+  as planned** — `Value::Reactive`/`Payload::Reactive`, both intercepts, `drive_flush`/
+  `read_reactive`, `Builtin::{Signal,Computed,Effect}`, the whole `VIRTUAL_MODULES` mechanism,
+  the checker tables; noeta-vm/eval/value shed the noeta-reactive dep. Perf work (all measured):
+  extern-method route cache in `Op::CallMethod`, borrowed-seed slot tables, `CtxOut::Retained`,
+  fused `run_thunk`/`call_thunk_into`, alloc-free graph (worklist dirty walk, swapped flush
+  scratch), gate caching; plus `codegen-units=1` + thin LTO (layout was a per-build lottery).
+  **Bench (split gate, user-approved 2026-07-08):** reads ≤5% — `r_get_hot` **−6.1%**,
+  `r_computed_memo` **+14.6%** ✓✓; writes ≤35% — `r_effect_fanout` **+29.2%** ✓, `r_set_flush`
+  **+48.8% ✗** (~198ns per set→flush→effect→tracked-get cycle vs 133ns; ~+34% is the structural
+  floor of the cycle's 3 boundary crossings at ~15ns each — the fixture is 100% seam-bound with
+  a no-op body). Gate verdict on r_set_flush = user decision, pending. Conformance 513/513
+  (all 19 reactivity fixtures byte-exact), 1009 workspace tests, clippy silent; t_*/serve
+  unchanged (borrowed seeds erased H2's residual: t_map_bounded now ±0%).
 - **H6** — extension commands: `ExtCommand`/`CommandCtx`, dynamic clap wiring, `noeta serve`
   migrated out of the `Command` enum. CLI integration test green.
 - **H7** — docs (Native-Extensions.md rewrite — Deferred shrinks to freeze/publish +
