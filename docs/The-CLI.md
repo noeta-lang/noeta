@@ -37,9 +37,10 @@ Style is read from a `[fmt]` table in the nearest `noeta.toml`, or built-in defa
 wrap             = false      # false (default) keeps your line breaks; true = width-driven wrapping
 line_width       = 100        # column budget, used only when wrap = true
 match_arm_arrows = "compact"  # "compact" (default) or "align" (column-align match `=>`)
+sort_imports     = false      # false (default); true alphabetizes each comment-free run of `use`
 ```
 
-With `wrap = false` (the default) the formatter preserves the line breaks you wrote and only normalizes indentation, spacing, and blank lines — so a tidy file is left essentially as-is. Trailing `;` and comments are always preserved. Editors format with the same engine via the language server's *Format Document* / format-on-save.
+With `wrap = false` (the default) the formatter preserves the line breaks you wrote and only normalizes indentation, spacing, and blank lines — so a tidy file is left essentially as-is. Trailing `;` and comments are always preserved; when `wrap = true`, wrapped lists get a trailing comma. Editors format with the same engine: the VS Code extension turns on **format-on-save** and **format-on-type** (reformatting a block when you type its closing `}`) for `.noe` files by default.
 
 ---
 

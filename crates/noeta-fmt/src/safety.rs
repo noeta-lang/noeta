@@ -8,11 +8,50 @@
 //! F3 note: this is upgradeable to a true span-erased structural walk if the string form ever proves
 //! too coarse; for now it is exact enough and far less code than mirroring every AST node.
 
-use noeta_ast::{Pretty, Program};
+use noeta_ast::{Pretty, Program, Stmt};
 
-/// Whether `a` and `b` are the same program up to span positions.
+/// Whether `a` and `b` are the same program up to span positions **and up to import ordering**. The
+/// latter lets the import-sorting formatter reorder `use` statements (and the names inside a `use`)
+/// without tripping the gate — reordering imports is semantics-neutral, so canonicalizing it away on
+/// both sides is sound and keeps every other structural difference caught.
 pub fn ast_equal_modulo_spans(a: &Program, b: &Program) -> bool {
-    strip_spans(&a.to_pretty_string()) == strip_spans(&b.to_pretty_string())
+    strip_spans(&canonical_imports(a).to_pretty_string())
+        == strip_spans(&canonical_imports(b).to_pretty_string())
+}
+
+/// A clone of `program` with import order canonicalized: every contiguous run of `use` statements is
+/// sorted, and the names inside each `use A.{…}` are sorted. Deterministic, so applying it to both
+/// compared programs makes the comparison invariant to import ordering.
+fn canonical_imports(program: &Program) -> Program {
+    let mut out = program.clone();
+    for stmt in &mut out.stmts {
+        if let Stmt::Use { names, .. } = stmt {
+            names.sort_by(|x, y| x.name.cmp(&y.name));
+        }
+    }
+    let mut i = 0;
+    while i < out.stmts.len() {
+        if matches!(out.stmts[i], Stmt::Use { .. }) {
+            let start = i;
+            while i < out.stmts.len() && matches!(out.stmts[i], Stmt::Use { .. }) {
+                i += 1;
+            }
+            out.stmts[start..i].sort_by_key(use_sort_key);
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// A deterministic sort key for a `use` statement: `path` then its (already-sorted) names.
+fn use_sort_key(stmt: &Stmt) -> (Vec<String>, Vec<String>) {
+    match stmt {
+        Stmt::Use { path, names, .. } => {
+            (path.clone(), names.iter().map(|n| n.name.clone()).collect())
+        }
+        _ => (Vec::new(), Vec::new()),
+    }
 }
 
 /// Remove every `@<digits>..<digits>` span annotation from a pretty string.

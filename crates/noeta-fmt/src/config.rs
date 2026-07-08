@@ -43,6 +43,9 @@ impl FmtConfig {
                 }
             };
         }
+        if let Some(v) = fmt.get("sort_imports") {
+            config.sort_imports = v.as_bool().ok_or("`fmt.sort_imports` must be a boolean")?;
+        }
         Ok(config)
     }
 
@@ -79,12 +82,13 @@ mod tests {
     #[test]
     fn overlays_known_keys() {
         let c = FmtConfig::from_toml(
-            "[fmt]\nwrap = true\nline_width = 80\nmatch_arm_arrows = \"align\"\n",
+            "[fmt]\nwrap = true\nline_width = 80\nmatch_arm_arrows = \"align\"\nsort_imports = true\n",
         )
         .unwrap();
         assert!(c.wrap);
         assert_eq!(c.line_width, 80);
         assert_eq!(c.match_arm_arrows, ArrowStyle::Align);
+        assert!(c.sort_imports);
     }
 
     #[test]

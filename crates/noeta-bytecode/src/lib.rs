@@ -767,11 +767,17 @@ pub enum Op {
         err_shape: u32,
         span: Span,
     },
-    /// A call-site-typed native module call (`json.parse::<T>(args)`): `dst = T`. The VM marshals the
-    /// argument registers, runs the shared native function (keyed by `module`/`func`), and
-    /// materializes the result tree into a value of `T` per `recipe` (the checker-resolved turbofish
-    /// type; `None` means `T` had no decoding — a checker error — and the VM raises at `span`).
-    ExtCall {
+    /// A **call-site-typed** native module call — the turbofish form (`json.parse::<T>(args)`)
+    /// ONLY: `dst = T`. This is NOT the general module-call op. An ordinary module call
+    /// (`http.get(url)`, `math.sqrt(x)`) is a `CallMethod` on a first-class module value
+    /// (`use std.{http}` binds `http` as a const-pool `NativeModule`); this op exists solely
+    /// because the turbofish call must carry a baked `recipe`. Anything scanning bytecode for
+    /// module usage (e.g. AOT footprint selection) must read the const pool (`NativeModule` +
+    /// `ModuleFn` entries), not this op. The VM marshals the argument registers, runs the shared
+    /// native function (keyed by `module`/`func`), and materializes the result tree into a value
+    /// of `T` per `recipe` (the checker-resolved turbofish type; `None` means `T` had no
+    /// decoding — a checker error — and the VM raises at `span`).
+    TypedModuleCall {
         dst: Reg,
         module: NameId,
         func: NameId,
@@ -1634,7 +1640,7 @@ fn op_repr(
             args,
             ..
         } => format!("Invoke      r{dst} <- invoke(r{recv}, r{name}, r{args})"),
-        Op::ExtCall {
+        Op::TypedModuleCall {
             dst,
             module,
             func,
@@ -1643,7 +1649,7 @@ fn op_repr(
         } => {
             let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
             format!(
-                "ExtCall     r{dst} <- {}.{}::<T>({})",
+                "TypedModuleCall r{dst} <- {}.{}::<T>({})",
                 n(module),
                 n(func),
                 args.join(", ")

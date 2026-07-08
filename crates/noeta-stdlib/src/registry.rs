@@ -2103,7 +2103,7 @@ const QUAT_FNS: &[ExtFn] = &[
 // --- `json`: parse (dynamic) + stringify, over the recursive value seam ------------------------
 //
 // `json.parse(text)` decodes into a dynamic value tree (`NativeOut::Map`/`List`/scalars); the
-// turbofish form `json.parse::<T>(text)` is a separate call-site-typed path (`Op::ExtCall` + a
+// turbofish form `json.parse::<T>(text)` is a separate call-site-typed path (`Op::TypedModuleCall` + a
 // `TypeRecipe`), not this dynamic dispatch. `json.stringify(value)` serializes a **deeply**
 // marshalled argument (the module sets `deep_marshal`) through the shared `json::stringify`.
 

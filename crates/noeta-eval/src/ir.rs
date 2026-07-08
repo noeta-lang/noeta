@@ -1468,7 +1468,7 @@ impl Interpreter {
                 let args_val = self.eval_ir_atom(args, frame)?;
                 self.invoke_dynamic(receiver, name_val, args_val, *span)
             }
-            noeta_ir::Rvalue::ExtCall {
+            noeta_ir::Rvalue::TypedModuleCall {
                 module,
                 func,
                 args,
