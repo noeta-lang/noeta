@@ -15,8 +15,9 @@
 
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    ctx_arity, no_function_error, panic_error, CtxError, CtxOut, CtxResult, ErrorKind, NativeCtx,
-    NativeValue, NetResponse, Scalar, Slot, StdError,
+    ctx_arity, no_function_error, panic_error, ArgKind, ArgSpec, CtxError, CtxOut, CtxResult,
+    EntryArg, EntryCall, ErrorKind, ExtCommand, NativeCtx, NativeValue, NetResponse, Scalar, Slot,
+    StdError,
 };
 
 use crate::net::{Request, REQUEST_TYPE_NAME};
@@ -33,6 +34,42 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
         ret: RetTy::Concrete(SigType::Unit),
     },
 ];
+
+/// The `noeta serve` CLI subcommand (higher-order-abi H6) — the ergonomic entry point over an
+/// explicit `http.serve(...)` call: run the file's top-level setup, then synthesize and run
+/// `http.serve(<port>, fetch)`. The program supplies `fetch` and `use std.{http}`; a missing one
+/// surfaces as an ordinary check error. Single worker, cooperatively concurrent; runs until
+/// interrupted (Ctrl-C).
+pub const SERVE_COMMAND: ExtCommand = ExtCommand {
+    name: "serve",
+    about: "Serve a program's HTTP handler (a top-level `fn fetch(req: Request): Response`)",
+    args: &[
+        ArgSpec {
+            name: "file",
+            help: "Path to a `.noe` file exporting a `fetch` handler",
+            kind: ArgKind::Path,
+        },
+        ArgSpec {
+            name: "port",
+            help: "The TCP port to bind, default 8080 (the listener binds all interfaces, `0.0.0.0`)",
+            kind: ArgKind::Int { default: 8080 },
+        },
+    ],
+    run: |ctx, args| {
+        let port = args.int("port");
+        ctx.run_file(
+            args.path("file"),
+            Some(&EntryCall {
+                module: "http",
+                func: "serve",
+                args: vec![EntryArg::Int(port), EntryArg::Ident("fetch")],
+            }),
+            Some(&format!(
+                "noeta serve: listening on http://0.0.0.0:{port} (Ctrl-C to stop)"
+            )),
+        )
+    },
+};
 
 /// The reply for a handler that errors or returns a non-`Response`.
 fn server_error() -> NetResponse {

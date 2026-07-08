@@ -32,6 +32,10 @@ impl Extension for StdExtension {
     fn types(&self) -> &'static [ExtType] {
         STD_TYPES
     }
+    fn commands(&self) -> &'static [noeta_native::ExtCommand] {
+        // `noeta serve` (higher-order-abi H6) — contributed here, not a core CLI verb.
+        &[crate::serve::SERVE_COMMAND]
+    }
 }
 
 /// Core's extern types: `Uuid` (X2 — pure, byte-ordered, key-capable) and `FileHandle` (X3 —
@@ -245,6 +249,12 @@ pub fn dispatch_ctx(
         Some(d) => d(func, ctx, args),
         None => Err(no_function_error(module, func).into()),
     }
+}
+
+/// Every extension-contributed CLI subcommand (higher-order-abi H6), for the CLI's dynamic
+/// wiring and its unmatched-name dispatch.
+pub fn commands() -> impl Iterator<Item = &'static noeta_native::ExtCommand> {
+    extensions().iter().flat_map(|e| e.commands())
 }
 
 /// Find a registered extern type by name (extern-types X1).

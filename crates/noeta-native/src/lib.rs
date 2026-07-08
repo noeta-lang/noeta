@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod command;
 pub mod ctx;
 pub mod executor;
 pub mod extern_value;
@@ -17,6 +18,7 @@ pub mod map_key;
 pub mod net;
 pub mod registry;
 
+pub use command::{ArgKind, ArgSpec, CommandCtx, EntryArg, EntryCall, ExtCommand, ParsedArgs};
 pub use ctx::{
     ctx_arity, CtxDispatch, CtxError, CtxOut, CtxResult, ExtState, NativeCtx, Retained, Slot,
 };

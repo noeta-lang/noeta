@@ -384,4 +384,8 @@ pub trait Extension: Sync {
     fn types(&self) -> &'static [ExtType] {
         &[]
     }
+    /// The extension's CLI subcommands (higher-order-abi H6). Default empty.
+    fn commands(&self) -> &'static [crate::ExtCommand] {
+        &[]
+    }
 }
