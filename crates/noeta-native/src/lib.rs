@@ -21,7 +21,7 @@ pub mod registry;
 
 pub use command::{ArgKind, ArgSpec, CommandCtx, EntryArg, EntryCall, ExtCommand, ParsedArgs};
 pub use ctx::{
-    ctx_arity, CtxDispatch, CtxError, CtxOut, CtxResult, ExtState, NativeCtx, Retained, Slot,
+    CtxDispatch, CtxError, CtxOut, CtxResult, ExtState, NativeCtx, Retained, Slot, ctx_arity,
 };
 pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};

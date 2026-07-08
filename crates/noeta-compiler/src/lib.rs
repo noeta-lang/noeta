@@ -90,7 +90,9 @@ fn unsupported<T>(reason: impl Into<String>) -> Result<T, Unsupported> {
 /// Whether `use <path>.{name}` imports a Ring 2 native module (`use std.{json}`) rather than a
 /// sibling-module declaration. Such names are bound as global values, not opaque types.
 fn is_native_module(path: &[String], name: &str) -> bool {
-    path == ["std"] && noeta_stdlib::registry::find_module(name).is_some()
+    path.len() == 1
+        && noeta_stdlib::registry::is_extension_root(&path[0])
+        && noeta_stdlib::registry::find_module(name).is_some()
 }
 
 /// For a selective member import `use std.<mod>.<name>` — `path == ["std", <mod>]` where `<mod>` is a
@@ -98,7 +100,9 @@ fn is_native_module(path: &[String], name: &str) -> bool {
 /// [`Const::ModuleFn`], called (or passed) through the same `call_native_module` path as
 /// `<mod>.<name>(...)`. `None` for a plain module import (`use std.{math}`) or a non-std path.
 fn selective_import_module(path: &[String]) -> Option<&str> {
-    if path.len() == 2 && path[0] == "std" && noeta_stdlib::registry::find_module(&path[1]).is_some()
+    if path.len() == 2
+        && noeta_stdlib::registry::is_extension_root(&path[0])
+        && noeta_stdlib::registry::find_module(&path[1]).is_some()
     {
         Some(&path[1])
     } else {

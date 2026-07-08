@@ -1548,12 +1548,15 @@ impl Checker {
                 // any other imported name (whether the linker merged its declaration or left an
                 // opaque stub) is a legal referent for an annotation — registered as a known type.
                 Stmt::Use { path, names, .. } => {
-                    let is_std = path.len() == 1 && path[0] == "std";
-                    // A selective member import `use std.<mod>.<fn>` — a two-segment `std` path whose
-                    // second segment is a known module. Each name binds as a bare function alias.
-                    let selective = (path.len() == 2 && path[0] == "std")
-                        .then(|| path[1].clone())
-                        .filter(|m| stdlib::is_std_module(m));
+                    let is_std =
+                        path.len() == 1 && noeta_stdlib::registry::is_extension_root(&path[0]);
+                    // A selective member import `use <root>.<mod>.<fn>` — a two-segment path under a
+                    // registered extension root whose second segment is a known module. Each name
+                    // binds as a bare function alias.
+                    let selective = (path.len() == 2
+                        && noeta_stdlib::registry::is_extension_root(&path[0]))
+                    .then(|| path[1].clone())
+                    .filter(|m| stdlib::is_std_module(m));
                     for name in names {
                         if is_std && stdlib::is_std_module(&name.name) {
                             self.modules.insert(name.name.clone());

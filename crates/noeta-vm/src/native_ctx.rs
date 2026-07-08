@@ -7,16 +7,16 @@
 //! dispatch cannot leak a slot — the table's `Drop` releases whatever the dispatch forgot.
 
 use noeta_diagnostics::DiagnosticCode;
+use noeta_gc::retain;
 use noeta_span::Span;
 use noeta_stdlib::{
     CtxError, CtxOut, CtxResult, ExternIo, NativeCtx, NativeOut, NativeValue, Retained, Slot,
     StdError,
 };
-use noeta_gc::retain;
 use noeta_value::Value;
 
 use crate::values::{materialize_ext, materialize_native};
-use crate::{isolate, stdlib_error_code, Abort, Poll, Vm};
+use crate::{Abort, Poll, Vm, isolate, stdlib_error_code};
 
 pub(crate) struct VmCtx<'c, 'm> {
     vm: &'c mut Vm<'m>,

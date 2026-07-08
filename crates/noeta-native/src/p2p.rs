@@ -30,7 +30,10 @@ pub struct P2pBroker {
 impl P2pBroker {
     /// Append `message` to `topic`'s log — visible to every current and future reader of the topic.
     pub fn publish(&mut self, topic: &str, message: Vec<u8>) {
-        self.logs.entry(topic.to_string()).or_default().push(message);
+        self.logs
+            .entry(topic.to_string())
+            .or_default()
+            .push(message);
     }
 
     /// The next message for the topic's default reader (P1 `p2p.receive`), advancing its cursor.
@@ -57,7 +60,10 @@ impl P2pBroker {
     /// subscribers to one topic each receive every message). `None` when caught up or unknown.
     pub fn poll_sub(&mut self, sub: u64) -> Option<Vec<u8>> {
         let (topic, cursor) = self.subs.get(&sub)?.clone();
-        let message = self.logs.get(&topic).and_then(|log| log.get(cursor).cloned());
+        let message = self
+            .logs
+            .get(&topic)
+            .and_then(|log| log.get(cursor).cloned());
         if message.is_some() {
             self.subs.get_mut(&sub).expect("sub exists").1 = cursor + 1;
         }

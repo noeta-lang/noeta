@@ -286,7 +286,11 @@ impl ExtModule {
 
 /// The [`ExtModule::DEFAULTS`] dispatch placeholder — reached only by a module that registers no
 /// plain functions (e.g. a ctx-only module), where any name is unknown by definition.
-fn no_dispatch(func: &str, _host: &mut dyn Host, _args: &[NativeValue]) -> Result<NativeOut, StdError> {
+fn no_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    _args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
     Err(StdError {
         kind: crate::ErrorKind::UnknownName,
         message: format!("no function `{func}`"),

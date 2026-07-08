@@ -462,6 +462,17 @@ fn str_list(items: impl IntoIterator<Item = String>) -> NativeOut {
     NativeOut::List(items.into_iter().map(NativeOut::Str).collect())
 }
 
+/// A `Map<string, string>` result (F5 `env.parse`/`env.load`). Entries stay in the iteration order
+/// of `items` — callers pass a `BTreeMap` so the map is key-sorted and deterministic.
+fn str_map(items: impl IntoIterator<Item = (String, String)>) -> NativeOut {
+    NativeOut::Map(
+        items
+            .into_iter()
+            .map(|(k, v)| (k, NativeOut::Str(v)))
+            .collect(),
+    )
+}
+
 /// The surface type name of an argument, for error messages (matches each backend's `type_name`).
 fn native_type_name(value: &NativeValue) -> &str {
     match value {
@@ -1312,6 +1323,37 @@ fn env_dispatch(
             want_arity(func, args, 0)?;
             Ok(str_list(host.env_keys()))
         }
+        // `.env` support (F5). `parse` is pure; `load` reads a file through the filesystem
+        // capability, parses it, then overlays the ambient environment on top (real env wins).
+        "parse" => {
+            want_arity(func, args, 1)?;
+            let text = want_str(func, args, 0)?;
+            Ok(str_map(crate::env::parse_dotenv(text)))
+        }
+        "load" => {
+            // `path` is optional (defaults to `.env`).
+            if args.len() > 1 {
+                return Err(arity_error(func, 1, args.len()));
+            }
+            let path = match args.first() {
+                Some(_) => want_str(func, args, 0)?,
+                None => crate::env::DEFAULT_DOTENV_PATH,
+            };
+            // A missing `.env` is tolerated — the result is just the ambient environment.
+            let mut merged = if host.fs_exists(path) {
+                crate::env::parse_dotenv(&host.fs_read(path)?)
+            } else {
+                std::collections::BTreeMap::new()
+            };
+            // Overlay the ambient environment on top so an existing variable always wins — the
+            // cross-ecosystem `.env` precedence. The union is the full merged environment.
+            for key in host.env_keys() {
+                if let Some(value) = host.env_get(&key) {
+                    merged.insert(key, value);
+                }
+            }
+            Ok(str_map(merged))
+        }
         _ => Err(no_function_error("env", func)),
     }
 }
@@ -1892,6 +1934,9 @@ fn uuid_method_dispatch(
     }
 }
 
+/// The `Map<string, string>` a `.env` parse/load yields (F5) — shared by `env.parse`/`env.load`.
+const STR_MAP: SigType = SigType::Map(&Str, &Str);
+
 const ENV_FNS: &[ExtFn] = &[
     ExtFn {
         name: "get",
@@ -1902,6 +1947,18 @@ const ENV_FNS: &[ExtFn] = &[
         name: "keys",
         params: &[],
         ret: Concrete(SigType::List(&Str)),
+    },
+    // `.env` support folded into the same namespace (F5): a pure parser and a file loader that
+    // applies a `.env`'s defaults under real-env-wins precedence.
+    ExtFn {
+        name: "parse",
+        params: &[Str],
+        ret: Concrete(STR_MAP),
+    },
+    ExtFn {
+        name: "load",
+        params: &[SigType::Optional(&Str)],
+        ret: Concrete(STR_MAP),
     },
 ];
 
@@ -2350,9 +2407,9 @@ pub fn static_dispatch_ctx_method<C: crate::NativeCtx + ?Sized>(
         crate::reactive::EFFECT_TYPE_NAME => Some(crate::reactive::effect_ctx_method_dispatch(
             method, ctx, recv, args,
         )),
-        crate::synced::SYNCED_SIGNAL_TYPE_NAME => Some(
-            crate::synced::synced_ctx_method_dispatch(method, ctx, recv, args),
-        ),
+        crate::synced::SYNCED_SIGNAL_TYPE_NAME => Some(crate::synced::synced_ctx_method_dispatch(
+            method, ctx, recv, args,
+        )),
         _ => None,
     }
 }

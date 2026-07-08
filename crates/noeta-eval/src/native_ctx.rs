@@ -12,8 +12,8 @@ use noeta_stdlib::{
 };
 
 use crate::{
-    materialize_ext, materialize_native, std_error_code, value_to_native_deep, Eval, Interpreter,
-    Unwind, Value,
+    Eval, Interpreter, Unwind, Value, materialize_ext, materialize_native, std_error_code,
+    value_to_native_deep,
 };
 
 pub(crate) struct EvalCtx<'i> {
@@ -175,10 +175,7 @@ impl NativeCtx for EvalCtx<'_> {
     }
 
     fn spawn_io(&mut self, io: Box<dyn ExternIo>) -> Slot {
-        let id = self
-            .interp
-            .executor
-            .spawn_ext(&mut *self.interp.host, io);
+        let id = self.interp.executor.spawn_ext(&mut *self.interp.host, io);
         self.insert(Value::AsyncIo(id))
     }
 

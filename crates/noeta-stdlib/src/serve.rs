@@ -15,12 +15,12 @@
 
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    ctx_arity, no_function_error, panic_error, ArgKind, ArgSpec, CtxError, CtxOut, CtxResult,
-    EntryArg, EntryCall, ErrorKind, ExtCommand, NativeCtx, NativeValue, NetResponse, Scalar, Slot,
-    StdError,
+    ArgKind, ArgSpec, CtxError, CtxOut, CtxResult, EntryArg, EntryCall, ErrorKind, ExtCommand,
+    NativeCtx, NativeValue, NetResponse, Scalar, Slot, StdError, ctx_arity, no_function_error,
+    panic_error,
 };
 
-use crate::net::{Request, REQUEST_TYPE_NAME};
+use crate::net::{REQUEST_TYPE_NAME, Request};
 
 const REQUEST_SIG: SigType = SigType::Named(REQUEST_TYPE_NAME);
 

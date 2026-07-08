@@ -11,8 +11,8 @@
 
 use noeta_native::registry::{ExtFn, RetTy, SigType};
 use noeta_native::{
-    panic_error, type_error, CtxError, CtxOut, CtxResult, ErrorKind, NativeCtx, NativeValue,
-    Scalar, Slot, StdError,
+    CtxError, CtxOut, CtxResult, ErrorKind, NativeCtx, NativeValue, Scalar, Slot, StdError,
+    panic_error, type_error,
 };
 
 const VAR_A: SigType = SigType::Var(0);
@@ -108,13 +108,12 @@ pub fn task_ctx_dispatch(
                     }
                 }
                 if results.iter().all(Option::is_some) {
-                    let ready: Vec<Slot> = results.into_iter().map(|r| r.expect("all ready")).collect();
+                    let ready: Vec<Slot> =
+                        results.into_iter().map(|r| r.expect("all ready")).collect();
                     return Ok(CtxOut::Slot(ctx.make_list(&ready)?));
                 }
                 let progressed = ctx.advance_tasks()?;
-                if !progressed
-                    && ctx.advance_clock().is_none()
-                    && !ctx.wait_external_wake(wake_gen)
+                if !progressed && ctx.advance_clock().is_none() && !ctx.wait_external_wake(wake_gen)
                 {
                     return Err(panic_error(
                         "async deadlock: `all` awaited futures with no pending timers",
@@ -145,9 +144,7 @@ pub fn task_ctx_dispatch(
                     }
                 }
                 let progressed = ctx.advance_tasks()?;
-                if !progressed
-                    && ctx.advance_clock().is_none()
-                    && !ctx.wait_external_wake(wake_gen)
+                if !progressed && ctx.advance_clock().is_none() && !ctx.wait_external_wake(wake_gen)
                 {
                     return Err(panic_error(
                         "async deadlock: `race` awaited futures with no pending timers",
@@ -207,9 +204,7 @@ pub fn task_ctx_dispatch(
                     }
                 }
                 progressed |= ctx.advance_tasks()?;
-                if !progressed
-                    && ctx.advance_clock().is_none()
-                    && !ctx.wait_external_wake(wake_gen)
+                if !progressed && ctx.advance_clock().is_none() && !ctx.wait_external_wake(wake_gen)
                 {
                     return Err(panic_error(
                         "async deadlock: `map_bounded` stalled with no pending timers",

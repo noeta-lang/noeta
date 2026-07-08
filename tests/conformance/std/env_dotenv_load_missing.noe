@@ -1,0 +1,11 @@
+// A missing `.env` is tolerated, not an error (the "defaults for local dev, file optional" model,
+// matching python-dotenv / node dotenv). `env.load` on an absent path returns just the ambient
+// environment — no E0021 — so a program without a `.env` still runs. Both backends agree.
+// expect: stdout "[\"HOME\", \"USER\"]"
+// expect: stdout "/home/sandbox"
+// expect: exit 0
+use std.{env}
+
+cfg = env.load("does_not_exist.env");
+echo cfg.keys();     // just the ambient fixture
+echo cfg["HOME"];

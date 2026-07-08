@@ -32,7 +32,10 @@ fn lang() -> Command {
     // ~/.cache/noeta. One per-test-target dir is safe to share across all tests — entries are keyed
     // by source + binary identity, and the atomic per-pid store handles the parallel test processes.
     // Tests that exercise the cache directly override this with their own dir.
-    cmd.env("NOETA_CACHE_DIR", concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"));
+    cmd.env(
+        "NOETA_CACHE_DIR",
+        concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+    );
     cmd
 }
 
@@ -185,7 +188,8 @@ fn startup_cache_is_semantically_invisible() {
 
     for &(name, src) in programs {
         let file = temp_program(&format!("cache_inv_{name}"), src);
-        let cache_dir = PathBuf::from(concat!(env!("CARGO_TARGET_TMPDIR"), "/cache-inv")).join(name);
+        let cache_dir =
+            PathBuf::from(concat!(env!("CARGO_TARGET_TMPDIR"), "/cache-inv")).join(name);
         let _ = std::fs::remove_dir_all(&cache_dir);
 
         // One observation of (stdout, stderr, exit code). `use_cache` selects the cached path (a
@@ -226,7 +230,10 @@ fn startup_cache_is_semantically_invisible() {
                     .count()
             })
             .unwrap_or(0);
-        assert_eq!(entries, 1, "{name}: the cold run should populate exactly one cache entry");
+        assert_eq!(
+            entries, 1,
+            "{name}: the cold run should populate exactly one cache entry"
+        );
 
         let _ = std::fs::remove_dir_all(&cache_dir);
     }
@@ -1797,7 +1804,10 @@ fn temp_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
 
 #[test]
 fn check_clean_file_succeeds() {
-    let file = temp_program("check_clean", "fn add(a: int, b: int): int { return a + b }\necho add(2, 3)\n");
+    let file = temp_program(
+        "check_clean",
+        "fn add(a: int, b: int): int { return a + b }\necho add(2, 3)\n",
+    );
     lang()
         .arg("check")
         .arg(&file)
@@ -1860,7 +1870,10 @@ fn check_shared_erroring_module_is_reported_once() {
     let dir = temp_dir(
         "check_shared",
         &[
-            ("m.noe", "namespace App.M;\npub fn boom(): int { return 1 + true }\n"),
+            (
+                "m.noe",
+                "namespace App.M;\npub fn boom(): int { return 1 + true }\n",
+            ),
             ("main1.noe", "use App.M.{boom}\necho boom()\n"),
             ("main2.noe", "use App.M.{boom}\necho boom()\n"),
         ],
@@ -1915,7 +1928,10 @@ fn check_json_emits_a_machine_readable_report_on_stdout() {
 
 #[test]
 fn check_json_clean_is_an_empty_diagnostics_array() {
-    let file = temp_program("check_json_ok", "fn id(n: int): int { return n }\necho id(1)\n");
+    let file = temp_program(
+        "check_json_ok",
+        "fn id(n: int): int { return n }\necho id(1)\n",
+    );
     let out = lang()
         .arg("check")
         .arg("--format")

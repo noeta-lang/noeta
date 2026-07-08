@@ -20,12 +20,12 @@ use std::any::Any;
 use std::cmp::Ordering;
 use std::fmt;
 
+use noeta_crdt::Mergeable;
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    arity_error, no_function_error, no_method_error, type_error, ErrorKind, ExternValue, Host,
-    NativeValue, Scalar, StdError,
+    ErrorKind, ExternValue, Host, NativeValue, Scalar, StdError, arity_error, no_function_error,
+    no_method_error, type_error,
 };
-use noeta_crdt::Mergeable;
 
 pub const GCOUNTER_TYPE_NAME: &str = "GCounter";
 pub const PNCOUNTER_TYPE_NAME: &str = "PnCounter";

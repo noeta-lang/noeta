@@ -14,8 +14,8 @@ use std::cmp::Ordering;
 
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    ctx_arity, no_function_error, CtxError, CtxOut, CtxResult, ExternValue, NativeCtx, Retained,
-    Slot,
+    CtxError, CtxOut, CtxResult, ExternValue, NativeCtx, Retained, Slot, ctx_arity,
+    no_function_error,
 };
 
 pub const CELL_TYPE_NAME: &str = "Cell";
@@ -111,9 +111,9 @@ pub fn cell_ctx_dispatch<C: NativeCtx + ?Sized>(
         "new" => {
             ctx_arity(func, args, 1)?;
             let retained = ctx.retain(args[0])?;
-            Ok(CtxOut::Out(NativeOut::Extern(noeta_native::ExternBox::new(
-                CellBox { retained },
-            ))))
+            Ok(CtxOut::Out(NativeOut::Extern(
+                noeta_native::ExternBox::new(CellBox { retained }),
+            )))
         }
         _ => Err(no_function_error("cell", func).into()),
     }

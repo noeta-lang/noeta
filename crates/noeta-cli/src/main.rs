@@ -292,8 +292,8 @@ fn main() -> ExitCode {
     {
         return ext_command_dispatch(ext, sub);
     }
-    let cli = <Cli as clap::FromArgMatches>::from_arg_matches(&matches)
-        .unwrap_or_else(|err| err.exit());
+    let cli =
+        <Cli as clap::FromArgMatches>::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
     match cli.command {
         Command::Run {
             file,
@@ -795,11 +795,7 @@ fn try_run_stapled() -> Option<ExitCode> {
     file.read_exact(&mut blob).ok()?;
     // A shipped `--exe` artifact is invoked directly, so its real process argv (`[<binary>, <args…>]`)
     // is exactly the program's argument vector — pass it straight through to `args.all()`.
-    Some(cmd_run_bundle(
-        &exe_path,
-        &blob,
-        std::env::args().collect(),
-    ))
+    Some(cmd_run_bundle(&exe_path, &blob, std::env::args().collect()))
 }
 
 fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a Diagnostic>) {
@@ -1108,7 +1104,10 @@ fn ext_command_dispatch(
             ),
             noeta_stdlib::ArgKind::Int { default } => parsed.push_int(
                 spec.name,
-                matches.get_one::<i64>(spec.name).copied().unwrap_or(default),
+                matches
+                    .get_one::<i64>(spec.name)
+                    .copied()
+                    .unwrap_or(default),
             ),
         }
     }
@@ -1167,7 +1166,10 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                 .args
                 .iter()
                 .map(|arg| match arg {
-                    noeta_stdlib::EntryArg::Int(value) => Expr::Int { value: *value, span: sp },
+                    noeta_stdlib::EntryArg::Int(value) => Expr::Int {
+                        value: *value,
+                        span: sp,
+                    },
                     noeta_stdlib::EntryArg::Ident(name) => ident(name),
                 })
                 .collect();
@@ -1176,7 +1178,10 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                 args,
                 span: sp,
             };
-            linked.program.stmts.push(Stmt::Expr { expr: call, span: sp });
+            linked.program.stmts.push(Stmt::Expr {
+                expr: call,
+                span: sp,
+            });
         }
 
         if let Some(banner) = banner {
@@ -1300,7 +1305,9 @@ fn compile_whole_file(
     // The active tier set is the union of any `--profile`'s live tiers (from `noeta.toml`) and any
     // explicit `--tier` flags, resolved before loading so a bad profile fails fast.
     let mut active: Vec<String> = match profile {
-        Some(name) => manifest::resolve_active_tiers(file, name).map_err(CompileFailure::Message)?,
+        Some(name) => {
+            manifest::resolve_active_tiers(file, name).map_err(CompileFailure::Message)?
+        }
         None => Vec::new(),
     };
     for tier in tiers {
@@ -1757,7 +1764,10 @@ fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
             }
         }
         for op in &chunk.code {
-            if let Op::TypedModuleCall { module: m, func, .. } = op {
+            if let Op::TypedModuleCall {
+                module: m, func, ..
+            } = op
+            {
                 note_fn(module.name(*m), module.name(*func), &mut rings);
             }
         }

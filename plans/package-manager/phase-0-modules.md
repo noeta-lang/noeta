@@ -40,35 +40,34 @@ construction; 0.4 migrates surface + adds conformance.
 - Internal only — no language-surface change, no NativeModule shape change yet. Differential
   byte-identical.
 
-### 0.2 — Generalize the hard-coded `std` off checker / compiler / eval
+### 0.2 — Generalize the hard-coded `std` recognition off checker / compiler / eval ✅ DONE
 
-- Replace every `path == ["std"]` / `path[0] == "std"` with **"`path[0]` is a registered extension
-  root"** (a `registry::is_extension_root(&str)` query). Touches the five sites above.
-- `Const::NativeModule` and `Value::NativeModule` carry the **full qualified path** (`"std.math"`),
-  not the bare name; member-call dispatch resolves on the stored path (`noeta-eval/lib.rs:1995`, VM
-  `Op::CallMethod` on a module value).
-- Checker `self.modules: HashSet<String>` → a **`bound → full-path` map** (bound local name → module
-  qualified path), so a call on the bound name resolves to the right module.
-- Still only `std` registered ⇒ every existing program resolves identically. Differential green.
-- **Synthetic collision test:** register a throwaway second-root test extension (test-only) exporting
-  a `math`-named module and assert `foo.math` vs `std.math` resolve distinctly — locks the property
-  before a real second root exists (Phase 2).
+- Replace every `path == ["std"]` / `path[0] == "std"` module-import recognition with **"`path[0]`
+  is a registered extension root"** (`registry::is_extension_root`). Six sites: compiler
+  `is_native_module` + `selective_import_module`; checker `is_std` + `selective`; eval `is_std` +
+  `selective_module`.
+- The stored module payload stays the **bare name** here — changing it to the qualified path couples
+  tightly to nested resolution (a nested module's value must remember *which* module it is), so that
+  moves to 0.3 with the split that first produces nested modules. Bare-name payloads are unambiguous
+  while only `std` is registered.
+- Faithful refactor: only `std` registered ⇒ every program resolves identically. Differential green.
 
-### 0.3 — Nested-path resolution, binding the last segment
+### 0.3 — Qualified module payload + nested-path binding + the `std.http` split
 
-- Support **nested module paths** (`std.http.client`): a module's registered name may itself be a
-  dotted path under its root. `find_module_qualified(["std","http","client"])` resolves it.
-- `use std.http.client` joins the segments after the root, looks up the nested module, and binds the
-  **last segment** (`client`) as the local module value — calls read `client.get(...)`. Distinguish
-  this from the existing selective *function* import (`use std.math.sqrt` binds a bound function) by
-  whether the tail names a module vs a function in the registry.
-- Sites: checker `use` resolution (`lib.rs:1551`+), compiler (`lib.rs:1805`+), eval (`lib.rs:1503`+).
-- Conformance: a nested-module import case (`use std.http.client` once 0.4 provides it — until then,
-  a synthetic nested test module).
-- Rejected alternative (per dce.md): qualified call-site form `http.client.get(...)` — needs
-  call-site path resolution + namespace *values*; last-segment binding is the chosen model.
+*Landed together: the split produces the first real nested modules (`std.http.client`/`.server`);
+nested resolution is what consumes them — neither is testable alone.*
 
-### 0.4 — The `std.http` split
+- **Qualified payload + dispatch.** `Const::NativeModule` / `Value::NativeModule` (and the `Wire`
+  twin, `isolate.rs`) carry the module's qualified path; `call_native_module` and the router
+  (`find_function`/`dispatch`, VM `methods.rs:385`) resolve it via `find_module_qualified`. Checker
+  `self.modules: HashSet<String>` → a **`bound → full-path` map**.
+- **Nested-path resolution, binding the last segment.** `use std.http.client` joins the segments
+  after the root, looks up the nested module `std.http.client`, and binds the **last segment**
+  (`client`) as the local module value — calls read `client.get(...)`. Distinguish from the selective
+  *function* import (`use std.math.sqrt`) by whether the tail names a module vs a function in the
+  registry. Rejected (per dce.md): qualified call-site form `http.client.get(...)` — needs namespace
+  *values*; last-segment binding is the chosen model.
+- **The `std.http` split:**
 
 - Move `serve` (ctx) + `response` (builder) out of `http` into **`std.http.server`**; `get`/`post`/
   …/`_async` stay in **`std.http.client`**. `http` stops being a module. `Response`/`Request` extern

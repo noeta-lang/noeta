@@ -1500,13 +1500,13 @@ impl Interpreter {
         // `use std.{json, ...}` binds each recognized name to its Ring 2 native module; a selective
         // member import (`use std.math.sqrt`) binds each member to a `(module, func)` module-function
         // value; other imports (and unrecognized `std` names) fall back to the opaque-stub binding.
-        let is_std = path == ["std"];
-        let selective_module = (path.len() == 2 && path[0] == "std")
-            .then(|| path[1].as_str())
-            .filter(|m| noeta_stdlib::registry::find_module(m).is_some());
+        let is_std = path.len() == 1 && noeta_stdlib::registry::is_extension_root(&path[0]);
+        let selective_module = (path.len() == 2
+            && noeta_stdlib::registry::is_extension_root(&path[0]))
+        .then(|| path[1].as_str())
+        .filter(|m| noeta_stdlib::registry::find_module(m).is_some());
         for imported in names {
-            let value = if is_std && noeta_stdlib::registry::find_module(&imported.name).is_some()
-            {
+            let value = if is_std && noeta_stdlib::registry::find_module(&imported.name).is_some() {
                 Value::NativeModule(imported.name.clone())
             } else if let Some(module) = selective_module
                 && noeta_stdlib::registry::is_module_function(module, &imported.name)
@@ -3263,7 +3263,6 @@ impl Interpreter {
         }
     }
 
-
     fn call_closure(&mut self, closure: &Rc<Closure>, args: Vec<Value>, span: Span) -> Eval<Value> {
         let required = required_count(&closure.defaults);
         if args.len() < required || args.len() > closure.params.len() {
@@ -3530,11 +3529,10 @@ impl Interpreter {
                     };
                     Err(self.runtime_error(DiagnosticCode::Panic, span, message))
                 }
-            }
-            // (The whole `Builtin` orchestration family — `task` at higher-order-abi H0/H2,
-            // `http.serve` at H3, `signal`/`computed`/`effect` at H5 — migrated to the
-            // registry's `NativeCtx` dispatch: `noeta-stdlib/src/{task,serve,reactive}.rs`;
-            // the drive loops there are shared with the VM.)
+            } // (The whole `Builtin` orchestration family — `task` at higher-order-abi H0/H2,
+              // `http.serve` at H3, `signal`/`computed`/`effect` at H5 — migrated to the
+              // registry's `NativeCtx` dispatch: `noeta-stdlib/src/{task,serve,reactive}.rs`;
+              // the drive loops there are shared with the VM.)
         }
     }
 

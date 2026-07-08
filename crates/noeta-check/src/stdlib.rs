@@ -68,7 +68,10 @@ fn sig_to_type_bound(sig: &registry::SigType, bindings: &[Option<Type>]) -> Type
         // optionality is carried separately as the required-argument count, not in the type.
         SigType::Optional(inner) => sig_to_type_bound(inner, bindings),
         SigType::Fn(params, ret) => Type::Fn {
-            params: params.iter().map(|p| sig_to_type_bound(p, bindings)).collect(),
+            params: params
+                .iter()
+                .map(|p| sig_to_type_bound(p, bindings))
+                .collect(),
             ret: Box::new(sig_to_type_bound(ret, bindings)),
         },
         // A bounded var (p2p P2) substitutes exactly like a plain var; the bound is enforced
@@ -80,7 +83,9 @@ fn sig_to_type_bound(sig: &registry::SigType, bindings: &[Option<Type>]) -> Type
         // A generic extern-type instantiation (higher-order-abi H4): `cell.new(v: A) -> Cell<A>`.
         SigType::Generic(n, args) => Type::Named(
             (*n).to_string(),
-            args.iter().map(|a| sig_to_type_bound(a, bindings)).collect(),
+            args.iter()
+                .map(|a| sig_to_type_bound(a, bindings))
+                .collect(),
         ),
     }
 }
@@ -258,7 +263,6 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         _ => None,
     }
 }
-
 
 /// A `Sender<T>` endpoint (isolates I.1): `send(v)` enqueues `v` (async — suspends on a full buffer),
 /// returning `Future<void>`; `close()` marks the channel closed so a drained `recv` yields `none`.

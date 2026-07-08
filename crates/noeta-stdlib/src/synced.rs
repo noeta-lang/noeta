@@ -37,13 +37,13 @@ use std::cmp::Ordering;
 
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    ctx_arity, no_function_error, no_method_error, type_error, CtxError, CtxOut, CtxResult,
-    ErrorKind, ExternBox, ExternValue, NativeCtx, NativeValue, Retained, Slot, StdError,
+    CtxError, CtxOut, CtxResult, ErrorKind, ExternBox, ExternValue, NativeCtx, NativeValue,
+    Retained, Slot, StdError, ctx_arity, no_function_error, no_method_error, type_error,
 };
 use noeta_reactive::NodeId;
 
 use crate::crdt::{from_bytes_like, merge_dyn, to_bytes_dyn};
-use crate::reactive::{drive_flush, state_of, sync_gates, ReactiveExt};
+use crate::reactive::{ReactiveExt, drive_flush, state_of, sync_gates};
 
 pub const SYNCED_SIGNAL_TYPE_NAME: &str = "SyncedSignal";
 
@@ -134,7 +134,9 @@ pub fn synced_ctx_dispatch<C: NativeCtx + ?Sized>(
             // Subscribe first (cursor at the log start), then announce the initial state, so another
             // replica that later subscribes still sees it and converges.
             let subscription = ctx.host().p2p_subscribe(&topic);
-            ctx.host().p2p_publish(&topic, bytes).map_err(CtxError::from)?;
+            ctx.host()
+                .p2p_publish(&topic, bytes)
+                .map_err(CtxError::from)?;
             // The CRDT lives in an arena cell; the node is a signal in the shared reactive graph.
             let cell = ctx.retain(args[0])?;
             let node = {
@@ -143,12 +145,14 @@ pub fn synced_ctx_dispatch<C: NativeCtx + ?Sized>(
                 let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
                 ext.graph.signal(cell)
             };
-            Ok(CtxOut::Out(NativeOut::Extern(ExternBox::new(SyncedSignalBox {
-                node,
-                cell,
-                subscription,
-                topic,
-            }))))
+            Ok(CtxOut::Out(NativeOut::Extern(ExternBox::new(
+                SyncedSignalBox {
+                    node,
+                    cell,
+                    subscription,
+                    topic,
+                },
+            ))))
         }
         _ => Err(no_function_error("synced", func).into()),
     }
@@ -177,7 +181,8 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             ctx_arity(method, args, 1)?;
             let current_slot = ctx.retained_get(handle.cell)?;
             let current = clone_crdt(ctx, current_slot).ok_or_else(not_a_crdt)?;
-            let delta = clone_crdt(ctx, args[0]).ok_or_else(|| type_error("merge", "a CRDT delta"))?;
+            let delta =
+                clone_crdt(ctx, args[0]).ok_or_else(|| type_error("merge", "a CRDT delta"))?;
             let merged = merge_dyn(&*current, &*delta).ok_or_else(mismatched_merge)?;
             let bytes = to_bytes_dyn(&*merged).ok_or_else(not_a_crdt)?;
             let merged_slot = ctx.intern(NativeOut::Extern(ExternBox(merged)))?;
