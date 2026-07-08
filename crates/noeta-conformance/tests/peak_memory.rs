@@ -90,7 +90,7 @@ fn eval_runner(program: noeta_ast::Program) -> impl FnOnce() -> noeta_backend::R
         noeta_ir::LoweringSites {
             packed_list_sites: &checked.sites.packed_list_sites,
             index_field_sites: &checked.sites.index_field_sites,
-            ext_call_sites: &checked.sites.ext_call_sites,
+            typed_module_call_sites: &checked.sites.typed_module_call_sites,
             for_stream_sites: &checked.sites.for_stream_sites,
             width_sites: &checked.sites.width_sites,
             construction_sites: &checked.sites.construction_sites,

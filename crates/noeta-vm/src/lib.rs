@@ -3486,7 +3486,7 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, list);
                         pc += 1;
                     }
-                    Op::ExtCall {
+                    Op::TypedModuleCall {
                         dst,
                         module: mod_id,
                         func: func_id,

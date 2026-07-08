@@ -250,7 +250,7 @@ fn compile_to_mc(
         type_of_sites,
         construction_sites,
         packed_list_sites,
-        ext_call_sites,
+        typed_module_call_sites,
         map_packed_sites,
         index_field_sites,
         for_stream_sites,
@@ -274,7 +274,7 @@ fn compile_to_mc(
         noeta_ir::LoweringSites {
             packed_list_sites: &packed_list_sites,
             index_field_sites: &index_field_sites,
-            ext_call_sites: &ext_call_sites,
+            typed_module_call_sites: &typed_module_call_sites,
             for_stream_sites: &for_stream_sites,
             width_sites: &width_sites,
             construction_sites: &construction_sites,
@@ -458,7 +458,7 @@ impl SessionCompiler {
                 noeta_ir::LoweringSites {
                     packed_list_sites: &sites.packed_list_sites,
                     index_field_sites: &sites.index_field_sites,
-                    ext_call_sites: &sites.ext_call_sites,
+                    typed_module_call_sites: &sites.typed_module_call_sites,
                     for_stream_sites: &sites.for_stream_sites,
                     width_sites: &sites.width_sites,
                     construction_sites: &sites.construction_sites,
@@ -3187,7 +3187,7 @@ impl<'m> FnCompiler<'m> {
                 args,
                 span,
             } => self.lower_invoke(recv, name, args, dst, *span),
-            Rvalue::ExtCall {
+            Rvalue::TypedModuleCall {
                 module,
                 func,
                 args,
@@ -3197,7 +3197,7 @@ impl<'m> FnCompiler<'m> {
                 let args = self.atom_regs(args)?;
                 let module_id = self.module.intern_name(module);
                 let func_id = self.module.intern_name(func);
-                self.code.push(Op::ExtCall {
+                self.code.push(Op::TypedModuleCall {
                     dst,
                     module: module_id,
                     func: func_id,

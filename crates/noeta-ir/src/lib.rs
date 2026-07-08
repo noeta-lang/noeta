@@ -475,11 +475,13 @@ pub enum Rvalue {
         args: Atom,
         span: Span,
     },
-    /// A call-site-typed native module call (`json.parse::<T>(args)`). `recipe` is the turbofish `T`
-    /// resolved by the checker (baked here from `ext_call_sites`); `None` means `T` had no decoding
-    /// (already a checker error), letting the backend fail cleanly. The backend marshals `args`, runs
-    /// the shared native function, and materializes the result tree into a value of `T`.
-    ExtCall {
+    /// A **call-site-typed** native module call — the turbofish form (`json.parse::<T>(args)`)
+    /// only; an ordinary module call (`http.get(url)`) lowers as `CallMethod` on a first-class
+    /// module value. `recipe` is the turbofish `T` resolved by the checker (baked here from
+    /// `typed_module_call_sites`); `None` means `T` had no decoding (already a checker error),
+    /// letting the backend fail cleanly. The backend marshals `args`, runs the shared native
+    /// function, and materializes the result tree into a value of `T`.
+    TypedModuleCall {
         module: String,
         func: String,
         args: Vec<Atom>,
