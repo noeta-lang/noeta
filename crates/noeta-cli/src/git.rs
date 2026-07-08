@@ -19,9 +19,11 @@ use crate::store::{Store, hash_tree};
 /// A materialized git dependency.
 #[derive(Debug)]
 pub struct Fetched {
-    /// The commit SHA the tag resolved to — the store key and the lockfile pin.
+    /// The commit SHA the tag resolved to — the store key and the lockfile pin (consumed in P2.4).
+    #[allow(dead_code)]
     pub sha: String,
-    /// The content hash of the checked-out tree (the lockfile's integrity value).
+    /// The content hash of the checked-out tree (the lockfile's integrity value, P2.4).
+    #[allow(dead_code)]
     pub content_hash: String,
     /// The on-disk tree in the store.
     pub path: PathBuf,

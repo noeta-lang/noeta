@@ -116,7 +116,19 @@ registry), run PubGrub → a resolved `name → version` map, or an explainable 
 the project's diagnostic bar). Pure and deterministic — no network in the test path. This is the
 algorithmic core, isolated from IO.
 
-### 2.3 — Git sources + content-addressed package store + fetch (real IO, CLI-only)
+### 2.3 — Git sources + content-addressed package store + fetch (real IO, CLI-only) ✅ DONE
+
+- **2.3a ✅** package store (`store.rs`): dir-tree CAS under `<cache>/pkg/<key>`, atomic dir-rename
+  publish, `hash_tree` integrity via KeyBuilder, reuses noeta-cache root + 0700.
+- **2.3b ✅** git fetch (`git.rs`): shell out to system `git`; `ls-remote` tag→SHA (peels annotated
+  tags), shallow clone into the store, HEAD-vs-SHA integrity check, `.git` stripped; idempotent.
+- **2.3c ✅** wired into `dependency_packages`: a git dep is fetched→stored→linked under its key;
+  `dep_package_from_dir` shared with path deps. Registry deps still error (→ P2.5). E2e CLI test: an
+  app pulls a local tagged repo and runs its code. **Flat only** (direct deps; no transitive) and does
+  an `ls-remote` per run — both closed by P2.4 (the lockfile pins SHA + records the resolved graph).
+- **`noeta add`/`update` — deferred to P2.4** (they write/refresh the lockfile; surfaced).
+
+<details><summary>original 2.3 scope</summary>
 
 - **Store:** reuse `noeta-cache`'s path-resolution (`NOETA_CACHE_DIR`/XDG/`~/.cache/noeta`), the
   `create_private_dir` 0700 discipline (security-critical — the store feeds source to a compiler), and
@@ -129,6 +141,8 @@ algorithmic core, isolated from IO.
   dependency-light, Go-like; no libgit2/gix), checkout, checksum the tree, store. A `git` dep is a
   `url` + `tag`; the tag→SHA + tree hash are what the lockfile pins.
 - **`noeta add` / `noeta update`** CLI verbs (via the extension-command seam or core verbs).
+
+</details>
 
 ### 2.4 — `noeta.lock` (reproducible pins)
 

@@ -2057,14 +2057,15 @@ fn a_path_dependency_resolves_and_runs() {
 }
 
 #[test]
-fn a_git_dependency_reports_it_is_not_yet_resolvable() {
-    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_gitdep");
+fn a_registry_dependency_reports_it_is_not_yet_resolvable() {
+    // Registry deps need the registry index (P2.5); path + git deps work today.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_registrydep");
     let _ = std::fs::remove_dir_all(&base);
     std::fs::create_dir_all(&base).unwrap();
     std::fs::write(
         base.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
-         [dependencies]\nhi = { git = \"https://example.com/acme/greet\", tag = \"v1.0.0\" }\n",
+         [dependencies]\nhi = \"^1.0\"\n",
     )
     .unwrap();
     std::fs::write(base.join("main.noe"), "echo 1;\n").unwrap();
@@ -2073,5 +2074,79 @@ fn a_git_dependency_reports_it_is_not_yet_resolvable() {
         .arg(base.join("main.noe"))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("git/registry dependency"));
+        .stderr(predicate::str::contains("registry dependency"));
+}
+
+// --- package manager: git-tag dependencies (P2.3) -----------------------------------------------
+
+/// Run a `git` command in `cwd`, asserting success (identity env set so commits work in CI).
+fn git_in(args: &[&str], cwd: &std::path::Path) {
+    let ok = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    assert!(ok, "git {args:?} failed");
+}
+
+fn git_available() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn a_git_tag_dependency_is_fetched_and_run() {
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_gitdep_run");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let dep_repo = base.join("greetlib_repo");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&dep_repo).unwrap();
+
+    // A local tagged package repo (root segment `greet`, from acme/greet).
+    git_in(&["init", "-q"], &dep_repo);
+    std::fs::write(
+        dep_repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dep_repo.join("hello.noe"),
+        "namespace greet.hello;\npub fn greeting(): string { return \"hi from a git dep\"; }\n",
+    )
+    .unwrap();
+    git_in(&["add", "."], &dep_repo);
+    git_in(&["commit", "-q", "-m", "release"], &dep_repo);
+    git_in(&["tag", "v1.0.0"], &dep_repo);
+
+    // The app depends on it by git URL (a local path is a valid git URL), keyed `hi`.
+    std::fs::write(
+        app.join("noeta.toml"),
+        format!(
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nhi = {{ git = \"{}\", tag = \"v1.0.0\" }}\n",
+            dep_repo.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "use hi.hello.greeting;\necho greeting();\n").unwrap();
+
+    // Isolate the package store under the test's cache dir (set by `lang()`), so the fetch is hermetic.
+    lang()
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hi from a git dep"));
 }

@@ -31,6 +31,7 @@ impl Store {
     }
 
     /// Open a store at an explicit directory (tests / an override).
+    #[allow(dead_code)] // used by tests + a future `--store` override
     pub fn open_at(dir: impl Into<PathBuf>) -> io::Result<Store> {
         let dir = dir.into();
         create_private_dir(&dir)?;

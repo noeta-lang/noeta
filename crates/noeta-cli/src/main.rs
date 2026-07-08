@@ -37,11 +37,9 @@ mod manifest;
 // need version selection (P2.3+). Landed + unit-tested first, isolated from IO.
 #[allow(dead_code)]
 mod resolve;
-// The content-addressed package store (P2.3a); consumed once git fetch lands (P2.3c).
-#[allow(dead_code)]
+// The content-addressed package store (P2.3a) — holds fetched git dependency trees.
 mod store;
-// Git-tag dependency fetch (P2.3b); wired into dependency resolution in P2.3c.
-#[allow(dead_code)]
+// Git-tag dependency fetch (P2.3b) — wired into dependency resolution (P2.3c).
 mod git;
 
 #[derive(Parser)]
