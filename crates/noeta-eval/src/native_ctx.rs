@@ -407,6 +407,23 @@ impl NativeCtx for EvalCtx<'_> {
     fn context_swap(&mut self, ctx: Vec<u64>) -> Vec<u64> {
         std::mem::replace(&mut self.interp.ctx_current, ctx)
     }
+
+    fn trace_future(&mut self, future: Slot, span: u64) -> CtxResult<bool> {
+        let value = self.get(future)?;
+        // Only a step future is traceable — the same line the VM draws, so telemetry parity
+        // holds for the fallback too.
+        if !matches!(value, Value::Future(_)) {
+            return Ok(false);
+        }
+        let mut context = self.interp.ctx_current.clone();
+        context.push(span);
+        self.interp.traced_futures.push(crate::TracedFuture {
+            future: value.clone(),
+            context,
+            span,
+        });
+        Ok(true)
+    }
 }
 
 impl Interpreter {

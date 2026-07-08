@@ -476,6 +476,25 @@ impl NativeCtx for VmCtx<'_, '_> {
     fn context_swap(&mut self, ctx: Vec<u64>) -> Vec<u64> {
         std::mem::replace(&mut self.vm.ctx_current, ctx)
     }
+
+    fn trace_future(&mut self, future: Slot, span: u64) -> CtxResult<bool> {
+        let value = self.get(future)?;
+        // Only a step future (a lowered `async fn` body) is traceable — both backends draw the
+        // same line, so telemetry parity holds for the fallback too.
+        if !value.is_step_future() {
+            return Ok(false);
+        }
+        // The table owns one reference; identity = the NaN-box bits, stable while it is held.
+        retain(value);
+        let mut context = self.vm.ctx_current.clone();
+        context.push(span);
+        self.vm.traced_futures.push(crate::TracedFuture {
+            future: value,
+            context,
+            span,
+        });
+        Ok(true)
+    }
 }
 
 impl<'m> Vm<'m> {

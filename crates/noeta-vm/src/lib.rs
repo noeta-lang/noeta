@@ -816,6 +816,13 @@ struct Vm<'m> {
     /// tree-walker's field, but carries no observable-output semantics (context is telemetry-only),
     /// so the differential is indifferent to it by construction.
     ctx_current: Vec<u64>,
+    /// **Traced futures** (native-otel T5c) — the future-completion hook behind
+    /// `NativeCtx::trace_future`: each entry holds one retained reference to a step future whose
+    /// polls run under its saved context and whose completion (or abort) ends its telemetry span.
+    /// Almost always empty (the hot check in `poll_once` is `is_empty()`); entries leave on
+    /// completion, and teardown feeds strays into the collector roots then releases them, exactly
+    /// like `ext_arena`.
+    traced_futures: Vec<TracedFuture>,
     /// The channel table (isolates I.1): every `channel::<T>(cap)` appends a [`Channel`]; endpoint
     /// values (`Sender`/`Receiver`) reference one by index. A queued message is owned by the channel
     /// (retained on enqueue, transferred out on dequeue). `channel_progress` counts successful queue
@@ -1724,6 +1731,16 @@ struct Task {
     context: Vec<u64>,
 }
 
+/// One traced future (native-otel T5c): the future-completion hook's entry. `future` is a
+/// **retained** reference (identity = its NaN-box bits, stable while the reference is held);
+/// `context` is the stack its polls run under (the registering strand's context + `span`), swapped
+/// in/out around each poll exactly like a task's; `span` is ended when the future completes.
+struct TracedFuture {
+    future: Value,
+    context: Vec<u64>,
+    span: u64,
+}
+
 /// The outcome of polling a future once (Track A.3): ready with a value, or still pending.
 enum Poll {
     Ready(Value),
@@ -1933,6 +1950,7 @@ impl<'m> Vm<'m> {
             executor,
             scopes: Vec::new(),
             ctx_current: Vec::new(),
+            traced_futures: Vec::new(),
             channels: Vec::new(),
             channel_progress: 0,
             ext_arena: Vec::new(),
@@ -2460,6 +2478,8 @@ impl<'m> Vm<'m> {
             // roots so the sweep cannot reclaim a value the arena release below would then
             // double-free.
             roots.extend(self.ext_arena.iter().copied().flatten());
+            // Traced futures (native-otel T5c) hold a `+1` each — the same graph treatment.
+            roots.extend(self.traced_futures.iter().map(|t| t.future));
             let garbage = collect_trace(&roots);
             self.reclaim_cycle_garbage(garbage);
         }
@@ -2482,6 +2502,12 @@ impl<'m> Vm<'m> {
             self.release_value(value);
         }
         self.ext_arena_free.clear();
+        // Release any still-traced futures (native-otel T5c) — an abandoned `with_span`-async
+        // future whose span never ended. The reference releases destructor-aware (residency 0);
+        // the span simply stays unended (the recorder/exporter only consume ended spans).
+        for traced in std::mem::take(&mut self.traced_futures) {
+            self.release_value(traced.future);
+        }
         // Destroy the globals at program end in reverse declaration order, running each
         // destructor on its last reference — the deterministic destruction the spec requires.
         for slot in self.global_order.clone().into_iter().rev() {
@@ -2634,6 +2660,10 @@ fn run_isolate_worker(
     // program's extensions still held — signals, cells — drops here, destructor-aware.
     for value in std::mem::take(&mut wvm.ext_arena).into_iter().flatten() {
         wvm.release_value(value);
+    }
+    // And its still-traced futures (native-otel T5c), same treatment.
+    for traced in std::mem::take(&mut wvm.traced_futures) {
+        wvm.release_value(traced.future);
     }
     message
 }

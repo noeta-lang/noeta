@@ -282,4 +282,17 @@ pub trait NativeCtx {
     /// must restore the returned context after the bracketed operation, mirroring the scheduler's
     /// own swap discipline.
     fn context_swap(&mut self, ctx: Vec<u64>) -> Vec<u64>;
+
+    /// Trace a future to completion (native-otel T5c) — the **future-completion hook**, a
+    /// telemetry-specific scheduler service: the backend registers the future in its traced set
+    /// (holding a reference; teardown releases strays), runs every subsequent poll of it under a
+    /// context of `current context + span` (so spans the body creates nest under `span`, across
+    /// suspensions), and on completion ends `span` — with an error status first if the body
+    /// aborted. This is what gives `with_span` over an **async** body its correct duration: the
+    /// span closes when the future resolves, not when it is constructed.
+    ///
+    /// Returns `false` if the future's flavor is not traceable (only step futures — lowered
+    /// `async fn` bodies — are, on both backends identically): the caller then falls back to
+    /// ending the span itself.
+    fn trace_future(&mut self, future: Slot, span: u64) -> CtxResult<bool>;
 }

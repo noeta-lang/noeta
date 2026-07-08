@@ -45,6 +45,15 @@ fn compile(text: &str) -> noeta_bytecode::Module {
 /// (Spans are invisible to `RunResult`, so the ordinary differential cannot see them; this is the
 /// telemetry twin of that oracle.)
 fn emitted_spans(text: &str) -> Vec<SpanData> {
+    let (spans, ok) = emitted_spans_any(text);
+    assert!(ok, "program ran cleanly");
+    spans
+}
+
+/// [`emitted_spans`] without the clean-exit requirement (for abort-path programs): returns the
+/// recorded spans plus whether the run succeeded. Backend parity is still asserted — both the
+/// spans AND the exit disposition must agree.
+fn emitted_spans_any(text: &str) -> (Vec<SpanData>, bool) {
     let db = LangDatabase::default();
     let source = Source::new(SourceId::FIRST, "telemetry_serve.noe", text);
     let src = noeta_db::source_program(&db, &source);
@@ -54,12 +63,6 @@ fn emitted_spans(text: &str) -> Vec<SpanData> {
     let mut host = SandboxHost::new();
     host.set_span_sink(sink.clone());
     let result = VmBackend::new().run_module_with_host(&module, Box::new(host));
-    assert!(
-        result.is_ok(),
-        "program ran cleanly (exit {}): {}",
-        result.exit_code,
-        result.stdout
-    );
     let vm_spans: Vec<SpanData> = sink.lock().unwrap().clone();
 
     // The tree-walker twin: same program, its own sandbox + sink.
@@ -73,14 +76,18 @@ fn emitted_spans(text: &str) -> Vec<SpanData> {
         sites,
         Box::new(tree_host),
     );
-    assert!(tree_result.is_ok(), "tree-walker ran cleanly");
+    assert_eq!(
+        result.is_ok(),
+        tree_result.is_ok(),
+        "both backends agree on the exit disposition"
+    );
     let tree_spans: Vec<SpanData> = tree_sink.lock().unwrap().clone();
     assert_eq!(
         vm_spans, tree_spans,
         "both backends record identical spans (telemetry parity)"
     );
 
-    vm_spans
+    (vm_spans, result.is_ok())
 }
 
 fn attr<'a>(span: &'a SpanData, key: &str) -> Option<&'a AttrValue> {
@@ -225,6 +232,62 @@ fn handler_spawned_task_inherits_the_server_span() {
         let parent = child.parent.expect("bg has a parent");
         assert_eq!(parent, server.context, "inherited across the spawn boundary");
     }
+}
+
+/// T5c — `with_span` over an ASYNC body has the body's duration, not the construction's: the
+/// future-completion hook ends the span when the future resolves, so the sleep inside the body is
+/// inside the span. And a span created AFTER the suspension still nests under it — the traced
+/// context follows the future across polls.
+#[test]
+fn with_span_async_covers_the_bodys_duration() {
+    let spans = emitted_spans(
+        "use std.{telemetry}\n\
+         use std.task.{sleep}\n\
+         async fn work(): int {\n\
+         \x20   early = telemetry.span(\"early\")\n\
+         \x20   early.end()\n\
+         \x20   sleep(5).await\n\
+         \x20   late = telemetry.span(\"late\")\n\
+         \x20   late.end()\n\
+         \x20   return 1\n\
+         }\n\
+         echo telemetry.with_span(\"job\", work).await\n",
+    );
+    let job = spans.iter().find(|s| s.name == "job").expect("job span recorded");
+    assert!(job.parent.is_none(), "top-level span is a root");
+    assert!(job.end_unix_ms.is_some(), "ended at completion");
+    // End-at-completion, pinned by RECORDING ORDER (the recorder appends at `end`): the job span
+    // must end after the post-suspension child — with the old end-at-construction behavior it was
+    // recorded first, before the body ever ran. (The sandbox host's logical wall clock does not
+    // advance with executor timers, so duration itself reads 0 here; the real host shares one
+    // clock and gets true durations.)
+    let pos = |name: &str| spans.iter().position(|s| s.name == name).unwrap();
+    assert!(pos("early") < pos("late"), "children end in body order");
+    assert!(pos("late") < pos("job"), "job ends after the body completes");
+    // Both children — before AND after the suspension — parent under the job span.
+    for name in ["early", "late"] {
+        let child = spans.iter().find(|s| s.name == name).unwrap();
+        assert_eq!(child.parent, Some(job.context), "{name} nests under job");
+    }
+}
+
+/// T5c — an async body that ABORTS after suspending still ends its span, with the error status,
+/// exactly like the sync abort path (the completion hook's abort arm).
+#[test]
+fn with_span_async_abort_ends_the_span_with_error() {
+    let (spans, ok) = emitted_spans_any(
+        "use std.{telemetry}\n\
+         use std.task.{sleep}\n\
+         async fn boom(): int {\n\
+         \x20   sleep(2).await\n\
+         \x20   panic(\"nope\")\n\
+         }\n\
+         echo telemetry.with_span(\"job\", boom).await\n",
+    );
+    assert!(!ok, "the abort propagates to the program");
+    let job = spans.iter().find(|s| s.name == "job").expect("aborted span still recorded");
+    assert_eq!(job.status, SpanStatus::Error("span body aborted".into()));
+    assert!(job.end_unix_ms.is_some(), "ended despite the abort");
 }
 
 /// A `5xx` reply marks its span an error (OTel HTTP convention); a `2xx`/`4xx` leaves it unset. Here

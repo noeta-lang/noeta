@@ -1,0 +1,14 @@
+// Native OTEL T5c — an ABANDONED `with_span`-async future: the traced-future table holds a
+// reference to the future (so its identity stays stable), and if the program never awaits it,
+// teardown releases that reference destructor-aware. The leak oracle proves residency returns to
+// 0 — the span simply stays unended (recorder/exporter only consume ended spans).
+// expect: stdout "made"
+// expect: exit 0
+use std.{telemetry}
+
+async fn never(): int {
+    return 1
+}
+
+fut = telemetry.with_span("orphan", never)
+echo "made"

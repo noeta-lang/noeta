@@ -13,7 +13,10 @@
 //! - `with_span(name, body) -> A` is the **scoped** form (the no-RAII answer, Class-2 `ctx.call`):
 //!   it starts a span, makes it the active parent for the duration of `body`, runs `body`, then ends
 //!   the span — **even if `body` aborts** (it records an error status and re-propagates). Returns
-//!   `body`'s value.
+//!   `body`'s value. An **async** body (T5c) returns its future and the span follows it through the
+//!   backend's completion hook (`NativeCtx::trace_future`): every poll runs under the span's
+//!   context (spans created after a suspension still nest correctly) and the span ends when the
+//!   future completes — or aborts — so the duration is the work's, not the construction's.
 //! - `current_context() -> str` is the current active span's W3C `traceparent` (empty when none) —
 //!   the propagation **inject** side (serialize onto a channel message / outbound header).
 //! - `span_from(name, traceparent) -> Span` is the propagation **extract** side: it starts a span
@@ -179,6 +182,14 @@ pub fn telemetry_ctx_dispatch<C: NativeCtx + ?Sized>(
             pop_active(ctx, id);
             match result {
                 Ok(slot) => {
+                    // An **async** body: `ctx.call` only constructed its future (lazily) — the
+                    // work hasn't run. Hand the future to the backend's completion hook (T5c):
+                    // its polls run under this span's context and the span ends when it
+                    // completes, so the duration is the body's, not the construction's. A
+                    // non-traceable future flavor falls back to ending now.
+                    if ctx.type_name(slot)? == "future" && ctx.trace_future(slot, id)? {
+                        return Ok(CtxOut::Slot(slot));
+                    }
                     ctx.host().tel_span_end(id);
                     Ok(CtxOut::Slot(slot))
                 }

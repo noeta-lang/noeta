@@ -1,0 +1,51 @@
+// Native OTEL T5c — `with_span` over an ASYNC body: the span follows the future (the backend's
+// completion hook), so it is still the active context AFTER the body resumes from a suspension —
+// and two interleaved tasks' spans stay isolated (per-task context, T5a). Both workers suspend at
+// a sleep inside their span, resume together, and read `current_context()`:
+//   - `active`: the context is non-empty after the resume — the span survived the suspension
+//     (before T5c the span ended at future construction and this read "").
+//   - `distinct`: the two workers see different traces — task-local context, no cross-talk.
+// Deterministic under the sandbox scheduler, so both backends agree exactly.
+// expect: stdout "active=true"
+// expect: stdout "distinct=true"
+// expect: exit 0
+use std.{telemetry}
+use std.task.{sleep}
+
+async fn body_a(): string {
+    sleep(3).await
+    return telemetry.current_context()
+}
+
+async fn body_b(): string {
+    sleep(3).await
+    return telemetry.current_context()
+}
+
+async fn worker_a(): string {
+    return telemetry.with_span("a", body_a).await
+}
+
+async fn worker_b(): string {
+    return telemetry.with_span("b", body_b).await
+}
+
+async fn run(): (string, string) {
+    mut a = ""
+    mut b = ""
+    concurrent {
+        ha = spawn worker_a()
+        hb = spawn worker_b()
+        a = ha.await
+        b = hb.await
+    }
+    return (a, b)
+}
+
+(a, b) = run().await
+a_parts = a.split("-")
+b_parts = b.split("-")
+active = a != ""
+distinct = a_parts[1] != b_parts[1]
+echo "active=${active}"
+echo "distinct=${distinct}"

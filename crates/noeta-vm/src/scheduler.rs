@@ -109,7 +109,53 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Poll a future once. The thin outer layer is the **traced-future hook** (native-otel T5c):
+    /// a future registered via `NativeCtx::trace_future` polls under its own saved context (the
+    /// task-swap discipline, applied to a bare future) and, on completion or abort, has its
+    /// telemetry span ended here — the completion hook `with_span` over an async body needs.
+    /// The untraced path is one `is_empty()` branch.
     pub(crate) fn poll_once(&mut self, future: Value, span: Span) -> Result<Poll, Abort> {
+        if self.traced_futures.is_empty() {
+            return self.poll_once_inner(future, span);
+        }
+        let bits = future.bits();
+        let Some(idx) = self
+            .traced_futures
+            .iter()
+            .position(|t| t.future.bits() == bits)
+        else {
+            return self.poll_once_inner(future, span);
+        };
+        let ctx = std::mem::take(&mut self.traced_futures[idx].context);
+        let saved = std::mem::replace(&mut self.ctx_current, ctx);
+        let polled = self.poll_once_inner(future, span);
+        let ctx = std::mem::replace(&mut self.ctx_current, saved);
+        // Re-find by identity: a nested poll may have completed *another* traced future
+        // (`swap_remove` moves entries), so `idx` cannot be trusted across the poll.
+        if let Some(idx) = self
+            .traced_futures
+            .iter()
+            .position(|t| t.future.bits() == bits)
+        {
+            match &polled {
+                Ok(Poll::Pending) => self.traced_futures[idx].context = ctx,
+                Ok(Poll::Ready(_)) | Err(_) => {
+                    let traced = self.traced_futures.swap_remove(idx);
+                    if polled.is_err() {
+                        self.host.tel_span_set_status(
+                            traced.span,
+                            noeta_stdlib::SpanStatus::Error("span body aborted".into()),
+                        );
+                    }
+                    self.host.tel_span_end(traced.span);
+                    self.release_value(traced.future);
+                }
+            }
+        }
+        polled
+    }
+
+    fn poll_once_inner(&mut self, future: Value, span: Span) -> Result<Poll, Abort> {
         // A real-thread isolate future (I.4b): harvest the worker's marshalled result if it has landed.
         if let Some(id) = future.isolate_future_id() {
             return self.poll_isolate(id, span);

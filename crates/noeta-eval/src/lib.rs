@@ -1037,6 +1037,24 @@ struct Task {
     context: Vec<u64>,
 }
 
+/// One traced future (native-otel T5c) — the tree-walker mirror of the VM's entry. `future` is a
+/// cloned [`Value::Future`] (the `Rc` keeps it alive; identity = `Rc::ptr_eq`); `context` is the
+/// stack its polls run under; `span` is ended when it completes.
+struct TracedFuture {
+    future: Value,
+    context: Vec<u64>,
+    span: u64,
+}
+
+/// Traced-future identity: the same step future (`Rc` pointer equality). Only [`Value::Future`]
+/// is ever registered, so other flavors never match.
+fn traced_same(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Future(x), Value::Future(y)) => std::rc::Rc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+
 /// A bounded channel's scheduler-owned state (isolates I.1): a FIFO queue of buffered messages, its
 /// capacity, and whether it has been closed (all senders done). Endpoints (`Sender`/`Receiver`) are
 /// just indices into the interpreter's `channels` table — the queue is never shared heap memory.
@@ -1080,6 +1098,10 @@ struct Interpreter {
     /// scheduler swaps a task's saved context in around each poll of its step, and a `spawn`
     /// snapshots it into the child. The tree-walker mirror of the VM's `ctx_current`.
     ctx_current: Vec<u64>,
+    /// **Traced futures** (native-otel T5c) — the future-completion hook, the tree-walker mirror
+    /// of the VM's table. Entries are `Value` clones (`Rc`-owned, so teardown is automatic when
+    /// the interpreter drops); almost always empty (the `poll_once` fast path is `is_empty()`).
+    traced_futures: Vec<TracedFuture>,
     /// The channel table (isolates I.1): every `channel::<T>(cap)` appends a [`Channel`]; endpoints
     /// reference one by index. Never cleared during a run (indices stay stable), like `scopes` it
     /// mirrors the VM exactly. `channel_progress` counts successful queue operations (a `send` push, a
@@ -1173,6 +1195,7 @@ impl Interpreter {
             executor,
             scopes: Vec::new(),
             ctx_current: Vec::new(),
+            traced_futures: Vec::new(),
             channels: Vec::new(),
             channel_progress: 0,
             ext_arena: Vec::new(),
@@ -3559,7 +3582,50 @@ impl Interpreter {
     /// `None` (pending). A step future's poll runs the state machine to its next suspend: the step
     /// returns the raw completion value (ready) or the pending sentinel (`None`). A non-future passes
     /// through as ready (totality for the uncheck­ed property test).
+    ///
+    /// The thin outer layer is the **traced-future hook** (native-otel T5c), the VM's mirrored:
+    /// a future registered via `NativeCtx::trace_future` polls under its own saved context and,
+    /// on completion or abort, has its telemetry span ended here.
     fn poll_once(&mut self, future: &Value, span: Span) -> Eval<Option<Value>> {
+        if self.traced_futures.is_empty() {
+            return self.poll_once_inner(future, span);
+        }
+        let Some(idx) = self
+            .traced_futures
+            .iter()
+            .position(|t| traced_same(&t.future, future))
+        else {
+            return self.poll_once_inner(future, span);
+        };
+        let ctx = std::mem::take(&mut self.traced_futures[idx].context);
+        let saved = std::mem::replace(&mut self.ctx_current, ctx);
+        let polled = self.poll_once_inner(future, span);
+        let ctx = std::mem::replace(&mut self.ctx_current, saved);
+        // Re-find by identity: a nested poll may have completed another traced future
+        // (`swap_remove` moves entries), so `idx` cannot be trusted across the poll.
+        if let Some(idx) = self
+            .traced_futures
+            .iter()
+            .position(|t| traced_same(&t.future, future))
+        {
+            match &polled {
+                Ok(None) => self.traced_futures[idx].context = ctx,
+                Ok(Some(_)) | Err(_) => {
+                    let traced = self.traced_futures.swap_remove(idx);
+                    if polled.is_err() {
+                        self.host.tel_span_set_status(
+                            traced.span,
+                            noeta_stdlib::SpanStatus::Error("span body aborted".into()),
+                        );
+                    }
+                    self.host.tel_span_end(traced.span);
+                }
+            }
+        }
+        polled
+    }
+
+    fn poll_once_inner(&mut self, future: &Value, span: Span) -> Eval<Option<Value>> {
         match future {
             Value::Timer(deadline) => {
                 let deadline = *deadline;
