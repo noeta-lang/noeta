@@ -56,6 +56,7 @@ impl CacheKey {
 #[derive(Debug, Default)]
 pub struct KeyBuilder {
     sources: Vec<(String, Vec<u8>)>,
+    entry: String,
     runtime_version: String,
     binary: String,
     tiers: Vec<String>,
@@ -71,6 +72,17 @@ impl KeyBuilder {
     /// The bytes are hashed immediately (so large sources aren't retained). Order-independent.
     pub fn source(&mut self, name: impl Into<String>, bytes: &[u8]) -> &mut Self {
         self.sources.push((name.into(), Sha256::digest(bytes).to_vec()));
+        self
+    }
+
+    /// The **entry point**'s stable name — the file `noeta run X` names, its top-level the
+    /// program's entry. This is distinct from the source *set*: a directory of dir-flat modules
+    /// compiles to a *different program* per entry (each file's top-level is a different `main`), so
+    /// two entries in one directory must land on different keys even though their source set — and
+    /// thus every `source(...)` contribution — is identical. Without this, `noeta run a.noe` and
+    /// `noeta run b.noe` in one directory collide, and the second serves the first's bytecode.
+    pub fn entry(&mut self, name: impl Into<String>) -> &mut Self {
+        self.entry = name.into();
         self
     }
 
@@ -108,6 +120,7 @@ impl KeyBuilder {
             field(&mut h, b"src-name", name.as_bytes());
             field(&mut h, b"src-hash", digest);
         }
+        field(&mut h, b"entry", self.entry.as_bytes());
         field(&mut h, b"rt", self.runtime_version.as_bytes());
         field(&mut h, b"bin", self.binary.as_bytes());
         h.update((self.tiers.len() as u64).to_le_bytes());
@@ -462,6 +475,34 @@ mod tests {
             .binary_identity("123:456.000000000")
             .tier("test");
         assert_ne!(base, more.finish());
+    }
+
+    #[test]
+    fn key_changes_on_entry_with_the_same_source_set() {
+        // Two files in one directory are the same source *set* but different *entries* — the file
+        // `noeta run` names is the program's `main`. They must land on different keys, or the
+        // second run serves the first's cached bytecode (the dir-flat-module cache-collision bug).
+        let sources = |b: &mut KeyBuilder| {
+            b.source("a.noe", b"echo 1")
+                .source("b.noe", b"echo 2")
+                .runtime_version("0.0.0")
+                .binary_identity("123:456.000000000");
+        };
+        let mut a = KeyBuilder::new();
+        sources(&mut a);
+        a.entry("a.noe");
+        let mut b = KeyBuilder::new();
+        sources(&mut b);
+        b.entry("b.noe");
+        assert_ne!(a.finish(), b.finish());
+        // The same entry + same sources is still stable.
+        let mut a2 = KeyBuilder::new();
+        sources(&mut a2);
+        a2.entry("a.noe");
+        let mut a3 = KeyBuilder::new();
+        sources(&mut a3);
+        a3.entry("a.noe");
+        assert_eq!(a2.finish(), a3.finish());
     }
 
     #[test]

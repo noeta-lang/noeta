@@ -1418,6 +1418,11 @@ fn open_startup_cache(
     // sorted siblings 1..), so a cached module's spans resolve correctly against this map.
     let workspace = noeta_loader::read_workspace(file).ok()?;
     let mut key = noeta_cache::KeyBuilder::new();
+    // Which file is the *entry* is part of the key, not just the source set: a directory of
+    // dir-flat modules compiles to a different program per entry, so `noeta run a.noe` and
+    // `noeta run b.noe` in one directory must not collide (they would otherwise share the same
+    // sorted source set and the second would run the first's cached bytecode).
+    key.entry(source_key_name(&workspace.entry));
     key.source(
         source_key_name(&workspace.entry),
         workspace.entry.text().as_bytes(),
