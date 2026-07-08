@@ -1150,7 +1150,18 @@ fn cmd_check(
 
     let mut unreadable = false;
     for entry in &entries {
-        match noeta_loader::load(entry) {
+        // Resolve the entry's dependency packages so a cross-package `use <dep-key>.…` type-checks
+        // accurately under `noeta check`, matching `run` (package-manager P2.1c). A resolution
+        // failure is reported like an unreadable file — it doesn't abort the whole check.
+        let deps = match graph::resolve_graph(entry) {
+            Ok(graph) => graph.packages,
+            Err(err) => {
+                eprintln!("lang: {}: {err}", entry.display());
+                unreadable = true;
+                continue;
+            }
+        };
+        match noeta_loader::load_with_deps(entry, &deps) {
             Err(err) => {
                 // One unreadable file does not abort the whole run — record it and keep checking the
                 // rest, so `check` reports as much as it can in a single pass.
@@ -1332,7 +1343,16 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         use noeta_ast::{Expr, Stmt};
         use noeta_span::Span;
 
-        let mut linked = match noeta_loader::load(file) {
+        // Resolve dependency packages so `noeta serve` (and any entry-call command) sees the same
+        // cross-package `use <dep-key>.…` the plain `run` path does (package-manager P2.1c).
+        let deps = match graph::resolve_graph(file) {
+            Ok(graph) => graph.packages,
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return 2;
+            }
+        };
+        let mut linked = match noeta_loader::load_with_deps(file, &deps) {
             Err(err) => {
                 eprintln!("lang: cannot read {}: {err}", file.display());
                 return 2;

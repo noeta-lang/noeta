@@ -2057,6 +2057,20 @@ fn a_path_dependency_resolves_and_runs() {
 }
 
 #[test]
+fn noeta_check_resolves_cross_package_use() {
+    // `noeta check` must see dependency packages too (package-manager P2.1c), so a cross-package
+    // `use` that references a real exported symbol checks clean rather than erroring.
+    let entry = path_dep_project("pm_check_crosspkg");
+    lang().arg("check").arg(&entry).assert().success();
+
+    // And a reference to a *missing* dependency export is a real error (the dep is genuinely linked,
+    // not opaquely stubbed away).
+    let dir = entry.parent().unwrap();
+    std::fs::write(dir.join("main.noe"), "use hi.hello.nope;\necho nope();\n").unwrap();
+    lang().arg("check").arg(dir.join("main.noe")).assert().failure();
+}
+
+#[test]
 fn a_transitive_path_dependency_resolves_and_runs() {
     // app → mid → low, each a path package. `mid` keys its own dependency `deep` (≠ low's root
     // segment `low`), so the graph walk must rewrite mid's internal `use deep.base.leaf` to low's
