@@ -45,6 +45,11 @@ impl OtlpExporter {
     /// `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` wins; else `OTEL_EXPORTER_OTLP_ENDPOINT` with the
     /// conventional `/v1/traces` path appended.
     pub(crate) fn from_env() -> Option<OtlpExporter> {
+        // The standard global kill switch (OTel spec): `OTEL_SDK_DISABLED=true` forces the null sink
+        // even when an endpoint is configured — the opt-out for auto-instrumentation.
+        if std::env::var("OTEL_SDK_DISABLED").is_ok_and(|v| v.eq_ignore_ascii_case("true")) {
+            return None;
+        }
         let traces_endpoint = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
             .ok()
             .filter(|s| !s.is_empty())

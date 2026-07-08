@@ -15,12 +15,12 @@
 
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    ctx_arity, no_function_error, panic_error, ArgKind, ArgSpec, CtxError, CtxOut, CtxResult,
-    EntryArg, EntryCall, ErrorKind, ExtCommand, NativeCtx, NativeValue, NetResponse, Scalar, Slot,
-    StdError,
+    ctx_arity, no_function_error, panic_error, ArgKind, ArgSpec, AttrValue, CtxError, CtxOut,
+    CtxResult, EntryArg, EntryCall, ErrorKind, ExtCommand, NativeCtx, NativeValue, NetRequest,
+    NetResponse, Scalar, Slot, SpanId, SpanKind, SpanStatus, StdError, TraceContext,
 };
 
-use crate::net::{Request, REQUEST_TYPE_NAME};
+use crate::net::{request_header, request_path, Request, REQUEST_TYPE_NAME};
 
 const REQUEST_SIG: SigType = SigType::Named(REQUEST_TYPE_NAME);
 
@@ -110,7 +110,12 @@ pub fn http_ctx_dispatch(
             let handler = args[1];
             let addr = format!("0.0.0.0:{port}");
             let listener = ctx.host().net_listen(&addr)?;
-            let mut in_flight: Vec<(u64, Slot)> = Vec::new();
+            // Auto-instrumentation gate: only wrap requests in a SERVER span when telemetry is
+            // actually configured, so an unconfigured `noeta serve` does zero span work per request.
+            let tracing = ctx.host().tel_enabled();
+            // Each in-flight handler carries the SERVER span it runs under (`None` when tracing is
+            // off), ended when the handler replies so the span's duration is the request's.
+            let mut in_flight: Vec<(u64, Slot, Option<SpanId>)> = Vec::new();
             let mut accept_future: Option<Slot> = None;
             let mut closing = false;
             loop {
@@ -130,15 +135,28 @@ pub fn http_ctx_dispatch(
                                 Some(request) => {
                                     ctx.free(accepted);
                                     let conn = request_conn(ctx, request)?;
+                                    // Open the SERVER span (parented on the inbound `traceparent`)
+                                    // before the handler runs, so its start marks request arrival.
+                                    let span = if tracing {
+                                        Some(start_server_span(ctx, request)?)
+                                    } else {
+                                        None
+                                    };
                                     // Spawn the handler. A sync handler returns the `Response`
                                     // immediately; an async one a `Future` reaped below. A
                                     // call-time abort → 500 now.
                                     let called = ctx.call(handler, &[request]);
                                     ctx.free(request);
                                     match called {
-                                        Ok(fut) => in_flight.push((conn, fut)),
-                                        Err(CtxError::Abort) => reply(ctx, conn, server_error())?,
-                                        Err(e) => return Err(e),
+                                        Ok(fut) => in_flight.push((conn, fut, span)),
+                                        Err(CtxError::Abort) => {
+                                            end_server_span(ctx, span, 500);
+                                            reply(ctx, conn, server_error())?;
+                                        }
+                                        Err(e) => {
+                                            end_server_span(ctx, span, 500);
+                                            return Err(e);
+                                        }
                                     }
                                 }
                                 // `none` → the listener closed; stop accepting and drain.
@@ -154,7 +172,7 @@ pub fn http_ctx_dispatch(
                 // Reap: poll each in-flight handler; reply on completion, 500 on abort.
                 let mut k = 0;
                 while k < in_flight.len() {
-                    let (conn, fut) = in_flight[k];
+                    let (conn, fut, span) = in_flight[k];
                     let done = match ctx.poll(fut) {
                         Ok(Some(value)) => {
                             let mut response = None;
@@ -163,12 +181,17 @@ pub fn http_ctx_dispatch(
                                 response = e.as_any().downcast_ref::<NetResponse>().cloned();
                             });
                             ctx.free(value);
-                            reply(ctx, conn, response.unwrap_or_else(server_error))?;
+                            let response = response.unwrap_or_else(server_error);
+                            // End the span with the reply's status before writing it, so the span's
+                            // duration is the handler's and its status reflects the outcome.
+                            end_server_span(ctx, span, response.status);
+                            reply(ctx, conn, response)?;
                             true
                         }
                         Ok(None) => false,
                         Err(CtxError::Abort) => {
                             ctx.free(fut);
+                            end_server_span(ctx, span, 500);
                             reply(ctx, conn, server_error())?;
                             true
                         }
@@ -201,6 +224,82 @@ pub fn http_ctx_dispatch(
     }
 }
 
+/// Open the auto-instrumentation **SERVER** span for an accepted request: named `"{method} {route}"`,
+/// parented on the inbound W3C `traceparent` (so the server span continues the client's trace; a
+/// missing/malformed header → a fresh root, the forgiving-reader rule), with the OTel HTTP
+/// semantic-convention request attributes. The handler's spans do not auto-nest under it yet — that
+/// needs per-task async context (T5); this span is the correctly-parented, timed root per request.
+fn start_server_span(ctx: &mut dyn NativeCtx, request: Slot) -> CtxResult<SpanId> {
+    // Pull the owned span inputs out under the extern borrow, then start the span (which needs the
+    // host) once the borrow has ended.
+    let mut inputs: Option<ServerSpanInputs> = None;
+    ctx.with_extern(request, &mut |e| {
+        if let Some(r) = e.as_any().downcast_ref::<Request>() {
+            inputs = Some(server_span_inputs(&r.inner));
+        }
+    })?;
+    let ServerSpanInputs {
+        name,
+        method,
+        route,
+        parent,
+    } = inputs.expect("accept yields a Request extern value");
+    let span = ctx.host().tel_span_start(&name, SpanKind::Server, parent);
+    ctx.host()
+        .tel_span_set_attr(span, "http.request.method", AttrValue::Str(method.into()));
+    ctx.host()
+        .tel_span_set_attr(span, "url.path", AttrValue::Str(route.into()));
+    Ok(span)
+}
+
+/// The pure inputs a request contributes to its SERVER span, split off the ctx seam so the OTel
+/// naming/attribute/parent-extraction is unit-tested directly.
+struct ServerSpanInputs {
+    name: String,
+    method: String,
+    route: String,
+    parent: Option<TraceContext>,
+}
+
+/// Derive the SERVER span inputs from an inbound request: OTel name `"{method} {route}"` (the route
+/// is the path with any query stripped), the method/route for the HTTP semantic-convention
+/// attributes, and the parent parsed from an inbound W3C `traceparent` (absent/malformed → no parent,
+/// i.e. a new root — the forgiving-reader rule).
+fn server_span_inputs(req: &NetRequest) -> ServerSpanInputs {
+    let method = req.method.clone();
+    let route = request_path(&req.url).to_string();
+    let name = format!("{method} {route}");
+    let parent = request_header(req, "traceparent").and_then(TraceContext::parse);
+    ServerSpanInputs {
+        name,
+        method,
+        route,
+        parent,
+    }
+}
+
+/// End a SERVER span (a no-op when tracing is off, i.e. `span` is `None`): record the response's
+/// status code and, per the OTel HTTP convention, mark the span an error only for a `5xx` (a `4xx`
+/// is the client's fault, not a server error), then end it.
+fn end_server_span(ctx: &mut dyn NativeCtx, span: Option<SpanId>, status: u16) {
+    let Some(span) = span else { return };
+    ctx.host().tel_span_set_attr(
+        span,
+        "http.response.status_code",
+        AttrValue::Int(status as i64),
+    );
+    if let Some(status) = server_span_error_status(status) {
+        ctx.host().tel_span_set_status(span, status);
+    }
+    ctx.host().tel_span_end(span);
+}
+
+/// The OTel span status for a SERVER span given its HTTP response code: `Error` only for `5xx`
+/// (server fault); `4xx` and below leave the status unset (a client error is not a server error).
+fn server_span_error_status(status: u16) -> Option<SpanStatus> {
+    (status >= 500).then(|| SpanStatus::Error(format!("HTTP {status}").into()))
+}
+
 /// The `conn` id riding inside the accepted [`Request`] extern value — where the loop replies.
 fn request_conn(ctx: &mut dyn NativeCtx, request: Slot) -> CtxResult<u64> {
     let mut conn = None;
@@ -208,4 +307,57 @@ fn request_conn(ctx: &mut dyn NativeCtx, request: Slot) -> CtxResult<u64> {
         conn = e.as_any().downcast_ref::<Request>().map(|r| r.conn);
     })?;
     Ok(conn.expect("accept yields a Request extern value"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(method: &str, url: &str, headers: &[(&str, &str)]) -> NetRequest {
+        NetRequest {
+            method: method.to_string(),
+            url: url.to_string(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            body: Vec::new(),
+        }
+    }
+
+    /// The span name is `"{method} {route}"` and the route is the path with any query string
+    /// stripped — the low-cardinality shape OTel wants (a raw query would explode span cardinality).
+    #[test]
+    fn server_span_name_is_method_and_route_without_query() {
+        let s = server_span_inputs(&req("GET", "/users/42?active=true", &[]));
+        assert_eq!(s.name, "GET /users/42");
+        assert_eq!(s.method, "GET");
+        assert_eq!(s.route, "/users/42");
+        assert!(s.parent.is_none(), "no traceparent → a root span");
+    }
+
+    /// An inbound `traceparent` becomes the SERVER span's parent, so the span continues the client's
+    /// trace; a malformed header is ignored (forgiving reader) and the span is a fresh root.
+    #[test]
+    fn server_span_extracts_inbound_traceparent() {
+        let tp = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+        let parent = server_span_inputs(&req("GET", "/", &[("traceparent", tp)])).parent;
+        assert_eq!(parent, TraceContext::parse(tp));
+        assert!(parent.is_some());
+
+        let malformed = server_span_inputs(&req("GET", "/", &[("traceparent", "garbage")])).parent;
+        assert!(malformed.is_none(), "a malformed header yields no parent");
+    }
+
+    /// Per the OTel HTTP convention a SERVER span is an error only for `5xx`; `2xx`/`4xx` leave the
+    /// status unset (a client error is not the server's fault).
+    #[test]
+    fn server_span_error_status_only_on_5xx() {
+        assert!(server_span_error_status(200).is_none());
+        assert!(server_span_error_status(404).is_none());
+        assert_eq!(
+            server_span_error_status(503),
+            Some(SpanStatus::Error("HTTP 503".into()))
+        );
+    }
 }

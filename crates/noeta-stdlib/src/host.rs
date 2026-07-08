@@ -16,6 +16,7 @@ use crate::fs::Vfs;
 use crate::random;
 use noeta_native::{AttrValue, SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, TraceContext};
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 /// The sandbox's fixed wall-clock epoch: 2026-01-01T00:00:00Z in unix milliseconds.
 /// `clock_unix_ms` on the sandbox is `SANDBOX_EPOCH_MS + logical clock`, so wall-time reads (and the
@@ -64,6 +65,10 @@ struct TelRecorder {
     next_trace: u64,
     live: BTreeMap<SpanId, SpanData>,
     recorded: Vec<SpanData>,
+    /// An optional external sink that also receives every ended span. `None` in every normal run;
+    /// installed by [`SandboxHost::set_span_sink`] so a caller that only sees the host by value (it
+    /// is moved into the VM and dropped at teardown) can still observe the spans a program emitted.
+    sink: Option<Arc<Mutex<Vec<SpanData>>>>,
 }
 
 /// The sandbox's inbound-server state: the fixed request script (see
@@ -96,6 +101,7 @@ impl SandboxHost {
                 next_trace: 1,
                 live: BTreeMap::new(),
                 recorded: Vec::new(),
+                sink: None,
             },
         }
     }
@@ -104,6 +110,14 @@ impl SandboxHost {
     /// telemetry conformance oracle (native OTEL). Spans not yet ended are not included.
     pub fn recorded_spans(&self) -> &[SpanData] {
         &self.tel.recorded
+    }
+
+    /// Install a shared sink that also receives every ended [`SpanData`]. The telemetry conformance
+    /// oracle uses this to observe the spans a *program* emits: the host is moved into the VM and
+    /// dropped at teardown, so [`recorded_spans`](Self::recorded_spans) is unreachable afterward, but
+    /// a sink handed in before the run survives it. No effect on normal runs (the sink stays `None`).
+    pub fn set_span_sink(&mut self, sink: Arc<Mutex<Vec<SpanData>>>) {
+        self.tel.sink = Some(sink);
     }
 }
 
@@ -311,6 +325,12 @@ impl Env for SandboxHost {
 }
 
 impl Telemetry for SandboxHost {
+    // The deterministic recorder is always on, so auto-instrumentation runs under the sandbox and
+    // conformance can assert on the emitted server spans.
+    fn tel_enabled(&self) -> bool {
+        true
+    }
+
     fn tel_span_start(
         &mut self,
         name: &str,
@@ -387,6 +407,9 @@ impl Telemetry for SandboxHost {
         let now = self.clock_unix_ms();
         if let Some(mut s) = self.tel.live.remove(&span) {
             s.end_unix_ms = Some(now);
+            if let Some(sink) = &self.tel.sink {
+                sink.lock().expect("span sink not poisoned").push(s.clone());
+            }
             self.tel.recorded.push(s);
         }
     }

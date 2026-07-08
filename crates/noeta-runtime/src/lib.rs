@@ -817,6 +817,19 @@ impl Env for RealHost {
 }
 
 impl Telemetry for RealHost {
+    fn tel_enabled(&self) -> bool {
+        // On when an OTLP endpoint is configured (and the `telemetry` feature is compiled in);
+        // otherwise the null sink, and auto-instrumentation short-circuits.
+        #[cfg(feature = "telemetry")]
+        {
+            self.tel.exporter.is_some()
+        }
+        #[cfg(not(feature = "telemetry"))]
+        {
+            false
+        }
+    }
+
     fn tel_span_start(
         &mut self,
         name: &str,

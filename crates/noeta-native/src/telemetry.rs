@@ -150,6 +150,14 @@ pub struct SpanData {
 /// derived ids); the real impl exports OTLP. Because a span is never observable in program output,
 /// the differential holds by construction with either behind the seam.
 pub trait Telemetry {
+    /// Whether telemetry is active — an export sink is configured (real host) or recording is on
+    /// (sandbox). **Auto-instrumentation gates on this**: when `false`, `noeta serve` (and other
+    /// auto-instrumented boundaries) skip span work entirely, so a program that never configures an
+    /// OTLP endpoint pays nothing per request. The explicit `std.telemetry` SDK does not consult it —
+    /// a user who calls `telemetry.span(...)` opted in — so unconfigured spans still mint (and drop at
+    /// the null sink), keeping ids/timestamps consistent.
+    fn tel_enabled(&self) -> bool;
+
     /// Start a span. `parent` is `None` for a root span, or the [`TraceContext`] of the parent —
     /// the current active span (read via [`Self::tel_span_context`]) for implicit parenting, or a
     /// remote context parsed from an inbound `traceparent` for propagation. Returns its handle.
