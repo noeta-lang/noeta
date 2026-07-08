@@ -182,11 +182,20 @@ so tracing calls in un-configured programs are ~free (the perf gate below).
   both backends; leak-0 — the `Span` extern releases at scope end) + the two diagnostics entries; a
   noeta-stdlib unit test drives dispatch and asserts on the sandbox recorder; 84 stdlib tests + clippy
   green. Implicit parenting / active-span stack deferred to T2.
-- **T2 — ergonomics.** Scoped `with_span(name, body)` (Class-2 `ctx.call`, abort-safe end) +
-  `add_event`/`record_error`/`set_status`. Nested spans parent correctly via `tel_activate`.
-- **T3 — W3C propagation.** `current_context()`/`span_from()`; inject/extract `traceparent`;
-  **cross-isolate propagation via the Wire envelope** (context string rides the channel message,
-  the receiving isolate continues the trace).
+- **T2 ✅ DONE (`2432d6f`).** Scoped `with_span(name, body) -> A` (Class-2 `ctx.call`, **abort-safe**:
+  a panic in the body still ends the span with an error status and re-propagates — proven by a
+  conformance test) + implicit parenting via a per-run **`ExtState` active-span stack** (the host
+  stays a pure factory, per T0), so `span`/`with_span`/`current_context` migrate onto the `NativeCtx`
+  seam while the `Span` methods stay plain. `Span` gains `add_event`/`record_error` (status via
+  `record_error`), all chaining. **`current_context() -> traceparent` pulled forward from T3** so
+  nesting is observable in-language — a conformance test shows an inner span shares its parent's
+  trace id but has a distinct span id. *Gate:* conformance differential over 4 telemetry `.noe`
+  (basic/nesting/abort + 2 diagnostics) + corpus + leak-0; a stdlib unit test drives the plain `Span`
+  methods against the sandbox recorder; 84 stdlib tests + clippy green.
+- **T3 — W3C propagation (remainder).** `span_from(name, traceparent)` (remote parent — the extract
+  side) + inject/extract `traceparent` at boundaries; **cross-isolate propagation via the Wire
+  envelope** (context string rides the channel message, the receiving isolate continues the trace).
+  (`current_context()` — the inject side — shipped in T2.)
 - **T4 — server auto-instrumentation (headline).** `serve.rs`'s per-connection handler call
   (`serve.rs:92` loop) wrapped in a SERVER-kind span: extract inbound `traceparent`, name from
   method+route, status from the response, inject context on outbound. Opt-out, on by default when
