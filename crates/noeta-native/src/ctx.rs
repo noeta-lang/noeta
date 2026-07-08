@@ -254,4 +254,32 @@ pub trait NativeCtx {
     /// what its declared arena read projects). An abort in the body propagates; the cell is
     /// untouched then.
     fn call_thunk_into(&mut self, body: Retained, dest: Retained) -> CtxResult<()>;
+
+    // ----- task-local context (native-otel T5a) -----
+    //
+    // A per-task stack of opaque `u64`s the backend carries with its cooperative scheduling: the
+    // **current** context belongs to whichever strand is executing (the main strand's root cell,
+    // or a task's own — the scheduler swaps a task's context in around each poll of its step, and
+    // a `spawn`ed task inherits a snapshot of its spawner's). Extensions that need scope to follow
+    // *execution* rather than the run — `std.telemetry`'s active-span stack is the first client —
+    // read/write the current context through these ops instead of keeping one global stack in
+    // `ExtState`, which would interleave wrongly across `await`s. The values are opaque to the
+    // core (telemetry stores `SpanId`s); an empty context is the natural zero.
+
+    /// The top of the current strand's context stack, if any.
+    fn context_top(&mut self) -> Option<u64>;
+
+    /// Push onto the current strand's context stack (`with_span` entering its body).
+    fn context_push(&mut self, v: u64);
+
+    /// Pop the current strand's context stack **if** its top is `v` (defensive against a push/pop
+    /// imbalance from a re-entrant dispatch); otherwise a no-op.
+    fn context_pop(&mut self, v: u64);
+
+    /// Replace the current strand's context wholesale, returning the previous one — how an
+    /// orchestrating dispatch that polls futures *manually* (outside the task scheduler; `http.serve`'s
+    /// per-connection handler futures) brackets each poll with that future's own context. Callers
+    /// must restore the returned context after the bracketed operation, mirroring the scheduler's
+    /// own swap discipline.
+    fn context_swap(&mut self, ctx: Vec<u64>) -> Vec<u64>;
 }

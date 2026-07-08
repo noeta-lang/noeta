@@ -303,7 +303,16 @@ impl<'m> Vm<'m> {
                 if task.result.is_none() && !task.cancelled && !task.polling {
                     let future = task.future;
                     self.scopes[si][ti].polling = true;
+                    // Swap the task's own context in for the duration of its poll (T5a), so
+                    // telemetry scope follows the task, not the interleaving. The paired swaps
+                    // nest like parentheses across re-entrant rounds (a nested join inside this
+                    // poll swaps inner tasks against *this* saved cell and restores it), and the
+                    // `polling` guard above keeps each task's pair balanced.
+                    let ctx = std::mem::take(&mut self.scopes[si][ti].context);
+                    let saved = std::mem::replace(&mut self.ctx_current, ctx);
                     let polled = self.poll_once(future, span);
+                    self.scopes[si][ti].context =
+                        std::mem::replace(&mut self.ctx_current, saved);
                     self.scopes[si][ti].polling = false;
                     if let Poll::Ready(value) = polled? {
                         self.scopes[si][ti].result = Some(value);
@@ -363,11 +372,14 @@ impl<'m> Vm<'m> {
         }
         let scope_idx = self.scopes.len() - 1;
         let task_idx = self.scopes[scope_idx].len();
+        // The child inherits a snapshot of the spawner's task-local context (T5a).
+        let context = self.ctx_current.clone();
         self.scopes[scope_idx].push(Task {
             future,
             result: None,
             cancelled: false,
             polling: false,
+            context,
         });
         Value::make_handle(ScopeId::from_index(scope_idx), TaskId::from_index(task_idx))
     }

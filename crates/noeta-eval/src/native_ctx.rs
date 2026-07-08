@@ -387,6 +387,26 @@ impl NativeCtx for EvalCtx<'_> {
         self.interp.destroy_value(old);
         Ok(())
     }
+
+    // ----- task-local context (native-otel T5a): thin views over `Interpreter::ctx_current` -----
+
+    fn context_top(&mut self) -> Option<u64> {
+        self.interp.ctx_current.last().copied()
+    }
+
+    fn context_push(&mut self, v: u64) {
+        self.interp.ctx_current.push(v);
+    }
+
+    fn context_pop(&mut self, v: u64) {
+        if self.interp.ctx_current.last() == Some(&v) {
+            self.interp.ctx_current.pop();
+        }
+    }
+
+    fn context_swap(&mut self, ctx: Vec<u64>) -> Vec<u64> {
+        std::mem::replace(&mut self.interp.ctx_current, ctx)
+    }
 }
 
 impl Interpreter {

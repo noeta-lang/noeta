@@ -808,6 +808,14 @@ struct Vm<'m> {
     /// its result once ready), released when the scope is joined and popped. Mirrors the tree-walker's
     /// `scopes`; both round-robin identically, so the differential holds by construction.
     scopes: Vec<Vec<Task>>,
+    /// The **current strand's task-local context** (native-otel T5a): an opaque `u64` stack
+    /// extensions read through `NativeCtx::context_*` (telemetry's active-span stack is the first
+    /// client). This cell always belongs to whichever strand is executing — the main strand (root)
+    /// by default; the scheduler swaps a task's own saved context in around each poll of its step
+    /// (`poll_all_scopes_round`), and a `spawn` snapshots it into the child. Mirrors the
+    /// tree-walker's field, but carries no observable-output semantics (context is telemetry-only),
+    /// so the differential is indifferent to it by construction.
+    ctx_current: Vec<u64>,
     /// The channel table (isolates I.1): every `channel::<T>(cap)` appends a [`Channel`]; endpoint
     /// values (`Sender`/`Receiver`) reference one by index. A queued message is owned by the channel
     /// (retained on enqueue, transferred out on dequeue). `channel_progress` counts successful queue
@@ -1708,6 +1716,12 @@ struct Task {
     /// duplicated effects). The task is already progressing; "skip while polling" is the correct
     /// scheduling, and it is also what keeps per-task context swaps balanced.
     polling: bool,
+    /// The task's **saved task-local context** (native-otel T5a): a snapshot of the spawner's
+    /// `ctx_current` taken at `spawn`, swapped into `Vm::ctx_current` around each poll of this
+    /// task's step and back out after — so telemetry scope follows the task across suspensions
+    /// instead of leaking between interleaved tasks. Plain `u64`s (span ids), not values — no
+    /// refcount traffic, invisible to the GC and the leak oracle.
+    context: Vec<u64>,
 }
 
 /// The outcome of polling a future once (Track A.3): ready with a value, or still pending.
@@ -1918,6 +1932,7 @@ impl<'m> Vm<'m> {
             host,
             executor,
             scopes: Vec::new(),
+            ctx_current: Vec::new(),
             channels: Vec::new(),
             channel_progress: 0,
             ext_arena: Vec::new(),
@@ -5062,11 +5077,15 @@ impl<'m> Vm<'m> {
                             retain(future);
                             let scope_idx = self.scopes.len() - 1;
                             let task_idx = self.scopes[scope_idx].len();
+                            // The child inherits a snapshot of the spawner's task-local context
+                            // (T5a): a task spawned inside `with_span` parents its spans there.
+                            let context = self.ctx_current.clone();
                             self.scopes[scope_idx].push(Task {
                                 future,
                                 result: None,
                                 cancelled: false,
                                 polling: false,
+                                context,
                             });
                             Value::make_handle(
                                 ScopeId::from_index(scope_idx),

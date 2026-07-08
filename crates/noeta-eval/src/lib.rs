@@ -1031,6 +1031,10 @@ struct Task {
     /// re-entering a mid-execution state machine re-runs its current segment (infinite recursion).
     /// The tree-walker mirror of the VM's flag.
     polling: bool,
+    /// The task's **saved task-local context** (native-otel T5a): a snapshot of the spawner's
+    /// `ctx_current` at `spawn`, swapped in around each poll of this task's step — the tree-walker
+    /// mirror of the VM's field.
+    context: Vec<u64>,
 }
 
 /// A bounded channel's scheduler-owned state (isolates I.1): a FIFO queue of buffered messages, its
@@ -1070,6 +1074,12 @@ struct Interpreter {
     /// position here. Mirrors the VM's `scopes` field; both round-robin identically, so the differential
     /// holds by construction.
     scopes: Vec<Vec<Task>>,
+    /// The **current strand's task-local context** (native-otel T5a): an opaque `u64` stack
+    /// extensions read through `NativeCtx::context_*` (telemetry's active-span stack is the first
+    /// client). Belongs to whichever strand is executing — the main strand (root) by default; the
+    /// scheduler swaps a task's saved context in around each poll of its step, and a `spawn`
+    /// snapshots it into the child. The tree-walker mirror of the VM's `ctx_current`.
+    ctx_current: Vec<u64>,
     /// The channel table (isolates I.1): every `channel::<T>(cap)` appends a [`Channel`]; endpoints
     /// reference one by index. Never cleared during a run (indices stay stable), like `scopes` it
     /// mirrors the VM exactly. `channel_progress` counts successful queue operations (a `send` push, a
@@ -1162,6 +1172,7 @@ impl Interpreter {
             host,
             executor,
             scopes: Vec::new(),
+            ctx_current: Vec::new(),
             channels: Vec::new(),
             channel_progress: 0,
             ext_arena: Vec::new(),
@@ -3653,7 +3664,14 @@ impl Interpreter {
                 if task.result.is_none() && !task.cancelled && !task.polling {
                     let future = task.future.clone();
                     self.scopes[si][ti].polling = true;
+                    // Swap the task's own context in for the duration of its poll (T5a) — the
+                    // VM's swap discipline, mirrored: paired swaps nest across re-entrant rounds,
+                    // and the `polling` guard keeps each task's pair balanced.
+                    let ctx = std::mem::take(&mut self.scopes[si][ti].context);
+                    let saved = std::mem::replace(&mut self.ctx_current, ctx);
                     let polled = self.poll_once(&future, span);
+                    self.scopes[si][ti].context =
+                        std::mem::replace(&mut self.ctx_current, saved);
                     self.scopes[si][ti].polling = false;
                     if let Some(value) = polled? {
                         self.scopes[si][ti].result = Some(value);

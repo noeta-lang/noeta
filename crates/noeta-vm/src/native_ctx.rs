@@ -456,6 +456,26 @@ impl NativeCtx for VmCtx<'_, '_> {
         self.vm.release_value(old);
         Ok(())
     }
+
+    // ----- task-local context (native-otel T5a): thin views over `Vm::ctx_current` -----
+
+    fn context_top(&mut self) -> Option<u64> {
+        self.vm.ctx_current.last().copied()
+    }
+
+    fn context_push(&mut self, v: u64) {
+        self.vm.ctx_current.push(v);
+    }
+
+    fn context_pop(&mut self, v: u64) {
+        if self.vm.ctx_current.last() == Some(&v) {
+            self.vm.ctx_current.pop();
+        }
+    }
+
+    fn context_swap(&mut self, ctx: Vec<u64>) -> Vec<u64> {
+        std::mem::replace(&mut self.vm.ctx_current, ctx)
+    }
 }
 
 impl<'m> Vm<'m> {

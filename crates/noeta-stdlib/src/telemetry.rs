@@ -2,8 +2,11 @@
 //!
 //! A facade over the [`Telemetry`](noeta_native::Telemetry) Host capability. The span tree and
 //! export live host-side (the sandbox recorder / the real OTLP exporter); this module owns only the
-//! **active-span stack** (per-run [`ExtState`]) that gives spans implicit parenting — exactly the
-//! design T0 chose (the host is a pure span factory/sink, context management is the SDK's job).
+//! **active-span stack** that gives spans implicit parenting — exactly the design T0 chose (the
+//! host is a pure span factory/sink, context management is the SDK's job). Since T5a the stack
+//! lives in the backend's **task-local context** (`NativeCtx::context_*`): each task carries its
+//! own, the scheduler swaps it in around the task's polls, and a `spawn`ed task inherits a snapshot
+//! of its spawner's — so scope follows execution, not the run.
 //!
 //! - `span(name) -> Span` starts a span parented on the current active span (a root at top level)
 //!   and returns a [`Span`] handle the caller ends itself.
@@ -32,15 +35,12 @@ use std::cmp::Ordering;
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
     arity_error, ctx_arity, no_function_error, no_method_error, type_error, AttrValue, CtxError,
-    CtxOut, CtxResult, ExtState, ExternBox, ExternValue, Host, NativeCtx, NativeValue, Scalar, Slot,
-    SpanId, SpanKind, SpanStatus, StdError, TraceContext,
+    CtxOut, CtxResult, ExternBox, ExternValue, Host, NativeCtx, NativeValue, Scalar, Slot, SpanId,
+    SpanKind, SpanStatus, StdError, TraceContext,
 };
 
 /// The reserved surface type name for a span handle. A user declaration of this name is E0049.
 pub const SPAN_TYPE_NAME: &str = "Span";
-
-/// The per-run extension state key (namespaces the active-span stack in the arena state map).
-const STATE_KEY: &str = "std.telemetry";
 
 /// `with_span`'s body return type variable — `with_span(name, Fn() -> A) -> A`.
 const VAR_A: SigType = SigType::Var(0);
@@ -152,13 +152,6 @@ impl ExternValue for Span {
     }
 }
 
-/// The per-run active-span stack (innermost last). Plain data — span ids, not language values —
-/// so it needs no retained arena and is not a GC root.
-#[derive(Default)]
-struct TelState {
-    active: Vec<SpanId>,
-}
-
 /// `std.telemetry` ctx dispatch. Generic over the ctx (`C: NativeCtx + ?Sized`) so a compiled-in
 /// backend inlines the small ctx ops, exactly as `cell`/`reactive` are.
 pub fn telemetry_ctx_dispatch<C: NativeCtx + ?Sized>(
@@ -268,49 +261,25 @@ pub fn span_method_dispatch(
     }
 }
 
-// ----- active-span stack (per-run ExtState) -----
-
-fn tel_state<C: NativeCtx + ?Sized>(ctx: &mut C) -> ExtState {
-    ctx.state(STATE_KEY, || Box::new(TelState::default()))
-}
-
-/// The current active span (top of the stack), if any. `.copied()` yields an owned value, so the
-/// `ExtState` borrow ends with this expression — none is held across a later `ctx.host()`/`ctx.call`.
-fn active_top<C: NativeCtx + ?Sized>(ctx: &mut C) -> Option<SpanId> {
-    tel_state(ctx)
-        .borrow()
-        .downcast_ref::<TelState>()
-        .expect("telemetry state is a TelState")
-        .active
-        .last()
-        .copied()
-}
+// ----- active-span stack (the backend's task-local context, T5a) -----
+//
+// The stack lives in the backend's per-strand context cell (`NativeCtx::context_*`), NOT in
+// per-run `ExtState`: the scheduler swaps each task's own stack in around its polls and a spawned
+// task inherits a snapshot of its spawner's, so telemetry scope follows *execution* — two
+// interleaved tasks' `with_span`s no longer see (or corrupt) each other's parents.
 
 fn push_active<C: NativeCtx + ?Sized>(ctx: &mut C, id: SpanId) {
-    let state = tel_state(ctx);
-    state
-        .borrow_mut()
-        .downcast_mut::<TelState>()
-        .expect("telemetry state is a TelState")
-        .active
-        .push(id);
+    ctx.context_push(id);
 }
 
 /// Pop `id` if it is the current top (defensive against a re-entrant push imbalance).
 fn pop_active<C: NativeCtx + ?Sized>(ctx: &mut C, id: SpanId) {
-    let state = tel_state(ctx);
-    let mut borrow = state.borrow_mut();
-    let st = borrow
-        .downcast_mut::<TelState>()
-        .expect("telemetry state is a TelState");
-    if st.active.last() == Some(&id) {
-        st.active.pop();
-    }
+    ctx.context_pop(id);
 }
 
 /// The W3C context of the current active span — a new span's implicit parent.
 fn current_parent<C: NativeCtx + ?Sized>(ctx: &mut C) -> Option<TraceContext> {
-    let top = active_top(ctx)?;
+    let top = ctx.context_top()?;
     Some(ctx.host().tel_span_context(top))
 }
 
