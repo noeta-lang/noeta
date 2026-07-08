@@ -199,10 +199,10 @@ mod tests {
             fmt_wrapped("echo [1, 2, 3]", 40).unwrap(),
             "echo [1, 2, 3]\n"
         );
-        // Exceeds width → one element per line, indented, no trailing comma.
+        // Exceeds width → one element per line, indented, with a trailing comma.
         assert_eq!(
             fmt_wrapped("echo [11111, 22222, 33333]", 12).unwrap(),
-            "echo [\n    11111,\n    22222,\n    33333\n]\n"
+            "echo [\n    11111,\n    22222,\n    33333,\n]\n"
         );
     }
 

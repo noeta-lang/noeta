@@ -1333,12 +1333,12 @@ impl Printer<'_> {
         })
     }
 
-    /// A parenthesized, comma-separated argument list.
     /// A comma-delimited `open … close` sequence. With `wrap = false` (default) it lays out flat —
     /// `[a, b, c]`, or `{ a, b }` when `spaced` — reproducing the pre-wrap output byte-for-byte. With
     /// `wrap = true` it becomes a width-driven [`Doc::group`]: flat if it fits [`FmtConfig::line_width`],
-    /// otherwise one element per line, indented, with the delimiters on their own lines. No trailing
-    /// comma (call arguments reject one).
+    /// otherwise one element per line, indented, with the delimiters on their own lines and a
+    /// **trailing comma** (the parser accepts one uniformly). The trailing comma is an
+    /// [`Doc::if_break`], so it appears only when the group breaks, never inline.
     fn delimited(&self, open: &str, elems: Vec<Doc>, close: &str, spaced: bool) -> Doc {
         if elems.is_empty() {
             return Doc::text(format!("{open}{close}"));
@@ -1350,6 +1350,7 @@ impl Printer<'_> {
                 Doc::concat([
                     boundary.clone(),
                     Doc::join(elems, Doc::concat([Doc::text(","), Doc::line()])),
+                    Doc::text(",").if_break(),
                 ])
                 .nest(INDENT),
                 boundary,
