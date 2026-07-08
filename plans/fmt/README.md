@@ -11,9 +11,21 @@ under both `wrap` policies**. `fmt` was one of the two subcommands `docs/The-CLI
 *intentionally absent* (the other is `check`). The parallel `noeta mcp` arc wraps this engine rather
 than reimplementing it — `noeta-fmt` is a reusable library, as required.
 
-*Remaining polish, all optional / deferred (see slice notes + Non-goals): width-wrapping of long
-binary/method chains and `A|B|C` unions; trailing commas where the grammar allows; `noeta fmt
---diff`; LSP range formatting; `// fmt: off`, import sorting, broader config.*
+**Follow-ons landed (branch `fmt-followups`, off `main`):**
+- ✅ **Uniform trailing commas** — parser accepts a trailing comma in every comma list (added
+  `.allow_trailing()` to the 11 that lacked it); formatter emits one on wrapped sequences via a new
+  `Doc::if_break` combinator. Conformance + corpus green under both wrap policies.
+- ✅ **On-type formatting (narrow)** — `noeta_fmt::format_stmt_at` reformats the single top-level
+  statement containing an offset (safety-checked by splice+reparse); LSP advertises
+  `documentOnTypeFormattingProvider` (trigger `}`), quiet on mid-typed/unparseable buffers.
+- ✅ **Optional import sorting** — `[fmt] sort_imports` (default off): alphabetizes comment-free `use`
+  runs + names; safety gate made import-order-invariant. Also fixed a pre-existing bug (single import
+  `use A.B.C` was printing as `use A.B.{C}`).
+- ✅ **Extension wiring** — VS Code ext turns on format-on-save + format-on-type by default for `.noe`
+  (verified the live LSP advertises both providers); ext 0.3.0→0.4.0.
+
+*Still deferred (optional): width-wrapping of long binary/method chains and `A|B|C` unions;
+`noeta fmt --diff`; LSP range formatting; `// fmt: off`; broader config.*
 
 ## The one idea that shapes everything: canonical reformat, not whitespace touch-up
 
