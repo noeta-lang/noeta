@@ -574,7 +574,7 @@ mod tests {
             })
             .collect();
         for k in &keys {
-            cache.store(k, &vec![b'x'; 100]).unwrap();
+            cache.store(k, &[b'x'; 100]).unwrap();
         }
         assert_eq!(cache.stats().unwrap(), (5, 500));
 
