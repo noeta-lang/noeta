@@ -30,7 +30,7 @@ pub use host::{
 };
 pub use map_key::{ExternKeyRef, MapKey};
 pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
-pub use p2p::ReceiveIo;
+pub use p2p::{P2pBroker, ReceiveIo};
 pub use registry::{
     ArenaGetter, CtxTypeDispatch, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut,
     NativeValue, RetTy, Scalar, SigType, TypeDispatch, TypeRecipe,

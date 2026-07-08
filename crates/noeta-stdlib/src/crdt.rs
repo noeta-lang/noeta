@@ -350,6 +350,72 @@ impl ExternValue for GSet {
     }
 }
 
+// --- Dynamic CRDT operations over boxed extern values (p2p P2, used by `std.synced`) ------------
+//
+// A synced signal holds a CRDT as a backend heap value it only sees as `&dyn ExternValue`; these
+// recover the concrete type to merge/serialize it. Each is a small match over the three CRDTs —
+// the one place that enumerates them for the sync engine, so adding a CRDT touches only here.
+
+/// Merge two CRDT values of the **same** concrete type into a new value; `None` if they are
+/// different types or not CRDTs (the checker's `Mergeable` bound makes the latter unreachable, but
+/// a `dyn`-laundered value could still reach here, so it is a clean `None`, not a panic).
+pub fn merge_dyn(
+    current: &dyn ExternValue,
+    delta: &dyn ExternValue,
+) -> Option<Box<dyn ExternValue>> {
+    if let (Some(a), Some(b)) = (
+        current.as_any().downcast_ref::<GCounter>(),
+        delta.as_any().downcast_ref::<GCounter>(),
+    ) {
+        return Some(Box::new(GCounter(a.0.merge(&b.0))));
+    }
+    if let (Some(a), Some(b)) = (
+        current.as_any().downcast_ref::<PnCounter>(),
+        delta.as_any().downcast_ref::<PnCounter>(),
+    ) {
+        return Some(Box::new(PnCounter(a.0.merge(&b.0))));
+    }
+    if let (Some(a), Some(b)) = (
+        current.as_any().downcast_ref::<GSet>(),
+        delta.as_any().downcast_ref::<GSet>(),
+    ) {
+        return Some(Box::new(GSet(a.0.merge(&b.0))));
+    }
+    None
+}
+
+/// Serialize a CRDT value to wire bytes for a peer; `None` if it is not a CRDT.
+pub fn to_bytes_dyn(value: &dyn ExternValue) -> Option<Vec<u8>> {
+    if let Some(g) = value.as_any().downcast_ref::<GCounter>() {
+        return Some(g.0.to_bytes());
+    }
+    if let Some(p) = value.as_any().downcast_ref::<PnCounter>() {
+        return Some(p.0.to_bytes());
+    }
+    if let Some(s) = value.as_any().downcast_ref::<GSet>() {
+        return Some(s.0.to_bytes());
+    }
+    None
+}
+
+/// Decode a peer's wire bytes into a CRDT value of the **same concrete type** as `like` (a topic
+/// carries one CRDT type); `None` if `like` is not a CRDT or the bytes are malformed/cross-type.
+pub fn from_bytes_like(like: &dyn ExternValue, bytes: &[u8]) -> Option<Box<dyn ExternValue>> {
+    if like.as_any().is::<GCounter>() {
+        return noeta_crdt::GCounter::from_bytes(bytes)
+            .map(|c| Box::new(GCounter(c)) as Box<dyn ExternValue>);
+    }
+    if like.as_any().is::<PnCounter>() {
+        return noeta_crdt::PnCounter::from_bytes(bytes)
+            .map(|c| Box::new(PnCounter(c)) as Box<dyn ExternValue>);
+    }
+    if like.as_any().is::<GSet>() {
+        return noeta_crdt::GSet::from_bytes(bytes)
+            .map(|c| Box::new(GSet(c)) as Box<dyn ExternValue>);
+    }
+    None
+}
+
 // --- Registration handles (referenced from `registry::STD_MODULES` / `STD_TYPES`) ---------------
 
 /// The `ExtType` method-dispatch entry for each CRDT — paired with its `*_METHODS` table when the

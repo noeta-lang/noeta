@@ -13,7 +13,7 @@ use crate::StdError;
 use crate::env;
 use crate::fs::Vfs;
 use crate::random;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
 /// The sandbox's fixed wall-clock epoch: 2026-01-01T00:00:00Z in unix milliseconds.
 /// `clock_unix_ms` on the sandbox is `SANDBOX_EPOCH_MS + logical clock`, so wall-time reads (and the
@@ -43,11 +43,10 @@ pub struct SandboxHost {
     /// most one listener — a differential program calls `http.serve` once — so a single slot
     /// suffices; a second `net_listen` re-arms it.
     inbound: Option<InboundState>,
-    /// The p2p broker (p2p P1): a per-topic FIFO of published messages. `p2p_publish` enqueues,
-    /// `p2p_poll` dequeues the front, an empty/absent topic yields `None`. Deterministic — the
-    /// whole p2p "network" in the sandbox — so a publish/receive program is byte-identical across
-    /// backends and terminates in-oracle once its topics drain.
-    p2p: BTreeMap<String, VecDeque<Vec<u8>>>,
+    /// The p2p broker (p2p P1/P2): the deterministic in-process pub/sub log that is the sandbox's
+    /// whole "network", so a publish/receive-or-sync program is byte-identical across backends and
+    /// terminates in-oracle once its topics drain.
+    p2p: noeta_native::P2pBroker,
 }
 
 /// The sandbox's inbound-server state: the fixed request script (see
@@ -74,7 +73,7 @@ impl SandboxHost {
             env: env::sandbox_vars(),
             args: env::sandbox_args(),
             inbound: None,
-            p2p: BTreeMap::new(),
+            p2p: noeta_native::P2pBroker::default(),
         }
     }
 }
@@ -250,17 +249,21 @@ impl Network for SandboxHost {
 }
 
 impl P2p for SandboxHost {
-    /// Enqueue `message` on `topic`'s FIFO — the sandbox's whole "network" is this in-process
-    /// broker (deterministic, so both backends agree).
     fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
-        self.p2p.entry(topic.to_string()).or_default().push_back(message);
+        self.p2p.publish(topic, message);
         Ok(())
     }
 
-    /// Dequeue the oldest pending message on `topic`, or `None` once it has drained — which is what
-    /// lets a receive loop terminate under the differential.
     fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, StdError> {
-        Ok(self.p2p.get_mut(topic).and_then(VecDeque::pop_front))
+        Ok(self.p2p.poll_default(topic))
+    }
+
+    fn p2p_subscribe(&mut self, topic: &str) -> u64 {
+        self.p2p.subscribe(topic)
+    }
+
+    fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
+        Ok(self.p2p.poll_sub(sub))
     }
 }
 

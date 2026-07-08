@@ -29,7 +29,7 @@ use noeta_stdlib::{
     Clock, Entropy, Env, ErrorKind, ExternBox, ExternIo, FileReader, FileSystem, Ids, NativeOut,
     NetRequest, NetResponse, Network, P2p, ReadSource, RealBody, Rng, StdError,
 };
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::fs::File;
@@ -86,10 +86,10 @@ pub struct RealHost {
     /// run from source or shipped as an executable — the toolchain's own `noeta run` prefix never
     /// leaks into the program.
     args: Vec<String>,
-    /// The p2p broker (p2p P1): a per-topic FIFO, identical to the sandbox's. Real p2p transport
-    /// (p2panda gossip over the network, cross-node) is P3; until then the real host is a single-
-    /// node loopback broker, so `noeta run` of a p2p program works locally without a network.
-    p2p: BTreeMap<String, VecDeque<Vec<u8>>>,
+    /// The p2p broker (p2p P1/P2): the same in-process pub/sub log as the sandbox. Real p2p
+    /// transport (p2panda gossip, cross-node) is P3; until then the real host is a single-node
+    /// loopback broker, so `noeta run` of a p2p program works locally without a network.
+    p2p: noeta_stdlib::P2pBroker,
 }
 
 /// One inbound listener's shared state. The socket is bound at `net_listen` (runtime-free, via
@@ -125,7 +125,7 @@ impl RealHost {
             conns: Arc::new(Mutex::new(HashMap::new())),
             next_conn: Arc::new(AtomicU64::new(0)),
             args: std::env::args().collect(),
-            p2p: BTreeMap::new(),
+            p2p: noeta_stdlib::P2pBroker::default(),
         })
     }
 
@@ -704,16 +704,25 @@ impl Ids for RealHost {
 }
 
 impl P2p for RealHost {
-    // p2p P1: the same in-process FIFO broker as the sandbox (single-node loopback). Real p2panda
-    // gossip transport, cross-node delivery, and a genuine async subscription future are P3 — at
-    // which point this becomes the non-deterministic, CLI-only side (like the real Network client).
+    // p2p P1/P2: the same in-process pub/sub broker as the sandbox (single-node loopback). Real
+    // p2panda gossip transport, cross-node delivery, and a genuine async subscription future are
+    // P3 — at which point this becomes the non-deterministic, CLI-only side (like the real Network
+    // client).
     fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
-        self.p2p.entry(topic.to_string()).or_default().push_back(message);
+        self.p2p.publish(topic, message);
         Ok(())
     }
 
     fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, StdError> {
-        Ok(self.p2p.get_mut(topic).and_then(VecDeque::pop_front))
+        Ok(self.p2p.poll_default(topic))
+    }
+
+    fn p2p_subscribe(&mut self, topic: &str) -> u64 {
+        self.p2p.subscribe(topic)
+    }
+
+    fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
+        Ok(self.p2p.poll_sub(sub))
     }
 }
 

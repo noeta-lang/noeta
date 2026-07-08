@@ -207,6 +207,16 @@ pub trait P2p {
     fn p2p_receive(&self, topic: String) -> Box<dyn crate::ExternIo> {
         Box::new(crate::p2p::ReceiveIo { topic })
     }
+
+    /// Subscribe to `topic`, returning a subscription id whose cursor starts at the beginning of
+    /// the topic log (p2p P2). Unlike the topic-level [`Self::p2p_poll`] (one implicit reader),
+    /// each subscription has an **independent** cursor — genuine broadcast, so several replicas on
+    /// one topic each receive every message. A `synced_signal` holds one for its topic.
+    fn p2p_subscribe(&mut self, topic: &str) -> u64;
+
+    /// The next message for subscription `sub` (advancing only its cursor), or `None` once it has
+    /// caught up — what `synced_signal.sync()` drains to merge peers' states.
+    fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError>;
 }
 
 /// Every host-coupled effect the interpreters perform, behind one swappable seam — the union of the

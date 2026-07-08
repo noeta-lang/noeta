@@ -142,6 +142,16 @@ const STD_TYPES: &[ExtType] = &[
         traits: crate::crdt::CRDT_TRAITS,
         ..ExtType::DEFAULTS
     },
+    // `SyncedSignal<T>` (p2p P2) — a signal node in the shared reactive graph holding a CRDT; its
+    // methods reach the arena + graph + P2p host, so they live in the ctx table.
+    ExtType {
+        name: crate::synced::SYNCED_SIGNAL_TYPE_NAME,
+        ctx_methods: crate::synced::SYNCED_CTX_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::synced::synced_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        ..ExtType::DEFAULTS
+    },
 ];
 
 /// The `FileHandle` instance methods (extern-types X3) — the signatures the checker's
@@ -2260,6 +2270,14 @@ const STD_MODULES: &[ExtModule] = &[
         dispatch: crate::p2p::p2p_dispatch,
         ..ExtModule::DEFAULTS
     },
+    // `synced` (p2p P2) — `synced_signal(initial, topic)`, a CRDT-backed signal in the reactive
+    // graph. A ctx module (it owns arena values + drives the graph), like `reactive`.
+    ExtModule {
+        name: "synced",
+        ctx_functions: crate::synced::SYNCED_CTX_FNS,
+        ctx_dispatch: Some(|func, ctx, args| crate::synced::synced_ctx_dispatch(func, ctx, args)),
+        ..ExtModule::DEFAULTS
+    },
 ];
 
 /// Compiled-in fast route for ctx **functions** (H5 perf): the same generic dispatch fns the
@@ -2278,6 +2296,7 @@ pub fn static_dispatch_ctx<C: crate::NativeCtx + ?Sized>(
     match module {
         "cell" => Some(crate::cell::cell_ctx_dispatch(func, ctx, args)),
         "reactive" => Some(crate::reactive::reactive_ctx_dispatch(func, ctx, args)),
+        "synced" => Some(crate::synced::synced_ctx_dispatch(func, ctx, args)),
         _ => None,
     }
 }
@@ -2305,6 +2324,9 @@ pub fn static_dispatch_ctx_method<C: crate::NativeCtx + ?Sized>(
         crate::reactive::EFFECT_TYPE_NAME => Some(crate::reactive::effect_ctx_method_dispatch(
             method, ctx, recv, args,
         )),
+        crate::synced::SYNCED_SIGNAL_TYPE_NAME => Some(
+            crate::synced::synced_ctx_method_dispatch(method, ctx, recv, args),
+        ),
         _ => None,
     }
 }

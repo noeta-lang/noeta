@@ -110,11 +110,28 @@ backends + leak oracle). Rough ordering, not committed:
   program is byte-identical across both backends. **P1 boundary (stated, not silent):** single-node
   loopback only — genuine peer/cross-isolate delivery is a later slice; payload is raw bytes (CRDT
   serialization onto this seam is P2).
-- **P2 — `synced_signal` surface over the ctx seam.** A new stdlib extension crate
-  (`std.synced` / fold into `std.reactive`), modeled on `crates/noeta-stdlib/src/reactive.rs`:
-  ExtState holds the sync engine over `Retained` cells; `SyncedSignal<T>` / `SyncStatus` extern
-  types; a peer event enters as an ordinary reactive `touch` + `flush`. `Mergeable` bound checked at
-  `synced_signal(...)` (checker work). Distinct `SyncedSignal<T>` type; status value.
+- **P2 — `synced_signal`: the three layers meet. ✅ DONE.** Where CRDT (P0) + P2p (P1) + reactivity
+  join. Sub-slices:
+  - **P2.0 — CRDT wire serialization ✅.** `Mergeable` requires `Serialize`+`DeserializeOwned` and
+    provides `to_bytes`/`from_bytes` (postcard, deterministic); `from_bytes` → `Option` (untrusted
+    input). noeta-crdt's one dep.
+  - **P2.M — first-class `Mergeable` bound ✅.** `BuiltinTrait::Mergeable` (intrinsic — not user
+    impl/derivable, E0015/E0014), `SigType::BoundedVar` + `ExtType.traits`, seed extern-type traits
+    into the checker, enforce bounds on registry calls (E0025 via `satisfies`). So `synced_signal`
+    is compile-time-safe *and* generic — option #3, the faithful path.
+  - **P2.1/P2.2 — `std.synced` runtime ✅.** `synced_signal<T: Mergeable>(initial, topic)` is a
+    signal node in the **shared reactive graph** holding a CRDT; `.get()` (reactive read), `.merge`
+    (local join + broadcast + flush), `.sync()` (drain topic → merge peers → flush). Reuses
+    `reactive.rs`'s engine (shared ExtState/graph — `touch`+`drive_flush`), so a peer's change
+    propagates to `effect`/`computed` like any local update. The P1 broker became an append-log
+    with per-subscriber cursors (broadcast, so N replicas each see every message). Two replicas on
+    one topic converge in-process (deterministic stand-in for real peers).
+
+    Green: differential/leak/JIT-diff all 513, 524 corpus, 3 `synced/` cases (converge+effect,
+    merge-propagates, compile-time bound), 211 checker + 13 crdt unit tests, clippy.
+    **Deferred (stated):** `SyncStatus` (Synced/Syncing/Offline — only meaningful with real
+    transport, so it lands with P3); background/automatic sync (`.sync()` is explicit by design);
+    value-carrying CRDTs (LWW/OR-Set).
 - **P3 — real transport: first-party p2panda extension.** Wrap p2panda in the `RealHost` `P2p`
   impl; embedded node on its own isolate started with the process; identity persisted to disk.
   `noeta add p2p`-style manifest gate so the iroh/QUIC/crypto tree only links when declared.

@@ -102,14 +102,18 @@ pub const COMPUTED_ARENA_GETTER: ArenaGetter = ("get", |e| computed_box(e).memo)
 
 /// The per-run extension state: the graph, over arena-cell ids, plus the last gate state pushed
 /// to the backend (so a redundant sync is one branch, not two backend calls).
-struct ReactiveExt {
-    graph: ReactiveGraph<Retained>,
+///
+/// `pub(crate)` because [`crate::synced`] (p2p P2) shares this exact graph: a synced signal is a
+/// signal node here plus a topic, so a peer's merge propagates to `computed`/`effect` like any
+/// local `set`. It reaches the graph, `sync_gates`, and `drive_flush` through the items below.
+pub(crate) struct ReactiveExt {
+    pub(crate) graph: ReactiveGraph<Retained>,
     gates_open: std::cell::Cell<bool>,
 }
 
-const STATE_KEY: &str = "std.reactive";
+pub(crate) const STATE_KEY: &str = "std.reactive";
 
-fn state_of<C: NativeCtx + ?Sized>(ctx: &mut C) -> ExtState {
+pub(crate) fn state_of<C: NativeCtx + ?Sized>(ctx: &mut C) -> ExtState {
     ctx.state(STATE_KEY, || {
         Box::new(ReactiveExt {
             graph: ReactiveGraph::new(),
@@ -121,7 +125,7 @@ fn state_of<C: NativeCtx + ?Sized>(ctx: &mut C) -> ExtState {
 
 /// Recompute the read gates from the graph's state (see the module docs) and push a *change* to
 /// the backend; an unchanged state is one branch.
-fn sync_gates<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) {
+pub(crate) fn sync_gates<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) {
     let open =
         !ext.graph.is_flushing() && !ext.graph.tracking() && ext.graph.dirty_computed_count() == 0;
     if ext.gates_open.replace(open) != open {
@@ -136,7 +140,10 @@ fn sync_gates<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) {
 /// `drive_flush`): bodies run via the fused [`NativeCtx::run_thunk`]; an abort inside a body is
 /// stashed and re-raised (the flush stops), and a non-converging update is the E0045
 /// reactive-cycle diagnostic. Gates are re-synced when the dust settles.
-fn drive_flush<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) -> Result<(), CtxError> {
+pub(crate) fn drive_flush<C: NativeCtx + ?Sized>(
+    ctx: &mut C,
+    ext: &ReactiveExt,
+) -> Result<(), CtxError> {
     let mut aborted: Option<CtxError> = None;
     let overflowed = ext
         .graph

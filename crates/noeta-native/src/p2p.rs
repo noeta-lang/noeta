@@ -7,6 +7,64 @@
 //! when the topic has drained — so a receive loop terminates in-oracle under the deterministic
 //! sandbox broker.
 
+use std::collections::BTreeMap;
+
+/// The deterministic in-process message broker both hosts use as their p2p "network" (p2p P1/P2).
+/// A topic is an **append-only log**; readers hold independent cursors, so it is genuine broadcast
+/// pub/sub — every subscriber sees every message — not a queue that one reader could drain out from
+/// under another (which multi-replica convergence needs). Deterministic and finite: a program
+/// publishes finitely and each reader polls until caught up, so a receive/sync loop terminates
+/// in-oracle. Real p2panda gossip (cross-node, non-deterministic) replaces this in P3.
+#[derive(Debug, Clone, Default)]
+pub struct P2pBroker {
+    /// topic → its append-only message log.
+    logs: BTreeMap<String, Vec<Vec<u8>>>,
+    /// The cursor behind the topic-level `p2p.receive(topic)` (P1): one implicit reader per topic.
+    default_cursors: BTreeMap<String, usize>,
+    /// subscription id → (topic, cursor). A `synced_signal` holds one, from the log's start, so a
+    /// late-joining replica still sees all prior state and converges.
+    subs: BTreeMap<u64, (String, usize)>,
+    next_sub: u64,
+}
+
+impl P2pBroker {
+    /// Append `message` to `topic`'s log — visible to every current and future reader of the topic.
+    pub fn publish(&mut self, topic: &str, message: Vec<u8>) {
+        self.logs.entry(topic.to_string()).or_default().push(message);
+    }
+
+    /// The next message for the topic's default reader (P1 `p2p.receive`), advancing its cursor.
+    pub fn poll_default(&mut self, topic: &str) -> Option<Vec<u8>> {
+        let log = self.logs.get(topic)?;
+        let cursor = self.default_cursors.entry(topic.to_string()).or_insert(0);
+        let message = log.get(*cursor).cloned();
+        if message.is_some() {
+            *cursor += 1;
+        }
+        message
+    }
+
+    /// Register a subscriber to `topic`, its cursor at the log's start (sees all prior + future
+    /// messages). Returns the subscription id polled via [`Self::poll_sub`].
+    pub fn subscribe(&mut self, topic: &str) -> u64 {
+        let id = self.next_sub;
+        self.next_sub += 1;
+        self.subs.insert(id, (topic.to_string(), 0));
+        id
+    }
+
+    /// The next message for subscription `sub`, advancing only that subscription's cursor (so two
+    /// subscribers to one topic each receive every message). `None` when caught up or unknown.
+    pub fn poll_sub(&mut self, sub: u64) -> Option<Vec<u8>> {
+        let (topic, cursor) = self.subs.get(&sub)?.clone();
+        let message = self.logs.get(&topic).and_then(|log| log.get(cursor).cloned());
+        if message.is_some() {
+            self.subs.get_mut(&sub).expect("sub exists").1 = cursor + 1;
+        }
+        message
+    }
+}
+
 /// The default async receive descriptor (p2p P1): it resolves synchronously through the Host at
 /// spawn (the sandbox pops the topic's FIFO; any host degrades serially) and has no real body. A
 /// real gossip transport overrides [`crate::host::P2p::p2p_receive`] with a genuine subscription

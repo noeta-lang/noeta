@@ -52,6 +52,7 @@ pub mod random;
 pub mod reactive;
 pub mod registry;
 pub mod serve;
+pub mod synced;
 pub mod task;
 pub mod vec3;
 
