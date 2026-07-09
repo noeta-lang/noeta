@@ -555,66 +555,48 @@ impl Value {
         })
     }
 
-    /// If this is a packed `List<Vec3<f32>>` — a flat buffer whose element schema is exactly three
-    /// `f32` fields — return its shared schema and a copy of its byte buffer (the input to the bulk
-    /// `vec` kernels, P-PACK 4.2). `None` for a boxed list or any other element schema, so the caller
-    /// takes the scalar fallback.
-    pub fn packed_vec3_data(self) -> Option<(&'static PackedSchema, Vec<u8>)> {
+    /// Borrow this packed list's schema and raw byte buffer for the duration of `f` — the
+    /// zero-copy read under the native raw-buffer seam (`NativeCtx::with_packed`, package-manager
+    /// N3.4; superseding the vec3-specific cloning accessors the bulk `vec` intercepts used).
+    /// `None` (without running `f`) for anything that is not a packed list.
+    pub fn with_packed_ref<R>(
+        self,
+        f: impl FnOnce(&'static PackedSchema, &[u8]) -> R,
+    ) -> Option<R> {
         if !self.is_packed_list() {
             return None;
         }
         heap::with_payload(self, |p| match p {
-            // Only a *row-major* (AoS) Vec3 buffer feeds the interleaved bulk kernels. A column
-            // (`layout: column`) list declines this fast path (P-SIMD C2) so the kernels fall back to
-            // the element-wise scalar loop — correct on either layout; the fast columnar SoA path is
-            // wired in C3.
-            Payload::PackedList { schema, bytes }
-                if !schema.column
-                    && schema.fields.len() == 3
-                    && schema.fields.iter().all(|k| matches!(k, PackedKind::F32)) =>
-            {
-                Some((*schema, bytes.clone()))
-            }
+            Payload::PackedList { schema, bytes } => Some(f(schema, bytes)),
             _ => None,
         })
     }
 
-    /// If this is a **column-major** packed `List<Vec3<f32>>` (`@packed(layout: column)`), its shared
-    /// schema and column-order byte buffer (`[x×n][y×n][z×n]`) — the direct input to the SoA reduction
-    /// kernels (P-SIMD C3), which read the three contiguous `f32` columns with no transpose. `None`
-    /// for a row list (which takes `packed_vec3_data`) or any other element schema.
-    pub fn packed_vec3_columns(self) -> Option<(&'static PackedSchema, Vec<u8>)> {
+    /// This packed list's schema handle and a **copy** of its byte buffer — the allocating read
+    /// for a caller that outlives the borrow (`NativeCtx::with_packed_mut`'s copy-on-write path).
+    /// `None` for anything that is not a packed list.
+    pub fn packed_parts(self) -> Option<(&'static PackedSchema, Vec<u8>)> {
         if !self.is_packed_list() {
             return None;
         }
         heap::with_payload(self, |p| match p {
-            Payload::PackedList { schema, bytes }
-                if schema.column
-                    && schema.fields.len() == 3
-                    && schema.fields.iter().all(|k| matches!(k, PackedKind::F32)) =>
-            {
-                Some((*schema, bytes.clone()))
-            }
+            Payload::PackedList { schema, bytes } => Some((*schema, bytes.clone())),
             _ => None,
         })
     }
 
-    /// If this is a packed `List<Vec3<f32>>` of **either** layout, its schema and byte buffer — for
-    /// the layout-agnostic element-wise kernels (`add`/`sub`/`scale`, P-SIMD C3), which operate over
-    /// the flat `f32` array and so preserve whichever layout the input carries.
-    pub fn packed_vec3_any(self) -> Option<(&'static PackedSchema, Vec<u8>)> {
-        if !self.is_packed_list() {
-            return None;
-        }
-        heap::with_payload(self, |p| match p {
-            Payload::PackedList { schema, bytes }
-                if schema.fields.len() == 3
-                    && schema.fields.iter().all(|k| matches!(k, PackedKind::F32)) =>
-            {
-                Some((*schema, bytes.clone()))
-            }
-            _ => None,
-        })
+    /// Mutate this packed list's byte buffer **in place** through `f` (the raw-buffer seam's
+    /// proven-sole-ownership fast path). The caller must guarantee a uniquely-owned packed list
+    /// (`refcount == 1`), like the other `*_in_place` ops.
+    pub fn packed_mutate_in_place(self, f: impl FnOnce(&'static PackedSchema, &mut [u8])) {
+        debug_assert!(
+            self.is_packed_list() && heap::refcount(self) == 1 && !heap::is_shared(self),
+            "packed_mutate_in_place requires a uniquely-owned packed list"
+        );
+        heap::with_payload_mut(self, |p| match p {
+            Payload::PackedList { schema, bytes } => f(schema, bytes),
+            _ => unreachable!("packed_mutate_in_place on a non-packed list"),
+        });
     }
 
     /// Build a new flat packed list from selected element `indices` of this one, copying each

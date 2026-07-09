@@ -7,13 +7,14 @@
 use noeta_diagnostics::DiagnosticCode;
 use noeta_span::Span;
 use noeta_stdlib::{
-    CtxError, CtxOut, CtxResult, ExternIo, NativeCtx, NativeOut, NativeValue, Retained, Slot,
-    StdError,
+    CtxError, CtxOut, CtxResult, ExternIo, NativeCtx, NativeOut, NativeValue, PackedView, Retained,
+    Scalar, Slot, StdError,
 };
 
+use crate::value::ListRepr;
 use crate::{
-    Eval, Interpreter, Unwind, Value, materialize_ext, materialize_native, std_error_code,
-    value_to_native_deep,
+    Eval, Interpreter, ObjectValue, Unwind, Value, materialize_ext, materialize_native,
+    scalar_to_value, std_error_code, value_to_native_deep, value_to_scalar,
 };
 
 pub(crate) struct EvalCtx<'i> {
@@ -383,6 +384,77 @@ impl NativeCtx for EvalCtx<'_> {
         };
         self.interp.destroy_value(old);
         Ok(())
+    }
+
+    // ----- The raw-buffer ABI (package-manager N3.4): the tree-walker twins. -----
+
+    fn with_packed(
+        &mut self,
+        slot: Slot,
+        f: &mut dyn FnMut(&PackedView, &[u8]),
+    ) -> CtxResult<bool> {
+        match self.get(slot)? {
+            Value::List(ListRepr::Packed(p)) => {
+                f(&p.seam_view(), p.raw());
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn with_packed_mut(
+        &mut self,
+        slot: Slot,
+        f: &mut dyn FnMut(&PackedView, &mut [u8]),
+    ) -> CtxResult<Option<Slot>> {
+        if !matches!(self.get(slot)?, Value::List(ListRepr::Packed(_))) {
+            return Ok(None);
+        }
+        // `take` spends a non-seed slot / clones a seed (the VM contract); `Rc::make_mut` inside
+        // `mutate_bytes` then supplies the copy-on-write for free — in place iff sole owner.
+        let Value::List(ListRepr::Packed(mut p)) = self.take(slot)? else {
+            unreachable!("checked packed above")
+        };
+        p.mutate_bytes(f);
+        Ok(Some(self.insert(Value::List(ListRepr::Packed(p)))))
+    }
+
+    fn make_packed_like(&mut self, like: Slot, bytes: Vec<u8>) -> CtxResult<Slot> {
+        let list = match self.get(like)? {
+            Value::List(ListRepr::Packed(p)) => p.like(bytes),
+            _ => {
+                return Err(CtxError::Std(noeta_stdlib::type_error(
+                    "make_packed_like",
+                    "packed list",
+                )));
+            }
+        };
+        Ok(self.insert(Value::List(ListRepr::Packed(list))))
+    }
+
+    fn object_scalars(&mut self, slot: Slot) -> CtxResult<Option<Vec<Scalar>>> {
+        match self.get(slot)? {
+            Value::Object(obj) => Ok(obj.slots.borrow().iter().map(value_to_scalar).collect()),
+            _ => Ok(None),
+        }
+    }
+
+    fn make_object_like(&mut self, like: Slot, fields: &[Scalar]) -> CtxResult<Slot> {
+        let built = match self.get(like)? {
+            Value::Object(obj) if obj.slots.borrow().len() == fields.len() => {
+                Value::Object(std::rc::Rc::new(ObjectValue::new(
+                    std::rc::Rc::clone(&obj.def),
+                    fields.iter().map(|&s| scalar_to_value(s)).collect(),
+                )))
+            }
+            _ => {
+                return Err(CtxError::Std(noeta_stdlib::type_error(
+                    "make_object_like",
+                    "object of matching field count",
+                )));
+            }
+        };
+        Ok(self.insert(built))
     }
 }
 

@@ -145,6 +145,15 @@ pub fn scale_buffer(a: &[u8], s: f32) -> Vec<u8> {
     out
 }
 
+/// [`scale_buffer`] **in place** — the `with_packed_mut` form (package-manager N3.4): the seam
+/// hands the kernel a uniquely-owned COW buffer, so scaling needs no second allocation at all.
+pub fn scale_buffer_in_place(a: &mut [u8], s: f32) {
+    for c in a.chunks_exact_mut(4) {
+        let scaled = (read_f32(c) * s).to_le_bytes();
+        c.copy_from_slice(&scaled);
+    }
+}
+
 /// `dot_all`: the per-element dot product of two packed Vec3 lists → one `f32` per element.
 pub fn dot_buffers(a: &[u8], b: &[u8]) -> Vec<f32> {
     a.chunks_exact(12)
@@ -401,6 +410,290 @@ pub fn soa_length(a: &SoaVec3) -> Vec<f32> {
         .zip(&a.zs)
         .map(|((&x, &y), &z)| (x * x + y * y + z * z).sqrt())
         .collect()
+}
+
+// --- The bulk `vec.*_all` dispatch over the raw-buffer seam (package-manager N3.4) ---
+//
+// Until N3.4 these five functions were the LAST per-backend native intercepts (`call_vec` twins in
+// the VM and the tree-walker): the neutral value seam could not lend a dispatch a packed list's
+// contiguous bytes. `NativeCtx::with_packed`/`with_packed_mut`/`make_packed_like` close that gap,
+// so the routing now lives here ONCE — a registered ctx dispatch, like `task`'s — and the
+// differential holds by construction. Packed `Vec3` operands take the flat autovectorized kernels
+// above (zero per-element traffic: one borrow per operand, one result allocation); anything else
+// falls back to an element-wise loop over `object_scalars`/`make_object_like`, exactly the boxed
+// path the old intercepts had.
+
+use crate::registry::{ExtFn, NativeOut, NativeValue, RetTy, Scalar, SigType};
+use crate::{CtxError, CtxOut, CtxResult, NativeCtx, PackedField, PackedView, Slot, ctx_arity};
+
+/// The bulk kernels' signatures. Structural arguments are `Dyn` (any 3-`f32`-field struct is a
+/// Vec3 — checked at dispatch); the element-wise ops return their first argument's type, the
+/// reductions a `List<f32>` — the same rows the checker's hand-written fallback carried before.
+pub(crate) const VEC_CTX_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "add_all",
+        params: &[SigType::Dyn, SigType::Dyn],
+        ret: RetTy::SameAsArg(0),
+    },
+    ExtFn {
+        name: "sub_all",
+        params: &[SigType::Dyn, SigType::Dyn],
+        ret: RetTy::SameAsArg(0),
+    },
+    ExtFn {
+        name: "scale_all",
+        params: &[SigType::Dyn, SigType::Dyn],
+        ret: RetTy::SameAsArg(0),
+    },
+    ExtFn {
+        name: "dot_all",
+        params: &[SigType::Dyn, SigType::Dyn],
+        ret: RetTy::Concrete(SigType::List(&SigType::F32)),
+    },
+    ExtFn {
+        name: "length_all",
+        params: &[SigType::Dyn],
+        ret: RetTy::Concrete(SigType::List(&SigType::F32)),
+    },
+];
+
+/// Whether a packed buffer's element is a Vec3 — exactly three `f32` fields (either layout).
+fn vec3_view(v: &PackedView) -> bool {
+    v.fields.len() == 3 && v.fields.iter().all(|f| matches!(f, PackedField::F32))
+}
+
+/// A `vec.*` argument-type misuse (maps to the backends' `TypeMismatch` diagnostic).
+fn arg_error(message: String) -> CtxError {
+    CtxError::Std(crate::StdError {
+        kind: crate::ErrorKind::ArgType,
+        message,
+    })
+}
+
+fn len_error(func: &str) -> CtxError {
+    arg_error(format!("`vec.{func}` expects two lists of equal length"))
+}
+
+/// Guard that a slot holds a list, with the intercepts' exact message.
+fn expect_list(ctx: &mut dyn NativeCtx, func: &str, slot: Slot) -> CtxResult<()> {
+    if ctx.is_list(slot)? {
+        Ok(())
+    } else {
+        let found = ctx.type_name(slot)?;
+        Err(arg_error(format!(
+            "`vec.{func}` expects a list, found {found}"
+        )))
+    }
+}
+
+/// Read an element slot as a Vec3 — an object of exactly three `f32` fields — or a type error.
+fn read_vec3_slot(ctx: &mut dyn NativeCtx, func: &str, slot: Slot) -> Result<[f32; 3], CtxError> {
+    if let Some(fields) = ctx.object_scalars(slot)?
+        && let [Scalar::F32(x), Scalar::F32(y), Scalar::F32(z)] = fields[..]
+    {
+        return Ok([x, y, z]);
+    }
+    let found = ctx.type_name(slot)?;
+    Err(arg_error(format!(
+        "`vec.{func}` expects a Vec3 (a struct of three f32 fields), found {found}"
+    )))
+}
+
+/// Read a numeric scalar (`f32`/`float`/`int`) as an `f32` — the `scale_all` factor.
+fn read_factor(ctx: &mut dyn NativeCtx, func: &str, slot: Slot) -> Result<f32, CtxError> {
+    match ctx.view(slot)? {
+        NativeValue::Scalar(Scalar::F32(f)) => Ok(f),
+        NativeValue::Scalar(Scalar::Float(f)) => Ok(f as f32),
+        NativeValue::Scalar(Scalar::Int(i)) => Ok(i as f32),
+        _ => {
+            let found = ctx.type_name(slot)?;
+            Err(arg_error(format!(
+                "`vec.{func}` expects a number factor, found {found}"
+            )))
+        }
+    }
+}
+
+/// A Vec3's components as result-object field scalars.
+fn f32_fields(c: [f32; 3]) -> [Scalar; 3] {
+    [Scalar::F32(c[0]), Scalar::F32(c[1]), Scalar::F32(c[2])]
+}
+
+/// A `List<f32>` result from reduction scalars (`dot_all`/`length_all`).
+fn f32_list_out(scalars: Vec<f32>) -> NativeOut {
+    NativeOut::List(
+        scalars
+            .into_iter()
+            .map(|f| NativeOut::Scalar(Scalar::F32(f)))
+            .collect(),
+    )
+}
+
+/// If `slot` is a packed Vec3 list, its layout + a copy of its bytes (the binary ops' left
+/// operand, which must outlive the right operand's borrow). `None` → the caller falls back.
+fn packed_vec3(ctx: &mut dyn NativeCtx, slot: Slot) -> CtxResult<Option<(bool, Vec<u8>)>> {
+    let mut out = None;
+    ctx.with_packed(slot, &mut |v, bytes| {
+        if vec3_view(v) {
+            out = Some((v.column, bytes.to_vec()));
+        }
+    })?;
+    Ok(out)
+}
+
+/// Element-wise fallback for `add_all`/`sub_all`: boxed operands (or packed operands of
+/// disagreeing layout/length — where the old fast path silently mis-added mixed layouts, this
+/// computes the correct per-element result). Each result element is shaped like its left input.
+fn bulk_binary_fallback(
+    ctx: &mut dyn NativeCtx,
+    func: &str,
+    xs: Slot,
+    ys: Slot,
+) -> Result<CtxOut, CtxError> {
+    let n = ctx.list_len(xs)?;
+    if ctx.list_len(ys)? != n {
+        return Err(len_error(func));
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let ex = ctx.list_get(xs, i)?;
+        let ey = ctx.list_get(ys, i)?;
+        let a = read_vec3_slot(ctx, func, ex)?;
+        let b = read_vec3_slot(ctx, func, ey)?;
+        let c = if func == "add_all" {
+            add(a, b)
+        } else {
+            sub(a, b)
+        };
+        let obj = ctx.make_object_like(ex, &f32_fields(c))?;
+        ctx.free(ex);
+        ctx.free(ey);
+        out.push(obj);
+    }
+    Ok(CtxOut::Slot(ctx.make_list(&out)?))
+}
+
+/// The `vec` module's higher-order dispatch: the five bulk kernels, shared by both backends.
+pub(crate) fn vec_ctx_dispatch(
+    func: &str,
+    ctx: &mut dyn NativeCtx,
+    args: &[Slot],
+) -> Result<CtxOut, CtxError> {
+    match func {
+        "add_all" | "sub_all" => {
+            ctx_arity(func, args, 2)?;
+            expect_list(ctx, func, args[0])?;
+            expect_list(ctx, func, args[1])?;
+            // Fast path: two packed Vec3 buffers of the SAME layout and length — the flat
+            // element-wise kernel is layout-agnostic when the layout is shared (P-SIMD C3).
+            if let Some((column, ab)) = packed_vec3(ctx, args[0])? {
+                let mut out: Option<Vec<u8>> = None;
+                ctx.with_packed(args[1], &mut |v, b| {
+                    if vec3_view(v) && v.column == column && b.len() == ab.len() {
+                        out = Some(if func == "add_all" {
+                            add_buffers(&ab, b)
+                        } else {
+                            sub_buffers(&ab, b)
+                        });
+                    }
+                })?;
+                if let Some(bytes) = out {
+                    return Ok(CtxOut::Slot(ctx.make_packed_like(args[0], bytes)?));
+                }
+            }
+            bulk_binary_fallback(ctx, func, args[0], args[1])
+        }
+        "scale_all" => {
+            ctx_arity(func, args, 2)?;
+            expect_list(ctx, func, args[0])?;
+            let s = read_factor(ctx, func, args[1])?;
+            // Fast path: scale the packed buffer through the COW-mutable borrow — in place when
+            // the backend proves sole ownership, one clone otherwise (either way, zero extra
+            // result allocation). Layout-agnostic: every byte is an `f32` component.
+            let mut is_packed_vec3 = false;
+            ctx.with_packed(args[0], &mut |v, _| is_packed_vec3 = vec3_view(v))?;
+            if is_packed_vec3
+                && let Some(result) =
+                    ctx.with_packed_mut(args[0], &mut |_, bytes| scale_buffer_in_place(bytes, s))?
+            {
+                return Ok(CtxOut::Slot(result));
+            }
+            let n = ctx.list_len(args[0])?;
+            let mut out = Vec::with_capacity(n);
+            for i in 0..n {
+                let e = ctx.list_get(args[0], i)?;
+                let c = scale(read_vec3_slot(ctx, func, e)?, s);
+                let obj = ctx.make_object_like(e, &f32_fields(c))?;
+                ctx.free(e);
+                out.push(obj);
+            }
+            Ok(CtxOut::Slot(ctx.make_list(&out)?))
+        }
+        "dot_all" => {
+            ctx_arity(func, args, 2)?;
+            expect_list(ctx, func, args[0])?;
+            expect_list(ctx, func, args[1])?;
+            // Fast path: same-layout packed Vec3 buffers — the column pair reads three contiguous
+            // `f32` columns (`col_dot`, the aligned-SIMD reduction), the row pair the interleaved
+            // kernel; a mixed pair falls back (each side decodes correctly element-wise).
+            if let Some((column, ab)) = packed_vec3(ctx, args[0])? {
+                let mut out: Option<Vec<f32>> = None;
+                ctx.with_packed(args[1], &mut |v, b| {
+                    if vec3_view(v) && v.column == column && b.len() == ab.len() {
+                        out = Some(if column {
+                            col_dot(&ab, b)
+                        } else {
+                            dot_buffers(&ab, b)
+                        });
+                    }
+                })?;
+                if let Some(scalars) = out {
+                    return Ok(CtxOut::Out(f32_list_out(scalars)));
+                }
+            }
+            let n = ctx.list_len(args[0])?;
+            if ctx.list_len(args[1])? != n {
+                return Err(len_error(func));
+            }
+            let mut scalars = Vec::with_capacity(n);
+            for i in 0..n {
+                let ex = ctx.list_get(args[0], i)?;
+                let ey = ctx.list_get(args[1], i)?;
+                let a = read_vec3_slot(ctx, func, ex)?;
+                let b = read_vec3_slot(ctx, func, ey)?;
+                ctx.free(ex);
+                ctx.free(ey);
+                scalars.push(dot(a, b));
+            }
+            Ok(CtxOut::Out(f32_list_out(scalars)))
+        }
+        "length_all" => {
+            ctx_arity(func, args, 1)?;
+            expect_list(ctx, func, args[0])?;
+            let mut out: Option<Vec<f32>> = None;
+            ctx.with_packed(args[0], &mut |v, b| {
+                if vec3_view(v) {
+                    out = Some(if v.column {
+                        col_length(b)
+                    } else {
+                        length_buffer(b)
+                    });
+                }
+            })?;
+            if let Some(scalars) = out {
+                return Ok(CtxOut::Out(f32_list_out(scalars)));
+            }
+            let n = ctx.list_len(args[0])?;
+            let mut scalars = Vec::with_capacity(n);
+            for i in 0..n {
+                let e = ctx.list_get(args[0], i)?;
+                scalars.push(length(read_vec3_slot(ctx, func, e)?));
+                ctx.free(e);
+            }
+            Ok(CtxOut::Out(f32_list_out(scalars)))
+        }
+        _ => Err(crate::no_function_error("vec", func).into()),
+    }
 }
 
 /// Encode an `f32` slice to a little-endian byte buffer — the packed-list representation. Used to

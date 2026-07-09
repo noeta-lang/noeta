@@ -480,20 +480,13 @@ pub fn dispatch_method(
 // last entry, at H5. Every std module is registry-backed now; the whole `Builtin` orchestration
 // family dispatches through the `NativeCtx` seam.)
 
-/// Whether `<module>.<func>` names a callable std-module function — the single predicate the
-/// checker and both backends share to decide what a selective member import (`use std.<mod>.<fn>`)
-/// binds, so all three agree by construction. Covers every registered function plus the handful
-/// of non-registry ones that still dispatch through a per-backend fallback (the `vec` bulk
-/// `*_all` kernels and `fs.list`, both pending `vec`/`fs` refinements — see `noeta-check::stdlib`).
+/// Whether `<module>.<func>` names a callable module function — the single predicate the checker
+/// and both backends share to decide what a selective member import (`use std.<mod>.<fn>`) binds,
+/// so all three agree by construction. Pure registry delegation since package-manager N3.4
+/// migrated the last per-backend fallbacks (the `vec` bulk `*_all` kernels became registered ctx
+/// functions; `fs.list` got its real trailing-optional signature).
 pub fn is_module_function(module: &str, func: &str) -> bool {
     find_function_sig(module, func).is_some()
-        || matches!(
-            (module_name(module), func),
-            (
-                "vec",
-                "add_all" | "sub_all" | "scale_all" | "dot_all" | "length_all"
-            ) | ("fs", "list")
-        )
 }
 
 /// See [`noeta_native::registry::dispatch`].
@@ -2122,9 +2115,10 @@ const FS_FNS: &[ExtFn] = &[
         params: &[Str],
         ret: Concrete(SigType::Future(&SigType::Bool)),
     },
+    // Trailing-optional dir, like the sync `list` (package-manager N3.4).
     ExtFn {
         name: "list_async",
-        params: &[Str],
+        params: &[SigType::Optional(&Str)],
         ret: Concrete(SigType::Future(&SigType::List(&Str))),
     },
     ExtFn {
@@ -2152,11 +2146,11 @@ const FS_FNS: &[ExtFn] = &[
         params: &[Str],
         ret: Concrete(SigType::Unit),
     },
-    // `list` is variadic (0 or 1 args); its arity is enforced in dispatch, and the checker
-    // special-cases it (no fixed arity check), so the declared params here are not consulted.
+    // `list([dir])` — the directory argument is trailing-optional (the http-arc H4 machinery,
+    // which post-dates this function's old "checker special-cases the arity" note).
     ExtFn {
         name: "list",
-        params: &[Str],
+        params: &[SigType::Optional(&Str)],
         ret: Concrete(SigType::List(&Str)),
     },
     ExtFn {
@@ -2166,9 +2160,9 @@ const FS_FNS: &[ExtFn] = &[
     },
 ];
 
-// Only the *scalar* `vec`/`quat` ops are registered; the bulk `*_all` kernels stay per-backend.
-// Structural arguments are `Dyn` (the 3/4-`f32` shape is checked at dispatch); object results are
-// `SameAsArg` (same shape as the indicated argument).
+// The *scalar* `vec`/`quat` ops (the bulk `*_all` kernels are ctx functions — see
+// `crate::vec3::VEC_CTX_FNS`). Structural arguments are `Dyn` (the 3/4-`f32` shape is checked at
+// dispatch); object results are `SameAsArg` (same shape as the indicated argument).
 const VEC_FNS: &[ExtFn] = &[
     ExtFn {
         name: "add",
@@ -2460,6 +2454,11 @@ const VEC_MODULES: &[ExtModule] = &[
         functions: VEC_FNS,
         dispatch: vec_dispatch,
         deep_marshal: false,
+        // The bulk `*_all` kernels (package-manager N3.4): they read/produce packed buffers
+        // through the raw-buffer ctx seam, so they live in the ctx table — the LAST per-backend
+        // intercepts, migrated.
+        ctx_functions: crate::vec3::VEC_CTX_FNS,
+        ctx_dispatch: Some(crate::vec3::vec_ctx_dispatch),
         ..ExtModule::DEFAULTS
     },
     ExtModule {

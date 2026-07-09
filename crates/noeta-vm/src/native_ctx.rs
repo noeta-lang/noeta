@@ -10,8 +10,8 @@ use noeta_diagnostics::DiagnosticCode;
 use noeta_gc::retain;
 use noeta_span::Span;
 use noeta_stdlib::{
-    CtxError, CtxOut, CtxResult, ExternIo, NativeCtx, NativeOut, NativeValue, Retained, Slot,
-    StdError,
+    CtxError, CtxOut, CtxResult, ExternIo, NativeCtx, NativeOut, NativeValue, PackedField,
+    PackedView, Retained, Scalar, Slot, StdError,
 };
 use noeta_value::Value;
 
@@ -30,11 +30,52 @@ pub(crate) struct VmCtx<'c, 'm> {
     span: Span,
 }
 
+/// Project the VM's interned packed schema onto the seam's neutral [`PackedView`] (package-manager
+/// N3.4) — built per `with_packed*` call; a bulk kernel pays it once per *call*, not per element.
+fn packed_view(schema: &noeta_object::PackedSchema, buffer_len: usize) -> PackedView {
+    PackedView {
+        fields: schema.fields.iter().map(packed_field).collect(),
+        byte_size: schema.byte_size,
+        column: schema.column,
+        count: schema.count(buffer_len),
+    }
+}
+
+fn packed_field(kind: &noeta_object::PackedKind) -> PackedField {
+    use noeta_object::PackedKind;
+    match kind {
+        PackedKind::Int => PackedField::Int,
+        PackedKind::Float => PackedField::Float,
+        PackedKind::F32 => PackedField::F32,
+        PackedKind::Bool => PackedField::Bool,
+        PackedKind::Struct(inner) => {
+            PackedField::Struct(inner.fields.iter().map(packed_field).collect())
+        }
+    }
+}
+
 fn bad_slot() -> CtxError {
     CtxError::Std(StdError {
         kind: noeta_stdlib::ErrorKind::UnknownName,
         message: "internal: a native dispatch used a freed slot".to_string(),
     })
+}
+
+/// An **owned** reference to `list[index]` for the ctx element reads: a boxed list hands out a
+/// borrowed reference (retained here), a packed list materializes the element owned (rc 1 —
+/// `Value::list_get` is deliberately boxed-only). Errs on a non-list or out-of-range index.
+fn element_owned(list: Value, index: usize, op: &str) -> CtxResult<Value> {
+    if list.is_packed_list() {
+        if index >= list.list_len().unwrap_or(0) {
+            return Err(CtxError::Std(noeta_stdlib::type_error(op, "list")));
+        }
+        return Ok(list.packed_get(index));
+    }
+    let element = list
+        .list_get(index)
+        .ok_or_else(|| CtxError::Std(noeta_stdlib::type_error(op, "list")))?;
+    retain(element);
+    Ok(element)
 }
 
 fn bad_retained() -> CtxError {
@@ -178,13 +219,11 @@ impl NativeCtx for VmCtx<'_, '_> {
 
     fn call_with_element(&mut self, callee: Slot, list: Slot, index: usize) -> CtxResult<Slot> {
         let callee = self.get(callee)?;
-        let element = self
-            .get(list)?
-            .list_get(index)
-            .ok_or_else(|| CtxError::Std(noeta_stdlib::type_error("call_with_element", "list")))?;
-        // The element rides straight into the callee's frame (which consumes the reference) —
-        // no table entry, exactly the fused `list_get` + `call` + `free`.
-        retain(element);
+        // An owned reference to `list[index]`: a boxed element is borrowed + retained; a packed
+        // element materializes owned (rc 1) — the callee's frame consumes it either way.
+        let element = element_owned(self.get(list)?, index, "call_with_element")?;
+        // The element rides straight into the callee's frame — no table entry, exactly the fused
+        // `list_get` + `call` + `free`.
         match self.vm.call_value(callee, vec![element], self.span) {
             Ok(result) => Ok(self.insert(result)),
             Err(Abort) => Err(CtxError::Abort),
@@ -198,12 +237,8 @@ impl NativeCtx for VmCtx<'_, '_> {
     }
 
     fn list_get(&mut self, list: Slot, index: usize) -> CtxResult<Slot> {
-        let element = self
-            .get(list)?
-            .list_get(index)
-            .ok_or_else(|| CtxError::Std(noeta_stdlib::type_error("list_get", "list")))?;
-        // `list_get` hands out a borrowed reference; the table owns its entries.
-        retain(element);
+        // Owned either way (see `element_owned`); the table adopts the reference.
+        let element = element_owned(self.get(list)?, index, "list_get")?;
         Ok(self.insert(element))
     }
 
@@ -455,6 +490,88 @@ impl NativeCtx for VmCtx<'_, '_> {
         let old = entry.replace(result).expect("checked above");
         self.vm.release_value(old);
         Ok(())
+    }
+
+    // ----- The raw-buffer ABI (package-manager N3.4) -----
+
+    fn with_packed(
+        &mut self,
+        slot: Slot,
+        f: &mut dyn FnMut(&PackedView, &[u8]),
+    ) -> CtxResult<bool> {
+        let value = self.get(slot)?;
+        Ok(value
+            .with_packed_ref(|schema, bytes| f(&packed_view(schema, bytes.len()), bytes))
+            .is_some())
+    }
+
+    fn with_packed_mut(
+        &mut self,
+        slot: Slot,
+        f: &mut dyn FnMut(&PackedView, &mut [u8]),
+    ) -> CtxResult<Option<Slot>> {
+        let value = self.get(slot)?;
+        if !value.is_packed_list() {
+            return Ok(None);
+        }
+        // Proven sole ownership — a table-owned slot holding the only reference: mutate the
+        // buffer in place (the P-REUSE shape, zero copy). The slot is spent either way.
+        if slot >= self.seeded && value.is_uniquely_owned() {
+            let owned = self.take(slot)?;
+            owned.packed_mutate_in_place(|schema, bytes| {
+                f(&packed_view(schema, bytes.len()), bytes)
+            });
+            return Ok(Some(self.insert(owned)));
+        }
+        // Shared (or a borrowed seed): copy-on-write — clone the buffer, mutate the clone. A
+        // non-seed input is spent (`free` is a no-op on a seed).
+        let (schema, mut bytes) = value.packed_parts().expect("checked packed above");
+        f(&packed_view(schema, bytes.len()), &mut bytes);
+        self.free(slot);
+        Ok(Some(self.insert(Value::packed_list(schema, bytes))))
+    }
+
+    fn make_packed_like(&mut self, like: Slot, bytes: Vec<u8>) -> CtxResult<Slot> {
+        let value = self.get(like)?;
+        let Some(schema) = value.with_packed_ref(|schema, _| schema) else {
+            return Err(CtxError::Std(noeta_stdlib::type_error(
+                "make_packed_like",
+                "packed list",
+            )));
+        };
+        debug_assert!(
+            schema.byte_size > 0 && bytes.len().is_multiple_of(schema.byte_size),
+            "make_packed_like: a whole number of elements"
+        );
+        Ok(self.insert(Value::packed_list(schema, bytes)))
+    }
+
+    fn object_scalars(&mut self, slot: Slot) -> CtxResult<Option<Vec<Scalar>>> {
+        let value = self.get(slot)?;
+        if !value.is_object() {
+            return Ok(None);
+        }
+        Ok(value.slots().and_then(|slots| {
+            slots
+                .iter()
+                .map(|&s| crate::values::value_to_scalar(s))
+                .collect()
+        }))
+    }
+
+    fn make_object_like(&mut self, like: Slot, fields: &[Scalar]) -> CtxResult<Slot> {
+        let value = self.get(like)?;
+        let Some(shape) = value.shape().filter(|s| s.fields.len() == fields.len()) else {
+            return Err(CtxError::Std(noeta_stdlib::type_error(
+                "make_object_like",
+                "object of matching field count",
+            )));
+        };
+        let slots = fields
+            .iter()
+            .map(|&s| crate::values::scalar_to_value(s))
+            .collect();
+        Ok(self.insert(Value::object(shape, slots)))
     }
 }
 

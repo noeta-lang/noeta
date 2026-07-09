@@ -111,6 +111,32 @@ bytes — the reason `vec`'s bulk `*_all` kernels are the **last per-backend spe
   kernels must hold the special-case numbers (the seam adds one borrow-shaped call per *bulk op*,
   not per element, so the floor is negligible; verify, don't assume).
 
+**Design refinements found at implementation (2026-07-09):** the two backends hold *different*
+concrete schema types (the VM an interned `&'static noeta_object::PackedSchema`; the eval oracle
+its own private `Rc<PackedSchema>` over `TypeDef`), so "exposing the shared `PackedSchema`" is
+realized the way this ABI always crosses type gaps — a **neutral vocabulary**: callbacks receive a
+read-only `PackedView { fields, byte_size, column, count }` built by each backend from its own
+schema. Consequences and additions:
+
+- `make_packed(schema, bytes)` becomes **`make_packed_like(like, bytes)`** — a result's element
+  schema is named by an existing packed *slot*, never constructed by the extension (schemas are
+  backend-interned; and `SigType` cannot name a user's `@packed` type anyway, so a result typing
+  as anything but an input's type was never expressible).
+- `with_packed_mut` preserves **value semantics**: the callback gets a uniquely-owned COW buffer
+  (in place only under proven sole ownership — free on the eval side via `Rc::make_mut`); the
+  result is a fresh slot, a non-seed input slot is spent (the `take`/`make_list` convention).
+- Two structural-object primitives make the *boxed fallback* expressible in the one shared
+  dispatch: `object_scalars(slot)` (the ctx twin of the shallow `NativeValue::Object` projection)
+  and `make_object_like(like, fields)` (the ctx twin of `NativeOut::Object` +
+  `RetTy::SameAsArg` materialization, which `intern` deliberately rejects for lack of shape).
+- Bug fixed by the migration: the old `add_all`/`sub_all` fast path accepted two packed operands
+  of **different layouts** (row × column) and added their buffers flat — silently wrong values.
+  The shared dispatch requires layout agreement and otherwise takes the (correct) element-wise
+  fallback; a conformance test pins the mixed-layout result.
+- `fs.list`'s checker special case dies too: the signature becomes `params: &[Optional(&Str)]`
+  (the http-arc H4 trailing-optional machinery, which post-dates the special case), so
+  `is_module_function` reduces to pure registry delegation.
+
 ### N3.5 — Host-coupled finalizers: **recommend CLOSING as won't-build** *(decision pending)*
 
 The gap-fill list named finalizers alongside raw buffers. Analysis says the two differ:

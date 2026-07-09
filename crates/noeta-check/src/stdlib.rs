@@ -33,8 +33,7 @@ pub(super) const RECEIVER: &str = "Receiver";
 pub(super) const NATIVE_TYPE_NAMES: &[&str] = &[ITERATOR, FUTURE, SENDER, RECEIVER];
 
 /// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. Every module — `json` included
-/// (B4) — comes from the native-extension registry now; only the `vec` bulk `*_all` kernels keep a
-/// small per-backend fallback in `module_params`/`module_return`.
+/// (B4) — comes from the native-extension registry.
 pub(super) fn is_std_module(name: &str) -> bool {
     registry::find_module(name).is_some()
 }
@@ -490,9 +489,9 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
 }
 
 /// The count of **required** arguments a Ring 2 module function takes — everything up to its first
-/// trailing-optional param (http arc H4). `None` for a non-registry function (the `vec` `*_all`
-/// fallback), whose params are all required. Runs alongside [`module_params`] so the arity gate
-/// admits `http.get(url)` as well as `http.get(url, headers)`.
+/// trailing-optional param (http arc H4). Runs alongside [`module_params`] so the arity gate
+/// admits `http.get(url)` as well as `http.get(url, headers)` (and, since N3.4, `fs.list()` as
+/// well as `fs.list(dir)`).
 pub(super) fn module_required(module: &str, name: &str) -> Option<usize> {
     registry::find_function_sig(module, name).map(|f| registry::SigType::required_count(f.params))
 }
@@ -602,29 +601,17 @@ fn map_params(name: &str, key: &Type, val: &Type) -> Option<Vec<Type>> {
 /// each `Var` substituted by its first-occurrence binding, so the ordinary argument check enforces
 /// the repeated-variable positions.
 pub(super) fn module_params(module: &str, name: &str, args: &[Type]) -> Option<Vec<Type>> {
-    // `fs.list` (and its async twin, extern-types X6) takes an optional dir argument (0 or 1) —
-    // not arity-checked. (Both are registered with a fixed signature for dispatch, so this skip
-    // must precede the registry lookup.)
-    if registry::module_name(module) == "fs" && (name == "list" || name == "list_async") {
-        return None;
-    }
-    // Migrated modules: parameter types come from the native-extension registry.
-    if let Some(f) = registry::find_function_sig(module, name) {
-        let bindings = bind_params(f.params, args);
-        return Some(
-            f.params
-                .iter()
-                .map(|p| sig_to_type_bound(p, &bindings))
-                .collect(),
-        );
-    }
-    // Not in the registry: the `vec` bulk `*_all` kernels (per-backend, deferred with vec/quat's
-    // eventual eviction to a package).
-    Some(match (registry::module_name(module), name) {
-        ("vec", "add_all" | "sub_all" | "dot_all" | "scale_all") => vec![Type::Dyn, Type::Dyn],
-        ("vec", "length_all") => vec![Type::Dyn],
-        _ => return None,
-    })
+    // Every module function types from the native-extension registry (the last non-registry
+    // stragglers died with package-manager N3.4: the `vec` bulk `*_all` kernels are registered
+    // ctx functions, and `fs.list`/`fs.list_async` carry a real trailing-`Optional` signature).
+    let f = registry::find_function_sig(module, name)?;
+    let bindings = bind_params(f.params, args);
+    Some(
+        f.params
+            .iter()
+            .map(|p| sig_to_type_bound(p, &bindings))
+            .collect(),
+    )
 }
 
 /// The return type of a prelude free-function call `name(args)`, given the argument types — or
@@ -682,22 +669,15 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
     // i-th argument's type (`vec.add(v, w): typeof v`); `NumericPreserving` is the `math.abs`/min/max
     // kind-preserving rule; `Concrete` maps directly, with any signature type variables bound from
     // the argument types (higher-order-abi H1) — `all(List<Future<T>>) -> List<T>` recovers `T`.
-    if let Some(f) = registry::find_function_sig(module, name) {
-        use registry::RetTy;
-        return Some(match f.ret {
-            RetTy::Concrete(s) => sig_to_type_bound(&s, &bind_params(f.params, args)),
-            RetTy::SameAsArg(i) => args.get(i).cloned().unwrap_or(Type::Dyn),
-            RetTy::NumericPreserving => numeric_preserving(args),
-            // The call-site-typed turbofish form lands in Phase B; until then no registered function
-            // uses it, so a hole is the safe fallback.
-            RetTy::TypeArg => Type::Unknown,
-        });
-    }
-    // Not in the registry: the `vec` bulk `*_all` kernels (per-backend).
-    Some(match (registry::module_name(module), name) {
-        ("vec", "add_all" | "sub_all" | "scale_all") => args.first().cloned().unwrap_or(Type::Dyn),
-        ("vec", "dot_all" | "length_all") => list(Type::F32),
-        _ => return None,
+    use registry::RetTy;
+    let f = registry::find_function_sig(module, name)?;
+    Some(match f.ret {
+        RetTy::Concrete(s) => sig_to_type_bound(&s, &bind_params(f.params, args)),
+        RetTy::SameAsArg(i) => args.get(i).cloned().unwrap_or(Type::Dyn),
+        RetTy::NumericPreserving => numeric_preserving(args),
+        // The call-site-typed turbofish form lands in Phase B; until then no registered function
+        // uses it, so a hole is the safe fallback.
+        RetTy::TypeArg => Type::Unknown,
     })
 }
 

@@ -1,0 +1,17 @@
+// Package-manager N3.4: a **packed** list driven through a ctx-seam element loop
+// (`task.map_bounded`'s fused `call_with_element`). The VM's ctx element reads used the boxed-only
+// `Value::list_get` and errored on a packed operand ("expects a list argument") — they now
+// materialize the one element from the flat buffer, so a `List<packed>` is an ordinary input to
+// any higher-order native function. The eval oracle always handled it; the differential pins both.
+// expect: stdout "result=2.0,4.0,6.0"
+// expect: exit 0
+use std.task.{map_bounded}
+
+@packed struct P { v: f32 }
+
+async fn dbl(p: P): f32 {
+    return p.v * 2.0f32
+}
+
+xs = map_bounded([P { v: 1.0f32 }, P { v: 2.0f32 }, P { v: 3.0f32 }], 2, dbl)
+echo "result=" ~ xs.join(",")

@@ -1,0 +1,20 @@
+// Package-manager N3.4: bulk `vec.*_all` over two packed Vec3 lists of DIFFERENT layouts (row ×
+// column). The flat buffer kernels are only valid when the operands share a layout — mixing them
+// used to add interleaved bytes to column bytes, silently producing garbage. The migrated shared
+// dispatch requires layout agreement and takes the element-wise fallback instead, so mixed-layout
+// operands get the mathematically correct result (shaped like the LEFT operand's elements).
+// expect: stdout "[R3 {x: 2.0, y: 2.0, z: 3.0}, R3 {x: 4.0, y: 8.0, z: 10.0}]"
+// expect: stdout "[R3 {x: 0.0, y: 2.0, z: 3.0}, R3 {x: 4.0, y: 2.0, z: 2.0}]"
+// expect: stdout "[1.0, 39.0]"
+// expect: exit 0
+use std.{vec}
+
+@packed struct R3 { x: f32; y: f32; z: f32 }
+@packed(layout: column) struct C3 { x: f32; y: f32; z: f32 }
+
+rows = [R3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }, R3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }]
+cols = [C3 { x: 1.0f32, y: 0.0f32, z: 0.0f32 }, C3 { x: 0.0f32, y: 3.0f32, z: 4.0f32 }]
+
+echo vec.add_all(rows, cols)
+echo vec.sub_all(rows, cols)
+echo vec.dot_all(rows, cols)
