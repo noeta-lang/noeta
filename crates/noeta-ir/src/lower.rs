@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 use noeta_ast::{
     BinaryOp, Expr, ForPattern as AstForPattern, Param, Program as AstProgram, Stmt as AstStmt,
-    StrPart,
+    StrPart, TypeRef,
 };
 use noeta_span::Span;
 
@@ -162,6 +162,7 @@ pub fn lower_with_sites_opts(
         sites,
         real_isolates,
         synth_step_name: None,
+        type_aliases: collect_type_aliases(program),
     };
     let top = lowerer.lower_body(&program.stmts)?;
     Ok(Program {
@@ -189,9 +190,67 @@ struct Lowerer<'a> {
     /// the first `Expr::Closure` the lowering meets (the step itself, which lowers before anything
     /// nested inside it). A user's own closure therefore always finds `None` and stays anonymous.
     synth_step_name: Option<String>,
+    /// Import **aliases** (`use std.id.Uuid as MyId` → `{"MyId": "Uuid"}`) — the local rename mapped
+    /// back to the imported type's own name, which is the name a runtime value is tagged with. A
+    /// narrowing target (`x is MyId`, `x.as<MyId>()`) is rewritten through this so it matches the
+    /// value's runtime tag; a non-aliased import (`use std.id.Uuid`) needs no entry, its local name
+    /// already being the runtime name. The one seam that makes `is`/`as`/`type_of` alias-aware in
+    /// both backends at once (they share this lowered IR).
+    type_aliases: HashMap<String, String>,
+}
+
+/// Build the import-alias map (see [`Lowerer::type_aliases`]) from a program's `use` statements:
+/// each renamed leaf `use … <Name> as <Alias>` contributes `Alias → Name`. Only aliases are
+/// recorded — a plain import's local name is already the runtime name, so it needs no rewrite.
+fn collect_type_aliases(program: &AstProgram) -> HashMap<String, String> {
+    let mut aliases = HashMap::new();
+    for stmt in &program.stmts {
+        if let AstStmt::Use { names, .. } = stmt {
+            for n in names {
+                if let Some(alias) = &n.alias {
+                    aliases.insert(alias.clone(), n.name.clone());
+                }
+            }
+        }
+    }
+    aliases
 }
 
 impl Lowerer<'_> {
+    /// Rewrite a narrowing target's [`TypeRef`] so any import **alias** resolves to the imported
+    /// type's own name (`MyId` → `Uuid`) — recursively, so `List<MyId>` / `?MyId` are covered too —
+    /// making `is`/`as`/`type_of` match a value's runtime tag. A no-op (plain clone) when the file
+    /// declared no aliases, which is the overwhelmingly common case.
+    fn resolve_type_aliases(&self, ty: &TypeRef) -> TypeRef {
+        if self.type_aliases.is_empty() {
+            return ty.clone();
+        }
+        match ty {
+            TypeRef::Named { name, args, span } => TypeRef::Named {
+                name: self.type_aliases.get(name).cloned().unwrap_or_else(|| name.clone()),
+                args: args.iter().map(|a| self.resolve_type_aliases(a)).collect(),
+                span: *span,
+            },
+            TypeRef::Union { members, span } => TypeRef::Union {
+                members: members.iter().map(|m| self.resolve_type_aliases(m)).collect(),
+                span: *span,
+            },
+            TypeRef::Tuple { elements, span } => TypeRef::Tuple {
+                elements: elements.iter().map(|e| self.resolve_type_aliases(e)).collect(),
+                span: *span,
+            },
+            TypeRef::Fn { params, ret, span } => TypeRef::Fn {
+                params: params.iter().map(|p| self.resolve_type_aliases(p)).collect(),
+                ret: Box::new(self.resolve_type_aliases(ret)),
+                span: *span,
+            },
+            TypeRef::Optional { inner, span } => TypeRef::Optional {
+                inner: Box::new(self.resolve_type_aliases(inner)),
+                span: *span,
+            },
+        }
+    }
+
     /// Allocate a fresh frame-local temporary.
     fn fresh(&mut self) -> Temp {
         let t = Temp(self.temps);
@@ -1251,7 +1310,7 @@ impl Lowerer<'_> {
                     out,
                     Rvalue::As {
                         operand,
-                        ty: ty.clone(),
+                        ty: self.resolve_type_aliases(ty),
                         span: *span,
                     },
                     *span,
@@ -1263,7 +1322,7 @@ impl Lowerer<'_> {
                     out,
                     Rvalue::TypeTest {
                         operand,
-                        ty: ty.clone(),
+                        ty: self.resolve_type_aliases(ty),
                         span: *span,
                     },
                     *span,
