@@ -48,9 +48,13 @@ We compose p2panda's pieces rather than invent crypto. What we must build/wire:
 
 ## Staging (each a green, committed increment)
 
-- **P3.4b.0 — offline spike.** Two in-process peers, real `Manager` + `SqliteSpacesStore` + a
-  `Forge`: create a space, add peer B, A `publish`es encrypted state, B `process`es + decrypts. No
-  networking. Proves the assembly + pins the concrete types. (De-risks everything.)
+- **P3.4b.0 — offline spike. ✅ DONE** (`a01e5a58`). Two in-process peers, real `Manager` +
+  `SqliteSpacesStore` + our `NoetaForge`/`SpacesOp`: A creates a space, publishes encrypted state,
+  adds B; B replays control messages in causal order and, once welcomed, decrypts. Proved the
+  assembly + pinned the types. **Finding:** the raw `Manager`'s state-persistence helpers
+  (`set_groups_state`/`set_space_state`/`*_persisted`) are `#[cfg(test/test_utils)]` — so the
+  **production integration persists via `p2panda-stream`'s spaces processor + orderer**, not the raw
+  Manager. b.1 adopts that. (The spike used a dev-only `ring-p2p-testkit` feature for those helpers.)
 - **P3.4b.1 — encrypted durable path.** Bind the spike to `RealHost`/the node as a parallel encrypted
   transport; keep the plaintext path unchanged. Encrypt/decrypt `synced_signal` bodies through a space.
 - **P3.4b.2 — membership + surface.** `.members()/.encrypted()`; add/remove with key rotation; the
