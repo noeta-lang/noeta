@@ -145,15 +145,22 @@ keeps today's clap error. Small, independent of composition.
 Rust crate shape, what composition does, the Rust-toolchain requirement); Deferred section shrinks
 to finalizers-won't-build note (if confirmed) + distribution/packaging.
 
-## Open decisions (user)
+## Decisions (user, 2026-07-09)
 
-1. **Finalizers** — N3.5 recommends won't-build (rationale above). Confirm or overrule.
-2. **Composed toolchain scope** — recommendation: the composed binary IS the app's toolchain
-   (all verbs delegate). The alternative (compose for `run` only) forks check/LSP behavior.
-3. **Interim source requirement** — composition builds against the noeta workspace (path deps)
-   when available, git+tag otherwise; packaged/hermetic toolchain distribution stays a later
-   decision (same posture as `resolve_aot_runtime`). Confirm.
-4. **Manifest key** — `[package] native = "<dir>"` explicit key (vs a `native/` dir convention).
+1. **Finalizers: SKIP for now** — N3.5 closed as won't-build-now (deterministic Rust `Drop`
+   covers resources; host access at free time is unsound; explicit `close()` stays;
+   `..DEFAULTS` makes a later `finalizer` field additive). Re-open only on a concrete demand.
+2. **Composed toolchain scope: confirmed** — the composed binary IS the app's toolchain.
+3. **Toolchain source retrieval: cargo fetches it** — the shim's `Cargo.toml` declares the
+   toolchain crates as **git deps pinned to the running binary's version tag** (`noeta-cli =
+   { git = …, tag = "vX.Y.Z" }`); cargo's own git cache handles fetch/caching/offline (no temp
+   dirs, no manual fetch — the toolchain is just one more git+tag dependency, the Phase-2
+   model). In-workspace: path deps. `NOETA_TOOLCHAIN_SRC` overrides for hermetic setups.
+   Packaged/hermetic distribution stays a later decision.
+4. **Manifest key: confirmed** — `[package] native = "<dir>"`, one **entry crate** per package.
+   Not a one-extension limit: the entry crate exports a **slice of units** (std's own shape —
+   six units in one crate); a multi-crate package aggregates in its entry crate's own
+   Cargo.toml.
 
 ## Gates
 
