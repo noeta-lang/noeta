@@ -1,7 +1,10 @@
 # Namespaced types — one qualified-identity model for extern + user types
 
 **Branch:** `extern-type-namespacing` (worktree `.claude/worktrees/extern-type-namespacing`, off `main` @ `7ecc9354`)
-**Status:** IN PROGRESS. Design approved (Option A, full scope). Slices commit green one at a time.
+**Status:** ✅ COMPLETE (Phase A + Phase B). Option A, full scope. Every slice committed green.
+Extern types and user types both carry qualified identities (`std.id.Uuid` / `App.Models.User`),
+importable and aliasable with `use … [as …]`, short-name display, nothing globally reserved, and two
+same-named types from different namespaces coexist. Unmerged.
 
 ## Goal
 
@@ -152,9 +155,19 @@ leaf `User`). Switch the origin/merge key to `name.local()` (alias-aware); the E
   verification slice since the linker pre-qualifies.
 - **B3** — conformance: two same-named user types from different namespaces coexist via aliases; the
   native-vs-user `Counter` case; E0020 clash / private-import cases. Differential agrees.
-- **B4** — unify: extern + user types share one identity/resolution/display path; fold what the linker
-  now covers out of the checker/IR extern maps where clean; update `docs/resources` + confirm LSP/salsa
-  parity. Final gate.
+- **B4** — unify + docs + parity. **Finding on "fold externs out of the checker/IR":** not sound.
+  Extern usage is pervasive *single-file* (`use std.id.Uuid; …`), and single-file paths (REPL, eval
+  one-shot, single-file salsa) bypass the linker — so extern resolution *must* stay in the checker/IR
+  (which every path shares) and cannot move to the linker-only rewrite. User-type coexistence, by
+  contrast, only arises multi-file (always linked). The genuine unification is at the **model** level
+  (both are qualified `ns.Name` identities) and the **display** level (one canonical
+  `noeta_ast::short_type_name`, B1) — both achieved. No risky map removal.
+  - Docs: `docs/Modules.md` gains the qualified-identity model, `use … as` aliasing, native-type
+    parity, and where qualification happens (link time).
+  - LSP/salsa parity: the salsa `linked` query qualifies in lockstep (differential already runs
+    multi-file through it). Go-to-definition made qualification-aware — a bare reference leaf-matches a
+    qualified declaration, and an aliased reference resolves through the entry's imports to the right
+    qualified declaration (new: cross-module nav now disambiguates same-named aliased imports).
 
 ## Risks / watch-list
 

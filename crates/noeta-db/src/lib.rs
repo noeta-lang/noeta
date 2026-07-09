@@ -570,11 +570,13 @@ mod tests {
             Ok(p) => p,
             Err(e) => panic!("link failed: {e:?}"),
         };
-        // The real `Foo` is merged in and its `use` dropped (resolved, no opaque stub).
+        // The real `Foo` is merged in under its qualified identity `App.A.Foo` (arc Phase B — the
+        // salsa `linked` query qualifies in lockstep with the CLI loader) and its `use` dropped
+        // (resolved, no opaque stub).
         assert!(
             prog.stmts
                 .iter()
-                .any(|s| matches!(s, noeta_ast::Stmt::Class(c) if c.name == "Foo"))
+                .any(|s| matches!(s, noeta_ast::Stmt::Class(c) if c.name == "App.A.Foo"))
         );
         assert!(
             !prog
