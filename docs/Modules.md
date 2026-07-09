@@ -52,7 +52,7 @@ Grouped imports may alias per-name: `use App.Metrics.{Counter as Hits, Gauge}`.
 
 ## Type identity across namespaces
 
-Every named type has a **qualified identity** — `App.Models.User`, not just `User` — formed from the namespace it is declared in. That identity is what the language keys on for method dispatch and for `is`/`as` narrowing, so two types with the same short name in different namespaces never conflate. Human-facing output (a value's display, `type_of`, error messages) shows the **short** name, so `App.Models.User` prints as `User`.
+Every named type — and every top-level function — has a **qualified identity**, `App.Models.User` or `App.Math.boom`, not just `User` / `boom`, formed from the namespace it is declared in. That identity is what the language keys on for method dispatch, call resolution, and `is`/`as` narrowing, so two types (or two functions) with the same short name in different namespaces never conflate: `use App.Metric.scale as mscale` and `use App.Audio.scale as ascale` bind distinct functions. Human-facing output (a value's display, `type_of`, error messages) shows the **short** name, so `App.Models.User` prints as `User`.
 
 Because identity is qualified, a short name only ever clashes *within a single file's local names*: importing two `Amount`s without aliases, or importing a name the file also declares, is the E0020 collision below — resolved by aliasing one of them.
 

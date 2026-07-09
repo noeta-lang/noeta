@@ -106,7 +106,13 @@ pub fn qualify_stmt(stmt: &mut Stmt, map: &QMap) {
             q_body(body, map);
         }
         Stmt::TierBlock { items, .. } => q_body(items, map),
-        Stmt::Fn(decl) => q_fn(decl, map),
+        Stmt::Fn(decl) => {
+            // A **top-level** function's own name qualifies (like a type's); a method's does not —
+            // methods resolve through their type, so `q_fn` (shared with methods) never touches the
+            // name, and the rewrite lives here on the `Stmt::Fn` arm only.
+            q_name(&mut decl.name, map);
+            q_fn(decl, map);
+        }
         Stmt::Class(decl) => {
             q_name(&mut decl.name, map);
             for a in &mut decl.attrs {
@@ -545,6 +551,43 @@ mod tests {
             matches!(&decl.params[1].ty, Some(TypeRef::Named { name, .. }) if name == "App.M.User")
         );
         assert!(matches!(&decl.ret, Some(TypeRef::Named { name, .. }) if name == "T"));
+    }
+
+    /// A top-level function's own name qualifies and so do its call sites, but a *method*'s name is
+    /// left bare (it resolves through its type, not as a top-level binding).
+    #[test]
+    fn function_name_and_calls_qualify_but_not_methods() {
+        let m = map(&[("scale", "App.M.scale"), ("Box", "App.M.Box")]);
+        let mut stmts = parse_one(
+            "fn scale(n: int): int { return n * 2; }\n\
+             class Box {\n\
+             \x20 v: int\n\
+             \x20 fn scale(): int { return self.v; }\n\
+             }\n\
+             y = scale(3);\n",
+        );
+        for s in &mut stmts {
+            qualify_stmt(s, &m);
+        }
+        // The free function's declaration name qualifies.
+        let Stmt::Fn(decl) = &stmts[0] else {
+            panic!("fn")
+        };
+        assert_eq!(decl.name, "App.M.scale");
+        // The class's method keeps its bare name (`scale`), and only the type name qualifies.
+        let Stmt::Class(class) = &stmts[1] else {
+            panic!("class")
+        };
+        assert_eq!(class.name, "App.M.Box");
+        assert_eq!(class.methods[0].name, "scale");
+        // The call site resolves to the qualified free function.
+        let Stmt::Binding { value, .. } = &stmts[2] else {
+            panic!("binding")
+        };
+        let Expr::Call { callee, .. } = value else {
+            panic!("call")
+        };
+        assert!(matches!(&**callee, Expr::Ident { name, .. } if name == "App.M.scale"));
     }
 
     /// A match with a qualified variant pattern and an `is T` pattern.

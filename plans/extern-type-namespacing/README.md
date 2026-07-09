@@ -168,6 +168,14 @@ leaf `User`). Switch the origin/merge key to `name.local()` (alias-aware); the E
     multi-file through it). Go-to-definition made qualification-aware — a bare reference leaf-matches a
     qualified declaration, and an aliased reference resolves through the entry's imports to the right
     qualified declaration (new: cross-module nav now disambiguates same-named aliased imports).
+- **B5** — **user functions namespaced too** (added after review: excluding them was an unsurfaced
+  scope cut). `build_module_map` + `qualifiable_decl_name` now cover top-level `fn`, and the walker
+  qualifies a **top-level** function's own declaration name (a method's stays bare — it resolves
+  through its type). No new backend work: the checker, both runtimes, LSP, and salsa already resolve a
+  call by name, so once the declaration, its call sites, and the runtime binding all carry the same
+  qualified identity, two same-named `pub fn`s from different namespaces coexist by alias exactly like
+  types (`modules/namespaced_fn_coexistence`). Stack-trace/profiler frames show the qualified function
+  name (identity in diagnostics, short in value display) — a deliberate, test-passing choice.
 
 ## Risks / watch-list
 

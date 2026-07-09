@@ -618,36 +618,39 @@ fn module_namespace(program: &Program) -> Option<Vec<String>> {
     })
 }
 
-/// The name a top-level *type* declaration introduces (class, struct, or enum); `None` for functions
-/// and everything else. Qualification (arc Phase B) is a **type**-identity concern: a class/struct/enum
-/// gains a qualified identity so two same-named types coexist across namespaces. Functions stay merged
-/// by short name (cross-module calls resolve a bare binding), so they are deliberately excluded —
-/// function namespacing is out of this arc's scope.
-fn type_decl_name(stmt: &Stmt) -> Option<&str> {
+/// The name a top-level declaration that gains a **qualified identity** introduces — a class, struct,
+/// enum, or free function. `None` for everything else. Both user types *and* user functions are
+/// namespace-scoped: two same-named ones from different namespaces coexist, each keyed on its qualified
+/// identity. (A method is not top-level — it resolves through its type, so it is not here.)
+fn qualifiable_decl_name(stmt: &Stmt) -> Option<&str> {
     match stmt {
         Stmt::Class(decl) => Some(&decl.name),
         Stmt::Struct(decl) => Some(&decl.name),
         Stmt::Enum(decl) => Some(&decl.name),
+        Stmt::Fn(decl) => Some(&decl.name),
         _ => None,
     }
 }
 
-/// Whether some loaded module with namespace `path` declares a top-level *type* `name` — i.e. `name`
-/// is a *user* type reachable at `path`, as opposed to an extern (`std.…`, which is no loaded module),
-/// a function, or an opaque-stub fallback. Drives [`build_module_map`]: only type names that resolve to
+/// Whether some loaded module with namespace `path` declares a top-level, qualifiable `name` — i.e.
+/// `name` is a *user* type or function reachable at `path`, as opposed to an extern (`std.…`, which is
+/// no loaded module) or an opaque-stub fallback. Drives [`build_module_map`]: only names that resolve to
 /// a real module declaration are qualified; everything else stays bare for its own resolution path.
-fn module_declares_type(modules: &[ModuleView], path: &[String], name: &str) -> bool {
-    modules
-        .iter()
-        .any(|m| m.namespace == path && m.stmts.iter().any(|s| type_decl_name(s) == Some(name)))
+fn module_declares(modules: &[ModuleView], path: &[String], name: &str) -> bool {
+    modules.iter().any(|m| {
+        m.namespace == path
+            && m.stmts
+                .iter()
+                .any(|s| qualifiable_decl_name(s) == Some(name))
+    })
 }
 
-/// Build a module's namespace-qualification map (arc Phase B): its local type names → qualified
-/// identities. Two sources feed it:
+/// Build a module's namespace-qualification map (arc Phase B): its local type/function names →
+/// qualified identities. Two sources feed it:
 ///
-/// - **Own declarations** qualify under this module's own namespace (`User` → `App.Models.User`),
-///   but only when the module *has* a namespace — a non-namespaced module contributes nothing, so its
-///   types stay bare and the file is byte-identical.
+/// - **Own declarations** qualify under this module's own namespace (`User` → `App.Models.User`,
+///   `boom` → `App.Math.boom`), but only when the module *has* a namespace — a non-namespaced module
+///   contributes nothing, so its names stay bare and the file is byte-identical.
 /// - **Imports that resolve to a loaded module** qualify to that module's identity, keyed by the
 ///   import's local (alias-aware) name (`use App.A.User as AUser` → `AUser` → `App.A.User`). An
 ///   extern or opaque-stub import resolves to no module ([`module_declares`] is false) and is skipped.
@@ -660,7 +663,7 @@ fn build_module_map(
     if !own_ns.is_empty() {
         let prefix = own_ns.join(".");
         for stmt in own_stmts {
-            if let Some(name) = type_decl_name(stmt) {
+            if let Some(name) = qualifiable_decl_name(stmt) {
                 map.insert(name.to_string(), format!("{prefix}.{name}"));
             }
         }
@@ -668,7 +671,7 @@ fn build_module_map(
     for stmt in own_stmts {
         if let Stmt::Use { path, names, .. } = stmt {
             for n in names {
-                if module_declares_type(modules, path, &n.name) {
+                if module_declares(modules, path, &n.name) {
                     map.insert(
                         n.local().to_string(),
                         format!("{}.{}", path.join("."), n.name),
@@ -1112,6 +1115,36 @@ mod tests {
         };
         assert_eq!(ctor("a"), "App.Models.User");
         assert_eq!(ctor("b"), "App.People.User");
+    }
+
+    #[test]
+    fn two_same_named_functions_from_distinct_namespaces_coexist_via_aliases() {
+        // Functions are namespace-scoped like types (arc Phase B): two modules each export a `scale`,
+        // imported under distinct aliases, each merged under its own qualified identity so the entry's
+        // aliased calls resolve to the right one.
+        let metric = module(
+            "metric.noe",
+            "namespace App.Metric;\npub fn scale(n: int): int { return n * 10; }\n",
+        );
+        let audio = module(
+            "audio.noe",
+            "namespace App.Audio;\npub fn scale(n: int): int { return n + 100; }\n",
+        );
+        let entry = "use App.Metric.scale as mscale;\nuse App.Audio.scale as ascale;\n\
+                     echo mscale(1);\necho ascale(1);\n";
+        let linked = link("main.noe", entry, &[metric, audio]).unwrap();
+
+        let fn_names: Vec<&str> = linked
+            .program
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Fn(f) => Some(f.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(fn_names.contains(&"App.Metric.scale"), "got {fn_names:?}");
+        assert!(fn_names.contains(&"App.Audio.scale"), "got {fn_names:?}");
     }
 
     #[test]
