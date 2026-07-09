@@ -48,12 +48,24 @@ use crate::reactive::{ReactiveExt, drive_flush, state_of, sync_gates};
 pub const SYNCED_SIGNAL_TYPE_NAME: &str = "SyncedSignal";
 
 const VAR_A: SigType = SigType::Var(0);
+/// The optional third argument: the member set of an **encrypted** group (p2p P3.4b). A list of
+/// peer-id (hex) strings. Present ⇒ the signal is end-to-end encrypted to exactly those members;
+/// absent ⇒ the plaintext transport (unchanged). Members-imply-encryption is the safe default:
+/// there is no way to declare members without encryption, and no meaningful encryption without a
+/// membership set.
+const MEMBERS: SigType = SigType::List(&SigType::String);
 
-/// `synced_signal(initial: T, topic: string) -> SyncedSignal<T>` where `T: Mergeable` — the bound
-/// is the compile-time guarantee that only a CRDT may be synced (p2p P2.M).
+/// `synced_signal(initial: T, topic: string, members?: List<string>) -> SyncedSignal<T>` where
+/// `T: Mergeable` — the bound is the compile-time guarantee that only a CRDT may be synced (p2p
+/// P2.M). The optional `members` list opts the signal into an encrypted group (p2p P3.4b); given at
+/// construction so the very first state announced to the topic is already encrypted.
 pub const SYNCED_CTX_FNS: &[ExtFn] = &[ExtFn {
     name: "synced_signal",
-    params: &[SigType::BoundedVar(0, "Mergeable"), SigType::String],
+    params: &[
+        SigType::BoundedVar(0, "Mergeable"),
+        SigType::String,
+        SigType::Optional(&MEMBERS),
+    ],
     ret: RetTy::Concrete(SigType::Generic(SYNCED_SIGNAL_TYPE_NAME, &[VAR_A])),
 }];
 
@@ -94,6 +106,18 @@ pub struct SyncedSignalBox {
     pub cell: Retained,
     pub subscription: u64,
     pub topic: String,
+    /// The encrypted group's member set (p2p P3.4b), empty for a plaintext signal. When non-empty
+    /// the signal's state crosses the wire encrypted to exactly these peer ids; the deterministic
+    /// sandbox treats it as a transparent pass-through (the decrypted value equals the plaintext
+    /// value), so an encrypted program stays oracle byte-identical.
+    pub members: Vec<String>,
+}
+
+impl SyncedSignalBox {
+    /// Whether this signal is an encrypted group (has a declared membership).
+    pub fn is_encrypted(&self) -> bool {
+        !self.members.is_empty()
+    }
 }
 
 impl ExternValue for SyncedSignalBox {
@@ -130,10 +154,34 @@ pub fn synced_ctx_dispatch<C: NativeCtx + ?Sized>(
 ) -> Result<CtxOut, CtxError> {
     match func {
         "synced_signal" => {
-            ctx_arity(func, args, 2)?;
+            // 2 required args (initial, topic); an optional 3rd (members) opts into encryption.
+            if args.len() < 2 || args.len() > 3 {
+                return Err(StdError {
+                    kind: ErrorKind::Arity,
+                    message: format!(
+                        "`synced_signal` takes 2 or 3 arguments but {} were supplied",
+                        args.len()
+                    ),
+                }
+                .into());
+            }
             let topic = match ctx.view(args[1])? {
                 NativeValue::Str(s) => s,
                 _ => return Err(type_error("synced_signal", "string").into()),
+            };
+            // The encrypted group's members (peer-id hex strings), or empty for the plaintext path.
+            let members = match args.get(2) {
+                Some(&slot) => match ctx.view(slot)? {
+                    NativeValue::List(items) => items
+                        .into_iter()
+                        .map(|v| match v {
+                            NativeValue::Str(s) => Ok(s),
+                            _ => Err(type_error("synced_signal", "a list of peer-id strings")),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    _ => return Err(type_error("synced_signal", "a list of peer-id strings").into()),
+                },
+                None => Vec::new(),
             };
             // Serialize the initial state (and validate it really is a CRDT — the `Mergeable` bound
             // makes this hold statically, but a `dyn`-laundered value could still arrive).
@@ -160,6 +208,7 @@ pub fn synced_ctx_dispatch<C: NativeCtx + ?Sized>(
                     cell,
                     subscription,
                     topic,
+                    members,
                 },
             ))))
         }
