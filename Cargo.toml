@@ -157,6 +157,15 @@ p2panda-core = "0.7"
 p2panda-store = "0.7"
 p2panda-sync = "0.7"
 futures-util = "0.3"
+# Group encryption for `synced_signal` (p2p P3.4b, same gated `ring-p2p` tree): p2panda's
+# decentralised group key-agreement + encryption. `p2panda-spaces` is the high-level API (a `Space`
+# encrypts operation payloads for a membership group with post-compromise security); it composes
+# `p2panda-auth` (membership/access control) + `p2panda-encryption` (the XChaCha20-Poly1305 "data
+# encryption" scheme, so late joiners can still decrypt history) over `p2panda-store`'s `spaces`
+# tables. Pre-1.0; pinned exactly. Never in a default build.
+p2panda-spaces = "0.7"
+p2panda-auth = "0.7"
+p2panda-encryption = { version = "0.7", features = ["data_scheme"] }
 
 [workspace.lints.rust]
 # Quarantine unsafe: forbidden workspace-wide in M0. The first crates that may

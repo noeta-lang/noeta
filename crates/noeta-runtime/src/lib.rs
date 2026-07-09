@@ -28,6 +28,9 @@ pub use executor::RealExecutor;
 // p2panda/iroh dependency tree. Off by default; `RealHost` keeps the loopback broker.
 #[cfg(feature = "ring-p2p")]
 pub mod p2p_node;
+// Group encryption for `synced_signal` (p2p P3.4b) — p2panda-spaces assembly, same ring.
+#[cfg(feature = "ring-p2p")]
+pub mod p2p_crypto;
 
 use noeta_stdlib::net::accept_outcome;
 use noeta_stdlib::{

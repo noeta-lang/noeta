@@ -22,8 +22,13 @@ reqwest = { workspace = true, optional = true }
 # real peers. Only `noeta run --features` / a build declaring the ring links p2panda.
 p2panda-net = { workspace = true, optional = true }
 p2panda-core = { workspace = true, optional = true }
-p2panda-store = { workspace = true, optional = true }
+# The `spaces` feature pulls in the group-encryption store tables (SqliteSpacesStore) that
+# `p2panda-spaces` needs; it transitively enables the store's `groups`/`encryption` support.
+p2panda-store = { workspace = true, optional = true, features = ["spaces"] }
 p2panda-sync = { workspace = true, optional = true }
+p2panda-spaces = { workspace = true, optional = true }
+p2panda-auth = { workspace = true, optional = true }
+p2panda-encryption = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 
 [features]
@@ -44,8 +49,15 @@ ring-p2p = [
     "dep:p2panda-core",
     "dep:p2panda-store",
     "dep:p2panda-sync",
+    "dep:p2panda-spaces",
+    "dep:p2panda-auth",
+    "dep:p2panda-encryption",
     "dep:futures-util",
 ]
+# TEST-ONLY: exposes p2panda-spaces' `test_utils` conveniences (the persisted/state-setter helpers
+# the raw `Manager` gates behind test builds) so the P3.4b group-encryption spike can persist state
+# without going through p2panda-stream. Never enabled in a shipping build — resolver 2 keeps it out.
+ring-p2p-testkit = ["ring-p2p", "p2panda-spaces?/test_utils"]
 
 [dev-dependencies]
 criterion = { workspace = true }
