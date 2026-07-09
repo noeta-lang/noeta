@@ -111,6 +111,20 @@ Coverage is instead:
 - **Node config** — storage path, discovery methods (mDNS / rendezvous), relay — configured, not
   imperatively constructed (§9.15.1).
 
+## Status (branch `p2p-p3`)
+
+- **P3.0 ✅** node bootstrap behind `ring-p2p`; async bridge (dedicated runtime + drain channels).
+- **P3.1 ✅** RealHost `P2p` routes through the node; `p2p_subscribe` made fallible; **verified**
+  two-node gossip delivery (mDNS, 3.16s).
+- **Packaging ✅** `ring-p2p` default-on, forwarded to `noeta-aot-runtime`, `ring: Some("ring-p2p")`
+  on the transport modules; `--no-default-features` sheds all p2panda (per the extension-system
+  handoff).
+- **P3.2 ✅** durable `synced_signal` transport via p2panda **log-sync** (SqliteStore append-logs of
+  signed operations); durable seam (`p2p_*_durable`, sandbox = broker); **verified** a late-joining
+  node catches up on a peer's prior state (4.20s) — the eventual-consistency guarantee.
+- **Remaining:** P3.3 (persist the Ed25519 identity + `SyncStatus` surface), P3.4 (group encryption
+  + topic membership + node config — the large one), P3.5 (docs: flip Local-First "what's next").
+
 ## 8. Proposed staging (feature-gated throughout)
 
 - **P3.0 — node bootstrap.** Add `p2panda-net` under a `p2p-net` cargo feature + the `iroh-gossip`
