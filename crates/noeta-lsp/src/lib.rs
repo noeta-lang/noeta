@@ -731,12 +731,18 @@ impl DocumentStore {
         // cursor. Resolve the receiver's type from the workspace type index and list its members.
         let def_use = resolve::DefUse::build(program);
         if let Some((receiver_span, _member)) = def_use.member_at(offset, cursor) {
-            let members = noeta_db::linked_checked_ide(db, cache.workspace)
+            let checked = noeta_db::linked_checked_ide(db, cache.workspace);
+            let mut members = checked
                 .expr_types
                 .get(&receiver_span)
                 .and_then(nominal_name)
                 .map(|type_name| completion::members_of(program, type_name))
                 .unwrap_or_default();
+            // Bundle-contributed methods (kernel-methods K4): a bound `@packed` type offers its
+            // bundles' Element methods, a `List<T>` of one their Bulk methods.
+            if let Some(repr) = checked.expr_types.get(&receiver_span) {
+                members.extend(bundle_members_for(repr, &checked.bundle_bindings));
+            }
             return Some(members);
         }
 
@@ -947,6 +953,29 @@ fn path_to_uri(path: &Path) -> String {
 /// The declared type name a reflected [`TypeRepr`] refers to, for member resolution — the nominal
 /// variants (`struct` / `class` / `enum` / unknown-kind named). Scalars, containers, functions, and
 /// unions have no user declaration to jump into, so they yield `None`.
+/// Bundle-contributed members for a receiver type (kernel-methods K4): a bound `@packed` type
+/// `T` gets its bundles' `Element` methods, a `List<T>` their `Bulk` methods; anything else none.
+fn bundle_members_for(
+    repr: &TypeRepr,
+    bindings: &std::collections::HashMap<String, Vec<(String, String)>>,
+) -> Vec<completion::Candidate> {
+    use noeta_stdlib::BundleReceiver;
+    let (name, kind) = match repr {
+        TypeRepr::List(elem) => match nominal_name(elem) {
+            Some(n) => (n, BundleReceiver::Bulk),
+            None => return Vec::new(),
+        },
+        other => match nominal_name(other) {
+            Some(n) => (n, BundleReceiver::Element),
+            None => return Vec::new(),
+        },
+    };
+    match bindings.get(name) {
+        Some(b) => completion::bundle_members(b, kind),
+        None => Vec::new(),
+    }
+}
+
 fn nominal_name(repr: &TypeRepr) -> Option<&str> {
     match repr {
         TypeRepr::Struct(name, _)
@@ -1043,8 +1072,13 @@ fn bare_dot_members(
     let checked = noeta_check::check_all_with_types(&parsed.program);
     let def_use = resolve::DefUse::build(&parsed.program);
     let (receiver_span, _member) = def_use.member_at(offset, SourceId::FIRST)?;
-    let type_name = nominal_name(checked.expr_types.get(&receiver_span)?)?;
-    Some(completion::members_of(program, type_name))
+    let repr = checked.expr_types.get(&receiver_span)?;
+    let mut members = nominal_name(repr)
+        .map(|type_name| completion::members_of(program, type_name))
+        .unwrap_or_default();
+    // Bundle-contributed methods (kernel-methods K4), as in the parsed-member path above.
+    members.extend(bundle_members_for(repr, &checked.bundle_bindings));
+    Some(members)
 }
 
 /// Type-name candidates when `offset` is in a type-annotation position, else `None`. A synthetic

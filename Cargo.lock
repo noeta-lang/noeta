@@ -1945,6 +1945,7 @@ dependencies = [
  "noeta-parser",
  "noeta-pm",
  "noeta-span",
+ "noeta-stdlib",
  "salsa",
  "tokio",
  "tower-lsp-server",

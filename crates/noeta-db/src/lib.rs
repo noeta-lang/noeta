@@ -110,6 +110,9 @@ pub struct Checked {
     /// main's flat per-map fields, including the noeta-native `TypeRecipe` rename — the bundle's
     /// field types live in `noeta_check::Sites` and follow that rename through the re-export.)
     pub sites: noeta_check::Sites,
+    /// Method-bundle bindings by target type (kernel-methods K4) — what member completion reads
+    /// to offer bound methods.
+    pub bundle_bindings: std::collections::HashMap<String, Vec<(String, String)>>,
 }
 
 /// Compiler output: a [`Module`], or the first construct outside the VM's subset.
@@ -202,6 +205,7 @@ fn from_check_output(out: noeta_check::Checked) -> Checked {
         diagnostics: out.diagnostics,
         expr_types: out.expr_types,
         sites: out.sites,
+        bundle_bindings: out.bundle_bindings,
     }
 }
 
@@ -428,6 +432,7 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             diagnostics: diags.clone(),
             expr_types: std::collections::HashMap::new(),
             sites: noeta_check::Sites::default(),
+            bundle_bindings: std::collections::HashMap::new(),
         },
     }
 }
@@ -444,6 +449,7 @@ pub fn linked_checked_ide(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             diagnostics: diags.clone(),
             expr_types: std::collections::HashMap::new(),
             sites: noeta_check::Sites::default(),
+            bundle_bindings: std::collections::HashMap::new(),
         },
     }
 }

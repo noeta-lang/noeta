@@ -104,6 +104,11 @@ pub struct Checked {
     pub expr_types: HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// The compile-input bundle both backends consume — see [`Sites`].
     pub sites: Sites,
+    /// Method-bundle bindings by target type name (kernel-methods K4): each
+    /// `impl <module>.<Bundle> for T {}` as `(module qualified identity, bundle name)`. The IDE
+    /// reads it to offer bound methods in member completion; a handful of entries, so it is
+    /// populated on every run.
+    pub bundle_bindings: HashMap<String, Vec<(String, String)>>,
 }
 
 /// The checker's **compile-input bundle**: every span-keyed codegen hint plus destructor relevance,
@@ -219,6 +224,7 @@ pub fn check_all_session(program: &Program) -> (Checked, SessionChecker) {
         diagnostics: std::mem::take(&mut checker.diags),
         expr_types: checker.sites.expr_types.clone(),
         sites: checker.sites.clone().into_sites(checker.relevance.clone()),
+        bundle_bindings: checker.bundle_bindings_public(),
     };
     (checked, SessionChecker { checker, env })
 }
@@ -960,6 +966,7 @@ impl Checker {
     /// Consume the checker into the public [`Checked`] result — the whole-program finisher
     /// (`check_all` moves; the session flavor clones and keeps the checker alive instead).
     fn into_checked(self) -> Checked {
+        let bundle_bindings = self.bundle_bindings_public();
         let relevance = self.relevance;
         let mut sites = self.sites;
         let expr_types = std::mem::take(&mut sites.expr_types);
@@ -967,7 +974,25 @@ impl Checker {
             diagnostics: self.diags,
             expr_types,
             sites: sites.into_sites(relevance),
+            bundle_bindings,
         }
+    }
+
+    /// The bundle bindings as the public `(module, bundle)` form (kernel-methods K4) — what the
+    /// IDE reads to offer bound methods in member completion.
+    fn bundle_bindings_public(&self) -> HashMap<String, Vec<(String, String)>> {
+        self.bundle_impls
+            .iter()
+            .map(|(ty, bindings)| {
+                (
+                    ty.clone(),
+                    bindings
+                        .iter()
+                        .map(|b| (b.module.clone(), b.bundle.name.to_string()))
+                        .collect(),
+                )
+            })
+            .collect()
     }
 
     /// Register built-in prelude types the checker must know regardless of the program. Run before

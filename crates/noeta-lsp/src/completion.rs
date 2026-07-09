@@ -181,6 +181,60 @@ pub fn members_of(program: &Program, type_name: &str) -> Vec<Candidate> {
 }
 
 /// Append each method as a `Method` candidate carrying its signature.
+/// The methods a **bundle binding** contributes to a receiver (kernel-methods K4): resolve each
+/// of the type's recorded `(module, bundle)` bindings against the registry and list the methods
+/// matching the receiver kind (`Element` on a `T` receiver, `Bulk` on a `List<T>`), with the
+/// declared signature as detail.
+pub fn bundle_members(
+    bindings: &[(String, String)],
+    receiver: noeta_stdlib::BundleReceiver,
+) -> Vec<Candidate> {
+    let mut members = Vec::new();
+    for (module, bundle) in bindings {
+        let Some(bundle) = noeta_stdlib::registry::find_bundle(module, bundle) else {
+            continue;
+        };
+        for m in bundle.methods.iter().filter(|m| m.receiver == receiver) {
+            members.push(Candidate {
+                label: m.sig.name.to_string(),
+                kind: CandidateKind::Method,
+                detail: Some(format!(
+                    "fn {}({}) [{}.{}]",
+                    m.sig.name,
+                    m.sig
+                        .params
+                        .iter()
+                        .map(sig_type_name)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    module,
+                    bundle.name
+                )),
+            });
+        }
+    }
+    members
+}
+
+/// A short display name for a bundle signature's parameter type (completion detail only).
+fn sig_type_name(sig: &noeta_stdlib::SigType) -> String {
+    use noeta_stdlib::SigType;
+    match sig {
+        SigType::Int => "int".to_string(),
+        SigType::Float => "float".to_string(),
+        SigType::F32 => "f32".to_string(),
+        SigType::Bool => "bool".to_string(),
+        SigType::String => "string".to_string(),
+        SigType::Bytes => "bytes".to_string(),
+        SigType::Unit => "unit".to_string(),
+        SigType::List(t) => format!("List<{}>", sig_type_name(t)),
+        SigType::Option(t) => format!("?{}", sig_type_name(t)),
+        SigType::Named(n) => (*n).to_string(),
+        SigType::Optional(t) => format!("{}?", sig_type_name(t)),
+        _ => "dyn".to_string(),
+    }
+}
+
 fn push_methods(members: &mut Vec<Candidate>, methods: &[noeta_ast::FnDecl]) {
     for method in methods {
         members.push(Candidate {
@@ -347,6 +401,31 @@ mod tests {
             .filter(|c| c.kind == kind)
             .map(|c| c.label.as_str())
             .collect()
+    }
+
+    #[test]
+    fn bundle_members_list_the_bound_methods_by_receiver_kind() {
+        // The std `vec.Kernels` bundle (registered via the lazy default): Bulk methods appear
+        // on a List receiver, Element methods (none today) on the type itself.
+        let bindings = vec![("std.vec".to_string(), "Kernels".to_string())];
+        let bulk = bundle_members(&bindings, noeta_stdlib::BundleReceiver::Bulk);
+        let labels: Vec<&str> = bulk.iter().map(|c| c.label.as_str()).collect();
+        assert!(labels.contains(&"add_all"), "got {labels:?}");
+        assert!(labels.contains(&"dot_all"));
+        assert!(
+            bulk.iter().all(|c| c.kind == CandidateKind::Method),
+            "bundle members complete as methods"
+        );
+        let detail = &bulk.iter().find(|c| c.label == "dot_all").unwrap().detail;
+        assert!(
+            detail.as_deref().unwrap_or("").contains("Kernels"),
+            "detail names the bundle: {detail:?}"
+        );
+        let element = bundle_members(&bindings, noeta_stdlib::BundleReceiver::Element);
+        assert!(
+            element.is_empty(),
+            "vec.Kernels declares no Element methods yet"
+        );
     }
 
     #[test]
