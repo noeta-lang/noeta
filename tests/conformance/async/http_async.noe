@@ -11,6 +11,7 @@
 // expect: stdout "{"body":"","method":"PATCH","path":"/echo"}"
 // expect: exit 0
 use std.http.client
+use std.http.Response
 use std.task.{all}
 
 async fn run(): void {

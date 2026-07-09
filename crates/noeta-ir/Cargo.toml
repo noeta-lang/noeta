@@ -10,6 +10,7 @@ rust-version.workspace = true
 noeta-span = { workspace = true }
 noeta-ast = { workspace = true }
 noeta-native = { workspace = true }
+noeta-stdlib = { workspace = true }
 noeta-types = { workspace = true }
 noeta-diagnostics = { workspace = true }
 

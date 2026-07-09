@@ -10,14 +10,18 @@ use std::time::Duration;
 #[test]
 #[ignore = "spawns the CLI and binds a real socket; run explicitly"]
 fn serve_routes_a_real_request() {
-    // A tiny handler app: `fetch` routes on the path, building responses with `http.response`.
+    // A tiny handler app: `fetch` routes on the path, building responses with `server.response`.
+    // `noeta serve` synthesizes `server.serve(<port>, fetch)`, so the program supplies `fetch` and
+    // `use std.http.server` (binding the local `server`); the `Request`/`Response` types are imported
+    // like any native type.
     let app = std::env::temp_dir().join("noeta_serve_integration_app.noe");
     std::fs::write(
         &app,
-        "use std.{http}\n\n\
+        "use std.http.server\n\
+         use std.http.{Request, Response}\n\n\
          fn fetch(req: Request): Response {\n\
-         \x20   if req.path() == \"/hi\" { return http.response(200, \"pong\") }\n\
-         \x20   return http.response(404, \"nope\")\n\
+         \x20   if req.path() == \"/hi\" { return server.response(200, \"pong\") }\n\
+         \x20   return server.response(404, \"nope\")\n\
          }\n",
     )
     .unwrap();

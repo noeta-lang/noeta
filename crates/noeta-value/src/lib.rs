@@ -2254,7 +2254,13 @@ impl Value {
                         .zip(slots)
                         .map(|(name, v)| format!("{name}: {}", v.repr()))
                         .collect();
-                    format!("{} {{{}}}", shape.name, parts.join(", "))
+                    // Display strips a qualified identity to its short name (`App.Models.User` →
+                    // `User`); the identity keyed on for dispatch/`is`/`as` stays qualified.
+                    format!(
+                        "{} {{{}}}",
+                        noeta_ast::short_type_name(&shape.name),
+                        parts.join(", ")
+                    )
                 }
                 // `Ok(x)`/`none` for built-in Result/Option, else `Type.Variant(data...)`;
                 // a no-data variant is just the head. Data renders with `display` (unquoted),
@@ -2265,7 +2271,7 @@ impl Value {
                     } else {
                         format!(
                             "{}.{}",
-                            shape.name,
+                            noeta_ast::short_type_name(&shape.name),
                             shape.variant.clone().unwrap_or_default()
                         )
                     };

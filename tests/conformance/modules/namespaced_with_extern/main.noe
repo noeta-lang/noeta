@@ -1,0 +1,20 @@
+// Cross-module use of a namespaced type that itself holds a native extern field, plus equality lit by
+// a standalone impl on a namespaced type. The entry imports the native `Uuid` on its own (externs are
+// per-file), constructs the record, and narrows its field to the native identity. Both backends agree.
+// expect: stdout "1"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: exit 0
+namespace App.Main;
+use App.Lib.Record;
+use App.Lib.Marker;
+use std.id;
+use std.id.Uuid;
+
+r = Record { id: id.uuid(), tag: 1 };
+echo r.tag;
+echo r.id is Uuid;
+
+m1 = Marker { n: 5 };
+m2 = Marker { n: 5 };
+echo m1 == m2;

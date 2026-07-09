@@ -1,5 +1,7 @@
-// A registered extern type's name is reserved (extern-types X2, E0049): its method table
-// dispatches by name, so a same-name user type would be silently shadowed. The checker-native
-// names (`FileHandle`, `Iterator`, ...) are reserved by the same rule.
-// expect: error E0049 at 5:8
-struct Uuid { x: int }
+// The **language-level** built-in type names — `Iterator`/`Future`/`Sender`/`Receiver`, produced by
+// `iter()`/`async`/`.await`/`channel()` — are still reserved (E0049): their values are backend
+// builtins dispatched by name, so a same-name user type would be silently shadowed. Registered
+// extern types (`Uuid`, `Response`, …) are NOT reserved any more — they are namespace-scoped and
+// `use`-imported, so a user may freely declare one (see `structs/user_type_shadows_native.noe`).
+// expect: error E0049 at 7:8
+struct Iterator { x: int }

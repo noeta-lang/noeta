@@ -69,11 +69,29 @@ impl Definitions {
     /// The declaration span for `name`, or `None` if it names no top-level definition. Types are
     /// checked before values: the two namespaces rarely collide, and a PascalCase type reference is
     /// the more likely intent when they do.
+    ///
+    /// `name` may be a fully-qualified identity (`App.Models.User`) or a bare source name (`User`).
+    /// A qualified `name` — the linker rewrites declarations to these (arc Phase B) — matches exactly;
+    /// a bare source token that no declaration carries verbatim falls back to matching the **leaf** of
+    /// a qualified declaration (`User` → `App.Models.User`), so cross-module go-to-definition still
+    /// lands on the merged, now-qualified declaration.
     pub fn resolve(&self, name: &str) -> Option<Span> {
         self.types
             .get(name)
             .or_else(|| self.values.get(name))
             .copied()
+            .or_else(|| self.resolve_by_leaf(name))
+    }
+
+    /// Fallback for a bare source name against qualified declarations: match a declaration whose leaf
+    /// (post-final-`.`) segment equals `name`. Types before values, as in [`resolve`].
+    fn resolve_by_leaf(&self, name: &str) -> Option<Span> {
+        let leaf = |k: &str| noeta_ast::short_type_name(k) == name;
+        self.types
+            .iter()
+            .find(|(k, _)| leaf(k))
+            .or_else(|| self.values.iter().find(|(k, _)| leaf(k)))
+            .map(|(_, span)| *span)
     }
 
     /// The declared-name spans of the top-level functions — for classifying them in semantic tokens.
@@ -85,6 +103,25 @@ impl Definitions {
     pub fn type_spans(&self) -> impl Iterator<Item = Span> + '_ {
         self.types.values().copied()
     }
+}
+
+/// Map each of `program`'s imports from its **local** binding name (the alias when present, else the
+/// imported leaf) to the **qualified identity** it names (`use App.A.User as AUser` → `AUser` →
+/// `App.A.User`). Lets go-to-definition on an aliased reference resolve to the qualified declaration
+/// the linker merged in (arc Phase B) — a leaf match alone can't, since the alias shares no segment
+/// with the target. Purely syntactic (no module pool); an entry that resolves to no such declaration
+/// simply misses and the caller falls back to leaf matching.
+pub fn import_targets(program: &Program) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for stmt in &program.stmts {
+        if let Stmt::Use { path, names, .. } = stmt {
+            let prefix = path.join(".");
+            for n in names {
+                map.insert(n.local().to_string(), format!("{prefix}.{}", n.name));
+            }
+        }
+    }
+    map
 }
 
 /// The members (fields, enum variants, and methods) each top-level type declares, keyed by

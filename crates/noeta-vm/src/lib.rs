@@ -1799,10 +1799,17 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         NarrowTarget::Fn => "function",
         NarrowTarget::Dyn => return true,
         NarrowTarget::Named(name) => {
-            // An extern-type value matches its registered type name (`x is Uuid`, extern-types
-            // X1); user objects/enums match their shape name.
+            // An extern-type value matches by its **qualified identity** (`std.id.Uuid`) — the
+            // narrowing target the lowering produced for an imported native type — so it never
+            // matches a same-short-named *user* type (whose shape name is bare). User objects/enums
+            // match their (bare) shape name.
             if v.is_extern() {
-                return v.with_extern(|e| e.type_name() == name);
+                return v.with_extern(|e| {
+                    noeta_stdlib::registry::find_type(e.type_name())
+                        .map(|t| t.qualified())
+                        .as_deref()
+                        == Some(name)
+                });
             }
             return v.shape().is_some_and(|s| &s.name == name);
         }

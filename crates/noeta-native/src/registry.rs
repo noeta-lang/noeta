@@ -346,8 +346,16 @@ pub type ArenaGetter = (&'static str, fn(&dyn crate::ExternValue) -> crate::Reta
 /// with the bare nominal name only.
 #[derive(Debug, Clone, Copy)]
 pub struct ExtType {
-    /// The surface type name (`Uuid`). Reserved: a user declaration of this name is E0049.
+    /// The **short display name** (`Uuid`) — what humans see in errors / `type_of` stringification.
+    /// The type's *identity* (for lookup, equality, dispatch, `is`/`as`) is the **qualified** name
+    /// [`ExtType::qualified`] = `"{namespace}.{name}"` (`std.id.Uuid`); two types with the same short
+    /// name under distinct namespaces are distinct identities. A user declaration of this short name
+    /// is no longer globally reserved — extern types are `use`-imported like user types.
     pub name: &'static str,
+    /// The namespace this type lives under (`std.id`) — its qualified identity is `namespace.name`.
+    /// Mirrors [`Extension::root`] for modules; the seam that lets a native `std.metrics.Counter`
+    /// coexist with a user's own `myapp.Counter`.
+    pub namespace: &'static str,
     /// Instance-method signatures — same vocabulary as module functions.
     pub methods: &'static [ExtFn],
     pub dispatch: TypeDispatch,
@@ -383,6 +391,7 @@ impl ExtType {
     /// a plain-data extern type declares no higher-order surface.
     pub const DEFAULTS: ExtType = ExtType {
         name: "",
+        namespace: "std",
         methods: &[],
         dispatch: |_, method, _, _| {
             Err(StdError {
@@ -396,6 +405,13 @@ impl ExtType {
         arena_getter: None,
         traits: &[],
     };
+
+    /// The type's **qualified identity** (`std.id.Uuid`) — `namespace.name`. This is the string the
+    /// checker keys `Type::Named` on and the runtime keys dispatch/`is`/`as` on; [`ExtType::name`]
+    /// is only the human-facing short form.
+    pub fn qualified(&self) -> String {
+        format!("{}.{}", self.namespace, self.name)
+    }
 }
 
 /// A bundle of native modules and types registered into the language. Core implements this once

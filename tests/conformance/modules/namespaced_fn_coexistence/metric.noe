@@ -1,0 +1,2 @@
+namespace App.Metric;
+pub fn scale(n: int): int { return n * 10; }

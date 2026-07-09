@@ -459,6 +459,10 @@ impl Type {
     }
 }
 
+/// Re-exported from `noeta-ast`, the lowest crate both the type lattice and the runtime value
+/// display share, so a qualified identity strips to its short display name in exactly one place.
+pub use noeta_ast::short_type_name;
+
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -481,9 +485,9 @@ impl std::fmt::Display for Type {
             Type::Option(t) => write!(f, "Option<{t}>"),
             Type::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Type::Kind(k) => f.write_str(k.name()),
-            Type::Named(n, args) if args.is_empty() => f.write_str(n),
+            Type::Named(n, args) if args.is_empty() => f.write_str(short_type_name(n)),
             Type::Named(n, args) => {
-                write!(f, "{n}<")?;
+                write!(f, "{}<", short_type_name(n))?;
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 {
                         f.write_str(", ")?;

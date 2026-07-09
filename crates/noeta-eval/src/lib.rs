@@ -452,7 +452,13 @@ impl EnumValue {
         let head = if self.is_builtin_result_or_option() {
             self.variant.clone()
         } else {
-            format!("{}.{}", self.enum_name, self.variant)
+            // Display strips a qualified identity to its short name; the identity keyed on for
+            // dispatch/`is`/`as` stays qualified.
+            format!(
+                "{}.{}",
+                noeta_ast::short_type_name(&self.enum_name),
+                self.variant
+            )
         };
         if self.data.is_empty() {
             head
@@ -651,7 +657,13 @@ impl ObjectValue {
             .zip(slots.iter())
             .map(|(f, value)| format!("{}: {}", f.name, value.repr()))
             .collect();
-        format!("{} {{{}}}", self.def.name, parts.join(", "))
+        // Display strips a qualified identity to its short name; the identity keyed on for
+        // dispatch/`is`/`as` stays qualified.
+        format!(
+            "{} {{{}}}",
+            noeta_ast::short_type_name(&self.def.name),
+            parts.join(", ")
+        )
     }
 }
 
@@ -4623,7 +4635,15 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
                 other => match value {
                     Value::Object(object) => object.def.name() == other,
                     Value::Enum(enum_value) => enum_value.enum_name == other,
-                    Value::Extern(e) => e.borrow().type_name() == other,
+                    // An extern value matches by its qualified identity (`std.id.Uuid`) — the target
+                    // an imported native type lowers to — so it never matches a same-short-named
+                    // user type (mirrors the VM's `narrow_matches`).
+                    Value::Extern(e) => {
+                        noeta_stdlib::registry::find_type(e.borrow().type_name())
+                            .map(|t| t.qualified())
+                            .as_deref()
+                            == Some(other)
+                    }
                     _ => false,
                 },
             };

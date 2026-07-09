@@ -18,6 +18,8 @@
 //! is tagged at parse time with its [`SourceId`], so the caller resolves it through the [`Linked`]
 //! [`SourceMap`] rather than against the entry (slice F4).
 
+mod qualify;
+
 use std::collections::HashSet;
 use std::io;
 use std::path::Path;
@@ -457,6 +459,22 @@ fn link_core(
         })
         .collect();
 
+    // Namespace qualification (arc Phase B): each module's local type names → qualified identities.
+    // A merged declaration is rewritten with the map of the module it came from (keyed by namespace,
+    // one module per namespace); the entry's own statements with the entry's map. Both are empty for
+    // a non-namespaced module, so single-namespace programs stay byte-identical.
+    let entry_ns = module_namespace(entry_program).unwrap_or_default();
+    let entry_map = build_module_map(&entry_ns, &entry_program.stmts, &module_views);
+    let module_maps: std::collections::HashMap<Vec<String>, qualify::QMap> = module_views
+        .iter()
+        .map(|mv| {
+            (
+                mv.namespace.clone(),
+                build_module_map(&mv.namespace, mv.stmts, &module_views),
+            )
+        })
+        .collect();
+
     // Every merged top-level name → its origin. Seeded with the entry's own declarations (each
     // `Local`); an import that would shadow a local, or clash with a differently-sourced import, is a
     // collision. An import that re-names an already-merged declaration from the *same* namespace is a
@@ -486,14 +504,22 @@ fn link_core(
         let mut unresolved = Vec::new();
         for name in names {
             match resolve(&module_views, path, &name.name) {
-                Resolution::Resolved(decl) => match origins.get(&name.name) {
+                // Keyed on the import's *local* (alias-aware) name: `use App.A.User as AUser` and
+                // `use App.B.User as BUser` bind distinct locals and coexist, while two imports (or an
+                // import and a local decl) sharing one local name are still the E0020 clash.
+                Resolution::Resolved(decl) => match origins.get(name.local()) {
                     None => {
-                        origins.insert(name.name.clone(), Origin::Import(path.to_vec()));
-                        imported.push(*decl);
+                        origins.insert(name.local().to_string(), Origin::Import(path.to_vec()));
+                        // Merge the declaration under its module's qualified identity.
+                        let mut decl = *decl;
+                        if let Some(map) = module_maps.get(path) {
+                            qualify::qualify_stmt(&mut decl, map);
+                        }
+                        imported.push(decl);
                     }
                     // Same declaration re-imported (same namespace) — merge once, ignore the rest.
                     Some(Origin::Import(p)) if p.as_slice() == path => {}
-                    // A different declaration under the same name — ambiguous.
+                    // A different declaration under the same local name — ambiguous.
                     Some(_) => errors.push(collision_error(entry, path, name)),
                 },
                 Resolution::NoModule => unresolved.push(name.clone()),
@@ -522,7 +548,13 @@ fn link_core(
                     });
                 }
             }
-            other => entry_stmts.push(other.clone()),
+            other => {
+                // The entry's own declarations and statements qualify against the entry's map (its
+                // own namespace + its resolved imports).
+                let mut stmt = other.clone();
+                qualify::qualify_stmt(&mut stmt, &entry_map);
+                entry_stmts.push(stmt);
+            }
         }
     }
 
@@ -584,6 +616,71 @@ fn module_namespace(program: &Program) -> Option<Vec<String>> {
         Stmt::Namespace { path, .. } => Some(path.clone()),
         _ => None,
     })
+}
+
+/// The name a top-level declaration that gains a **qualified identity** introduces — a class, struct,
+/// enum, or free function. `None` for everything else. Both user types *and* user functions are
+/// namespace-scoped: two same-named ones from different namespaces coexist, each keyed on its qualified
+/// identity. (A method is not top-level — it resolves through its type, so it is not here.)
+fn qualifiable_decl_name(stmt: &Stmt) -> Option<&str> {
+    match stmt {
+        Stmt::Class(decl) => Some(&decl.name),
+        Stmt::Struct(decl) => Some(&decl.name),
+        Stmt::Enum(decl) => Some(&decl.name),
+        Stmt::Fn(decl) => Some(&decl.name),
+        _ => None,
+    }
+}
+
+/// Whether some loaded module with namespace `path` declares a top-level, qualifiable `name` — i.e.
+/// `name` is a *user* type or function reachable at `path`, as opposed to an extern (`std.…`, which is
+/// no loaded module) or an opaque-stub fallback. Drives [`build_module_map`]: only names that resolve to
+/// a real module declaration are qualified; everything else stays bare for its own resolution path.
+fn module_declares(modules: &[ModuleView], path: &[String], name: &str) -> bool {
+    modules.iter().any(|m| {
+        m.namespace == path
+            && m.stmts
+                .iter()
+                .any(|s| qualifiable_decl_name(s) == Some(name))
+    })
+}
+
+/// Build a module's namespace-qualification map (arc Phase B): its local type/function names →
+/// qualified identities. Two sources feed it:
+///
+/// - **Own declarations** qualify under this module's own namespace (`User` → `App.Models.User`,
+///   `boom` → `App.Math.boom`), but only when the module *has* a namespace — a non-namespaced module
+///   contributes nothing, so its names stay bare and the file is byte-identical.
+/// - **Imports that resolve to a loaded module** qualify to that module's identity, keyed by the
+///   import's local (alias-aware) name (`use App.A.User as AUser` → `AUser` → `App.A.User`). An
+///   extern or opaque-stub import resolves to no module ([`module_declares`] is false) and is skipped.
+fn build_module_map(
+    own_ns: &[String],
+    own_stmts: &[Stmt],
+    modules: &[ModuleView],
+) -> qualify::QMap {
+    let mut map = qualify::QMap::new();
+    if !own_ns.is_empty() {
+        let prefix = own_ns.join(".");
+        for stmt in own_stmts {
+            if let Some(name) = qualifiable_decl_name(stmt) {
+                map.insert(name.to_string(), format!("{prefix}.{name}"));
+            }
+        }
+    }
+    for stmt in own_stmts {
+        if let Stmt::Use { path, names, .. } = stmt {
+            for n in names {
+                if module_declares(modules, path, &n.name) {
+                    map.insert(
+                        n.local().to_string(),
+                        format!("{}.{}", path.join("."), n.name),
+                    );
+                }
+            }
+        }
+    }
+    map
 }
 
 /// The outcome of resolving one imported name against the loaded modules.
@@ -688,6 +785,7 @@ fn decl_name(stmt: &Stmt) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noeta_ast::Expr;
 
     fn module(name: &str, text: &str) -> RawModule {
         RawModule {
@@ -698,12 +796,19 @@ mod tests {
 
     // --- cross-package linking (package-manager P2.1) -----------------------------------------
 
+    /// The leaf (short) segment of a possibly-qualified identity — `webclient.client.Client` →
+    /// `Client`. A namespaced module's declarations carry qualified identities now (arc Phase B), so
+    /// these link/re-root tests match on the leaf, which is what they are really asserting.
+    fn leaf(name: &str) -> &str {
+        name.rsplit_once('.').map_or(name, |(_, leaf)| leaf)
+    }
+
     fn has_class(linked: &Linked, name: &str) -> bool {
         linked
             .program
             .stmts
             .iter()
-            .any(|s| matches!(s, Stmt::Class(c) if c.name == name))
+            .any(|s| matches!(s, Stmt::Class(c) if leaf(&c.name) == name))
     }
 
     #[test]
@@ -856,14 +961,33 @@ mod tests {
         let entry =
             "namespace App.Main;\nuse App.Models.User;\nu = User.new(\"Ada\", 7);\necho u.name;\n";
         let linked = link("main.noe", entry, std::slice::from_ref(&models)).unwrap();
-        // The real `User` class is merged in; its `use` is dropped (no opaque stub for it).
+        // The real `User` class is merged in under its qualified identity `App.Models.User`
+        // (arc Phase B); its `use` is dropped (no opaque stub for it).
         assert!(
             linked
                 .program
                 .stmts
                 .iter()
-                .any(|s| matches!(s, Stmt::Class(c) if c.name == "User"))
+                .any(|s| matches!(s, Stmt::Class(c) if c.name == "App.Models.User"))
         );
+        // The entry's reference `User.new(...)` was rewritten to the qualified identity too, so it
+        // binds the merged class at runtime.
+        let Stmt::Binding { value, .. } = linked
+            .program
+            .stmts
+            .iter()
+            .find(|s| matches!(s, Stmt::Binding { name, .. } if name == "u"))
+            .expect("the `u = …` binding")
+        else {
+            unreachable!()
+        };
+        let Expr::Call { callee, .. } = value else {
+            panic!("a call")
+        };
+        let Expr::Member { receiver, .. } = &**callee else {
+            panic!("a member")
+        };
+        assert!(matches!(&**receiver, Expr::Ident { name, .. } if name == "App.Models.User"));
         assert!(
             !linked
                 .program
@@ -944,6 +1068,86 @@ mod tests {
     }
 
     #[test]
+    fn two_same_named_types_from_distinct_namespaces_coexist_via_aliases() {
+        // The whole arc's deliverable, at the linker level: two modules each export `User`; the entry
+        // imports both under distinct aliases, so each merges under its own qualified identity and the
+        // entry's references bind the right one — no collision (arc Phase B).
+        let models = module(
+            "models.noe",
+            "namespace App.Models;\npub class User { id: int }\n",
+        );
+        let people = module(
+            "people.noe",
+            "namespace App.People;\npub class User { name: string }\n",
+        );
+        let entry = "use App.Models.User as MUser;\nuse App.People.User as PUser;\n\
+                     a = MUser { id: 1 };\nb = PUser { name: \"x\" };\n";
+        let linked = link("main.noe", entry, &[models, people]).unwrap();
+
+        // Both classes are present under their full qualified identities — distinct, coexisting.
+        let names: Vec<&str> = linked
+            .program
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Class(c) => Some(c.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.contains(&"App.Models.User"), "got {names:?}");
+        assert!(names.contains(&"App.People.User"), "got {names:?}");
+
+        // Each aliased constructor was rewritten to the identity it resolves to.
+        let ctor = |binding: &str| -> String {
+            let Stmt::Binding { value, .. } = linked
+                .program
+                .stmts
+                .iter()
+                .find(|s| matches!(s, Stmt::Binding { name, .. } if name == binding))
+                .expect("binding")
+            else {
+                unreachable!()
+            };
+            let Expr::Object(lit) = value else {
+                panic!("object literal")
+            };
+            lit.type_name.clone()
+        };
+        assert_eq!(ctor("a"), "App.Models.User");
+        assert_eq!(ctor("b"), "App.People.User");
+    }
+
+    #[test]
+    fn two_same_named_functions_from_distinct_namespaces_coexist_via_aliases() {
+        // Functions are namespace-scoped like types (arc Phase B): two modules each export a `scale`,
+        // imported under distinct aliases, each merged under its own qualified identity so the entry's
+        // aliased calls resolve to the right one.
+        let metric = module(
+            "metric.noe",
+            "namespace App.Metric;\npub fn scale(n: int): int { return n * 10; }\n",
+        );
+        let audio = module(
+            "audio.noe",
+            "namespace App.Audio;\npub fn scale(n: int): int { return n + 100; }\n",
+        );
+        let entry = "use App.Metric.scale as mscale;\nuse App.Audio.scale as ascale;\n\
+                     echo mscale(1);\necho ascale(1);\n";
+        let linked = link("main.noe", entry, &[metric, audio]).unwrap();
+
+        let fn_names: Vec<&str> = linked
+            .program
+            .stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Fn(f) => Some(f.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(fn_names.contains(&"App.Metric.scale"), "got {fn_names:?}");
+        assert!(fn_names.contains(&"App.Audio.scale"), "got {fn_names:?}");
+    }
+
+    #[test]
     fn entry_parse_error_is_reported_against_the_entry() {
         let errs = link("main.noe", "echo $;", &[]).unwrap_err();
         assert!(!errs.is_empty());
@@ -967,7 +1171,7 @@ mod tests {
             .program
             .stmts
             .iter()
-            .find(|s| matches!(s, Stmt::Class(c) if c.name == "User"))
+            .find(|s| matches!(s, Stmt::Class(c) if c.name == "App.Models.User"))
             .expect("merged User class");
         assert_eq!(class.span().source, SourceId(1));
 
