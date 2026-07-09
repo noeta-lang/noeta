@@ -395,8 +395,14 @@ fn q_expr(e: &mut Expr, map: &QMap) {
         | Expr::F32 { .. }
         | Expr::F64 { .. }
         | Expr::IntN { .. }
-        | Expr::Bool { .. }
-        | Expr::RolesOf { .. } => {}
+        | Expr::Bool { .. } => {}
+        // The optional `roles_of::<E>()` enum, like `attributes_of`'s type, may be a namespace-
+        // qualified user enum, so qualify it (a bare `roles_of()` has nothing to qualify).
+        Expr::RolesOf { ty, .. } => {
+            if let Some(ty) = ty {
+                q_typeref(ty, map);
+            }
+        }
     }
 }
 

@@ -838,10 +838,13 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
-    /// The reflection query `roles_of()` — the compiler-built `(declaration, Role)` index (P2.7),
-    /// returned as a `List<RoleBinding>` (each `{ target: string, role: Role }`). Compile-time
-    /// resolved from the attribute manifest's `@role(...)` tags; takes no operand.
-    RolesOf { span: Span },
+    /// The reflection query `roles_of()` / `roles_of::<RoleEnum>()` — the compiler-built
+    /// `(declaration, Role)` index (P2.7), returned as a `List<RoleBinding>` (each
+    /// `{ target: string, role: Role }`). Compile-time resolved from the attribute manifest's
+    /// `@role(...)` tags. The optional turbofish scopes the query to a single role enum (mirroring
+    /// `attributes_of::<T>()`): `roles_of::<Semantic>()` returns only bindings whose role is a
+    /// `Semantic` variant; bare `roles_of()` (`ty = None`) returns the whole index.
+    RolesOf { ty: Option<TypeRef>, span: Span },
     /// The reflection invocation `invoke(recv, name, args)` — fallible by-name dispatch. `recv` is a
     /// value (→ instance method) or a bare type name (→ associated function); `name` is a runtime
     /// `string`; `args` is a runtime `List`. Evaluates to `Result<dyn, dyn>` — `Ok(retval)` on a
@@ -1068,7 +1071,7 @@ impl Expr {
             | Expr::FromBytes { span, .. }
             | Expr::Channel { span, .. }
             | Expr::TypedModuleCall { span, .. }
-            | Expr::RolesOf { span }
+            | Expr::RolesOf { span, .. }
             | Expr::Invoke { span, .. }
             | Expr::TypeTest { span, .. }
             | Expr::FieldSet { span, .. } => *span,

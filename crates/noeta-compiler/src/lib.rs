@@ -3200,8 +3200,14 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::AttributesOf { dst, type_name });
                 Ok(())
             }
-            Rvalue::RolesOf { .. } => {
-                self.code.push(Op::RolesOf { dst });
+            Rvalue::RolesOf { ty, .. } => {
+                // Optional turbofish scope (mirrors `AttributesOf`): resolve the role enum name at
+                // compile time (closed-world); the VM keeps only bindings of that enum. `None` = all.
+                let role_enum = ty.as_ref().and_then(|ty| match ty {
+                    TypeRef::Named { name, .. } => Some(self.module.intern_name(name)),
+                    _ => None,
+                });
+                self.code.push(Op::RolesOf { dst, role_enum });
                 Ok(())
             }
             Rvalue::Invoke {

@@ -4222,10 +4222,24 @@ impl Checker {
                 }
                 Type::Named("Type".to_string(), Vec::new())
             }
-            Expr::RolesOf { .. } => {
-                // The compiler-built role index, surfaced as `List<RoleBinding>`. No operand to
-                // synthesize and nothing to validate — the `@role` tags were checked at their
-                // declarations.
+            Expr::RolesOf { ty, span } => {
+                // The compiler-built role index, surfaced as `List<RoleBinding>`. The optional
+                // turbofish scopes the query to one role enum, which — like `attributes_of`'s
+                // `@attribute` gate — must be a `@semantic` enum (only those contribute roles).
+                if let Some(ty) = ty {
+                    self.check_type_ref(ty);
+                    let target = from_ref_q(ty, &self.extern_types);
+                    let is_semantic = matches!(&target, Type::Named(n, _)
+                        if self.semantic_enums.contains(n));
+                    if !is_semantic {
+                        self.error(
+                            DiagnosticCode::InvalidRole,
+                            *span,
+                            format!("`roles_of` requires a `@semantic` enum, but `{target}` is not one"),
+                        )
+                        .help("mark the enum `@semantic` to query its roles");
+                    }
+                }
                 Type::List(Box::new(Type::Named(
                     noeta_ast::reflect::ROLE_BINDING.to_string(),
                     Vec::new(),
