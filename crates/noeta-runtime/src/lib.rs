@@ -859,6 +859,16 @@ impl P2p for RealHost {
         self.p2p_node()?.group_poll(sub)
     }
 
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_group_add(&mut self, topic: &str, member: &str) -> Result<(), StdError> {
+        self.p2p_node()?.group_add(topic, member)
+    }
+
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_group_remove(&mut self, topic: &str, member: &str) -> Result<(), StdError> {
+        self.p2p_node()?.group_remove(topic, member)
+    }
+
     // Identity & status (p2p P3.3): the real node has a persisted Ed25519 key and tracks each
     // topic's sync state; without the ring the trait defaults apply (no identity, always Synced —
     // the loopback broker never lags).

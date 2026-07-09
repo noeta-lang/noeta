@@ -273,6 +273,20 @@ pub trait P2p {
         self.p2p_poll_sub(sub)
     }
 
+    /// Add `member` (peer-id hex) to the encrypted group on `topic` at runtime. On a real host the
+    /// group creator welcomes it. Default: a no-op — the pass-through sandbox has no membership to
+    /// enforce (the decrypted value is the same regardless of who is "in").
+    fn p2p_group_add(&mut self, _topic: &str, _member: &str) -> Result<(), StdError> {
+        Ok(())
+    }
+
+    /// Remove `member` (peer-id hex) from the encrypted group on `topic` at runtime, rotating the
+    /// group key on a real host so it can no longer decrypt new state (revocation). Default: a no-op
+    /// — the sandbox has no real crypto to revoke and its converged value is unaffected.
+    fn p2p_group_remove(&mut self, _topic: &str, _member: &str) -> Result<(), StdError> {
+        Ok(())
+    }
+
     // --- Identity & status (p2p P3.3) ---------------------------------------------------------
     //
     // Both are meaningful only once there is a *real* network with a persistent identity to have

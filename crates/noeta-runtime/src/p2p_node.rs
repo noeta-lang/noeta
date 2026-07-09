@@ -684,6 +684,43 @@ impl P2pNode {
             }
         }
     }
+
+    /// Add `member` (peer-id hex) to the encrypted group on `topic` at runtime, broadcasting any
+    /// welcome operations. Only the group creator manages membership; a no-op elsewhere.
+    pub fn group_add(&self, topic: &str, member: &str) -> Result<(), StdError> {
+        let member = VerifyingKey::from_str(member)
+            .map_err(|e| io_error(format!("invalid peer id `{member}`: {e}")))?;
+        let to_send = {
+            let mut groups = self.groups.lock().unwrap();
+            let entry = groups
+                .get_mut(topic)
+                .ok_or_else(|| io_error(format!("no encrypted group open on `{topic}`")))?;
+            self.runtime.block_on(entry.group.add_member(member))?
+        };
+        for op in to_send {
+            self.publish_durable(topic, op)?;
+        }
+        Ok(())
+    }
+
+    /// Remove `member` (peer-id hex) from the encrypted group on `topic` at runtime, **rotating the
+    /// group key** so it can no longer decrypt new state, and broadcasting the removal operations.
+    /// Only the group creator manages membership; a no-op elsewhere.
+    pub fn group_remove(&self, topic: &str, member: &str) -> Result<(), StdError> {
+        let member = VerifyingKey::from_str(member)
+            .map_err(|e| io_error(format!("invalid peer id `{member}`: {e}")))?;
+        let to_send = {
+            let mut groups = self.groups.lock().unwrap();
+            let entry = groups
+                .get_mut(topic)
+                .ok_or_else(|| io_error(format!("no encrypted group open on `{topic}`")))?;
+            self.runtime.block_on(entry.group.remove_member(member))?
+        };
+        for op in to_send {
+            self.publish_durable(topic, op)?;
+        }
+        Ok(())
+    }
 }
 
 /// One topic's encrypted group: its [`EncryptedGroup`] state machine plus a buffer of decrypted
@@ -1129,6 +1166,58 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         assert_eq!(received.as_deref(), Some(&secret[..]));
+    }
+
+    /// P3.4b dynamic membership over **real** networking: the creator removes the other member and
+    /// publishes state the removed member can no longer decrypt (revocation via key rotation). The
+    /// QUIC counterpart of the hermetic `removed_member_cannot_decrypt_new_state` test. `#[ignore]`
+    /// (needs real mDNS); run explicitly.
+    #[test]
+    #[ignore = "needs real networking (mDNS multicast); run explicitly"]
+    fn two_nodes_revocation_over_the_wire() {
+        let a = P2pNode::start_with_config(P2pConfig::ephemeral()).expect("node a");
+        let b = P2pNode::start_with_config(P2pConfig::ephemeral()).expect("node b");
+        let a_id = a.crypto_group_id().unwrap();
+        let b_id = b.crypto_group_id().unwrap();
+        let members = vec![a_id.clone(), b_id.clone()];
+        let a_is_creator = a_id == *members.iter().min().unwrap();
+        // The creator manages membership; it removes the other member.
+        let (creator, creator_sub, other, other_sub, removed_id) = {
+            let sub_a = a.group_open("secure/rev", &members).expect("a opens");
+            let sub_b = b.group_open("secure/rev", &members).expect("b opens");
+            if a_is_creator {
+                (&a, sub_a, &b, sub_b, b_id)
+            } else {
+                (&b, sub_b, &a, sub_a, a_id)
+            }
+        };
+        // Settle the handshake.
+        for _ in 0..50 {
+            let _ = creator.group_poll(creator_sub);
+            let _ = other.group_poll(other_sub);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // Remove the other member (rotates the key), then publish a secret it must not decrypt.
+        creator
+            .group_remove("secure/rev", &removed_id)
+            .expect("creator removes member");
+        let secret = b"post-revocation secret".to_vec();
+        creator
+            .group_publish("secure/rev", secret.clone())
+            .expect("creator publishes");
+
+        let mut leaked = false;
+        for _ in 0..100 {
+            let _ = creator.group_poll(creator_sub);
+            if let Some(bytes) = other.group_poll(other_sub).expect("other polls")
+                && bytes == secret
+            {
+                leaked = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(!leaked, "a removed member must not decrypt post-revocation state");
     }
 
     #[test]

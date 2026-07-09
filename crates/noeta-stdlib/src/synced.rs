@@ -94,6 +94,20 @@ pub const SYNCED_CTX_METHODS: &[ExtFn] = &[
         params: &[],
         ret: RetTy::Concrete(SigType::String),
     },
+    // `.add_member(peer_id)` / `.remove_member(peer_id)` — runtime membership changes for an
+    // encrypted group (p2p P3.4b). `remove` rotates the group key so the removed peer stops
+    // decrypting new state. Only meaningful on an encrypted signal (one created with a members
+    // list); the group creator is authoritative. No-ops under the deterministic sandbox.
+    ExtFn {
+        name: "add_member",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "remove_member",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
 ];
 
 /// The extern box: the reactive-graph node, the arena cell holding the CRDT value, the p2p
@@ -309,6 +323,34 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             ctx_arity(method, args, 0)?;
             let status = ctx.host().p2p_sync_status(&handle.topic);
             Ok(CtxOut::Out(NativeOut::Str(status.as_str().to_string())))
+        }
+        // Runtime membership changes for an encrypted group (p2p P3.4b). Only valid on an encrypted
+        // signal; `remove_member` revokes (the group key is rotated on a real host).
+        "add_member" | "remove_member" => {
+            ctx_arity(method, args, 1)?;
+            if !handle.is_encrypted() {
+                return Err(StdError {
+                    kind: ErrorKind::Panic,
+                    message: format!(
+                        "`{method}` is only valid on an encrypted synced_signal (one created with a members list)"
+                    ),
+                }
+                .into());
+            }
+            let member = match ctx.view(args[0])? {
+                NativeValue::Str(s) => s,
+                _ => return Err(type_error(method, "a peer-id string").into()),
+            };
+            if method == "add_member" {
+                ctx.host()
+                    .p2p_group_add(&handle.topic, &member)
+                    .map_err(CtxError::from)?;
+            } else {
+                ctx.host()
+                    .p2p_group_remove(&handle.topic, &member)
+                    .map_err(CtxError::from)?;
+            }
+            Ok(CtxOut::Out(NativeOut::Unit))
         }
         _ => Err(no_method_error(SYNCED_SIGNAL_TYPE_NAME, method).into()),
     }
