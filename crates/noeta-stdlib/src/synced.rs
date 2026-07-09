@@ -73,6 +73,15 @@ pub const SYNCED_CTX_METHODS: &[ExtFn] = &[
         params: &[],
         ret: RetTy::Concrete(SigType::Unit),
     },
+    // `.status() -> string` — this replica's convergence state for its topic (p2p P3.3): one of
+    // `"synced"` / `"syncing"` / `"offline"`. Always `"synced"` under the deterministic sandbox
+    // broker (a single node never lags), so a program that reads it stays oracle-safe; meaningful
+    // over a real network, where an `effect` can render "working offline".
+    ExtFn {
+        name: "status",
+        params: &[],
+        ret: RetTy::Concrete(SigType::String),
+    },
 ];
 
 /// The extern box: the reactive-graph node, the arena cell holding the CRDT value, the p2p
@@ -224,6 +233,12 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                 self_wake(ctx, handle.node)?;
             }
             Ok(CtxOut::Out(NativeOut::Unit))
+        }
+        // This replica's convergence state for its topic — a plain lowercase word (p2p P3.3).
+        "status" => {
+            ctx_arity(method, args, 0)?;
+            let status = ctx.host().p2p_sync_status(&handle.topic);
+            Ok(CtxOut::Out(NativeOut::Str(status.as_str().to_string())))
         }
         _ => Err(no_method_error(SYNCED_SIGNAL_TYPE_NAME, method).into()),
     }

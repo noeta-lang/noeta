@@ -23,8 +23,9 @@
 //!   which drops the runtime and severs the tasks (residency returns to zero — the reactive lesson).
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use futures_util::StreamExt;
 use p2panda_core::{Body, Hash, Header, Operation, SeqNum, SigningKey};
@@ -40,12 +41,62 @@ use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use crate::io_error;
-use noeta_stdlib::StdError;
+use noeta_stdlib::{StdError, SyncStatus};
 
 /// Every node keeps a single append-only log for its own operations; the durable (log-sync)
 /// transport hard-codes its id, matching p2panda's `chat` example.
 type LogId = u64;
 const LOG_ID: LogId = 1;
+
+/// Node configuration (p2p P3.3/P3.4). Where the node's persistent state lives, and (P3.4) how it
+/// discovers peers. `Default` resolves the per-user XDG data dir, so `noeta run` of a p2p program
+/// keeps its identity and synced logs across restarts with no configuration.
+#[derive(Debug, Clone)]
+pub struct P2pConfig {
+    /// The directory holding this node's identity (`identity.key`) and durable store (`store.db`).
+    /// `None` ⇒ the per-user default (`$XDG_DATA_HOME/noeta/p2p`, honoring `NOETA_P2P_DIR`). Two
+    /// distinct replicas on one machine (e.g. an integration test, or two apps) point at two dirs;
+    /// the *same* replica reuses one dir to restart with its prior identity + state.
+    pub data_dir: Option<PathBuf>,
+    /// If `false`, ignore any data dir and run fully ephemeral (fresh identity, in-memory store) —
+    /// the pre-P3.3 behavior, kept for tests and throwaway nodes.
+    pub persist: bool,
+}
+
+impl Default for P2pConfig {
+    /// Persistent by default: a `noeta run` of a p2p program keeps its identity and synced logs
+    /// across restarts with zero configuration (p2p P3.3).
+    fn default() -> Self {
+        P2pConfig::persistent()
+    }
+}
+
+impl P2pConfig {
+    /// The default persistent config: XDG data dir, state persisted across restarts.
+    pub fn persistent() -> P2pConfig {
+        P2pConfig {
+            data_dir: None,
+            persist: true,
+        }
+    }
+
+    /// A fully ephemeral node: fresh identity, in-memory store, no disk touched.
+    pub fn ephemeral() -> P2pConfig {
+        P2pConfig {
+            data_dir: None,
+            persist: false,
+        }
+    }
+
+    /// Persist into an explicit directory (created if absent). Used by the two-node integration
+    /// tests to give each in-process replica its own identity + store.
+    pub fn at(dir: impl Into<PathBuf>) -> P2pConfig {
+        P2pConfig {
+            data_dir: Some(dir.into()),
+            persist: true,
+        }
+    }
+}
 
 /// A long-lived p2panda-net node bridging the async gossip overlay to the synchronous [`P2p`]
 /// capability. One per `RealHost` (per isolate), started lazily.
@@ -66,7 +117,8 @@ pub struct P2pNode {
 
     // --- Durable (log-sync) transport (p2p P3.2), backing synced_signal ---
     /// This node's Ed25519 identity — signs every operation it appends to its log, and is the
-    /// endpoint's key, so a peer attributes received operations to this author.
+    /// endpoint's key, so a peer attributes received operations to this author. Loaded from disk
+    /// (persisted across restarts, p2p P3.3) or freshly generated for an ephemeral node.
     signing_key: SigningKey,
     /// The append-only operation log store (in-memory SQLite). Holds this node's log and peers'
     /// synced logs, giving a late-joining replica the full history to converge from.
@@ -76,6 +128,9 @@ pub struct P2pNode {
     /// topic → its durable state: the sync handle (join), plus this author's log tip (seq + backlink)
     /// so appends stay a correct append-only chain.
     durable: Mutex<HashMap<String, DurableTopic>>,
+    /// topic → its live [`SyncStatus`] (p2p P3.3), shared with the drain task that updates it from
+    /// the log-sync session lifecycle. `Arc` because the task outlives the borrow that spawns it.
+    status: Arc<Mutex<HashMap<String, SyncStatus>>>,
     // Discovery/endpoint components: kept alive for the node's lifetime (their background tasks run
     // on `runtime`), otherwise unused directly.
     _endpoint: Endpoint,
@@ -104,18 +159,57 @@ impl std::fmt::Debug for P2pNode {
 }
 
 impl P2pNode {
-    /// Build and start the node (blocking until its components are up). Fails only if the runtime or
-    /// the core networking components (endpoint, gossip) cannot start; mDNS failure is tolerated.
+    /// Build and start a node with the default (persistent) config — see [`Self::start_with_config`].
     pub fn start() -> Result<P2pNode, StdError> {
+        Self::start_with_config(P2pConfig::default())
+    }
+
+    /// Build and start the node (blocking until its components are up) with an explicit config.
+    /// Fails only if the runtime or the core networking components (endpoint, gossip) cannot start;
+    /// mDNS failure is tolerated.
+    ///
+    /// Identity & store follow `config` (p2p P3.3): a persistent node loads its Ed25519 key and an
+    /// on-disk SQLite log store from `config`'s data dir (created on first run), so it restarts with
+    /// the same identity and its prior synced state; an ephemeral node gets a fresh key and an
+    /// in-memory store.
+    pub fn start_with_config(config: P2pConfig) -> Result<P2pNode, StdError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .map_err(|e| io_error(format!("cannot start the p2p node runtime: {e}")))?;
 
-        // This node's persistent-for-the-session identity (ephemeral in P3.2 — persisting it to
-        // disk is P3.3). It signs the endpoint AND every log operation, so peers attribute synced
+        // Resolve where (if anywhere) persistent state lives. A persistent node with a usable data
+        // dir loads/saves its identity there and uses an on-disk store; otherwise it is ephemeral.
+        let data_dir = if config.persist {
+            match config.data_dir.clone().or_else(default_data_dir) {
+                Some(dir) => match ensure_dir(&dir) {
+                    Ok(()) => Some(dir),
+                    Err(e) => {
+                        eprintln!(
+                            "noeta p2p: cannot use data dir {} ({e}); running ephemeral (no persisted identity/state)",
+                            dir.display()
+                        );
+                        None
+                    }
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        // This node's identity — loaded from disk (stable across restarts, p2p P3.3) or freshly
+        // generated. It signs the endpoint AND every log operation, so peers attribute synced
         // operations to this author.
-        let signing_key = SigningKey::generate();
+        let signing_key = match &data_dir {
+            Some(dir) => load_or_create_identity(&dir.join("identity.key")),
+            None => SigningKey::generate(),
+        };
+        // The durable store: an on-disk SQLite log (survives restart) when persisting, else the
+        // in-memory store (P3.2 behavior).
+        let store_url = data_dir
+            .as_ref()
+            .map(|dir| format!("sqlite://{}", dir.join("store.db").display()));
 
         let node = runtime.block_on(async {
             let address_book = AddressBook::builder()
@@ -148,13 +242,14 @@ impl P2pNode {
                 .spawn()
                 .await
                 .map_err(|e| io_error(format!("p2p gossip: {e}")))?;
-            // The durable transport: an in-memory append-log store + the log-sync engine over the
-            // same endpoint/gossip. `synced_signal` publishes/subscribes through this. (In-memory
-            // for P3.2 — a persistent on-disk store for true offline-restart is a P3.3 config.)
-            let store = SqliteStoreBuilder::memory()
-                .build()
-                .await
-                .map_err(|e| io_error(format!("p2p store: {e}")))?;
+            // The durable transport: an append-log store + the log-sync engine over the same
+            // endpoint/gossip. `synced_signal` publishes/subscribes through this. On-disk (survives
+            // restart, p2p P3.3) when persisting, else in-memory (P3.2).
+            let store = match &store_url {
+                Some(url) => SqliteStoreBuilder::new().database_url(url).build().await,
+                None => SqliteStoreBuilder::memory().build().await,
+            }
+            .map_err(|e| io_error(format!("p2p store: {e}")))?;
             let log_sync = LogSync::<_, LogId, _>::builder(store.clone(), endpoint.clone(), gossip.clone())
                 .spawn()
                 .await
@@ -174,6 +269,7 @@ impl P2pNode {
             store,
             log_sync,
             durable: Mutex::new(HashMap::new()),
+            status: Arc::new(Mutex::new(HashMap::new())),
             _endpoint: endpoint,
             _address_book: address_book,
             _discovery: discovery,
@@ -301,6 +397,12 @@ impl P2pNode {
                 seq_num: 0,
                 backlink: None,
             });
+        // Joined but not yet synced with any peer — Offline until a session reaches this topic.
+        self.status
+            .lock()
+            .unwrap()
+            .entry(topic.to_string())
+            .or_insert(SyncStatus::Offline);
         Ok(())
     }
 
@@ -350,15 +452,37 @@ impl P2pNode {
                 .runtime
                 .block_on(entry.handle.subscribe())
                 .map_err(|e| io_error(format!("p2p log-sync subscribe: {e}")))?;
+            let status = Arc::clone(&self.status);
+            let topic_owned = topic.to_string();
             self.runtime.spawn(async move {
                 while let Some(Ok(from_sync)) = stream.next().await {
-                    // Only new operations carry a payload to merge; session-lifecycle events are
-                    // ignored here (a `SyncStatus` surface consumes them in a later slice).
-                    if let TopicLogSyncEvent::OperationReceived { operation, .. } = from_sync.event
-                        && let Some(body) = operation.body
-                        && tx.send(body.to_bytes()).is_err()
-                    {
-                        break; // receiver gone
+                    match from_sync.event {
+                        // A new operation carries a payload to merge. It also implies we are (at
+                        // least) syncing with a peer, so keep the status at Synced/Syncing, never
+                        // regressing it to Offline mid-stream.
+                        TopicLogSyncEvent::OperationReceived { operation, .. } => {
+                            if let Some(body) = operation.body
+                                && tx.send(body.to_bytes()).is_err()
+                            {
+                                break; // receiver gone
+                            }
+                        }
+                        // Session lifecycle → SyncStatus (p2p P3.3). A session is opening/replaying
+                        // (Syncing) until all past state is replicated (SyncFinished) or we go live
+                        // (LiveModeStarted), at which point we are caught up (Synced). A finished or
+                        // failed session with no live successor leaves us Offline until the next.
+                        TopicLogSyncEvent::SessionStarted
+                        | TopicLogSyncEvent::SyncStarted { .. } => {
+                            set_status(&status, &topic_owned, SyncStatus::Syncing);
+                        }
+                        TopicLogSyncEvent::SyncFinished { .. }
+                        | TopicLogSyncEvent::LiveModeStarted => {
+                            set_status(&status, &topic_owned, SyncStatus::Synced);
+                        }
+                        TopicLogSyncEvent::SessionFinished { .. }
+                        | TopicLogSyncEvent::Failed { .. } => {
+                            set_status(&status, &topic_owned, SyncStatus::Offline);
+                        }
                     }
                 }
             });
@@ -367,6 +491,136 @@ impl P2pNode {
         self.subs.lock().unwrap().insert(id, rx);
         Ok(id)
     }
+
+    // --- Identity & status (p2p P3.3) ---------------------------------------------------------
+
+    /// This node's stable identity: the hex-encoded Ed25519 public key it signs operations with
+    /// (persisted, so it is the same across restarts of a persistent node).
+    pub fn identity(&self) -> String {
+        self.signing_key.verifying_key().to_hex()
+    }
+
+    /// The current [`SyncStatus`] for `topic` — [`SyncStatus::Offline`] for a topic never joined or
+    /// with no live peer, updated by the drain task from the log-sync session lifecycle.
+    pub fn sync_status(&self, topic: &str) -> SyncStatus {
+        self.status
+            .lock()
+            .unwrap()
+            .get(topic)
+            .copied()
+            .unwrap_or(SyncStatus::Offline)
+    }
+}
+
+/// Set (overwrite) a topic's [`SyncStatus`], used by the drain task as session events arrive.
+fn set_status(status: &Arc<Mutex<HashMap<String, SyncStatus>>>, topic: &str, next: SyncStatus) {
+    status.lock().unwrap().insert(topic.to_string(), next);
+}
+
+/// The per-user default p2p data dir — `$NOETA_P2P_DIR`, else `$XDG_DATA_HOME/noeta/p2p`, else
+/// `$HOME/.local/share/noeta/p2p` (persistent state, so the XDG *data* dir, not the cache dir).
+/// `None` when no home can be resolved (a bare CI/container), in which case the node runs ephemeral.
+fn default_data_dir() -> Option<PathBuf> {
+    if let Some(dir) = env_path("NOETA_P2P_DIR") {
+        return Some(dir);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        if let Some(xdg) = env_path("XDG_DATA_HOME") {
+            return Some(xdg.join("noeta").join("p2p"));
+        }
+        Some(home()?.join(".local").join("share").join("noeta").join("p2p"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some(
+            home()?
+                .join("Library")
+                .join("Application Support")
+                .join("noeta")
+                .join("p2p"),
+        )
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local) = env_path("LOCALAPPDATA") {
+            return Some(local.join("noeta").join("p2p"));
+        }
+        Some(
+            home()?
+                .join("AppData")
+                .join("Local")
+                .join("noeta")
+                .join("p2p"),
+        )
+    }
+}
+
+fn env_path(var: &str) -> Option<PathBuf> {
+    match std::env::var_os(var) {
+        Some(v) if !v.is_empty() => Some(PathBuf::from(v)),
+        _ => None,
+    }
+}
+
+fn home() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        env_path("USERPROFILE")
+    }
+    #[cfg(not(windows))]
+    {
+        env_path("HOME")
+    }
+}
+
+/// Create the data dir (and parents) if absent, private (`0700`) on Unix so the identity key is not
+/// world-readable.
+fn ensure_dir(dir: &Path) -> std::io::Result<()> {
+    if dir.exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Load this node's Ed25519 identity from `path`, or generate + persist a fresh one there. Any read
+/// error, wrong length, or write failure falls back to an ephemeral (unsaved) key with a warning —
+/// the node still runs, just without a stable identity this session.
+fn load_or_create_identity(path: &Path) -> SigningKey {
+    if let Ok(bytes) = std::fs::read(path) {
+        if let Ok(arr) = <[u8; 32]>::try_from(bytes.as_slice()) {
+            return SigningKey::from_bytes(&arr);
+        }
+        eprintln!(
+            "noeta p2p: identity file {} is malformed; generating a new identity",
+            path.display()
+        );
+    }
+    let key = SigningKey::generate();
+    if let Err(e) = write_private(path, key.as_bytes()) {
+        eprintln!(
+            "noeta p2p: cannot persist identity to {} ({e}); identity is ephemeral this session",
+            path.display()
+        );
+    }
+    key
+}
+
+/// Write `bytes` to `path`, owner-only (`0600`) on Unix.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::write(path, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 /// Build a signed, sequence-numbered, back-linked operation for this author's log (verbatim from
@@ -411,10 +665,28 @@ mod tests {
     /// node B exists, and B still receives it once it joins and syncs A's log. Not hermetic (real
     /// networking) — run explicitly:
     /// `cargo test -p noeta-runtime --features ring-p2p -- --ignored durable_catch_up`.
+    /// A unique throwaway data dir under the OS temp dir, removed on drop — so a persistence test
+    /// exercises the real on-disk identity/store path without touching the user's XDG dir.
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> TempDir {
+            let dir = std::env::temp_dir().join(format!("noeta-p2p-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            TempDir(dir)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     #[ignore = "needs real networking (mDNS multicast); run explicitly"]
     fn durable_catch_up_reaches_a_late_joiner() {
-        let a = P2pNode::start().expect("node a");
+        // Distinct ephemeral nodes (fresh identity + in-memory store each): A and B are two real
+        // replicas, so B must catch up on A's log rather than already share A's identity/state.
+        let a = P2pNode::start_with_config(P2pConfig::ephemeral()).expect("node a");
         // A subscribes (joins the overlay) and publishes durably — this goes into A's log.
         let _sub_a = a.subscribe_durable("room").expect("a subscribes");
         a.publish_durable("room", b"durable state".to_vec())
@@ -423,7 +695,7 @@ mod tests {
 
         // B starts LATE — after A already published — and subscribes. Over gossip it would miss
         // the message; over log-sync it syncs A's log and catches up.
-        let b = P2pNode::start().expect("node b");
+        let b = P2pNode::start_with_config(P2pConfig::ephemeral()).expect("node b");
         let sub_b = b.subscribe_durable("room").expect("b subscribes");
 
         let mut received = None;
@@ -440,8 +712,8 @@ mod tests {
     #[test]
     #[ignore = "needs real networking (mDNS multicast); run explicitly"]
     fn two_nodes_exchange_a_gossip_message() {
-        let a = P2pNode::start().expect("node a");
-        let b = P2pNode::start().expect("node b");
+        let a = P2pNode::start_with_config(P2pConfig::ephemeral()).expect("node a");
+        let b = P2pNode::start_with_config(P2pConfig::ephemeral()).expect("node b");
         // Both subscribe first (gossip is ephemeral — only messages published after subscribing
         // arrive), then give discovery a moment to connect the overlay.
         let sub_b = b.subscribe("room").expect("b subscribes");
@@ -464,12 +736,43 @@ mod tests {
 
     #[test]
     fn node_starts_and_the_gossip_pipeline_runs() {
-        let node = P2pNode::start().expect("node starts");
+        let node = P2pNode::start_with_config(P2pConfig::ephemeral()).expect("node starts");
         node.publish("room", b"hello".to_vec())
             .expect("publish to an empty overlay succeeds");
         let sub = node.subscribe("room").expect("subscribe succeeds");
         // No peers, so nothing is delivered — but the poll path must work and be empty.
         assert_eq!(node.poll_sub(sub), None);
         assert_eq!(node.poll_sub(999), None); // unknown subscription id
+    }
+
+    /// P3.3: a persistent node writes its Ed25519 identity to its data dir and, restarted against
+    /// the same dir, comes back with the *same* identity — the offline-restart guarantee. Also
+    /// asserts an ephemeral node's identity differs (a fresh key each time).
+    #[test]
+    fn identity_persists_across_restart() {
+        let dir = TempDir::new("identity");
+
+        let first = P2pNode::start_with_config(P2pConfig::at(&dir.0)).expect("node 1");
+        let id1 = first.identity();
+        drop(first); // release the store/socket before restarting against the same dir
+
+        let second = P2pNode::start_with_config(P2pConfig::at(&dir.0)).expect("node 2");
+        assert_eq!(second.identity(), id1, "restart reuses the persisted identity");
+        assert!(dir.0.join("identity.key").exists(), "identity file written");
+
+        // A fresh ephemeral node has a different identity (nothing loaded).
+        let ephemeral = P2pNode::start_with_config(P2pConfig::ephemeral()).expect("ephemeral node");
+        assert_ne!(ephemeral.identity(), id1);
+    }
+
+    /// P3.3: with no peer reachable, every topic reports `Offline` — an unjoined topic trivially,
+    /// and even a joined-but-unpartnered `synced_signal` topic, since no sync session ever starts.
+    #[test]
+    fn sync_status_is_offline_without_a_peer() {
+        let node = P2pNode::start_with_config(P2pConfig::ephemeral()).expect("node starts");
+        assert_eq!(node.sync_status("never-joined"), SyncStatus::Offline);
+        let _sub = node.subscribe_durable("room").expect("subscribe");
+        // Joined the topic, but no peer exists to sync with → still Offline.
+        assert_eq!(node.sync_status("room"), SyncStatus::Offline);
     }
 }

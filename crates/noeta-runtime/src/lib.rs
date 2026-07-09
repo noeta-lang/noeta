@@ -820,6 +820,24 @@ impl P2p for RealHost {
     fn p2p_subscribe_durable(&mut self, topic: &str) -> Result<u64, StdError> {
         self.p2p_node()?.subscribe_durable(topic)
     }
+
+    // Identity & status (p2p P3.3): the real node has a persisted Ed25519 key and tracks each
+    // topic's sync state; without the ring the trait defaults apply (no identity, always Synced —
+    // the loopback broker never lags).
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_identity(&mut self) -> Result<Option<String>, StdError> {
+        Ok(Some(self.p2p_node()?.identity()))
+    }
+
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_sync_status(&mut self, topic: &str) -> noeta_stdlib::SyncStatus {
+        // Don't start a node just to answer a status query: an un-started node has never synced
+        // anything, so it is Offline.
+        match self.p2p_node.as_ref() {
+            Some(node) => node.sync_status(topic),
+            None => noeta_stdlib::SyncStatus::Offline,
+        }
+    }
 }
 
 impl Entropy for RealHost {
@@ -858,14 +876,30 @@ mod tests {
     #[cfg(feature = "ring-p2p")]
     #[test]
     fn real_host_p2p_routes_through_a_real_node() {
-        use noeta_stdlib::P2p;
+        use noeta_stdlib::{P2p, SyncStatus};
+        // Point the node's persistent state at a throwaway dir so the test never writes to the
+        // user's real XDG data dir (the node is persistent-by-default since P3.3). Pre-seat the
+        // node the lazy path would otherwise start with the default config — the test lives in the
+        // crate, so it can set the private field directly.
+        let data_dir =
+            std::env::temp_dir().join(format!("noeta-p2p-realhost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
         let mut host = RealHost::new().expect("real host");
+        host.p2p_node = Some(
+            p2p_node::P2pNode::start_with_config(p2p_node::P2pConfig::at(&data_dir)).expect("node"),
+        );
         host.p2p_publish("room", b"hello".to_vec())
             .expect("publish starts the node and succeeds");
         let sub = host.p2p_subscribe("room").expect("subscribe succeeds");
         // No peers → nothing delivered, but the poll path must work and be empty.
         assert_eq!(host.p2p_poll_sub(sub).expect("poll_sub"), None);
         assert_eq!(host.p2p_poll("other").expect("poll default"), None);
+        // P3.3 surface: a persistent identity is present, and status is Offline (no peer).
+        assert!(host.p2p_identity().expect("identity").is_some());
+        assert_eq!(host.p2p_sync_status("room"), SyncStatus::Offline);
+
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     /// The real `Network` capability against a live endpoint. `#[ignore]` so CI stays hermetic —

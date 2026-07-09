@@ -242,6 +242,55 @@ pub trait P2p {
     fn p2p_subscribe_durable(&mut self, topic: &str) -> Result<u64, StdError> {
         self.p2p_subscribe(topic)
     }
+
+    // --- Identity & status (p2p P3.3) ---------------------------------------------------------
+    //
+    // Both are meaningful only once there is a *real* network with a persistent identity to have
+    // and a network to be offline from — so the sandbox/loopback broker keeps the trivial defaults
+    // (no stable identity; "always synced", since a single-node broker never lags). Only `RealHost`
+    // under `ring-p2p` overrides them from its live p2panda node.
+
+    /// This node's stable identity — the hex-encoded Ed25519 public key it signs operations with,
+    /// persisted across restarts (p2p P3.3). `None` on the loopback broker, which has no identity.
+    fn p2p_identity(&mut self) -> Result<Option<String>, StdError> {
+        Ok(None)
+    }
+
+    /// The synchronization state of `topic` from this node's point of view (p2p P3.3): whether it
+    /// has caught up with peers ([`SyncStatus::Synced`]), is actively syncing, or has no live peer
+    /// ([`SyncStatus::Offline`]). Default [`SyncStatus::Synced`] — the loopback broker is a single
+    /// node with nothing to lag behind.
+    fn p2p_sync_status(&mut self, _topic: &str) -> SyncStatus {
+        SyncStatus::Synced
+    }
+}
+
+/// A `synced_signal`'s convergence state relative to its peers (p2p P3.3). Meaningless on the
+/// deterministic loopback broker (always [`SyncStatus::Synced`]); real once a network can be
+/// partitioned — a live p2panda node reports it from its log-sync session lifecycle, letting a
+/// program render "working offline" / "syncing…" / "up to date".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncStatus {
+    /// No live sync session with any peer — either none has been reached yet, or the last one
+    /// failed/ended with no peer. The local state is authoritative but possibly stale.
+    Offline,
+    /// A sync session is in progress: exchanging or replaying a peer's log, not yet caught up.
+    Syncing,
+    /// Caught up with the peers reached — all their prior operations are merged (and, in live mode,
+    /// new ones stream in). The convergence guarantee is met for those peers.
+    Synced,
+}
+
+impl SyncStatus {
+    /// The lowercase word `synced_signal.status()` surfaces to a program (`"offline"` / `"syncing"`
+    /// / `"synced"`) — a plain string so a script matches it without importing an enum type.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SyncStatus::Offline => "offline",
+            SyncStatus::Syncing => "syncing",
+            SyncStatus::Synced => "synced",
+        }
+    }
 }
 
 /// Every host-coupled effect the interpreters perform, behind one swappable seam — the union of the
