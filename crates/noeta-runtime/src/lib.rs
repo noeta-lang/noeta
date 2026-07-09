@@ -30,9 +30,9 @@ mod telemetry;
 use compact_str::CompactString;
 use noeta_stdlib::net::accept_outcome;
 use noeta_stdlib::{
-    AttrValue, Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, Logging,
-    Metrics, NativeOut, NetRequest, NetResponse, Network, P2p, ReadSource, RealBody, Rng, SpanData,
-    SpanEvent, SpanId, SpanKind, SpanStatus, StdError, Tracing, TraceContext,
+    AttrValue, Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, LogRecord,
+    Logging, Metrics, NativeOut, NetRequest, NetResponse, Network, P2p, ReadSource, RealBody, Rng,
+    SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, StdError, Tracing, TraceContext,
 };
 // Only the outbound-client (`ring-http-client`) path builds an `ExternBox` response body.
 #[cfg(feature = "ring-http-client")]
@@ -125,6 +125,9 @@ struct RealTelemetry {
     /// Ended spans awaiting export (flushed at [`telemetry::FLUSH_THRESHOLD`] or on teardown).
     #[cfg(feature = "telemetry")]
     buffer: Vec<SpanData>,
+    /// Emitted log records awaiting export (flushed at [`telemetry::FLUSH_THRESHOLD`] or teardown).
+    #[cfg(feature = "telemetry")]
+    logs_buffer: Vec<LogRecord>,
 }
 
 impl RealTelemetry {
@@ -137,6 +140,8 @@ impl RealTelemetry {
             exporter: telemetry::OtlpExporter::from_env(),
             #[cfg(feature = "telemetry")]
             buffer: Vec::new(),
+            #[cfg(feature = "telemetry")]
+            logs_buffer: Vec::new(),
         }
     }
 }
@@ -970,6 +975,26 @@ impl Logging for RealHost {
             false
         }
     }
+
+    #[cfg(feature = "telemetry")]
+    fn log_emit(&mut self, record: LogRecord) {
+        // Null sink for logs — no logs endpoint (or no exporter at all).
+        if self
+            .tel
+            .exporter
+            .as_ref()
+            .is_none_or(|e| e.logs_endpoint.is_none())
+        {
+            return;
+        }
+        self.tel.logs_buffer.push(record);
+        if self.tel.logs_buffer.len() >= telemetry::FLUSH_THRESHOLD {
+            self.flush_logs();
+        }
+    }
+
+    #[cfg(not(feature = "telemetry"))]
+    fn log_emit(&mut self, _record: LogRecord) {}
 }
 
 impl Metrics for RealHost {
@@ -1030,6 +1055,27 @@ impl RealHost {
         self.tel.buffer.clear();
     }
 
+    /// Export the buffered log records as one OTLP/JSON POST to the logs endpoint. Best-effort,
+    /// mirroring [`flush_telemetry`](Self::flush_telemetry) for the logs signal.
+    #[cfg(feature = "telemetry")]
+    fn flush_logs(&mut self) {
+        let Some((endpoint, headers, body)) = self.tel.exporter.as_ref().and_then(|e| {
+            let endpoint = e.logs_endpoint.clone()?;
+            (!self.tel.logs_buffer.is_empty()).then(|| {
+                (
+                    endpoint,
+                    e.headers.clone(),
+                    e.logs_request_body(&self.tel.logs_buffer),
+                )
+            })
+        }) else {
+            self.tel.logs_buffer.clear();
+            return;
+        };
+        self.otlp_post(&endpoint, &headers, &body);
+        self.tel.logs_buffer.clear();
+    }
+
     /// POST one OTLP/JSON body to `url` with `headers`, on the host's runtime. Shared by all three
     /// signals' flush paths. Best-effort — an export failure never affects the program.
     #[cfg(feature = "telemetry")]
@@ -1045,12 +1091,13 @@ impl RealHost {
     }
 }
 
-// Flush any buffered spans when the host (isolate) is torn down. Runs before the `runtime` field
-// drops (explicit `Drop::drop` precedes field drops), so `block_on` is still valid here.
+// Flush any buffered spans and logs when the host (isolate) is torn down. Runs before the `runtime`
+// field drops (explicit `Drop::drop` precedes field drops), so `block_on` is still valid here.
 #[cfg(feature = "telemetry")]
 impl Drop for RealHost {
     fn drop(&mut self) {
         self.flush_telemetry();
+        self.flush_logs();
     }
 }
 

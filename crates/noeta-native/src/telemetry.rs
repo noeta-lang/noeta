@@ -212,18 +212,51 @@ pub trait Tracing {
     fn tel_release_remote(&mut self, span: SpanId);
 }
 
+/// An OTel **log severity** — the six named levels the SDK surfaces (OTel defines 24 numeric levels
+/// in six groups; this is one per group, the common set). Maps to a severity *number* and *text* at
+/// the OTLP encoder (kept out of the ABI so no OTLP detail leaks across the seam).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+    Fatal,
+}
+
+/// One OTel **log record** — a structured, exported log line. Unlike a `print`, it carries a
+/// severity, structured attributes, and (the point of the signal) the [`TraceContext`] of the span
+/// active when it was emitted, so a log auto-correlates to the trace that produced it. Neutral
+/// `Send` data, shared by both host impls (sandbox records; real host exports OTLP).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LogRecord {
+    /// Emission wall-time (unix ms; the host's clock, so deterministic under the sandbox).
+    pub unix_ms: u64,
+    pub severity: Severity,
+    /// The log message (OTel `body`, string form).
+    pub body: CompactString,
+    pub attributes: Vec<(CompactString, AttrValue)>,
+    /// The active span's context at emission, or `None` at top level — the auto-correlation link.
+    pub trace_context: Option<TraceContext>,
+}
+
 /// **Logging** capability (native OTEL) — the second of three telemetry signals, sibling to
-/// [`Tracing`] and [`Metrics`]. Emits OTel `LogRecord`s: structured, exported log lines
+/// [`Tracing`] and [`Metrics`]. Emits OTel [`LogRecord`]s: structured, exported log lines
 /// **auto-correlated** to the active span (the record carries the current [`TraceContext`], read
 /// from the SDK's task-local context stack), *not* a `print` bridge. Write-only like the other
 /// signals — never differential-tested, held by the same byte-identical parity oracle.
-///
-/// P0 lands only the enable gate; [`Self::log_emit`] and the `LogRecord` ABI arrive with Phase L.
 pub trait Logging {
     /// Whether the logs signal is active — an OTLP logs endpoint is configured (real host) or the
     /// recorder is on (sandbox). The `std.log` module gates on this so a program that never
     /// configures a logs endpoint pays nothing per `log.info(...)`, mirroring [`Tracing::tel_enabled`].
     fn tel_logs_enabled(&self) -> bool;
+
+    /// Emit a [`LogRecord`] — the sandbox records it into an in-memory buffer (deterministic), the
+    /// real host buffers it for OTLP export. The SDK builds the record (severity, body, attributes)
+    /// and stamps the active span's [`TraceContext`]; the host owns timestamping only if the SDK
+    /// left it unset (it passes `unix_ms` from the host clock, so records stay deterministic).
+    fn log_emit(&mut self, record: LogRecord);
 }
 
 /// **Metrics** capability (native OTEL) — the third telemetry signal, sibling to [`Tracing`] and

@@ -14,7 +14,9 @@ use crate::StdError;
 use crate::env;
 use crate::fs::Vfs;
 use crate::random;
-use noeta_native::{AttrValue, SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, TraceContext};
+use noeta_native::{
+    AttrValue, LogRecord, SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, TraceContext,
+};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -73,6 +75,11 @@ struct TelRecorder {
     /// installed by [`SandboxHost::set_span_sink`] so a caller that only sees the host by value (it
     /// is moved into the VM and dropped at teardown) can still observe the spans a program emitted.
     sink: Option<Arc<Mutex<Vec<SpanData>>>>,
+    /// Emitted log records, in emission order — the logs signal's recorder (native OTEL Phase L).
+    logs: Vec<LogRecord>,
+    /// An optional external sink that also receives every emitted [`LogRecord`] — the logs analogue
+    /// of `sink`, installed by [`SandboxHost::set_log_sink`] for the logs parity oracle.
+    log_sink: Option<Arc<Mutex<Vec<LogRecord>>>>,
 }
 
 /// The sandbox's inbound-server state: the fixed request script (see
@@ -107,6 +114,8 @@ impl SandboxHost {
                 recorded: Vec::new(),
                 remote: BTreeMap::new(),
                 sink: None,
+                logs: Vec::new(),
+                log_sink: None,
             },
         }
     }
@@ -123,6 +132,19 @@ impl SandboxHost {
     /// a sink handed in before the run survives it. No effect on normal runs (the sink stays `None`).
     pub fn set_span_sink(&mut self, sink: Arc<Mutex<Vec<SpanData>>>) {
         self.tel.sink = Some(sink);
+    }
+
+    /// The log records this sandbox has emitted, in emission order — test introspection for the logs
+    /// parity oracle (native OTEL Phase L).
+    pub fn recorded_logs(&self) -> &[LogRecord] {
+        &self.tel.logs
+    }
+
+    /// Install a shared sink that also receives every emitted [`LogRecord`] — the logs analogue of
+    /// [`set_span_sink`](Self::set_span_sink), so the parity oracle can observe a program's logs
+    /// after the host is dropped at teardown. No effect on normal runs (the sink stays `None`).
+    pub fn set_log_sink(&mut self, sink: Arc<Mutex<Vec<LogRecord>>>) {
+        self.tel.log_sink = Some(sink);
     }
 }
 
@@ -456,6 +478,13 @@ impl Logging for SandboxHost {
     fn tel_logs_enabled(&self) -> bool {
         true
     }
+
+    fn log_emit(&mut self, record: LogRecord) {
+        if let Some(sink) = &self.tel.log_sink {
+            sink.lock().expect("log sink not poisoned").push(record.clone());
+        }
+        self.tel.logs.push(record);
+    }
 }
 
 impl Metrics for SandboxHost {
@@ -533,6 +562,48 @@ mod tests {
         host2.tel_span_set_status(r2, SpanStatus::Error("500".into()));
         host2.tel_span_end(r2);
         assert_eq!(host2.recorded_spans(), spans);
+    }
+
+    #[test]
+    fn log_recorder_captures_records_deterministically() {
+        use noeta_native::Severity;
+
+        let emit = |host: &mut SandboxHost| {
+            // A correlated record (emitted "inside" a span) + a top-level one.
+            let span = host.tel_span_start("op", SpanKind::Internal, None);
+            let ctx = host.tel_span_context(span);
+            host.log_emit(LogRecord {
+                unix_ms: 5,
+                severity: Severity::Info,
+                body: "inside".into(),
+                attributes: vec![("k".into(), AttrValue::Int(1))],
+                trace_context: Some(ctx),
+            });
+            host.tel_span_end(span);
+            host.log_emit(LogRecord {
+                unix_ms: 6,
+                severity: Severity::Error,
+                body: "top".into(),
+                attributes: vec![],
+                trace_context: None,
+            });
+        };
+
+        let mut host = SandboxHost::new();
+        emit(&mut host);
+        let logs = host.recorded_logs();
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].body, "inside");
+        assert_eq!(logs[0].severity, Severity::Info);
+        assert!(logs[0].trace_context.is_some());
+        assert_eq!(logs[1].body, "top");
+        assert!(logs[1].trace_context.is_none());
+
+        // Determinism: a second sandbox records byte-identical log records (ids/timestamps derive
+        // from counters + the logical clock).
+        let mut host2 = SandboxHost::new();
+        emit(&mut host2);
+        assert_eq!(host2.recorded_logs(), logs);
     }
 
     #[test]

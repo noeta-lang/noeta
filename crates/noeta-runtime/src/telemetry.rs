@@ -9,7 +9,7 @@
 //! T0 is a skeleton: spans buffer and flush as one OTLP/JSON POST at a size threshold or on host
 //! teardown. A real batch span processor (time-triggered, off the request path) is a later slice.
 
-use noeta_stdlib::{AttrValue, SpanData, SpanKind, SpanStatus};
+use noeta_stdlib::{AttrValue, LogRecord, Severity, SpanData, SpanKind, SpanStatus};
 use serde_json::{Value, json};
 
 /// Flush the span buffer once it reaches this many spans (a minimal batch; the proper time-based
@@ -90,6 +90,11 @@ impl OtlpExporter {
     pub(crate) fn request_body(&self, spans: &[SpanData]) -> Value {
         spans_to_json(spans, &self.service_name)
     }
+
+    /// The OTLP/JSON `ExportLogsServiceRequest` body for `records`.
+    pub(crate) fn logs_request_body(&self, records: &[LogRecord]) -> Value {
+        logs_to_json(records, &self.service_name)
+    }
 }
 
 /// Resolve one signal's endpoint from the environment. A signal-specific
@@ -162,6 +167,64 @@ fn span_to_json(s: &SpanData) -> Value {
         obj["parentSpanId"] = Value::String(hex(&parent.span_id));
     }
     obj
+}
+
+/// Build the OTLP/JSON `ExportLogsServiceRequest` for a batch of log records (one resource, one
+/// scope). Same encoding rules as spans: `timeUnixNano` is a stringified uint64, `traceId`/`spanId`
+/// are hex, `severityNumber` is the OTel numeric level, `body` is an `AnyValue` (`stringValue`).
+pub(crate) fn logs_to_json(records: &[LogRecord], service_name: &str) -> Value {
+    let records_json: Vec<Value> = records.iter().map(log_to_json).collect();
+    json!({
+        "resourceLogs": [{
+            "resource": resource(service_name),
+            "scopeLogs": [{
+                "scope": { "name": "noeta", "version": env!("CARGO_PKG_VERSION") },
+                "logRecords": records_json
+            }]
+        }]
+    })
+}
+
+fn log_to_json(r: &LogRecord) -> Value {
+    let mut obj = json!({
+        "timeUnixNano": nanos(r.unix_ms),
+        "observedTimeUnixNano": nanos(r.unix_ms),
+        "severityNumber": severity_number(r.severity),
+        "severityText": severity_text(r.severity),
+        "body": { "stringValue": r.body.as_str() },
+        "attributes": r.attributes.iter().map(|(k, v)| attr_kv(k, v)).collect::<Vec<_>>(),
+    });
+    // Auto-correlation: a record emitted inside a span carries that span's trace/span ids.
+    if let Some(ctx) = &r.trace_context {
+        obj["traceId"] = Value::String(hex(&ctx.trace_id));
+        obj["spanId"] = Value::String(hex(&ctx.span_id));
+    }
+    obj
+}
+
+/// The OTel severity **number** for a level (one representative per severity group: TRACE=1,
+/// DEBUG=5, INFO=9, WARN=13, ERROR=17, FATAL=21 — the group base values).
+fn severity_number(s: Severity) -> u8 {
+    match s {
+        Severity::Trace => 1,
+        Severity::Debug => 5,
+        Severity::Info => 9,
+        Severity::Warn => 13,
+        Severity::Error => 17,
+        Severity::Fatal => 21,
+    }
+}
+
+/// The OTel severity **text** for a level (the conventional uppercase name).
+fn severity_text(s: Severity) -> &'static str {
+    match s {
+        Severity::Trace => "TRACE",
+        Severity::Debug => "DEBUG",
+        Severity::Info => "INFO",
+        Severity::Warn => "WARN",
+        Severity::Error => "ERROR",
+        Severity::Fatal => "FATAL",
+    }
 }
 
 fn event_to_json(e: &noeta_stdlib::SpanEvent) -> Value {
@@ -287,6 +350,43 @@ mod tests {
         let s = &body["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
         assert!(s.get("parentSpanId").is_none());
         assert_eq!(s["status"]["code"], 1);
+    }
+
+    #[test]
+    fn otlp_logs_json_shape_is_valid() {
+        let records = vec![
+            LogRecord {
+                unix_ms: 2_000,
+                severity: Severity::Info,
+                body: "started".into(),
+                attributes: vec![("worker".into(), AttrValue::Int(3))],
+                trace_context: Some(ctx(0xab, 0xcd)),
+            },
+            LogRecord {
+                unix_ms: 2_500,
+                severity: Severity::Error,
+                body: "boom".into(),
+                attributes: vec![],
+                trace_context: None,
+            },
+        ];
+        let body = logs_to_json(&records, "svc");
+        let rl = &body["resourceLogs"][0];
+        assert_eq!(rl["resource"]["attributes"][0]["value"]["stringValue"], "svc");
+        let recs = &rl["scopeLogs"][0]["logRecords"];
+        // Correlated INFO record.
+        assert_eq!(recs[0]["severityNumber"], 9);
+        assert_eq!(recs[0]["severityText"], "INFO");
+        assert_eq!(recs[0]["body"]["stringValue"], "started");
+        assert_eq!(recs[0]["timeUnixNano"], "2000000000");
+        assert_eq!(recs[0]["attributes"][0]["value"]["intValue"], "3");
+        assert_eq!(recs[0]["traceId"], "abababababababababababababababab");
+        assert_eq!(recs[0]["spanId"], "cdcdcdcdcdcdcdcd");
+        // Top-level ERROR record — no trace correlation.
+        assert_eq!(recs[1]["severityNumber"], 17);
+        assert_eq!(recs[1]["severityText"], "ERROR");
+        assert!(recs[1].get("traceId").is_none());
+        assert!(recs[1].get("spanId").is_none());
     }
 
     #[test]
