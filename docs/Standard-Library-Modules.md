@@ -356,6 +356,39 @@ isolate messages are **auto-instrumented** into connected traces with no code ch
 reserved type name (declaring your own is **E0049**); a non-scalar `set_attribute` value is a
 compile error (**E0007**). Full surface, config, and design on [Observability](Observability).
 
+## `log`
+
+OpenTelemetry **log records** ([Observability](Observability)), auto-correlated to the active span
+(trace + span id) — not `print`. `log.info` / `debug` / `warn` / `error` (and the generic
+`log.log(severity, message)`); the `*_with(message, attrs)` forms attach a `Map<string,
+string|int|float|bool>` of attributes.
+
+```noeta ignore
+use std.{log}
+log.info("server started")
+log.error_with("checkout failed", {"order": 42, "stage": "charge"})
+```
+
+Opt-in like tracing; a `log.info(...)` is free when no logs endpoint is configured. A log inside a
+`with_span` (or a server request) carries that span's ids automatically.
+
+## `metrics`
+
+OpenTelemetry **metrics** ([Observability](Observability)) — aggregated host-side into time series.
+`metrics.counter` / `up_down_counter` / `histogram` / `gauge` are get-or-create by name, each
+returning one `Instrument`; record with `.add(n)` / `.record(v)` (interchangeable aliases) or the
+`.add_with(n, attrs)` / `.record_with(v, attrs)` attributed forms.
+
+```noeta ignore
+use std.{metrics}
+hits = metrics.counter("http.requests")
+hits.add_with(1, {"route": "/orders", "status": 200})
+```
+
+`Instrument` is a reserved type name (**E0049**). Server requests are auto-instrumented with an
+`http.server.request.duration` histogram and an `http.server.active_requests` counter. Keep attribute
+cardinality low — each distinct attribute set is a stored series.
+
 ## `vec` & `quat`
 
 Scalar 3D vector and quaternion math over any struct with the right shape — a `Vec3` is any struct with three `f32` fields, a `Quat` any struct with four. Result-shape operations return the *same* struct type as the input.

@@ -201,8 +201,20 @@ new deps — reuses `reqwest` + `serde_json` already compiled; all under the exi
   site; the plan's fallback (builder/variadic) was **not** needed. User-approved scope into noeta-check.
 - **L2 ✅** (`63e115f`) `std.log` structured attributes (`*_with(msg, attrs)`), `Map<string, union>`
   literal accepted; non-scalar value → E0007. Logs signal COMPLETE end-to-end.
+- **M0 ✅** (`af2bcc1`) metrics ABI + shared `MetricStore` aggregator (both backends, byte-identical) +
+  `metrics_to_json` (`v1/metrics`); sandbox collects at teardown (Drop→sink).
+- **M1 ✅** (`03272b0`) `std.metrics` module + **one `Instrument` extern type** (not three — reserving
+  `Counter`/`Gauge`/`Histogram` collides with common user code; only `Instrument` is reserved, E0049).
+  `ExtType::deep_marshal` added so `*_with` map args reach dispatch as `NativeValue::Map`. Sink-parity
+  oracle. **A follow-on `namespaced-extern-types` arc (separate branch) may later enable idiomatic
+  per-kind types** (see that arc's plan).
+- **M2 ✅** (`e1aaf93`) real-host periodic-export reader (background thread, `Arc<Mutex<MetricStore>>`,
+  `OTEL_METRIC_EXPORT_INTERVAL`, lazy-spawn, shutdown+final-flush on Drop); SDK `add`/`record` gated on
+  `tel_metrics_enabled` (free when off). End-to-end reader test vs a loopback collector.
+- **M3 ✅** (`17de5cc`) server auto-instrumentation: `http.server.request.duration` histogram +
+  `http.server.active_requests` up/down counter per request, rides the SERVER-span hook. Sink oracle.
 
-**Next: Phase M (metrics).**
+**Both new signals COMPLETE. Next: Phase D (docs + close-out).**
 
 ## Slices (commit per green slice; full gate = workspace suites + differential + leak + conformance + fmt + clippy)
 
