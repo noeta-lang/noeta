@@ -101,6 +101,13 @@ impl SpacesOp {
         self.0.header.to_bytes()
     }
 
+    /// Whether this is an encrypted **application** operation (as opposed to a control operation —
+    /// key bundle, auth, or space-membership). Only application ciphertext can be undecryptable for
+    /// us (a non-member or revoked peer), so this gates the "skip silently" path on receive.
+    pub fn is_application(&self) -> bool {
+        matches!(self.0.header.extensions, SpacesArgs::Application { .. })
+    }
+
     /// Reconstruct an operation received from the transport, recomputing its hash (the operation id)
     /// from the header bytes. The signature travels inside the header, so [`Provenance::verify`]
     /// still checks authenticity after a round-trip.
@@ -345,6 +352,34 @@ impl CryptoGroups {
         Ok(vec![auth_message, space_message])
     }
 
+    /// Remove `member` from the space, persisting the resulting auth + space state. p2panda-spaces
+    /// **rotates the group encryption secret** as part of this, so the removed member cannot decrypt
+    /// any state published after removal (revocation). Returns the auth + space-membership operations
+    /// to replicate (the latter carries the rotated key material to the remaining members).
+    pub async fn remove(
+        &self,
+        space_id: SpaceId,
+        member: ActorId,
+    ) -> Result<Vec<SpacesOp>, StdError> {
+        let space = self
+            .manager
+            .space(space_id)
+            .await
+            .map_err(|e| io_error(format!("cannot open space: {e}")))?
+            .ok_or_else(|| io_error("cannot remove from unknown space".to_string()))?;
+        let (groups_y, space_y, auth_message, space_message) = space
+            .remove(member)
+            .await
+            .map_err(|e| io_error(format!("cannot remove member: {e}")))?;
+        persist_groups(&self.spaces_store, &groups_y)
+            .await
+            .map_err(|e| io_error(format!("cannot persist auth state: {e}")))?;
+        persist_space(&self.spaces_store, space_y)
+            .await
+            .map_err(|e| io_error(format!("cannot persist space state: {e}")))?;
+        Ok(vec![auth_message, space_message])
+    }
+
     /// Ingest an operation received from a peer: persist it to the log (so dependency lookups
     /// resolve), process it through the manager (decrypt / apply membership), and persist any auth /
     /// space state the manager produced. Returns the decrypted application / membership events.
@@ -434,6 +469,10 @@ pub struct EncryptedGroup {
     welcomed: bool,
     /// Members already welcomed by this node (creator only), so each is added exactly once.
     added: std::collections::HashSet<ActorId>,
+    /// Every peer whose key bundle we have processed (member or not). Lets a member added at runtime
+    /// (`add_member`) be welcomed immediately if its bundle already arrived, not only when a fresh
+    /// bundle event fires.
+    known_bundles: std::collections::HashSet<ActorId>,
     /// The latest local state awaiting a welcome (non-creator), flushed when welcomed. Latest-wins
     /// is safe: the value is a CRDT, so the most recent local state subsumes earlier ones.
     pending: Option<Vec<u8>>,
@@ -467,6 +506,7 @@ impl EncryptedGroup {
             creator,
             welcomed: false,
             added: std::collections::HashSet::new(),
+            known_bundles: std::collections::HashSet::new(),
             pending: None,
         };
 
@@ -500,32 +540,29 @@ impl EncryptedGroup {
     /// once this node is welcomed into the space.
     pub async fn receive(&mut self, wire: &[u8]) -> Result<GroupOutput, StdError> {
         let op = SpacesOp::from_wire(wire)?;
-        let events = self.crypto.receive(&op).await?;
+        let events = match self.crypto.receive(&op).await {
+            Ok(events) => events,
+            // Encrypted application data we cannot decrypt — we are not (or no longer) a member, or
+            // lack the rotated group key. A non-member/revoked peer simply never sees the plaintext;
+            // skip it silently rather than failing the sync. Control ops must always process, so
+            // only application ciphertext takes this path.
+            Err(_) if op.is_application() => return Ok(GroupOutput::default()),
+            Err(e) => return Err(e),
+        };
 
         let mut out = GroupOutput::default();
-        let mut announced = Vec::new();
         for event in events {
             match event {
                 Event::Application { data, .. } => out.decrypted.push(data),
-                Event::KeyBundle { author } => announced.push(author),
+                Event::KeyBundle { author } => {
+                    self.known_bundles.insert(author);
+                }
                 _ => {}
             }
         }
 
-        // Creator welcomes each declared member once its key bundle is registered (exactly once).
-        if self.creator {
-            for author in announced {
-                if author != self.me
-                    && self.members.contains(&author)
-                    && self.added.insert(author)
-                {
-                    let add_ops = self.crypto.add(self.space_id, author, Access::read()).await?;
-                    for op in &add_ops {
-                        out.to_send.push(op.to_wire());
-                    }
-                }
-            }
-        }
+        // Creator welcomes any declared member whose key bundle is now known (each exactly once).
+        out.to_send.extend(self.welcome_eligible().await?);
 
         // Non-creator: detect being welcomed, then flush any state we buffered before joining.
         if !self.welcomed && self.crypto.is_member(self.space_id, self.me).await? {
@@ -537,6 +574,56 @@ impl EncryptedGroup {
         }
 
         Ok(out)
+    }
+
+    /// Add `member` to the group at runtime (p2p P3.4b dynamic membership). Only the creator manages
+    /// membership; on any other node this records the intent but produces nothing (the creator is
+    /// authoritative). If the new member's key bundle is already known it is welcomed immediately;
+    /// otherwise the welcome fires when its bundle arrives. Returns wire ops to broadcast.
+    pub async fn add_member(&mut self, member: ActorId) -> Result<Vec<Vec<u8>>, StdError> {
+        if !self.members.contains(&member) {
+            self.members.push(member);
+        }
+        self.welcome_eligible().await
+    }
+
+    /// Remove `member` from the group at runtime, **rotating the group key** so the removed member
+    /// cannot decrypt state published afterward (revocation — p2panda-spaces performs the rotation).
+    /// Only the creator manages membership; a no-op on any other node. Returns wire ops to broadcast.
+    pub async fn remove_member(&mut self, member: ActorId) -> Result<Vec<Vec<u8>>, StdError> {
+        self.members.retain(|m| *m != member);
+        self.added.remove(&member);
+        self.known_bundles.remove(&member);
+        if !self.creator || member == self.me {
+            return Ok(Vec::new());
+        }
+        let ops = self.crypto.remove(self.space_id, member).await?;
+        Ok(ops.iter().map(SpacesOp::to_wire).collect())
+    }
+
+    /// Welcome every declared member whose key bundle we hold but who is not yet added (creator
+    /// only). Idempotent — each member is added exactly once. Returns wire ops to broadcast.
+    async fn welcome_eligible(&mut self) -> Result<Vec<Vec<u8>>, StdError> {
+        if !self.creator {
+            return Ok(Vec::new());
+        }
+        let eligible: Vec<ActorId> = self
+            .members
+            .iter()
+            .copied()
+            .filter(|m| {
+                *m != self.me && self.known_bundles.contains(m) && !self.added.contains(m)
+            })
+            .collect();
+        let mut wire = Vec::new();
+        for member in eligible {
+            let add_ops = self.crypto.add(self.space_id, member, Access::read()).await?;
+            self.added.insert(member);
+            for op in &add_ops {
+                wire.push(op.to_wire());
+            }
+        }
+        Ok(wire)
     }
 }
 
@@ -719,6 +806,78 @@ mod tests {
             assert!(
                 received.iter().any(|d| d == &secret),
                 "the non-creator member decrypts the creator's encrypted state"
+            );
+        });
+    }
+
+    /// P3.4b dynamic membership: a **removed** member cannot decrypt state published after its
+    /// removal — revocation, backed by p2panda-spaces' key rotation. The creator publishes a secret
+    /// both members see, removes the other member (rotating the group key), then publishes a second
+    /// secret; the removed member receives that ciphertext but cannot decrypt it.
+    #[test]
+    fn removed_member_cannot_decrypt_new_state() {
+        use std::collections::VecDeque;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let alice_c = peer().await;
+            let bob_c = peer().await;
+            let alice_id = alice_c.id();
+            let bob_id = bob_c.id();
+            let members = vec![alice_id, bob_id];
+
+            let (mut alice, a_init) = EncryptedGroup::open(alice_c, "team/secure", members.clone())
+                .await
+                .unwrap();
+            let (mut bob, b_init) = EncryptedGroup::open(bob_c, "team/secure", members)
+                .await
+                .unwrap();
+            let mut alice_in: VecDeque<Vec<u8>> = b_init.into();
+            let mut bob_in: VecDeque<Vec<u8>> = a_init.into();
+            let mut alice_dec: Vec<Vec<u8>> = Vec::new();
+            let mut bob_dec: Vec<Vec<u8>> = Vec::new();
+            pump(&mut alice, &mut bob, &mut alice_in, &mut bob_in, &mut alice_dec, &mut bob_dec).await;
+
+            // Identify the creator (which manages membership) and the member it will remove.
+            let alice_is_creator = alice.creator;
+            let removed_id = if alice_is_creator { bob_id } else { alice_id };
+
+            // The creator publishes a first secret both members should decrypt.
+            let before = b"visible to both".to_vec();
+            let ops = if alice_is_creator {
+                alice.publish(before.clone()).await.unwrap()
+            } else {
+                bob.publish(before.clone()).await.unwrap()
+            };
+            if alice_is_creator { bob_in.extend(ops) } else { alice_in.extend(ops) }
+            pump(&mut alice, &mut bob, &mut alice_in, &mut bob_in, &mut alice_dec, &mut bob_dec).await;
+
+            // The creator removes the other member (rotating the key), then publishes a second
+            // secret the removed member must not be able to read.
+            let after = b"secret after removal".to_vec();
+            let mut ops = if alice_is_creator {
+                alice.remove_member(removed_id).await.unwrap()
+            } else {
+                bob.remove_member(removed_id).await.unwrap()
+            };
+            ops.extend(if alice_is_creator {
+                alice.publish(after.clone()).await.unwrap()
+            } else {
+                bob.publish(after.clone()).await.unwrap()
+            });
+            if alice_is_creator { bob_in.extend(ops) } else { alice_in.extend(ops) }
+            pump(&mut alice, &mut bob, &mut alice_in, &mut bob_in, &mut alice_dec, &mut bob_dec).await;
+
+            let removed_dec = if alice_is_creator { &bob_dec } else { &alice_dec };
+            assert!(
+                removed_dec.iter().any(|d| d == &before),
+                "the member decrypted state from while it was a member"
+            );
+            assert!(
+                !removed_dec.iter().any(|d| d == &after),
+                "the removed member cannot decrypt state published after removal (revocation)"
             );
         });
     }
