@@ -26,6 +26,9 @@ body = fn(): int {
 }
 tracing.with_span("job", body)
 
+// Structured attributes (`*_with`): a heterogeneous map literal absorbs the union value type.
+log.info_with("served", {"route": "/users", "status": 200, "cached": true, "ms": 1.5})
+
 log.debug("shutting down")
 
 echo "done"

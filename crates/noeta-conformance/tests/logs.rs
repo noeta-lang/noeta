@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use noeta_db::LangDatabase;
 use noeta_span::{Source, SourceId};
-use noeta_stdlib::{LogRecord, SandboxHost, Severity};
+use noeta_stdlib::{AttrValue, LogRecord, SandboxHost, Severity};
 use noeta_vm::VmBackend;
 
 fn compile(text: &str) -> noeta_bytecode::Module {
@@ -160,6 +160,52 @@ fn log_inside_a_span_correlates_to_it() {
     // The record after the span closed has none.
     assert_eq!(logs[1].body, "outside");
     assert!(logs[1].trace_context.is_none(), "span ended → no correlation");
+}
+
+/// L2 — the `*_with` forms carry a `Map<string, string|int|float|bool>` of structured attributes
+/// onto the record (a heterogeneous map literal absorbing the union value type at the call site),
+/// byte-identical across backends. Map iteration order is deterministic, so the recorded attribute
+/// order agrees.
+#[test]
+fn structured_attributes_ride_the_record() {
+    let logs = emitted_logs(
+        "use std.{log}\n\
+         log.info_with(\"served\", {\"route\": \"/users\", \"status\": 200, \"cached\": true, \"ms\": 1.5})\n",
+    );
+    assert_eq!(logs.len(), 1);
+    let r = &logs[0];
+    assert_eq!(r.body, "served");
+    assert_eq!(r.severity, Severity::Info);
+    // Each scalar value projects to its `AttrValue` variant.
+    let get = |k: &str| r.attributes.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+    assert_eq!(get("route"), Some(&AttrValue::Str("/users".into())));
+    assert_eq!(get("status"), Some(&AttrValue::Int(200)));
+    assert_eq!(get("cached"), Some(&AttrValue::Bool(true)));
+    assert_eq!(get("ms"), Some(&AttrValue::Float(1.5)));
+    assert_eq!(r.attributes.len(), 4);
+}
+
+/// L2 — the generic `log_with(severity, message, attrs)` form and a `*_with` inside a span (the
+/// attributes and the trace correlation combine).
+#[test]
+fn attributed_log_inside_a_span_correlates_and_carries_attrs() {
+    let logs = emitted_logs(
+        "use std.{log}\n\
+         use std.{tracing}\n\
+         body = fn(): int {\n\
+         \x20   log.error_with(\"failed\", {\"code\": 500})\n\
+         \x20   return 1\n\
+         }\n\
+         tracing.with_span(\"job\", body)\n",
+    );
+    assert_eq!(logs.len(), 1);
+    let r = &logs[0];
+    assert_eq!(r.severity, Severity::Error);
+    assert_eq!(
+        r.attributes.iter().find(|(n, _)| n == "code").map(|(_, v)| v),
+        Some(&AttrValue::Int(500))
+    );
+    assert!(r.trace_context.is_some(), "attributed log still correlates");
 }
 
 /// Nested `with_span`s correlate a log to the *innermost* active span (the top of the active-span

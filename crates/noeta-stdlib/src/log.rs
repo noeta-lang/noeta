@@ -19,9 +19,21 @@
 
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    ctx_arity, no_function_error, type_error, CtxError, CtxOut, CtxResult, LogRecord, NativeCtx,
-    NativeValue, Severity, Slot, TraceContext,
+    ctx_arity, no_function_error, type_error, AttrValue, CtxError, CtxOut, CtxResult, LogRecord,
+    NativeCtx, NativeValue, Scalar, Severity, Slot, TraceContext,
 };
+
+/// An OTel attribute value — the scalar union the surface accepts (a non-scalar is a compile-time
+/// type error, not a runtime one). Same union `std.tracing`'s attributes use.
+const ATTR_VALUE: SigType = SigType::Union(&[
+    SigType::String,
+    SigType::Int,
+    SigType::Float,
+    SigType::Bool,
+]);
+
+/// The structured-attributes parameter — `Map<string, string|int|float|bool>` (the `*_with` forms).
+const ATTR_MAP: SigType = SigType::Map(&SigType::String, &ATTR_VALUE);
 
 /// `std.log`'s functions — all ctx functions (they read the active-span stack for correlation).
 /// The generic `log(severity, message)` takes a severity string; the conveniences take just a
@@ -52,6 +64,32 @@ pub const LOG_CTX_FNS: &[ExtFn] = &[
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Unit),
     },
+    // Structured-attribute forms: a `Map<string, string|int|float|bool>` of extra attributes.
+    ExtFn {
+        name: "log_with",
+        params: &[SigType::String, SigType::String, ATTR_MAP],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "debug_with",
+        params: &[SigType::String, ATTR_MAP],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "info_with",
+        params: &[SigType::String, ATTR_MAP],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "warn_with",
+        params: &[SigType::String, ATTR_MAP],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "error_with",
+        params: &[SigType::String, ATTR_MAP],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
 ];
 
 /// `std.log` ctx dispatch. Generic over the ctx (`C: NativeCtx + ?Sized`) so a compiled-in backend
@@ -61,41 +99,68 @@ pub fn log_ctx_dispatch<C: NativeCtx + ?Sized>(
     ctx: &mut C,
     args: &[Slot],
 ) -> Result<CtxOut, CtxError> {
-    // Resolve (severity, message-slot) for the generic form vs. the per-level conveniences.
-    let (severity, msg_slot) = match func {
+    // Resolve (severity, message-slot, optional attributes-slot) across the generic form, the
+    // per-level conveniences, and their `*_with` structured-attribute variants.
+    let (severity, msg_slot, attrs_slot) = match func {
         "log" => {
             ctx_arity(func, args, 2)?;
-            // Gate before materializing either argument — the whole point of the enable check.
+            // Gate before materializing any argument — the whole point of the enable check.
             if !ctx.host().tel_logs_enabled() {
                 return Ok(unit());
             }
-            let severity = severity_from_str(&slot_str(ctx, args[0])?);
-            (severity, args[1])
+            (severity_from_str(&slot_str(ctx, args[0])?), args[1], None)
+        }
+        "log_with" => {
+            ctx_arity(func, args, 3)?;
+            if !ctx.host().tel_logs_enabled() {
+                return Ok(unit());
+            }
+            (
+                severity_from_str(&slot_str(ctx, args[0])?),
+                args[1],
+                Some(args[2]),
+            )
         }
         "debug" | "info" | "warn" | "error" => {
             ctx_arity(func, args, 1)?;
             if !ctx.host().tel_logs_enabled() {
                 return Ok(unit());
             }
-            (level_of(func), args[0])
+            (level_of(func), args[0], None)
+        }
+        "debug_with" | "info_with" | "warn_with" | "error_with" => {
+            ctx_arity(func, args, 2)?;
+            if !ctx.host().tel_logs_enabled() {
+                return Ok(unit());
+            }
+            (level_of(func), args[0], Some(args[1]))
         }
         _ => return Err(no_function_error("log", func).into()),
     };
     let body = slot_str(ctx, msg_slot)?;
-    emit(ctx, severity, body);
+    let attributes = match attrs_slot {
+        Some(slot) => slot_attrs(ctx, slot)?,
+        None => Vec::new(),
+    };
+    emit(ctx, severity, body, attributes);
     Ok(unit())
 }
 
 /// Build and emit one [`LogRecord`], stamping the active span's context (the correlation link) and
 /// the host clock. The caller has already confirmed the logs signal is enabled.
-fn emit<C: NativeCtx + ?Sized>(ctx: &mut C, severity: Severity, body: String) {
+fn emit<C: NativeCtx + ?Sized>(
+    ctx: &mut C,
+    severity: Severity,
+    body: String,
+    attributes: Vec<(compact_str::CompactString, AttrValue)>,
+) {
     let trace_context = current_parent(ctx);
     let unix_ms = ctx.host().clock_unix_ms();
     ctx.host().log_emit(LogRecord {
         unix_ms,
         severity,
         body: body.into(),
-        attributes: Vec::new(),
+        attributes,
         trace_context,
     });
 }
@@ -107,13 +172,41 @@ fn current_parent<C: NativeCtx + ?Sized>(ctx: &mut C) -> Option<TraceContext> {
     Some(ctx.host().tel_span_context(top))
 }
 
-/// The severity of a per-level convenience (`info` → [`Severity::Info`], …).
+/// The severity of a per-level convenience (`info`/`info_with` → [`Severity::Info`], …).
 fn level_of(func: &str) -> Severity {
-    match func {
+    match func.strip_suffix("_with").unwrap_or(func) {
         "debug" => Severity::Debug,
         "warn" => Severity::Warn,
         "error" => Severity::Error,
         _ => Severity::Info,
+    }
+}
+
+/// Project a `Map<string, string|int|float|bool>` argument into log attributes. The checker
+/// constrains the value type to that scalar union, so a non-scalar can only arrive through a `dyn`
+/// launder (a runtime type error then).
+fn slot_attrs<C: NativeCtx + ?Sized>(
+    ctx: &mut C,
+    slot: Slot,
+) -> CtxResult<Vec<(compact_str::CompactString, AttrValue)>> {
+    match ctx.view(slot)? {
+        NativeValue::Map(entries) => entries
+            .into_iter()
+            .map(|(k, v)| Ok((k.into(), attr_from_native(&v)?)))
+            .collect(),
+        _ => Err(type_error("log", "map").into()),
+    }
+}
+
+/// Project one map value into an [`AttrValue`] (str/int/float/bool).
+fn attr_from_native(v: &NativeValue) -> CtxResult<AttrValue> {
+    match v {
+        NativeValue::Str(s) => Ok(AttrValue::Str(s.as_str().into())),
+        NativeValue::Scalar(Scalar::Int(i)) => Ok(AttrValue::Int(*i)),
+        NativeValue::Scalar(Scalar::Float(f)) => Ok(AttrValue::Float(*f)),
+        NativeValue::Scalar(Scalar::F32(f)) => Ok(AttrValue::Float(*f as f64)),
+        NativeValue::Scalar(Scalar::Bool(b)) => Ok(AttrValue::Bool(*b)),
+        _ => Err(type_error("log", "string, int, float, or bool").into()),
     }
 }
 
