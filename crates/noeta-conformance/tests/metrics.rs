@@ -149,6 +149,46 @@ fn histogram_buckets_observations() {
     assert_eq!(points[0].buckets.iter().sum::<u64>(), 3);
 }
 
+/// M3 — server auto-instrumentation: every accepted request records the
+/// `http.server.request.duration` histogram (one series per method/route/status) and balances
+/// `http.server.active_requests` (net zero after all requests complete). The sandbox drives its
+/// fixed five-request script, so the collected metrics are deterministic and byte-identical across
+/// backends. The metrics twin of the SERVER-span auto-instrumentation.
+#[test]
+fn server_serve_auto_instruments_request_metrics() {
+    let metrics = collected_metrics(
+        "use std.http.server\n\
+         fn fetch(req: Request): Response { return server.response(200, \"ok\") }\n\
+         server.serve(8080, fetch)\n",
+    );
+
+    let duration = metrics
+        .iter()
+        .find(|m| m.name == "http.server.request.duration")
+        .expect("duration histogram recorded");
+    let MetricPoints::Histogram(points) = &duration.points else {
+        panic!("request duration is a histogram");
+    };
+    // The scripted requests: GET /, GET /health, POST /echo, GET /users/42, DELETE /users/42 — five
+    // distinct (method, route, status) series, each observed once.
+    assert_eq!(points.len(), 5, "one series per distinct request");
+    assert!(points.iter().all(|p| p.count == 1), "each request observed once");
+
+    let active = metrics
+        .iter()
+        .find(|m| m.name == "http.server.active_requests")
+        .expect("active-requests counter recorded");
+    let MetricPoints::Sum { points, monotonic } = &active.points else {
+        panic!("active_requests is a sum");
+    };
+    assert!(!monotonic, "active_requests is an up/down counter");
+    // Every series balances to zero once its request completes (a +1 and a −1).
+    assert!(
+        points.iter().all(|p| p.value == MetricValue::Int(0)),
+        "active_requests returns to zero"
+    );
+}
+
 /// Get-or-create is idempotent by name: two `counter("x")` calls share one host-side instrument, so
 /// their adds accumulate into a single series.
 #[test]
