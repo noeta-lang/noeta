@@ -1,0 +1,9 @@
+---
+source: crates/noeta-parser/src/lib.rs
+expression: "pretty(\"use App.Models.User as Customer; use std.metrics.{Counter as Metric, Gauge}; echo \\\"ok\\\";\")"
+---
+(program @0..87
+  (use App.Models [User=Customer] @0..32)
+  (use std.metrics [Counter=Metric Gauge] @33..76)
+  (echo @77..87
+    (str "ok" @82..86)))

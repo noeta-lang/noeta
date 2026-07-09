@@ -522,11 +522,22 @@ pub enum ForPattern {
     },
 }
 
-/// One imported leaf name in a `use` declaration, with its span for diagnostics.
+/// One imported leaf name in a `use` declaration, with its span for diagnostics. An optional
+/// `alias` (`use App.Models.User as Customer` / `use std.metrics.{Counter as Metric}`) renames the
+/// import in the importing module: `name` is resolved against the source, `alias` is the **local
+/// binding name** — the seam that lets a file import two same-named types from different namespaces.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UseName {
     pub name: String,
     pub span: Span,
+    pub alias: Option<String>,
+}
+
+impl UseName {
+    /// The name this import binds locally: the alias when present, else the imported name itself.
+    pub fn local(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.name)
+    }
 }
 
 /// A named function declaration. Constructors are not special in this language — a

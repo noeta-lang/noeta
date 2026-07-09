@@ -106,7 +106,14 @@ impl Pretty for Stmt {
                 span: s,
             } => {
                 indent(out, level);
-                let names: Vec<&str> = names.iter().map(|n| n.name.as_str()).collect();
+                // A renamed import renders `Name=Alias`; a plain one just `Name`.
+                let names: Vec<String> = names
+                    .iter()
+                    .map(|n| match &n.alias {
+                        Some(a) => format!("{}={a}", n.name),
+                        None => n.name.clone(),
+                    })
+                    .collect();
                 out.push_str(&format!(
                     "(use {} [{}] {})",
                     path.join("."),
