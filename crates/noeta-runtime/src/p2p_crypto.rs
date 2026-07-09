@@ -92,6 +92,30 @@ impl Digest<Hash> for SpacesOp {
     }
 }
 
+impl SpacesOp {
+    /// Serialize this operation for the transport. Spaces operations carry all their data — control
+    /// state *and* the encrypted application ciphertext — in the header extensions ([`SpacesArgs`]),
+    /// and [`NoetaForge`] always mints them with an empty body, so the canonical CBOR header
+    /// encoding is the whole operation on the wire.
+    pub fn to_wire(&self) -> Vec<u8> {
+        self.0.header.to_bytes()
+    }
+
+    /// Reconstruct an operation received from the transport, recomputing its hash (the operation id)
+    /// from the header bytes. The signature travels inside the header, so [`Provenance::verify`]
+    /// still checks authenticity after a round-trip.
+    pub fn from_wire(bytes: &[u8]) -> Result<SpacesOp, StdError> {
+        let header: Header<SpacesExtensions> = p2panda_core::cbor::decode_cbor(bytes)
+            .map_err(|e| io_error(format!("cannot decode spaces operation: {e}")))?;
+        let hash = header.hash();
+        Ok(SpacesOp(SpacesOperation {
+            hash,
+            header,
+            body: None,
+        }))
+    }
+}
+
 /// Builds, signs and persists spaces operations for one node — the [`Forge`] p2panda-spaces calls to
 /// mint control/data messages. Mirrors the shape of the crate's reference forge: the next entry's
 /// seq/backlink come from this author's log in the store, and the forged operation is persisted.
@@ -377,12 +401,20 @@ mod tests {
         CryptoGroups::new(store, credentials, rng).unwrap()
     }
 
-    /// P3.4b.0 spike, now on the **production** path (no `test_utils`): a real p2panda-spaces group,
-    /// in process, encrypts and decrypts application data across two peers, persisting all state
-    /// through the public store traits. Alice creates a space, publishes encrypted state, then adds
-    /// Bob; Bob replays the operations in order, becomes welcomed, and the buffered application
-    /// message decrypts to the original plaintext — proving our Forge / message / store / persistence
-    /// assembly end-to-end.
+    /// Round-trip an operation through the transport wire format — exactly what a peer receives off
+    /// the durable transport. Exercising every hand-off through this proves the CBOR encoding is
+    /// faithful (hash, signature and extensions survive) end-to-end.
+    fn wire(op: &SpacesOp) -> SpacesOp {
+        SpacesOp::from_wire(&op.to_wire()).expect("operation round-trips through the wire")
+    }
+
+    /// P3.4b.0 spike, now on the **production** path (no `test_utils`) and through the **wire format**
+    /// (P3.4b.1.2): a real p2panda-spaces group, in process, encrypts and decrypts application data
+    /// across two peers, persisting all state through the public store traits, with every operation
+    /// serialized and reconstructed as it would be over the transport. Alice creates a space,
+    /// publishes encrypted state, then adds Bob; Bob replays the operations in order, becomes
+    /// welcomed, and the buffered application message decrypts to the original plaintext — proving
+    /// our Forge / message / store / persistence / wire assembly end-to-end.
     #[test]
     fn two_peers_exchange_encrypted_application_data() {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -399,15 +431,15 @@ mod tests {
             // it so it can encrypt group secrets toward the sender.
             let alice_kb = alice.key_bundle_message().await.unwrap();
             let bob_kb = bob.key_bundle_message().await.unwrap();
-            bob.receive(&alice_kb).await.unwrap();
-            alice.receive(&bob_kb).await.unwrap();
+            bob.receive(&wire(&alice_kb)).await.unwrap();
+            alice.receive(&wire(&bob_kb)).await.unwrap();
 
             // Alice creates the space (she is the sole initial member), then replays the create
             // operations to Bob so he tracks the (public) group membership.
             let space_id = SpaceId::digest(b"room");
             let create_msgs = alice.create_space(space_id, &[]).await.unwrap();
             for msg in &create_msgs {
-                bob.receive(msg).await.unwrap();
+                bob.receive(&wire(msg)).await.unwrap();
             }
 
             // Alice publishes encrypted application data, then adds Bob as a reader.
@@ -418,12 +450,12 @@ mod tests {
             // Bob receives the ciphertext before being welcomed (buffered — no events yet), then the
             // add operations welcome him and the buffered application data decrypts.
             assert!(
-                bob.receive(&publish_msg).await.unwrap().is_empty(),
+                bob.receive(&wire(&publish_msg)).await.unwrap().is_empty(),
                 "not welcomed yet"
             );
             let mut events = Vec::new();
             for msg in &add_msgs {
-                events.extend(bob.receive(msg).await.unwrap());
+                events.extend(bob.receive(&wire(msg)).await.unwrap());
             }
 
             let decrypted = events.iter().find_map(|e| match e {
