@@ -40,9 +40,13 @@ noeta-diagnostics = { workspace = true }
 # scan builds this crate with `--no-default-features --features <used rings>` to shed the rest, and
 # the linker then drops each unreferenced ring's native dep tree. The `aot` runtime support (on
 # `noeta-vm`) is a hard dep feature above, so it survives `--no-default-features`.
-default = ["ring-http-client"]
+default = ["ring-http-client", "ring-p2p"]
 # The `std.http` outbound-client ring — forwards to reqwest in noeta-runtime.
 ring-http-client = ["noeta-runtime/ring-http-client"]
+# The `std.p2p`/`std.synced` real-transport ring — forwards to the p2panda-net node in
+# noeta-runtime. The footprint scan drops this (and its multi-MB iroh/QUIC tree) from an AOT binary
+# whose program never imports `std.p2p`/`std.synced`.
+ring-p2p = ["noeta-runtime/ring-p2p"]
 
 # This crate is the one place the whole AOT scheme's `unsafe` lives: a C-ABI `main`, the reference to
 # the linker-defined `noeta_aot_dispatch` data symbol, and the `run_module_aot` binding call. Relax

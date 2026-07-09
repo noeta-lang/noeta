@@ -1,0 +1,21 @@
+// std.telemetry T1: the manual tracing surface — `telemetry.span(name)` mints a `Span`, whose
+// methods `set_attribute` (chaining, union-typed value) and `end` marshal to the Telemetry Host
+// capability. Spans are a write-only side effect (never program output), so this program's OWN
+// output is what the differential pins; that both backends type-check and run the module function
+// + the extern-type methods identically is the end-to-end proof. (The recorded spans themselves are
+// asserted in the noeta-stdlib unit test, against the sandbox recorder.)
+// expect: stdout "start"
+// expect: stdout "done"
+// expect: exit 0
+use std.{telemetry}
+
+echo "start"
+
+// A span with two attributes (string + int through the value union), chained then ended.
+s = telemetry.span("request").set_attribute("http.method", "GET").set_attribute("http.status", 200)
+s.end()
+
+// A second, independent span with a bool attribute; the whole chain ends in `end()` (unit).
+telemetry.span("work").set_attribute("cache.hit", true).end()
+
+echo "done"

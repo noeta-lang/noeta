@@ -24,10 +24,22 @@
 pub mod executor;
 pub use executor::RealExecutor;
 
+#[cfg(feature = "telemetry")]
+mod telemetry;
+// Real p2p transport (p2p P3) — only compiled under the `ring-p2p` ring, which pulls the heavy
+// p2panda/iroh dependency tree. Off by default; `RealHost` keeps the loopback broker.
+#[cfg(feature = "ring-p2p")]
+pub mod p2p_node;
+// Group encryption for `synced_signal` (p2p P3.4b) — p2panda-spaces assembly, same ring.
+#[cfg(feature = "ring-p2p")]
+pub mod p2p_crypto;
+
+use compact_str::CompactString;
 use noeta_stdlib::net::accept_outcome;
 use noeta_stdlib::{
-    Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, NativeOut, NetRequest,
-    NetResponse, Network, P2p, ReadSource, RealBody, Rng, StdError,
+    AttrValue, Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, NativeOut,
+    NetRequest, NetResponse, Network, P2p, ReadSource, RealBody, Rng, SpanData, SpanEvent, SpanId,
+    SpanKind, SpanStatus, StdError, Telemetry, TraceContext,
 };
 // Only the outbound-client (`ring-http-client`) path builds an `ExternBox` response body.
 #[cfg(feature = "ring-http-client")]
@@ -92,10 +104,59 @@ pub struct RealHost {
     /// run from source or shipped as an executable — the toolchain's own `noeta run` prefix never
     /// leaks into the program.
     args: Vec<String>,
-    /// The p2p broker (p2p P1/P2): the same in-process pub/sub log as the sandbox. Real p2p
-    /// transport (p2panda gossip, cross-node) is P3; until then the real host is a single-node
-    /// loopback broker, so `noeta run` of a p2p program works locally without a network.
+    /// The p2p broker (p2p P1/P2): the in-process pub/sub log — the `RealHost` p2p backing when the
+    /// `ring-p2p` ring is OFF (single-node loopback, so `noeta run` of a p2p program works locally
+    /// without a network). Under `ring-p2p` the real node below replaces it, so it isn't compiled.
+    #[cfg(not(feature = "ring-p2p"))]
     p2p: noeta_stdlib::P2pBroker,
+    /// Telemetry state (native OTEL): in-flight spans + (behind the `telemetry` feature) the OTLP
+    /// exporter and its span buffer. Per-isolate, like everything else on `RealHost`.
+    tel: RealTelemetry,
+    /// The real p2panda node (p2p P3), lazily started on first p2p use and living for the isolate.
+    /// Only present under the `ring-p2p` ring.
+    #[cfg(feature = "ring-p2p")]
+    p2p_node: Option<p2p_node::P2pNode>,
+    /// The application namespace the lazily-started node keys its persistent identity/store dir on
+    /// (p2p P3.4) — the toolchain sets it to the running program's package name so two different
+    /// Noeta apps never share one p2p dir. `None` ⇒ the node's own default (exe stem / env). Held
+    /// unconditionally (cheap) though only the `ring-p2p` node reads it.
+    #[cfg_attr(not(feature = "ring-p2p"), allow(dead_code))]
+    p2p_app_id: Option<String>,
+}
+
+/// `RealHost`'s telemetry state. In-flight spans are tracked even with the `telemetry` feature off
+/// (so `tel_span_context` and parenting stay correct); only the OTLP export path is gated.
+#[derive(Debug)]
+struct RealTelemetry {
+    /// Opaque span-handle counter (the [`SpanId`] map key). The W3C `span_id` *bytes* are real
+    /// entropy, drawn per span — the handle is just a local key.
+    next_span: u64,
+    /// In-flight spans by handle, ended entries removed.
+    live: HashMap<SpanId, SpanData>,
+    /// Remote-interned contexts (T5d): pseudo-handles for contexts that arrived over a channel /
+    /// isolate boundary. Read by `tel_span_context`; everything else no-ops on them. Bounded by
+    /// live seeds (`tel_release_remote` frees replaced ones).
+    remote: HashMap<SpanId, TraceContext>,
+    /// The configured OTLP exporter, or `None` when no endpoint is set (the null sink).
+    #[cfg(feature = "telemetry")]
+    exporter: Option<telemetry::OtlpExporter>,
+    /// Ended spans awaiting export (flushed at [`telemetry::FLUSH_THRESHOLD`] or on teardown).
+    #[cfg(feature = "telemetry")]
+    buffer: Vec<SpanData>,
+}
+
+impl RealTelemetry {
+    fn new() -> RealTelemetry {
+        RealTelemetry {
+            next_span: 1,
+            live: HashMap::new(),
+            remote: HashMap::new(),
+            #[cfg(feature = "telemetry")]
+            exporter: telemetry::OtlpExporter::from_env(),
+            #[cfg(feature = "telemetry")]
+            buffer: Vec::new(),
+        }
+    }
 }
 
 /// One inbound listener's shared state. The socket is bound at `net_listen` (runtime-free, via
@@ -132,8 +193,21 @@ impl RealHost {
             conns: Arc::new(Mutex::new(HashMap::new())),
             next_conn: Arc::new(AtomicU64::new(0)),
             args: std::env::args().collect(),
+            #[cfg(not(feature = "ring-p2p"))]
             p2p: noeta_stdlib::P2pBroker::default(),
+            tel: RealTelemetry::new(),
+            #[cfg(feature = "ring-p2p")]
+            p2p_node: None,
+            p2p_app_id: None,
         })
+    }
+
+    /// Set the p2p application namespace ([`Self::p2p_app_id`]) — the running program's package
+    /// name, so its persistent p2p state lives under its own dir rather than a shared one. Builder
+    /// style so the per-isolate factory clones it into each host. A no-op without `ring-p2p`.
+    pub fn with_p2p_app(mut self, app_id: Option<String>) -> RealHost {
+        self.p2p_app_id = app_id;
+        self
     }
 
     /// Override the argument vector this host reports through `args.all()`. Used by
@@ -729,26 +803,131 @@ impl Ids for RealHost {
     }
 }
 
+#[cfg(feature = "ring-p2p")]
+impl RealHost {
+    /// The real p2panda node, started on **first** p2p use (lazy — most programs never touch p2p,
+    /// and starting the node binds sockets + spawns tasks). Lives for the isolate; dropped with
+    /// `RealHost`, which tears the node down.
+    fn p2p_node(&mut self) -> Result<&p2p_node::P2pNode, StdError> {
+        if self.p2p_node.is_none() {
+            // Persistent node, keyed on this app's namespace so its identity/store dir is its own.
+            let config = p2p_node::P2pConfig::persistent().with_app(self.p2p_app_id.clone());
+            self.p2p_node = Some(p2p_node::P2pNode::start_with_config(config)?);
+        }
+        Ok(self.p2p_node.as_ref().expect("just started"))
+    }
+}
+
 impl P2p for RealHost {
-    // p2p P1/P2: the same in-process pub/sub broker as the sandbox (single-node loopback). Real
-    // p2panda gossip transport, cross-node delivery, and a genuine async subscription future are
-    // P3 — at which point this becomes the non-deterministic, CLI-only side (like the real Network
-    // client).
+    // Two backings, chosen by the `ring-p2p` ring:
+    //   • default — the in-process pub/sub broker (single-node loopback, shared with the sandbox):
+    //     a `noeta run` of a p2p/synced program works locally, just without real peers.
+    //   • `ring-p2p` — a real p2panda-net node (gossip over iroh/QUIC), started lazily on first use
+    //     and living for the isolate. Non-deterministic and CLI-only, like the reqwest client.
     fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
-        self.p2p.publish(topic, message);
-        Ok(())
+        #[cfg(feature = "ring-p2p")]
+        {
+            self.p2p_node()?.publish(topic, message)
+        }
+        #[cfg(not(feature = "ring-p2p"))]
+        {
+            self.p2p.publish(topic, message);
+            Ok(())
+        }
     }
 
     fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, StdError> {
-        Ok(self.p2p.poll_default(topic))
+        // The topic-level (default-reader) poll backs the ephemeral `p2p.receive`; the real node
+        // routes it through one lazily-created default subscription per topic.
+        #[cfg(feature = "ring-p2p")]
+        {
+            self.p2p_node()?.poll_default(topic)
+        }
+        #[cfg(not(feature = "ring-p2p"))]
+        {
+            Ok(self.p2p.poll_default(topic))
+        }
     }
 
-    fn p2p_subscribe(&mut self, topic: &str) -> u64 {
-        self.p2p.subscribe(topic)
+    fn p2p_subscribe(&mut self, topic: &str) -> Result<u64, StdError> {
+        #[cfg(feature = "ring-p2p")]
+        {
+            self.p2p_node()?.subscribe(topic)
+        }
+        #[cfg(not(feature = "ring-p2p"))]
+        {
+            Ok(self.p2p.subscribe(topic))
+        }
     }
 
     fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
-        Ok(self.p2p.poll_sub(sub))
+        #[cfg(feature = "ring-p2p")]
+        {
+            Ok(self.p2p_node.as_ref().and_then(|node| node.poll_sub(sub)))
+        }
+        #[cfg(not(feature = "ring-p2p"))]
+        {
+            Ok(self.p2p.poll_sub(sub))
+        }
+    }
+
+    // Durable variants (synced_signal): under `ring-p2p` they route to the node's log-sync
+    // transport (eventual-consistency catch-up); without the ring the trait defaults fall back to
+    // the ephemeral methods, i.e. the loopback broker (already an append-log with catch-up).
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_publish_durable(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
+        self.p2p_node()?.publish_durable(topic, message)
+    }
+
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_subscribe_durable(&mut self, topic: &str) -> Result<u64, StdError> {
+        self.p2p_node()?.subscribe_durable(topic)
+    }
+
+    // Encrypted groups (p2p P3.4b): under `ring-p2p` an encrypted synced_signal routes through the
+    // node's p2panda-spaces group (state encrypted to the declared members over log-sync); without
+    // the ring the trait defaults apply (a transparent pass-through, correct for the sandbox).
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_group_open(&mut self, topic: &str, members: &[String]) -> Result<u64, StdError> {
+        self.p2p_node()?.group_open(topic, members)
+    }
+
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_group_publish(&mut self, topic: &str, plaintext: Vec<u8>) -> Result<(), StdError> {
+        self.p2p_node()?.group_publish(topic, plaintext)
+    }
+
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_group_poll(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
+        self.p2p_node()?.group_poll(sub)
+    }
+
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_group_add(&mut self, topic: &str, member: &str) -> Result<(), StdError> {
+        self.p2p_node()?.group_add(topic, member)
+    }
+
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_group_remove(&mut self, topic: &str, member: &str) -> Result<(), StdError> {
+        self.p2p_node()?.group_remove(topic, member)
+    }
+
+    // Identity & status (p2p P3.3): the real node has a persisted Ed25519 key and tracks each
+    // topic's sync state; without the ring the trait defaults apply (no identity, always Synced —
+    // the loopback broker never lags).
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_identity(&mut self) -> Result<Option<String>, StdError> {
+        Ok(Some(self.p2p_node()?.identity()))
+    }
+
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_sync_status(&mut self, topic: &str) -> noeta_stdlib::SyncStatus {
+        // Don't start a node just to answer a status query: an un-started node has never synced
+        // anything, so it is Offline.
+        match self.p2p_node.as_ref() {
+            Some(node) => node.sync_status(topic),
+            None => noeta_stdlib::SyncStatus::Offline,
+        }
     }
 }
 
@@ -777,9 +956,223 @@ impl Env for RealHost {
     }
 }
 
+impl Telemetry for RealHost {
+    fn tel_enabled(&self) -> bool {
+        // On when an OTLP endpoint is configured (and the `telemetry` feature is compiled in);
+        // otherwise the null sink, and auto-instrumentation short-circuits.
+        #[cfg(feature = "telemetry")]
+        {
+            self.tel.exporter.is_some()
+        }
+        #[cfg(not(feature = "telemetry"))]
+        {
+            false
+        }
+    }
+
+    fn tel_span_start(
+        &mut self,
+        name: &str,
+        kind: SpanKind,
+        parent: Option<TraceContext>,
+    ) -> SpanId {
+        let handle = self.tel.next_span;
+        self.tel.next_span += 1;
+        // Real entropy for the W3C ids (a root mints a fresh 16-byte trace id; a child inherits its
+        // parent's). Predictable/colliding ids across processes would be wrong for real traces.
+        let span_id = self.entropy_u64().to_be_bytes();
+        let trace_id = match parent {
+            Some(p) => p.trace_id,
+            None => {
+                let hi = self.entropy_u64().to_be_bytes();
+                let lo = self.entropy_u64().to_be_bytes();
+                let mut t = [0u8; 16];
+                t[..8].copy_from_slice(&hi);
+                t[8..].copy_from_slice(&lo);
+                t
+            }
+        };
+        let now = self.clock_unix_ms();
+        let context = TraceContext {
+            trace_id,
+            span_id,
+            sampled: true,
+        };
+        self.tel.live.insert(
+            handle,
+            SpanData {
+                name: name.into(),
+                kind,
+                context,
+                parent,
+                start_unix_ms: now,
+                end_unix_ms: None,
+                attributes: Vec::new(),
+                events: Vec::new(),
+                status: SpanStatus::Unset,
+            },
+        );
+        handle
+    }
+
+    fn tel_span_set_attr(&mut self, span: SpanId, key: &str, value: AttrValue) {
+        if let Some(s) = self.tel.live.get_mut(&span) {
+            match s.attributes.iter_mut().find(|(k, _)| k == key) {
+                Some(slot) => slot.1 = value,
+                None => s.attributes.push((key.into(), value)),
+            }
+        }
+    }
+
+    fn tel_span_add_event(
+        &mut self,
+        span: SpanId,
+        name: &str,
+        attrs: Vec<(CompactString, AttrValue)>,
+    ) {
+        let now = self.clock_unix_ms();
+        if let Some(s) = self.tel.live.get_mut(&span) {
+            s.events.push(SpanEvent {
+                name: name.into(),
+                unix_ms: now,
+                attributes: attrs,
+            });
+        }
+    }
+
+    fn tel_span_set_status(&mut self, span: SpanId, status: SpanStatus) {
+        if let Some(s) = self.tel.live.get_mut(&span) {
+            s.status = status;
+        }
+    }
+
+    fn tel_span_end(&mut self, span: SpanId) {
+        let now = self.clock_unix_ms();
+        if let Some(mut s) = self.tel.live.remove(&span) {
+            s.end_unix_ms = Some(now);
+            self.record_ended_span(s);
+        }
+    }
+
+    fn tel_span_context(&mut self, span: SpanId) -> TraceContext {
+        if let Some(remote) = self.tel.remote.get(&span) {
+            return *remote;
+        }
+        self.tel.live.get(&span).map_or(
+            TraceContext {
+                trace_id: [0u8; 16],
+                span_id: [0u8; 8],
+                sampled: false,
+            },
+            |s| s.context,
+        )
+    }
+
+    fn tel_intern_remote(&mut self, context: TraceContext) -> SpanId {
+        // Ids share the span counter, so a remote handle can never collide with a live span.
+        let id = self.tel.next_span;
+        self.tel.next_span += 1;
+        self.tel.remote.insert(id, context);
+        id
+    }
+
+    fn tel_is_remote(&self, span: SpanId) -> bool {
+        self.tel.remote.contains_key(&span)
+    }
+
+    fn tel_release_remote(&mut self, span: SpanId) {
+        self.tel.remote.remove(&span);
+    }
+}
+
+impl RealHost {
+    /// Route an ended span to the exporter (feature on + endpoint configured) or drop it (null
+    /// sink / feature off). Buffers and flushes in minimal batches.
+    #[cfg(feature = "telemetry")]
+    fn record_ended_span(&mut self, span: SpanData) {
+        if self.tel.exporter.is_none() {
+            return; // null sink — no endpoint configured
+        }
+        self.tel.buffer.push(span);
+        if self.tel.buffer.len() >= telemetry::FLUSH_THRESHOLD {
+            self.flush_telemetry();
+        }
+    }
+
+    #[cfg(not(feature = "telemetry"))]
+    fn record_ended_span(&mut self, _span: SpanData) {}
+
+    /// Export the buffered spans as one OTLP/JSON POST, on the host's runtime. Best-effort: an
+    /// export failure never affects the program (telemetry is a side effect).
+    #[cfg(feature = "telemetry")]
+    fn flush_telemetry(&mut self) {
+        let Some(exporter) = self.tel.exporter.as_ref() else {
+            self.tel.buffer.clear();
+            return;
+        };
+        if self.tel.buffer.is_empty() {
+            return;
+        }
+        let body = exporter.request_body(&self.tel.buffer);
+        let endpoint = exporter.traces_endpoint.clone();
+        let headers = exporter.headers.clone();
+        let http = self.http.clone();
+        let _ = self.runtime.block_on(async move {
+            let mut req = http.post(&endpoint).json(&body);
+            for (k, v) in &headers {
+                req = req.header(k.as_str(), v.as_str());
+            }
+            req.send().await
+        });
+        self.tel.buffer.clear();
+    }
+}
+
+// Flush any buffered spans when the host (isolate) is torn down. Runs before the `runtime` field
+// drops (explicit `Drop::drop` precedes field drops), so `block_on` is still valid here.
+#[cfg(feature = "telemetry")]
+impl Drop for RealHost {
+    fn drop(&mut self) {
+        self.flush_telemetry();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `RealHost` p2p wiring under `ring-p2p`: the trait methods lazily start a real p2panda
+    /// node and route through it (rather than the loopback broker). Single node, so no delivery —
+    /// this locks that the wiring + lazy start work end to end; cross-node delivery is the
+    /// `#[ignore]`d two-node test. Starting a node binds local sockets only, so it stays hermetic.
+    #[cfg(feature = "ring-p2p")]
+    #[test]
+    fn real_host_p2p_routes_through_a_real_node() {
+        use noeta_stdlib::{P2p, SyncStatus};
+        // Point the node's persistent state at a throwaway dir so the test never writes to the
+        // user's real XDG data dir (the node is persistent-by-default since P3.3). Pre-seat the
+        // node the lazy path would otherwise start with the default config — the test lives in the
+        // crate, so it can set the private field directly.
+        let data_dir =
+            std::env::temp_dir().join(format!("noeta-p2p-realhost-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data_dir);
+
+        let mut host = RealHost::new().expect("real host");
+        host.p2p_node = Some(
+            p2p_node::P2pNode::start_with_config(p2p_node::P2pConfig::at(&data_dir)).expect("node"),
+        );
+        host.p2p_publish("room", b"hello".to_vec())
+            .expect("publish starts the node and succeeds");
+        let sub = host.p2p_subscribe("room").expect("subscribe succeeds");
+        // No peers → nothing delivered, but the poll path must work and be empty.
+        assert_eq!(host.p2p_poll_sub(sub).expect("poll_sub"), None);
+        assert_eq!(host.p2p_poll("other").expect("poll default"), None);
+        // P3.3 surface: a persistent identity is present, and status is Offline (no peer).
+        assert!(host.p2p_identity().expect("identity").is_some());
+        assert_eq!(host.p2p_sync_status("room"), SyncStatus::Offline);
+
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
 
     /// The real `Network` capability against a live endpoint. `#[ignore]` so CI stays hermetic —
     /// run explicitly (`cargo test -p noeta-runtime -- --ignored real_host_fetches`) when network

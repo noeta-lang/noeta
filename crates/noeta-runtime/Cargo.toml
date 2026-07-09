@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 noeta-stdlib = { workspace = true }
+compact_str = { workspace = true }
 tokio = { workspace = true }
 getrandom = { workspace = true }
 # The outbound HTTP client (the `Network::net_fetch`/`net_spawn` capability on `RealHost`). Optional
@@ -15,13 +16,58 @@ getrandom = { workspace = true }
 # stack (rustls/ring/hyper/h2) — dropped by `noeta build --native`'s per-ring footprint selection
 # (DCE Axis B). Default-on: the toolchain and every non-tailored build keep the full client.
 reqwest = { workspace = true, optional = true }
+# Native OTEL (`telemetry` feature): the real host's OTLP/HTTP-JSON span exporter is hand-rolled
+# over reqwest + serde_json — deliberately NOT `opentelemetry-otlp` (which drags tonic/prost), so a
+# telemetry build adds no protobuf/gRPC tree. Optional so a non-telemetry build links none of it.
+serde_json = { workspace = true, optional = true }
+# Real p2p transport (p2p P3): the `P2p` capability on `RealHost` backed by a p2panda-net node
+# (gossip + log-sync over iroh/QUIC). Optional and OFF by default — pre-1.0, a heavy dep tree
+# (iroh/QUIC/rustls), and needs the `iroh-gossip` git `[patch]` in the workspace Cargo.toml. Off ⇒
+# `RealHost` keeps the single-node loopback broker (P1); a program still runs locally, just without
+# real peers. Only `noeta run --features` / a build declaring the ring links p2panda.
+p2panda-net = { workspace = true, optional = true }
+p2panda-core = { workspace = true, optional = true }
+# The `spaces` feature pulls in the group-encryption store tables (SqliteSpacesStore) that
+# `p2panda-spaces` needs; it transitively enables the store's `groups`/`encryption` support.
+p2panda-store = { workspace = true, optional = true, features = ["spaces"] }
+p2panda-sync = { workspace = true, optional = true }
+p2panda-spaces = { workspace = true, optional = true }
+p2panda-auth = { workspace = true, optional = true }
+p2panda-encryption = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+# Serialize the node's group-encryption `Credentials` to disk (p2p P3.4b) and (later) spaces
+# operations for the wire. Compact, no_std-friendly; only pulled in with the p2p ring.
+postcard = { workspace = true, optional = true }
 
 [features]
-default = ["ring-http-client"]
+default = ["ring-http-client", "telemetry", "ring-p2p"]
 # The `std.http` outbound-client ring: pulls reqwest into `RealHost`. Off ⇒ `net_fetch` is a stub
 # that errors (never reached — a program that doesn't import `std.http` never calls it), and reqwest
 # is absent from the link.
 ring-http-client = ["dep:reqwest"]
+# Native OTEL span export. Reuses the `ring-http-client` reqwest client (`RealHost::http`) to POST
+# spans, so it pulls that ring, plus json + serde_json. On by default for the dev toolchain;
+# `--no-default-features` drops it, and AOT footprint selection links it only when a program imports
+# `std.telemetry`.
+telemetry = ["dep:serde_json", "ring-http-client", "reqwest/json"]
+# The real-p2p ring (p2p P3): pulls a p2panda-net node into `RealHost`. On by default, mirroring
+# `ring-http-client` — the plain toolchain/build is fully capable, and `noeta build --native`'s
+# footprint scan sheds the whole p2panda/iroh tree from a binary that never imports `std.p2p`/
+# `std.synced` (via `noeta-aot-runtime --no-default-features`). Off ⇒ `RealHost`'s `P2p` stays the
+# dep-free loopback broker (single-node), which is also the always-compiled sandbox side. (The
+# oracle suite never builds `noeta-runtime`, so it stays p2panda-free regardless.) Pinned exactly
+# (`p2panda-net = "0.7"`) so the pre-1.0 dep can't break the default build via an auto-update.
+ring-p2p = [
+    "dep:p2panda-net",
+    "dep:p2panda-core",
+    "dep:p2panda-store",
+    "dep:p2panda-sync",
+    "dep:p2panda-spaces",
+    "dep:p2panda-auth",
+    "dep:p2panda-encryption",
+    "dep:futures-util",
+    "dep:postcard",
+]
 
 [dev-dependencies]
 criterion = { workspace = true }

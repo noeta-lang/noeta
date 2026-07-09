@@ -1,0 +1,27 @@
+// THE arc deliverable: two same-short-named user types from different namespaces coexist in one file
+// by importing each under a distinct alias. Their qualified identities (`App.Money.Amount` vs
+// `App.Geo.Amount`) keep them wholly distinct — each narrows to its own alias and never the other's,
+// exactly like the Phase-A native-vs-user case but now user-vs-user. Both display under the short name
+// `Amount` (display is by short name; distinction is by identity). Both backends agree.
+// expect: stdout "500"
+// expect: stdout "42"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "Amount {cents: 500}"
+// expect: exit 0
+namespace App.Main;
+use App.Money.Amount as Money;
+use App.Geo.Amount as Distance;
+
+m = Money { cents: 500 };
+d = Distance { meters: 42 };
+
+echo m.cents;
+echo d.meters;
+echo m is Money;
+echo m is Distance;
+echo d is Distance;
+echo d is Money;
+echo m;

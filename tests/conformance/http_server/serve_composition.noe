@@ -18,6 +18,7 @@
 // expect: stdout "served"
 // expect: exit 0
 use std.http.server
+use std.http.{Request, Response}
 
 // Sub-handlers, each an ordinary `(Request) -> Response`.
 home = fn(req: Request): Response {

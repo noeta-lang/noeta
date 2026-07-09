@@ -895,6 +895,13 @@ impl Value {
             })
     }
 
+    /// Whether this is specifically a **step/thunk future** ([`Payload::Future`], a lowered
+    /// `async fn` body) — the only future flavor the telemetry completion hook traces (T5c), on
+    /// both backends identically. Non-retaining, unlike [`Self::future_step`].
+    pub fn is_step_future(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Future(_)))
+    }
+
     /// A **leaf isolate-result future** (isolates I.4b): a real-thread `isolate f(args)` yields one,
     /// carrying an id into the backend's isolate table (the worker's join handle + result receiver).
     /// Polled by harvesting the worker's marshalled result. VM-real path only.
@@ -2261,7 +2268,13 @@ impl Value {
                         .zip(slots)
                         .map(|(name, v)| format!("{name}: {}", v.repr()))
                         .collect();
-                    format!("{} {{{}}}", shape.name, parts.join(", "))
+                    // Display strips a qualified identity to its short name (`App.Models.User` →
+                    // `User`); the identity keyed on for dispatch/`is`/`as` stays qualified.
+                    format!(
+                        "{} {{{}}}",
+                        noeta_ast::short_type_name(&shape.name),
+                        parts.join(", ")
+                    )
                 }
                 // `Ok(x)`/`none` for built-in Result/Option, else `Type.Variant(data...)`;
                 // a no-data variant is just the head. Data renders with `display` (unquoted),
@@ -2272,7 +2285,7 @@ impl Value {
                     } else {
                         format!(
                             "{}.{}",
-                            shape.name,
+                            noeta_ast::short_type_name(&shape.name),
                             shape.variant.clone().unwrap_or_default()
                         )
                     };

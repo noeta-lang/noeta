@@ -599,6 +599,45 @@ impl NativeCtx for VmCtx<'_, '_> {
             .collect();
         Ok(self.insert(Value::object(shape, slots)))
     }
+
+    // ----- task-local context (native-otel T5a): thin views over `Vm::ctx_current` -----
+
+    fn context_top(&mut self) -> Option<u64> {
+        self.vm.ctx_current.last().copied()
+    }
+
+    fn context_push(&mut self, v: u64) {
+        self.vm.ctx_current.push(v);
+    }
+
+    fn context_pop(&mut self, v: u64) {
+        if self.vm.ctx_current.last() == Some(&v) {
+            self.vm.ctx_current.pop();
+        }
+    }
+
+    fn context_swap(&mut self, ctx: Vec<u64>) -> Vec<u64> {
+        std::mem::replace(&mut self.vm.ctx_current, ctx)
+    }
+
+    fn trace_future(&mut self, future: Slot, span: u64) -> CtxResult<bool> {
+        let value = self.get(future)?;
+        // Only a step future (a lowered `async fn` body) is traceable — both backends draw the
+        // same line, so telemetry parity holds for the fallback too.
+        if !value.is_step_future() {
+            return Ok(false);
+        }
+        // The table owns one reference; identity = the NaN-box bits, stable while it is held.
+        retain(value);
+        let mut context = self.vm.ctx_current.clone();
+        context.push(span);
+        self.vm.traced_futures.push(crate::TracedFuture {
+            future: value,
+            context,
+            span,
+        });
+        Ok(true)
+    }
 }
 
 impl<'m> Vm<'m> {

@@ -170,6 +170,7 @@ Identity generation — sequential ids and UUIDs.
 
 ```noeta
 use std.{id}
+use std.id.Uuid              // the type, to name it in `is Uuid` below
 echo id.next_id()            // 1
 key = id.uuid()              // e.g. 4396d60d-bd85-47af-a98f-f1a0396ff552
 ordered = id.uuid_v7()       // sorts by creation time
@@ -332,6 +333,29 @@ needed; you compose them into the single handler you serve.
 deterministic sandbox (tests) `server.serve` instead drives a fixed, documented **request script**
 through the handler and returns — so a served program is reproducible and terminates in-oracle,
 the inbound mirror of the client's pure responder.
+
+## `telemetry`
+
+Production distributed tracing, emitted as OpenTelemetry ([Observability](Observability)). The
+scoped `with_span(name, body)` is the primary API; `span(name) -> Span` (with `set_attribute` /
+`add_event` / `record_error` / `end`) is the manual form; `current_context()` / `span_from(name,
+traceparent)` bridge W3C context across boundaries Noeta doesn't own.
+
+```noeta ignore
+use std.{telemetry}
+telemetry.with_span("checkout", fn(): void {
+    span = telemetry.span("charge")
+    span.set_attribute("amount", 4200)
+    // … work …
+    span.end()
+})
+```
+
+**Opt-in.** Nothing is emitted until `OTEL_EXPORTER_OTLP_ENDPOINT` is set — a program that never
+configures a collector pays nothing. Once configured, server requests, async work, and channel /
+isolate messages are **auto-instrumented** into connected traces with no code changes. `Span` is a
+reserved type name (declaring your own is **E0049**); a non-scalar `set_attribute` value is a
+compile error (**E0007**). Full surface, config, and design on [Observability](Observability).
 
 ## `vec` & `quat`
 

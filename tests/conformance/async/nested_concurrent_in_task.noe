@@ -1,0 +1,36 @@
+// Regression: a `concurrent` block INSIDE a spawned task's body. The nested join runs within the
+// task's own poll, and its scheduling round reaches the mid-poll task itself — which must be
+// skipped, not re-entered: re-entering a mid-execution state machine re-runs its current segment
+// (this was an unguarded infinite recursion / stack overflow in both backends). The `polling` guard
+// makes the nested join poll only the *other* tasks; the worker completes normally and the join
+// sees its result. 1*2 + 2*2 = 6.
+// expect: stdout "worker-start"
+// expect: stdout "worker-end"
+// expect: stdout "6"
+// expect: exit 0
+async fn inner(n: int): int {
+    return n * 2
+}
+
+async fn worker(): int {
+    echo "worker-start"
+    mut total = 0
+    concurrent {
+        a = spawn inner(1)
+        b = spawn inner(2)
+        total = a.await + b.await
+    }
+    echo "worker-end"
+    return total
+}
+
+async fn run(): int {
+    mut r = 0
+    concurrent {
+        h = spawn worker()
+        r = h.await
+    }
+    return r
+}
+
+echo run().await

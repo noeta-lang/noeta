@@ -18,6 +18,7 @@ pub mod map_key;
 pub mod net;
 pub mod p2p;
 pub mod registry;
+pub mod telemetry;
 
 pub use command::{ArgKind, ArgSpec, CommandCtx, EntryArg, EntryCall, ExtCommand, ParsedArgs};
 pub use ctx::{
@@ -28,6 +29,7 @@ pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};
 pub use host::{
     Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, P2p, ReadSource, Rng,
+    SyncStatus,
 };
 pub use map_key::{ExternKeyRef, MapKey};
 pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
@@ -36,6 +38,9 @@ pub use registry::{
     ArenaGetter, BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, CtxTypeDispatch,
     ExtBundle, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut, NativeValue,
     PackedConstraint, RetTy, Scalar, ScalarVec, SigType, TypeDispatch, TypeRecipe,
+};
+pub use telemetry::{
+    AttrValue, SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, Telemetry, TraceContext,
 };
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the

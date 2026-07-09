@@ -212,22 +212,143 @@ pub trait P2p {
     /// the topic log (p2p P2). Unlike the topic-level [`Self::p2p_poll`] (one implicit reader),
     /// each subscription has an **independent** cursor — genuine broadcast, so several replicas on
     /// one topic each receive every message. A `synced_signal` holds one for its topic.
-    fn p2p_subscribe(&mut self, topic: &str) -> u64;
+    ///
+    /// Fallible: the sandbox broker never errors (`Ok` always), but a real transport can fail to
+    /// join a topic overlay (p2p P3), and that must reach the program rather than be swallowed.
+    fn p2p_subscribe(&mut self, topic: &str) -> Result<u64, StdError>;
 
     /// The next message for subscription `sub` (advancing only its cursor), or `None` once it has
-    /// caught up — what `synced_signal.sync()` drains to merge peers' states.
+    /// caught up — what `synced_signal.sync()` drains to merge peers' states. Shared by ephemeral
+    /// and durable subscriptions (both deliver bytes; the id namespace is one).
     fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError>;
+
+    // --- Durable variants (p2p P3.2): eventual-consistency delivery ---------------------------
+    //
+    // `synced_signal` uses these so replicas **converge even after being offline** — a peer that
+    // joins or reconnects later still receives everything published to the topic, not just what
+    // arrives while it happens to be subscribed. The **default** delegates to the ephemeral
+    // methods, which is exactly right for the sandbox: its broker is an append-only log with a
+    // cursor from the start, so every subscriber already catches up. Only `RealHost` overrides
+    // these — ephemeral maps to gossip (best-effort), durable to p2panda's log-sync protocol
+    // (append-log + catch-up), which is the whole reason for the split.
+
+    /// Durable publish (see above). Default: the ephemeral [`Self::p2p_publish`].
+    fn p2p_publish_durable(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
+        self.p2p_publish(topic, message)
+    }
+
+    /// Durable subscribe (see above). Default: the ephemeral [`Self::p2p_subscribe`]; the id is
+    /// polled through the same [`Self::p2p_poll_sub`].
+    fn p2p_subscribe_durable(&mut self, topic: &str) -> Result<u64, StdError> {
+        self.p2p_subscribe(topic)
+    }
+
+    // --- Encrypted groups (p2p P3.4b): end-to-end-encrypted synced_signal ---------------------
+    //
+    // An encrypted `synced_signal(initial, topic, members)` routes through these instead of the
+    // plaintext durable methods. The **default** is a transparent pass-through to the durable
+    // transport: correct for the deterministic sandbox, where there are no real peers to hide state
+    // from and encryption must not perturb the converged value — so an encrypted program stays
+    // oracle-identical to its plaintext twin. Only `RealHost` under `ring-p2p` overrides them, where
+    // the bytes are encrypted to the declared member set through a p2panda-spaces group.
+
+    /// Open an encrypted group on `topic` for exactly `members` (peer-id hex strings), returning a
+    /// subscription id polled through [`Self::p2p_group_poll`]. Default: a durable subscribe (the
+    /// membership is irrelevant to the pass-through sandbox).
+    fn p2p_group_open(&mut self, topic: &str, _members: &[String]) -> Result<u64, StdError> {
+        self.p2p_subscribe_durable(topic)
+    }
+
+    /// Publish `plaintext` to the encrypted group on `topic` — encrypted to the member set on a
+    /// real host. Default: a durable publish of the bytes unchanged.
+    fn p2p_group_publish(&mut self, topic: &str, plaintext: Vec<u8>) -> Result<(), StdError> {
+        self.p2p_publish_durable(topic, plaintext)
+    }
+
+    /// The next **decrypted** application payload for group subscription `sub`, or `None`. On a real
+    /// host this drains control messages (membership / key material) as a side effect — welcoming
+    /// declared members as their key bundles arrive — and returns only decrypted application state.
+    /// Default: the plaintext [`Self::p2p_poll_sub`].
+    fn p2p_group_poll(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
+        self.p2p_poll_sub(sub)
+    }
+
+    /// Add `member` (peer-id hex) to the encrypted group on `topic` at runtime. On a real host the
+    /// group creator welcomes it. Default: a no-op — the pass-through sandbox has no membership to
+    /// enforce (the decrypted value is the same regardless of who is "in").
+    fn p2p_group_add(&mut self, _topic: &str, _member: &str) -> Result<(), StdError> {
+        Ok(())
+    }
+
+    /// Remove `member` (peer-id hex) from the encrypted group on `topic` at runtime, rotating the
+    /// group key on a real host so it can no longer decrypt new state (revocation). Default: a no-op
+    /// — the sandbox has no real crypto to revoke and its converged value is unaffected.
+    fn p2p_group_remove(&mut self, _topic: &str, _member: &str) -> Result<(), StdError> {
+        Ok(())
+    }
+
+    // --- Identity & status (p2p P3.3) ---------------------------------------------------------
+    //
+    // Both are meaningful only once there is a *real* network with a persistent identity to have
+    // and a network to be offline from — so the sandbox/loopback broker keeps the trivial defaults
+    // (no stable identity; "always synced", since a single-node broker never lags). Only `RealHost`
+    // under `ring-p2p` overrides them from its live p2panda node.
+
+    /// This node's stable identity — the hex-encoded Ed25519 public key it signs operations with,
+    /// persisted across restarts (p2p P3.3). `None` on the loopback broker, which has no identity.
+    fn p2p_identity(&mut self) -> Result<Option<String>, StdError> {
+        Ok(None)
+    }
+
+    /// The synchronization state of `topic` from this node's point of view (p2p P3.3): whether it
+    /// has caught up with peers ([`SyncStatus::Synced`]), is actively syncing, or has no live peer
+    /// ([`SyncStatus::Offline`]). Default [`SyncStatus::Synced`] — the loopback broker is a single
+    /// node with nothing to lag behind.
+    fn p2p_sync_status(&mut self, _topic: &str) -> SyncStatus {
+        SyncStatus::Synced
+    }
+}
+
+/// A `synced_signal`'s convergence state relative to its peers (p2p P3.3). Meaningless on the
+/// deterministic loopback broker (always [`SyncStatus::Synced`]); real once a network can be
+/// partitioned — a live p2panda node reports it from its log-sync session lifecycle, letting a
+/// program render "working offline" / "syncing…" / "up to date".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncStatus {
+    /// No live sync session with any peer — either none has been reached yet, or the last one
+    /// failed/ended with no peer. The local state is authoritative but possibly stale.
+    Offline,
+    /// A sync session is in progress: exchanging or replaying a peer's log, not yet caught up.
+    Syncing,
+    /// Caught up with the peers reached — all their prior operations are merged (and, in live mode,
+    /// new ones stream in). The convergence guarantee is met for those peers.
+    Synced,
+}
+
+impl SyncStatus {
+    /// The lowercase word `synced_signal.status()` surfaces to a program (`"offline"` / `"syncing"`
+    /// / `"synced"`) — a plain string so a script matches it without importing an enum type.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SyncStatus::Offline => "offline",
+            SyncStatus::Syncing => "syncing",
+            SyncStatus::Synced => "synced",
+        }
+    }
 }
 
 /// Every host-coupled effect the interpreters perform, behind one swappable seam — the union of the
-/// eight capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Entropy`], [`Ids`],
-/// [`Network`], [`P2p`]). Backends hold a `Box<dyn Host>` and reach any capability through it; a
-/// consumer that needs only one (a read handle → [`FileReader`], the RNG dispatch → [`Rng`], …)
-/// depends on that trait instead, so a partial host (e.g. a read-only test double) implements
-/// exactly what it supports rather than stubbing the rest.
+/// nine capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Entropy`], [`Ids`],
+/// [`Network`], [`P2p`], [`Telemetry`](crate::Telemetry)). Backends hold a `Box<dyn Host>` and reach
+/// any capability through it; a consumer that needs only one (a read handle → [`FileReader`], the RNG
+/// dispatch → [`Rng`], …) depends on that trait instead, so a partial host (e.g. a read-only test
+/// double) implements exactly what it supports rather than stubbing the rest.
 ///
 /// Object-safe on purpose (IO is never a hot path, so the dynamic dispatch is immaterial). The
-/// blanket impl means any type providing all eight capabilities *is* a `Host` automatically — there
+/// blanket impl means any type providing all nine capabilities *is* a `Host` automatically — there
 /// is nothing extra to implement.
-pub trait Host: FileSystem + Rng + Clock + Env + Entropy + Ids + Network + P2p {}
-impl<T: FileSystem + Rng + Clock + Env + Entropy + Ids + Network + P2p> Host for T {}
+pub trait Host: FileSystem + Rng + Clock + Env + Entropy + Ids + Network + P2p + crate::Telemetry {}
+impl<T: FileSystem + Rng + Clock + Env + Entropy + Ids + Network + P2p + crate::Telemetry> Host
+    for T
+{
+}

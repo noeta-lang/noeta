@@ -1,0 +1,32 @@
+// A file may use a native type AND declare its own type of the same short name, by importing the
+// native one under an alias. Here the native `std.id.Uuid` is imported as `NativeId`, while the
+// program declares its own `struct Uuid`. The two are wholly distinct nominal types with distinct
+// runtime identities (the native carries its qualified `std.id.Uuid`, the user's is a bare `Uuid`):
+// the native value narrows to `NativeId` but NOT to the user `Uuid`, and the user value narrows to
+// `Uuid` but NOT to `NativeId`. This is the coexistence the whole arc exists to enable — and, by the
+// same rule, a future native `Counter`/`Gauge` and a user's own `Counter`. Sandbox-deterministic.
+// expect: stdout "native 4"
+// expect: stdout "mine 5"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+use std.{id}
+use std.id.Uuid as NativeId
+
+struct Uuid {
+    tag: int
+}
+
+n: NativeId = id.uuid();
+mine = Uuid { tag: 5 };
+
+echo "native ${n.version()}";
+echo "mine ${mine.tag}";
+
+// Each narrows to its own type, never the other's.
+echo n is NativeId;
+echo n is Uuid;
+echo mine is Uuid;
+echo mine is NativeId;

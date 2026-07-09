@@ -17,6 +17,7 @@
 // expect: stdout "false"
 // expect: exit 0
 use std.{id}
+use std.id.Uuid
 
 u = id.uuid();
 echo u is Uuid;

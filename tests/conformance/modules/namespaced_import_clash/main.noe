@@ -1,0 +1,11 @@
+// The dual of `namespaced_coexistence`: importing two same-short-named types WITHOUT aliases binds
+// both to the same local name `Amount`, which is ambiguous — an E0020 collision. Aliasing (as in the
+// coexistence fixture) is the way to admit both. The error points at the second, clashing import.
+// expect: error E0020 at 8:13
+// expect: exit 1
+namespace App.Main;
+use App.Money.Amount;
+use App.Geo.Amount;
+
+a = Amount { cents: 1 };
+echo a.cents;

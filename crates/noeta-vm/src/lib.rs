@@ -808,6 +808,25 @@ struct Vm<'m> {
     /// its result once ready), released when the scope is joined and popped. Mirrors the tree-walker's
     /// `scopes`; both round-robin identically, so the differential holds by construction.
     scopes: Vec<Vec<Task>>,
+    /// The **current strand's task-local context** (native-otel T5a): an opaque `u64` stack
+    /// extensions read through `NativeCtx::context_*` (telemetry's active-span stack is the first
+    /// client). This cell always belongs to whichever strand is executing — the main strand (root)
+    /// by default; the scheduler swaps a task's own saved context in around each poll of its step
+    /// (`poll_all_scopes_round`), and a `spawn` snapshots it into the child. Mirrors the
+    /// tree-walker's field, but carries no observable-output semantics (context is telemetry-only),
+    /// so the differential is indifferent to it by construction.
+    ctx_current: Vec<u64>,
+    /// Whether telemetry is enabled, cached from the host at load (native-otel T5d perf): the
+    /// enabled state is fixed per host (env-derived at construction), and the channel send/recv
+    /// hot paths gate on it — a cached bool is one predictable branch instead of a virtual call.
+    tel_on: bool,
+    /// **Traced futures** (native-otel T5c) — the future-completion hook behind
+    /// `NativeCtx::trace_future`: each entry holds one retained reference to a step future whose
+    /// polls run under its saved context and whose completion (or abort) ends its telemetry span.
+    /// Almost always empty (the hot check in `poll_once` is `is_empty()`); entries leave on
+    /// completion, and teardown feeds strays into the collector roots then releases them, exactly
+    /// like `ext_arena`.
+    traced_futures: Vec<TracedFuture>,
     /// The channel table (isolates I.1): every `channel::<T>(cap)` appends a [`Channel`]; endpoint
     /// values (`Sender`/`Receiver`) reference one by index. A queued message is owned by the channel
     /// (retained on enqueue, transferred out on dequeue). `channel_progress` counts successful queue
@@ -1679,9 +1698,12 @@ struct IsolateFailure {
 /// so shipping a `Sender`/`Receiver` into a worker shares one queue. Send/recv still *poll*
 /// cooperatively (Pending on full/empty), never blocking a thread — a producer/consumer across
 /// isolate threads makes progress by each thread's scheduler re-polling the shared queue.
+/// Each queued message also carries the **sender's trace context** (native-otel T5d, `None` when
+/// telemetry is off or the sender had no active span) — the automatic-propagation envelope: recv
+/// seeds the receiving strand's context from it, so message *types* stay tracing-free.
 enum Channel {
     Local {
-        buffer: std::collections::VecDeque<Value>,
+        buffer: std::collections::VecDeque<(Value, Option<noeta_stdlib::TraceContext>)>,
         capacity: usize,
         closed: bool,
     },
@@ -1701,6 +1723,28 @@ struct Task {
     /// `destruct` on an async task's captured locals is a separate, pre-existing gap — see
     /// `plans/deferred.md` — that affects completed and cancelled tasks alike.)
     cancelled: bool,
+    /// Set while this task's future is **being polled** (its step is executing). A nested
+    /// `poll_all_scopes_round` — a `concurrent` join *inside* this task's own body — must skip it:
+    /// re-entering a mid-execution state machine re-runs its current segment (infinite recursion /
+    /// duplicated effects). The task is already progressing; "skip while polling" is the correct
+    /// scheduling, and it is also what keeps per-task context swaps balanced.
+    polling: bool,
+    /// The task's **saved task-local context** (native-otel T5a): a snapshot of the spawner's
+    /// `ctx_current` taken at `spawn`, swapped into `Vm::ctx_current` around each poll of this
+    /// task's step and back out after — so telemetry scope follows the task across suspensions
+    /// instead of leaking between interleaved tasks. Plain `u64`s (span ids), not values — no
+    /// refcount traffic, invisible to the GC and the leak oracle.
+    context: Vec<u64>,
+}
+
+/// One traced future (native-otel T5c): the future-completion hook's entry. `future` is a
+/// **retained** reference (identity = its NaN-box bits, stable while the reference is held);
+/// `context` is the stack its polls run under (the registering strand's context + `span`), swapped
+/// in/out around each poll exactly like a task's; `span` is ended when the future completes.
+struct TracedFuture {
+    future: Value,
+    context: Vec<u64>,
+    span: u64,
 }
 
 /// The outcome of polling a future once (Track A.3): ready with a value, or still pending.
@@ -1755,10 +1799,17 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         NarrowTarget::Fn => "function",
         NarrowTarget::Dyn => return true,
         NarrowTarget::Named(name) => {
-            // An extern-type value matches its registered type name (`x is Uuid`, extern-types
-            // X1); user objects/enums match their shape name.
+            // An extern-type value matches by its **qualified identity** (`std.id.Uuid`) — the
+            // narrowing target the lowering produced for an imported native type — so it never
+            // matches a same-short-named *user* type (whose shape name is bare). User objects/enums
+            // match their (bare) shape name.
             if v.is_extern() {
-                return v.with_extern(|e| e.type_name() == name);
+                return v.with_extern(|e| {
+                    noeta_stdlib::registry::find_type(e.type_name())
+                        .map(|t| t.qualified())
+                        .as_deref()
+                        == Some(name)
+                });
             }
             return v.shape().is_some_and(|s| &s.name == name);
         }
@@ -1836,6 +1887,8 @@ impl<'m> Vm<'m> {
         host: Box<dyn noeta_stdlib::Host>,
         executor: Box<dyn noeta_stdlib::Executor>,
     ) -> Vm<'m> {
+        // Cached: fixed per host (see the `tel_on` field). Read before `host` moves into the Vm.
+        let tel_on = host.tel_enabled();
         let methods = module
             .methods
             .iter()
@@ -1911,6 +1964,9 @@ impl<'m> Vm<'m> {
             host,
             executor,
             scopes: Vec::new(),
+            ctx_current: Vec::new(),
+            tel_on,
+            traced_futures: Vec::new(),
             channels: Vec::new(),
             channel_progress: 0,
             ext_arena: Vec::new(),
@@ -2453,6 +2509,8 @@ impl<'m> Vm<'m> {
             // roots so the sweep cannot reclaim a value the arena release below would then
             // double-free.
             roots.extend(self.ext_arena.iter().copied().flatten());
+            // Traced futures (native-otel T5c) hold a `+1` each — the same graph treatment.
+            roots.extend(self.traced_futures.iter().map(|t| t.future));
             let garbage = collect_trace(&roots);
             self.reclaim_cycle_garbage(garbage);
         }
@@ -2461,7 +2519,7 @@ impl<'m> Vm<'m> {
         // `Shared` channel (I.4c) holds `Wire` copies, not heap `Value`s, so dropping it frees cleanly.
         for chan in std::mem::take(&mut self.channels) {
             if let Channel::Local { buffer, .. } = chan {
-                for msg in buffer {
+                for (msg, _) in buffer {
                     self.release_value(msg);
                 }
             }
@@ -2475,6 +2533,12 @@ impl<'m> Vm<'m> {
             self.release_value(value);
         }
         self.ext_arena_free.clear();
+        // Release any still-traced futures (native-otel T5c) — an abandoned `with_span`-async
+        // future whose span never ended. The reference releases destructor-aware (residency 0);
+        // the span simply stays unended (the recorder/exporter only consume ended spans).
+        for traced in std::mem::take(&mut self.traced_futures) {
+            self.release_value(traced.future);
+        }
         // Destroy the globals at program end in reverse declaration order, running each
         // destructor on its last reference — the deterministic destruction the spec requires.
         for slot in self.global_order.clone().into_iter().rev() {
@@ -2543,11 +2607,22 @@ fn run_isolate_worker(
     proto: u32,
     iso_args: Vec<isolate::IsoArg>,
     wire_globals: Vec<(u32, isolate::Wire)>,
+    trace: Option<noeta_stdlib::TraceContext>,
     span: Span,
 ) -> Result<isolate::Wire, IsolateFailure> {
     noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
     let (host, executor) = factory();
     let mut wvm = Vm::load(module, host, executor);
+    // Inherit the spawner's trace context across the thread boundary (native-otel T5d): the worker
+    // has its OWN host (span handles don't transfer), so the W3C context is interned as a remote
+    // seed at the worker's root — its spans then continue the spawner's trace, exactly as a
+    // cooperative task inherits via its Task context (T5a). Real-path parity with the sandbox.
+    if let Some(ctx) = trace
+        && wvm.host.tel_enabled()
+    {
+        let seed = wvm.host.tel_intern_remote(ctx);
+        wvm.ctx_current.push(seed);
+    }
     wvm.parallel_isolates = true;
     wvm.isolate_module = Some(Arc::clone(module));
     wvm.isolate_factory = Some(factory.clone());
@@ -2618,7 +2693,7 @@ fn run_isolate_worker(
     }
     for chan in std::mem::take(&mut wvm.channels) {
         if let Channel::Local { buffer, .. } = chan {
-            for msg in buffer {
+            for (msg, _) in buffer {
                 wvm.release_value(msg);
             }
         }
@@ -2627,6 +2702,10 @@ fn run_isolate_worker(
     // program's extensions still held — signals, cells — drops here, destructor-aware.
     for value in std::mem::take(&mut wvm.ext_arena).into_iter().flatten() {
         wvm.release_value(value);
+    }
+    // And its still-traced futures (native-otel T5c), same treatment.
+    for traced in std::mem::take(&mut wvm.traced_futures) {
+        wvm.release_value(traced.future);
     }
     message
 }
@@ -5102,10 +5181,15 @@ impl<'m> Vm<'m> {
                             retain(future);
                             let scope_idx = self.scopes.len() - 1;
                             let task_idx = self.scopes[scope_idx].len();
+                            // The child inherits a snapshot of the spawner's task-local context
+                            // (T5a): a task spawned inside `with_span` parents its spans there.
+                            let context = self.ctx_current.clone();
                             self.scopes[scope_idx].push(Task {
                                 future,
                                 result: None,
                                 cancelled: false,
+                                polling: false,
+                                context,
                             });
                             Value::make_handle(
                                 ScopeId::from_index(scope_idx),

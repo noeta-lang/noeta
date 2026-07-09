@@ -18,6 +18,11 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
 > [!NOTE]
+> **Observability.** There is no telemetry subcommand or flag — production tracing rides `noeta run`
+> and the server, configured by the standard `OTEL_EXPORTER_OTLP_ENDPOINT` env var and off until you
+> set it. See [Observability](Observability). (The dev-time flamegraph tool is [`noeta profile`](Profiling).)
+
+> [!NOTE]
 > The language-conformance/differential harness that developers use is a *separate* dev binary (`noeta-conformance`), deliberately kept out of the shipped CLI so the `test` verb stays free for your program's own tests. Editor tooling is on [Editor & AI Tooling](Editor-and-AI-Tooling); the debugger on [Debugging](Debugging).
 
 ## `noeta fmt`

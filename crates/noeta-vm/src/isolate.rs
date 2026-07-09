@@ -21,6 +21,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use noeta_object::Shape;
+use noeta_stdlib::TraceContext;
 use noeta_value::{ChannelId, Value};
 
 use crate::Channel;
@@ -41,7 +42,9 @@ pub struct ChannelCore {
 
 #[derive(Debug)]
 struct ChannelInner {
-    queue: VecDeque<Wire>,
+    // Each message carries the sender's trace context (native-otel T5d) — the automatic-
+    // propagation envelope, crossing the thread with the payload.
+    queue: VecDeque<(Wire, Option<TraceContext>)>,
     closed: bool,
 }
 
@@ -56,7 +59,7 @@ pub enum SendState {
 /// The outcome of a receive poll (isolates I.4c): a message `Got`, the buffer is `Empty` (suspend), or
 /// the channel is closed and drained (`ClosedEmpty` → `none`).
 pub enum RecvState {
-    Got(Wire),
+    Got(Wire, Option<TraceContext>),
     Empty,
     ClosedEmpty,
 }
@@ -90,10 +93,10 @@ impl ChannelCore {
     /// lock, so a race after [`send_state`](Self::send_state) is safe); returns whether it was pushed.
     /// A successful push is cross-thread progress, so it bumps [`WAKE`] — a consumer's scheduler
     /// parked in `isolate_in_flight_wait` re-polls immediately instead of sleeping out its quantum.
-    pub fn try_send(&self, msg: Wire) -> bool {
+    pub fn try_send(&self, msg: Wire, context: Option<TraceContext>) -> bool {
         let mut inner = self.inner.lock().expect("channel mutex poisoned");
         if !inner.closed && inner.queue.len() < self.capacity {
-            inner.queue.push_back(msg);
+            inner.queue.push_back((msg, context));
             drop(inner);
             WAKE.notify();
             true
@@ -106,10 +109,10 @@ impl ChannelCore {
     /// buffer slot — progress for a producer parked on send-full — so it bumps [`WAKE`].
     pub fn try_recv(&self) -> RecvState {
         let mut inner = self.inner.lock().expect("channel mutex poisoned");
-        if let Some(msg) = inner.queue.pop_front() {
+        if let Some((msg, context)) = inner.queue.pop_front() {
             drop(inner);
             WAKE.notify();
-            RecvState::Got(msg)
+            RecvState::Got(msg, context)
         } else if inner.closed {
             RecvState::ClosedEmpty
         } else {

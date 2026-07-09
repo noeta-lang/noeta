@@ -34,6 +34,14 @@ pub const P2P_FNS: &[ExtFn] = &[
         params: &[SigType::String],
         ret: RetTy::Concrete(SigType::Future(&SigType::Option(&SigType::Bytes))),
     },
+    // `identity() -> ?string` — this node's stable identity, the hex Ed25519 public key it signs
+    // with, persisted across restarts (p2p P3.3). `none` on the deterministic sandbox/loopback,
+    // which has no network identity — so a program that prints it stays oracle-safe.
+    ExtFn {
+        name: "identity",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Option(&SigType::String)),
+    },
 ];
 
 pub fn p2p_dispatch(
@@ -56,6 +64,13 @@ pub fn p2p_dispatch(
             // a future (the `NativeOut::Spawn` path, intercepted at the dispatch return). The
             // default descriptor resolves through `p2p_poll` at spawn — deterministic in the sandbox.
             Ok(NativeOut::Spawn(SpawnBox(host.p2p_receive(topic))))
+        }
+        "identity" => {
+            want_arity(func, args, 0)?;
+            Ok(match host.p2p_identity()? {
+                Some(hex) => NativeOut::Some(Box::new(NativeOut::Str(hex))),
+                None => NativeOut::None,
+            })
         }
         _ => Err(no_function_error("p2p", func)),
     }

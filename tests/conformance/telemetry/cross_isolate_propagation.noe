@@ -1,0 +1,44 @@
+// Native OTEL T3 — cross-isolate trace propagation via the Wire envelope. A `traceparent` is a
+// plain string, so it rides a channel message with no special support: the producer isolate starts a
+// span and sends its `context()` over the channel; the consumer extracts it with `span_from`, whose
+// child continues the *same* trace across the isolate boundary. We assert continuity in-language by
+// comparing the hyphen-split trace-id field of the inbound context with the continued span's own —
+// they match, so the consumer returns `true`. Only `string`/`bool` cross the boundary (both Send), and
+// trace continuity is carried by the string itself, independent of per-host id assignment, so both
+// backends agree.
+// expect: stdout "true"
+// expect: exit 0
+use std.{telemetry}
+
+async fn producer(tx: Sender<string>): void {
+    s = telemetry.span("remote-work")
+    tx.send(s.context()).await
+    s.end()
+}
+
+async fn consumer(rx: Receiver<string>): bool {
+    inbound = rx.recv().await
+    parent = match inbound { some(x) => x, none => "" }
+    child = telemetry.span_from("continue", parent)
+    child_ctx = child.context()
+    child.end()
+    in_parts = parent.split("-")
+    out_parts = child_ctx.split("-")
+    return in_parts[1] == out_parts[1]
+}
+
+async fn run(): bool {
+    (tx, rx) = channel::<string>(1)
+    mut continued = false
+    concurrent {
+        h = spawn consumer(rx)
+        concurrent {
+            isolate producer(tx)
+        }
+        tx.close()
+        continued = h.await
+    }
+    return continued
+}
+
+echo run().await

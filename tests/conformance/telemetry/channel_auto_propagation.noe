@@ -1,0 +1,60 @@
+// Native OTEL T5d — AUTOMATIC trace propagation over channels: the sender's active-span context
+// rides the message envelope (the message type stays a plain `int`), and a receiver at top level
+// (empty context) is seeded with it — `current_context()` continues the producer's trace with zero
+// user threading. A second message from a DIFFERENT trace REPLACES the first seed (the queue-worker
+// pattern; the old seed is released host-side).
+//
+//   - The consumer is spawned OUTSIDE any span (empty inherited context), so a non-empty context
+//     after `recv` proves *seeding*, not T5a inheritance.
+//   - `seed1`/`seed2` equal the two producers' exact traceparents; they differ from each other
+//     (distinct traces), proving per-message replacement.
+//
+// Deterministic under the sandbox scheduler, so both backends agree exactly.
+// expect: stdout "seed1_matches=true"
+// expect: stdout "seed2_matches=true"
+// expect: stdout "distinct=true"
+// expect: exit 0
+use std.{telemetry}
+
+(tx, rx) = channel::<int>(2)
+
+async fn send_one(): string {
+    tx.send(1).await
+    return telemetry.current_context()
+}
+
+async fn send_two(): string {
+    tx.send(2).await
+    tx.close()
+    return telemetry.current_context()
+}
+
+async fn consumer(): (string, string) {
+    r1 = rx.recv().await
+    c1 = telemetry.current_context()
+    r2 = rx.recv().await
+    c2 = telemetry.current_context()
+    return (c1, c2)
+}
+
+async fn run(): (string, string, string, string) {
+    mut seeds = ("", "")
+    // Each send happens inside its own traced span, so each message carries a distinct trace.
+    ctx1 = telemetry.with_span("first", send_one).await
+    ctx2 = telemetry.with_span("second", send_two).await
+    mut got = ("", "")
+    concurrent {
+        h = spawn consumer()
+        got = h.await
+    }
+    (s1, s2) = got
+    return (ctx1, ctx2, s1, s2)
+}
+
+(ctx1, ctx2, seed1, seed2) = run().await
+seed1_matches = seed1 == ctx1
+seed2_matches = seed2 == ctx2
+distinct = seed1 != seed2
+echo "seed1_matches=${seed1_matches}"
+echo "seed2_matches=${seed2_matches}"
+echo "distinct=${distinct}"

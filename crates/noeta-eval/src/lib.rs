@@ -453,7 +453,13 @@ impl EnumValue {
         let head = if self.is_builtin_result_or_option() {
             self.variant.clone()
         } else {
-            format!("{}.{}", self.enum_name, self.variant)
+            // Display strips a qualified identity to its short name; the identity keyed on for
+            // dispatch/`is`/`as` stays qualified.
+            format!(
+                "{}.{}",
+                noeta_ast::short_type_name(&self.enum_name),
+                self.variant
+            )
         };
         if self.data.is_empty() {
             head
@@ -652,7 +658,13 @@ impl ObjectValue {
             .zip(slots.iter())
             .map(|(f, value)| format!("{}: {}", f.name, value.repr()))
             .collect();
-        format!("{} {{{}}}", self.def.name, parts.join(", "))
+        // Display strips a qualified identity to its short name; the identity keyed on for
+        // dispatch/`is`/`as` stays qualified.
+        format!(
+            "{} {{{}}}",
+            noeta_ast::short_type_name(&self.def.name),
+            parts.join(", ")
+        )
     }
 }
 
@@ -1027,6 +1039,33 @@ struct Task {
     /// Set when the task is **cancelled** (Track A.8) — e.g. a `race` loser. Cancelled tasks are never
     /// polled again and count as done for the join; the tree-walker mirror of the VM's flag.
     cancelled: bool,
+    /// Set while this task's future is **being polled** (its step is executing). A nested
+    /// `poll_all_scopes_round` — a `concurrent` join *inside* this task's own body — must skip it:
+    /// re-entering a mid-execution state machine re-runs its current segment (infinite recursion).
+    /// The tree-walker mirror of the VM's flag.
+    polling: bool,
+    /// The task's **saved task-local context** (native-otel T5a): a snapshot of the spawner's
+    /// `ctx_current` at `spawn`, swapped in around each poll of this task's step — the tree-walker
+    /// mirror of the VM's field.
+    context: Vec<u64>,
+}
+
+/// One traced future (native-otel T5c) — the tree-walker mirror of the VM's entry. `future` is a
+/// cloned [`Value::Future`] (the `Rc` keeps it alive; identity = `Rc::ptr_eq`); `context` is the
+/// stack its polls run under; `span` is ended when it completes.
+struct TracedFuture {
+    future: Value,
+    context: Vec<u64>,
+    span: u64,
+}
+
+/// Traced-future identity: the same step future (`Rc` pointer equality). Only [`Value::Future`]
+/// is ever registered, so other flavors never match.
+fn traced_same(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Future(x), Value::Future(y)) => std::rc::Rc::ptr_eq(x, y),
+        _ => false,
+    }
 }
 
 /// A bounded channel's scheduler-owned state (isolates I.1): a FIFO queue of buffered messages, its
@@ -1035,7 +1074,10 @@ struct Task {
 /// Mirrors the VM's `Channel`; both backends run the identical FIFO + block-on-full/empty logic, so
 /// the differential holds by construction.
 struct Channel {
-    buffer: std::collections::VecDeque<Value>,
+    /// Each queued message also carries the sender's trace context (native-otel T5d, `None` when
+    /// telemetry is off or no span was active) — the automatic-propagation envelope, mirroring the
+    /// VM's `Channel::Local`.
+    buffer: std::collections::VecDeque<(Value, Option<noeta_stdlib::TraceContext>)>,
     capacity: usize,
     closed: bool,
 }
@@ -1066,6 +1108,16 @@ struct Interpreter {
     /// position here. Mirrors the VM's `scopes` field; both round-robin identically, so the differential
     /// holds by construction.
     scopes: Vec<Vec<Task>>,
+    /// The **current strand's task-local context** (native-otel T5a): an opaque `u64` stack
+    /// extensions read through `NativeCtx::context_*` (telemetry's active-span stack is the first
+    /// client). Belongs to whichever strand is executing — the main strand (root) by default; the
+    /// scheduler swaps a task's saved context in around each poll of its step, and a `spawn`
+    /// snapshots it into the child. The tree-walker mirror of the VM's `ctx_current`.
+    ctx_current: Vec<u64>,
+    /// **Traced futures** (native-otel T5c) — the future-completion hook, the tree-walker mirror
+    /// of the VM's table. Entries are `Value` clones (`Rc`-owned, so teardown is automatic when
+    /// the interpreter drops); almost always empty (the `poll_once` fast path is `is_empty()`).
+    traced_futures: Vec<TracedFuture>,
     /// The channel table (isolates I.1): every `channel::<T>(cap)` appends a [`Channel`]; endpoints
     /// reference one by index. Never cleared during a run (indices stay stable), like `scopes` it
     /// mirrors the VM exactly. `channel_progress` counts successful queue operations (a `send` push, a
@@ -1158,6 +1210,8 @@ impl Interpreter {
             host,
             executor,
             scopes: Vec::new(),
+            ctx_current: Vec::new(),
+            traced_futures: Vec::new(),
             channels: Vec::new(),
             channel_progress: 0,
             ext_arena: Vec::new(),
@@ -3343,7 +3397,83 @@ impl Interpreter {
     /// `None` (pending). A step future's poll runs the state machine to its next suspend: the step
     /// returns the raw completion value (ready) or the pending sentinel (`None`). A non-future passes
     /// through as ready (totality for the uncheck­ed property test).
+    ///
+    /// The thin outer layer is the **traced-future hook** (native-otel T5c), the VM's mirrored:
+    /// a future registered via `NativeCtx::trace_future` polls under its own saved context and,
+    /// on completion or abort, has its telemetry span ended here.
     fn poll_once(&mut self, future: &Value, span: Span) -> Eval<Option<Value>> {
+        if self.traced_futures.is_empty() {
+            return self.poll_once_inner(future, span);
+        }
+        let Some(idx) = self
+            .traced_futures
+            .iter()
+            .position(|t| traced_same(&t.future, future))
+        else {
+            return self.poll_once_inner(future, span);
+        };
+        let ctx = std::mem::take(&mut self.traced_futures[idx].context);
+        let saved = std::mem::replace(&mut self.ctx_current, ctx);
+        let polled = self.poll_once_inner(future, span);
+        let ctx = std::mem::replace(&mut self.ctx_current, saved);
+        // Re-find by identity: a nested poll may have completed another traced future
+        // (`swap_remove` moves entries), so `idx` cannot be trusted across the poll.
+        if let Some(idx) = self
+            .traced_futures
+            .iter()
+            .position(|t| traced_same(&t.future, future))
+        {
+            match &polled {
+                Ok(None) => self.traced_futures[idx].context = ctx,
+                Ok(Some(_)) | Err(_) => {
+                    let traced = self.traced_futures.swap_remove(idx);
+                    if polled.is_err() {
+                        self.host.tel_span_set_status(
+                            traced.span,
+                            noeta_stdlib::SpanStatus::Error("span body aborted".into()),
+                        );
+                    }
+                    self.host.tel_span_end(traced.span);
+                }
+            }
+        }
+        polled
+    }
+
+    /// The sender's trace context to ride an outbound channel message (native-otel T5d) — the
+    /// VM's helper, mirrored: `None` (one bool test) when telemetry is off or no span is active.
+    fn outbound_trace_context(&mut self) -> Option<noeta_stdlib::TraceContext> {
+        if !self.host.tel_enabled() {
+            return None;
+        }
+        let top = *self.ctx_current.last()?;
+        Some(self.host.tel_span_context(top))
+    }
+
+    /// Seed the receiving strand's context from a dequeued message's (native-otel T5d) — the VM's
+    /// helper, mirrored: only when the strand is at top level (empty, or exactly one remote seed,
+    /// which is replaced and released); real active spans are never hijacked.
+    fn seed_context_from_message(&mut self, context: Option<noeta_stdlib::TraceContext>) {
+        let at_top = match self.ctx_current.as_slice() {
+            [] => true,
+            [only] => self.host.tel_is_remote(*only),
+            _ => false,
+        };
+        if !at_top {
+            return;
+        }
+        if let [old] = self.ctx_current.as_slice() {
+            let old = *old;
+            self.host.tel_release_remote(old);
+            self.ctx_current.clear();
+        }
+        if let Some(ctx) = context {
+            let seed = self.host.tel_intern_remote(ctx);
+            self.ctx_current.push(seed);
+        }
+    }
+
+    fn poll_once_inner(&mut self, future: &Value, span: Span) -> Eval<Option<Value>> {
         match future {
             Value::Timer(deadline) => {
                 let deadline = *deadline;
@@ -3404,7 +3534,10 @@ impl Interpreter {
                 }
                 if chan.buffer.len() < chan.capacity {
                     let value = (**value).clone();
-                    self.channels[id.index()].buffer.push_back(value);
+                    // The sender's trace context rides the message (T5d) — the VM's envelope,
+                    // mirrored.
+                    let context = self.outbound_trace_context();
+                    self.channels[id.index()].buffer.push_back((value, context));
                     self.channel_progress += 1;
                     Ok(Some(Value::Unit))
                 } else {
@@ -3415,7 +3548,9 @@ impl Interpreter {
             // once the channel is closed and drained, else suspend (pending) on an empty open buffer.
             Value::ChannelRecv(id) => {
                 let id = *id;
-                if let Some(value) = self.channels[id.index()].buffer.pop_front() {
+                if let Some((value, context)) = self.channels[id.index()].buffer.pop_front() {
+                    // Seed the receiving strand from the message's context (T5d).
+                    self.seed_context_from_message(context);
                     self.channel_progress += 1;
                     Ok(Some(builtin_enum("Option", "some", vec![value])))
                 } else if self.channels[id.index()].closed {
@@ -3441,9 +3576,23 @@ impl Interpreter {
             let mut ti = 0;
             while ti < self.scopes[si].len() {
                 let task = &self.scopes[si][ti];
-                if task.result.is_none() && !task.cancelled {
+                // Skip a task whose step is *currently executing* (`polling`): a nested round — a
+                // `concurrent` join inside that task's own body — must not re-enter its
+                // mid-execution state machine (that re-runs the current segment: infinite
+                // recursion). The VM's guard, mirrored.
+                if task.result.is_none() && !task.cancelled && !task.polling {
                     let future = task.future.clone();
-                    if let Some(value) = self.poll_once(&future, span)? {
+                    self.scopes[si][ti].polling = true;
+                    // Swap the task's own context in for the duration of its poll (T5a) — the
+                    // VM's swap discipline, mirrored: paired swaps nest across re-entrant rounds,
+                    // and the `polling` guard keeps each task's pair balanced.
+                    let ctx = std::mem::take(&mut self.scopes[si][ti].context);
+                    let saved = std::mem::replace(&mut self.ctx_current, ctx);
+                    let polled = self.poll_once(&future, span);
+                    self.scopes[si][ti].context =
+                        std::mem::replace(&mut self.ctx_current, saved);
+                    self.scopes[si][ti].polling = false;
+                    if let Some(value) = polled? {
                         self.scopes[si][ti].result = Some(value);
                         completed = true;
                     }
@@ -4268,7 +4417,15 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
                 other => match value {
                     Value::Object(object) => object.def.name() == other,
                     Value::Enum(enum_value) => enum_value.enum_name == other,
-                    Value::Extern(e) => e.borrow().type_name() == other,
+                    // An extern value matches by its qualified identity (`std.id.Uuid`) — the target
+                    // an imported native type lowers to — so it never matches a same-short-named
+                    // user type (mirrors the VM's `narrow_matches`).
+                    Value::Extern(e) => {
+                        noeta_stdlib::registry::find_type(e.borrow().type_name())
+                            .map(|t| t.qualified())
+                            .as_deref()
+                            == Some(other)
+                    }
                     _ => false,
                 },
             };

@@ -509,7 +509,15 @@ impl DocumentStore {
             token.kind == TokenKind::Ident && token.span.start <= offset && offset <= token.span.end
         })?;
         let name = &entry_text[token.span.range()];
-        let def_span = resolve::Definitions::collect(program).resolve(name)?;
+        let defs = resolve::Definitions::collect(program);
+        // An aliased or plain import resolves through the entry's own `use` list to the qualified
+        // identity the linker merged in (arc Phase B); `resolve` itself falls back to leaf matching for
+        // a bare reference to a namespaced declaration. The entry AST (not the linked program, whose
+        // resolved `use`s are dropped) carries the imports.
+        let def_span = resolve::import_targets(&entry_ast.0.program)
+            .get(name)
+            .and_then(|qualified| defs.resolve(qualified))
+            .or_else(|| defs.resolve(name))?;
         self.locate(cache, def_span, encoding)
     }
 
@@ -2169,6 +2177,61 @@ mod tests {
         // `pub struct User` is on line 1 of models.noe (line 0 is the `namespace`).
         assert_eq!(range.start.line, 1);
         assert_eq!(range.start.character, 11); // after "pub struct "
+    }
+
+    #[test]
+    fn goto_definition_disambiguates_aliased_same_named_imports() {
+        // Arc Phase B: two sibling modules each declare `Amount`; the entry imports both under
+        // distinct aliases. Go-to-definition on each alias resolves through the entry's imports to the
+        // *right* qualified declaration — `Money` to money.noe, `Distance` to geo.noe — never
+        // conflating the two same-short-named types.
+        let dir = temp_workspace(
+            "goto_alias",
+            &[
+                (
+                    "money.noe",
+                    "namespace App.Money;\npub struct Amount { cents: int }\n",
+                ),
+                (
+                    "geo.noe",
+                    "namespace App.Geo;\npub struct Amount { meters: int }\n",
+                ),
+            ],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let money_uri = path_to_uri(&dir.join("money.noe"));
+        let geo_uri = path_to_uri(&dir.join("geo.noe"));
+        let mut store = DocumentStore::default();
+        store.open(
+            &entry_uri,
+            "use App.Money.Amount as Money;\nuse App.Geo.Amount as Distance;\nm = Money { cents: 1 };\nd = Distance { meters: 2 }".to_string(),
+        );
+
+        // Cursor on `Money` (line 2, column 4) → money.noe's `Amount`.
+        let (money_target, _) = store
+            .definition(
+                &entry_uri,
+                Position {
+                    line: 2,
+                    character: 4,
+                },
+                Encoding::Utf8,
+            )
+            .expect("aliased `Money` resolves");
+        assert_eq!(money_target, money_uri);
+
+        // Cursor on `Distance` (line 3, column 4) → geo.noe's `Amount` (a different file).
+        let (distance_target, _) = store
+            .definition(
+                &entry_uri,
+                Position {
+                    line: 3,
+                    character: 4,
+                },
+                Encoding::Utf8,
+            )
+            .expect("aliased `Distance` resolves");
+        assert_eq!(distance_target, geo_uri);
     }
 
     #[test]

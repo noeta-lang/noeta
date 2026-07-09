@@ -1403,10 +1403,14 @@ impl Interpreter {
                 }
                 let scope_idx = self.scopes.len() - 1;
                 let task_idx = self.scopes[scope_idx].len();
+                // The child inherits a snapshot of the spawner's task-local context (T5a).
+                let context = self.ctx_current.clone();
                 self.scopes[scope_idx].push(crate::Task {
                     future,
                     result: None,
                     cancelled: false,
+                    polling: false,
+                    context,
                 });
                 Ok(Value::Handle(
                     ScopeId::from_index(scope_idx),
@@ -1427,10 +1431,14 @@ impl Interpreter {
                 }
                 let scope_idx = self.scopes.len() - 1;
                 let task_idx = self.scopes[scope_idx].len();
+                // The child inherits a snapshot of the spawner's task-local context (T5a).
+                let context = self.ctx_current.clone();
                 self.scopes[scope_idx].push(crate::Task {
                     future,
                     result: None,
                     cancelled: false,
+                    polling: false,
+                    context,
                 });
                 Ok(Value::Handle(
                     ScopeId::from_index(scope_idx),

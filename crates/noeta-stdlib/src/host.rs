@@ -8,12 +8,15 @@
 pub use noeta_native::host::{
     Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, P2p, ReadSource, Rng,
 };
+pub use noeta_native::Telemetry;
 
 use crate::StdError;
 use crate::env;
 use crate::fs::Vfs;
 use crate::random;
+use noeta_native::{AttrValue, SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, TraceContext};
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 /// The sandbox's fixed wall-clock epoch: 2026-01-01T00:00:00Z in unix milliseconds.
 /// `clock_unix_ms` on the sandbox is `SANDBOX_EPOCH_MS + logical clock`, so wall-time reads (and the
@@ -47,6 +50,29 @@ pub struct SandboxHost {
     /// whole "network", so a publish/receive-or-sync program is byte-identical across backends and
     /// terminates in-oracle once its topics drain.
     p2p: noeta_native::P2pBroker,
+    /// The deterministic telemetry recorder (native OTEL): in-progress spans by id, ended spans in
+    /// end order, and the counters deriving deterministic span/trace ids. Since spans are write-only
+    /// (never program output), this exists only so conformance can assert on emitted spans; the
+    /// differential never observes it.
+    tel: TelRecorder,
+}
+
+/// The sandbox's in-memory span recorder. Span ids count from 1; trace ids from 1; both derive
+/// their W3C bytes from those counters (big-endian), so recorded spans are byte-reproducible.
+#[derive(Debug, Clone, Default)]
+struct TelRecorder {
+    next_span: u64,
+    next_trace: u64,
+    live: BTreeMap<SpanId, SpanData>,
+    recorded: Vec<SpanData>,
+    /// Remote-interned contexts (T5d): pseudo-handles minted by `tel_intern_remote` for contexts
+    /// that arrived over a channel/isolate boundary. Not spans — `tel_span_context` reads them,
+    /// everything else no-ops. Bounded by live seeds (`tel_release_remote` frees replaced ones).
+    remote: BTreeMap<SpanId, TraceContext>,
+    /// An optional external sink that also receives every ended span. `None` in every normal run;
+    /// installed by [`SandboxHost::set_span_sink`] so a caller that only sees the host by value (it
+    /// is moved into the VM and dropped at teardown) can still observe the spans a program emitted.
+    sink: Option<Arc<Mutex<Vec<SpanData>>>>,
 }
 
 /// The sandbox's inbound-server state: the fixed request script (see
@@ -74,7 +100,29 @@ impl SandboxHost {
             args: env::sandbox_args(),
             inbound: None,
             p2p: noeta_native::P2pBroker::default(),
+            tel: TelRecorder {
+                next_span: 1,
+                next_trace: 1,
+                live: BTreeMap::new(),
+                recorded: Vec::new(),
+                remote: BTreeMap::new(),
+                sink: None,
+            },
         }
+    }
+
+    /// The spans this sandbox has recorded (ended), in end order — test introspection for the
+    /// telemetry conformance oracle (native OTEL). Spans not yet ended are not included.
+    pub fn recorded_spans(&self) -> &[SpanData] {
+        &self.tel.recorded
+    }
+
+    /// Install a shared sink that also receives every ended [`SpanData`]. The telemetry conformance
+    /// oracle uses this to observe the spans a *program* emits: the host is moved into the VM and
+    /// dropped at teardown, so [`recorded_spans`](Self::recorded_spans) is unreachable afterward, but
+    /// a sink handed in before the run survives it. No effect on normal runs (the sink stays `None`).
+    pub fn set_span_sink(&mut self, sink: Arc<Mutex<Vec<SpanData>>>) {
+        self.tel.sink = Some(sink);
     }
 }
 
@@ -258,8 +306,8 @@ impl P2p for SandboxHost {
         Ok(self.p2p.poll_default(topic))
     }
 
-    fn p2p_subscribe(&mut self, topic: &str) -> u64 {
-        self.p2p.subscribe(topic)
+    fn p2p_subscribe(&mut self, topic: &str) -> Result<u64, StdError> {
+        Ok(self.p2p.subscribe(topic))
     }
 
     fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
@@ -278,6 +326,127 @@ impl Env for SandboxHost {
 
     fn args(&self) -> Vec<String> {
         self.args.clone()
+    }
+}
+
+impl Telemetry for SandboxHost {
+    // The deterministic recorder is always on, so auto-instrumentation runs under the sandbox and
+    // conformance can assert on the emitted server spans.
+    fn tel_enabled(&self) -> bool {
+        true
+    }
+
+    fn tel_span_start(
+        &mut self,
+        name: &str,
+        kind: SpanKind,
+        parent: Option<TraceContext>,
+    ) -> SpanId {
+        let id = self.tel.next_span;
+        self.tel.next_span += 1;
+        let trace_id = match parent {
+            Some(p) => p.trace_id,
+            None => {
+                let t = self.tel.next_trace;
+                self.tel.next_trace += 1;
+                let mut bytes = [0u8; 16];
+                bytes[8..].copy_from_slice(&t.to_be_bytes());
+                bytes
+            }
+        };
+        let context = TraceContext {
+            trace_id,
+            span_id: id.to_be_bytes(),
+            sampled: true,
+        };
+        let now = self.clock_unix_ms();
+        self.tel.live.insert(
+            id,
+            SpanData {
+                name: name.into(),
+                kind,
+                context,
+                parent,
+                start_unix_ms: now,
+                end_unix_ms: None,
+                attributes: Vec::new(),
+                events: Vec::new(),
+                status: SpanStatus::Unset,
+            },
+        );
+        id
+    }
+
+    fn tel_span_set_attr(&mut self, span: SpanId, key: &str, value: AttrValue) {
+        if let Some(s) = self.tel.live.get_mut(&span) {
+            match s.attributes.iter_mut().find(|(k, _)| k == key) {
+                Some(slot) => slot.1 = value,
+                None => s.attributes.push((key.into(), value)),
+            }
+        }
+    }
+
+    fn tel_span_add_event(
+        &mut self,
+        span: SpanId,
+        name: &str,
+        attrs: Vec<(compact_str::CompactString, AttrValue)>,
+    ) {
+        let now = self.clock_unix_ms();
+        if let Some(s) = self.tel.live.get_mut(&span) {
+            s.events.push(SpanEvent {
+                name: name.into(),
+                unix_ms: now,
+                attributes: attrs,
+            });
+        }
+    }
+
+    fn tel_span_set_status(&mut self, span: SpanId, status: SpanStatus) {
+        if let Some(s) = self.tel.live.get_mut(&span) {
+            s.status = status;
+        }
+    }
+
+    fn tel_span_end(&mut self, span: SpanId) {
+        let now = self.clock_unix_ms();
+        if let Some(mut s) = self.tel.live.remove(&span) {
+            s.end_unix_ms = Some(now);
+            if let Some(sink) = &self.tel.sink {
+                sink.lock().expect("span sink not poisoned").push(s.clone());
+            }
+            self.tel.recorded.push(s);
+        }
+    }
+
+    fn tel_span_context(&mut self, span: SpanId) -> TraceContext {
+        if let Some(remote) = self.tel.remote.get(&span) {
+            return *remote;
+        }
+        self.tel.live.get(&span).map_or(
+            TraceContext {
+                trace_id: [0u8; 16],
+                span_id: [0u8; 8],
+                sampled: false,
+            },
+            |s| s.context,
+        )
+    }
+
+    fn tel_intern_remote(&mut self, context: TraceContext) -> SpanId {
+        // Ids share the span counter, so a remote handle can never collide with a live span.
+        let id = self.tel.next_span;
+        self.tel.next_span += 1;
+        self.tel.remote.insert(id, context);
+        id
+    }
+
+    fn tel_is_remote(&self, span: SpanId) -> bool {
+        self.tel.remote.contains_key(&span)
+    }
+
+    fn tel_release_remote(&mut self, span: SpanId) {
+        self.tel.remote.remove(&span);
     }
 }
 
@@ -301,6 +470,69 @@ mod tests {
         // entropy value differs from a fresh stream's first, seed or no seed.
         a.rng_seed(42);
         assert_ne!(a.entropy_u64(), SandboxHost::new().entropy_u64());
+    }
+
+    #[test]
+    fn telemetry_recorder_captures_spans_deterministically() {
+        let mut host = SandboxHost::new();
+
+        // A root span with a child; the child inherits the root's trace id, the root gets a fresh
+        // one. Ids derive from counters, so two fresh sandboxes agree byte-for-byte.
+        let root = host.tel_span_start("request", SpanKind::Server, None);
+        let parent_ctx = host.tel_span_context(root);
+        host.tel_span_set_attr(root, "http.method", AttrValue::Str("GET".into()));
+        let child = host.tel_span_start("db.query", SpanKind::Client, Some(parent_ctx));
+        host.tel_span_set_status(child, SpanStatus::Ok);
+        host.tel_span_end(child);
+        host.tel_span_set_status(root, SpanStatus::Error("500".into()));
+        host.tel_span_end(root);
+
+        // Ended in end order (child first).
+        let spans = host.recorded_spans();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].name, "db.query");
+        assert_eq!(spans[1].name, "request");
+
+        // The child's parent link + shared trace id.
+        assert_eq!(spans[0].parent, Some(parent_ctx));
+        assert_eq!(spans[0].context.trace_id, spans[1].context.trace_id);
+        assert_ne!(spans[0].context.span_id, spans[1].context.span_id);
+
+        // Attributes/status recorded; timestamps are the derived wall clock.
+        assert_eq!(
+            spans[1].attributes,
+            vec![("http.method".into(), AttrValue::Str("GET".into()))]
+        );
+        assert_eq!(spans[1].status, SpanStatus::Error("500".into()));
+        assert_eq!(spans[1].start_unix_ms, SANDBOX_EPOCH_MS);
+
+        // Determinism: a second run records byte-identical spans.
+        let mut host2 = SandboxHost::new();
+        let r2 = host2.tel_span_start("request", SpanKind::Server, None);
+        let p2 = host2.tel_span_context(r2);
+        host2.tel_span_set_attr(r2, "http.method", AttrValue::Str("GET".into()));
+        let c2 = host2.tel_span_start("db.query", SpanKind::Client, Some(p2));
+        host2.tel_span_set_status(c2, SpanStatus::Ok);
+        host2.tel_span_end(c2);
+        host2.tel_span_set_status(r2, SpanStatus::Error("500".into()));
+        host2.tel_span_end(r2);
+        assert_eq!(host2.recorded_spans(), spans);
+    }
+
+    #[test]
+    fn traceparent_round_trips() {
+        let mut host = SandboxHost::new();
+        let span = host.tel_span_start("s", SpanKind::Internal, None);
+        let ctx = host.tel_span_context(span);
+        let header = ctx.to_traceparent();
+        assert_eq!(header.len(), 55); // 00-<32>-<16>-<2>
+        assert_eq!(TraceContext::parse(&header), Some(ctx));
+        // A forgiving reader rejects malformed / all-zero contexts.
+        assert_eq!(TraceContext::parse("garbage"), None);
+        assert_eq!(
+            TraceContext::parse("00-00000000000000000000000000000000-0000000000000000-01"),
+            None
+        );
     }
 
     #[test]

@@ -1,0 +1,21 @@
+// Every user type here is namespaced, so its runtime identity is qualified (`App.Lib.Shape`, …). The
+// entry references them all through imports; the linker qualifies each reference to the same identity
+// the declaration now carries, so dispatch/matching/`is` resolve — this fixture is the coverage proof
+// that qualification reaches every reference form (annotation, constructor, enum-variant pattern,
+// algebraic payload, method, generic argument, method handle).
+namespace App.Lib;
+
+pub enum Shape {
+    Circle(radius: int);
+    Square(side: int)
+}
+
+pub struct Wrap<T> {
+    inner: T
+}
+
+pub class Counter {
+    n: int
+    fn new(n: int): Counter { return Counter { n: n }; }
+    fn bump(by: int): int { return self.n + by; }
+}
