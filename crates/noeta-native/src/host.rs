@@ -243,6 +243,36 @@ pub trait P2p {
         self.p2p_subscribe(topic)
     }
 
+    // --- Encrypted groups (p2p P3.4b): end-to-end-encrypted synced_signal ---------------------
+    //
+    // An encrypted `synced_signal(initial, topic, members)` routes through these instead of the
+    // plaintext durable methods. The **default** is a transparent pass-through to the durable
+    // transport: correct for the deterministic sandbox, where there are no real peers to hide state
+    // from and encryption must not perturb the converged value — so an encrypted program stays
+    // oracle-identical to its plaintext twin. Only `RealHost` under `ring-p2p` overrides them, where
+    // the bytes are encrypted to the declared member set through a p2panda-spaces group.
+
+    /// Open an encrypted group on `topic` for exactly `members` (peer-id hex strings), returning a
+    /// subscription id polled through [`Self::p2p_group_poll`]. Default: a durable subscribe (the
+    /// membership is irrelevant to the pass-through sandbox).
+    fn p2p_group_open(&mut self, topic: &str, _members: &[String]) -> Result<u64, StdError> {
+        self.p2p_subscribe_durable(topic)
+    }
+
+    /// Publish `plaintext` to the encrypted group on `topic` — encrypted to the member set on a
+    /// real host. Default: a durable publish of the bytes unchanged.
+    fn p2p_group_publish(&mut self, topic: &str, plaintext: Vec<u8>) -> Result<(), StdError> {
+        self.p2p_publish_durable(topic, plaintext)
+    }
+
+    /// The next **decrypted** application payload for group subscription `sub`, or `None`. On a real
+    /// host this drains control messages (membership / key material) as a side effect — welcoming
+    /// declared members as their key bundles arrive — and returns only decrypted application state.
+    /// Default: the plaintext [`Self::p2p_poll_sub`].
+    fn p2p_group_poll(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
+        self.p2p_poll_sub(sub)
+    }
+
     // --- Identity & status (p2p P3.3) ---------------------------------------------------------
     //
     // Both are meaningful only once there is a *real* network with a persistent identity to have

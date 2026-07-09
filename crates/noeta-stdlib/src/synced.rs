@@ -189,11 +189,23 @@ pub fn synced_ctx_dispatch<C: NativeCtx + ?Sized>(
                 .and_then(|v| to_bytes_dyn(&*v))
                 .ok_or_else(not_a_crdt)?;
             // Subscribe first (cursor at the log start), then announce the initial state, so another
-            // replica that later subscribes still sees it and converges.
-            let subscription = ctx.host().p2p_subscribe_durable(&topic).map_err(CtxError::from)?;
-            ctx.host()
-                .p2p_publish_durable(&topic, bytes)
-                .map_err(CtxError::from)?;
+            // replica that later subscribes still sees it and converges. An encrypted group
+            // (`members` given) routes through the group transport, which encrypts the announce to
+            // the declared members; a plaintext signal uses the durable transport directly.
+            let subscription = if members.is_empty() {
+                ctx.host().p2p_subscribe_durable(&topic).map_err(CtxError::from)?
+            } else {
+                ctx.host().p2p_group_open(&topic, &members).map_err(CtxError::from)?
+            };
+            if members.is_empty() {
+                ctx.host()
+                    .p2p_publish_durable(&topic, bytes)
+                    .map_err(CtxError::from)?;
+            } else {
+                ctx.host()
+                    .p2p_group_publish(&topic, bytes)
+                    .map_err(CtxError::from)?;
+            }
             // The CRDT lives in an arena cell; the node is a signal in the shared reactive graph.
             let cell = ctx.retain(args[0])?;
             let node = {
@@ -248,9 +260,15 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             ctx.free(merged_slot);
             ctx.free(current_slot);
             self_wake(ctx, handle.node)?;
-            ctx.host()
-                .p2p_publish_durable(&handle.topic, bytes)
-                .map_err(CtxError::from)?;
+            if handle.is_encrypted() {
+                ctx.host()
+                    .p2p_group_publish(&handle.topic, bytes)
+                    .map_err(CtxError::from)?;
+            } else {
+                ctx.host()
+                    .p2p_publish_durable(&handle.topic, bytes)
+                    .map_err(CtxError::from)?;
+            }
             Ok(CtxOut::Out(NativeOut::Unit))
         }
         // Drain the subscription and merge every peer message; wake dependents once if the value
@@ -259,10 +277,13 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
         "sync" => {
             ctx_arity(method, args, 0)?;
             let mut changed = false;
-            while let Some(bytes) = ctx
-                .host()
-                .p2p_poll_sub(handle.subscription)
-                .map_err(CtxError::from)?
+            let encrypted = handle.is_encrypted();
+            while let Some(bytes) = (if encrypted {
+                ctx.host().p2p_group_poll(handle.subscription)
+            } else {
+                ctx.host().p2p_poll_sub(handle.subscription)
+            })
+            .map_err(CtxError::from)?
             {
                 let current_slot = ctx.retained_get(handle.cell)?;
                 let current = clone_crdt(ctx, current_slot).ok_or_else(not_a_crdt)?;
