@@ -34,15 +34,28 @@ serves as today. The Rust-toolchain requirement is confirmed scope for native-de
 
 ## Slices
 
-### N3.0 — Registry accepts assembly-time units; `noeta-cli` grows a lib entry
+### N3.0 — Registry mechanism moves to `noeta-native`; assembly-time install; CLI lib entry
 
-- `noeta-native`: `Extension` unchanged. `noeta-stdlib::registry`: `extensions()` reads a
-  `OnceLock<Vec<&'static (dyn Extension + Sync)>>` seeded with the in-tree units;
-  `register_extensions(extra)` (callable once, before any lookup) appends composed units.
-  Collision rule: a duplicate **root** is a hard startup error (roots are global identity).
+The lookup layer in `noeta-stdlib::registry` (find_module/find_function_sig/ring_of/
+is_extension_root/qualified resolution/dispatch routers) is already fully generic — it iterates
+`extensions()` and touches nothing std-specific; it lives in stdlib only because it grew around
+the dogfood. Phase 3's assembler (the composed shim) must not reach through the dogfood crate to
+register its peers, so the mechanism moves to the ABI crate (user-confirmed 2026-07-09):
+
+- `noeta-native::registry` gains the **runtime registry**: `OnceLock`-held assembled unit list,
+  `install(units)` (once, before any lookup; duplicate **root** = hard startup error) +
+  `extensions()` + the whole generic lookup layer moved verbatim.
+- `noeta-stdlib::registry` becomes a **facade**: same public paths, each function delegates to
+  `noeta_native::registry` after lazily ensuring the std units are installed — zero call-site
+  churn across backends/checker/tests, no forgot-to-seed failure mode. Std residue stays behind
+  deliberately: the six unit definitions, `static_dispatch_ctx`/`_method` fast routes (they name
+  `cell`/`reactive` concretely — the monomorphized per-crate fast path), and the `vec`/`fs`
+  special-case notes N3.4 deletes.
 - `noeta-cli` gains a `lib` target exposing `pub fn run_cli(extra: &'static [&'static (dyn
-  Extension + Sync)]) -> ExitCode`; the `[[bin]]` main becomes `run_cli(&[])`. Zero behavior
-  change; differential/conformance untouched.
+  Extension + Sync)]) -> ExitCode` (installs std + extras, then dispatches); the `[[bin]]` main
+  becomes `run_cli(&[])`. Zero behavior change; differential/conformance untouched.
+- Gate beyond the standard suite: dispatch-path A/B (the `OnceLock` load replaces a `static` —
+  expected noise-level, but H5's rule is measure, not assume).
 
 ### N3.1 — The manifest declares a native crate
 
