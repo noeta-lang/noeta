@@ -97,10 +97,15 @@ pub struct RealHost {
     /// run from source or shipped as an executable — the toolchain's own `noeta run` prefix never
     /// leaks into the program.
     args: Vec<String>,
-    /// The p2p broker (p2p P1/P2): the same in-process pub/sub log as the sandbox. Real p2p
-    /// transport (p2panda gossip, cross-node) is P3; until then the real host is a single-node
-    /// loopback broker, so `noeta run` of a p2p program works locally without a network.
+    /// The p2p broker (p2p P1/P2): the in-process pub/sub log — the `RealHost` p2p backing when the
+    /// `ring-p2p` ring is OFF (single-node loopback, so `noeta run` of a p2p program works locally
+    /// without a network). Under `ring-p2p` the real node below replaces it, so it isn't compiled.
+    #[cfg(not(feature = "ring-p2p"))]
     p2p: noeta_stdlib::P2pBroker,
+    /// The real p2panda node (p2p P3), lazily started on first p2p use and living for the isolate.
+    /// Only present under the `ring-p2p` ring.
+    #[cfg(feature = "ring-p2p")]
+    p2p_node: Option<p2p_node::P2pNode>,
 }
 
 /// One inbound listener's shared state. The socket is bound at `net_listen` (runtime-free, via
@@ -137,7 +142,10 @@ impl RealHost {
             conns: Arc::new(Mutex::new(HashMap::new())),
             next_conn: Arc::new(AtomicU64::new(0)),
             args: std::env::args().collect(),
+            #[cfg(not(feature = "ring-p2p"))]
             p2p: noeta_stdlib::P2pBroker::default(),
+            #[cfg(feature = "ring-p2p")]
+            p2p_node: None,
         })
     }
 
@@ -734,26 +742,70 @@ impl Ids for RealHost {
     }
 }
 
+#[cfg(feature = "ring-p2p")]
+impl RealHost {
+    /// The real p2panda node, started on **first** p2p use (lazy — most programs never touch p2p,
+    /// and starting the node binds sockets + spawns tasks). Lives for the isolate; dropped with
+    /// `RealHost`, which tears the node down.
+    fn p2p_node(&mut self) -> Result<&p2p_node::P2pNode, StdError> {
+        if self.p2p_node.is_none() {
+            self.p2p_node = Some(p2p_node::P2pNode::start()?);
+        }
+        Ok(self.p2p_node.as_ref().expect("just started"))
+    }
+}
+
 impl P2p for RealHost {
-    // p2p P1/P2: the same in-process pub/sub broker as the sandbox (single-node loopback). Real
-    // p2panda gossip transport, cross-node delivery, and a genuine async subscription future are
-    // P3 — at which point this becomes the non-deterministic, CLI-only side (like the real Network
-    // client).
+    // Two backings, chosen by the `ring-p2p` ring:
+    //   • default — the in-process pub/sub broker (single-node loopback, shared with the sandbox):
+    //     a `noeta run` of a p2p/synced program works locally, just without real peers.
+    //   • `ring-p2p` — a real p2panda-net node (gossip over iroh/QUIC), started lazily on first use
+    //     and living for the isolate. Non-deterministic and CLI-only, like the reqwest client.
     fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
-        self.p2p.publish(topic, message);
-        Ok(())
+        #[cfg(feature = "ring-p2p")]
+        {
+            self.p2p_node()?.publish(topic, message)
+        }
+        #[cfg(not(feature = "ring-p2p"))]
+        {
+            self.p2p.publish(topic, message);
+            Ok(())
+        }
     }
 
     fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, StdError> {
-        Ok(self.p2p.poll_default(topic))
+        // The topic-level (default-reader) poll backs the ephemeral `p2p.receive`; the real node
+        // routes it through one lazily-created default subscription per topic.
+        #[cfg(feature = "ring-p2p")]
+        {
+            self.p2p_node()?.poll_default(topic)
+        }
+        #[cfg(not(feature = "ring-p2p"))]
+        {
+            Ok(self.p2p.poll_default(topic))
+        }
     }
 
-    fn p2p_subscribe(&mut self, topic: &str) -> u64 {
-        self.p2p.subscribe(topic)
+    fn p2p_subscribe(&mut self, topic: &str) -> Result<u64, StdError> {
+        #[cfg(feature = "ring-p2p")]
+        {
+            self.p2p_node()?.subscribe(topic)
+        }
+        #[cfg(not(feature = "ring-p2p"))]
+        {
+            Ok(self.p2p.subscribe(topic))
+        }
     }
 
     fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
-        Ok(self.p2p.poll_sub(sub))
+        #[cfg(feature = "ring-p2p")]
+        {
+            Ok(self.p2p_node.as_ref().and_then(|node| node.poll_sub(sub)))
+        }
+        #[cfg(not(feature = "ring-p2p"))]
+        {
+            Ok(self.p2p.poll_sub(sub))
+        }
     }
 }
 
@@ -785,6 +837,23 @@ impl Env for RealHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `RealHost` p2p wiring under `ring-p2p`: the trait methods lazily start a real p2panda
+    /// node and route through it (rather than the loopback broker). Single node, so no delivery —
+    /// this locks that the wiring + lazy start work end to end; cross-node delivery is the
+    /// `#[ignore]`d two-node test. Starting a node binds local sockets only, so it stays hermetic.
+    #[cfg(feature = "ring-p2p")]
+    #[test]
+    fn real_host_p2p_routes_through_a_real_node() {
+        use noeta_stdlib::P2p;
+        let mut host = RealHost::new().expect("real host");
+        host.p2p_publish("room", b"hello".to_vec())
+            .expect("publish starts the node and succeeds");
+        let sub = host.p2p_subscribe("room").expect("subscribe succeeds");
+        // No peers → nothing delivered, but the poll path must work and be empty.
+        assert_eq!(host.p2p_poll_sub(sub).expect("poll_sub"), None);
+        assert_eq!(host.p2p_poll("other").expect("poll default"), None);
+    }
 
     /// The real `Network` capability against a live endpoint. `#[ignore]` so CI stays hermetic —
     /// run explicitly (`cargo test -p noeta-runtime -- --ignored real_host_fetches`) when network

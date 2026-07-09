@@ -50,6 +50,9 @@ pub struct P2pNode {
     /// subscription id → the channel a drain task feeds from that subscription's gossip stream.
     subs: Mutex<HashMap<u64, UnboundedReceiver<Vec<u8>>>>,
     next_sub: AtomicU64,
+    /// topic → the single default subscription backing the topic-level `p2p.receive` (P1's default
+    /// reader), created lazily so `poll_default` mirrors the broker's one-implicit-reader semantics.
+    default_subs: Mutex<HashMap<String, u64>>,
     // Discovery/endpoint components: kept alive for the node's lifetime (their background tasks run
     // on `runtime`), otherwise unused directly.
     _endpoint: Endpoint,
@@ -118,6 +121,7 @@ impl P2pNode {
             handles: Mutex::new(HashMap::new()),
             subs: Mutex::new(HashMap::new()),
             next_sub: AtomicU64::new(0),
+            default_subs: Mutex::new(HashMap::new()),
             _endpoint: endpoint,
             _address_book: address_book,
             _discovery: discovery,
@@ -185,6 +189,28 @@ impl P2pNode {
     pub fn poll_sub(&self, sub: u64) -> Option<Vec<u8>> {
         let mut subs = self.subs.lock().unwrap();
         subs.get_mut(&sub).and_then(|rx| rx.try_recv().ok())
+    }
+
+    /// The next message on `topic`'s **default** reader (backing the ephemeral `p2p.receive`), the
+    /// node analogue of the broker's single per-topic cursor: one subscription per topic, created on
+    /// first poll.
+    pub fn poll_default(&self, topic: &str) -> Result<Option<Vec<u8>>, StdError> {
+        // Read the existing id and release the lock *before* the match — `subscribe` (in the miss
+        // arm) re-locks `default_subs`, and holding the guard across it would self-deadlock (the
+        // `std::sync::Mutex` is non-reentrant).
+        let existing = self.default_subs.lock().unwrap().get(topic).copied();
+        let sub = match existing {
+            Some(id) => id,
+            None => {
+                let id = self.subscribe(topic)?;
+                self.default_subs
+                    .lock()
+                    .unwrap()
+                    .insert(topic.to_string(), id);
+                id
+            }
+        };
+        Ok(self.poll_sub(sub))
     }
 }
 

@@ -212,7 +212,10 @@ pub trait P2p {
     /// the topic log (p2p P2). Unlike the topic-level [`Self::p2p_poll`] (one implicit reader),
     /// each subscription has an **independent** cursor — genuine broadcast, so several replicas on
     /// one topic each receive every message. A `synced_signal` holds one for its topic.
-    fn p2p_subscribe(&mut self, topic: &str) -> u64;
+    ///
+    /// Fallible: the sandbox broker never errors (`Ok` always), but a real transport can fail to
+    /// join a topic overlay (p2p P3), and that must reach the program rather than be swallowed.
+    fn p2p_subscribe(&mut self, topic: &str) -> Result<u64, StdError>;
 
     /// The next message for subscription `sub` (advancing only its cursor), or `None` once it has
     /// caught up — what `synced_signal.sync()` drains to merge peers' states.

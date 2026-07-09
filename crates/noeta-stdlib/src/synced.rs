@@ -133,7 +133,7 @@ pub fn synced_ctx_dispatch<C: NativeCtx + ?Sized>(
                 .ok_or_else(not_a_crdt)?;
             // Subscribe first (cursor at the log start), then announce the initial state, so another
             // replica that later subscribes still sees it and converges.
-            let subscription = ctx.host().p2p_subscribe(&topic);
+            let subscription = ctx.host().p2p_subscribe(&topic).map_err(CtxError::from)?;
             ctx.host()
                 .p2p_publish(&topic, bytes)
                 .map_err(CtxError::from)?;
