@@ -25,14 +25,18 @@ p2panda-core = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 
 [features]
-default = ["ring-http-client"]
+default = ["ring-http-client", "ring-p2p"]
 # The `std.http` outbound-client ring: pulls reqwest into `RealHost`. Off ⇒ `net_fetch` is a stub
 # that errors (never reached — a program that doesn't import `std.http` never calls it), and reqwest
 # is absent from the link.
 ring-http-client = ["dep:reqwest"]
-# The real-p2p ring (p2p P3): pulls a p2panda-net node into `RealHost`. Off ⇒ `RealHost`'s `P2p`
-# stays the loopback broker (single-node). Deliberately not in `default` — pre-1.0 dependency,
-# quarantined from mainline + the oracle suite.
+# The real-p2p ring (p2p P3): pulls a p2panda-net node into `RealHost`. On by default, mirroring
+# `ring-http-client` — the plain toolchain/build is fully capable, and `noeta build --native`'s
+# footprint scan sheds the whole p2panda/iroh tree from a binary that never imports `std.p2p`/
+# `std.synced` (via `noeta-aot-runtime --no-default-features`). Off ⇒ `RealHost`'s `P2p` stays the
+# dep-free loopback broker (single-node), which is also the always-compiled sandbox side. (The
+# oracle suite never builds `noeta-runtime`, so it stays p2panda-free regardless.) Pinned exactly
+# (`p2panda-net = "0.7"`) so the pre-1.0 dep can't break the default build via an auto-update.
 ring-p2p = ["dep:p2panda-net", "dep:p2panda-core", "dep:futures-util"]
 
 [dev-dependencies]

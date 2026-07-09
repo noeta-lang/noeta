@@ -2485,6 +2485,8 @@ const VEC_MODULES: &[ExtModule] = &[
 /// `synced` CRDT-backed reactive signal (P2).
 const P2P_MODULES: &[ExtModule] = &[
     // `crdt` (p2p P0) — the CRDT constructors; a plain value-in/value-out module like `math`.
+    // **No ring**: the convergence logic is pure Rust (~KB, in `noeta-crdt`) with no native
+    // transport, so a program using only local CRDTs never pulls the p2panda tree.
     ExtModule {
         name: "crdt",
         functions: crate::crdt::CRDT_FNS,
@@ -2493,18 +2495,23 @@ const P2P_MODULES: &[ExtModule] = &[
     },
     // `p2p` (p2p P1) — publish/receive over the `P2p` host capability. `publish` is a plain host
     // effect; `receive` returns a `Future<?bytes>` via `NativeOut::Spawn`, like `fs.read_async`.
+    // Declares the `ring-p2p` ring: a program importing `std.p2p` links the real transport (and
+    // the footprint scan keeps p2panda in its AOT binary); one that doesn't sheds it.
     ExtModule {
         name: "p2p",
         functions: crate::p2p::P2P_FNS,
         dispatch: crate::p2p::p2p_dispatch,
+        ring: Some("ring-p2p"),
         ..ExtModule::DEFAULTS
     },
     // `synced` (p2p P2) — `synced_signal(initial, topic)`, a CRDT-backed signal in the reactive
-    // graph. A ctx module (it owns arena values + drives the graph), like `reactive`.
+    // graph. A ctx module (it owns arena values + drives the graph), like `reactive`. Needs the
+    // real transport to sync with peers, so it declares the `ring-p2p` ring too.
     ExtModule {
         name: "synced",
         ctx_functions: crate::synced::SYNCED_CTX_FNS,
         ctx_dispatch: Some(|func, ctx, args| crate::synced::synced_ctx_dispatch(func, ctx, args)),
+        ring: Some("ring-p2p"),
         ..ExtModule::DEFAULTS
     },
 ];
