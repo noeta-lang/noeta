@@ -384,6 +384,160 @@ impl CryptoGroups {
         }
         Ok(events)
     }
+
+    /// Whether `actor` is currently a member of the space (used to detect being welcomed). A space
+    /// this node hasn't created/joined yet answers `false`.
+    pub async fn is_member(&self, space_id: SpaceId, actor: ActorId) -> Result<bool, StdError> {
+        let Some(space) = self
+            .manager
+            .space(space_id)
+            .await
+            .map_err(|e| io_error(format!("cannot open space: {e}")))?
+        else {
+            return Ok(false);
+        };
+        let members = space
+            .members()
+            .await
+            .map_err(|e| io_error(format!("cannot read space members: {e}")))?;
+        Ok(members.iter().any(|(id, _)| *id == actor))
+    }
+}
+
+/// The wire operations to broadcast and the decrypted application payloads produced by one step of
+/// the [`EncryptedGroup`] choreography.
+#[derive(Debug, Default)]
+pub struct GroupOutput {
+    /// Decrypted application state to surface to the program (fed to the CRDT merge).
+    pub decrypted: Vec<Vec<u8>>,
+    /// Wire operations to broadcast to the topic (a creator's welcome ops, a flushed publish).
+    pub to_send: Vec<Vec<u8>>,
+}
+
+/// The membership choreography for one encrypted `synced_signal` group (p2p P3.4b, model A),
+/// **independent of the transport** — feed it operations received off the wire, it tells you what
+/// to send back and yields decrypted payloads. Keeping it transport-free is what makes the
+/// security-critical handshake unit-testable without real networking (see the in-memory relay test).
+///
+/// Model A: the group's member set is fixed at construction. The **creator** — the
+/// lexicographically smallest member id, which every node computes identically from the shared set —
+/// creates the space and welcomes each other member as that member's key bundle arrives on the
+/// topic. A non-creator announces its key bundle and waits to be welcomed; any state it wants to
+/// publish before then is buffered (latest-wins, a CRDT) and flushed once welcomed.
+#[derive(Debug)]
+pub struct EncryptedGroup {
+    crypto: CryptoGroups,
+    space_id: SpaceId,
+    members: Vec<ActorId>,
+    me: ActorId,
+    creator: bool,
+    welcomed: bool,
+    /// Members already welcomed by this node (creator only), so each is added exactly once.
+    added: std::collections::HashSet<ActorId>,
+    /// The latest local state awaiting a welcome (non-creator), flushed when welcomed. Latest-wins
+    /// is safe: the value is a CRDT, so the most recent local state subsumes earlier ones.
+    pending: Option<Vec<u8>>,
+}
+
+impl EncryptedGroup {
+    /// Open the encrypted group for `topic` with the given `members`. Returns the group and the
+    /// initial operations to broadcast: this node's key bundle, plus (if it is the elected creator)
+    /// the space-creation operations.
+    pub async fn open(
+        crypto: CryptoGroups,
+        topic: &str,
+        members: Vec<ActorId>,
+    ) -> Result<(EncryptedGroup, Vec<Vec<u8>>), StdError> {
+        let me = crypto.id();
+        let space_id = SpaceId::digest(topic.as_bytes());
+        // Deterministic creator election: the smallest member id. Every node computes the same
+        // answer from the shared member set, with no coordination.
+        let creator = members.iter().min().copied() == Some(me);
+
+        let mut to_send = Vec::new();
+        // Announce our key bundle so members can encrypt group secrets toward us.
+        let key_bundle = crypto.key_bundle_message().await?;
+        to_send.push(key_bundle.to_wire());
+
+        let mut group = EncryptedGroup {
+            crypto,
+            space_id,
+            members,
+            me,
+            creator,
+            welcomed: false,
+            added: std::collections::HashSet::new(),
+            pending: None,
+        };
+
+        if creator {
+            // Create the space; the creator is auto-added as manager, so it is welcomed immediately.
+            let create_ops = group.crypto.create_space(space_id, &[]).await?;
+            for op in &create_ops {
+                to_send.push(op.to_wire());
+            }
+            group.welcomed = true;
+            group.added.insert(me);
+        }
+
+        Ok((group, to_send))
+    }
+
+    /// Publish local `plaintext` state to the group. Once welcomed it is encrypted and returned as a
+    /// wire operation to broadcast; before then it is buffered (latest-wins) and flushed on welcome.
+    pub async fn publish(&mut self, plaintext: Vec<u8>) -> Result<Vec<Vec<u8>>, StdError> {
+        if self.welcomed {
+            let op = self.crypto.publish(self.space_id, &plaintext).await?;
+            Ok(vec![op.to_wire()])
+        } else {
+            self.pending = Some(plaintext);
+            Ok(Vec::new())
+        }
+    }
+
+    /// Process one operation received off the wire. Decrypts application data, drives the creator's
+    /// welcome of members whose key bundles arrive, and (for a non-creator) flushes buffered state
+    /// once this node is welcomed into the space.
+    pub async fn receive(&mut self, wire: &[u8]) -> Result<GroupOutput, StdError> {
+        let op = SpacesOp::from_wire(wire)?;
+        let events = self.crypto.receive(&op).await?;
+
+        let mut out = GroupOutput::default();
+        let mut announced = Vec::new();
+        for event in events {
+            match event {
+                Event::Application { data, .. } => out.decrypted.push(data),
+                Event::KeyBundle { author } => announced.push(author),
+                _ => {}
+            }
+        }
+
+        // Creator welcomes each declared member once its key bundle is registered (exactly once).
+        if self.creator {
+            for author in announced {
+                if author != self.me
+                    && self.members.contains(&author)
+                    && self.added.insert(author)
+                {
+                    let add_ops = self.crypto.add(self.space_id, author, Access::read()).await?;
+                    for op in &add_ops {
+                        out.to_send.push(op.to_wire());
+                    }
+                }
+            }
+        }
+
+        // Non-creator: detect being welcomed, then flush any state we buffered before joining.
+        if !self.welcomed && self.crypto.is_member(self.space_id, self.me).await? {
+            self.welcomed = true;
+            if let Some(plaintext) = self.pending.take() {
+                let op = self.crypto.publish(self.space_id, &plaintext).await?;
+                out.to_send.push(op.to_wire());
+            }
+        }
+
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -466,6 +620,105 @@ mod tests {
                 decrypted.as_deref(),
                 Some(plaintext.as_slice()),
                 "Bob decrypts Alice's application data once welcomed into the space"
+            );
+        });
+    }
+
+    /// Pump the two groups to a fixpoint over an in-memory relay: each drains its inbox, its replies
+    /// land in the peer's inbox, until nothing flows.
+    async fn pump(
+        alice: &mut EncryptedGroup,
+        bob: &mut EncryptedGroup,
+        alice_in: &mut std::collections::VecDeque<Vec<u8>>,
+        bob_in: &mut std::collections::VecDeque<Vec<u8>>,
+        alice_dec: &mut Vec<Vec<u8>>,
+        bob_dec: &mut Vec<Vec<u8>>,
+    ) {
+        loop {
+            let mut progressed = false;
+            while let Some(msg) = alice_in.pop_front() {
+                let out = alice.receive(&msg).await.unwrap();
+                alice_dec.extend(out.decrypted);
+                bob_in.extend(out.to_send);
+                progressed = true;
+            }
+            while let Some(msg) = bob_in.pop_front() {
+                let out = bob.receive(&msg).await.unwrap();
+                bob_dec.extend(out.decrypted);
+                alice_in.extend(out.to_send);
+                progressed = true;
+            }
+            if !progressed {
+                break;
+            }
+        }
+    }
+
+    /// P3.4b.2.2: the model-A membership choreography, driven purely through the [`EncryptedGroup`]
+    /// state machine over an in-memory relay (no networking) — the hermetic proof of the handshake
+    /// that the `#[ignore]` real-node test (b.3) exercises over QUIC. Two members open the group;
+    /// the elected creator creates the space and welcomes the other as its key bundle arrives; then
+    /// the creator publishes encrypted state and the other member decrypts it. Everything the creator
+    /// sends is ciphertext + control ops — the plaintext only ever exists inside a welcomed member.
+    #[test]
+    fn two_group_members_converge_on_encrypted_state() {
+        use std::collections::VecDeque;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let alice_c = peer().await;
+            let bob_c = peer().await;
+            let members = vec![alice_c.id(), bob_c.id()];
+
+            let (mut alice, a_init) = EncryptedGroup::open(alice_c, "team/secure", members.clone())
+                .await
+                .unwrap();
+            let (mut bob, b_init) = EncryptedGroup::open(bob_c, "team/secure", members)
+                .await
+                .unwrap();
+
+            // Each node's initial ops go to the other's inbox.
+            let mut alice_in: VecDeque<Vec<u8>> = b_init.into();
+            let mut bob_in: VecDeque<Vec<u8>> = a_init.into();
+            let mut alice_dec: Vec<Vec<u8>> = Vec::new();
+            let mut bob_dec: Vec<Vec<u8>> = Vec::new();
+
+            // Settle the handshake: key bundles exchanged, the creator welcomes the other member.
+            pump(
+                &mut alice,
+                &mut bob,
+                &mut alice_in,
+                &mut bob_in,
+                &mut alice_dec,
+                &mut bob_dec,
+            )
+            .await;
+
+            // The creator publishes a secret; the other member decrypts it after the next pump.
+            let secret = b"converged secret".to_vec();
+            if alice.creator {
+                let ops = alice.publish(secret.clone()).await.unwrap();
+                bob_in.extend(ops);
+            } else {
+                let ops = bob.publish(secret.clone()).await.unwrap();
+                alice_in.extend(ops);
+            }
+            pump(
+                &mut alice,
+                &mut bob,
+                &mut alice_in,
+                &mut bob_in,
+                &mut alice_dec,
+                &mut bob_dec,
+            )
+            .await;
+
+            let received = if alice.creator { &bob_dec } else { &alice_dec };
+            assert!(
+                received.iter().any(|d| d == &secret),
+                "the non-creator member decrypts the creator's encrypted state"
             );
         });
     }

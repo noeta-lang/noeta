@@ -40,12 +40,16 @@ use p2panda_sync::protocols::TopicLogSyncEvent;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
+use std::collections::VecDeque;
+use std::str::FromStr;
+
+use p2panda_core::VerifyingKey;
 use p2panda_encryption::Rng;
 use p2panda_encryption::crypto::x25519::SecretKey;
-use p2panda_spaces::Credentials;
+use p2panda_spaces::{ActorId, Credentials};
 
 use crate::io_error;
-use crate::p2p_crypto::CryptoGroups;
+use crate::p2p_crypto::{CryptoGroups, EncryptedGroup};
 use noeta_stdlib::{StdError, SyncStatus};
 
 /// Every node keeps a single append-only log for its own operations; the durable (log-sync)
@@ -162,6 +166,12 @@ pub struct P2pNode {
     /// plaintext-only program never constructs it). Its identity is the node's [`signing_key`], so
     /// encryption membership is keyed on the same peer id as the transport.
     crypto: Mutex<Option<CryptoGroups>>,
+    /// topic → the encrypted group running on it (its [`EncryptedGroup`] state machine, durable
+    /// subscription, and a buffer of decrypted payloads not yet returned to the program).
+    groups: Mutex<HashMap<String, GroupEntry>>,
+    /// group subscription id → its topic, so [`Self::group_poll`] finds the group by the id the
+    /// program holds.
+    group_subs: Mutex<HashMap<u64, String>>,
     // Discovery/endpoint components: kept alive for the node's lifetime (their background tasks run
     // on `runtime`), otherwise unused directly.
     _endpoint: Endpoint,
@@ -307,6 +317,8 @@ impl P2pNode {
             status: Arc::new(Mutex::new(HashMap::new())),
             data_dir,
             crypto: Mutex::new(None),
+            groups: Mutex::new(HashMap::new()),
+            group_subs: Mutex::new(HashMap::new()),
             _endpoint: endpoint,
             _address_book: address_book,
             _discovery: discovery,
@@ -592,6 +604,105 @@ impl P2pNode {
     pub fn crypto_group_id(&self) -> Result<String, StdError> {
         Ok(self.crypto()?.id().to_hex())
     }
+
+    /// Open an encrypted group on `topic` for `members` (peer-id hex strings), returning a
+    /// subscription id polled through [`Self::group_poll`]. Subscribes to the durable transport,
+    /// then broadcasts this node's key bundle (and, if it is the elected creator, the space-creation
+    /// operations) so members can converge — the model-A handshake driven over the real transport.
+    pub fn group_open(&self, topic: &str, members: &[String]) -> Result<u64, StdError> {
+        let members = parse_members(members)?;
+        let crypto = self.crypto()?;
+        // The async crypto handshake runs in one `block_on` producing wire ops; the transport
+        // publishes (each its own `block_on`) happen *after*, never nested inside it.
+        let (group, to_send) = self
+            .runtime
+            .block_on(EncryptedGroup::open(crypto, topic, members))?;
+        let sub = self.subscribe_durable(topic)?;
+        for op in to_send {
+            self.publish_durable(topic, op)?;
+        }
+        self.groups.lock().unwrap().insert(
+            topic.to_string(),
+            GroupEntry {
+                group,
+                inbox: VecDeque::new(),
+            },
+        );
+        self.group_subs.lock().unwrap().insert(sub, topic.to_string());
+        Ok(sub)
+    }
+
+    /// Publish `plaintext` to the encrypted group on `topic`: encrypt it to the members and broadcast
+    /// (or buffer it until this node is welcomed, then flush).
+    pub fn group_publish(&self, topic: &str, plaintext: Vec<u8>) -> Result<(), StdError> {
+        let to_send = {
+            let mut groups = self.groups.lock().unwrap();
+            let entry = groups
+                .get_mut(topic)
+                .ok_or_else(|| io_error(format!("no encrypted group open on `{topic}`")))?;
+            self.runtime.block_on(entry.group.publish(plaintext))?
+        };
+        for op in to_send {
+            self.publish_durable(topic, op)?;
+        }
+        Ok(())
+    }
+
+    /// The next decrypted application payload for group subscription `sub`, or `None`. Drains control
+    /// operations (key bundles, welcomes) as a side effect — broadcasting any welcome ops the creator
+    /// produces — and buffers decrypted payloads, returning them one per call.
+    pub fn group_poll(&self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
+        let topic = match self.group_subs.lock().unwrap().get(&sub) {
+            Some(t) => t.clone(),
+            None => return Ok(None),
+        };
+        loop {
+            // Return a buffered decrypted payload first, if any.
+            {
+                let mut groups = self.groups.lock().unwrap();
+                if let Some(entry) = groups.get_mut(&topic)
+                    && let Some(payload) = entry.inbox.pop_front()
+                {
+                    return Ok(Some(payload));
+                }
+            }
+            // Otherwise pull the next raw operation off the transport and process it.
+            let Some(raw) = self.poll_sub(sub) else {
+                return Ok(None);
+            };
+            let to_send = {
+                let mut groups = self.groups.lock().unwrap();
+                let entry = groups
+                    .get_mut(&topic)
+                    .ok_or_else(|| io_error(format!("no encrypted group open on `{topic}`")))?;
+                let out = self.runtime.block_on(entry.group.receive(&raw))?;
+                entry.inbox.extend(out.decrypted);
+                out.to_send
+            };
+            for op in to_send {
+                self.publish_durable(&topic, op)?;
+            }
+        }
+    }
+}
+
+/// One topic's encrypted group: its [`EncryptedGroup`] state machine plus a buffer of decrypted
+/// payloads not yet handed back to the program (one `group_poll` may decrypt several at once — e.g.
+/// a welcome that releases buffered messages).
+struct GroupEntry {
+    group: EncryptedGroup,
+    inbox: VecDeque<Vec<u8>>,
+}
+
+/// Parse a member set of peer-id hex strings into actor ids.
+fn parse_members(members: &[String]) -> Result<Vec<ActorId>, StdError> {
+    members
+        .iter()
+        .map(|m| {
+            VerifyingKey::from_str(m)
+                .map_err(|e| io_error(format!("invalid peer id `{m}` in members: {e}")))
+        })
+        .collect()
 }
 
 /// Set (overwrite) a topic's [`SyncStatus`], used by the drain task as session events arrive.

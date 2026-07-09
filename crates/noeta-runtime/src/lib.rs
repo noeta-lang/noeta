@@ -841,6 +841,24 @@ impl P2p for RealHost {
         self.p2p_node()?.subscribe_durable(topic)
     }
 
+    // Encrypted groups (p2p P3.4b): under `ring-p2p` an encrypted synced_signal routes through the
+    // node's p2panda-spaces group (state encrypted to the declared members over log-sync); without
+    // the ring the trait defaults apply (a transparent pass-through, correct for the sandbox).
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_group_open(&mut self, topic: &str, members: &[String]) -> Result<u64, StdError> {
+        self.p2p_node()?.group_open(topic, members)
+    }
+
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_group_publish(&mut self, topic: &str, plaintext: Vec<u8>) -> Result<(), StdError> {
+        self.p2p_node()?.group_publish(topic, plaintext)
+    }
+
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_group_poll(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
+        self.p2p_node()?.group_poll(sub)
+    }
+
     // Identity & status (p2p P3.3): the real node has a persisted Ed25519 key and tracks each
     // topic's sync state; without the ring the trait defaults apply (no identity, always Synced —
     // the loopback broker never lags).
