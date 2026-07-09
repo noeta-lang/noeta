@@ -332,10 +332,10 @@ pub fn std_units() -> Vec<&'static (dyn Extension + Sync)> {
 // unchanged, and make an unseeded registry unobservable: each ensures the std units are installed
 // (a no-op after the first call, or after an assembling binary's explicit earlier `install`).
 //
-// Std residue deliberately NOT moved: the unit definitions above, `is_module_function`'s
-// transitional `vec`/`fs` special cases (die with the N3.4 `with_packed` migration), and the
-// `static_dispatch_ctx*` monomorphized fast routes below (they name `cell`/`reactive` concretely —
-// the per-crate compiled-in fast path).
+// Std residue deliberately NOT moved: the unit definitions above and the `static_dispatch_ctx*`
+// monomorphized fast routes below (they name `cell`/`reactive` concretely — the per-crate
+// compiled-in fast path). (`is_module_function`'s transitional `vec`/`fs` special cases died with
+// the N3.4 `with_packed` migration, as planned.)
 
 /// Ensure the std units are installed before a lookup (lazy default; an explicit
 /// [`noeta_native::registry::install`] by the assembling binary wins).

@@ -432,16 +432,45 @@ impl NativeCtx for EvalCtx<'_> {
         Ok(self.insert(Value::List(ListRepr::Packed(list))))
     }
 
-    fn object_scalars(&mut self, slot: Slot) -> CtxResult<Option<Vec<Scalar>>> {
-        match self.get(slot)? {
-            Value::Object(obj) => Ok(obj.slots.borrow().iter().map(value_to_scalar).collect()),
-            _ => Ok(None),
+    fn object_scalars_at(
+        &mut self,
+        list: Slot,
+        index: usize,
+        out: &mut Vec<Scalar>,
+    ) -> CtxResult<bool> {
+        out.clear();
+        let element = match self.get(list)? {
+            Value::List(repr) => repr.get(index),
+            _ => None,
         }
+        .ok_or_else(|| CtxError::Std(noeta_stdlib::type_error("object_scalars_at", "list")))?;
+        let Value::Object(obj) = element else {
+            return Ok(false);
+        };
+        for s in obj.slots.borrow().iter() {
+            match value_to_scalar(s) {
+                Some(scalar) => out.push(scalar),
+                None => {
+                    out.clear();
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
     }
 
-    fn make_object_like(&mut self, like: Slot, fields: &[Scalar]) -> CtxResult<Slot> {
-        let built = match self.get(like)? {
-            Value::Object(obj) if obj.slots.borrow().len() == fields.len() => {
+    fn make_object_like_element(
+        &mut self,
+        list: Slot,
+        index: usize,
+        fields: &[Scalar],
+    ) -> CtxResult<Slot> {
+        let element = match self.get(list)? {
+            Value::List(repr) => repr.get(index),
+            _ => None,
+        };
+        let built = match element {
+            Some(Value::Object(obj)) if obj.slots.borrow().len() == fields.len() => {
                 Value::Object(std::rc::Rc::new(ObjectValue::new(
                     std::rc::Rc::clone(&obj.def),
                     fields.iter().map(|&s| scalar_to_value(s)).collect(),
@@ -449,7 +478,7 @@ impl NativeCtx for EvalCtx<'_> {
             }
             _ => {
                 return Err(CtxError::Std(noeta_stdlib::type_error(
-                    "make_object_like",
+                    "make_object_like_element",
                     "object of matching field count",
                 )));
             }

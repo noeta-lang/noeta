@@ -1531,10 +1531,10 @@ impl Interpreter {
             NativeOut::Str(s) => Ok(Value::Str(s)),
             NativeOut::Bytes(b) => Ok(Value::Bytes(Rc::new(b))),
             NativeOut::Unit => Ok(Value::Unit),
-            // A `TypeRecipe` names only JSON shapes; extern values and async work can never
-            // decode from one.
-            NativeOut::Extern(_) | NativeOut::Spawn(_) => {
-                unreachable!("json recipes never produce extern/spawn results")
+            // A `TypeRecipe` names only JSON shapes; extern values, async work, and bulk scalar
+            // vectors (a packed reduction's result, N3.4) can never decode from one.
+            NativeOut::Extern(_) | NativeOut::Spawn(_) | NativeOut::Scalars(_) => {
+                unreachable!("json recipes never produce extern/spawn/bulk-scalar results")
             }
             NativeOut::None => Ok(crate::builtin_enum("Option", "none", vec![])),
             NativeOut::Some(inner) => {

@@ -322,14 +322,29 @@ pub trait NativeCtx {
     /// when `like` does not hold a packed list.
     fn make_packed_like(&mut self, like: Slot, bytes: Vec<u8>) -> CtxResult<Slot>;
 
-    /// An object's primitive fields in slot (declared) order — `None` for a non-object, or an
-    /// object with a non-primitive field. The ctx twin of the plain dispatches' shallow
-    /// [`NativeValue::Object`] projection; what a bulk kernel's per-element fallback reads.
-    fn object_scalars(&mut self, slot: Slot) -> CtxResult<Option<Vec<Scalar>>>;
+    /// Read `list[index]`'s primitive fields in slot (declared) order into `out` (cleared first —
+    /// pass the same buffer around a loop and the whole element-wise fallback of a bulk kernel
+    /// allocates nothing per element). `Ok(true)` = filled; `Ok(false)` = the element is not an
+    /// all-primitive object (the caller reports its own type error); `Err` = a non-list slot or
+    /// out-of-range index (dispatch misuse — kernels iterate `0..list_len`). Fused
+    /// list-read + shallow [`NativeValue::Object`] projection with **zero slot traffic**, the
+    /// [`NativeCtx::call_with_element`] rationale applied to structural reads.
+    fn object_scalars_at(
+        &mut self,
+        list: Slot,
+        index: usize,
+        out: &mut Vec<Scalar>,
+    ) -> CtxResult<bool>;
 
-    /// Build an object **shaped like** `like`'s value from field scalars, as a fresh slot — the
+    /// Build an object **shaped like `list[index]`** from field scalars, as a fresh slot — the
     /// ctx twin of a plain dispatch's [`NativeOut::Object`] + `RetTy::SameAsArg` materialization
-    /// (which [`NativeCtx::intern`] deliberately rejects: it has no shape context). Errs when
-    /// `like` is not an object or `fields` disagrees with its field count.
-    fn make_object_like(&mut self, like: Slot, fields: &[Scalar]) -> CtxResult<Slot>;
+    /// (which [`NativeCtx::intern`] deliberately rejects: it has no shape context), fused with
+    /// the element read so a result-building loop mints only its result slots. Errs when the
+    /// element is not an object or `fields` disagrees with its field count.
+    fn make_object_like_element(
+        &mut self,
+        list: Slot,
+        index: usize,
+        fields: &[Scalar],
+    ) -> CtxResult<Slot>;
 }

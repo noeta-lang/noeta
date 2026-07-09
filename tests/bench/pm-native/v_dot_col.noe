@@ -1,0 +1,22 @@
+// N3.4 gate: bulk `vec.dot_all` over two column-major packed Vec3 lists (2048 elements × 300
+// calls) — the column twin: the SoA reduction (`col_dot`) reads three contiguous f32 columns.
+use std.{vec}
+
+@packed(layout: column) struct V3 { x: f32; y: f32; z: f32 }
+
+mut xs = [V3 { x: 1.5f32, y: 2.5f32, z: 3.5f32 }]
+mut d = 0
+while d < 11 {
+    xs = xs ~ xs
+    d = d + 1
+}
+ys = xs
+
+mut total = 0.0f32
+mut k = 0
+while k < 3000 {
+    r = vec.dot_all(xs, ys)
+    total = total + r[2047]
+    k = k + 1
+}
+echo "total=${total}"

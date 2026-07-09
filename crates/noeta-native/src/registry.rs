@@ -73,6 +73,12 @@ pub enum NativeOut {
     /// A homogeneous list (e.g. `env.keys()` → list of strings). The backend builds its native
     /// list; nested `NativeOut` keeps it general for later recursive modules.
     List(Vec<NativeOut>),
+    /// A homogeneous list of primitives as one **typed vector** (package-manager N3.4) — the
+    /// result shape of a bulk *reduction* over a packed buffer (`vec.dot_all`/`length_all`: one
+    /// `f32` per element). The backend converts the vector straight into its list in one pass;
+    /// the boxed [`NativeOut::List`] form builds an enum per element first, which measured +80%
+    /// on a 2k-element reduction. The bulk twin of [`NativeOut::Bytes`].
+    Scalars(ScalarVec),
     /// A value-struct instance built by a call-site type recipe (`json.parse::<T>`): the type name
     /// and its `(field, value)` pairs **in the type's declared order**. Unlike [`NativeOut::Object`]
     /// — whose shape is supplied from an argument via [`RetTy::SameAsArg`] — a `Struct` names its own
@@ -97,6 +103,16 @@ pub enum NativeOut {
     /// never reaching `materialize`. This is how an extension implements an async function
     /// without ever seeing the executor.
     Spawn(SpawnBox),
+}
+
+/// The typed bulk-primitive vector inside [`NativeOut::Scalars`]: one variant per [`Scalar`]
+/// kind, so a reduction kernel's output vector crosses the seam without per-element boxing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ScalarVec {
+    Int(Vec<i64>),
+    Float(Vec<f64>),
+    F32(Vec<f32>),
+    Bool(Vec<bool>),
 }
 
 /// A one-shot [`crate::ExternIo`] carrier inside [`NativeOut`] (which derives `Clone` +

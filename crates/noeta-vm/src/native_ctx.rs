@@ -546,24 +546,50 @@ impl NativeCtx for VmCtx<'_, '_> {
         Ok(self.insert(Value::packed_list(schema, bytes)))
     }
 
-    fn object_scalars(&mut self, slot: Slot) -> CtxResult<Option<Vec<Scalar>>> {
-        let value = self.get(slot)?;
-        if !value.is_object() {
-            return Ok(None);
+    fn object_scalars_at(
+        &mut self,
+        list: Slot,
+        index: usize,
+        out: &mut Vec<Scalar>,
+    ) -> CtxResult<bool> {
+        out.clear();
+        let list = self.get(list)?;
+        // A packed element materializes once (owned) and is released after the read; a boxed
+        // element is read through the borrow — zero refcount traffic either way.
+        if list.is_packed_list() {
+            if index >= list.list_len().unwrap_or(0) {
+                return Err(CtxError::Std(noeta_stdlib::type_error(
+                    "object_scalars_at",
+                    "list",
+                )));
+            }
+            let element = list.packed_get(index);
+            let ok = element.scalar_slots_into(out);
+            self.vm.release_value(element);
+            return Ok(ok);
         }
-        Ok(value.slots().and_then(|slots| {
-            slots
-                .iter()
-                .map(|&s| crate::values::value_to_scalar(s))
-                .collect()
-        }))
+        let element = list
+            .list_get(index)
+            .ok_or_else(|| CtxError::Std(noeta_stdlib::type_error("object_scalars_at", "list")))?;
+        Ok(element.scalar_slots_into(out))
     }
 
-    fn make_object_like(&mut self, like: Slot, fields: &[Scalar]) -> CtxResult<Slot> {
-        let value = self.get(like)?;
-        let Some(shape) = value.shape().filter(|s| s.fields.len() == fields.len()) else {
+    fn make_object_like_element(
+        &mut self,
+        list: Slot,
+        index: usize,
+        fields: &[Scalar],
+    ) -> CtxResult<Slot> {
+        let list = self.get(list)?;
+        // The shape only — a packed list's schema carries it directly, no materialization.
+        let shape = if list.is_packed_list() {
+            list.with_packed_ref(|schema, _| schema.shape)
+        } else {
+            list.list_get(index).and_then(|e| e.shape())
+        };
+        let Some(shape) = shape.filter(|s| s.fields.len() == fields.len()) else {
             return Err(CtxError::Std(noeta_stdlib::type_error(
-                "make_object_like",
+                "make_object_like_element",
                 "object of matching field count",
             )));
         };

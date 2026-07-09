@@ -4400,6 +4400,16 @@ fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         NativeOut::Bytes(b) => Value::Bytes(Rc::new(b)),
         NativeOut::Unit => Value::Unit,
         NativeOut::List(items) => Value::list(items.into_iter().map(materialize_native).collect()),
+        // A typed bulk-primitive vector (N3.4: a packed reduction's result) converts in one pass.
+        NativeOut::Scalars(v) => {
+            use noeta_stdlib::ScalarVec;
+            Value::list(match v {
+                ScalarVec::Int(xs) => xs.into_iter().map(Value::Int).collect(),
+                ScalarVec::Float(xs) => xs.into_iter().map(Value::Float).collect(),
+                ScalarVec::F32(xs) => xs.into_iter().map(Value::F32).collect(),
+                ScalarVec::Bool(xs) => xs.into_iter().map(Value::Bool).collect(),
+            })
+        }
         // A dynamic `json.parse` object → a string-keyed map (entries arrive in key order).
         NativeOut::Map(entries) => Value::map_value(Rc::new(
             entries

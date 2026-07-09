@@ -1,0 +1,21 @@
+// N3.4 gate: bulk `vec.scale_all` over a row-major packed Vec3 list (2048 elements × 300 calls)
+// — the `with_packed_mut` path: copy-on-write scale (in place under proven sole ownership).
+use std.{vec}
+
+@packed struct V3 { x: f32; y: f32; z: f32 }
+
+mut xs = [V3 { x: 1.5f32, y: 2.5f32, z: 3.5f32 }]
+mut d = 0
+while d < 11 {
+    xs = xs ~ xs
+    d = d + 1
+}
+
+mut total = 0
+mut k = 0
+while k < 300 {
+    r = vec.scale_all(xs, 1.0f32)
+    total = total + r.len()
+    k = k + 1
+}
+echo "total=${total}"

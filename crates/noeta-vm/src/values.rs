@@ -122,6 +122,16 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         NativeOut::Bytes(b) => Value::bytes(b),
         NativeOut::Unit => Value::unit(),
         NativeOut::List(items) => Value::list(items.into_iter().map(materialize_native).collect()),
+        // A typed bulk-primitive vector (N3.4: a packed reduction's result) converts in one pass.
+        NativeOut::Scalars(v) => {
+            use noeta_stdlib::ScalarVec;
+            Value::list(match v {
+                ScalarVec::Int(xs) => xs.into_iter().map(Value::int).collect(),
+                ScalarVec::Float(xs) => xs.into_iter().map(Value::float).collect(),
+                ScalarVec::F32(xs) => xs.into_iter().map(Value::f32).collect(),
+                ScalarVec::Bool(xs) => xs.into_iter().map(Value::bool).collect(),
+            })
+        }
         // A dynamic `json.parse` object → a string-keyed map (entries arrive in key order). Each
         // value is freshly built (refcount 1), so the map owns its children without extra retains.
         NativeOut::Map(entries) => Value::map(
@@ -488,9 +498,13 @@ pub(crate) fn materialize_recipe(out: noeta_stdlib::NativeOut) -> Value {
                 .collect();
             Value::object(shape, values)
         }
-        // `Object` (shape-from-argument) and extern values are never produced by a recipe
-        // decode (a `TypeRecipe` names only JSON shapes).
-        NativeOut::Object(_) | NativeOut::Extern(_) | NativeOut::Spawn(_) => {
+        // `Object` (shape-from-argument), extern values, and bulk scalar vectors (a packed
+        // reduction's result, N3.4) are never produced by a recipe decode (a `TypeRecipe` names
+        // only JSON shapes).
+        NativeOut::Object(_)
+        | NativeOut::Extern(_)
+        | NativeOut::Spawn(_)
+        | NativeOut::Scalars(_) => {
             unreachable!("json.parse recipe decode never yields an Object/Extern/Spawn result")
         }
     }

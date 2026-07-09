@@ -2112,6 +2112,38 @@ impl Value {
         }
     }
 
+    /// Fill `out` (cleared first) with this object's primitive fields in slot (declared) order —
+    /// the allocation-free shallow scalar projection under the ctx element loops (package-manager
+    /// N3.4). `false` for a non-object or any non-primitive field (with `out` left cleared).
+    pub fn scalar_slots_into(self, out: &mut Vec<noeta_stdlib::Scalar>) -> bool {
+        use noeta_stdlib::Scalar;
+        out.clear();
+        if !self.is_pointer() {
+            return false;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::Object { slots, .. } => {
+                for s in slots {
+                    let scalar = if let Some(n) = s.as_int() {
+                        Scalar::Int(n)
+                    } else if let Some(f) = s.as_f32() {
+                        Scalar::F32(f)
+                    } else if let Some(f) = s.as_float() {
+                        Scalar::Float(f)
+                    } else if let Some(b) = s.as_bool() {
+                        Scalar::Bool(b)
+                    } else {
+                        out.clear();
+                        return false;
+                    };
+                    out.push(scalar);
+                }
+                true
+            }
+            _ => false,
+        })
+    }
+
     /// The enum variant's positional data, if this is an enum value. Shares references.
     pub fn enum_data(self) -> Option<Vec<Value>> {
         if self.is_pointer() {

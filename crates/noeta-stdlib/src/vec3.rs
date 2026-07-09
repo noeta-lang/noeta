@@ -423,7 +423,7 @@ pub fn soa_length(a: &SoaVec3) -> Vec<f32> {
 // falls back to an element-wise loop over `object_scalars`/`make_object_like`, exactly the boxed
 // path the old intercepts had.
 
-use crate::registry::{ExtFn, NativeOut, NativeValue, RetTy, Scalar, SigType};
+use crate::registry::{ExtFn, NativeOut, NativeValue, RetTy, Scalar, ScalarVec, SigType};
 use crate::{CtxError, CtxOut, CtxResult, NativeCtx, PackedField, PackedView, Slot, ctx_arity};
 
 /// The bulk kernels' signatures. Structural arguments are `Dyn` (any 3-`f32`-field struct is a
@@ -486,14 +486,23 @@ fn expect_list(ctx: &mut dyn NativeCtx, func: &str, slot: Slot) -> CtxResult<()>
     }
 }
 
-/// Read an element slot as a Vec3 — an object of exactly three `f32` fields — or a type error.
-fn read_vec3_slot(ctx: &mut dyn NativeCtx, func: &str, slot: Slot) -> Result<[f32; 3], CtxError> {
-    if let Some(fields) = ctx.object_scalars(slot)?
-        && let [Scalar::F32(x), Scalar::F32(y), Scalar::F32(z)] = fields[..]
+/// Read `list[index]` as a Vec3 — an object of exactly three `f32` fields — through the reused
+/// scalar buffer (no per-element allocation), or a type error naming the element's type.
+fn read_vec3_at(
+    ctx: &mut dyn NativeCtx,
+    func: &str,
+    list: Slot,
+    index: usize,
+    buf: &mut Vec<Scalar>,
+) -> Result<[f32; 3], CtxError> {
+    if ctx.object_scalars_at(list, index, buf)?
+        && let [Scalar::F32(x), Scalar::F32(y), Scalar::F32(z)] = buf[..]
     {
         return Ok([x, y, z]);
     }
-    let found = ctx.type_name(slot)?;
+    // Error path only: mint the element slot just to render its type name.
+    let element = ctx.list_get(list, index)?;
+    let found = ctx.type_name(element)?;
     Err(arg_error(format!(
         "`vec.{func}` expects a Vec3 (a struct of three f32 fields), found {found}"
     )))
@@ -519,14 +528,11 @@ fn f32_fields(c: [f32; 3]) -> [Scalar; 3] {
     [Scalar::F32(c[0]), Scalar::F32(c[1]), Scalar::F32(c[2])]
 }
 
-/// A `List<f32>` result from reduction scalars (`dot_all`/`length_all`).
-fn f32_list_out(scalars: Vec<f32>) -> NativeOut {
-    NativeOut::List(
-        scalars
-            .into_iter()
-            .map(|f| NativeOut::Scalar(Scalar::F32(f)))
-            .collect(),
-    )
+/// A `List<f32>` result from reduction scalars (`dot_all`/`length_all`): the typed bulk vector
+/// crosses the seam whole ([`NativeOut::Scalars`]) — one backend conversion pass, no per-element
+/// [`NativeOut`] boxing, no intermediate vector.
+fn f32_list_out(scalars: Vec<f32>) -> Result<CtxOut, CtxError> {
+    Ok(CtxOut::Out(NativeOut::Scalars(ScalarVec::F32(scalars))))
 }
 
 /// If `slot` is a packed Vec3 list, its layout + a copy of its bytes (the binary ops' left
@@ -554,21 +560,17 @@ fn bulk_binary_fallback(
     if ctx.list_len(ys)? != n {
         return Err(len_error(func));
     }
+    let mut buf = Vec::new();
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        let ex = ctx.list_get(xs, i)?;
-        let ey = ctx.list_get(ys, i)?;
-        let a = read_vec3_slot(ctx, func, ex)?;
-        let b = read_vec3_slot(ctx, func, ey)?;
+        let a = read_vec3_at(ctx, func, xs, i, &mut buf)?;
+        let b = read_vec3_at(ctx, func, ys, i, &mut buf)?;
         let c = if func == "add_all" {
             add(a, b)
         } else {
             sub(a, b)
         };
-        let obj = ctx.make_object_like(ex, &f32_fields(c))?;
-        ctx.free(ex);
-        ctx.free(ey);
-        out.push(obj);
+        out.push(ctx.make_object_like_element(xs, i, &f32_fields(c))?);
     }
     Ok(CtxOut::Slot(ctx.make_list(&out)?))
 }
@@ -619,13 +621,11 @@ pub(crate) fn vec_ctx_dispatch(
                 return Ok(CtxOut::Slot(result));
             }
             let n = ctx.list_len(args[0])?;
+            let mut buf = Vec::new();
             let mut out = Vec::with_capacity(n);
             for i in 0..n {
-                let e = ctx.list_get(args[0], i)?;
-                let c = scale(read_vec3_slot(ctx, func, e)?, s);
-                let obj = ctx.make_object_like(e, &f32_fields(c))?;
-                ctx.free(e);
-                out.push(obj);
+                let c = scale(read_vec3_at(ctx, func, args[0], i, &mut buf)?, s);
+                out.push(ctx.make_object_like_element(args[0], i, &f32_fields(c))?);
             }
             Ok(CtxOut::Slot(ctx.make_list(&out)?))
         }
@@ -648,24 +648,21 @@ pub(crate) fn vec_ctx_dispatch(
                     }
                 })?;
                 if let Some(scalars) = out {
-                    return Ok(CtxOut::Out(f32_list_out(scalars)));
+                    return f32_list_out(scalars);
                 }
             }
             let n = ctx.list_len(args[0])?;
             if ctx.list_len(args[1])? != n {
                 return Err(len_error(func));
             }
+            let mut buf = Vec::new();
             let mut scalars = Vec::with_capacity(n);
             for i in 0..n {
-                let ex = ctx.list_get(args[0], i)?;
-                let ey = ctx.list_get(args[1], i)?;
-                let a = read_vec3_slot(ctx, func, ex)?;
-                let b = read_vec3_slot(ctx, func, ey)?;
-                ctx.free(ex);
-                ctx.free(ey);
+                let a = read_vec3_at(ctx, func, args[0], i, &mut buf)?;
+                let b = read_vec3_at(ctx, func, args[1], i, &mut buf)?;
                 scalars.push(dot(a, b));
             }
-            Ok(CtxOut::Out(f32_list_out(scalars)))
+            f32_list_out(scalars)
         }
         "length_all" => {
             ctx_arity(func, args, 1)?;
@@ -681,16 +678,15 @@ pub(crate) fn vec_ctx_dispatch(
                 }
             })?;
             if let Some(scalars) = out {
-                return Ok(CtxOut::Out(f32_list_out(scalars)));
+                return f32_list_out(scalars);
             }
             let n = ctx.list_len(args[0])?;
+            let mut buf = Vec::new();
             let mut scalars = Vec::with_capacity(n);
             for i in 0..n {
-                let e = ctx.list_get(args[0], i)?;
-                scalars.push(length(read_vec3_slot(ctx, func, e)?));
-                ctx.free(e);
+                scalars.push(length(read_vec3_at(ctx, func, args[0], i, &mut buf)?));
             }
-            Ok(CtxOut::Out(f32_list_out(scalars)))
+            f32_list_out(scalars)
         }
         _ => Err(crate::no_function_error("vec", func).into()),
     }
