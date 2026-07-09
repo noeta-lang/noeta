@@ -103,3 +103,19 @@ pub struct ExtCommand {
     /// The command body: inspect the parsed args, drive the ctx, return the exit code.
     pub run: fn(&mut dyn CommandCtx, &ParsedArgs) -> u8,
 }
+
+impl ExtCommand {
+    /// Field defaults for additive evolution (N3.6), mirroring `ExtModule::DEFAULTS`: write
+    /// `ExtCommand { name, about, run, ..ExtCommand::DEFAULTS }` and a future optional field
+    /// lands here once instead of in every registration. (`run` has no meaningful default — the
+    /// placeholder exits with an error — so always name it explicitly.)
+    pub const DEFAULTS: ExtCommand = ExtCommand {
+        name: "",
+        about: "",
+        args: &[],
+        run: |_, _| {
+            eprintln!("internal: an ExtCommand registered without a body");
+            2
+        },
+    };
+}

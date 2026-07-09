@@ -137,6 +137,16 @@ schema. Consequences and additions:
   (the http-arc H4 trailing-optional machinery, which post-dates the special case), so
   `is_module_function` reduces to pure registry delegation.
 
+**✅ N3.4 DONE** (`4eb736b8` seam+migration, `e8932f08` third-party proof, `f2f396f4` perf gate).
+Also fixed en route: the VM's ctx element reads (`list_get`/`call_with_element`) errored on packed
+lists since H2 (pinned by `map_bounded_packed.noe`). Gate additions the first A/B forced:
+`NativeOut::Scalars(ScalarVec)` (bulk reduction results as ONE typed vector — the boxed
+`NativeOut::List` form was +80%) and the fused `object_scalars_at`/`make_object_like_element`
+(reused scalar buffer, zero per-element slots). **Final numbers** (pinned interleaved, median of 7,
+`tests/bench/pm-native/`): add row −3%, dot column −2..−5%, scale −29% (`with_packed_mut` COW),
+boxed fallback +5..+11% (three dyn calls/element vs the intercept's direct value access — accepted:
+it is the compat path; `@packed` is the bulk-math representation).
+
 ### N3.5 — Host-coupled finalizers: **recommend CLOSING as won't-build** *(decision pending)*
 
 The gap-fill list named finalizers alongside raw buffers. Analysis says the two differ:
@@ -158,6 +168,18 @@ version leaves `0.0.0` → `noeta-native` (and the crates a composed shim consum
 `noeta-stdlib`, …) get `0.1.0`; additive-evolution audit (`#[non_exhaustive]` on the ABI enums,
 `DEFAULTS` on structs — most already hold from the higher-order arc); a semver policy note in
 `docs/Native-Extensions.md`: pre-1.0, minor = breaking allowed, composed shims pin by git tag.
+
+**Audit outcome (2026-07-09): `#[non_exhaustive]` is deliberately NOT applied.** (a) On the
+registration structs it would forbid literal construction outside the crate entirely — killing the
+`..DEFAULTS` pattern that *is* the additive-evolution mechanism; on the enums it would force
+wildcard arms in our own sibling crates (`non_exhaustive` binds per *crate*, not per workspace),
+discarding exactly the exhaustiveness that caught the `NativeOut::Scalars` materializer gaps the
+day it was added. (b) There is no binary skew to defend against: a composed shim pins the
+toolchain by version tag and cargo unifies the extension's `noeta-native` onto the same source —
+compatibility is source-level semver, which the pre-1.0 policy (minor may break) already governs.
+Instead the `DEFAULTS` convention is completed: `ExtFn::DEFAULTS` + `ExtCommand::DEFAULTS` join
+`ExtModule`/`ExtType`'s. Revisit `non_exhaustive` at 1.0 if dynamic loading ever decouples the
+extension's ABI version from the toolchain's.
 
 ### N3.7 — `ExtCommand` external-binary form
 

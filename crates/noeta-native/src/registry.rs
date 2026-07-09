@@ -259,6 +259,17 @@ pub struct ExtFn {
     pub ret: RetTy,
 }
 
+impl ExtFn {
+    /// Field defaults for additive evolution (N3.6), mirroring [`ExtModule::DEFAULTS`]: an
+    /// out-of-tree table written as `ExtFn { name, params, ret, ..ExtFn::DEFAULTS }` keeps
+    /// compiling when a future optional field (a doc string, a deprecation note, …) lands here.
+    pub const DEFAULTS: ExtFn = ExtFn {
+        name: "",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Unit),
+    };
+}
+
 /// A module's dispatch: given the function name, the host seam, and the projected arguments, run
 /// the function and return a neutral result (or a misuse error). One per module, mirroring the
 /// existing `call(func, args)` shape.
