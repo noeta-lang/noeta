@@ -4299,12 +4299,9 @@ checksum = "885df80e133b676447543f126b70d5e80c7299fb28ce4af5c8528ed4737d2f41"
 dependencies = [
  "p2panda-core",
  "petgraph",
- "rand 0.10.2",
  "serde",
  "thiserror 2.0.18",
- "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -4417,8 +4414,6 @@ dependencies = [
  "p2panda-auth",
  "p2panda-core",
  "p2panda-encryption",
- "rand 0.10.2",
- "rand_chacha 0.10.0",
  "serde",
  "sqlx",
  "thiserror 2.0.18",

@@ -54,10 +54,6 @@ ring-p2p = [
     "dep:p2panda-encryption",
     "dep:futures-util",
 ]
-# TEST-ONLY: exposes p2panda-spaces' `test_utils` conveniences (the persisted/state-setter helpers
-# the raw `Manager` gates behind test builds) so the P3.4b group-encryption spike can persist state
-# without going through p2panda-stream. Never enabled in a shipping build — resolver 2 keeps it out.
-ring-p2p-testkit = ["ring-p2p", "p2panda-spaces?/test_utils"]
 
 [dev-dependencies]
 criterion = { workspace = true }
