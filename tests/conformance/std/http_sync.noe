@@ -15,6 +15,7 @@
 // expect: stdout "none"
 // expect: exit 0
 use std.http.client
+use std.http.Response
 
 r = client.get("https://svc.test/echo")
 echo r.status()

@@ -13,6 +13,7 @@
 // expect: stdout "false"
 // expect: exit 0
 use std.{crypto}
+use std.crypto.Hasher
 
 h = crypto.sha256_hasher()
 // A fresh hasher's digest is the empty-input digest.

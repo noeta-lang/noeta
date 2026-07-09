@@ -1,7 +1,0 @@
-// `Span` is a native extern type (native OTEL T1), so it is a reserved type name: a user
-// declaration of it is E0049, exactly as `FileHandle`/`Uuid` are reserved.
-// expect: error E0049 at 5:8
-// expect: exit 1
-struct Span {
-    id: int
-}

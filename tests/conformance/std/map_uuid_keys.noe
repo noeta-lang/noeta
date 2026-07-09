@@ -20,6 +20,7 @@
 // expect: stdout "true"
 // expect: exit 0
 use std.{id}
+use std.id.Uuid
 
 u1 = id.uuid();
 u2 = id.uuid();

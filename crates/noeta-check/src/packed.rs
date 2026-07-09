@@ -295,7 +295,7 @@ impl Checker {
             return;
         }
         for f in &r.fields {
-            let ty = field_type(&f.ty);
+            let ty = field_type(&f.ty, &self.extern_types);
             if !self.is_packable_type(&ty) {
                 self.error(
                         DiagnosticCode::InvalidPackedType,

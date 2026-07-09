@@ -186,6 +186,7 @@ fn check_all_impl(program: &Program, record_expr_types: bool) -> Checked {
         ..Checker::default()
     };
     checker.register_prelude();
+    checker.collect_imports(program);
     checker.collect(program);
     // Compute destruct-reachability + parameter relevance before checking bodies (local-binding
     // relevance is recorded inline during `check_program`, and needs the reachable set ready).
@@ -203,6 +204,7 @@ fn check_all_impl(program: &Program, record_expr_types: bool) -> Checked {
 pub fn check_all_session(program: &Program) -> (Checked, SessionChecker) {
     let mut checker = Checker::default();
     checker.register_prelude();
+    checker.collect_imports(program);
     checker.collect(program);
     checker.compute_relevance(program);
     checker.check_semantic_roles(program);
@@ -286,6 +288,7 @@ impl SessionChecker {
         let backup_env = self.env.clone();
         self.reset_scratch();
         let diag_mark = self.checker.diags.len();
+        self.checker.collect_imports(entry);
         self.checker.collect(entry);
         // Re-run the reachability fixpoint over the ACCUMULATED registries (this entry's
         // `destruct` class can make an earlier entry's type reachable), and record this entry's
@@ -755,6 +758,14 @@ struct Checker {
     /// each mapped to its `(module, func)`. A bare call `sqrt(args)` types through
     /// [`stdlib::module_return`] exactly like the qualified `math.sqrt(args)`.
     imported_fns: HashMap<String, (String, String)>,
+    /// Local names bound to a **registered extern type** by a `use std.<ns>.<Type> [as Alias]`
+    /// import, each mapped to that type's **qualified identity** (`Uuid` → `std.id.Uuid`,
+    /// `Metric` → `std.metrics.Counter`). An extern annotation resolves through this map — so a
+    /// native type must be imported to be named (like a user type), an alias renames it, and a
+    /// user-declared type of the same short name shadows it (user names in [`Self::types`] take
+    /// precedence). This is what lets a file pull in two same-short-named types from different
+    /// namespaces, and a native `Counter` coexist with a user's own.
+    extern_types: HashMap<String, String>,
     /// Every name a type annotation may legally resolve to: declared records/classes/enums plus
     /// names brought in by a `use` (whether merged in by the linker or left as an opaque stub).
     /// Built-in names and in-scope generic parameters are *not* stored here — they are checked
@@ -894,21 +905,52 @@ impl Checker {
     /// shadow as a fresh local, so allowing a binding meant the backends diverged. Rejecting it
     /// statically closes that divergence by construction. Methods and enum variants are exempt —
     /// they are always receiver-/type-qualified, so a bare prelude name never resolves to them.
-    /// Reject a type declaration that binds a **reserved native type name** (extern-types X1,
-    /// E0049): a registered extern type (`Uuid`) or a checker-native type (`FileHandle`,
-    /// `Iterator`, …). Their method tables come from the registry/checker, so a same-name user
-    /// type would be silently shadowed by name-match dispatch — reserve the names instead.
+    /// Reject a type declaration that binds a **reserved language-level type name** (E0049): the
+    /// checker-native `Iterator`/`Future`/`Sender`/`Receiver` (produced by `iter()`/`async`/`.await`/
+    /// `channel()`), whose values are backend builtins dispatched by name-match — a same-name user
+    /// type would be silently shadowed. **Registered extern types (`Uuid`, `Response`, …) are no
+    /// longer reserved**: they are namespace-scoped and `use`-imported like user types, so a user may
+    /// freely declare `class Response` — the two carry distinct qualified identities and never
+    /// conflate. A collision with a *specific* extern the file also imported is caught separately as
+    /// E0020 ([`Self::check_extern_import_collision`]).
     fn check_reserved_type_name(&mut self, name: &str, span: Span) {
-        let native = stdlib::NATIVE_TYPE_NAMES.contains(&name);
-        if native || noeta_stdlib::registry::find_type(name).is_some() {
+        if stdlib::NATIVE_TYPE_NAMES.contains(&name) {
             self.diags.push(
                 Diagnostic::error(
                     DiagnosticCode::ReservedTypeName,
                     span,
-                    format!("cannot declare `{name}`: it is a reserved native type name"),
+                    format!("cannot declare `{name}`: it is a reserved language type name"),
                 )
-                .with_help("rename the type — native type names cannot be shadowed"),
+                .with_help(
+                    "rename the type — the built-in `Iterator`/`Future`/`Sender`/`Receiver` cannot \
+                     be shadowed",
+                ),
             );
+        }
+        self.check_extern_import_collision(name, span);
+    }
+
+    /// The registered extern type a source annotation name resolves to **in this file's scope**, via
+    /// the `use`-import map (`Uuid` → `std.id.Uuid`, an alias → its target) — or `None` if the name
+    /// is not an imported native type. The scope-aware counterpart to a bare `registry::find_type`.
+    fn imported_extern(&self, name: &str) -> Option<&'static noeta_stdlib::registry::ExtType> {
+        self.extern_types
+            .get(name)
+            .and_then(|q| noeta_stdlib::registry::find_type_qualified(q))
+    }
+
+    /// Reject declaring a type whose name a `use std.<ns>.<Type> [as Alias]` in this file already
+    /// bound (E0020): the local name would be ambiguous between the imported native type and the
+    /// local declaration. Mirrors the linker's user-import collision rule — the reason a user type
+    /// and a same-named native type can safely coexist is that they can never both be in scope.
+    fn check_extern_import_collision(&mut self, name: &str, span: Span) {
+        if let Some(qualified) = self.extern_types.get(name) {
+            self.error(
+                DiagnosticCode::NameCollision,
+                span,
+                format!("`{name}` is already imported from `{qualified}`"),
+            )
+            .help("rename the local type, or import the native type under an alias (`as …`)");
         }
     }
 
@@ -1186,7 +1228,7 @@ impl Checker {
 
     fn record_param_relevance_fn(&mut self, fn_span: Span, params: &[Param], body: &[Stmt]) {
         for p in params {
-            if self.type_relevant(&param_type(p)) {
+            if self.type_relevant(&param_type(p, &self.extern_types)) {
                 self.relevance.params.insert((fn_span, p.name.clone()));
             }
         }
@@ -1227,6 +1269,56 @@ impl Checker {
         }
     }
 
+    /// Pass 0: resolve every `use` import before any declaration is collected, so an annotation in a
+    /// signature (`fn f(x: Uuid)`) sees the import map regardless of source order. Populates the four
+    /// import channels: native **modules** (`use std.{json}`), selective module **functions**
+    /// (`use std.math.sqrt`), **extern types** (`use std.id.Uuid [as Alias]` → [`Self::extern_types`]),
+    /// and **user-type** imports (everything else → [`Self::types`]). The extern-type case is tried
+    /// before the selective-function case: `use std.id.Uuid` names a *type* in the `id` unit, not a
+    /// function, so it must not fall into the "module has no function" error.
+    fn collect_imports(&mut self, program: &Program) {
+        for stmt in &program.stmts {
+            let Stmt::Use { path, names, .. } = stmt else {
+                continue;
+            };
+            let rooted = !path.is_empty() && noeta_stdlib::registry::is_extension_root(&path[0]);
+            let prefix = path.join(".");
+            // A selective member import `use <root>.<mod>.<fn>` — a rooted path whose prefix is a
+            // known module. Each name binds as a bare function alias against the module identity.
+            let selective = (path.len() >= 2 && rooted)
+                .then(|| prefix.clone())
+                .filter(|m| stdlib::is_std_module(m));
+            for name in names {
+                let local = name.local().to_string();
+                // A plain (`use std.{json}`) or nested (`use std.http.client`) module import.
+                let qualified = format!("{prefix}.{}", name.name);
+                if rooted && stdlib::is_std_module(&qualified) {
+                    self.modules.insert(local, qualified);
+                } else if rooted
+                    && let Some(ext) = noeta_stdlib::registry::find_type_qualified(&qualified)
+                {
+                    // An **extern-type** import (`use std.id.Uuid`, `use std.metrics.Counter as C`):
+                    // the leaf names a registered type in this namespace. Bind the local name (alias
+                    // or short) to its qualified identity — the resolver keys annotations on this.
+                    self.extern_types.insert(local, ext.qualified());
+                } else if let Some(module) = &selective {
+                    if noeta_stdlib::registry::is_module_function(module, &name.name) {
+                        self.imported_fns
+                            .insert(local, (module.clone(), name.name.clone()));
+                    } else {
+                        self.error(
+                            DiagnosticCode::UnknownName,
+                            name.span,
+                            format!("module `{module}` has no function `{}`", name.name),
+                        );
+                    }
+                } else {
+                    self.types.insert(local);
+                }
+            }
+        }
+    }
+
     /// Pass 1: register every top-level declaration so forward references resolve before any
     /// body is checked. Mirrors the compiler's "register types first" pass.
     fn collect(&mut self, program: &Program) {
@@ -1236,7 +1328,7 @@ impl Checker {
                     let fields = r
                         .fields
                         .iter()
-                        .map(|f| (f.name.clone(), field_type(&f.ty)))
+                        .map(|f| (f.name.clone(), field_type(&f.ty, &self.extern_types)))
                         .collect();
                     self.records.insert(r.name.clone(), fields);
                     if let Some(directive) = &r.packed {
@@ -1287,9 +1379,9 @@ impl Checker {
                             (r.name.clone(), m.name.clone()),
                             m.body.iter().any(|s| s.mentions("self")),
                         );
-                        let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
+                        let raw_params: Vec<Type> = m.params.iter().map(|p| param_type(p, &self.extern_types)).collect();
                         let raw_ret = async_return(
-                            m.ret.as_ref().map(from_ref_q).unwrap_or(Type::Unknown),
+                            m.ret.as_ref().map(|t| from_ref_q(t, &self.extern_types)).unwrap_or(Type::Unknown),
                             m.is_async,
                         );
                         let params = raw_params
@@ -1318,7 +1410,7 @@ impl Checker {
                     let fields = c
                         .fields
                         .iter()
-                        .map(|f| (f.name.clone(), field_type(&f.ty)))
+                        .map(|f| (f.name.clone(), field_type(&f.ty, &self.extern_types)))
                         .collect();
                     self.records.insert(c.name.clone(), fields);
                     let muts: HashSet<String> = c
@@ -1400,9 +1492,9 @@ impl Checker {
                             (c.name.clone(), m.name.clone()),
                             m.body.iter().any(|s| s.mentions("self")),
                         );
-                        let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
+                        let raw_params: Vec<Type> = m.params.iter().map(|p| param_type(p, &self.extern_types)).collect();
                         let raw_ret = async_return(
-                            m.ret.as_ref().map(from_ref_q).unwrap_or(Type::Unknown),
+                            m.ret.as_ref().map(|t| from_ref_q(t, &self.extern_types)).unwrap_or(Type::Unknown),
                             m.is_async,
                         );
                         let params = raw_params
@@ -1440,7 +1532,7 @@ impl Checker {
                             // which is `Unknown` for a positional payload whose type parses into the
                             // `Param`'s *name* — an `Unknown` that silently classified an enum wrapping
                             // a `class` as `Send`, unlike the equivalent struct.)
-                            fields: v.fields.iter().map(variant_field_type).collect(),
+                            fields: v.fields.iter().map(|v| variant_field_type(v, &self.extern_types)).collect(),
                         })
                         .collect();
                     self.enums.insert(e.name.clone(), variants);
@@ -1482,9 +1574,9 @@ impl Checker {
                             (e.name.clone(), m.name.clone()),
                             m.body.iter().any(|s| s.mentions("self")),
                         );
-                        let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
+                        let raw_params: Vec<Type> = m.params.iter().map(|p| param_type(p, &self.extern_types)).collect();
                         let raw_ret = async_return(
-                            m.ret.as_ref().map(from_ref_q).unwrap_or(Type::Unknown),
+                            m.ret.as_ref().map(|t| from_ref_q(t, &self.extern_types)).unwrap_or(Type::Unknown),
                             m.is_async,
                         );
                         let params = raw_params
@@ -1516,11 +1608,11 @@ impl Checker {
                     // and enforce its bounds (S4.2); a non-generic function carries `None`.
                     let tps: HashSet<String> =
                         f.type_params.iter().map(|p| p.name.clone()).collect();
-                    let raw_params: Vec<Type> = f.params.iter().map(param_type).collect();
+                    let raw_params: Vec<Type> = f.params.iter().map(|p| param_type(p, &self.extern_types)).collect();
                     // An `async fn f(): T` call produces `Future<T>` (Track A); wrap before erasure so
                     // the erased signature and the generic instantiation both carry the future.
                     let raw_ret = async_return(
-                        f.ret.as_ref().map(from_ref_q).unwrap_or(Type::Unknown),
+                        f.ret.as_ref().map(|t| from_ref_q(t, &self.extern_types)).unwrap_or(Type::Unknown),
                         f.is_async,
                     );
                     let params = raw_params
@@ -1551,37 +1643,9 @@ impl Checker {
                 // A `use std.{json, …}` import binds a Ring 2 module value (tracked in `modules`);
                 // any other imported name (whether the linker merged its declaration or left an
                 // opaque stub) is a legal referent for an annotation — registered as a known type.
-                Stmt::Use { path, names, .. } => {
-                    let rooted =
-                        !path.is_empty() && noeta_stdlib::registry::is_extension_root(&path[0]);
-                    // A selective member import `use <root>.<mod>.<fn>` — a two-segment path under a
-                    // registered extension root whose second segment is a known module. Each name
-                    // binds as a bare function alias against the module's root-qualified identity.
-                    let selective = (path.len() >= 2 && rooted)
-                        .then(|| path.join("."))
-                        .filter(|m| stdlib::is_std_module(m));
-                    for name in names {
-                        // A plain (`use std.{json}`) or nested (`use std.http.client`) module import:
-                        // the path segments plus the imported name join to a registered module.
-                        let qualified = format!("{}.{}", path.join("."), name.name);
-                        if rooted && stdlib::is_std_module(&qualified) {
-                            self.modules.insert(name.name.clone(), qualified);
-                        } else if let Some(module) = &selective {
-                            if noeta_stdlib::registry::is_module_function(module, &name.name) {
-                                self.imported_fns
-                                    .insert(name.name.clone(), (module.clone(), name.name.clone()));
-                            } else {
-                                self.error(
-                                    DiagnosticCode::UnknownName,
-                                    name.span,
-                                    format!("module `{module}` has no function `{}`", name.name),
-                                );
-                            }
-                        } else {
-                            self.types.insert(name.name.clone());
-                        }
-                    }
-                }
+                // `use` imports are resolved up front in `collect_imports` (pass 0), so the import
+                // map is ready before any signature annotation is resolved.
+                Stmt::Use { .. } => {}
                 // A standalone `impl Trait for T {}` registers `T` as satisfying the trait (for
                 // bound/gate checks) and records the occurrence so the target's coherence check
                 // counts it. Validity (orphan rule, trait, body) is checked in pass 2.
@@ -1762,7 +1826,7 @@ impl Checker {
                 match ty {
                     Some(ty) => {
                         self.check_type_ref(ty);
-                        let expected = from_ref_q(ty);
+                        let expected = from_ref_q(ty, &self.extern_types);
                         self.check(value, &expected, env);
                         // Record destructor-relevance of this binding for the drop-insertion pass.
                         if self.type_relevant(&expected) {
@@ -1977,7 +2041,7 @@ impl Checker {
                     && !reassigns(then_body, name)
                 {
                     env.push(HashMap::new());
-                    bind(env, name, from_ref_q(ty));
+                    bind(env, name, from_ref_q(ty, &self.extern_types));
                     self.check_block(then_body, env);
                     env.pop();
                 } else {
@@ -2139,7 +2203,7 @@ impl Checker {
         let ret = decl
             .ret
             .as_ref()
-            .map(from_ref_q)
+            .map(|t| from_ref_q(t, &self.extern_types))
             .unwrap_or(Type::Unknown);
         // A function whose body contains `yield` is a generator (Track G): its declared return must
         // be `Iterator<T>`, and its body's `yield e` are checked against the element type `T`. The
@@ -2194,7 +2258,7 @@ impl Checker {
         }
         for p in &decl.params {
             self.check_reserved_name(&p.name, p.name_span);
-            bind(env, &p.name, param_type(p));
+            bind(env, &p.name, param_type(p, &self.extern_types));
         }
         for stmt in &decl.body {
             self.check_stmt(stmt, env);
@@ -2488,7 +2552,7 @@ impl Checker {
             // Skip the type check when the parameter has no annotation (already an `E0022`) or its
             // type is generic/`dyn` (erases to `dyn`, which accepts any default).
             if p.ty.is_some() {
-                let expected = erase_type_params(param_type(p), &tps);
+                let expected = erase_type_params(param_type(p, &self.extern_types), &tps);
                 if !self.arg_assignable(&actual, &expected) {
                     self.error(
                         DiagnosticCode::TypeMismatch,
@@ -2517,7 +2581,7 @@ impl Checker {
             // Skip the type check when the field has no annotation (every field requires one, so an
             // un-annotated field is already reported) or its type erases to `dyn` (accepts any).
             if f.ty.is_some() {
-                let expected = erase_type_params(field_type(&f.ty), &tps);
+                let expected = erase_type_params(field_type(&f.ty, &self.extern_types), &tps);
                 if !self.arg_assignable(&actual, &expected) {
                     self.error(
                         DiagnosticCode::TypeMismatch,
@@ -2745,8 +2809,10 @@ impl Checker {
                     && !PRELUDE_TYPES.contains(&name.as_str())
                     && !self.type_params.contains_key(name)
                     && !self.types.contains(name)
-                    // A registered extern type (`Uuid`, extern-types X1) is a valid annotation.
-                    && noeta_stdlib::registry::find_type(name).is_none()
+                    // A native extern type is a valid annotation only when `use`-imported into this
+                    // file (`use std.id.Uuid` → `extern_types["Uuid"]`), like a user type — it is no
+                    // longer globally in scope by bare name.
+                    && !self.extern_types.contains_key(name)
                 {
                     self.error(
                         DiagnosticCode::UnknownType,
@@ -2754,8 +2820,8 @@ impl Checker {
                         format!("unknown type `{name}`"),
                     )
                     .help(
-                        "name a declared type, one imported with `use`, a generic parameter, \
-                             or a built-in",
+                        "name a declared type, one imported with `use` (native types too, e.g. \
+                             `use std.id.Uuid`), a generic parameter, or a built-in",
                     );
                 }
                 // Key-capability gate (extern-types X4): a `Map<K, _>` key / `Set<T>` element
@@ -2771,7 +2837,7 @@ impl Checker {
                     span: key_span,
                     ..
                 }) = key_position
-                    && let Some(ext) = noeta_stdlib::registry::find_type(key_name)
+                    && let Some(ext) = self.imported_extern(key_name)
                     && !ext.key_capable
                 {
                     let role = if name == "Map" {
@@ -3146,7 +3212,7 @@ impl Checker {
                     .enumerate()
                     .map(|(i, p)| {
                         p.ty.as_ref()
-                            .map(from_ref_q)
+                            .map(|t| from_ref_q(t, &self.extern_types))
                             .or_else(|| expected_params.get(i).cloned())
                             .unwrap_or(Type::Unknown)
                     })
@@ -3161,7 +3227,7 @@ impl Checker {
                 // result" shape (`map` expects `(T) -> dyn`): checking against `dyn` would erase the
                 // body's real type and starve the call-site refinements (`xs.map(f) → List<R>`), so
                 // the body is inferred instead; `dyn` accepts whatever comes out.
-                let declared = ann.as_ref().map(from_ref_q);
+                let declared = ann.as_ref().map(|t| from_ref_q(t, &self.extern_types));
                 let body_expected = declared
                     .clone()
                     .or_else(|| (!matches!(**ret, Type::Dyn)).then(|| (**ret).clone()));
@@ -3448,16 +3514,16 @@ impl Checker {
                 env.push(HashMap::new());
                 for p in params {
                     self.check_reserved_name(&p.name, p.name_span);
-                    bind(env, &p.name, param_type(p));
+                    bind(env, &p.name, param_type(p, &self.extern_types));
                 }
                 // With an explicit return annotation, check the body against it (and adopt it as the
                 // closure's return type); otherwise infer it from the body (the arrow expression's
                 // type, or a block's joined `return`s).
-                let declared = ann.as_ref().map(from_ref_q);
+                let declared = ann.as_ref().map(|t| from_ref_q(t, &self.extern_types));
                 let ret = self.closure_body_type(body, declared.as_ref(), env);
                 env.pop();
                 Type::Fn {
-                    params: params.iter().map(param_type).collect(),
+                    params: params.iter().map(|p| param_type(p, &self.extern_types)).collect(),
                     ret: Box::new(ret),
                 }
             }
@@ -3580,7 +3646,7 @@ impl Checker {
                 // A literal keyed by a non-key-capable extern type is rejected statically
                 // (extern-types X4), matching the `Map<K, _>` formation gate.
                 if let Type::Named(key_name, _) = &key_ty
-                    && let Some(ext) = noeta_stdlib::registry::find_type(key_name)
+                    && let Some(ext) = self.imported_extern(key_name)
                     && !ext.key_capable
                 {
                     self.error(
@@ -3817,7 +3883,7 @@ impl Checker {
             Expr::As { expr, ty, span } => {
                 let src = self.synth(expr, env);
                 self.check_type_ref(ty);
-                let target = from_ref_q(ty);
+                let target = from_ref_q(ty, &self.extern_types);
                 // Narrowing is the explicit way *out* of an open type: the dynamic top `dyn`, an
                 // un-inferred hole (which defers), a **union** (a *closed* `dyn`), or an abstract
                 // **kind-type** (`Enum`/`Struct`/`Class` — narrow to a concrete member). A value
@@ -3849,7 +3915,7 @@ impl Checker {
             }
             Expr::AttributesOf { ty, span } => {
                 self.check_type_ref(ty);
-                let target = from_ref_q(ty);
+                let target = from_ref_q(ty, &self.extern_types);
                 // The type argument must itself be an attribute — a struct marked `@attribute` (the
                 // same capability gate as a `#[T(...)]` use). Otherwise the manifest holds no `T` to
                 // materialize.
@@ -3902,7 +3968,7 @@ impl Checker {
                     );
                 }
                 self.check_type_ref(ty);
-                let elem = from_ref_q(ty);
+                let elem = from_ref_q(ty, &self.extern_types);
                 // The element type must be a packable `@packed` struct — the blob is a flat packed
                 // buffer. Recording the layout in `packed_list_sites` (the channel list literals use)
                 // hands the backend the schema to rebuild the list. Generic over any declared packable
@@ -3938,7 +4004,7 @@ impl Checker {
                     );
                 }
                 self.check_type_ref(elem);
-                let t = from_ref_q(elem);
+                let t = from_ref_q(elem, &self.extern_types);
                 // The split-endpoint pair: a `Sender<T>` and a `Receiver<T>` over the message type.
                 Type::Tuple(vec![
                     Type::Named(stdlib::SENDER.to_string(), vec![t.clone()]),
@@ -3991,7 +4057,7 @@ impl Checker {
                     );
                 }
                 self.check_type_ref(ty);
-                let t = from_ref_q(ty);
+                let t = from_ref_q(ty, &self.extern_types);
                 // Record the build recipe; a type with no JSON decoding (an enum, class, generic, …)
                 // is an error here.
                 match self.type_to_recipe(&t) {
@@ -5500,7 +5566,7 @@ impl Checker {
             env.push(HashMap::new());
             self.bind_pattern(&arm.pattern, &scrut, env);
             if let (Some(name), Pattern::IsType { ty, .. }) = (scrut_ident, &arm.pattern) {
-                bind(env, name, from_ref_q(ty));
+                bind(env, name, from_ref_q(ty, &self.extern_types));
             }
             let t = self.synth(&arm.body, env);
             env.pop();
@@ -5531,7 +5597,7 @@ impl Checker {
         let type_targets: Vec<Type> = arms
             .iter()
             .filter_map(|a| match &a.pattern {
-                Pattern::IsType { ty, .. } => Some(from_ref_q(ty)),
+                Pattern::IsType { ty, .. } => Some(from_ref_q(ty, &self.extern_types)),
                 _ => None,
             })
             .collect();
@@ -6209,26 +6275,28 @@ fn reassigns(stmts: &[Stmt], name: &str) -> bool {
     })
 }
 
-/// [`Type::from_ref`], but every **registered extern-type** name is rewritten to its qualified
-/// identity (`Uuid` → `std.id.Uuid`, `Cell<int>` → `std.cell.Cell<int>`). This is the single
-/// annotation-resolution entry point the checker uses instead of the bare `Type::from_ref`, so an
-/// annotation (`x: Uuid`) and a registry-derived return (`uuid()` → `Uuid`) agree on identity — and
-/// a native type is never conflated with a same-short-named user type. Non-extern names (user types,
-/// generic parameters, the language-level `Future`/`Iterator`/`Sender`/`Receiver`) are left bare.
-/// (Alias/import scoping and user-type precedence layer on later; today extern names are still
-/// globally reserved, so a bare registry match is unambiguously the extern type.)
-fn from_ref_q(ty: &TypeRef) -> Type {
-    qualify_externs(Type::from_ref(ty))
+/// [`Type::from_ref`], but each name a `use std.<ns>.<Type> [as Alias]` import brought into scope is
+/// rewritten to that extern type's **qualified identity** (`Uuid` → `std.id.Uuid`, an alias
+/// `Metric` → `std.metrics.Counter`). `xt` is the importing scope's extern-import map
+/// ([`Checker::extern_types`]). This is the single annotation-resolution entry point the checker
+/// uses instead of the bare `Type::from_ref`, so an annotation (`x: Uuid`) and a registry-derived
+/// return (`uuid()` → `Uuid`) agree on identity, and a native type is never conflated with a
+/// same-short-named user type. A name absent from `xt` — a user type, a generic parameter, the
+/// language-level `Future`/`Iterator`/…, or an un-imported (hence unknown) name — is left bare;
+/// user-type precedence needs no check here because importing a name you also declare is an E0020
+/// collision, so the two can never both be in scope.
+fn from_ref_q(ty: &TypeRef, xt: &HashMap<String, String>) -> Type {
+    qualify_externs(Type::from_ref(ty), xt)
 }
 
-/// Recursively rewrite registered extern-type names inside a [`Type`] to their qualified identity.
-/// Idempotent: an already-qualified name (`std.id.Uuid`) is not a bare registry name, so it is left
-/// unchanged.
-fn qualify_externs(t: Type) -> Type {
-    let q = |t: Type| qualify_externs(t);
+/// Recursively rewrite imported extern-type names inside a [`Type`] to their qualified identity via
+/// the import map `xt`. Idempotent: an already-qualified identity (`std.id.Uuid`) is not a local
+/// import key, so it is left unchanged.
+fn qualify_externs(t: Type, xt: &HashMap<String, String>) -> Type {
+    let q = |t: Type| qualify_externs(t, xt);
     match t {
         Type::Named(n, args) => {
-            let n = noeta_stdlib::registry::find_type(&n).map_or(n, |e| e.qualified());
+            let n = xt.get(&n).cloned().unwrap_or(n);
             Type::Named(n, args.into_iter().map(q).collect())
         }
         Type::List(e) => Type::List(Box::new(q(*e))),
@@ -6247,8 +6315,8 @@ fn qualify_externs(t: Type) -> Type {
 }
 
 /// The declared type of a field, or `Unknown` when unannotated.
-fn field_type(ty: &Option<TypeRef>) -> Type {
-    ty.as_ref().map(from_ref_q).unwrap_or(Type::Unknown)
+fn field_type(ty: &Option<TypeRef>, xt: &HashMap<String, String>) -> Type {
+    ty.as_ref().map(|t| from_ref_q(t, xt)).unwrap_or(Type::Unknown)
 }
 
 /// The type of one enum-variant payload field (R2b). A **positional** payload (`Leaf(T)`, `V(int)`)
@@ -6256,14 +6324,17 @@ fn field_type(ty: &Option<TypeRef>) -> Type {
 /// from the name; a **named** field (`Leaf(x: T)`) uses its annotation. Reconstructing from the name
 /// routes through the same name→[`Type`] resolution `from_ref` uses, so `int` maps to [`Type::Int`]
 /// and a type parameter `T` to `Type::Named("T", [])` (the form [`bind_type_params`] unifies).
-fn variant_field_type(p: &Param) -> Type {
+fn variant_field_type(p: &Param, xt: &HashMap<String, String>) -> Type {
     match &p.ty {
-        Some(tr) => from_ref_q(tr),
-        None => from_ref_q(&TypeRef::Named {
-            name: p.name.clone(),
-            args: Vec::new(),
-            span: p.name_span,
-        }),
+        Some(tr) => from_ref_q(tr, xt),
+        None => from_ref_q(
+            &TypeRef::Named {
+                name: p.name.clone(),
+                args: Vec::new(),
+                span: p.name_span,
+            },
+            xt,
+        ),
     }
 }
 
@@ -6282,8 +6353,10 @@ fn self_type(name: &str, type_params: &[TypeParam]) -> Type {
 }
 
 /// The declared type of a parameter, or `Unknown` when unannotated.
-fn param_type(p: &Param) -> Type {
-    p.ty.as_ref().map(from_ref_q).unwrap_or(Type::Unknown)
+fn param_type(p: &Param, xt: &HashMap<String, String>) -> Type {
+    p.ty.as_ref()
+        .map(|t| from_ref_q(t, xt))
+        .unwrap_or(Type::Unknown)
 }
 
 /// Whether dropping a value of type `ty` could run *some* `destruct` block — destructor-relevance

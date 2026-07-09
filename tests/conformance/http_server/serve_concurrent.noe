@@ -16,6 +16,7 @@
 // expect: stdout "served"
 // expect: exit 0
 use std.http.server
+use std.http.{Request, Response}
 use std.task.{sleep}
 
 async fn handle(req: Request): Response {
