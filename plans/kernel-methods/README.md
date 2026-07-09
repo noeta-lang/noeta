@@ -145,3 +145,31 @@ pre-bound to the bundles in the package's own source, next to the native kernels
 
 Users then `use vec.{Vec3}` and everything works out of the box; their own types still opt in
 with one `impl` line.
+
+### Type inventory (decision 2026-07-09: one module, organized together)
+
+All spatial-math types live in **one package/namespace** (working name `vec`; real name — `geometry`?
+`spatial`? — is an eviction-time decision, since the contents outgrow "vec"). Tiered:
+
+**Tier 1 (the package's reason to exist):**
+- `Vec2` / `Vec3` / `Vec4` — component-wise family, `dot`, `length`, `normalize`, `lerp`, per width.
+- `Quat` — layout-twin of `Vec4`, disjoint bundle (Hamilton `mul`, `conjugate`, `slerp`,
+  `rotate_vec3`, unit-`normalize`).
+- `Mat3` / `Mat4` — the biggest gap in today's surface: 9/16 `f32` packed, `mul` (mat×mat,
+  mat×vec), `transpose`, `inverse`, `determinant`, and the constructors that make 3D usable
+  (`perspective`, `ortho`, `look_at`, `from_trs(pos, rot, scale)`). Carries the single most classic
+  bulk kernel there is: **transform a `List<Vec3>` by one `Mat4`** (vertex transform) — a `Bulk`
+  bundle method (`points.transform_all(m)`) and the flagship demo of the whole kernel machinery.
+  (`Mat2` only if free; rarely used.)
+
+**Tier 2 (source-level types — the hybrid model's other half):** `Ray` (origin + dir), `Aabb`
+(min/max `Vec3`), `Plane`, `Sphere`, `Rect` — compositional `@packed` structs *of* the Tier-1 types
+(nested packed structs flatten inline, already supported) whose methods (`intersects`, `contains`,
+`closest_point`, …) are scalar math with **no bulk loops → plain Noeta methods in the package
+source, zero native code**. Deliberately so: they demonstrate that the package's Rust footprint is
+only the hot loops, everything else is language. (Bulk forms — `ray.hit_all(aabbs)` — can join a
+bundle later if profiled.)
+
+**Deferred (with triggers):** integer vectors (`IVec2`/`IVec3` — grid/texel coords; trigger: demand),
+`f64` vectors (trigger: scientific use), `Transform`/affine TRS type (Mat4 covers v1; trigger:
+scene-graph work), `Color` (vec4-shaped but belongs to a color-space module, not here).
