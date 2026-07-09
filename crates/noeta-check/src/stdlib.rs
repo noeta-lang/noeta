@@ -39,6 +39,15 @@ pub(super) fn is_std_module(name: &str) -> bool {
     registry::find_module(name).is_some()
 }
 
+/// The **qualified identity** (`std.id.Uuid`) of a registered extern type named by its bare
+/// registry name (`Uuid`), or the name unchanged if it is not a registered type. This is what the
+/// checker stores in `Type::Named` so a native type is never conflated with a same-short-named user
+/// type; the runtime still tags values with the bare name, and `registry::resolve_type` bridges the
+/// two spellings at every method-lookup site.
+fn qualified_extern(n: &str) -> String {
+    registry::find_type(n).map_or_else(|| n.to_string(), registry::ExtType::qualified)
+}
+
 /// Map a [`registry::SigType`] onto a checker [`Type`] under call-site variable `bindings`
 /// (higher-order-abi H1): `Var(n)` becomes its bound type, or a gradual hole when the call's
 /// arguments never determined it — permissive, never a wrong concrete type.
@@ -60,7 +69,10 @@ fn sig_to_type_bound(sig: &registry::SigType, bindings: &[Option<Type>]) -> Type
             Box::new(sig_to_type_bound(v, bindings)),
         ),
         SigType::Future(t) => Type::Named(FUTURE.to_string(), vec![sig_to_type_bound(t, bindings)]),
-        SigType::Named(n) => Type::Named((*n).to_string(), vec![]),
+        // A registered extern type carries its **qualified identity** (`std.id.Uuid`), so a native
+        // type never collides with a user type of the same short name. `Iterator`/`Future`/… (the
+        // language-level `SigType::Future`/etc.) stay bare — they are not registry types.
+        SigType::Named(n) => Type::Named(qualified_extern(n), vec![]),
         SigType::Union(members) => {
             Type::union(members.iter().map(|m| sig_to_type_bound(m, bindings)))
         }
@@ -82,7 +94,7 @@ fn sig_to_type_bound(sig: &registry::SigType, bindings: &[Option<Type>]) -> Type
             .unwrap_or(Type::Unknown),
         // A generic extern-type instantiation (higher-order-abi H4): `cell.new(v: A) -> Cell<A>`.
         SigType::Generic(n, args) => Type::Named(
-            (*n).to_string(),
+            qualified_extern(n),
             args.iter()
                 .map(|a| sig_to_type_bound(a, bindings))
                 .collect(),
@@ -253,7 +265,7 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         // (extern-types X1) — the registry is the single source, so a new native type never
         // edits this file. A generic extern type's method signatures reference the receiver's
         // type arguments as `Var(i)` (H4): `Cell<int>.get()` is `int`.
-        Type::Named(n, targs) if registry::find_type(n).is_some() => {
+        Type::Named(n, targs) if registry::resolve_type(n).is_some() => {
             let sig = registry::find_type_method_sig(n, name)?;
             Some(match sig.ret {
                 registry::RetTy::Concrete(s) => sig_to_type_bound(&s, &receiver_bindings(targs)),
@@ -475,7 +487,7 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         // A registered extern type's method parameters come from its `ExtType` signature table
         // (extern-types X1), like `method_return`, with the receiver's type arguments seeding
         // any variables (H4): `Cell<int>.set(v)` demands an `int`.
-        Type::Named(n, targs) if registry::find_type(n).is_some() => {
+        Type::Named(n, targs) if registry::resolve_type(n).is_some() => {
             let sig = registry::find_type_method_sig(n, name)?;
             let bindings = receiver_bindings(targs);
             Some(
@@ -501,7 +513,7 @@ pub(super) fn module_required(module: &str, name: &str) -> Option<usize> {
 /// built-in receiver method (all required), so the caller falls back to `params.len()`.
 pub(super) fn method_required(receiver: &Type, name: &str) -> Option<usize> {
     if let Type::Named(n, _) = receiver
-        && registry::find_type(n).is_some()
+        && registry::resolve_type(n).is_some()
     {
         return registry::find_type_method_sig(n, name)
             .map(|sig| registry::SigType::required_count(sig.params));

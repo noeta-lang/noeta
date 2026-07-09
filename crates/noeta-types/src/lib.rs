@@ -459,6 +459,14 @@ impl Type {
     }
 }
 
+/// The human-facing **short name** of a (possibly namespace-qualified) `Type::Named` identity: the
+/// segment after the final `.`, so a qualified extern identity `std.id.Uuid` — and, later, a
+/// qualified user identity `App.Models.User` — displays as `Uuid` / `User`. A bare name (no `.`) is
+/// returned unchanged. Identity/equality still use the full qualified string; only display strips it.
+pub fn short_type_name(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(_, short)| short)
+}
+
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -481,9 +489,9 @@ impl std::fmt::Display for Type {
             Type::Option(t) => write!(f, "Option<{t}>"),
             Type::Result(t, e) => write!(f, "Result<{t}, {e}>"),
             Type::Kind(k) => f.write_str(k.name()),
-            Type::Named(n, args) if args.is_empty() => f.write_str(n),
+            Type::Named(n, args) if args.is_empty() => f.write_str(short_type_name(n)),
             Type::Named(n, args) => {
-                write!(f, "{n}<")?;
+                write!(f, "{}<", short_type_name(n))?;
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 {
                         f.write_str(", ")?;

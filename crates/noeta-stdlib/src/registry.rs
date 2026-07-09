@@ -457,9 +457,17 @@ pub fn find_type_qualified(qualified: &str) -> Option<&'static ExtType> {
         .find(|t| t.qualified() == qualified)
 }
 
+/// Resolve an extern type from **either** a qualified identity (`std.id.Uuid`, what the checker
+/// keys on) or a bare short name (`Uuid`, what a runtime value's `type_name()` still returns in
+/// Phase A). The single lookup every method-resolution/dispatch site routes through, so the checker
+/// and both backends agree whichever spelling they hold.
+pub fn resolve_type(name: &str) -> Option<&'static ExtType> {
+    find_type_qualified(name).or_else(|| find_type(name))
+}
+
 /// Find a registered extern type's method signature.
 pub fn find_type_method(type_name: &str, method: &str) -> Option<&'static ExtFn> {
-    find_type(type_name)?
+    resolve_type(type_name)?
         .methods
         .iter()
         .find(|m| m.name == method)
@@ -468,7 +476,7 @@ pub fn find_type_method(type_name: &str, method: &str) -> Option<&'static ExtFn>
 /// Find a registered extern type's **higher-order** method signature (higher-order-abi H4) —
 /// methods that dispatch through the ctx seam ([`ExtType::ctx_dispatch`]).
 pub fn find_type_ctx_method(type_name: &str, method: &str) -> Option<&'static ExtFn> {
-    find_type(type_name)?
+    resolve_type(type_name)?
         .ctx_methods
         .iter()
         .find(|m| m.name == method)
@@ -489,7 +497,7 @@ pub fn dispatch_ctx_method(
     recv: crate::Slot,
     args: &[crate::Slot],
 ) -> Result<crate::CtxOut, crate::CtxError> {
-    match find_type(type_name).and_then(|t| t.ctx_dispatch) {
+    match resolve_type(type_name).and_then(|t| t.ctx_dispatch) {
         Some(d) => d(method, ctx, recv, args),
         None => Err(crate::no_method_error(type_name, method).into()),
     }
@@ -504,7 +512,7 @@ pub fn dispatch_method(
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError> {
     let type_name = recv.type_name();
-    let Some(ext) = find_type(type_name) else {
+    let Some(ext) = resolve_type(type_name) else {
         return Err(StdError {
             kind: crate::ErrorKind::UnknownName,
             message: format!("`{type_name}` is not a registered type"),

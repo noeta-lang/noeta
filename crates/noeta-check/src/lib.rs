@@ -979,7 +979,9 @@ impl Checker {
         for ext in noeta_stdlib::registry::extensions() {
             for ty in ext.types() {
                 if !ty.traits.is_empty() {
-                    self.record_trait_impls(ty.name, ty.traits.iter().copied());
+                    // Keyed by the **qualified identity** (`std.crdt.GCounter`) the checker stores in
+                    // `Type::Named`, so a `T: Mergeable` bound resolves against the same string.
+                    self.record_trait_impls(&ty.qualified(), ty.traits.iter().copied());
                 }
             }
         }
@@ -1287,7 +1289,7 @@ impl Checker {
                         );
                         let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
                         let raw_ret = async_return(
-                            m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
+                            m.ret.as_ref().map(from_ref_q).unwrap_or(Type::Unknown),
                             m.is_async,
                         );
                         let params = raw_params
@@ -1400,7 +1402,7 @@ impl Checker {
                         );
                         let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
                         let raw_ret = async_return(
-                            m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
+                            m.ret.as_ref().map(from_ref_q).unwrap_or(Type::Unknown),
                             m.is_async,
                         );
                         let params = raw_params
@@ -1482,7 +1484,7 @@ impl Checker {
                         );
                         let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
                         let raw_ret = async_return(
-                            m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
+                            m.ret.as_ref().map(from_ref_q).unwrap_or(Type::Unknown),
                             m.is_async,
                         );
                         let params = raw_params
@@ -1518,7 +1520,7 @@ impl Checker {
                     // An `async fn f(): T` call produces `Future<T>` (Track A); wrap before erasure so
                     // the erased signature and the generic instantiation both carry the future.
                     let raw_ret = async_return(
-                        f.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
+                        f.ret.as_ref().map(from_ref_q).unwrap_or(Type::Unknown),
                         f.is_async,
                     );
                     let params = raw_params
@@ -1760,7 +1762,7 @@ impl Checker {
                 match ty {
                     Some(ty) => {
                         self.check_type_ref(ty);
-                        let expected = Type::from_ref(ty);
+                        let expected = from_ref_q(ty);
                         self.check(value, &expected, env);
                         // Record destructor-relevance of this binding for the drop-insertion pass.
                         if self.type_relevant(&expected) {
@@ -1975,7 +1977,7 @@ impl Checker {
                     && !reassigns(then_body, name)
                 {
                     env.push(HashMap::new());
-                    bind(env, name, Type::from_ref(ty));
+                    bind(env, name, from_ref_q(ty));
                     self.check_block(then_body, env);
                     env.pop();
                 } else {
@@ -2137,7 +2139,7 @@ impl Checker {
         let ret = decl
             .ret
             .as_ref()
-            .map(Type::from_ref)
+            .map(from_ref_q)
             .unwrap_or(Type::Unknown);
         // A function whose body contains `yield` is a generator (Track G): its declared return must
         // be `Iterator<T>`, and its body's `yield e` are checked against the element type `T`. The
@@ -3144,7 +3146,7 @@ impl Checker {
                     .enumerate()
                     .map(|(i, p)| {
                         p.ty.as_ref()
-                            .map(Type::from_ref)
+                            .map(from_ref_q)
                             .or_else(|| expected_params.get(i).cloned())
                             .unwrap_or(Type::Unknown)
                     })
@@ -3159,7 +3161,7 @@ impl Checker {
                 // result" shape (`map` expects `(T) -> dyn`): checking against `dyn` would erase the
                 // body's real type and starve the call-site refinements (`xs.map(f) → List<R>`), so
                 // the body is inferred instead; `dyn` accepts whatever comes out.
-                let declared = ann.as_ref().map(Type::from_ref);
+                let declared = ann.as_ref().map(from_ref_q);
                 let body_expected = declared
                     .clone()
                     .or_else(|| (!matches!(**ret, Type::Dyn)).then(|| (**ret).clone()));
@@ -3451,7 +3453,7 @@ impl Checker {
                 // With an explicit return annotation, check the body against it (and adopt it as the
                 // closure's return type); otherwise infer it from the body (the arrow expression's
                 // type, or a block's joined `return`s).
-                let declared = ann.as_ref().map(Type::from_ref);
+                let declared = ann.as_ref().map(from_ref_q);
                 let ret = self.closure_body_type(body, declared.as_ref(), env);
                 env.pop();
                 Type::Fn {
@@ -3815,7 +3817,7 @@ impl Checker {
             Expr::As { expr, ty, span } => {
                 let src = self.synth(expr, env);
                 self.check_type_ref(ty);
-                let target = Type::from_ref(ty);
+                let target = from_ref_q(ty);
                 // Narrowing is the explicit way *out* of an open type: the dynamic top `dyn`, an
                 // un-inferred hole (which defers), a **union** (a *closed* `dyn`), or an abstract
                 // **kind-type** (`Enum`/`Struct`/`Class` — narrow to a concrete member). A value
@@ -3847,7 +3849,7 @@ impl Checker {
             }
             Expr::AttributesOf { ty, span } => {
                 self.check_type_ref(ty);
-                let target = Type::from_ref(ty);
+                let target = from_ref_q(ty);
                 // The type argument must itself be an attribute — a struct marked `@attribute` (the
                 // same capability gate as a `#[T(...)]` use). Otherwise the manifest holds no `T` to
                 // materialize.
@@ -3900,7 +3902,7 @@ impl Checker {
                     );
                 }
                 self.check_type_ref(ty);
-                let elem = Type::from_ref(ty);
+                let elem = from_ref_q(ty);
                 // The element type must be a packable `@packed` struct — the blob is a flat packed
                 // buffer. Recording the layout in `packed_list_sites` (the channel list literals use)
                 // hands the backend the schema to rebuild the list. Generic over any declared packable
@@ -3936,7 +3938,7 @@ impl Checker {
                     );
                 }
                 self.check_type_ref(elem);
-                let t = Type::from_ref(elem);
+                let t = from_ref_q(elem);
                 // The split-endpoint pair: a `Sender<T>` and a `Receiver<T>` over the message type.
                 Type::Tuple(vec![
                     Type::Named(stdlib::SENDER.to_string(), vec![t.clone()]),
@@ -3989,7 +3991,7 @@ impl Checker {
                     );
                 }
                 self.check_type_ref(ty);
-                let t = Type::from_ref(ty);
+                let t = from_ref_q(ty);
                 // Record the build recipe; a type with no JSON decoding (an enum, class, generic, …)
                 // is an error here.
                 match self.type_to_recipe(&t) {
@@ -5498,7 +5500,7 @@ impl Checker {
             env.push(HashMap::new());
             self.bind_pattern(&arm.pattern, &scrut, env);
             if let (Some(name), Pattern::IsType { ty, .. }) = (scrut_ident, &arm.pattern) {
-                bind(env, name, Type::from_ref(ty));
+                bind(env, name, from_ref_q(ty));
             }
             let t = self.synth(&arm.body, env);
             env.pop();
@@ -5529,7 +5531,7 @@ impl Checker {
         let type_targets: Vec<Type> = arms
             .iter()
             .filter_map(|a| match &a.pattern {
-                Pattern::IsType { ty, .. } => Some(Type::from_ref(ty)),
+                Pattern::IsType { ty, .. } => Some(from_ref_q(ty)),
                 _ => None,
             })
             .collect();
@@ -6207,9 +6209,46 @@ fn reassigns(stmts: &[Stmt], name: &str) -> bool {
     })
 }
 
+/// [`Type::from_ref`], but every **registered extern-type** name is rewritten to its qualified
+/// identity (`Uuid` → `std.id.Uuid`, `Cell<int>` → `std.cell.Cell<int>`). This is the single
+/// annotation-resolution entry point the checker uses instead of the bare `Type::from_ref`, so an
+/// annotation (`x: Uuid`) and a registry-derived return (`uuid()` → `Uuid`) agree on identity — and
+/// a native type is never conflated with a same-short-named user type. Non-extern names (user types,
+/// generic parameters, the language-level `Future`/`Iterator`/`Sender`/`Receiver`) are left bare.
+/// (Alias/import scoping and user-type precedence layer on later; today extern names are still
+/// globally reserved, so a bare registry match is unambiguously the extern type.)
+fn from_ref_q(ty: &TypeRef) -> Type {
+    qualify_externs(Type::from_ref(ty))
+}
+
+/// Recursively rewrite registered extern-type names inside a [`Type`] to their qualified identity.
+/// Idempotent: an already-qualified name (`std.id.Uuid`) is not a bare registry name, so it is left
+/// unchanged.
+fn qualify_externs(t: Type) -> Type {
+    let q = |t: Type| qualify_externs(t);
+    match t {
+        Type::Named(n, args) => {
+            let n = noeta_stdlib::registry::find_type(&n).map_or(n, |e| e.qualified());
+            Type::Named(n, args.into_iter().map(q).collect())
+        }
+        Type::List(e) => Type::List(Box::new(q(*e))),
+        Type::Set(e) => Type::Set(Box::new(q(*e))),
+        Type::Option(e) => Type::Option(Box::new(q(*e))),
+        Type::Map(k, v) => Type::Map(Box::new(q(*k)), Box::new(q(*v))),
+        Type::Result(t, e) => Type::Result(Box::new(q(*t)), Box::new(q(*e))),
+        Type::Tuple(es) => Type::Tuple(es.into_iter().map(q).collect()),
+        Type::Union(es) => Type::union(es.into_iter().map(q)),
+        Type::Fn { params, ret } => Type::Fn {
+            params: params.into_iter().map(q).collect(),
+            ret: Box::new(q(*ret)),
+        },
+        other => other,
+    }
+}
+
 /// The declared type of a field, or `Unknown` when unannotated.
 fn field_type(ty: &Option<TypeRef>) -> Type {
-    ty.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown)
+    ty.as_ref().map(from_ref_q).unwrap_or(Type::Unknown)
 }
 
 /// The type of one enum-variant payload field (R2b). A **positional** payload (`Leaf(T)`, `V(int)`)
@@ -6219,8 +6258,8 @@ fn field_type(ty: &Option<TypeRef>) -> Type {
 /// and a type parameter `T` to `Type::Named("T", [])` (the form [`bind_type_params`] unifies).
 fn variant_field_type(p: &Param) -> Type {
     match &p.ty {
-        Some(tr) => Type::from_ref(tr),
-        None => Type::from_ref(&TypeRef::Named {
+        Some(tr) => from_ref_q(tr),
+        None => from_ref_q(&TypeRef::Named {
             name: p.name.clone(),
             args: Vec::new(),
             span: p.name_span,
@@ -6244,7 +6283,7 @@ fn self_type(name: &str, type_params: &[TypeParam]) -> Type {
 
 /// The declared type of a parameter, or `Unknown` when unannotated.
 fn param_type(p: &Param) -> Type {
-    p.ty.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown)
+    p.ty.as_ref().map(from_ref_q).unwrap_or(Type::Unknown)
 }
 
 /// Whether dropping a value of type `ty` could run *some* `destruct` block — destructor-relevance
