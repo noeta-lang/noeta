@@ -41,7 +41,7 @@ point:
 
 Four pillars follow from this: **Ground** (docs/examples/stdlib), **Understand** (semantic queries),
 **Introspect** (compiler-artifact traversal), **Execute** (run / eval / debug). Plus a transform leg
-(**format**) gated on a prerequisite that does not exist yet.
+(**format**) that wraps a formatter being built by a parallel arc.
 
 ---
 
@@ -92,8 +92,16 @@ Four pillars follow from this: **Ground** (docs/examples/stdlib), **Understand**
 - **Shared analysis engine access** for defs/refs/completions/signature — the logic exists in
   `noeta-lsp` but is **private** (`DocumentStore` and the `resolve`/`completion`/`signature` modules
   are not `pub`). §Decisions #3 covers how we reach it without duplicating.
-- **`format`** — a source formatter does **not exist** (no `noeta fmt`, no formatter crate; the
-  `Pretty` trait emits S-expr debug output, not source). §Decisions #6.
+
+**Consumed from a parallel arc (in-flight, not this arc's work):**
+
+- **`noeta fmt` (source formatter)** and **`noeta check` (lint + static verification)** are being
+  built by a parallel effort. The MCP does **not** reimplement them — its `format` and `check` tools
+  are **thin wrappers over that arc's engine** (a library API where one is exposed; otherwise the CLI
+  surface). MCP `check` therefore surfaces the *combined* lint + static-verify + type diagnostics
+  the agent should see, exactly matching what `noeta check` reports, rather than a divergent
+  MCP-only diagnostic set. §Decisions #6. Coordination point: align on the reusable entry the fmt/
+  check arc exposes so agent and CLI never disagree.
 
 ---
 
@@ -119,7 +127,7 @@ on-demand deep-dives.
 
 | Tool | Input | Returns |
 |------|-------|---------|
-| `check` | `source \| file`, `workspace?` | Diagnostics `{code, severity, span, message, labels, rendered?}` — **the feedback loop** |
+| `check` | `source \| file`, `workspace?` | Combined lint + static-verify + type diagnostics `{code, severity, span, message, labels, rendered?}` — wraps the parallel `noeta check` arc — **the feedback loop** |
 | `type_at` | `file \| source`, `symbol \| selection \| position` | The `TypeRepr` at that site (hover) |
 | `symbols` | `file \| source` | Outline: `fn`/`struct`/`class`/`enum`/`impl` tree with spans |
 | `definition` | `file \| source`, `symbol \| position` | Defining location + snippet (needs the shared engine, §Decisions #3) |
@@ -156,11 +164,11 @@ driving the VM directly, JIT-off with debug info):
 | `debug_step` | `session`, `over\|into\|out\|continue` | Next stop state |
 | `debug_stop` | `session` | Teardown |
 
-### Transform (gated)
+### Transform
 
 | Tool | Input | Returns |
 |------|-------|---------|
-| `format` | `source \| file` | Formatted source — **blocked: no formatter exists** (§Decisions #6) |
+| `format` | `source \| file` | Formatted source — thin wrapper over the parallel `noeta fmt` arc (§Decisions #6) |
 
 ### Resources & prompts (complementary to tools)
 
@@ -176,7 +184,7 @@ driving the VM directly, JIT-off with debug info):
 
 ---
 
-## Decisions proposed (confirm before M0)
+## Decisions (signed off — see per-item notes)
 
 1. **`noeta-mcp` is a new crate + a `noeta mcp` CLI subcommand.** Mirrors `noeta-lsp`/`noeta-dap`:
    `cmd_mcp()` → `noeta_mcp::run_stdio()`. Depends on `noeta-db`, `noeta-check`, `noeta-compiler`,
@@ -185,9 +193,8 @@ driving the VM directly, JIT-off with debug info):
 2. **Protocol = the official Rust MCP SDK (`rmcp`), over hand-rolled framing.** MCP has more surface
    than LSP/DAP (tools + JSON-Schema'd params + resources + prompts + capability negotiation);
    `rmcp` derives tool schemas and handles the envelope, where the LSP/DAP hand-rolls paid off for
-   their smaller, fussier protocols. *Trade-off flagged:* `rmcp` is a newer dependency; if you'd
-   rather hand-roll (zero new dep, full control) as we did for DAP, M0 is where we'd choose —
-   nothing downstream depends on it beyond the M0 adapter. **Recommend `rmcp`.**
+   their smaller, fussier protocols. Reversible at M0 (nothing downstream depends on it beyond the
+   adapter). **✅ Signed off: `rmcp`.**
 3. **Reuse the analysis engine by staging, not by upfront refactor.** The high-value pillars —
    `check`, `type_at`, `symbols`, `ast`, `bytecode`, `module_graph`, `reflect`, `pipeline`, `run`,
    `eval`, `test` — need only **public** crates (`noeta-db`, `noeta-vm`, `noeta-check`), *no* private
@@ -199,32 +206,44 @@ driving the VM directly, JIT-off with debug info):
    it). This is the architecturally correct boundary once there are two consumers, it is
    behavior-neutral (guarded by the LSP's existing request/response fixtures), and it avoids dragging
    `tower-lsp-server` into the MCP dep tree. *Alternative (cheaper, worse):* just make `DocumentStore`
-   `pub` and depend `noeta-mcp → noeta-lsp`. **Recommend the extraction, deferred to the defs/refs
-   slice** so it never blocks the headline value.
+   `pub` and depend `noeta-mcp → noeta-lsp`. **✅ Signed off: the extraction, deferred to the
+   defs/refs slice (M5)** so it never blocks the headline value.
 4. **Debugging drives the VM seam directly; extract the breakpoint/`Debugger` glue.** The MCP
    implements its own `noeta_vm::Debugger` (no DAP wire). The reusable seam is public, but
    `resolve_breakpoints` + a headless `Debugger` impl are private in `noeta-dap`; the debug slice
    promotes those to a shared spot (a small `noeta-debug`/shared module) so LSP-less, DAP-less
    drivers reuse them. Values are `!Send` and thread-local to the run worker, so everything crosses
    the boundary as rendered strings (as the DAP already does).
-5. **Execution is sandboxed by default, real-host opt-in with limits.** `run`/`eval`/`test` use the
-   deterministic `SandboxHost` unless the caller passes `host: "real"`, which requires explicit
-   resource limits (wall-clock, output cap) — an agent should not touch the real disk/network/env
-   unless the user's tool call says so. **Recommend sandbox default.**
-6. **`format` is gated on a formatter that does not exist — spin it as a prerequisite arc, not
-   inside this one.** A real source formatter (AST→source with trivia/comment preservation) is its
-   own milestone; the `Pretty` S-expr printer is not it, and there is no `noeta fmt`. The MCP
-   `format` tool ships as a **thin wrapper** that lands when a `noeta fmt` / formatter crate does; a
-   `format` slice here is a stub that reports "unavailable" until then. *This is a scope deferral —
-   confirm.* **Recommend: defer `format` to a dedicated formatter arc; wire the MCP tool in when it
-   exists.**
+5. **Execution is sandboxed by default; real-host opt-in; liveness limits are always-on.**
+   `run`/`eval`/`test` use the deterministic `SandboxHost` unless the caller passes `host: "real"`.
+   Two points settled after a second pass:
+   - **Real-host opt-in is load-bearing, not a luxury.** Under the sandbox, `fs` is an in-memory
+     Vfs, `time` a logical clock, `random` seeded, `http`/network pure responders — so a program
+     that reads a real config, calls a real API, or serves real HTTP runs against *stubs* and won't
+     reflect production. Determinism is the right default for "why does this produce X"; real-host
+     (with explicit limits, gating the IO capabilities) is required for "does this actually work
+     end-to-end." The residual risk is only the *agent* triggering real effects silently — which the
+     harness's per-call tool approval already gates, and which is no more than `noeta run` already
+     does.
+   - **Limits apply even in sandbox.** Determinism does not prevent an infinite loop or an output
+     flood from hanging the server, so a wall-clock timeout + output cap (+ optional step budget)
+     bound *every* execution; `host: "real"` additionally unlocks the IO capabilities.
+   **✅ Signed off: sandbox default, real opt-in, always-on liveness limits.**
+6. **`format` and `check` wrap the parallel `noeta fmt` / `noeta check` arc — not reimplemented
+   here.** A separate in-flight effort is building the source formatter and a lint + static-verify
+   `check` command. The MCP `format` tool is a thin wrapper over the formatter engine; the MCP
+   `check` tool surfaces the *combined* lint + static-verify + type diagnostics that `noeta check`
+   reports, so the agent and the CLI never disagree. Both land as MCP tools in this arc, gated only
+   on the parallel arc exposing a reusable entry (library API preferred; CLI surface otherwise).
+   **✅ Signed off: wrap the parallel arc; `format` is in scope as a wrapper, coordinate on the
+   shared entry.**
 7. **Auto-registration = VS Code MCP provider API + documented manual registration elsewhere.** In
    `editors/vscode-noeta/`, register via `vscode.lm.registerMcpServerDefinitionProvider` returning a
    stdio definition `{command: noetaCommand(), args: ["mcp"]}` — reusing the same `noeta.server.path`
-   setting, so one binary serves `lsp`/`dap`/`mcp`. This needs an `engines.vscode` bump (the LM/MCP
-   API is far newer than the current `^1.82.0` floor) — *confirm the bump is acceptable.* For
-   Claude Code / Cursor / other clients, ship a documented `claude mcp add noeta -- noeta mcp`
-   snippet (no code, just docs). **Recommend both.**
+   setting, so one binary serves `lsp`/`dap`/`mcp`. Needs an `engines.vscode` bump (the LM/MCP API is
+   far newer than the current `^1.82.0` floor). For Claude Code / Cursor / other clients, ship a
+   documented `claude mcp add noeta -- noeta mcp` snippet (no code, just docs). **✅ Signed off:
+   both; the `engines.vscode` bump is accepted.**
 
 ---
 
@@ -273,24 +292,23 @@ and the debug driver.
 
 | # | Slice | Delivers | Notes |
 |---|-------|----------|-------|
-| **M0** | Server skeleton + `check` + instructions | An agent can connect and get real diagnostics | `noeta-mcp` crate + `noeta mcp` subcommand; MCP handshake, capability + **instructions** advertisement; one tool, `check`, over `linked_checked_ide` (`{code,severity,span,message,labels}`). **Protocol/SDK decision (#2) lands here.** The single highest-value tool, first. |
+| **M0** | Server skeleton + `check` + instructions | An agent can connect and get real diagnostics | `noeta-mcp` crate + `noeta mcp` subcommand; MCP handshake, capability + **instructions** advertisement; one tool, `check` — wired to the parallel `noeta check` arc's engine (lint + static-verify + type), falling back to `linked_checked_ide` diagnostics until that entry is exposed. **Protocol/SDK decision (#2) lands here.** The single highest-value tool, first. |
 | **M1** | Ground — docs + examples + explain | The agent writes idiomatic Noeta from real sources | `docs_search`/`docs_get`/`examples_find` over the in-memory corpus index; `explain_diagnostic`; docs+examples also exposed as MCP **resources**. No compiler state beyond the index. |
 | **M2** | Ground — stdlib surface | The agent stops inventing stdlib calls | `stdlib_api` renders the native registry + reflection manifest into module/function/method signatures. |
 | **M3** | Understand (cheap half) + Introspect | Semantic + artifact queries with zero refactor | `type_at`, `symbols`, `ast`, `bytecode`, `module_graph`, `pipeline`, `reflect` — all on public `noeta-db`/`noeta-ast`/`noeta-check`. Ships the byte-offset↔position helper (astral-plane unit tests). |
-| **M4** | Execute — run / eval / test | "Run this and tell me what happened" | `run` (sandbox default, real-host opt-in + limits — decision #5), `eval` via `VmSession`, `test` over `@test` blocks. Structured stdout/stderr/exit/traceback. |
+| **M4** | Execute — run / eval / test + `format` | "Run this and tell me what happened"; clean it up | `run` (sandbox default, real-host opt-in, always-on liveness limits — decision #5), `eval` via `VmSession`, `test` over `@test` blocks (structured stdout/stderr/exit/traceback). `format` wraps the parallel `noeta fmt` arc (decision #6) — bundled here as the transform leg; if the fmt entry isn't ready, it slips to a one-commit follow-on. |
 | **M5** | Understand (full) — defs / refs / completions / signature | Precise cross-symbol navigation | **Extract `noeta-ide`** from `noeta-lsp` (decision #3): `DocumentStore` + `offsets`/`resolve`/`completion`/`signature`/`symbols` become a shared crate; `noeta-lsp` re-adapts over it (its fixtures are the gate); `noeta-mcp` calls it for `definition`/`references`/`completions`/`signature`. The load-bearing refactor, deferred to exactly where it's needed. |
 | **M6** | Execute — debug sessions | Programmatic breakpoint / inspect / eval / step | Headless `noeta_vm::Debugger` + shared breakpoint index (decision #4); `debug_start`/`debug_inspect`/`debug_eval`/`debug_step`/`debug_stop` over a `session` handle map. Heaviest slice, last. |
 | **M7** | Wire auto-registration | The extension registers the MCP server; other clients documented | `vscode.lm.registerMcpServerDefinitionProvider` in `editors/vscode-noeta/` (reusing `noetaCommand()`), `engines.vscode` bump; `docs/Editor-and-AI-Tooling.md` updated with `claude mcp add` + the tool catalog (decision #7). |
 
-`format` is intentionally **not** a slice here — it is gated on a formatter arc that doesn't exist
-(decision #6); the tool is wired in a one-commit follow-on when that lands.
+`format` rides along in M4 as a thin wrapper over the parallel `noeta fmt` arc (decision #6); if that
+arc's reusable entry isn't ready when M4 lands, `format` slips to a one-commit follow-on — it never
+blocks the rest of the arc.
 
 ---
 
 ## Deferred (revisit after the arc)
 
-- **`format`** — blocked on a net-new source-formatter arc (decision #6). Wire the tool in when
-  `noeta fmt` exists.
 - **MCP prompts** (`scaffold-module`, `explain-and-fix`, `review-noeta`) — nice-to-have; the tools +
   instructions carry the value first.
 - **Semantic/embedding retrieval** — M1 ships lexical/section ranking over the small corpus; an
@@ -315,4 +333,6 @@ types, symbols, AST, bytecode, the module graph, and the `@role` architectural m
 sandbox (`run`/`eval`/`test`); navigate defs/refs (`definition`/`references`); and set a breakpoint,
 inspect the paused state, and step (`debug_*`) — each covered by in-process tool-call fixtures, with
 the VS Code extension auto-registering the server, the workspace clean under fmt/clippy, and zero new
-`unsafe`. `format` is explicitly out (a follow-on when the formatter exists).
+`unsafe`. `format` (and `check`'s lint layer) wrap the parallel `noeta fmt` / `noeta check` arc and
+land as soon as that arc exposes a reusable entry; a not-yet-ready `format` is the one gate-exempt
+tool (one-commit follow-on).
