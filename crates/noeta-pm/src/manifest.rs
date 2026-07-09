@@ -70,9 +70,9 @@ impl PackageName {
     /// (`[A-Za-z_][A-Za-z0-9_]*`). The `package` half is the package's **root namespace segment** —
     /// what a consumer's dep-key re-roots at the package boundary (see phase-2 plan).
     pub fn parse(s: &str) -> Result<PackageName, String> {
-        let (company, package) = s.split_once('/').ok_or_else(|| {
-            format!("package name `{s}` must be `company/package` (missing `/`)")
-        })?;
+        let (company, package) = s
+            .split_once('/')
+            .ok_or_else(|| format!("package name `{s}` must be `company/package` (missing `/`)"))?;
         if package.contains('/') {
             return Err(format!(
                 "package name `{s}` must have exactly one `/` (found more)"
@@ -180,9 +180,8 @@ pub fn add_dependency(manifest_path: &Path, key: &str, value_toml: &str) -> Resu
     let entry = format!("{key} = {value_toml}");
     let updated = insert_dependency_entry(&text, &entry);
     // Re-parse the edited manifest so a bad value/source fails here rather than corrupting the file.
-    Manifest::parse(&updated).map_err(|err| {
-        format!("`noeta add {key}` would make `{MANIFEST_NAME}` invalid: {err}")
-    })?;
+    Manifest::parse(&updated)
+        .map_err(|err| format!("`noeta add {key}` would make `{MANIFEST_NAME}` invalid: {err}"))?;
 
     let dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = dir.join(format!(".{MANIFEST_NAME}.{}.tmp", std::process::id()));
@@ -354,10 +353,7 @@ impl Manifest {
     /// A future tier-execution layer reads this to dispatch a tier to its provider; today the
     /// providers are validated (a resolved dependency is a valid provider) and surfaced here.
     #[allow(dead_code)] // consumed by the tier-execution layer; validated + surfaced now
-    pub fn active_tier_providers(
-        &self,
-        profile: &str,
-    ) -> Result<BTreeMap<String, String>, String> {
+    pub fn active_tier_providers(&self, profile: &str) -> Result<BTreeMap<String, String>, String> {
         let mut chain = Vec::new();
         self.resolve(profile, &mut chain)
     }
@@ -457,7 +453,9 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
         return Ok(Dependency::Registry { package: None, req });
     }
     let table = value.as_table().ok_or_else(|| {
-        format!("dependency `{key}` must be a SemVer string or a table (`{{ path/git/version = … }}`)")
+        format!(
+            "dependency `{key}` must be a SemVer string or a table (`{{ path/git/version = … }}`)"
+        )
     })?;
     let has = |k: &str| table.contains_key(k);
     match (has("path"), has("git"), has("version")) {
@@ -473,15 +471,12 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
             let url = table["git"]
                 .as_str()
                 .ok_or_else(|| format!("dependency `{key}`: `git` must be a string"))?;
-            let tag = table
-                .get("tag")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    format!(
-                        "dependency `{key}`: a `git` dependency requires a string `tag` \
+            let tag = table.get("tag").and_then(|v| v.as_str()).ok_or_else(|| {
+                format!(
+                    "dependency `{key}`: a `git` dependency requires a string `tag` \
                          (sources are git + tagged releases only)"
-                    )
-                })?;
+                )
+            })?;
             Ok(Dependency::Git {
                 url: url.to_string(),
                 tag: tag.to_string(),
@@ -501,7 +496,10 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
                     let s = v
                         .as_str()
                         .ok_or_else(|| format!("dependency `{key}`: `package` must be a string"))?;
-                    Some(PackageName::parse(s).map_err(|err| format!("dependency `{key}`: {err}"))?)
+                    Some(
+                        PackageName::parse(s)
+                            .map_err(|err| format!("dependency `{key}`: {err}"))?,
+                    )
                 }
             };
             Ok(Dependency::Registry { package, req })
@@ -590,9 +588,7 @@ mod tests {
     #[test]
     fn package_name_requires_company_slash_package() {
         assert!(Manifest::parse("[package]\nname = \"widgets\"\nversion = \"1.0.0\"\n").is_err());
-        assert!(
-            Manifest::parse("[package]\nname = \"a/b/c\"\nversion = \"1.0.0\"\n").is_err()
-        );
+        assert!(Manifest::parse("[package]\nname = \"a/b/c\"\nversion = \"1.0.0\"\n").is_err());
         assert!(Manifest::parse("[package]\nname = \"1bad/x\"\nversion = \"1.0.0\"\n").is_err());
     }
 
@@ -643,18 +639,13 @@ mod tests {
 
     #[test]
     fn a_git_dependency_requires_a_tag() {
-        assert!(
-            Manifest::parse("[dependencies]\nhttp = { git = \"https://x/y\" }\n").is_err()
-        );
+        assert!(Manifest::parse("[dependencies]\nhttp = { git = \"https://x/y\" }\n").is_err());
     }
 
     #[test]
     fn a_dependency_names_exactly_one_source() {
         assert!(
-            Manifest::parse(
-                "[dependencies]\nx = { path = \"../p\", version = \"^1\" }\n"
-            )
-            .is_err()
+            Manifest::parse("[dependencies]\nx = { path = \"../p\", version = \"^1\" }\n").is_err()
         );
         assert!(Manifest::parse("[dependencies]\nx = {}\n").is_err());
     }

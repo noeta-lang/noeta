@@ -62,9 +62,7 @@ impl Store {
         }
         // Stage in a sibling temp dir (same filesystem, so the rename is atomic), pid-tagged so
         // parallel publishers don't collide on the staging path.
-        let tmp = self
-            .dir
-            .join(format!(".{key}.{}.tmp", std::process::id()));
+        let tmp = self.dir.join(format!(".{key}.{}.tmp", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp)?;
         let result = build(&tmp).and_then(|()| match fs::rename(&tmp, &final_path) {
@@ -171,9 +169,7 @@ mod tests {
     #[test]
     fn a_failed_build_leaves_no_partial_tree() {
         let store = tmp_store("store_failed_build");
-        let err = store.publish("bad", |_| {
-            Err(io::Error::other("fetch blew up"))
-        });
+        let err = store.publish("bad", |_| Err(io::Error::other("fetch blew up")));
         assert!(err.is_err());
         assert!(!store.contains("bad"), "no partial tree on failure");
     }

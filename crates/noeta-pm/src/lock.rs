@@ -199,10 +199,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         write(&dir, &[git_pkg()]).unwrap();
-        let first = std::fs::metadata(dir.join(LOCK_NAME)).unwrap().modified().unwrap();
+        let first = std::fs::metadata(dir.join(LOCK_NAME))
+            .unwrap()
+            .modified()
+            .unwrap();
         // A no-op write must not touch the file (same content).
         write(&dir, &[git_pkg()]).unwrap();
-        let second = std::fs::metadata(dir.join(LOCK_NAME)).unwrap().modified().unwrap();
+        let second = std::fs::metadata(dir.join(LOCK_NAME))
+            .unwrap()
+            .modified()
+            .unwrap();
         assert_eq!(first, second, "an unchanged lock must not be rewritten");
     }
 

@@ -226,12 +226,7 @@ impl Walker<'_> {
                 // `path` is kept verbatim in the lock entry.
                 let joined = base_dir.join(path);
                 let dir = joined.canonicalize().unwrap_or(joined);
-                Ok((
-                    dir,
-                    ResolvedSource::Path {
-                        path: path.clone(),
-                    },
-                ))
+                Ok((dir, ResolvedSource::Path { path: path.clone() }))
             }
             Dependency::Git { url, tag } => self.fetch_git(key, url, tag),
             Dependency::Registry { package, req } => {
@@ -365,7 +360,9 @@ fn assemble(
     let mut used: HashSet<String> = HashSet::new();
     for (key, identity) in root_edges {
         // First root key wins if the same identity is aliased under several keys.
-        global.entry(identity.clone()).or_insert_with(|| key.clone());
+        global
+            .entry(identity.clone())
+            .or_insert_with(|| key.clone());
         used.insert(key.clone());
     }
     // Deterministic assignment order for synthesized segments.

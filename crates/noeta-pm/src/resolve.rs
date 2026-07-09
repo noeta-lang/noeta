@@ -77,9 +77,7 @@ pub fn resolve(
             .into_iter()
             .filter(|(name, _)| name != root)
             .collect()),
-        Err(pubgrub::PubGrubError::NoSolution(tree)) => {
-            Err(DefaultStringReporter::report(&tree))
-        }
+        Err(pubgrub::PubGrubError::NoSolution(tree)) => Err(DefaultStringReporter::report(&tree)),
         Err(err) => Err(format!("{err}")),
     }
 }
@@ -179,9 +177,29 @@ mod tests {
     #[test]
     fn ranges_agree_with_semver_matches() {
         let reqs = [
-            "*", "^1.2.3", "^1.2", "^1", "^0.2.3", "^0.2", "^0.0.3", "^0.0", "^0", "~1.2.3", "~1.2",
-            "~1", "=1.2.3", "=1.2", "=1", "1.*", "1.2.*", ">1.2.3", ">=1.2.3", "<1.2.3", "<=1.2.3",
-            ">=1.2.0, <1.5.0", ">1.0.0, <=2.0.0",
+            "*",
+            "^1.2.3",
+            "^1.2",
+            "^1",
+            "^0.2.3",
+            "^0.2",
+            "^0.0.3",
+            "^0.0",
+            "^0",
+            "~1.2.3",
+            "~1.2",
+            "~1",
+            "=1.2.3",
+            "=1.2",
+            "=1",
+            "1.*",
+            "1.2.*",
+            ">1.2.3",
+            ">=1.2.3",
+            "<1.2.3",
+            "<=1.2.3",
+            ">=1.2.0, <1.5.0",
+            ">1.0.0, <=2.0.0",
         ];
         let mut versions = Vec::new();
         for major in 0..3 {
@@ -212,15 +230,10 @@ mod tests {
     }
     impl MemRegistry {
         fn add(&mut self, pkg: &str, version: &str, deps: &[(&str, &str)]) {
-            self.packages
-                .entry(pkg.to_string())
-                .or_default()
-                .insert(
-                    v(version),
-                    deps.iter()
-                        .map(|(n, r)| (n.to_string(), req(r)))
-                        .collect(),
-                );
+            self.packages.entry(pkg.to_string()).or_default().insert(
+                v(version),
+                deps.iter().map(|(n, r)| (n.to_string(), req(r))).collect(),
+            );
         }
     }
     impl Registry for MemRegistry {

@@ -2023,7 +2023,11 @@ fn path_dep_project(name: &str) -> PathBuf {
          [dependencies]\nhi = { path = \"../greetlib\" }\n",
     )
     .unwrap();
-    std::fs::write(app.join("main.noe"), "use hi.hello.greeting;\necho greeting();\n").unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use hi.hello.greeting;\necho greeting();\n",
+    )
+    .unwrap();
     std::fs::write(
         lib.join("noeta.toml"),
         "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
@@ -2067,7 +2071,11 @@ fn noeta_check_resolves_cross_package_use() {
     // not opaquely stubbed away).
     let dir = entry.parent().unwrap();
     std::fs::write(dir.join("main.noe"), "use hi.hello.nope;\necho nope();\n").unwrap();
-    lang().arg("check").arg(dir.join("main.noe")).assert().failure();
+    lang()
+        .arg("check")
+        .arg(dir.join("main.noe"))
+        .assert()
+        .failure();
 }
 
 #[test]
@@ -2148,28 +2156,42 @@ fn a_version_conflict_is_reported() {
          [dependencies]\ns = { path = \"../c1\" }\n",
     )
     .unwrap();
-    std::fs::write(a.join("a.noe"), "namespace a.x;\npub fn f(): int { return 1; }\n").unwrap();
+    std::fs::write(
+        a.join("a.noe"),
+        "namespace a.x;\npub fn f(): int { return 1; }\n",
+    )
+    .unwrap();
     std::fs::write(
         b.join("noeta.toml"),
         "[package]\nname = \"acme/b\"\nversion = \"1.0.0\"\n\
          [dependencies]\ns = { path = \"../c2\" }\n",
     )
     .unwrap();
-    std::fs::write(b.join("b.noe"), "namespace b.x;\npub fn g(): int { return 2; }\n").unwrap();
+    std::fs::write(
+        b.join("b.noe"),
+        "namespace b.x;\npub fn g(): int { return 2; }\n",
+    )
+    .unwrap();
     std::fs::write(
         c1.join("noeta.toml"),
         "[package]\nname = \"acme/shared\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(c1.join("s.noe"), "namespace shared.core;\npub fn h(): int { return 3; }\n")
-        .unwrap();
+    std::fs::write(
+        c1.join("s.noe"),
+        "namespace shared.core;\npub fn h(): int { return 3; }\n",
+    )
+    .unwrap();
     std::fs::write(
         c2.join("noeta.toml"),
         "[package]\nname = \"acme/shared\"\nversion = \"2.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(c2.join("s.noe"), "namespace shared.core;\npub fn h(): int { return 4; }\n")
-        .unwrap();
+    std::fs::write(
+        c2.join("s.noe"),
+        "namespace shared.core;\npub fn h(): int { return 4; }\n",
+    )
+    .unwrap();
 
     lang()
         .arg("run")
@@ -2212,7 +2234,13 @@ fn a_published_package_resolves_as_a_registry_dependency() {
     lang()
         .current_dir(&repo)
         .env("NOETA_REGISTRY_DIR", &reg)
-        .args(["publish", "--git", repo.to_str().unwrap(), "--tag", "v1.2.0"])
+        .args([
+            "publish",
+            "--git",
+            repo.to_str().unwrap(),
+            "--tag",
+            "v1.2.0",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("published `acme/greet` 1.2.0"));
@@ -2224,7 +2252,11 @@ fn a_published_package_resolves_as_a_registry_dependency() {
          [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
     )
     .unwrap();
-    std::fs::write(app.join("main.noe"), "use gc.hello.greeting;\necho greeting();\n").unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use gc.hello.greeting;\necho greeting();\n",
+    )
+    .unwrap();
 
     lang()
         .env("NOETA_REGISTRY_DIR", &reg)
@@ -2320,7 +2352,11 @@ fn a_git_tag_dependency_is_fetched_and_run() {
         ),
     )
     .unwrap();
-    std::fs::write(app.join("main.noe"), "use hi.hello.greeting;\necho greeting();\n").unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use hi.hello.greeting;\necho greeting();\n",
+    )
+    .unwrap();
 
     // Isolate the package store under the test's cache dir (set by `lang()`), so the fetch is hermetic.
     lang()
@@ -2351,8 +2387,11 @@ fn noeta_add_edits_the_manifest_and_resolves() {
         "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(lib.join("m.noe"), "namespace lib.core;\npub fn v(): int { return 42; }\n")
-        .unwrap();
+    std::fs::write(
+        lib.join("m.noe"),
+        "namespace lib.core;\npub fn v(): int { return 42; }\n",
+    )
+    .unwrap();
 
     lang()
         .current_dir(&app)
@@ -2362,12 +2401,23 @@ fn noeta_add_edits_the_manifest_and_resolves() {
         .stdout(predicate::str::contains("added `hi`"));
 
     let manifest = std::fs::read_to_string(app.join("noeta.toml")).unwrap();
-    assert!(manifest.contains("# my app"), "comment preserved: {manifest}");
-    assert!(manifest.contains("hi = { path = \"../lib\" }"), "dep added: {manifest}");
+    assert!(
+        manifest.contains("# my app"),
+        "comment preserved: {manifest}"
+    );
+    assert!(
+        manifest.contains("hi = { path = \"../lib\" }"),
+        "dep added: {manifest}"
+    );
     assert!(app.join("noeta.lock").is_file(), "lock written");
 
     // The added dependency actually resolves and runs.
-    lang().arg("run").arg(app.join("main.noe")).assert().success().stdout("42\n");
+    lang()
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout("42\n");
 }
 
 #[test]
@@ -2387,8 +2437,11 @@ fn noeta_update_rewrites_the_lock() {
         "[package]\nname = \"acme/up\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(dep_repo.join("m.noe"), "namespace up.core;\npub fn v(): int { return 7; }\n")
-        .unwrap();
+    std::fs::write(
+        dep_repo.join("m.noe"),
+        "namespace up.core;\npub fn v(): int { return 7; }\n",
+    )
+    .unwrap();
     git_in(&["add", "."], &dep_repo);
     git_in(&["commit", "-q", "-m", "r"], &dep_repo);
     git_in(&["tag", "v1.0.0"], &dep_repo);
@@ -2460,8 +2513,14 @@ fn a_git_dependency_is_pinned_and_reproduces_offline() {
 
     // The lock pins the git source + commit SHA.
     let lock = std::fs::read_to_string(app.join("noeta.lock")).expect("lock written");
-    assert!(lock.contains("acme/pinned"), "lock names the package: {lock}");
-    assert!(lock.contains("source = \"git\""), "lock records the git source: {lock}");
+    assert!(
+        lock.contains("acme/pinned"),
+        "lock names the package: {lock}"
+    );
+    assert!(
+        lock.contains("source = \"git\""),
+        "lock records the git source: {lock}"
+    );
     assert!(lock.contains("sha = "), "lock pins a commit SHA: {lock}");
 
     // Delete the remote repo entirely; the pinned tree already lives in the store, so a second run

@@ -286,8 +286,7 @@ impl DocumentStore {
         // module as a `DepModule` input (SourceIds continue past the siblings), so cross-package
         // `use <dep-key>.…` resolves in hover/goto/completion exactly as the CLI resolves it.
         let deps = self.resolve_dep_modules(uri, programs.len() as u32);
-        let workspace =
-            Workspace::new(&self.db, programs[0], programs[1..].to_vec(), deps.modules);
+        let workspace = Workspace::new(&self.db, programs[0], programs[1..].to_vec(), deps.modules);
         self.workspaces.insert(
             uri.to_string(),
             WorkspaceCache {
@@ -356,12 +355,8 @@ impl DocumentStore {
                 .flat_map(|(local, global)| [local.clone(), global.clone()])
                 .collect();
             for module in &package.modules {
-                let src = SourceProgram::new(
-                    &self.db,
-                    next_id,
-                    module.name.clone(),
-                    module.text.clone(),
-                );
+                let src =
+                    SourceProgram::new(&self.db, next_id, module.name.clone(), module.text.clone());
                 next_id += 1;
                 deps.modules.push(DepModule::new(
                     &self.db,
@@ -825,10 +820,16 @@ impl DocumentStore {
         // Entry + siblings are indexed directly; a dependency module's SourceId continues past them
         // (see `resolve_dep_modules`), so it maps into the dep arrays (package-manager P2.1c).
         let (uri, program) = if idx < cache.programs.len() {
-            (cache.source_uris.get(idx)?.clone(), *cache.programs.get(idx)?)
+            (
+                cache.source_uris.get(idx)?.clone(),
+                *cache.programs.get(idx)?,
+            )
         } else {
             let di = idx - cache.programs.len();
-            (cache.dep_uris.get(di)?.clone(), *cache.dep_programs.get(di)?)
+            (
+                cache.dep_uris.get(di)?.clone(),
+                *cache.dep_programs.get(di)?,
+            )
         };
         let index = LineIndex::new(program.text(&self.db));
         Some((uri, index.range(span, encoding)))

@@ -89,7 +89,8 @@ impl LocalIndex {
             Some(dir) => PathBuf::from(dir),
             None => noeta_cache::Cache::locate()
                 .ok_or_else(|| {
-                    "cannot locate a registry directory (set NOETA_REGISTRY_DIR or HOME)".to_string()
+                    "cannot locate a registry directory (set NOETA_REGISTRY_DIR or HOME)"
+                        .to_string()
                 })?
                 .join("registry"),
         };
@@ -125,8 +126,7 @@ impl Index for LocalIndex {
             for entry in entries {
                 let Some(t) = entry.as_table() else { continue };
                 let get = |k: &str| t.get(k).and_then(|v| v.as_str());
-                if let (Some(ver), Some(url), Some(tag)) =
-                    (get("version"), get("url"), get("tag"))
+                if let (Some(ver), Some(url), Some(tag)) = (get("version"), get("url"), get("tag"))
                     && let Ok(version) = Version::parse(ver)
                 {
                     out.push((
@@ -193,9 +193,15 @@ mod tests {
     #[test]
     fn publish_then_resolve_picks_highest_match() {
         let index = mem("pick_highest");
-        index.publish("guzzle/http", &Version::new(1, 0, 0), &coords("v1.0.0")).unwrap();
-        index.publish("guzzle/http", &Version::new(1, 4, 0), &coords("v1.4.0")).unwrap();
-        index.publish("guzzle/http", &Version::new(2, 0, 0), &coords("v2.0.0")).unwrap();
+        index
+            .publish("guzzle/http", &Version::new(1, 0, 0), &coords("v1.0.0"))
+            .unwrap();
+        index
+            .publish("guzzle/http", &Version::new(1, 4, 0), &coords("v1.4.0"))
+            .unwrap();
+        index
+            .publish("guzzle/http", &Version::new(2, 0, 0), &coords("v2.0.0"))
+            .unwrap();
 
         let (version, c) =
             resolve_coords(&index, "guzzle/http", &VersionReq::parse("^1.0").unwrap()).unwrap();
@@ -206,9 +212,11 @@ mod tests {
     #[test]
     fn resolve_reports_no_match_and_unknown() {
         let index = mem("no_match");
-        index.publish("guzzle/http", &Version::new(1, 0, 0), &coords("v1.0.0")).unwrap();
-        let err = resolve_coords(&index, "guzzle/http", &VersionReq::parse("^2").unwrap())
-            .unwrap_err();
+        index
+            .publish("guzzle/http", &Version::new(1, 0, 0), &coords("v1.0.0"))
+            .unwrap();
+        let err =
+            resolve_coords(&index, "guzzle/http", &VersionReq::parse("^2").unwrap()).unwrap_err();
         assert!(err.contains("no version"), "{err}");
         let err = resolve_coords(&index, "who/dis", &VersionReq::parse("^1").unwrap()).unwrap_err();
         assert!(err.contains("no package"), "{err}");
@@ -217,9 +225,13 @@ mod tests {
     #[test]
     fn republishing_a_version_with_new_coords_is_rejected() {
         let index = mem("republish");
-        index.publish("a/b", &Version::new(1, 0, 0), &coords("v1.0.0")).unwrap();
+        index
+            .publish("a/b", &Version::new(1, 0, 0), &coords("v1.0.0"))
+            .unwrap();
         // Same coords: idempotent.
-        index.publish("a/b", &Version::new(1, 0, 0), &coords("v1.0.0")).unwrap();
+        index
+            .publish("a/b", &Version::new(1, 0, 0), &coords("v1.0.0"))
+            .unwrap();
         // Different coords for a published version: rejected (immutable).
         let err = index
             .publish("a/b", &Version::new(1, 0, 0), &coords("v9.9.9"))

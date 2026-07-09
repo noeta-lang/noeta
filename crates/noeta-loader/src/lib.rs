@@ -371,8 +371,7 @@ pub fn link_with_deps(
 
     let sibling_refs: Vec<&Program> = sibling_programs.iter().collect();
     let dep_refs: Vec<&Program> = dep_programs.iter().collect();
-    let program =
-        link_parsed_with_deps(&entry, &entry_parsed.program, &sibling_refs, &dep_refs)?;
+    let program = link_parsed_with_deps(&entry, &entry_parsed.program, &sibling_refs, &dep_refs)?;
     Ok(Linked {
         program,
         entry,
@@ -756,7 +755,10 @@ mod tests {
         let entry = "use webclient.client.Client;\nc = Client { body: Body { text: \"hi\" } };\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
         assert!(has_class(&linked, "Client"));
-        assert!(has_class(&linked, "Body"), "the package-internal Body must be linked in");
+        assert!(
+            has_class(&linked, "Body"),
+            "the package-internal Body must be linked in"
+        );
     }
 
     #[test]
@@ -781,7 +783,8 @@ mod tests {
             )],
             dep_renames: Default::default(),
         };
-        let entry = "use alpha.core.Ping;\nuse beta.core.Pong;\np = Ping { n: 1 };\nq = Pong { n: 2 };\n";
+        let entry =
+            "use alpha.core.Ping;\nuse beta.core.Pong;\np = Ping { n: 1 };\nq = Pong { n: 2 };\n";
         let linked = link_with_deps("main.noe", entry, &[], &[a, b]).unwrap();
         assert!(has_class(&linked, "Ping"));
         assert!(has_class(&linked, "Pong"));

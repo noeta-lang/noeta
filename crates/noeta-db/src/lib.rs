@@ -681,12 +681,19 @@ mod tests {
         };
         let ws = workspace_with_deps(&db, &entry, &[], std::slice::from_ref(&dep));
         let linked = linked(&db, ws);
-        assert!(linked.0.is_ok(), "cross-package use must resolve: {:?}", linked.0);
+        assert!(
+            linked.0.is_ok(),
+            "cross-package use must resolve: {:?}",
+            linked.0
+        );
         // The dependency's `greeting` fn was merged into the linked program (and its `use` no longer
         // survives as an unresolved import).
         let program = linked.0.as_ref().unwrap();
         assert!(
-            program.stmts.iter().any(|s| format!("{s:?}").contains("greeting")),
+            program
+                .stmts
+                .iter()
+                .any(|s| format!("{s:?}").contains("greeting")),
             "the dependency's greeting declaration must be linked in"
         );
     }
