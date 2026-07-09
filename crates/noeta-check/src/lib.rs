@@ -3065,19 +3065,40 @@ impl Checker {
             );
             return;
         }
-        // Conflicts, reported on the binding (the textually-later party): a bundle method may
-        // not collide with the target's own declared methods, nor with a method an earlier
-        // binding already contributed.
+        // Conflicts, reported on the binding (the textually-later party). Receiver-aware: an
+        // Element method lives on `T` — it may not collide with the target's own methods or
+        // fields; a Bulk method lives on `List<T>` — it may not shadow a built-in list method
+        // (the one namespace it joins). Cross-bundle collisions check within either kind.
         let mut conflicts: Vec<String> = Vec::new();
         for m in bundle.methods {
-            if self
-                .methods
-                .contains_key(&(decl.target.clone(), m.sig.name.to_string()))
-            {
-                conflicts.push(format!(
-                    "`{}` already declares a method `{}`",
-                    decl.target, m.sig.name
-                ));
+            match m.receiver {
+                noeta_stdlib::BundleReceiver::Element => {
+                    if self
+                        .methods
+                        .contains_key(&(decl.target.clone(), m.sig.name.to_string()))
+                    {
+                        conflicts.push(format!(
+                            "`{}` already declares a method `{}`",
+                            decl.target, m.sig.name
+                        ));
+                    }
+                    if self
+                        .records
+                        .get(&decl.target)
+                        .is_some_and(|fields| fields.iter().any(|(f, _)| f == m.sig.name))
+                    {
+                        conflicts.push(format!(
+                            "`{}` already declares a field `{}`",
+                            decl.target, m.sig.name
+                        ));
+                    }
+                }
+                noeta_stdlib::BundleReceiver::Bulk => {
+                    if stdlib::method_return(&Type::List(Box::new(Type::Dyn)), m.sig.name).is_some()
+                    {
+                        conflicts.push(format!("`{}` is a built-in list method", m.sig.name));
+                    }
+                }
             }
         }
         for earlier in self.bundle_impls.get(&decl.target).into_iter().flatten() {

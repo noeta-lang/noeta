@@ -9,6 +9,11 @@
 // expect: stdout "[5.0]"
 // expect: stdout "12.0"
 // expect: stdout "[]"
+// expect: stdout "5.0"
+// expect: stdout "3.0"
+// expect: stdout "V3 {x: 4.0, y: 4.0, z: 0.0}"
+// expect: stdout "V3 {x: 6.0, y: 8.0, z: 0.0}"
+// expect: stdout "V3 {x: 0.6, y: 0.8, z: 0.0}"
 // expect: exit 0
 use std.{vec}
 
@@ -36,3 +41,13 @@ echo bright[0].y
 // An EMPTY receiver dispatches (the route is call-site-resolved, not shape-discovered).
 empty: List<V3> = []
 echo empty.length_all()
+
+// Element methods: scalar Vec3 math on ONE bound value — `v.dot(w)` ≡ `vec.dot(v, w)`, with
+// shape-relative results built from the receiver's own shape.
+v = V3 { x: 3.0f32, y: 4.0f32, z: 0.0f32 }
+w = V3 { x: 1.0f32, y: 0.0f32, z: 0.0f32 }
+echo v.length()
+echo v.dot(w)
+echo v.add(w)
+echo v.scale(2.0f32)
+echo v.normalize()

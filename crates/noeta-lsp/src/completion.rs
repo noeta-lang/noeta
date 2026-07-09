@@ -422,9 +422,11 @@ mod tests {
             "detail names the bundle: {detail:?}"
         );
         let element = bundle_members(&bindings, noeta_stdlib::BundleReceiver::Element);
+        let element_labels: Vec<&str> = element.iter().map(|c| c.label.as_str()).collect();
+        assert!(element_labels.contains(&"dot"), "got {element_labels:?}");
         assert!(
-            element.is_empty(),
-            "vec.Kernels declares no Element methods yet"
+            !element_labels.contains(&"dot_all"),
+            "Bulk methods stay off the element receiver"
         );
     }
 

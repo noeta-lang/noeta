@@ -445,6 +445,56 @@ pub(crate) const VEC_KERNELS: ExtBundle = ExtBundle {
         layout: ConstraintLayout::Any,
     },
     methods: &[
+        // --- Element methods (`v.dot(w)` on a single bound value) ---
+        BundleFn {
+            sig: ExtFn {
+                name: "add",
+                params: &[SigType::Dyn],
+                ret: RetTy::SameAsArg(0),
+            },
+            receiver: BundleReceiver::Element,
+        },
+        BundleFn {
+            sig: ExtFn {
+                name: "sub",
+                params: &[SigType::Dyn],
+                ret: RetTy::SameAsArg(0),
+            },
+            receiver: BundleReceiver::Element,
+        },
+        BundleFn {
+            sig: ExtFn {
+                name: "scale",
+                params: &[SigType::Dyn],
+                ret: RetTy::SameAsArg(0),
+            },
+            receiver: BundleReceiver::Element,
+        },
+        BundleFn {
+            sig: ExtFn {
+                name: "normalize",
+                params: &[],
+                ret: RetTy::SameAsArg(0),
+            },
+            receiver: BundleReceiver::Element,
+        },
+        BundleFn {
+            sig: ExtFn {
+                name: "dot",
+                params: &[SigType::Dyn],
+                ret: RetTy::Concrete(SigType::F32),
+            },
+            receiver: BundleReceiver::Element,
+        },
+        BundleFn {
+            sig: ExtFn {
+                name: "length",
+                params: &[],
+                ret: RetTy::Concrete(SigType::F32),
+            },
+            receiver: BundleReceiver::Element,
+        },
+        // --- Bulk methods (`xs.dot_all(ys)` on a List of the bound type) ---
         BundleFn {
             sig: ExtFn {
                 name: "add_all",
@@ -489,18 +539,86 @@ pub(crate) const VEC_KERNELS: ExtBundle = ExtBundle {
     ctx_dispatch: vec_bundle_dispatch,
 };
 
-/// The bundle's dispatch: prepend the receiver and run the exact module dispatch —
-/// `xs.dot_all(ys)` and `vec.dot_all(xs, ys)` are one code path by construction.
+/// The bundle's dispatch. Bulk methods prepend the receiver and run the exact module dispatch —
+/// `xs.dot_all(ys)` and `vec.dot_all(xs, ys)` are one code path by construction; element methods
+/// compute over the receiver value's fields directly (the deep view projects an object as a
+/// field map).
 fn vec_bundle_dispatch(
     method: &str,
     ctx: &mut dyn NativeCtx,
     recv: Slot,
     args: &[Slot],
 ) -> Result<CtxOut, CtxError> {
-    let mut all = Vec::with_capacity(args.len() + 1);
-    all.push(recv);
-    all.extend_from_slice(args);
-    vec_ctx_dispatch(method, ctx, &all)
+    match method {
+        "add" | "sub" | "scale" | "normalize" | "dot" | "length" => {
+            vec_element_dispatch(method, ctx, recv, args)
+        }
+        _ => {
+            let mut all = Vec::with_capacity(args.len() + 1);
+            all.push(recv);
+            all.extend_from_slice(args);
+            vec_ctx_dispatch(method, ctx, &all)
+        }
+    }
+}
+
+/// Read a bound element value — an object of exactly three `f32` fields — through the deep view.
+fn read_vec3_deep(ctx: &mut dyn NativeCtx, func: &str, slot: Slot) -> Result<[f32; 3], CtxError> {
+    if let NativeValue::Map(fields) = ctx.view(slot)?
+        && let [
+            (_, NativeValue::Scalar(Scalar::F32(x))),
+            (_, NativeValue::Scalar(Scalar::F32(y))),
+            (_, NativeValue::Scalar(Scalar::F32(z))),
+        ] = fields.as_slice()
+    {
+        return Ok([*x, *y, *z]);
+    }
+    let found = ctx.type_name(slot)?;
+    Err(arg_error(format!(
+        "`vec.{func}` expects a Vec3 (a struct of three f32 fields), found {found}"
+    )))
+}
+
+/// The element half of `vec.Kernels`: scalar Vec3 math on one bound value. Shape-relative
+/// results ride `NativeOut::Object` — the receiver-at-0 convention supplies the shape.
+fn vec_element_dispatch(
+    method: &str,
+    ctx: &mut dyn NativeCtx,
+    recv: Slot,
+    args: &[Slot],
+) -> Result<CtxOut, CtxError> {
+    let a = read_vec3_deep(ctx, method, recv)?;
+    let object = |c: [f32; 3]| CtxOut::Out(NativeOut::Object(f32_fields(c).to_vec()));
+    let scalar = |f: f32| CtxOut::Out(NativeOut::Scalar(Scalar::F32(f)));
+    Ok(match method {
+        "length" => {
+            ctx_arity(method, args, 0)?;
+            scalar(length(a))
+        }
+        "normalize" => {
+            ctx_arity(method, args, 0)?;
+            object(normalize(a))
+        }
+        "scale" => {
+            ctx_arity(method, args, 1)?;
+            let k = read_factor(ctx, method, args[0])?;
+            object(scale(a, k))
+        }
+        "dot" => {
+            ctx_arity(method, args, 1)?;
+            scalar(dot(a, read_vec3_deep(ctx, method, args[0])?))
+        }
+        "add" | "sub" => {
+            ctx_arity(method, args, 1)?;
+            let b = read_vec3_deep(ctx, method, args[0])?;
+            object(if method == "add" {
+                add(a, b)
+            } else {
+                sub(a, b)
+            })
+        }
+        _ => return Err(crate::no_method_error("vec.Kernels", method).into()),
+    })
 }
 
 /// The bulk kernels' signatures. Structural arguments are `Dyn` (any 3-`f32`-field struct is a

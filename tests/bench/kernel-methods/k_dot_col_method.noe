@@ -1,0 +1,22 @@
+// K5 gate: column dot in METHOD form (2048 elements × 3000 calls) vs pm-native/v_dot_col.noe.
+use std.{vec}
+
+@packed(layout: column) struct V3 { x: f32; y: f32; z: f32 }
+impl vec.Kernels for V3 {}
+
+mut xs = [V3 { x: 1.5f32, y: 2.5f32, z: 3.5f32 }]
+mut d = 0
+while d < 11 {
+    xs = xs ~ xs
+    d = d + 1
+}
+ys = xs
+
+mut total = 0.0f32
+mut k = 0
+while k < 3000 {
+    r = xs.dot_all(ys)
+    total = total + r[2047]
+    k = k + 1
+}
+echo "total=${total}"
