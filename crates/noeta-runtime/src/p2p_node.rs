@@ -1080,6 +1080,57 @@ mod tests {
         assert_ne!(ephemeral.crypto_group_id().expect("group id"), group_id);
     }
 
+    /// P3.4b.3: two **real** nodes converge on **encrypted** state over the live transport. Both
+    /// open the same encrypted group (the member set is the two node ids); the elected creator
+    /// welcomes the other as key bundles flow, then publishes a secret that the other decrypts —
+    /// the QUIC-over-iroh counterpart of the hermetic `EncryptedGroup` relay test. Not hermetic
+    /// (real mDNS multicast + networking), so `#[ignore]`; run explicitly:
+    /// `cargo test -p noeta-runtime --features ring-p2p -- --ignored two_nodes_converge_encrypted`.
+    #[test]
+    #[ignore = "needs real networking (mDNS multicast); run explicitly"]
+    fn two_nodes_converge_on_encrypted_state() {
+        let a = P2pNode::start_with_config(P2pConfig::ephemeral()).expect("node a");
+        let b = P2pNode::start_with_config(P2pConfig::ephemeral()).expect("node b");
+        let members = vec![
+            a.crypto_group_id().expect("a id"),
+            b.crypto_group_id().expect("b id"),
+        ];
+        let a_is_creator = a.crypto_group_id().unwrap() == *members.iter().min().unwrap();
+
+        let sub_a = a.group_open("secure/room", &members).expect("a opens group");
+        let sub_b = b.group_open("secure/room", &members).expect("b opens group");
+        // Give discovery + the key-bundle/welcome handshake time to flow; polling both drives it
+        // (each poll processes received ops and broadcasts any welcomes).
+        for _ in 0..50 {
+            let _ = a.group_poll(sub_a);
+            let _ = b.group_poll(sub_b);
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        // The creator publishes (it is welcomed by construction); the other polls until it decrypts.
+        let secret = b"converged encrypted secret".to_vec();
+        let (publisher, reader, reader_sub) = if a_is_creator {
+            (&a, &b, sub_b)
+        } else {
+            (&b, &a, sub_a)
+        };
+        publisher
+            .group_publish("secure/room", secret.clone())
+            .expect("creator publishes");
+
+        let mut received = None;
+        for _ in 0..150 {
+            // Poll the publisher too, so it keeps servicing the handshake.
+            let _ = publisher.group_poll(if a_is_creator { sub_a } else { sub_b });
+            if let Some(bytes) = reader.group_poll(reader_sub).expect("reader polls") {
+                received = Some(bytes);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(received.as_deref(), Some(&secret[..]));
+    }
+
     #[test]
     fn sanitize_maps_unsafe_bytes_to_one_segment() {
         assert_eq!(sanitize_segment("acme/chat"), "acme-chat");
