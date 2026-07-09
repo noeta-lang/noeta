@@ -2917,6 +2917,14 @@ fn composed_toolchain_end_to_end() {
     let entry = composed_project("pm_compose_e2e");
     let app = entry.parent().unwrap().to_path_buf();
 
+    // Step 1 asserts a compose-cache MISS, but the shared test cache dir outlives test
+    // invocations — once the binary and fixture are both stable, a second `cargo test` would hit
+    // the previous run's entry and see no banner. Clear the compose cache (only) for idempotence;
+    // the step-2 hit is then proven within this run.
+    let _ = std::fs::remove_dir_all(
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("noeta-cache/compose"),
+    );
+
     // 1. First run: composes (banner on stderr), then dispatches the native module, the extern
     //    type's plain methods, the higher-order ctx method, and the raw-buffer kernels (N3.4:
     //    `sum_r` reduces the app's own @packed column type; `brighten_all` produces a new list
