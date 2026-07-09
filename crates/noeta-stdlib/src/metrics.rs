@@ -183,6 +183,12 @@ fn observe(
     args: &[NativeValue],
     with_attrs: bool,
 ) -> Result<NativeOut, StdError> {
+    // Free when metrics are disabled (real host, no endpoint): no aggregation, no unbounded store
+    // growth for a program that records into instruments it never exports. The sandbox recorder is
+    // always enabled, so the parity oracle still observes every measurement.
+    if !host.tel_metrics_enabled() {
+        return Ok(NativeOut::Unit);
+    }
     let expected = if with_attrs { 2 } else { 1 };
     if args.len() != expected {
         return Err(arity_error(method, expected, args.len()));

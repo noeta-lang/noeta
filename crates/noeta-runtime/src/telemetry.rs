@@ -99,9 +99,10 @@ impl OtlpExporter {
         logs_to_json(records, &self.service_name)
     }
 
-    /// The OTLP/JSON `ExportMetricsServiceRequest` body for collected `metrics`.
-    pub(crate) fn metrics_request_body(&self, metrics: &[MetricData]) -> Value {
-        metrics_to_json(metrics, &self.service_name)
+    /// The `service.name` — the periodic metrics reader clones it into its own thread (it builds
+    /// request bodies off the interpreter thread).
+    pub(crate) fn service_name(&self) -> &str {
+        &self.service_name
     }
 }
 
