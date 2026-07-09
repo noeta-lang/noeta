@@ -16,13 +16,20 @@ use serde_json::{Value, json};
 /// batch processor is a later slice).
 pub(crate) const FLUSH_THRESHOLD: usize = 512;
 
-/// A configured OTLP/HTTP-JSON traces exporter. Present only when an endpoint is configured.
+/// A configured OTLP/HTTP-JSON exporter, shared by all three telemetry signals. Present when **any**
+/// signal has a resolved endpoint; each signal's endpoint is `Some` only when that signal is enabled
+/// (a base endpoint is set and the signal isn't turned off via `OTEL_{SIGNAL}_EXPORTER=none`, or a
+/// signal-specific endpoint is set). Headers and `service.name` are shared across signals.
 pub(crate) struct OtlpExporter {
-    /// The full traces endpoint URL (`.../v1/traces`).
-    pub(crate) traces_endpoint: String,
-    /// Extra headers (e.g. an auth token), from `OTEL_EXPORTER_OTLP_HEADERS`.
+    /// The full traces endpoint URL (`.../v1/traces`), or `None` when traces are disabled.
+    pub(crate) traces_endpoint: Option<String>,
+    /// The full logs endpoint URL (`.../v1/logs`), or `None` when logs are disabled.
+    pub(crate) logs_endpoint: Option<String>,
+    /// The full metrics endpoint URL (`.../v1/metrics`), or `None` when metrics are disabled.
+    pub(crate) metrics_endpoint: Option<String>,
+    /// Extra headers (e.g. an auth token), from `OTEL_EXPORTER_OTLP_HEADERS`. Shared across signals.
     pub(crate) headers: Vec<(String, String)>,
-    /// `service.name` resource attribute.
+    /// `service.name` resource attribute. Shared across signals.
     service_name: String,
 }
 
@@ -31,6 +38,8 @@ impl std::fmt::Debug for OtlpExporter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OtlpExporter")
             .field("traces_endpoint", &self.traces_endpoint)
+            .field("logs_endpoint", &self.logs_endpoint)
+            .field("metrics_endpoint", &self.metrics_endpoint)
             .field(
                 "headers",
                 &format_args!("<{} redacted>", self.headers.len()),
@@ -41,24 +50,27 @@ impl std::fmt::Debug for OtlpExporter {
 }
 
 impl OtlpExporter {
-    /// Build from the environment, or `None` if no OTLP endpoint is configured (the null sink).
-    /// `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` wins; else `OTEL_EXPORTER_OTLP_ENDPOINT` with the
-    /// conventional `/v1/traces` path appended.
+    /// Build from the environment, or `None` if no OTLP endpoint is configured for any signal (the
+    /// null sink). The master switch is `OTEL_EXPORTER_OTLP_ENDPOINT` (base, with `/v1/{signal}`
+    /// appended per signal); a signal-specific `OTEL_EXPORTER_OTLP_{SIGNAL}_ENDPOINT` wins for that
+    /// signal (used verbatim) and can enable one signal on its own. Any signal can be turned off with
+    /// `OTEL_{SIGNAL}_EXPORTER=none` even when a base is set.
     pub(crate) fn from_env() -> Option<OtlpExporter> {
         // The standard global kill switch (OTel spec): `OTEL_SDK_DISABLED=true` forces the null sink
         // even when an endpoint is configured — the opt-out for auto-instrumentation.
         if std::env::var("OTEL_SDK_DISABLED").is_ok_and(|v| v.eq_ignore_ascii_case("true")) {
             return None;
         }
-        let traces_endpoint = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        let base = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
             .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .map(|base| format!("{}/v1/traces", base.trim_end_matches('/')))
-            })?;
+            .filter(|s| !s.is_empty());
+        let traces_endpoint = signal_endpoint(base.as_deref(), "traces");
+        let logs_endpoint = signal_endpoint(base.as_deref(), "logs");
+        let metrics_endpoint = signal_endpoint(base.as_deref(), "metrics");
+        // No signal resolved to an endpoint ⇒ the null sink, exactly as an unset base was before.
+        if traces_endpoint.is_none() && logs_endpoint.is_none() && metrics_endpoint.is_none() {
+            return None;
+        }
         let headers = std::env::var("OTEL_EXPORTER_OTLP_HEADERS")
             .ok()
             .map(|s| parse_headers(&s))
@@ -67,6 +79,8 @@ impl OtlpExporter {
             std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "noeta".to_string());
         Some(OtlpExporter {
             traces_endpoint,
+            logs_endpoint,
+            metrics_endpoint,
             headers,
             service_name,
         })
@@ -76,6 +90,29 @@ impl OtlpExporter {
     pub(crate) fn request_body(&self, spans: &[SpanData]) -> Value {
         spans_to_json(spans, &self.service_name)
     }
+}
+
+/// Resolve one signal's endpoint from the environment. A signal-specific
+/// `OTEL_EXPORTER_OTLP_{SIGNAL}_ENDPOINT` is used verbatim; otherwise `base` gets `/v1/{signal}`
+/// appended. `OTEL_{SIGNAL}_EXPORTER=none` disables the signal outright. `signal` is the lowercase
+/// path segment (`traces`/`logs`/`metrics`); the env var infix is its uppercase form.
+fn signal_endpoint(base: Option<&str>, signal: &str) -> Option<String> {
+    let upper = signal.to_ascii_uppercase();
+    if std::env::var(format!("OTEL_{upper}_EXPORTER")).is_ok_and(|v| v.eq_ignore_ascii_case("none")) {
+        return None;
+    }
+    if let Some(ep) = std::env::var(format!("OTEL_EXPORTER_OTLP_{upper}_ENDPOINT"))
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        return Some(ep);
+    }
+    base.map(|b| format!("{}/v1/{signal}", b.trim_end_matches('/')))
+}
+
+/// The OTLP `resource` object carrying `service.name` — shared by all three signals' request bodies.
+pub(crate) fn resource(service_name: &str) -> Value {
+    json!({ "attributes": [attr_kv("service.name", &AttrValue::Str(service_name.into()))] })
 }
 
 /// Parse `OTEL_EXPORTER_OTLP_HEADERS` (`k1=v1,k2=v2`) into pairs, skipping malformed entries.
@@ -100,9 +137,7 @@ pub(crate) fn spans_to_json(spans: &[SpanData], service_name: &str) -> Value {
     let spans_json: Vec<Value> = spans.iter().map(span_to_json).collect();
     json!({
         "resourceSpans": [{
-            "resource": {
-                "attributes": [attr_kv("service.name", &AttrValue::Str(service_name.into()))]
-            },
+            "resource": resource(service_name),
             "scopeSpans": [{
                 "scope": { "name": "noeta", "version": env!("CARGO_PKG_VERSION") },
                 "spans": spans_json

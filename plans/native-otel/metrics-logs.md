@@ -230,6 +230,16 @@ new deps — reuses `reqwest` + `serde_json` already compiled; all under the exi
   default 60s; final flush at teardown). Sandbox unaffected (teardown-only). *Perf gate:* metrics-off a
   hot `counter.add` loop is ~free (gated on `tel_metrics_enabled`); metrics-on within a stated budget
   (aggregation is a map insert + add, off any export path). Report A/B like the tracing gates.
+- **M3** Metrics **auto-instrumentation on `server.serve`** *(in-arc — confirmed with user)*: the metrics
+  twin of T4's SERVER span. Each accepted request records the OTel-semantic-convention
+  `http.server.request.duration` **histogram** (unit `s`, attributes `http.request.method` /
+  `http.route` / `http.response.status_code`) and maintains an `http.server.active_requests`
+  **UpDownCounter** (+1 on accept, −1 on completion). Rides the same connection hook as the SERVER span
+  (`std.http.server` serve loop), gated on `tel_metrics_enabled` so it's free when metrics are off.
+  *Gate:* sink-parity oracle — byte-identical `MetricData` (one histogram series per method/route/status,
+  active-requests returning to 0) across both backends when a handler runs under the sandbox server; the
+  auto-metrics nest with, and reuse the same request boundary as, the existing SERVER-span
+  auto-instrumentation. Leak-0.
 
 **Phase D — close-out**
 - **D0** Docs: `docs/Observability.md` drops the "tracing, not metrics/logs" caveat and gains logs +
@@ -240,8 +250,7 @@ new deps — reuses `reqwest` + `serde_json` already compiled; all under the exi
 ## Optional / deferred (name explicitly, don't silently cut)
 - **Async/observable instruments** (`ObservableCounter`/`Gauge` with callbacks) — sync instruments first.
 - **Histogram views / custom buckets / delta temporality** — defaults only in this arc.
-- **Metrics auto-instrumentation** (e.g. `http.server.request.duration` on `server.serve`, the metrics
-  twin of T4's SERVER span) — a natural M3, decide with the user whether it's in-arc.
+- ~~**Metrics auto-instrumentation** on `server.serve`~~ — **in-arc as M3** (confirmed with user).
 - **stdout/structured-logging bridge** — logs stay OTel-export-only here (§decision 3).
 - **Sampling / cardinality limits** — always-on; a hard attribute-set cap is a later policy slice.
 

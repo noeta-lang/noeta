@@ -211,3 +211,33 @@ pub trait Tracing {
     /// Releasing a non-remote or already-released id is a no-op.
     fn tel_release_remote(&mut self, span: SpanId);
 }
+
+/// **Logging** capability (native OTEL) — the second of three telemetry signals, sibling to
+/// [`Tracing`] and [`Metrics`]. Emits OTel `LogRecord`s: structured, exported log lines
+/// **auto-correlated** to the active span (the record carries the current [`TraceContext`], read
+/// from the SDK's task-local context stack), *not* a `print` bridge. Write-only like the other
+/// signals — never differential-tested, held by the same byte-identical parity oracle.
+///
+/// P0 lands only the enable gate; [`Self::log_emit`] and the `LogRecord` ABI arrive with Phase L.
+pub trait Logging {
+    /// Whether the logs signal is active — an OTLP logs endpoint is configured (real host) or the
+    /// recorder is on (sandbox). The `std.log` module gates on this so a program that never
+    /// configures a logs endpoint pays nothing per `log.info(...)`, mirroring [`Tracing::tel_enabled`].
+    fn tel_logs_enabled(&self) -> bool;
+}
+
+/// **Metrics** capability (native OTEL) — the third telemetry signal, sibling to [`Tracing`] and
+/// [`Logging`]. Unlike spans and logs (emit-and-forget), instruments are **long-lived and
+/// host-owned**: `metric_get_or_create` is idempotent on name, aggregation (counter sums, histogram
+/// buckets) lives entirely host-side keyed by attribute-set, and collection snapshots the aggregation
+/// for export (sandbox: at teardown only, for determinism; real host: on a periodic reader + a final
+/// teardown flush). Write-only like the other signals.
+///
+/// P0 lands only the enable gate; the instrument ABI + aggregation methods arrive with Phase M.
+pub trait Metrics {
+    /// Whether the metrics signal is active — an OTLP metrics endpoint is configured (real host) or
+    /// the recorder is on (sandbox). `std.metrics` and the `server.serve` auto-instrumentation gate
+    /// on this so a hot `counter.add(...)` loop is free when metrics are off, mirroring
+    /// [`Tracing::tel_enabled`].
+    fn tel_metrics_enabled(&self) -> bool;
+}

@@ -30,9 +30,9 @@ mod telemetry;
 use compact_str::CompactString;
 use noeta_stdlib::net::accept_outcome;
 use noeta_stdlib::{
-    AttrValue, Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, NativeOut,
-    NetRequest, NetResponse, Network, P2p, ReadSource, RealBody, Rng, SpanData, SpanEvent, SpanId,
-    SpanKind, SpanStatus, StdError, Tracing, TraceContext,
+    AttrValue, Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, Logging,
+    Metrics, NativeOut, NetRequest, NetResponse, Network, P2p, ReadSource, RealBody, Rng, SpanData,
+    SpanEvent, SpanId, SpanKind, SpanStatus, StdError, Tracing, TraceContext,
 };
 // Only the outbound-client (`ring-http-client`) path builds an `ExternBox` response body.
 #[cfg(feature = "ring-http-client")]
@@ -823,11 +823,15 @@ impl Env for RealHost {
 
 impl Tracing for RealHost {
     fn tel_enabled(&self) -> bool {
-        // On when an OTLP endpoint is configured (and the `telemetry` feature is compiled in);
-        // otherwise the null sink, and auto-instrumentation short-circuits.
+        // On when an OTLP **traces** endpoint is configured (and the `telemetry` feature is compiled
+        // in); otherwise the null sink, and auto-instrumentation short-circuits. Traces can be turned
+        // off independently of logs/metrics via `OTEL_TRACES_EXPORTER=none`.
         #[cfg(feature = "telemetry")]
         {
-            self.tel.exporter.is_some()
+            self.tel
+                .exporter
+                .as_ref()
+                .is_some_and(|e| e.traces_endpoint.is_some())
         }
         #[cfg(not(feature = "telemetry"))]
         {
@@ -950,13 +954,55 @@ impl Tracing for RealHost {
     }
 }
 
+impl Logging for RealHost {
+    fn tel_logs_enabled(&self) -> bool {
+        // On when an OTLP **logs** endpoint is configured (and the `telemetry` feature is compiled
+        // in). Independent of traces/metrics — one signal can be on while the others are off.
+        #[cfg(feature = "telemetry")]
+        {
+            self.tel
+                .exporter
+                .as_ref()
+                .is_some_and(|e| e.logs_endpoint.is_some())
+        }
+        #[cfg(not(feature = "telemetry"))]
+        {
+            false
+        }
+    }
+}
+
+impl Metrics for RealHost {
+    fn tel_metrics_enabled(&self) -> bool {
+        // On when an OTLP **metrics** endpoint is configured (and the `telemetry` feature is compiled
+        // in). Independent of traces/logs — one signal can be on while the others are off.
+        #[cfg(feature = "telemetry")]
+        {
+            self.tel
+                .exporter
+                .as_ref()
+                .is_some_and(|e| e.metrics_endpoint.is_some())
+        }
+        #[cfg(not(feature = "telemetry"))]
+        {
+            false
+        }
+    }
+}
+
 impl RealHost {
-    /// Route an ended span to the exporter (feature on + endpoint configured) or drop it (null
-    /// sink / feature off). Buffers and flushes in minimal batches.
+    /// Route an ended span to the exporter (feature on + traces endpoint configured) or drop it
+    /// (null sink / feature off). Buffers and flushes in minimal batches.
     #[cfg(feature = "telemetry")]
     fn record_ended_span(&mut self, span: SpanData) {
-        if self.tel.exporter.is_none() {
-            return; // null sink — no endpoint configured
+        // Null sink for traces — no traces endpoint (or no exporter at all).
+        if self
+            .tel
+            .exporter
+            .as_ref()
+            .is_none_or(|e| e.traces_endpoint.is_none())
+        {
+            return;
         }
         self.tel.buffer.push(span);
         if self.tel.buffer.len() >= telemetry::FLUSH_THRESHOLD {
@@ -971,25 +1017,31 @@ impl RealHost {
     /// export failure never affects the program (telemetry is a side effect).
     #[cfg(feature = "telemetry")]
     fn flush_telemetry(&mut self) {
-        let Some(exporter) = self.tel.exporter.as_ref() else {
+        let Some((endpoint, headers, body)) = self.tel.exporter.as_ref().and_then(|e| {
+            let endpoint = e.traces_endpoint.clone()?;
+            (!self.tel.buffer.is_empty())
+                .then(|| (endpoint, e.headers.clone(), e.request_body(&self.tel.buffer)))
+        }) else {
+            // No traces endpoint, or nothing buffered — drop any buffered spans and return.
             self.tel.buffer.clear();
             return;
         };
-        if self.tel.buffer.is_empty() {
-            return;
-        }
-        let body = exporter.request_body(&self.tel.buffer);
-        let endpoint = exporter.traces_endpoint.clone();
-        let headers = exporter.headers.clone();
+        self.otlp_post(&endpoint, &headers, &body);
+        self.tel.buffer.clear();
+    }
+
+    /// POST one OTLP/JSON body to `url` with `headers`, on the host's runtime. Shared by all three
+    /// signals' flush paths. Best-effort — an export failure never affects the program.
+    #[cfg(feature = "telemetry")]
+    fn otlp_post(&self, url: &str, headers: &[(String, String)], body: &serde_json::Value) {
         let http = self.http.clone();
         let _ = self.runtime.block_on(async move {
-            let mut req = http.post(&endpoint).json(&body);
-            for (k, v) in &headers {
+            let mut req = http.post(url).json(body);
+            for (k, v) in headers {
                 req = req.header(k.as_str(), v.as_str());
             }
             req.send().await
         });
-        self.tel.buffer.clear();
     }
 }
 

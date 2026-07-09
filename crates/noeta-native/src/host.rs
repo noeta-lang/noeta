@@ -220,17 +220,44 @@ pub trait P2p {
 }
 
 /// Every host-coupled effect the interpreters perform, behind one swappable seam — the union of the
-/// nine capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Entropy`], [`Ids`],
-/// [`Network`], [`P2p`], [`Tracing`](crate::Tracing)). Backends hold a `Box<dyn Host>` and reach
-/// any capability through it; a consumer that needs only one (a read handle → [`FileReader`], the RNG
-/// dispatch → [`Rng`], …) depends on that trait instead, so a partial host (e.g. a read-only test
-/// double) implements exactly what it supports rather than stubbing the rest.
+/// eleven capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Entropy`], [`Ids`],
+/// [`Network`], [`P2p`], and the three telemetry signals [`Tracing`](crate::Tracing) /
+/// [`Metrics`](crate::Metrics) / [`Logging`](crate::Logging)). Backends hold a `Box<dyn Host>` and
+/// reach any capability through it; a consumer that needs only one (a read handle → [`FileReader`],
+/// the RNG dispatch → [`Rng`], …) depends on that trait instead, so a partial host (e.g. a read-only
+/// test double) implements exactly what it supports rather than stubbing the rest.
 ///
 /// Object-safe on purpose (IO is never a hot path, so the dynamic dispatch is immaterial). The
-/// blanket impl means any type providing all nine capabilities *is* a `Host` automatically — there
-/// is nothing extra to implement.
-pub trait Host: FileSystem + Rng + Clock + Env + Entropy + Ids + Network + P2p + crate::Tracing {}
-impl<T: FileSystem + Rng + Clock + Env + Entropy + Ids + Network + P2p + crate::Tracing> Host
-    for T
+/// blanket impl means any type providing all eleven capabilities *is* a `Host` automatically — there
+/// is nothing extra to implement. Splitting telemetry into three sibling traits costs nothing at
+/// runtime: a `dyn Host` has one vtable and supertrait methods fold into it, so a call is one
+/// indirection regardless of which sub-trait declared it.
+pub trait Host:
+    FileSystem
+    + Rng
+    + Clock
+    + Env
+    + Entropy
+    + Ids
+    + Network
+    + P2p
+    + crate::Tracing
+    + crate::Metrics
+    + crate::Logging
+{
+}
+impl<
+    T: FileSystem
+        + Rng
+        + Clock
+        + Env
+        + Entropy
+        + Ids
+        + Network
+        + P2p
+        + crate::Tracing
+        + crate::Metrics
+        + crate::Logging,
+> Host for T
 {
 }

@@ -8,7 +8,7 @@
 pub use noeta_native::host::{
     Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, P2p, ReadSource, Rng,
 };
-pub use noeta_native::Tracing;
+pub use noeta_native::{Logging, Metrics, Tracing};
 
 use crate::StdError;
 use crate::env;
@@ -447,6 +447,22 @@ impl Tracing for SandboxHost {
 
     fn tel_release_remote(&mut self, span: SpanId) {
         self.tel.remote.remove(&span);
+    }
+}
+
+impl Logging for SandboxHost {
+    // The deterministic recorder is always on (like tracing), so the logs signal runs under the
+    // sandbox and conformance can assert on the emitted records.
+    fn tel_logs_enabled(&self) -> bool {
+        true
+    }
+}
+
+impl Metrics for SandboxHost {
+    // The deterministic recorder is always on (like tracing), so the metrics signal runs under the
+    // sandbox and conformance can assert on the collected series.
+    fn tel_metrics_enabled(&self) -> bool {
+        true
     }
 }
 
