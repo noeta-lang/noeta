@@ -14,6 +14,7 @@
 //! pillars (see `plans/mcp/README.md`).
 
 mod corpus;
+mod stdlib;
 
 use noeta_diagnostics::{DiagnosticCode, JsonDiagnostic, to_json};
 use noeta_span::{Source, SourceId, SourceMap};
@@ -40,6 +41,8 @@ Tools:
 unfamiliar syntax or feature.
 - `examples_find` — find real, CI-tested example programs by feature, concept, or diagnostic code. \
 Copy the idioms rather than inventing them.
+- `stdlib_api` — list the real standard-library module/function/method signatures from the \
+compiler's own registry. Call this before writing any `std.*` call — do not guess stdlib APIs.
 - `check` — type-check Noeta code and get its diagnostics (stable `E0xxx` codes, severities, source \
 spans, help). Pass code inline via `source`, or a path via `file` (sibling `.noe` modules are \
 resolved so imports type-check). Run this before claiming any Noeta code compiles.
@@ -151,6 +154,16 @@ pub struct ExampleOut {
     pub code: String,
     /// Any `E0xxx` diagnostics this example is expected to raise (empty for a passing example).
     pub expects: Vec<String>,
+}
+
+/// Arguments to `stdlib_api`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct StdlibApiArgs {
+    /// A module identity (`std.math`, or bare `math`; a prefix like `http` expands to
+    /// `std.http.client`/`std.http.server`) or an extern type name (`Uuid`, `Response`) to narrow to.
+    /// Omit to list the entire standard-library surface.
+    #[serde(default)]
+    pub module: Option<String>,
 }
 
 /// Arguments to `explain_diagnostic`.
@@ -266,6 +279,21 @@ description — copy the idioms rather than inventing them."
             .map(example_out)
             .collect();
         Json(ExamplesFindOutput { examples })
+    }
+
+    /// Enumerate the real standard-library surface so the agent stops inventing stdlib calls.
+    #[tool(
+        description = "List the real Noeta standard-library surface — module and function signatures \
+(and extern-type methods) straight from the compiler's native registry, the same source the type \
+checker uses. Pass `module` (e.g. `std.math`, `math`, `http`, or a type like `Uuid`) to narrow; \
+omit it for the whole surface. Use this instead of guessing stdlib calls — the signatures are ground \
+truth."
+    )]
+    async fn stdlib_api(
+        &self,
+        Parameters(args): Parameters<StdlibApiArgs>,
+    ) -> Json<stdlib::StdlibApiOutput> {
+        Json(stdlib::query(args.module.as_deref()))
     }
 
     /// Explain a diagnostic code with real programs that trigger it.
@@ -595,6 +623,58 @@ mod tests {
             structured["diagnostics"][0]["code"],
             serde_json::json!("E0007")
         );
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+
+    /// M2 gate fixture: drive a real MCP session and call `stdlib_api` with a module filter — the
+    /// tool is advertised and returns rendered signatures straight from the native registry.
+    #[tokio::test]
+    async fn round_trip_stdlib_api_over_a_duplex() {
+        use rmcp::model::CallToolRequestParams;
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+
+        let client = ().serve(client_io).await.expect("client initializes");
+
+        let tools = client
+            .list_tools(Default::default())
+            .await
+            .expect("tools/list");
+        assert!(
+            tools.tools.iter().any(|t| t.name == "stdlib_api"),
+            "stdlib_api tool advertised"
+        );
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "module".to_string(),
+            serde_json::Value::String("std.math".to_string()),
+        );
+        let mut params = CallToolRequestParams::default();
+        params.name = "stdlib_api".into();
+        params.arguments = Some(arguments);
+        let result = client
+            .call_tool(params)
+            .await
+            .expect("tools/call stdlib_api");
+
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["not_found"], serde_json::json!(false));
+        assert_eq!(
+            structured["modules"][0]["module"],
+            serde_json::json!("std.math")
+        );
+        let sig = structured["modules"][0]["functions"][0]["signature"]
+            .as_str()
+            .expect("a rendered signature string");
+        assert!(sig.starts_with("fn "), "signature was {sig:?}");
 
         client.cancel().await.expect("client shuts down");
         server.abort();
