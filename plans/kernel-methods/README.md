@@ -162,13 +162,17 @@ All spatial-math types live in **one package/namespace** (working name `vec`; re
   bundle method (`points.transform_all(m)`) and the flagship demo of the whole kernel machinery.
   (`Mat2` only if free; rarely used.)
 
-**Tier 2 (source-level types — the hybrid model's other half):** `Ray` (origin + dir), `Aabb`
-(min/max `Vec3`), `Plane`, `Sphere`, `Rect` — compositional `@packed` structs *of* the Tier-1 types
-(nested packed structs flatten inline, already supported) whose methods (`intersects`, `contains`,
-`closest_point`, …) are scalar math with **no bulk loops → plain Noeta methods in the package
-source, zero native code**. Deliberately so: they demonstrate that the package's Rust footprint is
-only the hot loops, everything else is language. (Bulk forms — `ray.hit_all(aabbs)` — can join a
-bundle later if profiled.)
+**Tier 2 — a separate `geometry` module (decision 2026-07-09):** `Ray` (origin + dir), `Aabb`
+(min/max `Vec3`), `Plane`, `Sphere`, `Rect` live in their own **`geometry` module**, consuming the
+core linear-algebra types — not mixed into the vec/mat/quat module. They are compositional
+`@packed` structs *of* the Tier-1 types (nested packed structs flatten inline, already supported)
+whose methods (`intersects`, `contains`, `closest_point`, …) are scalar math with **no bulk loops →
+plain Noeta methods in module source, zero native code**. Deliberately so: geometry demonstrates
+that the Rust footprint is only the hot loops, everything else is language. Same package as the
+core module or a sibling package depending on it — an eviction-time call (a sibling pure-Noeta
+package is the cleaner layering, but any geometry consumer pulls the core's native crate
+transitively anyway, so there's no toolchain saving either way). (Bulk forms —
+`ray.hit_all(aabbs)` — can join a bundle later if profiled.)
 
 **Deferred (with triggers):** integer vectors (`IVec2`/`IVec3` — grid/texel coords; trigger: demand),
 `f64` vectors (trigger: scientific use), `Transform`/affine TRS type (Mat4 covers v1; trigger:
