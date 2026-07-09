@@ -306,8 +306,8 @@ impl P2p for SandboxHost {
         Ok(self.p2p.poll_default(topic))
     }
 
-    fn p2p_subscribe(&mut self, topic: &str) -> u64 {
-        self.p2p.subscribe(topic)
+    fn p2p_subscribe(&mut self, topic: &str) -> Result<u64, StdError> {
+        Ok(self.p2p.subscribe(topic))
     }
 
     fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
