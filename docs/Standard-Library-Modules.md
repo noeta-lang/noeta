@@ -170,6 +170,7 @@ Identity generation — sequential ids and UUIDs.
 
 ```noeta
 use std.{id}
+use std.id.Uuid              // the type, to name it in `is Uuid` below
 echo id.next_id()            // 1
 key = id.uuid()              // e.g. 4396d60d-bd85-47af-a98f-f1a0396ff552
 ordered = id.uuid_v7()       // sorts by creation time
