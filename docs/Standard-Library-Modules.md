@@ -333,7 +333,7 @@ deterministic sandbox (tests) `server.serve` instead drives a fixed, documented 
 through the handler and returns — so a served program is reproducible and terminates in-oracle,
 the inbound mirror of the client's pure responder.
 
-## `telemetry`
+## `tracing`
 
 Production distributed tracing, emitted as OpenTelemetry ([Observability](Observability)). The
 scoped `with_span(name, body)` is the primary API; `span(name) -> Span` (with `set_attribute` /
@@ -341,9 +341,9 @@ scoped `with_span(name, body)` is the primary API; `span(name) -> Span` (with `s
 traceparent)` bridge W3C context across boundaries Noeta doesn't own.
 
 ```noeta ignore
-use std.{telemetry}
-telemetry.with_span("checkout", fn(): void {
-    span = telemetry.span("charge")
+use std.{tracing}
+tracing.with_span("checkout", fn(): void {
+    span = tracing.span("charge")
     span.set_attribute("amount", 4200)
     // … work …
     span.end()

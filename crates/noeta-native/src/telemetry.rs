@@ -1,4 +1,4 @@
-//! The **Telemetry** capability (native OTEL) — the ABI data types + trait side.
+//! The **Tracing** capability (native OTEL) — the ABI data types + trait side.
 //!
 //! Production observability, the 8th [`Host`](crate::Host) capability. A span is a *write-only side
 //! effect* — it never re-enters program output — so telemetry is real-host-only and **never
@@ -13,7 +13,7 @@
 
 use compact_str::CompactString;
 
-/// An opaque handle to one span, minted by [`Telemetry::tel_span_start`] and passed back to the
+/// An opaque handle to one span, minted by [`Tracing::tel_span_start`] and passed back to the
 /// mutation/end methods. Plain `Send` data (the SDK's `Span` extern value wraps exactly this); ids
 /// are per-run and per-host, never reused while a span is live.
 pub type SpanId = u64;
@@ -140,7 +140,7 @@ pub struct SpanData {
     pub status: SpanStatus,
 }
 
-/// **Telemetry** capability (native OTEL) — span emission, the 8th [`Host`](crate::Host)
+/// **Tracing** capability (native OTEL) — span emission, the 8th [`Host`](crate::Host)
 /// capability. A pure span factory + sink: it creates, mutates, and ends spans and reports a live
 /// span's [`TraceContext`], but owns **no active-span stack** — implicit parenting and scope
 /// nesting are the `std.telemetry` extension's job (its per-run `ExtState`), so both host impls
@@ -149,7 +149,7 @@ pub struct SpanData {
 /// The sandbox impl records into an in-memory buffer (deterministic — logical-clock timestamps,
 /// derived ids); the real impl exports OTLP. Because a span is never observable in program output,
 /// the differential holds by construction with either behind the seam.
-pub trait Telemetry {
+pub trait Tracing {
     /// Whether telemetry is active — an export sink is configured (real host) or recording is on
     /// (sandbox). **Auto-instrumentation gates on this**: when `false`, `noeta serve` (and other
     /// auto-instrumented boundaries) skip span work entirely, so a program that never configures an

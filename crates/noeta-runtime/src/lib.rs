@@ -32,7 +32,7 @@ use noeta_stdlib::net::accept_outcome;
 use noeta_stdlib::{
     AttrValue, Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, NativeOut,
     NetRequest, NetResponse, Network, P2p, ReadSource, RealBody, Rng, SpanData, SpanEvent, SpanId,
-    SpanKind, SpanStatus, StdError, Telemetry, TraceContext,
+    SpanKind, SpanStatus, StdError, Tracing, TraceContext,
 };
 // Only the outbound-client (`ring-http-client`) path builds an `ExternBox` response body.
 #[cfg(feature = "ring-http-client")]
@@ -821,7 +821,7 @@ impl Env for RealHost {
     }
 }
 
-impl Telemetry for RealHost {
+impl Tracing for RealHost {
     fn tel_enabled(&self) -> bool {
         // On when an OTLP endpoint is configured (and the `telemetry` feature is compiled in);
         // otherwise the null sink, and auto-instrumentation short-circuits.

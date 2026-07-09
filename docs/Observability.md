@@ -1,4 +1,4 @@
-# Observability (`std.telemetry`)
+# Observability (`std.tracing`)
 
 Production **distributed tracing** for Noeta programs, emitted as [OpenTelemetry](https://opentelemetry.io/).
 A *span* wraps a unit of work — a request, a task, an effect — and carries a name, timing, attributes,
@@ -13,7 +13,7 @@ into concurrent work still reads as one connected trace.
 
 Noeta ships two things people call "observability"; they don't overlap:
 
-| | [`noeta profile`](Profiling) | `std.telemetry` (this page) |
+| | [`noeta profile`](Profiling) | `std.tracing` (this page) |
 |---|---|---|
 | **Question** | *Where does my program spend time?* | *What happened during this request, across services?* |
 | **When** | Dev time, one run, on your machine | Production, continuously, exported to a collector |
@@ -55,14 +55,14 @@ Export is **OTLP over HTTP/JSON**, batched and flushed on a threshold or at prog
 
 ## The SDK surface
 
-`use std.{telemetry}`. The primary API is the **scoped** span; the manual form is the escape hatch.
+`use std.{tracing}`. The primary API is the **scoped** span; the manual form is the escape hatch.
 
 | Function | Signature | Notes |
 |---|---|---|
-| `telemetry.with_span` | `with_span(name: string, body: () -> A) -> A` | **Scoped** span: starts, runs `body` as its active parent, ends on exit — **even if `body` aborts** (records an error status, re-propagates). An **async** `body` is tracked to completion (see below). Returns `body`'s value. |
-| `telemetry.span` | `span(name: string) -> Span` | The lower-level form: start a span parented on the current active one; **you** call `.end()`. Use it when a span outlives a lexical scope. |
-| `telemetry.current_context` | `current_context() -> string` | The active span's W3C `traceparent` — the **inject** side of manual propagation. Empty when no span is active. |
-| `telemetry.span_from` | `span_from(name: string, traceparent: string) -> Span` | The **extract** side: start a span continuing a *remote* trace parsed from an inbound `traceparent` (a malformed header → a fresh root). |
+| `tracing.with_span` | `with_span(name: string, body: () -> A) -> A` | **Scoped** span: starts, runs `body` as its active parent, ends on exit — **even if `body` aborts** (records an error status, re-propagates). An **async** `body` is tracked to completion (see below). Returns `body`'s value. |
+| `tracing.span` | `span(name: string) -> Span` | The lower-level form: start a span parented on the current active one; **you** call `.end()`. Use it when a span outlives a lexical scope. |
+| `tracing.current_context` | `current_context() -> string` | The active span's W3C `traceparent` — the **inject** side of manual propagation. Empty when no span is active. |
+| `tracing.span_from` | `span_from(name: string, traceparent: string) -> Span` | The **extract** side: start a span continuing a *remote* trace parsed from an inbound `traceparent` (a malformed header → a fresh root). |
 
 ### The `Span` handle
 
@@ -78,11 +78,11 @@ A `Span` is a mutable handle to one live span (like a file handle — no auto-cl
 | `end` | `end() -> void` | Finalize; the span is exported. |
 
 ```noeta ignore
-use std.{telemetry}
+use std.{tracing}
 
 fn handle_order(id: int): void {
-    telemetry.with_span("handle_order", fn(): void {
-        span = telemetry.span("db.lookup")
+    tracing.with_span("handle_order", fn(): void {
+        span = tracing.span("db.lookup")
         span.set_attribute("db.system", "postgres").set_attribute("order.id", id)
         // … query …
         span.end()
@@ -117,11 +117,11 @@ HTTP call to another service, a queue — thread the `traceparent` yourself:
 
 ```noeta ignore
 // Inject on the way out:
-tp = telemetry.current_context()          // "00-<trace>-<span>-01"
+tp = tracing.current_context()          // "00-<trace>-<span>-01"
 // … send `tp` as the `traceparent` header / message field …
 
 // Extract on the way in:
-span = telemetry.span_from("consume", inbound_traceparent)
+span = tracing.span_from("consume", inbound_traceparent)
 ```
 
 ## Design notes
@@ -133,7 +133,7 @@ span = telemetry.span_from("consume", inbound_traceparent)
 - **Per-task context.** The active-span stack is **task-local**: each cooperative task (and each
   isolate) carries its own, so interleaved work can't cross-parent. A spawned task inherits a snapshot
   of its spawner's context.
-- **Bundle cost.** A program that never imports `std.telemetry` and never sets an endpoint pays
+- **Bundle cost.** A program that never imports `std.tracing` and never sets an endpoint pays
   nothing at runtime. The exporter is a hand-rolled OTLP/HTTP-JSON writer over the `reqwest` +
   `serde_json` already in the build — deliberately **not** `opentelemetry-otlp` (which drags
   `tonic`/`prost`) — and sits behind a default-on `telemetry` build feature a minimal CLI can drop.
@@ -142,5 +142,5 @@ span = telemetry.span_from("consume", inbound_traceparent)
 
 - [Concurrency](Concurrency) — `server.serve`, channels, isolates (the boundaries auto-instrumentation traces).
 - [Profiling](Profiling) — the dev-time flamegraph tool (the *other* observability half).
-- [Standard-Library Modules](Standard-Library-Modules#telemetry) — the module in the stdlib reference.
+- [Standard-Library Modules](Standard-Library-Modules#tracing) — the module in the stdlib reference.
 - [Native Extensions](Native-Extensions) — the `Telemetry` Host capability and the higher-order seam the SDK dispatches through.

@@ -1,6 +1,6 @@
-//! `std.telemetry` — the tracing SDK surface (native OTEL, T1–T3).
+//! `std.tracing` — the tracing SDK surface (native OTEL, T1–T3).
 //!
-//! A facade over the [`Telemetry`](noeta_native::Telemetry) Host capability. The span tree and
+//! A facade over the [`Tracing`](noeta_native::Tracing) Host capability. The span tree and
 //! export live host-side (the sandbox recorder / the real OTLP exporter); this module owns only the
 //! **active-span stack** that gives spans implicit parenting — exactly the design T0 chose (the
 //! host is a pure span factory/sink, context management is the SDK's job). Since T5a the stack
@@ -57,9 +57,9 @@ const ATTR_VALUE: SigType = SigType::Union(&[
     SigType::Bool,
 ]);
 
-/// `std.telemetry`'s functions — all higher-order (they reach the active-span stack, and `with_span`
+/// `std.tracing`'s functions — all higher-order (they reach the active-span stack, and `with_span`
 /// calls a closure), so they live in the ctx table.
-pub const TELEMETRY_CTX_FNS: &[ExtFn] = &[
+pub const TRACING_CTX_FNS: &[ExtFn] = &[
     ExtFn {
         name: "span",
         params: &[SigType::String],
@@ -155,9 +155,9 @@ impl ExternValue for Span {
     }
 }
 
-/// `std.telemetry` ctx dispatch. Generic over the ctx (`C: NativeCtx + ?Sized`) so a compiled-in
+/// `std.tracing` ctx dispatch. Generic over the ctx (`C: NativeCtx + ?Sized`) so a compiled-in
 /// backend inlines the small ctx ops, exactly as `cell`/`reactive` are.
-pub fn telemetry_ctx_dispatch<C: NativeCtx + ?Sized>(
+pub fn tracing_ctx_dispatch<C: NativeCtx + ?Sized>(
     func: &str,
     ctx: &mut C,
     args: &[Slot],
@@ -219,7 +219,7 @@ pub fn telemetry_ctx_dispatch<C: NativeCtx + ?Sized>(
             let id = ctx.host().tel_span_start(&name, SpanKind::Internal, parent);
             Ok(CtxOut::Out(NativeOut::Extern(ExternBox::new(Span { id }))))
         }
-        _ => Err(no_function_error("telemetry", func).into()),
+        _ => Err(no_function_error("tracing", func).into()),
     }
 }
 
@@ -252,7 +252,7 @@ pub fn span_method_dispatch(
         "context" => {
             // This span's own W3C `traceparent` — the inject side for a *held* span (e.g. serialize
             // it onto a channel message or an outbound header), distinct from the active-span read
-            // `telemetry.current_context()`.
+            // `tracing.current_context()`.
             want_arity(method, args, 0)?;
             let context = host.tel_span_context(id);
             Ok(NativeOut::Str(context.to_traceparent()))
@@ -276,7 +276,7 @@ pub fn span_method_dispatch(
 //
 // The stack lives in the backend's per-strand context cell (`NativeCtx::context_*`), NOT in
 // per-run `ExtState`: the scheduler swaps each task's own stack in around its polls and a spawned
-// task inherits a snapshot of its spawner's, so telemetry scope follows *execution* — two
+// task inherits a snapshot of its spawner's, so tracing scope follows *execution* — two
 // interleaved tasks' `with_span`s no longer see (or corrupt) each other's parents.
 
 fn push_active<C: NativeCtx + ?Sized>(ctx: &mut C, id: SpanId) {
@@ -297,7 +297,7 @@ fn current_parent<C: NativeCtx + ?Sized>(ctx: &mut C) -> Option<TraceContext> {
 fn slot_str<C: NativeCtx + ?Sized>(ctx: &mut C, slot: Slot) -> CtxResult<String> {
     match ctx.view(slot)? {
         NativeValue::Str(s) => Ok(s),
-        _ => Err(type_error("telemetry", "string").into()),
+        _ => Err(type_error("tracing", "string").into()),
     }
 }
 
@@ -336,7 +336,7 @@ fn want_attr(method: &str, args: &[NativeValue], index: usize) -> Result<AttrVal
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Telemetry; // the trait, so `tel_span_start` resolves on a concrete SandboxHost
+    use crate::Tracing; // the trait, so `tel_span_start` resolves on a concrete SandboxHost
     use crate::host::SandboxHost;
 
     fn str_arg(s: &str) -> NativeValue {

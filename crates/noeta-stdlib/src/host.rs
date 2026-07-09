@@ -8,7 +8,7 @@
 pub use noeta_native::host::{
     Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, P2p, ReadSource, Rng,
 };
-pub use noeta_native::Telemetry;
+pub use noeta_native::Tracing;
 
 use crate::StdError;
 use crate::env;
@@ -329,7 +329,7 @@ impl Env for SandboxHost {
     }
 }
 
-impl Telemetry for SandboxHost {
+impl Tracing for SandboxHost {
     // The deterministic recorder is always on, so auto-instrumentation runs under the sandbox and
     // conformance can assert on the emitted server spans.
     fn tel_enabled(&self) -> bool {

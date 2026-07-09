@@ -163,9 +163,9 @@ const CORE_TYPES: &[ExtType] = &[
     // `Span` (native OTEL T1) — a mutable, effectful, host-coupled handle (like `FileHandle`): its
     // methods reach the `Telemetry` capability by id. NOT key-capable (identifies a host resource).
     ExtType {
-        name: crate::telemetry::SPAN_TYPE_NAME,
-        methods: crate::telemetry::SPAN_METHODS,
-        dispatch: crate::telemetry::span_method_dispatch,
+        name: crate::tracing::SPAN_TYPE_NAME,
+        methods: crate::tracing::SPAN_METHODS,
+        dispatch: crate::tracing::span_method_dispatch,
         key_capable: false,
         ..ExtType::DEFAULTS
     },
@@ -2369,15 +2369,15 @@ const CORE_MODULES: &[ExtModule] = &[
         deep_marshal: false,
         ..ExtModule::DEFAULTS
     },
-    // `telemetry` (native OTEL T1–T2) — the tracing SDK facade. `span`/`with_span`/`current_context`
+    // `tracing` (native OTEL T1–T2) — the tracing SDK facade. `span`/`with_span`/`current_context`
     // reach the per-run active-span stack (and `with_span` calls a closure), so they are ctx
     // functions; the `Span` type's own methods stay plain (they only touch the host). The span tree
     // lives host-side (recorder / OTLP exporter).
     ExtModule {
-        name: "telemetry",
-        ctx_functions: crate::telemetry::TELEMETRY_CTX_FNS,
+        name: "tracing",
+        ctx_functions: crate::tracing::TRACING_CTX_FNS,
         ctx_dispatch: Some(|func, ctx, args| {
-            crate::telemetry::telemetry_ctx_dispatch(func, ctx, args)
+            crate::tracing::tracing_ctx_dispatch(func, ctx, args)
         }),
         ..ExtModule::DEFAULTS
     },
