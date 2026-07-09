@@ -100,6 +100,10 @@ tower-lsp-server = "0.23"
 # `#[tool_router]` surface) + stdio transport + schemars-backed tool-parameter schemas. Composes
 # with the workspace tokio; only `noeta-mcp` (and the CLI entry point) pull it in.
 rmcp = { version = "2.1", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
+# JSON-Schema derive for tool-parameter and output types. Pinned to the major `rmcp` depends on so
+# the `JsonSchema` trait is the same one the MCP SDK consumes. Also feature-gated onto
+# `noeta-diagnostics` (feature `schema`) so its canonical `JsonDiagnostic` describes itself for MCP.
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 # Agent-native tooling (MCP arc, M1 Ground pillar): embed the docs (`docs/*.md`) and example
 # (`tests/conformance/**/*.noe`) corpus into the `noeta` binary at compile time, so the MCP server's

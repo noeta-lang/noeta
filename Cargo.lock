@@ -3663,6 +3663,7 @@ version = "0.1.0"
 dependencies = [
  "ariadne",
  "noeta-span",
+ "schemars",
  "serde",
 ]
 

@@ -17,6 +17,7 @@ use crate::{Diagnostic, Severity};
 /// label) is resolved to its file and 1-based line/column, with the raw byte offsets kept alongside
 /// for consumers that index the source themselves.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct JsonDiagnostic {
     /// The stable diagnostic code, e.g. `"E0007"`.
     pub code: &'static str,
@@ -38,6 +39,7 @@ pub struct JsonDiagnostic {
 
 /// A resolved secondary annotation: a message plus the file and location it points at.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct JsonLabel {
     pub message: String,
     pub file: String,
@@ -47,6 +49,7 @@ pub struct JsonLabel {
 
 /// A span resolved to 1-based start/end line/column, with the raw byte offsets retained.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct JsonSpan {
     pub line: u32,
     pub column: u32,

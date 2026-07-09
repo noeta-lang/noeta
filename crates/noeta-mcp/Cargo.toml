@@ -11,7 +11,9 @@ rust-version.workspace = true
 # tool over `linked_checked`); later slices grow to drive the VM like the DAP. The `run` set minus
 # the executor, plus the MCP SDK.
 noeta-span = { workspace = true }
-noeta-diagnostics = { workspace = true }
+# `schema` feature = the `JsonDiagnostic` family derives `JsonSchema`, so the `check` tool returns
+# the *same* canonical shape as `noeta check --format json` — agent and CLI never disagree.
+noeta-diagnostics = { workspace = true, features = ["schema"] }
 noeta-db = { workspace = true }
 noeta-loader = { workspace = true }
 tokio = { workspace = true, features = ["io-std", "rt-multi-thread", "macros"] }

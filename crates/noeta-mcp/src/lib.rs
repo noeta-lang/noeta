@@ -15,8 +15,8 @@
 
 mod corpus;
 
-use noeta_diagnostics::{Diagnostic, DiagnosticCode, Severity};
-use noeta_span::{Source, SourceId};
+use noeta_diagnostics::{DiagnosticCode, JsonDiagnostic, to_json};
+use noeta_span::{Source, SourceId, SourceMap};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::model::{
     Implementation, ListResourcesResult, PaginatedRequestParams, ProtocolVersion,
@@ -48,53 +48,19 @@ real programs that trigger and fix it.
 
 Do not invent syntax or standard-library calls; search the docs/examples, then `check` a snippet.";
 
-/// A source span rendered for an agent: the raw byte offsets plus the resolved file and 1-based
-/// line/column of the span's start (what an agent needs to point a human — or itself — at the code).
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct SpanOut {
-    /// The file the span is in (the entry's display path, a sibling module's path, or `<inline>`).
-    pub file: String,
-    /// 1-based line of the span's start.
-    pub line: u32,
-    /// 1-based column of the span's start (counted in Unicode scalar values).
-    pub column: u32,
-    /// Start byte offset within the file.
-    pub start: u32,
-    /// End byte offset within the file (exclusive).
-    pub end: u32,
-}
-
-/// A secondary label attached to a diagnostic (a span + a message).
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct LabelOut {
-    pub span: SpanOut,
-    pub message: String,
-}
-
-/// One diagnostic, flattened for an agent.
-#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
-pub struct DiagnosticOut {
-    /// The stable diagnostic code, e.g. `E0007`.
-    pub code: String,
-    /// `error`, `warning`, or `note`.
-    pub severity: String,
-    /// The headline message.
-    pub message: String,
-    /// The primary span.
-    pub span: SpanOut,
-    /// Any secondary labels.
-    pub labels: Vec<LabelOut>,
-    /// An optional help/suggestion line.
-    pub help: Option<String>,
-}
-
-/// The `check` tool's result: whether the program is error-free, and every diagnostic it produced.
+/// The `check` tool's result. The per-diagnostic shape is `noeta_diagnostics::JsonDiagnostic` — the
+/// *same* canonical form `noeta check --format json` emits — so an agent parses one schema whether it
+/// calls this tool or the CLI. `ok` and the counts are the MCP-friendly summary on top.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct CheckOutput {
     /// True when there are no `error`-severity diagnostics (warnings/notes may still be present).
     pub ok: bool,
-    /// Every diagnostic, in the order the checker produced them.
-    pub diagnostics: Vec<DiagnosticOut>,
+    /// The number of error-severity diagnostics.
+    pub errors: usize,
+    /// The number of warning-severity diagnostics.
+    pub warnings: usize,
+    /// Every diagnostic, resolved to file + line/column + byte offsets, in checker order.
+    pub diagnostics: Vec<JsonDiagnostic>,
 }
 
 /// Arguments to `check`: inline `source` OR a `file` path (exactly one).
@@ -427,8 +393,9 @@ fn resolve_sources(args: &CheckArgs) -> Result<Vec<Source>, ErrorData> {
     }
 }
 
-/// Run the whole-workspace check over `sources` (entry at index 0) and marshal the diagnostics.
-/// Uses a fresh `LangDatabase` — the memoization is per call in M0.
+/// Run the whole-workspace check over `sources` (entry at index 0) and resolve the diagnostics into
+/// the canonical `JsonDiagnostic` form (the same one `noeta check --format json` emits). Uses a
+/// fresh `LangDatabase` — the memoization is per call in M0.
 fn run_check(sources: &[Source]) -> CheckOutput {
     let db = noeta_db::LangDatabase::default();
     let (entry, modules) = sources
@@ -436,62 +403,23 @@ fn run_check(sources: &[Source]) -> CheckOutput {
         .expect("resolve_sources always yields at least the entry");
     let ws = noeta_db::workspace(&db, entry, modules);
     let checked = noeta_db::linked_checked(&db, ws);
-    let diagnostics: Vec<DiagnosticOut> = checked
+    // The `SourceMap` resolves each diagnostic's span → file + line/column (entry is SourceId 0).
+    let source_map = SourceMap::new(sources.to_vec());
+    let diagnostics: Vec<JsonDiagnostic> = checked
         .diagnostics
         .iter()
-        .map(|d| marshal_diagnostic(sources, d))
+        .map(|d| to_json(&source_map, d))
         .collect();
-    let ok = !diagnostics.iter().any(|d| d.severity == "error");
-    CheckOutput { ok, diagnostics }
-}
-
-fn marshal_diagnostic(sources: &[Source], diag: &Diagnostic) -> DiagnosticOut {
-    DiagnosticOut {
-        code: diag.code.code().to_string(),
-        severity: severity_str(diag.severity).to_string(),
-        message: diag.message.clone(),
-        span: marshal_span(sources, diag.span),
-        labels: diag
-            .labels
-            .iter()
-            .map(|l| LabelOut {
-                span: marshal_span(sources, l.span),
-                message: l.message.clone(),
-            })
-            .collect(),
-        help: diag.help.clone(),
-    }
-}
-
-/// Resolve a span to `{file, line, column, start, end}` against the source it indexes. A span whose
-/// `SourceId` is out of range (should not happen for checker output) degrades to line/column 0.
-fn marshal_span(sources: &[Source], span: noeta_span::Span) -> SpanOut {
-    match sources.get(span.source.0 as usize) {
-        Some(src) => {
-            let lc = src.line_col(span.start);
-            SpanOut {
-                file: src.name().to_string(),
-                line: lc.line,
-                column: lc.col,
-                start: span.start,
-                end: span.end,
-            }
-        }
-        None => SpanOut {
-            file: String::new(),
-            line: 0,
-            column: 0,
-            start: span.start,
-            end: span.end,
-        },
-    }
-}
-
-fn severity_str(severity: Severity) -> &'static str {
-    match severity {
-        Severity::Error => "error",
-        Severity::Warning => "warning",
-        Severity::Note => "note",
+    let errors = diagnostics.iter().filter(|d| d.severity == "error").count();
+    let warnings = diagnostics
+        .iter()
+        .filter(|d| d.severity == "warning")
+        .count();
+    CheckOutput {
+        ok: errors == 0,
+        errors,
+        warnings,
+        diagnostics,
     }
 }
 
@@ -594,14 +522,15 @@ mod tests {
         // that resolves to a 1-based line/column in the inline source.
         let out = check_source("fn main(): int {\n  return \"x\";\n}\n");
         assert!(!out.ok, "expected an error, got a clean check");
+        assert_eq!(out.errors, 1);
         let err = out
             .diagnostics
             .iter()
             .find(|d| d.severity == "error")
             .expect("an error diagnostic");
         assert!(err.code.starts_with('E'), "code was {:?}", err.code);
-        assert_eq!(err.span.file, "<inline>");
-        assert!(err.span.line >= 1 && err.span.column >= 1);
+        assert_eq!(err.file, "<inline>");
+        assert!(err.location.line >= 1 && err.location.column >= 1);
     }
 
     #[test]
