@@ -139,13 +139,24 @@ tally.sync()                                          // decrypts peers' state i
 
 The members list is given at construction, so the very **first** state announced to the topic is already encrypted — there is no window where it goes out in the clear. Encryption is transparent to your program: `.get()` returns the same converged value it would without it, so the deterministic sandbox treats an encrypted signal as a pass-through and a synced program behaves identically whether or not it is encrypted. Under the real transport it is backed by [p2panda-spaces](https://p2panda.org) group encryption (a symmetric group key with post-compromise security; a member that joins late can still decrypt prior state — exactly what a convergent CRDT needs). Membership uses the group's declared set: the elected creator welcomes each member as it announces its key on the topic, with no out-of-band key exchange.
 
+Membership is not fixed for life — you can change it at runtime:
+
+- `.add_member(peer_id)` — admit a peer to the group (welcomed once its key arrives on the topic).
+- `.remove_member(peer_id)` — remove a peer and **rotate the group key**, so the removed peer can no longer decrypt state published afterward (revocation).
+
+```noeta
+tally.add_member(carol_id)      // carol can now read new state
+tally.remove_member(bob_id)     // bob is revoked — the key rotates; he can't read anything published now on
+```
+
+The group creator is authoritative over membership (it holds the manage capability). Membership is transparent to the converged value, so these are no-ops under the sandbox and real only over the live transport.
+
 A per-signal **`.status(): string`** — `"synced"` / `"syncing"` / `"offline"` — reports this replica's convergence state against its peers (always `"synced"` on the single-node sandbox; meaningful over a real network, e.g. to render "working offline").
 
 ## What's next
 
-The transport, encryption, and identity layers ship today. Remaining future milestones:
+The transport, encryption, identity, and dynamic-membership layers ship today. Remaining future milestones:
 
 - **Richer collaborative types.** A last-write-wins register and an add/remove set (OR-Set) — CRDTs that carry arbitrary application values, not just counters and string sets.
-- **Dynamic membership.** The encrypted group's member set is fixed at construction today; runtime add/remove of members with key rotation (revoking a departed member) is a natural extension.
 
 See also [Reactivity](Reactivity) for the signal/computed/effect core these build on, and [Standard-Library Modules](Standard-Library-Modules) for the full module surface.

@@ -95,14 +95,21 @@ We compose p2panda's pieces rather than invent crypto. What we must build/wire:
   `noeta-aot-runtime` `--no-default-features` trees contain **0** p2panda/iroh/spaces crates, so the
   footprint scan sheds the whole tree from a tailored native binary.
 
-## Deferred (surfaced as a decision, not silently cut)
+- **P3.4b.2.3 — dynamic membership + revocation. ✅ DONE** (`272e5116` crypto, `22665539` surface).
+  Runtime `.add_member(peer_id)` / `.remove_member(peer_id)` on an encrypted synced_signal. `remove`
+  **rotates the group key** — p2panda-spaces performs the rotation (`apply_secret_member_change`), so
+  a removed peer cannot decrypt state published afterward. `EncryptedGroup` tracks `known_bundles`
+  (welcome a runtime-added member immediately if its bundle already arrived) and skips undecryptable
+  application ciphertext silently (a non-member/revoked peer never sees plaintext, no error). The
+  creator is authoritative over membership; sandbox = no-op (transparent to the converged value).
+  Proven by the hermetic `removed_member_cannot_decrypt_new_state` test **and** the real-network
+  `two_nodes_revocation_over_the_wire` test (passes over QUIC).
 
-**Dynamic membership + key rotation.** The member set is fixed at construction. Runtime add/remove of
-members — with the key rotation p2panda-spaces' `space.remove` performs so a removed member stops
-decrypting *new* state — is a real feature (revocation) but a distinct one, with its own surface
-(runtime `.add_member`/`.remove_member` methods, or a mutable members handle) and its own multi-node
-choreography. It is not required for the safe-by-default encrypted-group milestone and awaits an
-explicit go-ahead.
+## Status: arc complete
+
+P3.4b (group encryption) is complete end-to-end — assembly, node identity, wire format, surface,
+choreography, dynamic membership + revocation — with hermetic and real-network proofs. Nothing
+deferred.
 
 ## Honest risk
 
