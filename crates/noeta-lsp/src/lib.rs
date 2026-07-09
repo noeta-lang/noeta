@@ -286,8 +286,7 @@ impl DocumentStore {
         // module as a `DepModule` input (SourceIds continue past the siblings), so cross-package
         // `use <dep-key>.…` resolves in hover/goto/completion exactly as the CLI resolves it.
         let deps = self.resolve_dep_modules(uri, programs.len() as u32);
-        let workspace =
-            Workspace::new(&self.db, programs[0], programs[1..].to_vec(), deps.modules);
+        let workspace = Workspace::new(&self.db, programs[0], programs[1..].to_vec(), deps.modules);
         self.workspaces.insert(
             uri.to_string(),
             WorkspaceCache {
@@ -356,12 +355,8 @@ impl DocumentStore {
                 .flat_map(|(local, global)| [local.clone(), global.clone()])
                 .collect();
             for module in &package.modules {
-                let src = SourceProgram::new(
-                    &self.db,
-                    next_id,
-                    module.name.clone(),
-                    module.text.clone(),
-                );
+                let src =
+                    SourceProgram::new(&self.db, next_id, module.name.clone(), module.text.clone());
                 next_id += 1;
                 deps.modules.push(DepModule::new(
                     &self.db,
@@ -514,7 +509,15 @@ impl DocumentStore {
             token.kind == TokenKind::Ident && token.span.start <= offset && offset <= token.span.end
         })?;
         let name = &entry_text[token.span.range()];
-        let def_span = resolve::Definitions::collect(program).resolve(name)?;
+        let defs = resolve::Definitions::collect(program);
+        // An aliased or plain import resolves through the entry's own `use` list to the qualified
+        // identity the linker merged in (arc Phase B); `resolve` itself falls back to leaf matching for
+        // a bare reference to a namespaced declaration. The entry AST (not the linked program, whose
+        // resolved `use`s are dropped) carries the imports.
+        let def_span = resolve::import_targets(&entry_ast.0.program)
+            .get(name)
+            .and_then(|qualified| defs.resolve(qualified))
+            .or_else(|| defs.resolve(name))?;
         self.locate(cache, def_span, encoding)
     }
 
@@ -736,12 +739,18 @@ impl DocumentStore {
         // cursor. Resolve the receiver's type from the workspace type index and list its members.
         let def_use = resolve::DefUse::build(program);
         if let Some((receiver_span, _member)) = def_use.member_at(offset, cursor) {
-            let members = noeta_db::linked_checked_ide(db, cache.workspace)
+            let checked = noeta_db::linked_checked_ide(db, cache.workspace);
+            let mut members = checked
                 .expr_types
                 .get(&receiver_span)
                 .and_then(nominal_name)
                 .map(|type_name| completion::members_of(program, type_name))
                 .unwrap_or_default();
+            // Bundle-contributed methods (kernel-methods K4): a bound `@packed` type offers its
+            // bundles' Element methods, a `List<T>` of one their Bulk methods.
+            if let Some(repr) = checked.expr_types.get(&receiver_span) {
+                members.extend(bundle_members_for(repr, &checked.bundle_bindings));
+            }
             return Some(members);
         }
 
@@ -825,10 +834,16 @@ impl DocumentStore {
         // Entry + siblings are indexed directly; a dependency module's SourceId continues past them
         // (see `resolve_dep_modules`), so it maps into the dep arrays (package-manager P2.1c).
         let (uri, program) = if idx < cache.programs.len() {
-            (cache.source_uris.get(idx)?.clone(), *cache.programs.get(idx)?)
+            (
+                cache.source_uris.get(idx)?.clone(),
+                *cache.programs.get(idx)?,
+            )
         } else {
             let di = idx - cache.programs.len();
-            (cache.dep_uris.get(di)?.clone(), *cache.dep_programs.get(di)?)
+            (
+                cache.dep_uris.get(di)?.clone(),
+                *cache.dep_programs.get(di)?,
+            )
         };
         let index = LineIndex::new(program.text(&self.db));
         Some((uri, index.range(span, encoding)))
@@ -946,6 +961,29 @@ fn path_to_uri(path: &Path) -> String {
 /// The declared type name a reflected [`TypeRepr`] refers to, for member resolution — the nominal
 /// variants (`struct` / `class` / `enum` / unknown-kind named). Scalars, containers, functions, and
 /// unions have no user declaration to jump into, so they yield `None`.
+/// Bundle-contributed members for a receiver type (kernel-methods K4): a bound `@packed` type
+/// `T` gets its bundles' `Element` methods, a `List<T>` their `Bulk` methods; anything else none.
+fn bundle_members_for(
+    repr: &TypeRepr,
+    bindings: &std::collections::HashMap<String, Vec<(String, String)>>,
+) -> Vec<completion::Candidate> {
+    use noeta_stdlib::BundleReceiver;
+    let (name, kind) = match repr {
+        TypeRepr::List(elem) => match nominal_name(elem) {
+            Some(n) => (n, BundleReceiver::Bulk),
+            None => return Vec::new(),
+        },
+        other => match nominal_name(other) {
+            Some(n) => (n, BundleReceiver::Element),
+            None => return Vec::new(),
+        },
+    };
+    match bindings.get(name) {
+        Some(b) => completion::bundle_members(b, kind),
+        None => Vec::new(),
+    }
+}
+
 fn nominal_name(repr: &TypeRepr) -> Option<&str> {
     match repr {
         TypeRepr::Struct(name, _)
@@ -1042,8 +1080,13 @@ fn bare_dot_members(
     let checked = noeta_check::check_all_with_types(&parsed.program);
     let def_use = resolve::DefUse::build(&parsed.program);
     let (receiver_span, _member) = def_use.member_at(offset, SourceId::FIRST)?;
-    let type_name = nominal_name(checked.expr_types.get(&receiver_span)?)?;
-    Some(completion::members_of(program, type_name))
+    let repr = checked.expr_types.get(&receiver_span)?;
+    let mut members = nominal_name(repr)
+        .map(|type_name| completion::members_of(program, type_name))
+        .unwrap_or_default();
+    // Bundle-contributed methods (kernel-methods K4), as in the parsed-member path above.
+    members.extend(bundle_members_for(repr, &checked.bundle_bindings));
+    Some(members)
 }
 
 /// Type-name candidates when `offset` is in a type-annotation position, else `None`. A synthetic
@@ -2134,6 +2177,61 @@ mod tests {
         // `pub struct User` is on line 1 of models.noe (line 0 is the `namespace`).
         assert_eq!(range.start.line, 1);
         assert_eq!(range.start.character, 11); // after "pub struct "
+    }
+
+    #[test]
+    fn goto_definition_disambiguates_aliased_same_named_imports() {
+        // Arc Phase B: two sibling modules each declare `Amount`; the entry imports both under
+        // distinct aliases. Go-to-definition on each alias resolves through the entry's imports to the
+        // *right* qualified declaration — `Money` to money.noe, `Distance` to geo.noe — never
+        // conflating the two same-short-named types.
+        let dir = temp_workspace(
+            "goto_alias",
+            &[
+                (
+                    "money.noe",
+                    "namespace App.Money;\npub struct Amount { cents: int }\n",
+                ),
+                (
+                    "geo.noe",
+                    "namespace App.Geo;\npub struct Amount { meters: int }\n",
+                ),
+            ],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let money_uri = path_to_uri(&dir.join("money.noe"));
+        let geo_uri = path_to_uri(&dir.join("geo.noe"));
+        let mut store = DocumentStore::default();
+        store.open(
+            &entry_uri,
+            "use App.Money.Amount as Money;\nuse App.Geo.Amount as Distance;\nm = Money { cents: 1 };\nd = Distance { meters: 2 }".to_string(),
+        );
+
+        // Cursor on `Money` (line 2, column 4) → money.noe's `Amount`.
+        let (money_target, _) = store
+            .definition(
+                &entry_uri,
+                Position {
+                    line: 2,
+                    character: 4,
+                },
+                Encoding::Utf8,
+            )
+            .expect("aliased `Money` resolves");
+        assert_eq!(money_target, money_uri);
+
+        // Cursor on `Distance` (line 3, column 4) → geo.noe's `Amount` (a different file).
+        let (distance_target, _) = store
+            .definition(
+                &entry_uri,
+                Position {
+                    line: 3,
+                    character: 4,
+                },
+                Encoding::Utf8,
+            )
+            .expect("aliased `Distance` resolves");
+        assert_eq!(distance_target, geo_uri);
     }
 
     #[test]

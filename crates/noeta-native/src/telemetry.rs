@@ -7,7 +7,7 @@
 //! conformance can assert on emitted spans; the real host exports OTLP (in `noeta-runtime`).
 //!
 //! Only **neutral data** crosses this seam — no backend value and no OTel-crate type leaks into the
-//! ABI. The `std.telemetry` extension marshals language values into [`AttrValue`]/`&str`, holds the
+//! ABI. The `std.tracing` extension marshals language values into [`AttrValue`]/`&str`, holds the
 //! returned [`SpanId`] inside its `Span` extern value, and reads a live span's [`TraceContext`] for
 //! propagation; each host accumulates its own [`SpanData`] and consumes it (record vs. export).
 
@@ -143,7 +143,7 @@ pub struct SpanData {
 /// **Tracing** capability (native OTEL) — span emission, the 8th [`Host`](crate::Host)
 /// capability. A pure span factory + sink: it creates, mutates, and ends spans and reports a live
 /// span's [`TraceContext`], but owns **no active-span stack** — implicit parenting and scope
-/// nesting are the `std.telemetry` extension's job (its per-run `ExtState`), so both host impls
+/// nesting are the `std.tracing` extension's job (its per-run `ExtState`), so both host impls
 /// stay simple and the context model lives in one place.
 ///
 /// The sandbox impl records into an in-memory buffer (deterministic — logical-clock timestamps,
@@ -153,8 +153,8 @@ pub trait Tracing {
     /// Whether telemetry is active — an export sink is configured (real host) or recording is on
     /// (sandbox). **Auto-instrumentation gates on this**: when `false`, `noeta serve` (and other
     /// auto-instrumented boundaries) skip span work entirely, so a program that never configures an
-    /// OTLP endpoint pays nothing per request. The explicit `std.telemetry` SDK does not consult it —
-    /// a user who calls `telemetry.span(...)` opted in — so unconfigured spans still mint (and drop at
+    /// OTLP endpoint pays nothing per request. The explicit `std.tracing` SDK does not consult it —
+    /// a user who calls `tracing.span(...)` opted in — so unconfigured spans still mint (and drop at
     /// the null sink), keeping ids/timestamps consistent.
     fn tel_enabled(&self) -> bool;
 
@@ -369,7 +369,12 @@ pub trait Metrics {
 
     /// Get-or-create an instrument by name (idempotent — the OTel "identical instrument" rule; the
     /// first `unit`/`kind` wins). Returns its stable [`InstrumentId`].
-    fn metric_get_or_create(&mut self, name: &str, unit: &str, kind: InstrumentKind) -> InstrumentId;
+    fn metric_get_or_create(
+        &mut self,
+        name: &str,
+        unit: &str,
+        kind: InstrumentKind,
+    ) -> InstrumentId;
 
     /// Record a measurement on an instrument, keyed by its attribute set (Counter/UpDownCounter add
     /// to a running sum, Histogram buckets it, Gauge takes the last value — dispatched on the
@@ -417,17 +422,16 @@ struct Series {
 enum Agg {
     Sum(f64, bool), // (running sum, integral) — integral tracks whether every input was an int
     Gauge(MetricValue),
-    Histogram { count: u64, sum: f64, buckets: Vec<u64> },
+    Histogram {
+        count: u64,
+        sum: f64,
+        buckets: Vec<u64>,
+    },
 }
 
 impl MetricStore {
     /// Get-or-create an instrument by name (idempotent; first unit/kind wins).
-    pub fn get_or_create(
-        &mut self,
-        name: &str,
-        unit: &str,
-        kind: InstrumentKind,
-    ) -> InstrumentId {
+    pub fn get_or_create(&mut self, name: &str, unit: &str, kind: InstrumentKind) -> InstrumentId {
         if let Some(&id) = self.by_name.get(name) {
             return id;
         }
@@ -526,17 +530,16 @@ impl Instrument {
         match self.kind {
             InstrumentKind::Counter | InstrumentKind::UpDownCounter => MetricPoints::Sum {
                 monotonic: matches!(self.kind, InstrumentKind::Counter),
-                points: self
-                    .series
-                    .values()
-                    .map(|s| s.number_point(now))
-                    .collect(),
+                points: self.series.values().map(|s| s.number_point(now)).collect(),
             },
             InstrumentKind::Gauge => {
                 MetricPoints::Gauge(self.series.values().map(|s| s.number_point(now)).collect())
             }
             InstrumentKind::Histogram => MetricPoints::Histogram(
-                self.series.values().map(|s| s.histogram_point(now)).collect(),
+                self.series
+                    .values()
+                    .map(|s| s.histogram_point(now))
+                    .collect(),
             ),
         }
     }
@@ -617,7 +620,10 @@ mod tests {
     use super::*;
 
     fn attrs(pairs: &[(&str, AttrValue)]) -> Vec<(CompactString, AttrValue)> {
-        pairs.iter().map(|(k, v)| ((*k).into(), v.clone())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).into(), v.clone()))
+            .collect()
     }
 
     #[test]

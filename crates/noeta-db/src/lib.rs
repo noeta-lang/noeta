@@ -110,6 +110,9 @@ pub struct Checked {
     /// main's flat per-map fields, including the noeta-native `TypeRecipe` rename — the bundle's
     /// field types live in `noeta_check::Sites` and follow that rename through the re-export.)
     pub sites: noeta_check::Sites,
+    /// Method-bundle bindings by target type (kernel-methods K4) — what member completion reads
+    /// to offer bound methods.
+    pub bundle_bindings: std::collections::HashMap<String, Vec<(String, String)>>,
 }
 
 /// Compiler output: a [`Module`], or the first construct outside the VM's subset.
@@ -202,6 +205,7 @@ fn from_check_output(out: noeta_check::Checked) -> Checked {
         diagnostics: out.diagnostics,
         expr_types: out.expr_types,
         sites: out.sites,
+        bundle_bindings: out.bundle_bindings,
     }
 }
 
@@ -428,6 +432,7 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             diagnostics: diags.clone(),
             expr_types: std::collections::HashMap::new(),
             sites: noeta_check::Sites::default(),
+            bundle_bindings: std::collections::HashMap::new(),
         },
     }
 }
@@ -444,6 +449,7 @@ pub fn linked_checked_ide(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             diagnostics: diags.clone(),
             expr_types: std::collections::HashMap::new(),
             sites: noeta_check::Sites::default(),
+            bundle_bindings: std::collections::HashMap::new(),
         },
     }
 }
@@ -570,11 +576,13 @@ mod tests {
             Ok(p) => p,
             Err(e) => panic!("link failed: {e:?}"),
         };
-        // The real `Foo` is merged in and its `use` dropped (resolved, no opaque stub).
+        // The real `Foo` is merged in under its qualified identity `App.A.Foo` (arc Phase B — the
+        // salsa `linked` query qualifies in lockstep with the CLI loader) and its `use` dropped
+        // (resolved, no opaque stub).
         assert!(
             prog.stmts
                 .iter()
-                .any(|s| matches!(s, noeta_ast::Stmt::Class(c) if c.name == "Foo"))
+                .any(|s| matches!(s, noeta_ast::Stmt::Class(c) if c.name == "App.A.Foo"))
         );
         assert!(
             !prog
@@ -681,12 +689,19 @@ mod tests {
         };
         let ws = workspace_with_deps(&db, &entry, &[], std::slice::from_ref(&dep));
         let linked = linked(&db, ws);
-        assert!(linked.0.is_ok(), "cross-package use must resolve: {:?}", linked.0);
+        assert!(
+            linked.0.is_ok(),
+            "cross-package use must resolve: {:?}",
+            linked.0
+        );
         // The dependency's `greeting` fn was merged into the linked program (and its `use` no longer
         // survives as an unresolved import).
         let program = linked.0.as_ref().unwrap();
         assert!(
-            program.stmts.iter().any(|s| format!("{s:?}").contains("greeting")),
+            program
+                .stmts
+                .iter()
+                .any(|s| format!("{s:?}").contains("greeting")),
             "the dependency's greeting declaration must be linked in"
         );
     }

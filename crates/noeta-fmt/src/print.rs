@@ -12,7 +12,7 @@
 use noeta_ast::{
     AttrArg, AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr,
     FieldDecl, FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, ObjectLit, Param, Pattern,
-    Program, RoleTag, Stmt, StrPart, StructDecl, TypeParam, TypeRef, VariantDecl,
+    Program, RoleTag, Stmt, StrPart, StructDecl, TypeParam, TypeRef, UseName, VariantDecl,
 };
 use std::cell::Cell;
 
@@ -413,15 +413,20 @@ impl Printer<'_> {
             )),
             Stmt::Use { path, names, span } => {
                 let prefix = path.join(".");
+                // A leaf renders `name` or, with a rename, `name as alias`.
+                let render = |u: &UseName| match &u.alias {
+                    Some(a) => format!("{} as {a}", u.name),
+                    None => u.name.clone(),
+                };
                 let doc = match names.as_slice() {
                     // Whole-namespace import `use App.Models` (no leaf names).
                     [] => Doc::text(format!("use {prefix}")),
                     // A single import prints dotted, without braces: `use std.math.sqrt`.
-                    [only] if prefix.is_empty() => Doc::text(format!("use {}", only.name)),
-                    [only] => Doc::text(format!("use {prefix}.{}", only.name)),
+                    [only] if prefix.is_empty() => Doc::text(format!("use {}", render(only))),
+                    [only] => Doc::text(format!("use {prefix}.{}", render(only))),
                     // A selective group `use App.{Invoice, Receipt}` (names sorted when configured).
                     names => {
-                        let mut leaves = names.iter().map(|u| u.name.clone()).collect::<Vec<_>>();
+                        let mut leaves = names.iter().map(render).collect::<Vec<_>>();
                         if self.config.sort_imports {
                             leaves.sort();
                         }

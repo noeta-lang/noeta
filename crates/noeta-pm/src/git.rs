@@ -56,8 +56,7 @@ fn materialize_sha(url: &str, tag: &str, sha: String, store: &Store) -> Result<F
             .publish(&sha, |staging| clone_tag(url, tag, &sha, staging))
             .map_err(|err| format!("storing `{url}`@`{tag}`: {err}"))?
     };
-    let content_hash =
-        hash_tree(&path).map_err(|err| format!("hashing `{url}`@`{tag}`: {err}"))?;
+    let content_hash = hash_tree(&path).map_err(|err| format!("hashing `{url}`@`{tag}`: {err}"))?;
     Ok(Fetched {
         sha,
         content_hash,
@@ -165,7 +164,11 @@ mod tests {
             "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
         )
         .unwrap();
-        std::fs::write(repo.join("lib.noe"), "namespace lib.core;\npub fn v(): int { return 1; }\n").unwrap();
+        std::fs::write(
+            repo.join("lib.noe"),
+            "namespace lib.core;\npub fn v(): int { return 1; }\n",
+        )
+        .unwrap();
         git(&["add", "."], &repo);
         git(&["commit", "-q", "-m", "release"], &repo);
         git(&["tag", tag], &repo);

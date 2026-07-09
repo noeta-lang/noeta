@@ -19,18 +19,14 @@
 
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    ctx_arity, no_function_error, type_error, AttrValue, CtxError, CtxOut, CtxResult, LogRecord,
-    NativeCtx, NativeValue, Scalar, Severity, Slot, TraceContext,
+    AttrValue, CtxError, CtxOut, CtxResult, LogRecord, NativeCtx, NativeValue, Scalar, Severity,
+    Slot, TraceContext, ctx_arity, no_function_error, type_error,
 };
 
 /// An OTel attribute value — the scalar union the surface accepts (a non-scalar is a compile-time
 /// type error, not a runtime one). Same union `std.tracing`'s attributes use.
-const ATTR_VALUE: SigType = SigType::Union(&[
-    SigType::String,
-    SigType::Int,
-    SigType::Float,
-    SigType::Bool,
-]);
+const ATTR_VALUE: SigType =
+    SigType::Union(&[SigType::String, SigType::Int, SigType::Float, SigType::Bool]);
 
 /// The structured-attributes parameter — `Map<string, string|int|float|bool>` (the `*_with` forms).
 const ATTR_MAP: SigType = SigType::Map(&SigType::String, &ATTR_VALUE);

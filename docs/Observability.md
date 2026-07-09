@@ -129,20 +129,19 @@ is configured.
 ## Metrics (`std.metrics`)
 
 `use std.{metrics}`. OTel **instruments** — long-lived, host-owned, **aggregated** into time series
-per attribute set. A constructor is *get-or-create by name* (idempotent), returning an `Instrument`
+per attribute set. A constructor is *get-or-create by name* (idempotent), returning the instrument's
 handle; its methods record a measurement, aggregated host-side and exported on a periodic reader.
 
-| Constructor | Aggregation |
-|---|---|
-| `metrics.counter(name)` | Monotonic sum (only goes up). |
-| `metrics.up_down_counter(name)` | Non-monotonic sum (up and down). |
-| `metrics.histogram(name)` | Distribution over the OTel default explicit buckets (count + sum + buckets). |
-| `metrics.gauge(name)` | Last-value sample. |
+| Constructor | Handle | Aggregation |
+|---|---|---|
+| `metrics.counter(name)` | `Counter` | Monotonic sum (only goes up); `.add(n)`. |
+| `metrics.up_down_counter(name)` | `Counter` | Non-monotonic sum (up and down); `.add(n)`. |
+| `metrics.histogram(name)` | `Histogram` | Distribution over the OTel default explicit buckets; `.record(v)`. |
+| `metrics.gauge(name)` | `Gauge` | Last-value sample; `.record(v)`. |
 
-Each returns one `Instrument`. Record with `.add(n)` (reads best for counters) or `.record(v)` (for
-histograms/gauges) — the two are interchangeable aliases; the behavior is the instrument's *kind*, set
-at construction. The `.add_with(n, attrs)` / `.record_with(v, attrs)` forms attach a `Map<string,
-string|int|float|bool>` of attributes (each distinct set is its own series).
+Counters record with `.add(n)`; histograms and gauges with `.record(v)`. The `.add_with(n, attrs)` /
+`.record_with(v, attrs)` forms attach a `Map<string, string|int|float|bool>` of attributes (each
+distinct set is its own series).
 
 ```noeta ignore
 use std.{metrics}
@@ -154,9 +153,9 @@ requests.add_with(1, {"route": "/orders", "status": 200})
 latency.record(4.2)
 ```
 
-> **One `Instrument` type, not `Counter`/`Gauge`/`Histogram`.** Those OTel names are too common in
-> user code to reserve as global type names; only `Instrument` is reserved (**E0049**). The kind lives
-> host-side, so `.add` and `.record` are interchangeable.
+> **`Counter`/`Histogram`/`Gauge` are namespaced types** under `std.metrics` — `use`-imported like any
+> extern type, so they coexist with a user's own `Counter`. You only need `use std.metrics.{Counter,
+> …}` when you name one in an annotation; the constructors return them regardless.
 
 **Cardinality matters.** Every distinct attribute set is a separate stored series. Keep attribute
 values low-cardinality (a route template, a status class) — never a user id, a raw path with ids, or a

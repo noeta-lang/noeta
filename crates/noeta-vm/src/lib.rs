@@ -1799,10 +1799,17 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         NarrowTarget::Fn => "function",
         NarrowTarget::Dyn => return true,
         NarrowTarget::Named(name) => {
-            // An extern-type value matches its registered type name (`x is Uuid`, extern-types
-            // X1); user objects/enums match their shape name.
+            // An extern-type value matches by its **qualified identity** (`std.id.Uuid`) — the
+            // narrowing target the lowering produced for an imported native type — so it never
+            // matches a same-short-named *user* type (whose shape name is bare). User objects/enums
+            // match their (bare) shape name.
             if v.is_extern() {
-                return v.with_extern(|e| e.type_name() == name);
+                return v.with_extern(|e| {
+                    noeta_stdlib::registry::find_type(e.type_name())
+                        .map(|t| t.qualified())
+                        .as_deref()
+                        == Some(name)
+                });
             }
             return v.shape().is_some_and(|s| &s.name == name);
         }
@@ -3649,6 +3656,38 @@ impl<'m> Vm<'m> {
                             ),
                         ));
                         }
+                        pc += 1;
+                    }
+                    Op::BundleMethod {
+                        dst,
+                        recv,
+                        module: mod_id,
+                        bundle: bundle_id,
+                        method: method_id,
+                        args,
+                        span,
+                    } => {
+                        // A bound method-bundle call (kernel-methods K3): the route was baked at
+                        // compile time — straight to the bundle's shared ctx dispatch, receiver
+                        // as slot 0. Values are copied out of the registers first (borrowed by
+                        // the ctx seed; the seam owns the refcount discipline).
+                        let mod_name = module.name(*mod_id);
+                        let bundle_name = module.name(*bundle_id);
+                        let method_name = module.name(*method_id);
+                        let recv_value = regs[fbase + *recv as usize];
+                        let mut arg_values = Vec::with_capacity(args.len());
+                        for r in args.iter() {
+                            arg_values.push(regs[fbase + *r as usize]);
+                        }
+                        let result = self.call_bundle_method(
+                            mod_name,
+                            bundle_name,
+                            method_name,
+                            recv_value,
+                            &arg_values,
+                            *span,
+                        )?;
+                        set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
                     Op::PackedListPush {

@@ -1,0 +1,15 @@
+// Kernel-methods K1 impl-site diagnostics: an unknown module in the bundle path (E0014), an
+// unknown bundle in a known module (E0014), a non-packed target (E0015), and a constraint
+// mismatch — wrong field kinds (E0015). Each error names exactly what disagrees.
+// expect: error E0014 at 12:6
+// expect: error E0014 at 13:6
+// expect: error E0015 at 14:22
+// expect: error E0015 at 15:22
+// expect: exit 1
+use std.{vec}
+struct Plain { x: f32; y: f32; z: f32 }
+@packed struct Wide { x: f32; y: f32; z: f32; w: f32 }
+impl nope.Kernels for Plain {}
+impl vec.Nope for Plain {}
+impl vec.Kernels for Plain {}
+impl vec.Kernels for Wide {}

@@ -21,7 +21,7 @@ use std::rc::Rc;
 use crate::StdError;
 use crate::executor::ExternIo;
 use crate::host::Host;
-use crate::registry::{NativeOut, NativeValue};
+use crate::registry::{NativeOut, NativeValue, Scalar};
 
 /// An opaque handle to one backend value held in the per-call slot table. Slots are **owned by
 /// the table**: every method returning a `Slot` mints a fresh one (methods never consume argument
@@ -74,6 +74,39 @@ pub fn ctx_arity(func: &str, args: &[Slot], expected: usize) -> CtxResult<()> {
     } else {
         Err(crate::arity_error(func, expected, args.len()).into())
     }
+}
+
+/// A neutral, read-only description of a packed list's element layout (package-manager N3.4) —
+/// what a raw-buffer kernel needs to interpret the byte buffer [`NativeCtx::with_packed`] lends it.
+/// The backends hold *different* concrete schema representations (the VM an interned
+/// `&'static` schema, the reference interpreter an `Rc` over its type table), so — like
+/// [`NativeValue`]/[`crate::registry::SigType`] before it — the seam crosses the gap with its own
+/// vocabulary: each backend projects its schema into this view on entry. Purely descriptive: a
+/// result buffer's schema is *named*, never built, via [`NativeCtx::make_packed_like`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackedView {
+    /// One entry per element field, in slot (declared) order.
+    pub fields: Vec<PackedField>,
+    /// Bytes per element (an `f32` field is 4, `int`/`float` 8, `bool` 1).
+    pub byte_size: usize,
+    /// Whether the buffer is stored **column-major** (SoA: `[f0×n][f1×n]…`) rather than row-major
+    /// (AoS: each element's fields contiguous) — `@packed(layout: column)`. Kernels must respect
+    /// it: element-wise math is layout-agnostic over the flat primitive array, per-element reads
+    /// are not.
+    pub column: bool,
+    /// The number of elements in the viewed buffer.
+    pub count: usize,
+}
+
+/// One packed field's storage in a [`PackedView`]: a primitive, or a nested packed struct
+/// flattened inline (its own fields laid out contiguously within the parent's element).
+#[derive(Debug, Clone, PartialEq)]
+pub enum PackedField {
+    Int,
+    Float,
+    F32,
+    Bool,
+    Struct(Vec<PackedField>),
 }
 
 /// What a [`CtxDispatch`] returns: a slot whose value becomes the call's result verbatim, a
@@ -258,13 +291,70 @@ pub trait NativeCtx {
     /// untouched then.
     fn call_thunk_into(&mut self, body: Retained, dest: Retained) -> CtxResult<()>;
 
+    // ----- The raw-buffer ABI (package-manager N3.4): packed lists + structural objects -----
+
+    /// Read a packed list's element layout and raw byte buffer through a borrow — the
+    /// [`NativeCtx::with_extern`] twin for `List<packed>`, and the capability that lets a native
+    /// bulk kernel run over the contiguous buffer with **zero per-element traffic**. `Ok(true)` =
+    /// the callback ran; `Ok(false)` = the slot holds anything else (typically a boxed list — the
+    /// caller takes its element-wise fallback); `Err` = a freed/invalid slot. The borrow ends with
+    /// the callback: copy out what the kernel keeps.
+    fn with_packed(&mut self, slot: Slot, f: &mut dyn FnMut(&PackedView, &[u8]))
+    -> CtxResult<bool>;
+
+    /// Transform a packed list's buffer, **preserving value semantics**: the callback receives a
+    /// uniquely-owned copy-on-write buffer (mutated in place only when the backend can prove sole
+    /// ownership), and the transformed list arrives as a fresh slot. A non-seed input slot is
+    /// spent (its reference moves into the result — the [`NativeCtx::make_list`] convention); a
+    /// seed argument stays valid, exactly like a `take`. `Ok(None)` when the slot does not hold a
+    /// packed list — no callback run, slot untouched.
+    fn with_packed_mut(
+        &mut self,
+        slot: Slot,
+        f: &mut dyn FnMut(&PackedView, &mut [u8]),
+    ) -> CtxResult<Option<Slot>>;
+
+    /// Build a packed list from a raw byte buffer, its element schema **shared with an existing
+    /// packed slot** — the allocating result-producer of a bulk kernel. Schemas are
+    /// backend-interned objects the neutral seam cannot construct, so a result always names an
+    /// input's (which is also all the checker could type — a signature cannot name a user's
+    /// `@packed` type). `bytes.len()` must be a whole number of `byte_size`-wide elements; errs
+    /// when `like` does not hold a packed list.
+    fn make_packed_like(&mut self, like: Slot, bytes: Vec<u8>) -> CtxResult<Slot>;
+
+    /// Read `list[index]`'s primitive fields in slot (declared) order into `out` (cleared first —
+    /// pass the same buffer around a loop and the whole element-wise fallback of a bulk kernel
+    /// allocates nothing per element). `Ok(true)` = filled; `Ok(false)` = the element is not an
+    /// all-primitive object (the caller reports its own type error); `Err` = a non-list slot or
+    /// out-of-range index (dispatch misuse — kernels iterate `0..list_len`). Fused
+    /// list-read + shallow [`NativeValue::Object`] projection with **zero slot traffic**, the
+    /// [`NativeCtx::call_with_element`] rationale applied to structural reads.
+    fn object_scalars_at(
+        &mut self,
+        list: Slot,
+        index: usize,
+        out: &mut Vec<Scalar>,
+    ) -> CtxResult<bool>;
+
+    /// Build an object **shaped like `list[index]`** from field scalars, as a fresh slot — the
+    /// ctx twin of a plain dispatch's [`NativeOut::Object`] + `RetTy::SameAsArg` materialization
+    /// (which [`NativeCtx::intern`] deliberately rejects: it has no shape context), fused with
+    /// the element read so a result-building loop mints only its result slots. Errs when the
+    /// element is not an object or `fields` disagrees with its field count.
+    fn make_object_like_element(
+        &mut self,
+        list: Slot,
+        index: usize,
+        fields: &[Scalar],
+    ) -> CtxResult<Slot>;
+
     // ----- task-local context (native-otel T5a) -----
     //
     // A per-task stack of opaque `u64`s the backend carries with its cooperative scheduling: the
     // **current** context belongs to whichever strand is executing (the main strand's root cell,
     // or a task's own — the scheduler swaps a task's context in around each poll of its step, and
     // a `spawn`ed task inherits a snapshot of its spawner's). Extensions that need scope to follow
-    // *execution* rather than the run — `std.telemetry`'s active-span stack is the first client —
+    // *execution* rather than the run — `std.tracing`'s active-span stack is the first client —
     // read/write the current context through these ops instead of keeping one global stack in
     // `ExtState`, which would interleave wrongly across `await`s. The values are opaque to the
     // core (telemetry stores `SpanId`s); an empty context is the natural zero.

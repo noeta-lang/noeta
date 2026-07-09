@@ -1114,12 +1114,18 @@ fn every_reserved_prelude_name_rejects_binding() {
 
 #[test]
 fn reserved_native_type_names_reject_type_declarations() {
-    // E0049 (extern-types X1): the checker-native type names — and any registered extern type —
-    // cannot be re-declared; their method tables dispatch by name, so a same-name user type
-    // would be silently shadowed.
-    assert_eq!(codes("struct FileHandle { x: int }\n"), ["E0049"]);
+    // E0049 now reserves only the **language-level** built-ins (`Iterator`/`Future`/`Sender`/
+    // `Receiver`), whose values are backend builtins dispatched by name.
     assert_eq!(codes("class Iterator { x: int }\n"), ["E0049"]);
     assert_eq!(codes("enum Future { A }\n"), ["E0049"]);
+    // A registered **extern** type's name is no longer reserved — extern types are namespace-scoped
+    // and `use`-imported, so a user may freely declare one (it carries a distinct qualified
+    // identity and never conflates with the native type).
+    assert_eq!(
+        codes("struct FileHandle { x: int }\n"),
+        Vec::<String>::new()
+    );
+    assert_eq!(codes("class Response { x: int }\n"), Vec::<String>::new());
     // An unreserved name stays declarable.
     assert_eq!(codes("struct Handle2 { x: int }\n"), Vec::<String>::new());
 }
@@ -2016,13 +2022,14 @@ fn an_erroring_entry_leaves_the_session_usable_and_diagnostics_do_not_leak() {
 #[test]
 fn reserved_names_refuse_in_a_session_entry() {
     let mut session = super::SessionChecker::new();
-    // A prelude value name (E0046) and a native type name (E0049) refuse, as in a file.
+    // A prelude value name (E0046) and a reserved language-level type name (E0049) refuse, as in a
+    // file. (A registered extern type like `Uuid` is no longer reserved — see the file-level test.)
     assert_eq!(
         entry_codes(&mut session, 0, "fn panic(): int { return 1 }\n"),
         vec!["E0046"]
     );
     assert_eq!(
-        entry_codes(&mut session, 1, "struct Uuid { x: int }\n"),
+        entry_codes(&mut session, 1, "struct Iterator { x: int }\n"),
         vec!["E0049"]
     );
 }

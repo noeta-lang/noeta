@@ -488,7 +488,13 @@ fn set_public(stmt: Stmt, is_public: bool) -> Stmt {
 /// Assemble a parsed `use` path into its dotted `path` prefix and imported `names`. With
 /// a `{ ... }` group the whole dotted run is the prefix; otherwise the last segment is the
 /// single imported name (`use App.Models.User;` → path `App.Models`, name `User`).
-fn build_use(first: String, first_span: Span, tails: Vec<UseTail>, span: Span) -> Stmt {
+fn build_use(
+    first: String,
+    first_span: Span,
+    tails: Vec<UseTail>,
+    alias: Option<String>,
+    span: Span,
+) -> Stmt {
     let mut segs: Vec<(String, Span)> = vec![(first, first_span)];
     let mut group: Option<Vec<UseName>> = None;
     for tail in tails {
@@ -498,6 +504,8 @@ fn build_use(first: String, first_span: Span, tails: Vec<UseTail>, span: Span) -
         }
     }
     let (path, names) = match group {
+        // A group carries its renames per-name inside the braces; a trailing `as` is meaningless
+        // here (`use X.{A, B} as C`) and simply ignored.
         Some(g) => (segs.into_iter().map(|(n, _)| n).collect(), g),
         None => {
             let (leaf, leaf_span) = segs.pop().expect("the leading id is always present");
@@ -507,6 +515,7 @@ fn build_use(first: String, first_span: Span, tails: Vec<UseTail>, span: Span) -
                 vec![UseName {
                     name: leaf,
                     span: leaf_span,
+                    alias,
                 }],
             )
         }
@@ -2263,10 +2272,31 @@ where
                 },
             );
         let class_method = method.clone().map(ClassMember::Method);
+        // A trait reference: a bare built-in name (`Clone`) or a dotted path into a native
+        // module's method bundles (`vec.Kernels`, kernel-methods K1). Joined into one dotted
+        // name; the span covers the whole path.
+        let trait_path = id
+            .clone()
+            .then(
+                just(T::Dot)
+                    .ignore_then(id.clone())
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .map(|((first, first_span), rest)| {
+                let mut name: String = first;
+                let mut span = first_span;
+                for (seg, seg_span) in rest {
+                    name.push('.');
+                    name.push_str(&seg);
+                    span.end = seg_span.end;
+                }
+                (name, span)
+            });
         // `impl Trait { fn ... }` — implementing a built-in trait lights up its operator/protocol.
         // The body is just methods; they are flattened into the class's method table below.
         let class_impl = just(T::ImplKw)
-            .ignore_then(id.clone())
+            .ignore_then(trait_path.clone())
             .then(
                 method
                     .clone()
@@ -2353,7 +2383,7 @@ where
         // {}`). The `for Type` is what distinguishes it from the class-body `impl Trait { ... }`
         // above. The checker requires `Type` to be declared in the same module (orphan rule).
         let standalone_impl = just(T::ImplKw)
-            .ignore_then(id.clone())
+            .ignore_then(trait_path.clone())
             .then_ignore(just(T::ForKw))
             .then(id.clone())
             .then(
@@ -2502,9 +2532,16 @@ where
             });
 
         // `use App.Models.User;` (single) or `use App.Billing.{Invoice, Receipt};` (grouped).
+        // Each grouped name may carry an `as <alias>` rename (`{Counter as Metric, Gauge}`).
+        let as_alias = just(T::AsKw).ignore_then(id.clone()).or_not();
         let use_group = id
             .clone()
-            .map(|(name, span)| UseName { name, span })
+            .then(as_alias.clone())
+            .map(|((name, span), alias)| UseName {
+                name,
+                span,
+                alias: alias.map(|(a, _)| a),
+            })
             .separated_by(just(T::Comma))
             .allow_trailing()
             .at_least(1)
@@ -2518,9 +2555,17 @@ where
         let use_decl = just(T::UseKw)
             .ignore_then(id.clone())
             .then(use_tail.repeated().collect::<Vec<_>>())
+            // A trailing `as <alias>` renames the single-import form (`use App.Models.User as Customer`).
+            .then(as_alias)
             .then_ignore(stmt_terminator())
-            .map_with(move |((first, first_span), tails), e| {
-                build_use(first, first_span, tails, ctx.to_span(e.span()))
+            .map_with(move |(((first, first_span), tails), alias), e| {
+                build_use(
+                    first,
+                    first_span,
+                    tails,
+                    alias.map(|(a, _)| a),
+                    ctx.to_span(e.span()),
+                )
             });
 
         // A bare expression, optionally an assignment `name = expr` carrying an optional type
@@ -3666,6 +3711,16 @@ mod tests {
     fn namespace_and_use_declarations() {
         insta::assert_snapshot!(pretty(
             "namespace App.Orders; use App.Models.User; use App.Billing.{Invoice, Receipt}; echo \"ok\";"
+        ));
+    }
+
+    #[test]
+    fn use_import_aliases() {
+        // `as <alias>` renames an import, in both the single (`User as Customer`) and grouped
+        // (`{Counter as Metric, Gauge}`) forms — the seam that lets a file pull in two same-named
+        // types from different namespaces. The pretty form renders a rename as `Name=Alias`.
+        insta::assert_snapshot!(pretty(
+            "use App.Models.User as Customer; use std.metrics.{Counter as Metric, Gauge}; echo \"ok\";"
         ));
     }
 

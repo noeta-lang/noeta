@@ -33,10 +33,18 @@ pub(super) const RECEIVER: &str = "Receiver";
 pub(super) const NATIVE_TYPE_NAMES: &[&str] = &[ITERATOR, FUTURE, SENDER, RECEIVER];
 
 /// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. Every module — `json` included
-/// (B4) — comes from the native-extension registry now; only the `vec` bulk `*_all` kernels keep a
-/// small per-backend fallback in `module_params`/`module_return`.
+/// (B4) — comes from the native-extension registry.
 pub(super) fn is_std_module(name: &str) -> bool {
     registry::find_module(name).is_some()
+}
+
+/// The **qualified identity** (`std.id.Uuid`) of a registered extern type named by its bare
+/// registry name (`Uuid`), or the name unchanged if it is not a registered type. This is what the
+/// checker stores in `Type::Named` so a native type is never conflated with a same-short-named user
+/// type; the runtime still tags values with the bare name, and `registry::resolve_type` bridges the
+/// two spellings at every method-lookup site.
+fn qualified_extern(n: &str) -> String {
+    registry::find_type(n).map_or_else(|| n.to_string(), registry::ExtType::qualified)
 }
 
 /// Map a [`registry::SigType`] onto a checker [`Type`] under call-site variable `bindings`
@@ -60,7 +68,10 @@ fn sig_to_type_bound(sig: &registry::SigType, bindings: &[Option<Type>]) -> Type
             Box::new(sig_to_type_bound(v, bindings)),
         ),
         SigType::Future(t) => Type::Named(FUTURE.to_string(), vec![sig_to_type_bound(t, bindings)]),
-        SigType::Named(n) => Type::Named((*n).to_string(), vec![]),
+        // A registered extern type carries its **qualified identity** (`std.id.Uuid`), so a native
+        // type never collides with a user type of the same short name. `Iterator`/`Future`/… (the
+        // language-level `SigType::Future`/etc.) stay bare — they are not registry types.
+        SigType::Named(n) => Type::Named(qualified_extern(n), vec![]),
         SigType::Union(members) => {
             Type::union(members.iter().map(|m| sig_to_type_bound(m, bindings)))
         }
@@ -82,7 +93,7 @@ fn sig_to_type_bound(sig: &registry::SigType, bindings: &[Option<Type>]) -> Type
             .unwrap_or(Type::Unknown),
         // A generic extern-type instantiation (higher-order-abi H4): `cell.new(v: A) -> Cell<A>`.
         SigType::Generic(n, args) => Type::Named(
-            (*n).to_string(),
+            qualified_extern(n),
             args.iter()
                 .map(|a| sig_to_type_bound(a, bindings))
                 .collect(),
@@ -253,7 +264,7 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         // (extern-types X1) — the registry is the single source, so a new native type never
         // edits this file. A generic extern type's method signatures reference the receiver's
         // type arguments as `Var(i)` (H4): `Cell<int>.get()` is `int`.
-        Type::Named(n, targs) if registry::find_type(n).is_some() => {
+        Type::Named(n, targs) if registry::resolve_type(n).is_some() => {
             let sig = registry::find_type_method_sig(n, name)?;
             Some(match sig.ret {
                 registry::RetTy::Concrete(s) => sig_to_type_bound(&s, &receiver_bindings(targs)),
@@ -475,7 +486,7 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         // A registered extern type's method parameters come from its `ExtType` signature table
         // (extern-types X1), like `method_return`, with the receiver's type arguments seeding
         // any variables (H4): `Cell<int>.set(v)` demands an `int`.
-        Type::Named(n, targs) if registry::find_type(n).is_some() => {
+        Type::Named(n, targs) if registry::resolve_type(n).is_some() => {
             let sig = registry::find_type_method_sig(n, name)?;
             let bindings = receiver_bindings(targs);
             Some(
@@ -490,9 +501,9 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
 }
 
 /// The count of **required** arguments a Ring 2 module function takes — everything up to its first
-/// trailing-optional param (http arc H4). `None` for a non-registry function (the `vec` `*_all`
-/// fallback), whose params are all required. Runs alongside [`module_params`] so the arity gate
-/// admits `http.get(url)` as well as `http.get(url, headers)`.
+/// trailing-optional param (http arc H4). Runs alongside [`module_params`] so the arity gate
+/// admits `http.get(url)` as well as `http.get(url, headers)` (and, since N3.4, `fs.list()` as
+/// well as `fs.list(dir)`).
 pub(super) fn module_required(module: &str, name: &str) -> Option<usize> {
     registry::find_function_sig(module, name).map(|f| registry::SigType::required_count(f.params))
 }
@@ -501,7 +512,7 @@ pub(super) fn module_required(module: &str, name: &str) -> Option<usize> {
 /// built-in receiver method (all required), so the caller falls back to `params.len()`.
 pub(super) fn method_required(receiver: &Type, name: &str) -> Option<usize> {
     if let Type::Named(n, _) = receiver
-        && registry::find_type(n).is_some()
+        && registry::resolve_type(n).is_some()
     {
         return registry::find_type_method_sig(n, name)
             .map(|sig| registry::SigType::required_count(sig.params));
@@ -602,29 +613,17 @@ fn map_params(name: &str, key: &Type, val: &Type) -> Option<Vec<Type>> {
 /// each `Var` substituted by its first-occurrence binding, so the ordinary argument check enforces
 /// the repeated-variable positions.
 pub(super) fn module_params(module: &str, name: &str, args: &[Type]) -> Option<Vec<Type>> {
-    // `fs.list` (and its async twin, extern-types X6) takes an optional dir argument (0 or 1) —
-    // not arity-checked. (Both are registered with a fixed signature for dispatch, so this skip
-    // must precede the registry lookup.)
-    if registry::module_name(module) == "fs" && (name == "list" || name == "list_async") {
-        return None;
-    }
-    // Migrated modules: parameter types come from the native-extension registry.
-    if let Some(f) = registry::find_function_sig(module, name) {
-        let bindings = bind_params(f.params, args);
-        return Some(
-            f.params
-                .iter()
-                .map(|p| sig_to_type_bound(p, &bindings))
-                .collect(),
-        );
-    }
-    // Not in the registry: the `vec` bulk `*_all` kernels (per-backend, deferred with vec/quat's
-    // eventual eviction to a package).
-    Some(match (registry::module_name(module), name) {
-        ("vec", "add_all" | "sub_all" | "dot_all" | "scale_all") => vec![Type::Dyn, Type::Dyn],
-        ("vec", "length_all") => vec![Type::Dyn],
-        _ => return None,
-    })
+    // Every module function types from the native-extension registry (the last non-registry
+    // stragglers died with package-manager N3.4: the `vec` bulk `*_all` kernels are registered
+    // ctx functions, and `fs.list`/`fs.list_async` carry a real trailing-`Optional` signature).
+    let f = registry::find_function_sig(module, name)?;
+    let bindings = bind_params(f.params, args);
+    Some(
+        f.params
+            .iter()
+            .map(|p| sig_to_type_bound(p, &bindings))
+            .collect(),
+    )
 }
 
 /// The return type of a prelude free-function call `name(args)`, given the argument types — or
@@ -682,23 +681,41 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
     // i-th argument's type (`vec.add(v, w): typeof v`); `NumericPreserving` is the `math.abs`/min/max
     // kind-preserving rule; `Concrete` maps directly, with any signature type variables bound from
     // the argument types (higher-order-abi H1) — `all(List<Future<T>>) -> List<T>` recovers `T`.
-    if let Some(f) = registry::find_function_sig(module, name) {
-        use registry::RetTy;
-        return Some(match f.ret {
-            RetTy::Concrete(s) => sig_to_type_bound(&s, &bind_params(f.params, args)),
-            RetTy::SameAsArg(i) => args.get(i).cloned().unwrap_or(Type::Dyn),
-            RetTy::NumericPreserving => numeric_preserving(args),
-            // The call-site-typed turbofish form lands in Phase B; until then no registered function
-            // uses it, so a hole is the safe fallback.
-            RetTy::TypeArg => Type::Unknown,
-        });
-    }
-    // Not in the registry: the `vec` bulk `*_all` kernels (per-backend).
-    Some(match (registry::module_name(module), name) {
-        ("vec", "add_all" | "sub_all" | "scale_all") => args.first().cloned().unwrap_or(Type::Dyn),
-        ("vec", "dot_all" | "length_all") => list(Type::F32),
-        _ => return None,
+    use registry::RetTy;
+    let f = registry::find_function_sig(module, name)?;
+    Some(match f.ret {
+        RetTy::Concrete(s) => sig_to_type_bound(&s, &bind_params(f.params, args)),
+        RetTy::SameAsArg(i) => args.get(i).cloned().unwrap_or(Type::Dyn),
+        RetTy::NumericPreserving => numeric_preserving(args),
+        // The call-site-typed turbofish form lands in Phase B; until then no registered function
+        // uses it, so a hole is the safe fallback.
+        RetTy::TypeArg => Type::Unknown,
     })
+}
+
+/// A bundle method's parameter types under the receiver-at-0 convention (kernel-methods K2):
+/// the receiver is NOT in `params` (it rides as ctx slot 0), so binding and substitution run
+/// over the call's own arguments exactly like a module function's.
+pub(super) fn bundle_method_params(f: &registry::ExtFn, args: &[Type]) -> Vec<Type> {
+    let bindings = bind_params(f.params, args);
+    f.params
+        .iter()
+        .map(|p| sig_to_type_bound(p, &bindings))
+        .collect()
+}
+
+/// A bundle method's return type under the receiver-at-0 convention (kernel-methods K2):
+/// `SameAsArg(0)` is **the receiver's type** (`xs.add_all(ys)` returns `xs`'s own `List<T>`),
+/// `SameAsArg(i > 0)` the call's argument `i - 1`.
+pub(super) fn bundle_method_return(f: &registry::ExtFn, recv: &Type, args: &[Type]) -> Type {
+    use registry::RetTy;
+    match f.ret {
+        RetTy::Concrete(s) => sig_to_type_bound(&s, &bind_params(f.params, args)),
+        RetTy::SameAsArg(0) => recv.clone(),
+        RetTy::SameAsArg(i) => args.get(i - 1).cloned().unwrap_or(Type::Dyn),
+        RetTy::NumericPreserving => numeric_preserving(args),
+        RetTy::TypeArg => Type::Unknown,
+    }
 }
 
 /// Kind-preserving numeric result (`math.abs`/`min`/`max`): `int` if every argument is concretely

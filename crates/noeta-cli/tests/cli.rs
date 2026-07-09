@@ -2023,7 +2023,11 @@ fn path_dep_project(name: &str) -> PathBuf {
          [dependencies]\nhi = { path = \"../greetlib\" }\n",
     )
     .unwrap();
-    std::fs::write(app.join("main.noe"), "use hi.hello.greeting;\necho greeting();\n").unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use hi.hello.greeting;\necho greeting();\n",
+    )
+    .unwrap();
     std::fs::write(
         lib.join("noeta.toml"),
         "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
@@ -2067,7 +2071,11 @@ fn noeta_check_resolves_cross_package_use() {
     // not opaquely stubbed away).
     let dir = entry.parent().unwrap();
     std::fs::write(dir.join("main.noe"), "use hi.hello.nope;\necho nope();\n").unwrap();
-    lang().arg("check").arg(dir.join("main.noe")).assert().failure();
+    lang()
+        .arg("check")
+        .arg(dir.join("main.noe"))
+        .assert()
+        .failure();
 }
 
 #[test]
@@ -2148,28 +2156,42 @@ fn a_version_conflict_is_reported() {
          [dependencies]\ns = { path = \"../c1\" }\n",
     )
     .unwrap();
-    std::fs::write(a.join("a.noe"), "namespace a.x;\npub fn f(): int { return 1; }\n").unwrap();
+    std::fs::write(
+        a.join("a.noe"),
+        "namespace a.x;\npub fn f(): int { return 1; }\n",
+    )
+    .unwrap();
     std::fs::write(
         b.join("noeta.toml"),
         "[package]\nname = \"acme/b\"\nversion = \"1.0.0\"\n\
          [dependencies]\ns = { path = \"../c2\" }\n",
     )
     .unwrap();
-    std::fs::write(b.join("b.noe"), "namespace b.x;\npub fn g(): int { return 2; }\n").unwrap();
+    std::fs::write(
+        b.join("b.noe"),
+        "namespace b.x;\npub fn g(): int { return 2; }\n",
+    )
+    .unwrap();
     std::fs::write(
         c1.join("noeta.toml"),
         "[package]\nname = \"acme/shared\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(c1.join("s.noe"), "namespace shared.core;\npub fn h(): int { return 3; }\n")
-        .unwrap();
+    std::fs::write(
+        c1.join("s.noe"),
+        "namespace shared.core;\npub fn h(): int { return 3; }\n",
+    )
+    .unwrap();
     std::fs::write(
         c2.join("noeta.toml"),
         "[package]\nname = \"acme/shared\"\nversion = \"2.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(c2.join("s.noe"), "namespace shared.core;\npub fn h(): int { return 4; }\n")
-        .unwrap();
+    std::fs::write(
+        c2.join("s.noe"),
+        "namespace shared.core;\npub fn h(): int { return 4; }\n",
+    )
+    .unwrap();
 
     lang()
         .arg("run")
@@ -2212,7 +2234,13 @@ fn a_published_package_resolves_as_a_registry_dependency() {
     lang()
         .current_dir(&repo)
         .env("NOETA_REGISTRY_DIR", &reg)
-        .args(["publish", "--git", repo.to_str().unwrap(), "--tag", "v1.2.0"])
+        .args([
+            "publish",
+            "--git",
+            repo.to_str().unwrap(),
+            "--tag",
+            "v1.2.0",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("published `acme/greet` 1.2.0"));
@@ -2224,7 +2252,11 @@ fn a_published_package_resolves_as_a_registry_dependency() {
          [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
     )
     .unwrap();
-    std::fs::write(app.join("main.noe"), "use gc.hello.greeting;\necho greeting();\n").unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use gc.hello.greeting;\necho greeting();\n",
+    )
+    .unwrap();
 
     lang()
         .env("NOETA_REGISTRY_DIR", &reg)
@@ -2320,7 +2352,11 @@ fn a_git_tag_dependency_is_fetched_and_run() {
         ),
     )
     .unwrap();
-    std::fs::write(app.join("main.noe"), "use hi.hello.greeting;\necho greeting();\n").unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use hi.hello.greeting;\necho greeting();\n",
+    )
+    .unwrap();
 
     // Isolate the package store under the test's cache dir (set by `lang()`), so the fetch is hermetic.
     lang()
@@ -2351,8 +2387,11 @@ fn noeta_add_edits_the_manifest_and_resolves() {
         "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(lib.join("m.noe"), "namespace lib.core;\npub fn v(): int { return 42; }\n")
-        .unwrap();
+    std::fs::write(
+        lib.join("m.noe"),
+        "namespace lib.core;\npub fn v(): int { return 42; }\n",
+    )
+    .unwrap();
 
     lang()
         .current_dir(&app)
@@ -2362,12 +2401,23 @@ fn noeta_add_edits_the_manifest_and_resolves() {
         .stdout(predicate::str::contains("added `hi`"));
 
     let manifest = std::fs::read_to_string(app.join("noeta.toml")).unwrap();
-    assert!(manifest.contains("# my app"), "comment preserved: {manifest}");
-    assert!(manifest.contains("hi = { path = \"../lib\" }"), "dep added: {manifest}");
+    assert!(
+        manifest.contains("# my app"),
+        "comment preserved: {manifest}"
+    );
+    assert!(
+        manifest.contains("hi = { path = \"../lib\" }"),
+        "dep added: {manifest}"
+    );
     assert!(app.join("noeta.lock").is_file(), "lock written");
 
     // The added dependency actually resolves and runs.
-    lang().arg("run").arg(app.join("main.noe")).assert().success().stdout("42\n");
+    lang()
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout("42\n");
 }
 
 #[test]
@@ -2387,8 +2437,11 @@ fn noeta_update_rewrites_the_lock() {
         "[package]\nname = \"acme/up\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(dep_repo.join("m.noe"), "namespace up.core;\npub fn v(): int { return 7; }\n")
-        .unwrap();
+    std::fs::write(
+        dep_repo.join("m.noe"),
+        "namespace up.core;\npub fn v(): int { return 7; }\n",
+    )
+    .unwrap();
     git_in(&["add", "."], &dep_repo);
     git_in(&["commit", "-q", "-m", "r"], &dep_repo);
     git_in(&["tag", "v1.0.0"], &dep_repo);
@@ -2460,8 +2513,14 @@ fn a_git_dependency_is_pinned_and_reproduces_offline() {
 
     // The lock pins the git source + commit SHA.
     let lock = std::fs::read_to_string(app.join("noeta.lock")).expect("lock written");
-    assert!(lock.contains("acme/pinned"), "lock names the package: {lock}");
-    assert!(lock.contains("source = \"git\""), "lock records the git source: {lock}");
+    assert!(
+        lock.contains("acme/pinned"),
+        "lock names the package: {lock}"
+    );
+    assert!(
+        lock.contains("source = \"git\""),
+        "lock records the git source: {lock}"
+    );
     assert!(lock.contains("sha = "), "lock pins a commit SHA: {lock}");
 
     // Delete the remote repo entirely; the pinned tree already lives in the store, so a second run
@@ -2473,4 +2532,525 @@ fn a_git_dependency_is_pinned_and_reproduces_offline() {
         .assert()
         .success()
         .stdout(predicate::str::contains("pinned offline value"));
+}
+
+// --- package manager: composed toolchain (Phase 3, N3.2/N3.3) -----------------------------------
+
+/// Lay out an app + a dependency package carrying a **native entry crate** (the Phase-3 proving
+/// package): module `fx` (plain dispatch), extern type `Acc` (plain methods + a higher-order ctx
+/// method), and an `fx-info` ExtCommand. The crate depends on this workspace's `noeta-native` by
+/// path and exports the composition convention symbol `NOETA_EXTENSIONS`.
+fn composed_project(name: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let dep = base.join("imgfx");
+    let krate = dep.join("native");
+    std::fs::create_dir_all(&app).expect("mk app");
+    std::fs::create_dir_all(krate.join("src")).expect("mk crate");
+
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nimgfx = { path = \"../imgfx\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use imgfx.{fx}\n\n\
+         @packed(layout: column) struct Px { r: f32; g: f32; b: f32 }\n\n\
+         a = fx.acc();\n\
+         a.add(2);\n\
+         a.apply(fn(t) => t * 10);\n\
+         echo fx.double(21);\n\
+         echo a.total();\n\n\
+         // The raw-buffer seam, third-party edition (N3.4): the extension's column kernel\n\
+         // reduces the app's own @packed type, and its COW-mutating kernel produces a new list.\n\
+         impl fx.Pixels for Px {}\n\
+         ps = [Px { r: 0.25f32, g: 1.0f32, b: 2.0f32 }, Px { r: 0.5f32, g: 1.0f32, b: 2.0f32 }];\n\
+         echo fx.sum_r(ps);\n\
+         bright = fx.brighten_all(ps, 0.5f32);\n\
+         echo bright[1].g;\n\
+         echo ps[1].g;\n\
+         echo ps.brighten(2.0f32)[0].r;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("bad.noe"),
+        "use imgfx.{fx}\n\necho fx.double(\"nope\");\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        dep.join("noeta.toml"),
+        "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
+    )
+    .unwrap();
+
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+    std::fs::write(
+        krate.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"imgfx-native\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+             [lib]\npath = \"src/lib.rs\"\n\n\
+             [dependencies]\nnoeta-native = {{ path = \"{}\" }}\n\n[workspace]\n",
+            workspace.join("crates").join("noeta-native").display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(krate.join("src").join("lib.rs"), IMGFX_NATIVE_SRC).unwrap();
+    app.join("main.noe")
+}
+
+/// The proving extension's Rust source (see [`composed_project`]).
+const IMGFX_NATIVE_SRC: &str = r##"
+//! The Phase-3 proving extension: one module, one extern type with plain + ctx methods, one
+//! CLI command — exercised end-to-end through toolchain composition.
+
+use std::any::Any;
+use std::cmp::Ordering;
+use std::fmt;
+use std::sync::atomic::{AtomicI64, Ordering as AtomicOrd};
+
+use noeta_native::registry::{
+    BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, ExtBundle, ExtFn, ExtModule,
+    ExtType, Extension, NativeOut, NativeValue, PackedConstraint, RetTy, Scalar, SigType,
+};
+use noeta_native::{
+    no_function_error, no_method_error, CommandCtx, CtxError, CtxOut, ErrorKind, ExtCommand,
+    ExternValue, Host, NativeCtx, ParsedArgs, Slot, StdError,
+};
+
+const FX_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "double",
+        params: &[SigType::Int],
+        ret: RetTy::Concrete(SigType::Int),
+    },
+    ExtFn {
+        name: "acc",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Named("Acc")),
+    },
+];
+
+fn fx_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match func {
+        "double" => match args.first() {
+            Some(NativeValue::Scalar(Scalar::Int(n))) => Ok(NativeOut::Scalar(Scalar::Int(n * 2))),
+            _ => Err(StdError {
+                kind: ErrorKind::ArgType,
+                message: "`fx.double` expects an int".to_string(),
+            }),
+        },
+        "acc" => Ok(NativeOut::Extern(noeta_native::ExternBox(Box::new(
+            Acc::default(),
+        )))),
+        _ => Err(no_function_error("fx", func)),
+    }
+}
+
+// The raw-buffer seam (package-manager N3.4), third-party edition: kernels over the CONSUMER's
+// own `@packed` pixel type — a column reduction (zero per-element traffic) and a COW-mutating
+// transform producing a new list.
+const FX_CTX_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "sum_r",
+        params: &[SigType::Dyn],
+        ret: RetTy::Concrete(SigType::F32),
+    },
+    ExtFn {
+        name: "brighten_all",
+        params: &[SigType::Dyn, SigType::F32],
+        ret: RetTy::SameAsArg(0),
+    },
+];
+
+fn packed_error(func: &str) -> CtxError {
+    StdError {
+        kind: ErrorKind::ArgType,
+        message: format!("`fx.{func}` expects a packed pixel list"),
+    }
+    .into()
+}
+
+fn fx_ctx_dispatch(
+    func: &str,
+    ctx: &mut dyn NativeCtx,
+    args: &[Slot],
+) -> Result<CtxOut, CtxError> {
+    match func {
+        // Sum the first (`r`) component across the buffer, layout-aware through the neutral
+        // view: a column list's `r`s are one contiguous run; a row list strides.
+        "sum_r" => {
+            let mut sum: Option<f32> = None;
+            ctx.with_packed(args[0], &mut |v, bytes| {
+                if v.fields.len() == 3 {
+                    let (run, step) = if v.column {
+                        (&bytes[..v.count * 4], 4)
+                    } else {
+                        (bytes, v.byte_size)
+                    };
+                    sum = Some(
+                        run.chunks(step)
+                            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                            .sum(),
+                    );
+                }
+            })?;
+            match sum {
+                Some(s) => Ok(CtxOut::Out(NativeOut::Scalar(Scalar::F32(s)))),
+                None => Err(packed_error(func)),
+            }
+        }
+        // Add `delta` to every component — value semantics through the copy-on-write mutable
+        // borrow; the transformed list arrives as a fresh slot, the input stays intact.
+        "brighten_all" => {
+            let NativeValue::Scalar(Scalar::F32(delta)) = ctx.view(args[1])? else {
+                return Err(StdError {
+                    kind: ErrorKind::ArgType,
+                    message: "`fx.brighten_all` expects an f32 delta".to_string(),
+                }
+                .into());
+            };
+            match ctx.with_packed_mut(args[0], &mut |_, bytes| {
+                for c in bytes.chunks_exact_mut(4) {
+                    let v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]) + delta;
+                    c.copy_from_slice(&v.to_le_bytes());
+                }
+            })? {
+                Some(result) => Ok(CtxOut::Slot(result)),
+                None => Err(packed_error(func)),
+            }
+        }
+        _ => Err(no_function_error("fx", func).into()),
+    }
+}
+
+#[derive(Debug, Default)]
+struct Acc {
+    total: AtomicI64,
+}
+
+impl ExternValue for Acc {
+    fn type_name(&self) -> &'static str {
+        "Acc"
+    }
+    fn eq_value(&self, other: &dyn ExternValue) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Acc>()
+            .is_some_and(|o| o.total.load(AtomicOrd::Relaxed) == self.total.load(AtomicOrd::Relaxed))
+    }
+    fn cmp_value(&self, _other: &dyn ExternValue) -> Option<Ordering> {
+        None
+    }
+    fn hash_value(&self) -> u64 {
+        0
+    }
+    fn display(&self, out: &mut dyn fmt::Write) -> fmt::Result {
+        write!(out, "<acc {}>", self.total.load(AtomicOrd::Relaxed))
+    }
+    fn clone_box(&self) -> Box<dyn ExternValue> {
+        Box::new(Acc {
+            total: AtomicI64::new(self.total.load(AtomicOrd::Relaxed)),
+        })
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+const ACC_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "add",
+        params: &[SigType::Int],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "total",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Int),
+    },
+];
+
+fn acc_method_dispatch(
+    recv: &mut dyn ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let acc = recv
+        .as_any_mut()
+        .downcast_mut::<Acc>()
+        .expect("receiver is an Acc");
+    match method {
+        "add" => match args.first() {
+            Some(NativeValue::Scalar(Scalar::Int(n))) => {
+                acc.total.fetch_add(*n, AtomicOrd::Relaxed);
+                Ok(NativeOut::Unit)
+            }
+            _ => Err(StdError {
+                kind: ErrorKind::ArgType,
+                message: "`Acc.add` expects an int".to_string(),
+            }),
+        },
+        "total" => Ok(NativeOut::Scalar(Scalar::Int(
+            acc.total.load(AtomicOrd::Relaxed),
+        ))),
+        _ => Err(no_method_error("Acc", method)),
+    }
+}
+
+const ACC_CTX_METHODS: &[ExtFn] = &[ExtFn {
+    name: "apply",
+    params: &[SigType::Fn(&[SigType::Int], &SigType::Int)],
+    ret: RetTy::Concrete(SigType::Unit),
+}];
+
+/// `acc.apply(f)` — replace the total with `f(total)`: the higher-order ctx seam, third-party
+/// edition (closure call-back through `NativeCtx`).
+fn acc_ctx_dispatch(
+    method: &str,
+    ctx: &mut dyn NativeCtx,
+    recv: Slot,
+    args: &[Slot],
+) -> Result<CtxOut, CtxError> {
+    match method {
+        "apply" => {
+            let mut total = 0;
+            ctx.with_extern(recv, &mut |e| {
+                if let Some(acc) = e.as_any().downcast_ref::<Acc>() {
+                    total = acc.total.load(AtomicOrd::Relaxed);
+                }
+            })?;
+            let arg = ctx.intern(NativeOut::Scalar(Scalar::Int(total)))?;
+            let out = ctx.call(args[0], &[arg])?;
+            let NativeValue::Scalar(Scalar::Int(new_total)) = ctx.view(out)? else {
+                return Err(StdError {
+                    kind: ErrorKind::ArgType,
+                    message: "`Acc.apply` closure must return an int".to_string(),
+                }
+                .into());
+            };
+            ctx.free(arg);
+            ctx.free(out);
+            ctx.with_extern(recv, &mut |e| {
+                if let Some(acc) = e.as_any().downcast_ref::<Acc>() {
+                    acc.total.store(new_total, AtomicOrd::Relaxed);
+                }
+            })?;
+            Ok(CtxOut::Out(NativeOut::Unit))
+        }
+        _ => Err(no_method_error("Acc", method).into()),
+    }
+}
+
+const FX_INFO: ExtCommand = ExtCommand {
+    name: "fx-info",
+    about: "Prove an extension-contributed command dispatches through composition",
+    args: &[],
+    run: fx_info_run,
+};
+
+fn fx_info_run(_ctx: &mut dyn CommandCtx, _args: &ParsedArgs) -> u8 {
+    println!("imgfx: native extension ok");
+    0
+}
+
+// A third-party METHOD BUNDLE (kernel-methods K6): the consumer's own @packed pixel type opts in
+// with `impl fx.Pixels for Px {}` and gains `ps.brighten(delta)` — same COW raw-buffer kernel as
+// `fx.brighten_all`, in method position, statically routed through the composed toolchain.
+const PIXELS_BUNDLE: ExtBundle = ExtBundle {
+    name: "Pixels",
+    constraint: PackedConstraint {
+        fields: &[
+            ConstraintField::F32,
+            ConstraintField::F32,
+            ConstraintField::F32,
+        ],
+        layout: ConstraintLayout::Any,
+    },
+    methods: &[BundleFn {
+        sig: ExtFn {
+            name: "brighten",
+            params: &[SigType::F32],
+            ret: RetTy::SameAsArg(0),
+        },
+        receiver: BundleReceiver::Bulk,
+    }],
+    ctx_dispatch: pixels_bundle_dispatch,
+};
+
+fn pixels_bundle_dispatch(
+    method: &str,
+    ctx: &mut dyn NativeCtx,
+    recv: noeta_native::Slot,
+    args: &[noeta_native::Slot],
+) -> Result<CtxOut, CtxError> {
+    match method {
+        // `ps.brighten(delta)` ≡ `fx.brighten_all(ps, delta)` — one kernel, two surfaces.
+        "brighten" => {
+            let mut all = Vec::with_capacity(args.len() + 1);
+            all.push(recv);
+            all.extend_from_slice(args);
+            fx_ctx_dispatch("brighten_all", ctx, &all)
+        }
+        _ => Err(no_method_error("fx.Pixels", method).into()),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ImgfxExtension;
+
+impl Extension for ImgfxExtension {
+    fn name(&self) -> &'static str {
+        "imgfx"
+    }
+    fn modules(&self) -> &'static [ExtModule] {
+        &[ExtModule {
+            name: "fx",
+            functions: FX_FNS,
+            dispatch: fx_dispatch,
+            ctx_functions: FX_CTX_FNS,
+            ctx_dispatch: Some(fx_ctx_dispatch),
+            bundles: &[PIXELS_BUNDLE],
+            ..ExtModule::DEFAULTS
+        }]
+    }
+    fn types(&self) -> &'static [ExtType] {
+        &[ExtType {
+            name: "Acc",
+            methods: ACC_METHODS,
+            dispatch: acc_method_dispatch,
+            ctx_methods: ACC_CTX_METHODS,
+            ctx_dispatch: Some(acc_ctx_dispatch),
+            ..ExtType::DEFAULTS
+        }]
+    }
+    fn commands(&self) -> &'static [ExtCommand] {
+        &[FX_INFO]
+    }
+}
+
+/// The composition convention (package-manager Phase 3): the entry crate exports its units as a
+/// slice — one crate, any number of units.
+pub static NOETA_EXTENSIONS: &[&(dyn Extension + Sync)] = &[&ImgfxExtension];
+"##;
+
+/// Point the compose build at the workspace's existing debug artifacts (the shim links the
+/// already-built noeta-cli lib in seconds instead of a cold release build).
+fn composed_env(cmd: &mut Command) -> &mut Command {
+    cmd.env("NOETA_COMPOSE_DEBUG", "1").env(
+        "NOETA_COMPOSE_TARGET_DIR",
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).parent().unwrap(),
+    )
+}
+
+#[test]
+fn composed_toolchain_end_to_end() {
+    let entry = composed_project("pm_compose_e2e");
+    let app = entry.parent().unwrap().to_path_buf();
+
+    // Step 1 asserts a compose-cache MISS, but the shared test cache dir outlives test
+    // invocations — once the binary and fixture are both stable, a second `cargo test` would hit
+    // the previous run's entry and see no banner. Clear the compose cache (only) for idempotence;
+    // the step-2 hit is then proven within this run.
+    let _ = std::fs::remove_dir_all(
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("noeta-cache/compose"),
+    );
+
+    // 1. First run: composes (banner on stderr), then dispatches the native module, the extern
+    //    type's plain methods, the higher-order ctx method, and the raw-buffer kernels (N3.4:
+    //    `sum_r` reduces the app's own @packed column type; `brighten_all` produces a new list
+    //    while — copy-on-write — the input stays intact: 1.5 then 1.0) — all composed.
+    composed_env(&mut lang())
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("42")
+                .and(predicate::str::contains("20"))
+                .and(predicate::str::contains("0.75"))
+                .and(predicate::str::contains("1.5\n1.0"))
+                .and(predicate::str::contains("2.25")),
+        )
+        .stderr(predicate::str::contains("composing the toolchain"));
+
+    // 2. Second run: content-addressed cache hit — no compose banner, same output.
+    composed_env(&mut lang())
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("42"))
+        .stderr(predicate::str::contains("composing the toolchain").not());
+
+    // 3. `noeta check` sees the extension's signatures: a wrong-typed argument to the native fn
+    //    is a *static* error (the composed binary IS the checker), and the good file checks clean.
+    composed_env(&mut lang())
+        .arg("check")
+        .arg(app.join("bad.noe"))
+        .assert()
+        .failure();
+    composed_env(&mut lang())
+        .arg("check")
+        .arg(&entry)
+        .assert()
+        .success();
+
+    // 4. An extension-contributed command is an unknown subcommand to the stock binary; the
+    //    cwd-manifest fallback composes (cache hit) and the composed binary dispatches it.
+    composed_env(&mut lang())
+        .arg("fx-info")
+        .current_dir(&app)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("imgfx: native extension ok"));
+}
+
+#[test]
+#[cfg(unix)]
+fn an_unknown_subcommand_falls_back_to_a_noeta_prefixed_binary_on_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_external_cmd");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let tool = dir.join("noeta-hello");
+    std::fs::write(
+        &tool,
+        "#!/bin/sh\necho \"hello from external: $1\"\nexit 7\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // PATH includes only our dir — the fallback finds `noeta-hello`, forwards trailing args, and
+    // the exit code passes through.
+    lang()
+        .arg("hello")
+        .arg("world")
+        .env("PATH", &dir)
+        .assert()
+        .code(7)
+        .stdout(predicate::str::contains("hello from external: world"));
+
+    // Without the binary on PATH the ordinary clap error renders (exit 2, mentions the name).
+    lang()
+        .arg("hello")
+        .env("PATH", env!("CARGO_TARGET_TMPDIR"))
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("hello"));
 }

@@ -1,0 +1,22 @@
+// A native extern type may be imported under an alias (`use std.id.Uuid as MyId`) — the alias is a
+// local rename of the very same type. It annotates (`x: MyId`), narrows (`is MyId`, and from `dyn`
+// via `.as<MyId>()`), and dispatches methods, all against the aliased name. The runtime resolves the
+// alias back to the imported type, so both backends agree. (Two DIFFERENT types sharing a short name
+// — a native one and a user's own — is a separate case; see the coexistence tests.)
+// expect: stdout "4"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: exit 0
+use std.{id}
+use std.id.Uuid as MyId
+
+x: MyId = id.uuid();
+echo x.version();
+echo x is MyId;
+
+// From `dyn`, `.as<MyId>()` recovers `?MyId`; the unwrapped value is still a `MyId`.
+d: dyn = x;
+echo d is MyId;
+recovered = d.as<MyId>();
+echo recovered != none;

@@ -48,12 +48,24 @@ use crate::reactive::{ReactiveExt, drive_flush, state_of, sync_gates};
 pub const SYNCED_SIGNAL_TYPE_NAME: &str = "SyncedSignal";
 
 const VAR_A: SigType = SigType::Var(0);
+/// The optional third argument: the member set of an **encrypted** group (p2p P3.4b). A list of
+/// peer-id (hex) strings. Present ⇒ the signal is end-to-end encrypted to exactly those members;
+/// absent ⇒ the plaintext transport (unchanged). Members-imply-encryption is the safe default:
+/// there is no way to declare members without encryption, and no meaningful encryption without a
+/// membership set.
+const MEMBERS: SigType = SigType::List(&SigType::String);
 
-/// `synced_signal(initial: T, topic: string) -> SyncedSignal<T>` where `T: Mergeable` — the bound
-/// is the compile-time guarantee that only a CRDT may be synced (p2p P2.M).
+/// `synced_signal(initial: T, topic: string, members?: List<string>) -> SyncedSignal<T>` where
+/// `T: Mergeable` — the bound is the compile-time guarantee that only a CRDT may be synced (p2p
+/// P2.M). The optional `members` list opts the signal into an encrypted group (p2p P3.4b); given at
+/// construction so the very first state announced to the topic is already encrypted.
 pub const SYNCED_CTX_FNS: &[ExtFn] = &[ExtFn {
     name: "synced_signal",
-    params: &[SigType::BoundedVar(0, "Mergeable"), SigType::String],
+    params: &[
+        SigType::BoundedVar(0, "Mergeable"),
+        SigType::String,
+        SigType::Optional(&MEMBERS),
+    ],
     ret: RetTy::Concrete(SigType::Generic(SYNCED_SIGNAL_TYPE_NAME, &[VAR_A])),
 }];
 
@@ -73,6 +85,29 @@ pub const SYNCED_CTX_METHODS: &[ExtFn] = &[
         params: &[],
         ret: RetTy::Concrete(SigType::Unit),
     },
+    // `.status() -> string` — this replica's convergence state for its topic (p2p P3.3): one of
+    // `"synced"` / `"syncing"` / `"offline"`. Always `"synced"` under the deterministic sandbox
+    // broker (a single node never lags), so a program that reads it stays oracle-safe; meaningful
+    // over a real network, where an `effect` can render "working offline".
+    ExtFn {
+        name: "status",
+        params: &[],
+        ret: RetTy::Concrete(SigType::String),
+    },
+    // `.add_member(peer_id)` / `.remove_member(peer_id)` — runtime membership changes for an
+    // encrypted group (p2p P3.4b). `remove` rotates the group key so the removed peer stops
+    // decrypting new state. Only meaningful on an encrypted signal (one created with a members
+    // list); the group creator is authoritative. No-ops under the deterministic sandbox.
+    ExtFn {
+        name: "add_member",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "remove_member",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
 ];
 
 /// The extern box: the reactive-graph node, the arena cell holding the CRDT value, the p2p
@@ -85,6 +120,18 @@ pub struct SyncedSignalBox {
     pub cell: Retained,
     pub subscription: u64,
     pub topic: String,
+    /// The encrypted group's member set (p2p P3.4b), empty for a plaintext signal. When non-empty
+    /// the signal's state crosses the wire encrypted to exactly these peer ids; the deterministic
+    /// sandbox treats it as a transparent pass-through (the decrypted value equals the plaintext
+    /// value), so an encrypted program stays oracle byte-identical.
+    pub members: Vec<String>,
+}
+
+impl SyncedSignalBox {
+    /// Whether this signal is an encrypted group (has a declared membership).
+    pub fn is_encrypted(&self) -> bool {
+        !self.members.is_empty()
+    }
 }
 
 impl ExternValue for SyncedSignalBox {
@@ -121,10 +168,36 @@ pub fn synced_ctx_dispatch<C: NativeCtx + ?Sized>(
 ) -> Result<CtxOut, CtxError> {
     match func {
         "synced_signal" => {
-            ctx_arity(func, args, 2)?;
+            // 2 required args (initial, topic); an optional 3rd (members) opts into encryption.
+            if args.len() < 2 || args.len() > 3 {
+                return Err(StdError {
+                    kind: ErrorKind::Arity,
+                    message: format!(
+                        "`synced_signal` takes 2 or 3 arguments but {} were supplied",
+                        args.len()
+                    ),
+                }
+                .into());
+            }
             let topic = match ctx.view(args[1])? {
                 NativeValue::Str(s) => s,
                 _ => return Err(type_error("synced_signal", "string").into()),
+            };
+            // The encrypted group's members (peer-id hex strings), or empty for the plaintext path.
+            let members = match args.get(2) {
+                Some(&slot) => match ctx.view(slot)? {
+                    NativeValue::List(items) => items
+                        .into_iter()
+                        .map(|v| match v {
+                            NativeValue::Str(s) => Ok(s),
+                            _ => Err(type_error("synced_signal", "a list of peer-id strings")),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    _ => {
+                        return Err(type_error("synced_signal", "a list of peer-id strings").into());
+                    }
+                },
+                None => Vec::new(),
             };
             // Serialize the initial state (and validate it really is a CRDT — the `Mergeable` bound
             // makes this hold statically, but a `dyn`-laundered value could still arrive).
@@ -132,11 +205,27 @@ pub fn synced_ctx_dispatch<C: NativeCtx + ?Sized>(
                 .and_then(|v| to_bytes_dyn(&*v))
                 .ok_or_else(not_a_crdt)?;
             // Subscribe first (cursor at the log start), then announce the initial state, so another
-            // replica that later subscribes still sees it and converges.
-            let subscription = ctx.host().p2p_subscribe(&topic);
-            ctx.host()
-                .p2p_publish(&topic, bytes)
-                .map_err(CtxError::from)?;
+            // replica that later subscribes still sees it and converges. An encrypted group
+            // (`members` given) routes through the group transport, which encrypts the announce to
+            // the declared members; a plaintext signal uses the durable transport directly.
+            let subscription = if members.is_empty() {
+                ctx.host()
+                    .p2p_subscribe_durable(&topic)
+                    .map_err(CtxError::from)?
+            } else {
+                ctx.host()
+                    .p2p_group_open(&topic, &members)
+                    .map_err(CtxError::from)?
+            };
+            if members.is_empty() {
+                ctx.host()
+                    .p2p_publish_durable(&topic, bytes)
+                    .map_err(CtxError::from)?;
+            } else {
+                ctx.host()
+                    .p2p_group_publish(&topic, bytes)
+                    .map_err(CtxError::from)?;
+            }
             // The CRDT lives in an arena cell; the node is a signal in the shared reactive graph.
             let cell = ctx.retain(args[0])?;
             let node = {
@@ -151,6 +240,7 @@ pub fn synced_ctx_dispatch<C: NativeCtx + ?Sized>(
                     cell,
                     subscription,
                     topic,
+                    members,
                 },
             ))))
         }
@@ -190,9 +280,15 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             ctx.free(merged_slot);
             ctx.free(current_slot);
             self_wake(ctx, handle.node)?;
-            ctx.host()
-                .p2p_publish(&handle.topic, bytes)
-                .map_err(CtxError::from)?;
+            if handle.is_encrypted() {
+                ctx.host()
+                    .p2p_group_publish(&handle.topic, bytes)
+                    .map_err(CtxError::from)?;
+            } else {
+                ctx.host()
+                    .p2p_publish_durable(&handle.topic, bytes)
+                    .map_err(CtxError::from)?;
+            }
             Ok(CtxOut::Out(NativeOut::Unit))
         }
         // Drain the subscription and merge every peer message; wake dependents once if the value
@@ -201,10 +297,13 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
         "sync" => {
             ctx_arity(method, args, 0)?;
             let mut changed = false;
-            while let Some(bytes) = ctx
-                .host()
-                .p2p_poll_sub(handle.subscription)
-                .map_err(CtxError::from)?
+            let encrypted = handle.is_encrypted();
+            while let Some(bytes) = (if encrypted {
+                ctx.host().p2p_group_poll(handle.subscription)
+            } else {
+                ctx.host().p2p_poll_sub(handle.subscription)
+            })
+            .map_err(CtxError::from)?
             {
                 let current_slot = ctx.retained_get(handle.cell)?;
                 let current = clone_crdt(ctx, current_slot).ok_or_else(not_a_crdt)?;
@@ -222,6 +321,40 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             }
             if changed {
                 self_wake(ctx, handle.node)?;
+            }
+            Ok(CtxOut::Out(NativeOut::Unit))
+        }
+        // This replica's convergence state for its topic — a plain lowercase word (p2p P3.3).
+        "status" => {
+            ctx_arity(method, args, 0)?;
+            let status = ctx.host().p2p_sync_status(&handle.topic);
+            Ok(CtxOut::Out(NativeOut::Str(status.as_str().to_string())))
+        }
+        // Runtime membership changes for an encrypted group (p2p P3.4b). Only valid on an encrypted
+        // signal; `remove_member` revokes (the group key is rotated on a real host).
+        "add_member" | "remove_member" => {
+            ctx_arity(method, args, 1)?;
+            if !handle.is_encrypted() {
+                return Err(StdError {
+                    kind: ErrorKind::Panic,
+                    message: format!(
+                        "`{method}` is only valid on an encrypted synced_signal (one created with a members list)"
+                    ),
+                }
+                .into());
+            }
+            let member = match ctx.view(args[0])? {
+                NativeValue::Str(s) => s,
+                _ => return Err(type_error(method, "a peer-id string").into()),
+            };
+            if method == "add_member" {
+                ctx.host()
+                    .p2p_group_add(&handle.topic, &member)
+                    .map_err(CtxError::from)?;
+            } else {
+                ctx.host()
+                    .p2p_group_remove(&handle.topic, &member)
+                    .map_err(CtxError::from)?;
             }
             Ok(CtxOut::Out(NativeOut::Unit))
         }

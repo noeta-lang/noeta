@@ -1,5 +1,6 @@
 // A non-key-capable extern type cannot key a map (extern-types X4): a FileHandle mutates, so
 // its hash/order could go stale under a key — rejected statically at Map<K, _> formation.
-// expect: error E0007 at 5:13
+// expect: error E0007 at 6:13
 use std.{fs}
+use std.fs.FileHandle
 fn f(m: Map<FileHandle, int>): int { return m.len(); }

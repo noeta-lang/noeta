@@ -276,7 +276,12 @@ pub fn http_ctx_dispatch(
                             // duration is the handler's and its status reflects the outcome; record
                             // the request's metrics (duration + -1 active) at the same boundary.
                             end_server_span(ctx, span, response.status);
-                            end_server_metrics(ctx, &instruments, in_flight[k].metrics.take(), response.status);
+                            end_server_metrics(
+                                ctx,
+                                &instruments,
+                                in_flight[k].metrics.take(),
+                                response.status,
+                            );
                             reply(ctx, conn, response)?;
                             true
                         }
@@ -343,8 +348,11 @@ fn start_server_span(ctx: &mut dyn NativeCtx, inputs: &ServerSpanInputs) -> Span
         "http.request.method",
         AttrValue::Str(inputs.method.as_str().into()),
     );
-    ctx.host()
-        .tel_span_set_attr(span, "url.path", AttrValue::Str(inputs.route.as_str().into()));
+    ctx.host().tel_span_set_attr(
+        span,
+        "url.path",
+        AttrValue::Str(inputs.route.as_str().into()),
+    );
     span
 }
 
@@ -389,8 +397,11 @@ fn end_server_metrics(
         "http.response.status_code".into(),
         AttrValue::Int(status as i64),
     ));
-    ctx.host()
-        .metric_observe(inst.duration, MetricValue::Float(duration_s), duration_attrs);
+    ctx.host().metric_observe(
+        inst.duration,
+        MetricValue::Float(duration_s),
+        duration_attrs,
+    );
     ctx.host().metric_observe(
         inst.active,
         MetricValue::Int(-1),

@@ -22,24 +22,27 @@ pub mod telemetry;
 
 pub use command::{ArgKind, ArgSpec, CommandCtx, EntryArg, EntryCall, ExtCommand, ParsedArgs};
 pub use ctx::{
-    CtxDispatch, CtxError, CtxOut, CtxResult, ExtState, NativeCtx, Retained, Slot, ctx_arity,
+    CtxDispatch, CtxError, CtxOut, CtxResult, ExtState, NativeCtx, PackedField, PackedView,
+    Retained, Slot, ctx_arity,
 };
 pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};
 pub use host::{
     Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, P2p, ReadSource, Rng,
+    SyncStatus,
 };
 pub use map_key::{ExternKeyRef, MapKey};
 pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
 pub use p2p::{P2pBroker, ReceiveIo};
 pub use registry::{
-    ArenaGetter, CtxTypeDispatch, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut,
-    NativeValue, RetTy, Scalar, SigType, TypeDispatch, TypeRecipe,
+    ArenaGetter, BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, CtxTypeDispatch,
+    ExtBundle, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut, NativeValue,
+    PackedConstraint, RetTy, Scalar, ScalarVec, SigType, TypeDispatch, TypeRecipe,
 };
 pub use telemetry::{
     AttrValue, DEFAULT_HISTOGRAM_BOUNDS, HistogramPoint, InstrumentId, InstrumentKind, LogRecord,
     Logging, MetricData, MetricPoints, MetricStore, MetricValue, Metrics, NumberPoint, Severity,
-    SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, Temporality, Tracing, TraceContext,
+    SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, Temporality, TraceContext, Tracing,
 };
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the

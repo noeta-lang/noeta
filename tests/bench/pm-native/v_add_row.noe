@@ -1,0 +1,23 @@
+// N3.4 gate: bulk `vec.add_all` over two row-major packed Vec3 lists (2048 elements × 300 calls).
+// The migrated ctx dispatch must hold the old per-backend intercept's numbers — the packed path is
+// one borrowed read + one buffer copy + the autovectorized kernel per call.
+use std.{vec}
+
+@packed struct V3 { x: f32; y: f32; z: f32 }
+
+mut xs = [V3 { x: 1.5f32, y: 2.5f32, z: 3.5f32 }]
+mut d = 0
+while d < 11 {
+    xs = xs ~ xs
+    d = d + 1
+}
+ys = xs
+
+mut total = 0
+mut k = 0
+while k < 3000 {
+    r = vec.add_all(xs, ys)
+    total = total + r.len()
+    k = k + 1
+}
+echo "total=${total}"

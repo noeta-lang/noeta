@@ -20,7 +20,7 @@ b.sync()   // b merges a's state → also 3
 echo "converged: ${a.get().value()} == ${b.get().value()}"   // 3 == 3
 ```
 
-> **Status.** The data-convergence and language layers are complete and run entirely locally today (a single-node, in-process loopback that models peers deterministically). The real networked transport — peer discovery, NAT traversal, gossip — is a later milestone (see [What's next](#whats-next)). This is a supported, opt-in path, not something imposed on every program.
+> **Status.** All three layers ship today. Data convergence and the language surface run entirely locally on a deterministic in-process loopback that models peers; and a real networked transport — [p2panda](https://p2panda.org) peer discovery (mDNS), NAT-traversing QUIC, gossip + eventual-consistency log-sync, a persistent per-node identity, and end-to-end **group encryption** — backs `noeta run` under the default `ring-p2p` build. A program that never syncs pays nothing for it: the whole p2panda tree is dropped from a tailored `noeta build --native` binary that imports neither `std.p2p` nor `std.synced`. This is a supported, opt-in path, not something imposed on every program.
 
 ## CRDTs — `std.crdt`
 
@@ -123,11 +123,40 @@ echo here.get().members()                  // ["alice", "bob"] — converged
 
 Because a synced signal is an ordinary node in the reactivity graph, everything reactive composes with it: a `computed` derived from `here.get()` recomputes when a peer joins, an `effect` re-renders, and a diamond of dependencies still settles glitch-free.
 
+### Encrypted groups
+
+Add a third argument — a **member set** — to make a synced signal end-to-end encrypted to exactly those peers. Every state it publishes crosses the wire encrypted; a node outside the set sees only ciphertext it cannot read.
+
+```noeta ignore
+use std.{crdt}
+use std.synced.{synced_signal}
+
+// A shared tally readable only by alice and bob (peer ids are their node identities).
+tally = synced_signal(crdt.gcounter(), "team/tally", [alice_id, bob_id])
+tally.merge(crdt.gcounter().increment("alice", 1))   // encrypted before it leaves the node
+tally.sync()                                          // decrypts peers' state in
+```
+
+The members list is given at construction, so the very **first** state announced to the topic is already encrypted — there is no window where it goes out in the clear. Encryption is transparent to your program: `.get()` returns the same converged value it would without it, so the deterministic sandbox treats an encrypted signal as a pass-through and a synced program behaves identically whether or not it is encrypted. Under the real transport it is backed by [p2panda-spaces](https://p2panda.org) group encryption (a symmetric group key with post-compromise security; a member that joins late can still decrypt prior state — exactly what a convergent CRDT needs). Membership uses the group's declared set: the elected creator welcomes each member as it announces its key on the topic, with no out-of-band key exchange.
+
+Membership is not fixed for life — you can change it at runtime:
+
+- `.add_member(peer_id)` — admit a peer to the group (welcomed once its key arrives on the topic).
+- `.remove_member(peer_id)` — remove a peer and **rotate the group key**, so the removed peer can no longer decrypt state published afterward (revocation).
+
+```noeta ignore
+tally.add_member(carol_id)      // carol can now read new state
+tally.remove_member(bob_id)     // bob is revoked — the key rotates; he can't read anything published now on
+```
+
+The group creator is authoritative over membership (it holds the manage capability). Membership is transparent to the converged value, so these are no-ops under the sandbox and real only over the live transport.
+
+A per-signal **`.status(): string`** — `"synced"` / `"syncing"` / `"offline"` — reports this replica's convergence state against its peers (always `"synced"` on the single-node sandbox; meaningful over a real network, e.g. to render "working offline").
+
 ## What's next
 
-Two pieces complete the story and are tracked as future milestones:
+The transport, encryption, identity, and dynamic-membership layers ship today. Remaining future milestones:
 
-- **Real networked transport.** Today the transport is an in-process broker: it models peers deterministically and runs a synced program end-to-end on one node, but it does not yet cross the network. The planned backing is [p2panda](https://p2panda.org) — discovery (mDNS + rendezvous), NAT-traversing QUIC transport, gossip, and encryption — shipped as an opt-in first-party extension so a program that does not use it pays nothing for it. It arrives once the package manager and that extension land.
-- **Richer collaborative types.** A last-write-wins register and an add/remove set (OR-Set) — CRDTs that carry arbitrary application values, not just counters and string sets — plus a per-value sync **status** (`Synced` / `Syncing` / `Offline`) that a real transport makes meaningful.
+- **Richer collaborative types.** A last-write-wins register and an add/remove set (OR-Set) — CRDTs that carry arbitrary application values, not just counters and string sets.
 
 See also [Reactivity](Reactivity) for the signal/computed/effect core these build on, and [Standard-Library Modules](Standard-Library-Modules) for the full module surface.

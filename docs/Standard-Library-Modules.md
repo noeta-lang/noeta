@@ -170,6 +170,7 @@ Identity generation — sequential ids and UUIDs.
 
 ```noeta
 use std.{id}
+use std.id.Uuid              // the type, to name it in `is Uuid` below
 echo id.next_id()            // 1
 key = id.uuid()              // e.g. 4396d60d-bd85-47af-a98f-f1a0396ff552
 ordered = id.uuid_v7()       // sorts by creation time
@@ -375,9 +376,9 @@ Opt-in like tracing; a `log.info(...)` is free when no logs endpoint is configur
 ## `metrics`
 
 OpenTelemetry **metrics** ([Observability](Observability)) — aggregated host-side into time series.
-`metrics.counter` / `up_down_counter` / `histogram` / `gauge` are get-or-create by name, each
-returning one `Instrument`; record with `.add(n)` / `.record(v)` (interchangeable aliases) or the
-`.add_with(n, attrs)` / `.record_with(v, attrs)` attributed forms.
+`metrics.counter` / `up_down_counter` / `histogram` / `gauge` are get-or-create by name, returning a
+`Counter` / `Histogram` / `Gauge` handle; counters record with `.add(n)`, histograms/gauges with
+`.record(v)` (plus the `.add_with(n, attrs)` / `.record_with(v, attrs)` attributed forms).
 
 ```noeta ignore
 use std.{metrics}
@@ -385,9 +386,10 @@ hits = metrics.counter("http.requests")
 hits.add_with(1, {"route": "/orders", "status": 200})
 ```
 
-`Instrument` is a reserved type name (**E0049**). Server requests are auto-instrumented with an
-`http.server.request.duration` histogram and an `http.server.active_requests` counter. Keep attribute
-cardinality low — each distinct attribute set is a stored series.
+`Counter`/`Histogram`/`Gauge` are namespaced extern types under `std.metrics` — `use`-imported (they
+coexist with a user's own `Counter`), needed only when you annotate one. Server requests are
+auto-instrumented with an `http.server.request.duration` histogram and an `http.server.active_requests`
+counter. Keep attribute cardinality low — each distinct attribute set is a stored series.
 
 ## `vec` & `quat`
 

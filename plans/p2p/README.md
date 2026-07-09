@@ -132,10 +132,14 @@ backends + leak oracle). Rough ordering, not committed:
     **Deferred (stated):** `SyncStatus` (Synced/Syncing/Offline — only meaningful with real
     transport, so it lands with P3); background/automatic sync (`.sync()` is explicit by design);
     value-carrying CRDTs (LWW/OR-Set).
-- **P3 — real transport: first-party p2panda extension.** Wrap p2panda in the `RealHost` `P2p`
-  impl; embedded node on its own isolate started with the process; identity persisted to disk.
-  `noeta add p2p`-style manifest gate so the iroh/QUIC/crypto tree only links when declared.
-  CLI-only, not differential.
+- **P3 — real transport: p2panda behind a Cargo feature. 📋 SCOPED — see
+  [`p3-real-transport.md`](p3-real-transport.md).** Packaging blocker **lifted** (package-manager
+  Phase 1: `P2pExtension` is a dependency-gated in-tree unit, no ABI freeze). Swap `RealHost`'s
+  loopback broker for a `p2panda-net` node (v0.7.0, still pre-1.0): `Gossip` backs `std.p2p`,
+  `LogSync` backs `synced_signal`; raw bytes over the unchanged `P2p` seam; sandbox stays the
+  deterministic broker (never oracle-tested, like `reqwest`). Core challenge = the async bridge (a
+  long-lived node vs `RealHost`'s leaf-blocking IO). **Recommendation: a minimal P3.0+P3.1 spike
+  behind a `p2p-net` feature, then decide** whether to push through given p2panda's pre-1.0 churn.
 - **P4 — packaging polish.** DCE within-feature pruning (blob transfer / rendezvous slices) riding
   the `aot-dce` work; capability-gating (`.members().encrypted()` → drop blob/relay machinery when
   ungranted); the Tauri packaging story (§9.9).

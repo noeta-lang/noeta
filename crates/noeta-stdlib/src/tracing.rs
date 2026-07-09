@@ -37,9 +37,9 @@ use std::cmp::Ordering;
 
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    arity_error, ctx_arity, no_function_error, no_method_error, type_error, AttrValue, CtxError,
-    CtxOut, CtxResult, ExternBox, ExternValue, Host, NativeCtx, NativeValue, Scalar, Slot, SpanId,
-    SpanKind, SpanStatus, StdError, TraceContext,
+    AttrValue, CtxError, CtxOut, CtxResult, ExternBox, ExternValue, Host, NativeCtx, NativeValue,
+    Scalar, Slot, SpanId, SpanKind, SpanStatus, StdError, TraceContext, arity_error, ctx_arity,
+    no_function_error, no_method_error, type_error,
 };
 
 /// The reserved surface type name for a span handle. A user declaration of this name is E0049.
@@ -50,12 +50,8 @@ const VAR_A: SigType = SigType::Var(0);
 
 /// An OTel attribute value — the scalar union the surface accepts (a non-scalar is a compile-time
 /// type error, not a runtime one).
-const ATTR_VALUE: SigType = SigType::Union(&[
-    SigType::String,
-    SigType::Int,
-    SigType::Float,
-    SigType::Bool,
-]);
+const ATTR_VALUE: SigType =
+    SigType::Union(&[SigType::String, SigType::Int, SigType::Float, SigType::Bool]);
 
 /// `std.tracing`'s functions — all higher-order (they reach the active-span stack, and `with_span`
 /// calls a closure), so they live in the ctx table.

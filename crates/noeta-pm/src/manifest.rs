@@ -54,6 +54,13 @@ pub struct PackageMeta {
     pub version: semver::Version,
     /// The language edition, if pinned (reserved; not yet consumed).
     pub edition: Option<String>,
+    /// The relative directory of this package's native Rust **entry crate** (package-manager
+    /// Phase 3, N3.1): `native = "native"` points at a `Cargo.toml` whose crate exports the
+    /// package's extension units (one crate, any number of units — std's own shape). `None` for a
+    /// pure-Noeta package. Declaring native code is deliberately explicit — it pulls arbitrary
+    /// Rust into a consumer's build, which should never be triggered by the mere presence of a
+    /// directory.
+    pub native: Option<String>,
 }
 
 /// A global package identity `company/package` (package-manager P2.0). The slash is deliberately
@@ -70,9 +77,9 @@ impl PackageName {
     /// (`[A-Za-z_][A-Za-z0-9_]*`). The `package` half is the package's **root namespace segment** —
     /// what a consumer's dep-key re-roots at the package boundary (see phase-2 plan).
     pub fn parse(s: &str) -> Result<PackageName, String> {
-        let (company, package) = s.split_once('/').ok_or_else(|| {
-            format!("package name `{s}` must be `company/package` (missing `/`)")
-        })?;
+        let (company, package) = s
+            .split_once('/')
+            .ok_or_else(|| format!("package name `{s}` must be `company/package` (missing `/`)"))?;
         if package.contains('/') {
             return Err(format!(
                 "package name `{s}` must have exactly one `/` (found more)"
@@ -180,9 +187,8 @@ pub fn add_dependency(manifest_path: &Path, key: &str, value_toml: &str) -> Resu
     let entry = format!("{key} = {value_toml}");
     let updated = insert_dependency_entry(&text, &entry);
     // Re-parse the edited manifest so a bad value/source fails here rather than corrupting the file.
-    Manifest::parse(&updated).map_err(|err| {
-        format!("`noeta add {key}` would make `{MANIFEST_NAME}` invalid: {err}")
-    })?;
+    Manifest::parse(&updated)
+        .map_err(|err| format!("`noeta add {key}` would make `{MANIFEST_NAME}` invalid: {err}"))?;
 
     let dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = dir.join(format!(".{MANIFEST_NAME}.{}.tmp", std::process::id()));
@@ -240,6 +246,25 @@ pub fn resolve_active_tiers(entry: &Path, profile: &str) -> Result<Vec<String>, 
 /// `use`s link without key collision.
 pub fn dependency_packages(entry: &Path) -> Result<Vec<noeta_loader::DepPackage>, String> {
     Ok(crate::graph::resolve_graph(entry)?.packages)
+}
+
+/// The `[package] name` of a **cargo** manifest — what a composed-toolchain shim writes into its
+/// dependency line for a native entry crate (package-manager Phase 3, N3.2). Kept here because
+/// `noeta-pm` owns the toml dependency; this reads cargo's manifest, not ours.
+pub fn cargo_package_name(crate_dir: &Path) -> Result<String, String> {
+    let path = crate_dir.join("Cargo.toml");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
+    let table: toml::Table = text
+        .parse()
+        .map_err(|err| format!("`{}` is not valid TOML: {err}", path.display()))?;
+    table
+        .get("package")
+        .and_then(|p| p.as_table())
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!("`{}` has no `[package] name`", path.display()))
 }
 
 /// Resolve the [`FmtConfig`] for a target directory: discover the nearest `noeta.toml`, read its
@@ -354,10 +379,7 @@ impl Manifest {
     /// A future tier-execution layer reads this to dispatch a tier to its provider; today the
     /// providers are validated (a resolved dependency is a valid provider) and surfaced here.
     #[allow(dead_code)] // consumed by the tier-execution layer; validated + surfaced now
-    pub fn active_tier_providers(
-        &self,
-        profile: &str,
-    ) -> Result<BTreeMap<String, String>, String> {
+    pub fn active_tier_providers(&self, profile: &str) -> Result<BTreeMap<String, String>, String> {
         let mut chain = Vec::new();
         self.resolve(profile, &mut chain)
     }
@@ -420,11 +442,47 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
                 .to_string(),
         ),
     };
+    let native = match pkg.get("native") {
+        None => None,
+        Some(v) => {
+            let dir = v
+                .as_str()
+                .ok_or("`package.native` must be a string (a relative directory)")?;
+            Some(validate_native_dir(dir)?)
+        }
+    };
     Ok(Some(PackageMeta {
         name,
         version,
         edition,
+        native,
     }))
+}
+
+/// Syntactic validation of a `package.native` value (Phase 3, N3.1): a non-empty **relative**
+/// directory that stays inside the package tree. A git/registry package's tree is materialized
+/// into the shared content-addressed store, so a `..` escape would point at other packages'
+/// content; existence of the directory (and its `Cargo.toml`) is checked at resolve time, where
+/// the package root is known.
+fn validate_native_dir(dir: &str) -> Result<String, String> {
+    if dir.is_empty() {
+        return Err("`package.native` must not be empty".to_string());
+    }
+    let path = std::path::Path::new(dir);
+    if path.is_absolute() {
+        return Err(format!(
+            "`package.native` must be a relative directory (inside the package), got `{dir}`"
+        ));
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "`package.native` must not leave the package tree (`..` in `{dir}`)"
+        ));
+    }
+    Ok(dir.to_string())
 }
 
 /// Parse the optional `[dependencies]` table. Each key is a local **import root** (must be an
@@ -457,7 +515,9 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
         return Ok(Dependency::Registry { package: None, req });
     }
     let table = value.as_table().ok_or_else(|| {
-        format!("dependency `{key}` must be a SemVer string or a table (`{{ path/git/version = … }}`)")
+        format!(
+            "dependency `{key}` must be a SemVer string or a table (`{{ path/git/version = … }}`)"
+        )
     })?;
     let has = |k: &str| table.contains_key(k);
     match (has("path"), has("git"), has("version")) {
@@ -473,15 +533,12 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
             let url = table["git"]
                 .as_str()
                 .ok_or_else(|| format!("dependency `{key}`: `git` must be a string"))?;
-            let tag = table
-                .get("tag")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    format!(
-                        "dependency `{key}`: a `git` dependency requires a string `tag` \
+            let tag = table.get("tag").and_then(|v| v.as_str()).ok_or_else(|| {
+                format!(
+                    "dependency `{key}`: a `git` dependency requires a string `tag` \
                          (sources are git + tagged releases only)"
-                    )
-                })?;
+                )
+            })?;
             Ok(Dependency::Git {
                 url: url.to_string(),
                 tag: tag.to_string(),
@@ -501,7 +558,10 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
                     let s = v
                         .as_str()
                         .ok_or_else(|| format!("dependency `{key}`: `package` must be a string"))?;
-                    Some(PackageName::parse(s).map_err(|err| format!("dependency `{key}`: {err}"))?)
+                    Some(
+                        PackageName::parse(s)
+                            .map_err(|err| format!("dependency `{key}`: {err}"))?,
+                    )
                 }
             };
             Ok(Dependency::Registry { package, req })
@@ -580,6 +640,39 @@ mod tests {
         assert_eq!(pkg.edition.as_deref(), Some("2026"));
     }
 
+    // --- `package.native` (package-manager Phase 3, N3.1) --------------------------------------
+
+    #[test]
+    fn parses_a_native_entry_crate() {
+        let m = Manifest::parse(
+            "[package]\n\
+             name = \"acme/imgfx\"\n\
+             version = \"1.0.0\"\n\
+             native = \"native\"\n",
+        )
+        .expect("valid");
+        assert_eq!(m.package().unwrap().native.as_deref(), Some("native"));
+    }
+
+    #[test]
+    fn native_is_absent_for_a_pure_package() {
+        let m = Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").expect("valid");
+        assert_eq!(m.package().unwrap().native, None);
+    }
+
+    #[test]
+    fn native_rejects_absolute_escape_and_empty() {
+        let manifest = |native: &str| {
+            format!("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\nnative = \"{native}\"\n")
+        };
+        assert!(Manifest::parse(&manifest("/abs/dir")).is_err());
+        assert!(Manifest::parse(&manifest("../outside")).is_err());
+        assert!(Manifest::parse(&manifest("ok/../../outside")).is_err());
+        assert!(Manifest::parse(&manifest("")).is_err());
+        // A nested relative dir is fine.
+        assert!(Manifest::parse(&manifest("rust/imgfx")).is_ok());
+    }
+
     #[test]
     fn a_bare_script_has_no_package() {
         let m = Manifest::parse("[profiles.dev.tiers]\ntest = \"std\"\n").expect("valid");
@@ -590,9 +683,7 @@ mod tests {
     #[test]
     fn package_name_requires_company_slash_package() {
         assert!(Manifest::parse("[package]\nname = \"widgets\"\nversion = \"1.0.0\"\n").is_err());
-        assert!(
-            Manifest::parse("[package]\nname = \"a/b/c\"\nversion = \"1.0.0\"\n").is_err()
-        );
+        assert!(Manifest::parse("[package]\nname = \"a/b/c\"\nversion = \"1.0.0\"\n").is_err());
         assert!(Manifest::parse("[package]\nname = \"1bad/x\"\nversion = \"1.0.0\"\n").is_err());
     }
 
@@ -643,18 +734,13 @@ mod tests {
 
     #[test]
     fn a_git_dependency_requires_a_tag() {
-        assert!(
-            Manifest::parse("[dependencies]\nhttp = { git = \"https://x/y\" }\n").is_err()
-        );
+        assert!(Manifest::parse("[dependencies]\nhttp = { git = \"https://x/y\" }\n").is_err());
     }
 
     #[test]
     fn a_dependency_names_exactly_one_source() {
         assert!(
-            Manifest::parse(
-                "[dependencies]\nx = { path = \"../p\", version = \"^1\" }\n"
-            )
-            .is_err()
+            Manifest::parse("[dependencies]\nx = { path = \"../p\", version = \"^1\" }\n").is_err()
         );
         assert!(Manifest::parse("[dependencies]\nx = {}\n").is_err());
     }

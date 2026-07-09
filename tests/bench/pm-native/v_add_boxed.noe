@@ -1,0 +1,23 @@
+// N3.4 gate: bulk `vec.add_all` over two BOXED (plain-struct) Vec3 lists (512 elements × 100
+// calls) — the element-wise fallback: per-element ctx slot traffic (list_get / object_scalars /
+// make_object_like / make_list) vs the old intercept's realize_list loop.
+use std.{vec}
+
+struct V3 { x: f32; y: f32; z: f32 }
+
+mut xs = [V3 { x: 1.5f32, y: 2.5f32, z: 3.5f32 }]
+mut d = 0
+while d < 9 {
+    xs = xs ~ xs
+    d = d + 1
+}
+ys = xs
+
+mut total = 0
+mut k = 0
+while k < 100 {
+    r = vec.add_all(xs, ys)
+    total = total + r.len()
+    k = k + 1
+}
+echo "total=${total}"

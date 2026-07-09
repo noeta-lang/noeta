@@ -238,6 +238,20 @@ pub enum Rvalue {
         reflect: Option<noeta_ast::reflect::TypeRepr>,
         span: Span,
     },
+    /// A **method-bundle** method call (kernel-methods K2): `receiver.name(args)` where the
+    /// checker statically resolved the receiver's type to a bundle binding
+    /// (`impl <module>.<Bundle> for T {}`). The route is baked in — dispatch goes straight to the
+    /// registered bundle's shared ctx dispatch with the receiver as slot 0, no runtime discovery
+    /// (which is what makes an empty list receiver work). `module` is the owning module's
+    /// root-qualified identity (`"std.vec"`).
+    BundleMethod {
+        receiver: Atom,
+        module: String,
+        bundle: String,
+        name: String,
+        args: Vec<Atom>,
+        span: Span,
+    },
     /// Bare member access: `receiver.name`. Resolves to a field load, an enum-variant
     /// constructor reference, or an associated-function reference, exactly as the
     /// tree-walker's `Member` evaluation does.

@@ -1,0 +1,17 @@
+// A namespaced module's own types get qualified identities, but the native `Uuid` it imports stays
+// bare and is resolved through the Phase-A extern path — the two identity models coexist within one
+// module. `Record.id: Uuid` is a native field type; `Marker` gets a capability via a standalone
+// `impl Trait for Type` (whose target is a namespaced type, qualified by the linker like any ref).
+namespace App.Lib;
+use std.id.Uuid;
+
+pub struct Record {
+    id: Uuid
+    tag: int
+}
+
+pub struct Marker {
+    n: int
+}
+
+impl Equatable for Marker {}

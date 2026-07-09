@@ -71,11 +71,8 @@ fn emitted_spans_any(text: &str) -> (Vec<SpanData>, bool) {
     let tree_sink = Arc::new(Mutex::new(Vec::new()));
     let mut tree_host = SandboxHost::new();
     tree_host.set_span_sink(tree_sink.clone());
-    let tree_result = noeta_conformance::reference::reference_run_with_host(
-        &program,
-        sites,
-        Box::new(tree_host),
-    );
+    let tree_result =
+        noeta_conformance::reference::reference_run_with_host(&program, sites, Box::new(tree_host));
     assert_eq!(
         result.is_ok(),
         tree_result.is_ok(),
@@ -91,7 +88,10 @@ fn emitted_spans_any(text: &str) -> (Vec<SpanData>, bool) {
 }
 
 fn attr<'a>(span: &'a SpanData, key: &str) -> Option<&'a AttrValue> {
-    span.attributes.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    span.attributes
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v)
 }
 
 /// Every accepted connection produces one SERVER span, named `"{method} {route}"` with the query
@@ -100,6 +100,7 @@ fn attr<'a>(span: &'a SpanData, key: &str) -> Option<&'a AttrValue> {
 fn serve_emits_one_server_span_per_request() {
     let spans = emitted_spans(
         "use std.http.server\n\
+         use std.http.{Request, Response}\n\
          fn fetch(req: Request): Response { return server.response(200, \"ok\") }\n\
          server.serve(8080, fetch)\n",
     );
@@ -107,14 +108,23 @@ fn serve_emits_one_server_span_per_request() {
     let names: Vec<&str> = spans.iter().map(|s| s.name.as_str()).collect();
     assert_eq!(
         names,
-        ["GET /", "GET /health", "POST /echo", "GET /users/42", "DELETE /users/42"]
+        [
+            "GET /",
+            "GET /health",
+            "POST /echo",
+            "GET /users/42",
+            "DELETE /users/42"
+        ]
     );
     assert!(
         spans.iter().all(|s| s.kind == SpanKind::Server),
         "every request span is SERVER-kind"
     );
     // No inbound `traceparent` in the script → every span is a fresh root.
-    assert!(spans.iter().all(|s| s.parent.is_none()), "roots (no inbound parent)");
+    assert!(
+        spans.iter().all(|s| s.parent.is_none()),
+        "roots (no inbound parent)"
+    );
     assert!(spans.iter().all(|s| s.end_unix_ms.is_some()), "all ended");
 }
 
@@ -124,6 +134,7 @@ fn serve_emits_one_server_span_per_request() {
 fn serve_span_carries_http_attributes() {
     let spans = emitted_spans(
         "use std.http.server\n\
+         use std.http.{Request, Response}\n\
          fn fetch(req: Request): Response { return server.response(201, \"made\") }\n\
          server.serve(8080, fetch)\n",
     );
@@ -132,7 +143,10 @@ fn serve_span_carries_http_attributes() {
         attr(echo, "http.request.method"),
         Some(&AttrValue::Str("POST".into()))
     );
-    assert_eq!(attr(echo, "url.path"), Some(&AttrValue::Str("/echo".into())));
+    assert_eq!(
+        attr(echo, "url.path"),
+        Some(&AttrValue::Str("/echo".into()))
+    );
     assert_eq!(
         attr(echo, "http.response.status_code"),
         Some(&AttrValue::Int(201))
@@ -146,6 +160,7 @@ fn serve_span_carries_http_attributes() {
 fn handler_spans_nest_under_the_server_span() {
     let spans = emitted_spans(
         "use std.http.server\n\
+         use std.http.{Request, Response}\n\
          use std.{tracing}\n\
          fn fetch(req: Request): Response {\n\
          \x20   body = fn(): int { return 1 }\n\
@@ -155,13 +170,22 @@ fn handler_spans_nest_under_the_server_span() {
          server.serve(8080, fetch)\n",
     );
     let db: Vec<_> = spans.iter().filter(|s| s.name == "db").collect();
-    let servers: Vec<_> = spans.iter().filter(|s| s.kind == SpanKind::Server).collect();
+    let servers: Vec<_> = spans
+        .iter()
+        .filter(|s| s.kind == SpanKind::Server)
+        .collect();
     assert_eq!(db.len(), 5, "one child span per scripted request");
     assert_eq!(servers.len(), 5);
     for (child, server) in db.iter().zip(&servers) {
         let parent = child.parent.expect("child has a parent");
-        assert_eq!(parent, server.context, "child parents under ITS request's server span");
-        assert_eq!(child.context.trace_id, server.context.trace_id, "same trace");
+        assert_eq!(
+            parent, server.context,
+            "child parents under ITS request's server span"
+        );
+        assert_eq!(
+            child.context.trace_id, server.context.trace_id,
+            "same trace"
+        );
     }
 }
 
@@ -173,6 +197,7 @@ fn handler_spans_nest_under_the_server_span() {
 fn interleaved_handlers_keep_their_own_context() {
     let spans = emitted_spans(
         "use std.http.server\n\
+         use std.http.{Request, Response}\n\
          use std.{tracing}\n\
          use std.task.{sleep}\n\
          async fn fetch(req: Request): Response {\n\
@@ -184,7 +209,10 @@ fn interleaved_handlers_keep_their_own_context() {
          server.serve(8080, fetch)\n",
     );
     let work: Vec<_> = spans.iter().filter(|s| s.name == "work").collect();
-    let servers: Vec<_> = spans.iter().filter(|s| s.kind == SpanKind::Server).collect();
+    let servers: Vec<_> = spans
+        .iter()
+        .filter(|s| s.kind == SpanKind::Server)
+        .collect();
     assert_eq!(work.len(), 5);
     assert_eq!(servers.len(), 5);
     // Every work span parents under exactly one distinct server span (a bijection), and shares its
@@ -196,7 +224,10 @@ fn interleaved_handlers_keep_their_own_context() {
             .iter()
             .find(|s| s.context.span_id == parent.span_id)
             .expect("parent is one of the server spans");
-        assert_eq!(w.context.trace_id, server.context.trace_id, "stays in its own trace");
+        assert_eq!(
+            w.context.trace_id, server.context.trace_id,
+            "stays in its own trace"
+        );
         assert!(
             !claimed.contains(&parent.span_id),
             "two handlers parented under the same request"
@@ -211,6 +242,7 @@ fn interleaved_handlers_keep_their_own_context() {
 fn handler_spawned_task_inherits_the_server_span() {
     let spans = emitted_spans(
         "use std.http.server\n\
+         use std.http.{Request, Response}\n\
          use std.{tracing}\n\
          async fn bg(): int {\n\
          \x20   s = tracing.span(\"bg\")\n\
@@ -228,12 +260,18 @@ fn handler_spawned_task_inherits_the_server_span() {
          server.serve(8080, fetch)\n",
     );
     let bg: Vec<_> = spans.iter().filter(|s| s.name == "bg").collect();
-    let servers: Vec<_> = spans.iter().filter(|s| s.kind == SpanKind::Server).collect();
+    let servers: Vec<_> = spans
+        .iter()
+        .filter(|s| s.kind == SpanKind::Server)
+        .collect();
     assert_eq!(bg.len(), 5);
     assert_eq!(servers.len(), 5);
     for (child, server) in bg.iter().zip(&servers) {
         let parent = child.parent.expect("bg has a parent");
-        assert_eq!(parent, server.context, "inherited across the spawn boundary");
+        assert_eq!(
+            parent, server.context,
+            "inherited across the spawn boundary"
+        );
     }
 }
 
@@ -256,7 +294,10 @@ fn with_span_async_covers_the_bodys_duration() {
          }\n\
          echo tracing.with_span(\"job\", work).await\n",
     );
-    let job = spans.iter().find(|s| s.name == "job").expect("job span recorded");
+    let job = spans
+        .iter()
+        .find(|s| s.name == "job")
+        .expect("job span recorded");
     assert!(job.parent.is_none(), "top-level span is a root");
     assert!(job.end_unix_ms.is_some(), "ended at completion");
     // End-at-completion, pinned by RECORDING ORDER (the recorder appends at `end`): the job span
@@ -266,7 +307,10 @@ fn with_span_async_covers_the_bodys_duration() {
     // clock and gets true durations.)
     let pos = |name: &str| spans.iter().position(|s| s.name == name).unwrap();
     assert!(pos("early") < pos("late"), "children end in body order");
-    assert!(pos("late") < pos("job"), "job ends after the body completes");
+    assert!(
+        pos("late") < pos("job"),
+        "job ends after the body completes"
+    );
     // Both children — before AND after the suspension — parent under the job span.
     for name in ["early", "late"] {
         let child = spans.iter().find(|s| s.name == name).unwrap();
@@ -288,7 +332,10 @@ fn with_span_async_abort_ends_the_span_with_error() {
          echo tracing.with_span(\"job\", boom).await\n",
     );
     assert!(!ok, "the abort propagates to the program");
-    let job = spans.iter().find(|s| s.name == "job").expect("aborted span still recorded");
+    let job = spans
+        .iter()
+        .find(|s| s.name == "job")
+        .expect("aborted span still recorded");
     assert_eq!(job.status, SpanStatus::Error("span body aborted".into()));
     assert!(job.end_unix_ms.is_some(), "ended despite the abort");
 }
@@ -326,7 +373,9 @@ fn channel_seeded_consumer_spans_parent_under_the_producer() {
     );
     let produce = spans.iter().find(|s| s.name == "produce").unwrap();
     let work = spans.iter().find(|s| s.name == "work").unwrap();
-    let parent = work.parent.expect("the seeded consumer's span has a parent");
+    let parent = work
+        .parent
+        .expect("the seeded consumer's span has a parent");
     assert_eq!(
         parent, produce.context,
         "the consumer's span parents under the producer's, across the channel"
@@ -340,6 +389,7 @@ fn channel_seeded_consumer_spans_parent_under_the_producer() {
 fn serve_span_status_reflects_5xx_only() {
     let spans = emitted_spans(
         "use std.http.server\n\
+         use std.http.{Request, Response}\n\
          fn fetch(req: Request): Response {\n\
          \x20   if req.path() == \"/health\" { return server.response(503, \"down\") }\n\
          \x20   return server.response(200, \"ok\")\n\

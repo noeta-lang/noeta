@@ -274,6 +274,7 @@ fn compile_to_mc(
         handle_sites,
         bound_handle_sites,
         f32_literal_sites,
+        bundle_call_sites,
         destructor_relevance: _,
     } = sites;
     // Lower the surface program to the shared Core IR, then compile *that* to bytecode. The same
@@ -297,6 +298,7 @@ fn compile_to_mc(
             handle_sites: &handle_sites,
             bound_handle_sites: &bound_handle_sites,
             f32_literal_sites: &f32_literal_sites,
+            bundle_call_sites: &bundle_call_sites,
         },
         real_isolates,
     )
@@ -481,6 +483,7 @@ impl SessionCompiler {
                     handle_sites: &sites.handle_sites,
                     bound_handle_sites: &sites.bound_handle_sites,
                     f32_literal_sites: &sites.f32_literal_sites,
+                    bundle_call_sites: &sites.bundle_call_sites,
                 },
                 // The REPL keeps cooperative isolates, exactly like the checkerless path.
                 false,
@@ -3223,6 +3226,32 @@ impl<'m> FnCompiler<'m> {
                     func: func_id,
                     args,
                     recipe: recipe.clone().map(Box::new),
+                    span: *span,
+                });
+                Ok(())
+            }
+            // A method-bundle call (kernel-methods K2): route baked by the checker; the receiver
+            // and args are borrowed registers, exactly the ctx-method convention.
+            Rvalue::BundleMethod {
+                receiver,
+                module,
+                bundle,
+                name,
+                args,
+                span,
+            } => {
+                let recv = self.atom_reg(receiver)?;
+                let args = self.atom_regs(args)?;
+                let module_id = self.module.intern_name(module);
+                let bundle_id = self.module.intern_name(bundle);
+                let method_id = self.module.intern_name(name);
+                self.code.push(Op::BundleMethod {
+                    dst,
+                    recv,
+                    module: module_id,
+                    bundle: bundle_id,
+                    method: method_id,
+                    args,
                     span: *span,
                 });
                 Ok(())

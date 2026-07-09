@@ -1,0 +1,13 @@
+// Functions are namespace-scoped too (arc Phase B): two modules each declare a `pub fn scale`, and the
+// entry imports both under distinct aliases. Each call resolves to its own module's function by
+// qualified identity (`App.Metric.scale` vs `App.Audio.scale`) — the function analogue of the
+// same-named-type coexistence. Both backends agree.
+// expect: stdout "50"
+// expect: stdout "105"
+// expect: exit 0
+namespace App.Main;
+use App.Metric.scale as mscale;
+use App.Audio.scale as ascale;
+
+echo mscale(5);   // App.Metric.scale — n * 10
+echo ascale(5);   // App.Audio.scale  — n + 100

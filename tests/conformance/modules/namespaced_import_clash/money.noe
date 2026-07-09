@@ -1,0 +1,2 @@
+namespace App.Money;
+pub struct Amount { cents: int }

@@ -1,0 +1,53 @@
+// Kernel-methods K2/K3: the bound bundle's methods in METHOD POSITION — `xs.add_all(ys)` is the
+// same shared kernel dispatch as `vec.add_all(xs, ys)`, statically routed at the call site (the
+// checker resolved the binding), so it works on packed row + column layouts, on the boxed
+// fallback, and on an EMPTY receiver (no runtime shape discovery). Results type nominally:
+// `bright[0].y` resolves through SameAsArg(0) = the receiver's List<V3>.
+// expect: stdout "[V3 {x: 11.0, y: 12.0, z: 13.0}, V3 {x: 5.0, y: 6.0, z: 7.0}]"
+// expect: stdout "[60.0, 15.0]"
+// expect: stdout "[C3 {x: 2.0, y: 4.0, z: 6.0}]"
+// expect: stdout "[5.0]"
+// expect: stdout "12.0"
+// expect: stdout "[]"
+// expect: stdout "5.0"
+// expect: stdout "3.0"
+// expect: stdout "V3 {x: 4.0, y: 4.0, z: 0.0}"
+// expect: stdout "V3 {x: 6.0, y: 8.0, z: 0.0}"
+// expect: stdout "V3 {x: 0.6, y: 0.8, z: 0.0}"
+// expect: exit 0
+use std.{vec}
+
+@packed struct V3 { x: f32; y: f32; z: f32 }
+@packed(layout: column) struct C3 { x: f32; y: f32; z: f32 }
+
+impl vec.Kernels for V3 {}
+impl vec.Kernels for C3 {}
+
+xs = [V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }, V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }]
+ys = [V3 { x: 10.0f32, y: 10.0f32, z: 10.0f32 }, V3 { x: 1.0f32, y: 1.0f32, z: 1.0f32 }]
+
+echo xs.add_all(ys)
+echo xs.dot_all(ys)
+
+cs = [C3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }]
+echo cs.scale_all(2.0f32)
+echo [C3 { x: 3.0f32, y: 4.0f32, z: 0.0f32 }].length_all()
+
+// The nominal result type: SameAsArg(0) = the receiver's own List<V3>, so member access
+// resolves statically.
+bright = xs.add_all(ys)
+echo bright[0].y
+
+// An EMPTY receiver dispatches (the route is call-site-resolved, not shape-discovered).
+empty: List<V3> = []
+echo empty.length_all()
+
+// Element methods: scalar Vec3 math on ONE bound value — `v.dot(w)` ≡ `vec.dot(v, w)`, with
+// shape-relative results built from the receiver's own shape.
+v = V3 { x: 3.0f32, y: 4.0f32, z: 0.0f32 }
+w = V3 { x: 1.0f32, y: 0.0f32, z: 0.0f32 }
+echo v.length()
+echo v.dot(w)
+echo v.add(w)
+echo v.scale(2.0f32)
+echo v.normalize()

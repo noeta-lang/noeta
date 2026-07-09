@@ -1,9 +1,0 @@
-// The metrics `Instrument` handle is a reserved native type name (it registers as an extern type
-// like `Span`): declaring your own is E0049, the shared reserved-native-type diagnostic. (Only
-// `Instrument` is reserved — the OTel `Counter`/`Gauge`/`Histogram` names are too common in user
-// code, so the four constructors all return the one `Instrument` type.)
-// expect: error E0049 at 7:8
-// expect: exit 1
-struct Instrument {
-    samples: int
-}

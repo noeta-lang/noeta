@@ -53,11 +53,8 @@ fn emitted_logs(text: &str) -> Vec<LogRecord> {
     let tree_sink = Arc::new(Mutex::new(Vec::new()));
     let mut tree_host = SandboxHost::new();
     tree_host.set_log_sink(tree_sink.clone());
-    let tree_result = noeta_conformance::reference::reference_run_with_host(
-        &program,
-        sites,
-        Box::new(tree_host),
-    );
+    let tree_result =
+        noeta_conformance::reference::reference_run_with_host(&program, sites, Box::new(tree_host));
     assert_eq!(
         result.is_ok(),
         tree_result.is_ok(),
@@ -82,7 +79,10 @@ fn top_level_log_has_no_trace_correlation() {
     assert_eq!(logs.len(), 1);
     assert_eq!(logs[0].body, "starting up");
     assert_eq!(logs[0].severity, Severity::Info);
-    assert!(logs[0].trace_context.is_none(), "no active span → no correlation");
+    assert!(
+        logs[0].trace_context.is_none(),
+        "no active span → no correlation"
+    );
     assert!(logs[0].attributes.is_empty());
 }
 
@@ -96,10 +96,7 @@ fn convenience_levels_carry_their_severity() {
          log.warn(\"w\")\n\
          log.error(\"e\")\n",
     );
-    let got: Vec<(&str, Severity)> = logs
-        .iter()
-        .map(|r| (r.body.as_str(), r.severity))
-        .collect();
+    let got: Vec<(&str, Severity)> = logs.iter().map(|r| (r.body.as_str(), r.severity)).collect();
     assert_eq!(
         got,
         [
@@ -121,10 +118,7 @@ fn generic_log_parses_severity_with_info_fallback() {
          log.log(\"fatal\", \"f\")\n\
          log.log(\"bogus\", \"b\")\n",
     );
-    let got: Vec<(&str, Severity)> = logs
-        .iter()
-        .map(|r| (r.body.as_str(), r.severity))
-        .collect();
+    let got: Vec<(&str, Severity)> = logs.iter().map(|r| (r.body.as_str(), r.severity)).collect();
     assert_eq!(
         got,
         [
@@ -159,7 +153,10 @@ fn log_inside_a_span_correlates_to_it() {
     assert_ne!(ctx.span_id, [0u8; 8]);
     // The record after the span closed has none.
     assert_eq!(logs[1].body, "outside");
-    assert!(logs[1].trace_context.is_none(), "span ended → no correlation");
+    assert!(
+        logs[1].trace_context.is_none(),
+        "span ended → no correlation"
+    );
 }
 
 /// L2 — the `*_with` forms carry a `Map<string, string|int|float|bool>` of structured attributes
@@ -202,7 +199,10 @@ fn attributed_log_inside_a_span_correlates_and_carries_attrs() {
     let r = &logs[0];
     assert_eq!(r.severity, Severity::Error);
     assert_eq!(
-        r.attributes.iter().find(|(n, _)| n == "code").map(|(_, v)| v),
+        r.attributes
+            .iter()
+            .find(|(n, _)| n == "code")
+            .map(|(_, v)| v),
         Some(&AttrValue::Int(500))
     );
     assert!(r.trace_context.is_some(), "attributed log still correlates");

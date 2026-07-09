@@ -38,6 +38,7 @@ fn lowered_ir(src: &str) -> String {
             handle_sites: &checked.sites.handle_sites,
             bound_handle_sites: &checked.sites.bound_handle_sites,
             f32_literal_sites: &checked.sites.f32_literal_sites,
+            bundle_call_sites: &checked.sites.bundle_call_sites,
         },
     )
     .expect("lowering is total over the parsed language");

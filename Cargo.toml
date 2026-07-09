@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/nsrosenqvist/noeta"
@@ -145,6 +145,27 @@ hmac = { version = "0.12", default-features = false }
 # hmac verify twins rely on) — already in-tree transitively via `hmac`; never hand-roll this.
 subtle = { version = "2", default-features = false }
 bcrypt = { version = "0.17", default-features = false, features = ["alloc"] }
+# Real p2p transport (p2p P3, behind noeta-runtime's `ring-p2p` feature — OFF by default): a
+# p2panda-net node (gossip + log-sync over iroh/QUIC). Pre-1.0; pinned exactly because its
+# user-facing API may break before 1.0. Never in a default build. `p2panda-core` supplies the
+# `Hash`/`Topic` types; `futures-util` drives the gossip subscription stream in the drain task.
+p2panda-net = "0.7"
+p2panda-core = "0.7"
+# Durable synced_signal transport (p2p P3.2): the log-sync store + sync-event types. `SqliteStore`
+# (in-memory `temporary()`) holds the append-only operation logs; `p2panda-sync` provides the
+# `TopicLogSyncEvent`/`Operation` sync surface. Same gated `ring-p2p` tree as p2panda-net.
+p2panda-store = "0.7"
+p2panda-sync = "0.7"
+futures-util = "0.3"
+# Group encryption for `synced_signal` (p2p P3.4b, same gated `ring-p2p` tree): p2panda's
+# decentralised group key-agreement + encryption. `p2panda-spaces` is the high-level API (a `Space`
+# encrypts operation payloads for a membership group with post-compromise security); it composes
+# `p2panda-auth` (membership/access control) + `p2panda-encryption` (the XChaCha20-Poly1305 "data
+# encryption" scheme, so late joiners can still decrypt history) over `p2panda-store`'s `spaces`
+# tables. Pre-1.0; pinned exactly. Never in a default build.
+p2panda-spaces = "0.7"
+p2panda-auth = "0.7"
+p2panda-encryption = { version = "0.7", features = ["data_scheme"] }
 
 [workspace.lints.rust]
 # Quarantine unsafe: forbidden workspace-wide in M0. The first crates that may

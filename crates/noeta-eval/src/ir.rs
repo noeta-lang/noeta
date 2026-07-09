@@ -1122,6 +1122,20 @@ impl Interpreter {
                 // type onto the freshly-built value (R2b.2) — the tree-walker twin of the VM's node tag.
                 result.map(|v| tag_enum_reflect(v, reflect))
             }
+            // A bound method-bundle call (kernel-methods K3): the route was baked at the call
+            // site — straight to the bundle's shared ctx dispatch, receiver as slot 0.
+            noeta_ir::Rvalue::BundleMethod {
+                receiver,
+                module,
+                bundle,
+                name,
+                args,
+                span,
+            } => {
+                let recv = self.eval_ir_atom(receiver, frame)?;
+                let values = self.eval_ir_atoms(args, frame)?;
+                self.call_bundle_method(module, bundle, name, recv, &values, *span)
+            }
             noeta_ir::Rvalue::Field {
                 receiver,
                 name,
@@ -1539,10 +1553,10 @@ impl Interpreter {
             NativeOut::Str(s) => Ok(Value::Str(s)),
             NativeOut::Bytes(b) => Ok(Value::Bytes(Rc::new(b))),
             NativeOut::Unit => Ok(Value::Unit),
-            // A `TypeRecipe` names only JSON shapes; extern values and async work can never
-            // decode from one.
-            NativeOut::Extern(_) | NativeOut::Spawn(_) => {
-                unreachable!("json recipes never produce extern/spawn results")
+            // A `TypeRecipe` names only JSON shapes; extern values, async work, and bulk scalar
+            // vectors (a packed reduction's result, N3.4) can never decode from one.
+            NativeOut::Extern(_) | NativeOut::Spawn(_) | NativeOut::Scalars(_) => {
+                unreachable!("json recipes never produce extern/spawn/bulk-scalar results")
             }
             NativeOut::None => Ok(crate::builtin_enum("Option", "none", vec![])),
             NativeOut::Some(inner) => {

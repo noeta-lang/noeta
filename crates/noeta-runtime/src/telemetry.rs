@@ -112,7 +112,8 @@ impl OtlpExporter {
 /// path segment (`traces`/`logs`/`metrics`); the env var infix is its uppercase form.
 fn signal_endpoint(base: Option<&str>, signal: &str) -> Option<String> {
     let upper = signal.to_ascii_uppercase();
-    if std::env::var(format!("OTEL_{upper}_EXPORTER")).is_ok_and(|v| v.eq_ignore_ascii_case("none")) {
+    if std::env::var(format!("OTEL_{upper}_EXPORTER")).is_ok_and(|v| v.eq_ignore_ascii_case("none"))
+    {
         return None;
     }
     if let Some(ep) = std::env::var(format!("OTEL_EXPORTER_OTLP_{upper}_ENDPOINT"))
@@ -457,7 +458,10 @@ mod tests {
         ];
         let body = logs_to_json(&records, "svc");
         let rl = &body["resourceLogs"][0];
-        assert_eq!(rl["resource"]["attributes"][0]["value"]["stringValue"], "svc");
+        assert_eq!(
+            rl["resource"]["attributes"][0]["value"]["stringValue"],
+            "svc"
+        );
         let recs = &rl["scopeLogs"][0]["logRecords"];
         // Correlated INFO record.
         assert_eq!(recs[0]["severityNumber"], 9);
@@ -491,7 +495,10 @@ mod tests {
 
         let body = metrics_to_json(&data, "svc");
         let rm = &body["resourceMetrics"][0];
-        assert_eq!(rm["resource"]["attributes"][0]["value"]["stringValue"], "svc");
+        assert_eq!(
+            rm["resource"]["attributes"][0]["value"]["stringValue"],
+            "svc"
+        );
         let metrics = &rm["scopeMetrics"][0]["metrics"];
 
         // Counter → sum, monotonic, cumulative (temporality 2), asInt string.

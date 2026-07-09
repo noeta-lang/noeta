@@ -54,11 +54,8 @@ fn collected_metrics(text: &str) -> Vec<MetricData> {
     let tree_sink = Arc::new(Mutex::new(Vec::new()));
     let mut tree_host = SandboxHost::new();
     tree_host.set_metric_sink(tree_sink.clone());
-    let tree_result = noeta_conformance::reference::reference_run_with_host(
-        &program,
-        sites,
-        Box::new(tree_host),
-    );
+    let tree_result =
+        noeta_conformance::reference::reference_run_with_host(&program, sites, Box::new(tree_host));
     assert_eq!(
         result.is_ok(),
         tree_result.is_ok(),
@@ -158,6 +155,7 @@ fn histogram_buckets_observations() {
 fn server_serve_auto_instruments_request_metrics() {
     let metrics = collected_metrics(
         "use std.http.server\n\
+         use std.http.{Request, Response}\n\
          fn fetch(req: Request): Response { return server.response(200, \"ok\") }\n\
          server.serve(8080, fetch)\n",
     );
@@ -172,7 +170,10 @@ fn server_serve_auto_instruments_request_metrics() {
     // The scripted requests: GET /, GET /health, POST /echo, GET /users/42, DELETE /users/42 — five
     // distinct (method, route, status) series, each observed once.
     assert_eq!(points.len(), 5, "one series per distinct request");
-    assert!(points.iter().all(|p| p.count == 1), "each request observed once");
+    assert!(
+        points.iter().all(|p| p.count == 1),
+        "each request observed once"
+    );
 
     let active = metrics
         .iter()

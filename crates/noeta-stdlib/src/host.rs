@@ -359,8 +359,8 @@ impl P2p for SandboxHost {
         Ok(self.p2p.poll_default(topic))
     }
 
-    fn p2p_subscribe(&mut self, topic: &str) -> u64 {
-        self.p2p.subscribe(topic)
+    fn p2p_subscribe(&mut self, topic: &str) -> Result<u64, StdError> {
+        Ok(self.p2p.subscribe(topic))
     }
 
     fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
@@ -512,7 +512,9 @@ impl Logging for SandboxHost {
 
     fn log_emit(&mut self, record: LogRecord) {
         if let Some(sink) = &self.tel.log_sink {
-            sink.lock().expect("log sink not poisoned").push(record.clone());
+            sink.lock()
+                .expect("log sink not poisoned")
+                .push(record.clone());
         }
         self.tel.logs.push(record);
     }
@@ -525,7 +527,12 @@ impl Metrics for SandboxHost {
         true
     }
 
-    fn metric_get_or_create(&mut self, name: &str, unit: &str, kind: InstrumentKind) -> InstrumentId {
+    fn metric_get_or_create(
+        &mut self,
+        name: &str,
+        unit: &str,
+        kind: InstrumentKind,
+    ) -> InstrumentId {
         self.tel.metrics.get_or_create(name, unit, kind)
     }
 

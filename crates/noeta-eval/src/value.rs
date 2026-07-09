@@ -341,6 +341,20 @@ pub(crate) struct PackedSlot {
     pub(crate) kind: SlotKind,
 }
 
+/// Project one packed field onto the seam's neutral [`noeta_stdlib::PackedField`] (N3.4).
+fn seam_field(kind: &SlotKind) -> noeta_stdlib::PackedField {
+    use noeta_stdlib::PackedField;
+    match kind {
+        SlotKind::Int => PackedField::Int,
+        SlotKind::Float => PackedField::Float,
+        SlotKind::F32 => PackedField::F32,
+        SlotKind::Bool => PackedField::Bool,
+        SlotKind::Struct(inner) => {
+            PackedField::Struct(inner.fields.iter().map(|f| seam_field(&f.kind)).collect())
+        }
+    }
+}
+
 /// A packed field's storage: a primitive occupying one word, or a nested packed struct flattened
 /// inline (its own sub-schema describing how its fields are laid out contiguously).
 pub(crate) enum SlotKind {
@@ -353,6 +367,52 @@ pub(crate) enum SlotKind {
 }
 
 impl PackedList {
+    /// The neutral seam view of this list's element layout (package-manager N3.4) — what
+    /// `NativeCtx::with_packed*` lends a raw-buffer kernel. The eval twin of the VM's projection
+    /// from its interned `noeta_object::PackedSchema`.
+    pub(crate) fn seam_view(&self) -> noeta_stdlib::PackedView {
+        noeta_stdlib::PackedView {
+            fields: self
+                .schema
+                .fields
+                .iter()
+                .map(|f| seam_field(&f.kind))
+                .collect(),
+            byte_size: self.schema.byte_size,
+            column: self.schema.column,
+            count: self.schema.count(self.bytes.len()),
+        }
+    }
+
+    /// The raw byte buffer, borrowed (N3.4 `with_packed`).
+    pub(crate) fn raw(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// A packed list **sharing this one's schema** over a fresh buffer — the eval half of
+    /// `NativeCtx::make_packed_like` (N3.4). `bytes` must hold a whole number of elements.
+    pub(crate) fn like(&self, bytes: Vec<u8>) -> PackedList {
+        debug_assert!(
+            self.schema.byte_size > 0 && bytes.len().is_multiple_of(self.schema.byte_size),
+            "make_packed_like: a whole number of elements"
+        );
+        PackedList {
+            schema: Rc::clone(&self.schema),
+            bytes: Rc::new(bytes),
+        }
+    }
+
+    /// Mutate the byte buffer through `f`, copy-on-write (`NativeCtx::with_packed_mut`, N3.4):
+    /// `Rc::make_mut` mutates in place iff this list is the buffer's sole owner, else clones —
+    /// exactly the value-semantics COW the boxed list's `Rc<Vec<Value>>` gets for free.
+    pub(crate) fn mutate_bytes(&mut self, f: &mut dyn FnMut(&noeta_stdlib::PackedView, &mut [u8])) {
+        let view = self.seam_view();
+        f(
+            &view,
+            Rc::<Vec<u8>>::make_mut(&mut self.bytes).as_mut_slice(),
+        );
+    }
+
     /// An empty packed list with the given `schema` — the start of a streaming flat build
     /// (P-PACK 2.5). Elements are appended one at a time by [`PackedList::push`].
     pub(crate) fn empty(schema: Rc<PackedSchema>) -> PackedList {
@@ -368,61 +428,6 @@ impl PackedList {
         PackedList {
             schema,
             bytes: Rc::new(bytes),
-        }
-    }
-
-    /// If this is a `List<Vec3<f32>>` (element schema = exactly three `f32` fields), its shared
-    /// schema and a copy of its byte buffer — the input to the bulk `vec` kernels (P-PACK 4.2).
-    pub(crate) fn vec3_data(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
-        // A column (`layout: column`) list declines the interleaved bulk-kernel fast path (P-SIMD C2)
-        // so the kernels fall back to the element-wise scalar loop — correct on either layout; the
-        // fast columnar SoA path is wired in C3.
-        if !self.schema.column
-            && self.schema.fields.len() == 3
-            && self
-                .schema
-                .fields
-                .iter()
-                .all(|f| matches!(f.kind, SlotKind::F32))
-        {
-            Some((Rc::clone(&self.schema), (*self.bytes).clone()))
-        } else {
-            None
-        }
-    }
-
-    /// If this is a **column-major** `List<Vec3<f32>>` (`@packed(layout: column)`), its schema and
-    /// column-order buffer — the direct input to the SoA reduction kernels (P-SIMD C3). `None` for a
-    /// row list (which takes `vec3_data`) or any other schema.
-    fn vec3_columns(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
-        if self.schema.column
-            && self.schema.fields.len() == 3
-            && self
-                .schema
-                .fields
-                .iter()
-                .all(|f| matches!(f.kind, SlotKind::F32))
-        {
-            Some((Rc::clone(&self.schema), (*self.bytes).clone()))
-        } else {
-            None
-        }
-    }
-
-    /// If this is a `List<Vec3<f32>>` of **either** layout, its schema and byte buffer — for the
-    /// layout-agnostic element-wise kernels (`add`/`sub`/`scale`, P-SIMD C3), which operate over the
-    /// flat `f32` array and so preserve whichever layout the input carries.
-    fn vec3_any(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
-        if self.schema.fields.len() == 3
-            && self
-                .schema
-                .fields
-                .iter()
-                .all(|f| matches!(f.kind, SlotKind::F32))
-        {
-            Some((Rc::clone(&self.schema), (*self.bytes).clone()))
-        } else {
-            None
         }
     }
 
@@ -652,32 +657,6 @@ impl Value {
     /// element type from the source list's tag.
     pub(crate) fn set_value_tagged(items: Rc<Vec<Value>>, reflect: Option<Rc<TypeRepr>>) -> Value {
         Value::Set(items, reflect)
-    }
-
-    /// If this is a packed `List<Vec3<f32>>`, its schema and byte buffer (P-PACK 4.2 bulk `vec`).
-    pub(crate) fn packed_vec3_data(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
-        match self {
-            Value::List(ListRepr::Packed(p)) => p.vec3_data(),
-            _ => None,
-        }
-    }
-
-    /// If this is a **column-major** packed `List<Vec3<f32>>`, its schema and column-order buffer —
-    /// the direct input to the SoA reduction kernels (P-SIMD C3).
-    pub(crate) fn packed_vec3_columns(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
-        match self {
-            Value::List(ListRepr::Packed(p)) => p.vec3_columns(),
-            _ => None,
-        }
-    }
-
-    /// If this is a packed `List<Vec3<f32>>` of **either** layout, its schema and buffer — for the
-    /// layout-agnostic element-wise kernels (`add`/`sub`/`scale`, P-SIMD C3).
-    pub(crate) fn packed_vec3_any(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
-        match self {
-            Value::List(ListRepr::Packed(p)) => p.vec3_any(),
-            _ => None,
-        }
     }
 
     /// Build a packed `List` value directly from a result byte buffer + schema (P-PACK 4.2).

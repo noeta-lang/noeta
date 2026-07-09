@@ -1,0 +1,19 @@
+// A namespaced user type has a qualified runtime identity (`App.Shapes.Point`), but displays under
+// its SHORT name — echoing an object or an enum value strips the namespace, exactly as the checker's
+// error messages and `type_of` stringification do. Identity stays qualified underneath: the value
+// still `is App.Shapes.Point` (written here through the import as `Point`). Both backends agree.
+// expect: stdout "Point {x: 1, y: 2}"
+// expect: stdout "Color.Red"
+// expect: stdout "true"
+// expect: exit 0
+namespace App.Main;
+use App.Shapes.Point;
+use App.Shapes.Color;
+
+p = Point { x: 1, y: 2 };
+echo p;
+
+c = Color.Red;
+echo c;
+
+echo p is Point;

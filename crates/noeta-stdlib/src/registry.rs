@@ -51,13 +51,33 @@ macro_rules! std_unit {
     };
 }
 
-std_unit!(CoreExtension, "std.core", modules = CORE_MODULES, types = CORE_TYPES);
-std_unit!(CryptoExtension, "std.crypto", modules = CRYPTO_MODULES, types = CRYPTO_TYPES);
-std_unit!(IdExtension, "std.id", modules = ID_MODULES, types = ID_TYPES);
+std_unit!(
+    CoreExtension,
+    "std.core",
+    modules = CORE_MODULES,
+    types = CORE_TYPES
+);
+std_unit!(
+    CryptoExtension,
+    "std.crypto",
+    modules = CRYPTO_MODULES,
+    types = CRYPTO_TYPES
+);
+std_unit!(
+    IdExtension,
+    "std.id",
+    modules = ID_MODULES,
+    types = ID_TYPES
+);
 // The `vec`/`quat` packed-3D-math pair, split into its own unit to **prep extraction** into an
 // out-of-tree geometry package (native-extensions; Phase 3). No extern types — pure value math.
 std_unit!(VecExtension, "std.vec", modules = VEC_MODULES, types = &[]);
-std_unit!(P2pExtension, "std.p2p", modules = P2P_MODULES, types = P2P_TYPES);
+std_unit!(
+    P2pExtension,
+    "std.p2p",
+    modules = P2P_MODULES,
+    types = P2P_TYPES
+);
 
 /// The `http` unit — the only one contributing a CLI subcommand (`noeta serve`), so it can't use the
 /// `std_unit!` shorthand.
@@ -86,6 +106,7 @@ impl Extension for HttpExtension {
 /// The `id` unit's extern type: `Uuid` (X2 — pure, byte-ordered, key-capable).
 const ID_TYPES: &[ExtType] = &[ExtType {
     name: crate::id::TYPE_NAME,
+    namespace: "std.id",
     methods: UUID_METHODS,
     dispatch: uuid_method_dispatch,
     key_capable: true,
@@ -95,6 +116,7 @@ const ID_TYPES: &[ExtType] = &[ExtType {
 /// The `crypto` unit's extern type: the incremental `Hasher` (C3).
 const CRYPTO_TYPES: &[ExtType] = &[ExtType {
     name: crate::crypto::HASHER_TYPE_NAME,
+    namespace: "std.crypto",
     methods: HASHER_METHODS,
     dispatch: hasher_method_dispatch,
     key_capable: false, // `update` mutates — a hasher can never key a map
@@ -106,6 +128,7 @@ const CRYPTO_TYPES: &[ExtType] = &[ExtType {
 const HTTP_TYPES: &[ExtType] = &[
     ExtType {
         name: crate::net::RESPONSE_TYPE_NAME,
+        namespace: "std.http",
         methods: RESPONSE_METHODS,
         dispatch: response_method_dispatch,
         key_capable: false, // a response is not a map key
@@ -113,6 +136,7 @@ const HTTP_TYPES: &[ExtType] = &[
     },
     ExtType {
         name: crate::net::REQUEST_TYPE_NAME,
+        namespace: "std.http",
         methods: REQUEST_METHODS,
         dispatch: request_method_dispatch,
         key_capable: false, // an inbound request is not a map key
@@ -126,6 +150,7 @@ const P2P_TYPES: &[ExtType] = &[
     // the `noeta-crdt` convergence core. All pure — no arena, no ctx seam, not key-capable.
     ExtType {
         name: crate::crdt::GCOUNTER_TYPE_NAME,
+        namespace: "std.crdt",
         methods: crate::crdt::GCOUNTER_METHODS,
         dispatch: crate::crdt::GCOUNTER_DISPATCH,
         traits: crate::crdt::CRDT_TRAITS,
@@ -133,6 +158,7 @@ const P2P_TYPES: &[ExtType] = &[
     },
     ExtType {
         name: crate::crdt::PNCOUNTER_TYPE_NAME,
+        namespace: "std.crdt",
         methods: crate::crdt::PNCOUNTER_METHODS,
         dispatch: crate::crdt::PNCOUNTER_DISPATCH,
         traits: crate::crdt::CRDT_TRAITS,
@@ -140,6 +166,7 @@ const P2P_TYPES: &[ExtType] = &[
     },
     ExtType {
         name: crate::crdt::GSET_TYPE_NAME,
+        namespace: "std.crdt",
         methods: crate::crdt::GSET_METHODS,
         dispatch: crate::crdt::GSET_DISPATCH,
         traits: crate::crdt::CRDT_TRAITS,
@@ -149,6 +176,7 @@ const P2P_TYPES: &[ExtType] = &[
     // methods reach the arena + graph + P2p host, so they live in the ctx table.
     ExtType {
         name: crate::synced::SYNCED_SIGNAL_TYPE_NAME,
+        namespace: "std.synced",
         ctx_methods: crate::synced::SYNCED_CTX_METHODS,
         ctx_dispatch: Some(|method, ctx, recv, args| {
             crate::synced::synced_ctx_method_dispatch(method, ctx, recv, args)
@@ -161,28 +189,50 @@ const P2P_TYPES: &[ExtType] = &[
 /// and the reactive handles (H5).
 const CORE_TYPES: &[ExtType] = &[
     // `Span` (native OTEL T1) — a mutable, effectful, host-coupled handle (like `FileHandle`): its
-    // methods reach the `Telemetry` capability by id. NOT key-capable (identifies a host resource).
+    // methods reach the `Tracing` capability by id. NOT key-capable (identifies a host resource).
     ExtType {
         name: crate::tracing::SPAN_TYPE_NAME,
+        namespace: "std.tracing",
         methods: crate::tracing::SPAN_METHODS,
         dispatch: crate::tracing::span_method_dispatch,
         key_capable: false,
         ..ExtType::DEFAULTS
     },
-    // The metrics `Instrument` handle (native OTEL Phase M) — mutable, effectful, host-coupled like
-    // `Span`: its methods reach the `Metrics` capability by id. One reserved type (not three: the
-    // OTel `Counter`/`Gauge`/`Histogram` names are far too common in user code to reserve); the kind
-    // is host-side. Reserved (E0049); not key-capable.
+    // The metrics instrument handles (native OTEL Phase M) — mutable, effectful, host-coupled like
+    // `Span`: their methods reach the `Metrics` capability by id. Namespaced under `std.metrics`, so
+    // the idiomatic OTel names are `use`-imported (not globally reserved) and coexist with a user's
+    // own `Counter`. Not key-capable; `deep_marshal` so the `*_with(_, attrs)` map argument arrives
+    // as a full `NativeValue`.
     ExtType {
-        name: crate::metrics::INSTRUMENT_TYPE_NAME,
-        methods: crate::metrics::INSTRUMENT_METHODS,
-        dispatch: crate::metrics::instrument_method_dispatch,
+        name: crate::metrics::COUNTER_TYPE_NAME,
+        namespace: "std.metrics",
+        methods: crate::metrics::COUNTER_METHODS,
+        dispatch: crate::metrics::counter_method_dispatch,
         key_capable: false,
-        deep_marshal: true, // `add_with`/`record_with(_, attrs)` take a `Map` argument
+        deep_marshal: true,
+        ..ExtType::DEFAULTS
+    },
+    ExtType {
+        name: crate::metrics::HISTOGRAM_TYPE_NAME,
+        namespace: "std.metrics",
+        methods: crate::metrics::RECORD_METHODS,
+        dispatch: crate::metrics::histogram_method_dispatch,
+        key_capable: false,
+        deep_marshal: true,
+        ..ExtType::DEFAULTS
+    },
+    ExtType {
+        name: crate::metrics::GAUGE_TYPE_NAME,
+        namespace: "std.metrics",
+        methods: crate::metrics::RECORD_METHODS,
+        dispatch: crate::metrics::gauge_method_dispatch,
+        key_capable: false,
+        deep_marshal: true,
         ..ExtType::DEFAULTS
     },
     ExtType {
         name: "FileHandle",
+        namespace: "std.fs",
         methods: FILE_HANDLE_METHODS,
         dispatch: file_handle_dispatch,
         key_capable: false,
@@ -193,6 +243,7 @@ const CORE_TYPES: &[ExtType] = &[
     // always-open arena read (H5), so the backend inlines it.
     ExtType {
         name: crate::cell::CELL_TYPE_NAME,
+        namespace: "std.cell",
         ctx_methods: crate::cell::CELL_CTX_METHODS,
         // A shim closure picks the `dyn` instantiation of the generic dispatch (the fn-pointer
         // table needs the higher-ranked trait-object lifetime a turbofish cannot name).
@@ -206,6 +257,7 @@ const CORE_TYPES: &[ExtType] = &[
     // state; `get` on both readable kinds is a declared arena read behind the extension's gate.
     ExtType {
         name: crate::reactive::SIGNAL_TYPE_NAME,
+        namespace: "std.reactive",
         ctx_methods: crate::reactive::SIGNAL_CTX_METHODS,
         ctx_dispatch: Some(|method, ctx, recv, args| {
             crate::reactive::signal_ctx_method_dispatch(method, ctx, recv, args)
@@ -215,6 +267,7 @@ const CORE_TYPES: &[ExtType] = &[
     },
     ExtType {
         name: crate::reactive::COMPUTED_TYPE_NAME,
+        namespace: "std.reactive",
         ctx_methods: crate::reactive::COMPUTED_CTX_METHODS,
         ctx_dispatch: Some(|method, ctx, recv, args| {
             crate::reactive::computed_ctx_method_dispatch(method, ctx, recv, args)
@@ -224,6 +277,7 @@ const CORE_TYPES: &[ExtType] = &[
     },
     ExtType {
         name: crate::reactive::EFFECT_TYPE_NAME,
+        namespace: "std.reactive",
         ctx_methods: crate::reactive::EFFECT_CTX_METHODS,
         ctx_dispatch: Some(|method, ctx, recv, args| {
             crate::reactive::effect_ctx_method_dispatch(method, ctx, recv, args)
@@ -309,167 +363,181 @@ fn file_handle_dispatch(
     }
 }
 
-/// The in-process extension registry (package-manager P1.4) — the **assembled** list of registered
-/// extension units, replacing the former hardwired `&[&StdExtension]`. In-tree it holds core's `std`
-/// split into per-capability units; a package manager will extend it with declared dependencies, and
-/// a tailored build gates a heavy capability's unit out wholesale (the Cargo-feature seam). The order
-/// is cosmetic — every lookup iterates the whole list filtered by namespace root.
-static REGISTRY: &[&(dyn Extension + Sync)] = &[
-    &CoreExtension,
-    &HttpExtension,
-    &CryptoExtension,
-    &IdExtension,
-    &VecExtension,
-    &P2pExtension,
-];
+/// The `std` extension units this crate contributes — what the facade below installs as the
+/// registry's lazy default, and what an assembling binary (`noeta_cli::run_cli`, a composed
+/// Phase-3 shim) passes to [`noeta_native::registry::install`] alongside its extra units. The
+/// order is cosmetic — every lookup iterates the whole list filtered by namespace root.
+pub fn std_units() -> Vec<&'static (dyn Extension + Sync)> {
+    vec![
+        &CoreExtension,
+        &HttpExtension,
+        &CryptoExtension,
+        &IdExtension,
+        &VecExtension,
+        &P2pExtension,
+    ]
+}
+
+// --- the registry facade (package-manager Phase 3, N3.0) ----------------------------------------
+//
+// The registry *mechanism* — the assembled unit list and the whole generic lookup layer — lives in
+// `noeta_native::registry` (it was grown here around the dogfood, but nothing in it was
+// std-specific, and Phase 3's composed shim must not register its units through the dogfood
+// crate). These wrappers keep every existing `noeta_stdlib::registry::*` call site working
+// unchanged, and make an unseeded registry unobservable: each ensures the std units are installed
+// (a no-op after the first call, or after an assembling binary's explicit earlier `install`).
+//
+// Std residue deliberately NOT moved: the unit definitions above and the `static_dispatch_ctx*`
+// monomorphized fast routes below (they name `cell`/`reactive` concretely — the per-crate
+// compiled-in fast path). (`is_module_function`'s transitional `vec`/`fs` special cases died with
+// the N3.4 `with_packed` migration, as planned.)
+
+/// Ensure the std units are installed before a lookup (lazy default; an explicit
+/// [`noeta_native::registry::install`] by the assembling binary wins).
+fn ensure() {
+    noeta_native::registry::install_default(std_units);
+}
+
+/// Assemble the registry for a toolchain binary: the std units plus a composed shim's `extra`
+/// extension units (package-manager Phase 3). Called by `noeta_cli::run_cli` at entry, before
+/// anything can look a name up. With no extras this is exactly the lazy default; with extras it
+/// installs eagerly so a later facade lookup cannot race in an std-only default first.
+pub fn install_with_extras(extra: &[&'static (dyn Extension + Sync)]) {
+    if extra.is_empty() {
+        ensure();
+    } else {
+        let mut units = std_units();
+        units.extend_from_slice(extra);
+        noeta_native::registry::install(units);
+    }
+}
 
 /// All registered extensions.
 pub fn extensions() -> &'static [&'static (dyn Extension + Sync)] {
-    REGISTRY
+    ensure();
+    noeta_native::registry::extensions()
 }
 
-/// Find a registered module by its identity string — a **root-qualified path** (`"std.math"`,
-/// nested `"std.http.client"`) or a bare module name (`"math"`, from tests / legacy literal calls).
-/// A leading segment that names a registered extension root selects that root and matches the
-/// remainder against the module name; otherwise the whole string is matched as a bare name.
+/// See [`noeta_native::registry::find_module`].
 pub fn find_module(name: &str) -> Option<&'static ExtModule> {
-    if let Some((root, module)) = name.split_once('.')
-        && is_extension_root(root)
-    {
-        return extensions()
-            .iter()
-            .filter(|e| e.root() == root)
-            .flat_map(|e| e.modules())
-            .find(|m| m.name == module);
-    }
-    extensions()
-        .iter()
-        .flat_map(|e| e.modules())
-        .find(|m| m.name == name)
+    ensure();
+    noeta_native::registry::find_module(name)
 }
 
-/// The registered module name of a (possibly root-qualified) module identity — the identity with its
-/// extension root stripped: `"std.vec"` → `"vec"`, `"std.http.client"` → `"http.client"`, bare
-/// `"vec"` → `"vec"`. This is the `ExtModule::name` the identity resolves to. The transitional
-/// per-backend sites (`vec`/`quat` bulk `*_all`, `fs.list`) and the AOT ring tables key on this name.
+/// See [`noeta_native::registry::module_name`] (pure string projection — no registry state).
 pub fn module_name(module: &str) -> &str {
-    module.split_once('.').map_or(module, |(_root, name)| name)
+    noeta_native::registry::module_name(module)
 }
 
-/// The native-dependency **ring** a module identity resolves to, or `None` for always-on core
-/// (package-manager P1.0). This is the registry-backed replacement for the CLI's hand-maintained
-/// `module_ring`/`fn_ring` tables: `noeta build --native`'s footprint scan calls this to select the
-/// AOT archive's Cargo features. Accepts any module identity [`find_module`] accepts — a
-/// root-qualified path (`"std.http.client"`), a bare name (`"http.client"`, `"json"`), or a bound
-/// local (turbofish receiver) — so the three bytecode forms the scan walks all funnel through one
-/// lookup. An unrecognized identity is `None` (conservative: never strips a ring for a module the
-/// registry doesn't own).
+/// See [`noeta_native::registry::ring_of`].
 pub fn ring_of(module: &str) -> Option<&'static str> {
-    find_module(module).and_then(|m| m.ring)
+    ensure();
+    noeta_native::registry::ring_of(module)
 }
 
-/// Whether `root` is the namespace root of some registered extension (`"std"` today; a package's
-/// root once the manifest populates the registry). The generalization of the hard-coded `path[0]
-/// == "std"` module-import check — a `use <root>.…` import binds a native module iff this holds.
+/// See [`noeta_native::registry::is_extension_root`].
 pub fn is_extension_root(root: &str) -> bool {
-    extensions().iter().any(|e| e.root() == root)
+    ensure();
+    noeta_native::registry::is_extension_root(root)
 }
 
-/// Find a registered module by its **fully qualified path** — `["std", "math"]`, or (nested,
-/// phase 0.3+) `["std", "http", "client"]`. The first segment selects the extension by [root]; the
-/// remainder, dot-joined, matches the module's registered name. Two extensions with distinct roots
-/// never collide (`std.http` ≠ `guzzle.http`).
-///
-/// [root]: noeta_native::Extension::root
+/// See [`noeta_native::registry::find_module_qualified`].
 pub fn find_module_qualified(path: &[String]) -> Option<&'static ExtModule> {
-    let (root, rest) = path.split_first()?;
-    if rest.is_empty() {
-        return None;
-    }
-    let module_name = rest.join(".");
-    extensions()
-        .iter()
-        .filter(|e| e.root() == root.as_str())
-        .flat_map(|e| e.modules())
-        .find(|m| m.name == module_name.as_str())
+    ensure();
+    noeta_native::registry::find_module_qualified(path)
 }
 
-/// Find a registered function's signature.
+/// See [`noeta_native::registry::find_function`].
 pub fn find_function(module: &str, func: &str) -> Option<&'static ExtFn> {
-    find_module(module)?
-        .functions
-        .iter()
-        .find(|f| f.name == func)
+    ensure();
+    noeta_native::registry::find_function(module, func)
 }
 
-/// Find a registered **higher-order** function's signature (higher-order-abi H0) — the ctx-table
-/// twin of [`find_function`]. The backends route a matched name through the `NativeCtx` seam.
+/// See [`noeta_native::registry::find_ctx_function`].
 pub fn find_ctx_function(module: &str, func: &str) -> Option<&'static ExtFn> {
-    find_module(module)?
-        .ctx_functions
-        .iter()
-        .find(|f| f.name == func)
+    ensure();
+    noeta_native::registry::find_ctx_function(module, func)
 }
 
-/// A function's signature from **either** table — what the checker and name resolution consult
-/// (they don't care how a call dispatches, only that the name exists and what it types as).
+/// See [`noeta_native::registry::find_function_sig`].
 pub fn find_function_sig(module: &str, func: &str) -> Option<&'static ExtFn> {
-    find_function(module, func).or_else(|| find_ctx_function(module, func))
+    ensure();
+    noeta_native::registry::find_function_sig(module, func)
 }
 
-/// Dispatch a registered higher-order function through the module's [`crate::CtxDispatch`]
-/// (higher-order-abi H0). Mirrors [`dispatch`] for the ctx table.
+/// See [`noeta_native::registry::dispatch_ctx`].
 pub fn dispatch_ctx(
     module: &str,
     func: &str,
     ctx: &mut dyn crate::NativeCtx,
     args: &[crate::Slot],
 ) -> Result<crate::CtxOut, crate::CtxError> {
-    match find_module(module).and_then(|m| m.ctx_dispatch) {
-        Some(d) => d(func, ctx, args),
-        None => Err(no_function_error(module, func).into()),
-    }
+    ensure();
+    noeta_native::registry::dispatch_ctx(module, func, ctx, args)
 }
 
-/// Every extension-contributed CLI subcommand (higher-order-abi H6), for the CLI's dynamic
-/// wiring and its unmatched-name dispatch.
+/// See [`noeta_native::registry::commands`].
 pub fn commands() -> impl Iterator<Item = &'static noeta_native::ExtCommand> {
-    extensions().iter().flat_map(|e| e.commands())
+    ensure();
+    noeta_native::registry::commands()
 }
 
-/// Find a registered extern type by name (extern-types X1).
+/// See [`noeta_native::registry::find_bundle`] (kernel-methods K0).
+pub fn find_bundle(module: &str, bundle: &str) -> Option<&'static ExtBundle> {
+    ensure();
+    noeta_native::registry::find_bundle(module, bundle)
+}
+
+/// See [`noeta_native::registry::dispatch_bundle_method`] (kernel-methods K0).
+pub fn dispatch_bundle_method(
+    module: &str,
+    bundle: &str,
+    method: &str,
+    ctx: &mut dyn crate::NativeCtx,
+    recv: crate::Slot,
+    args: &[crate::Slot],
+) -> Result<crate::CtxOut, crate::CtxError> {
+    ensure();
+    noeta_native::registry::dispatch_bundle_method(module, bundle, method, ctx, recv, args)
+}
+
+/// See [`noeta_native::registry::find_type`].
 pub fn find_type(name: &str) -> Option<&'static ExtType> {
-    extensions()
-        .iter()
-        .flat_map(|e| e.types())
-        .find(|t| t.name == name)
+    ensure();
+    noeta_native::registry::find_type(name)
 }
 
-/// Find a registered extern type's method signature.
+/// See [`noeta_native::registry::find_type_qualified`] (extern-type namespacing).
+pub fn find_type_qualified(qualified: &str) -> Option<&'static ExtType> {
+    ensure();
+    noeta_native::registry::find_type_qualified(qualified)
+}
+
+/// See [`noeta_native::registry::resolve_type`] (extern-type namespacing).
+pub fn resolve_type(name: &str) -> Option<&'static ExtType> {
+    ensure();
+    noeta_native::registry::resolve_type(name)
+}
+
+/// See [`noeta_native::registry::find_type_method`].
 pub fn find_type_method(type_name: &str, method: &str) -> Option<&'static ExtFn> {
-    find_type(type_name)?
-        .methods
-        .iter()
-        .find(|m| m.name == method)
+    ensure();
+    noeta_native::registry::find_type_method(type_name, method)
 }
 
-/// Find a registered extern type's **higher-order** method signature (higher-order-abi H4) —
-/// methods that dispatch through the ctx seam ([`ExtType::ctx_dispatch`]).
+/// See [`noeta_native::registry::find_type_ctx_method`].
 pub fn find_type_ctx_method(type_name: &str, method: &str) -> Option<&'static ExtFn> {
-    find_type(type_name)?
-        .ctx_methods
-        .iter()
-        .find(|m| m.name == method)
+    ensure();
+    noeta_native::registry::find_type_ctx_method(type_name, method)
 }
 
-/// A type method's signature from **either** table — what the checker consults (it doesn't care
-/// how a call dispatches). The type-method twin of [`find_function_sig`].
+/// See [`noeta_native::registry::find_type_method_sig`].
 pub fn find_type_method_sig(type_name: &str, method: &str) -> Option<&'static ExtFn> {
-    find_type_method(type_name, method).or_else(|| find_type_ctx_method(type_name, method))
+    ensure();
+    noeta_native::registry::find_type_method_sig(type_name, method)
 }
 
-/// Route a **higher-order** method call to its type's ctx dispatch (higher-order-abi H4) — the
-/// type-method twin of [`dispatch_ctx`].
+/// See [`noeta_native::registry::dispatch_ctx_method`].
 pub fn dispatch_ctx_method(
     type_name: &str,
     method: &str,
@@ -477,28 +545,19 @@ pub fn dispatch_ctx_method(
     recv: crate::Slot,
     args: &[crate::Slot],
 ) -> Result<crate::CtxOut, crate::CtxError> {
-    match find_type(type_name).and_then(|t| t.ctx_dispatch) {
-        Some(d) => d(method, ctx, recv, args),
-        None => Err(crate::no_method_error(type_name, method).into()),
-    }
+    ensure();
+    noeta_native::registry::dispatch_ctx_method(type_name, method, ctx, recv, args)
 }
 
-/// Dispatch a method on an extern receiver through its registered [`ExtType`]. Returns the
-/// canonical "no such method" error for an unknown method, mirroring [`dispatch`] for modules.
+/// See [`noeta_native::registry::dispatch_method`].
 pub fn dispatch_method(
     recv: &mut dyn crate::ExternValue,
     method: &str,
     host: &mut dyn Host,
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError> {
-    let type_name = recv.type_name();
-    let Some(ext) = find_type(type_name) else {
-        return Err(StdError {
-            kind: crate::ErrorKind::UnknownName,
-            message: format!("`{type_name}` is not a registered type"),
-        });
-    };
-    (ext.dispatch)(recv, method, host, args)
+    ensure();
+    noeta_native::registry::dispatch_method(recv, method, host, args)
 }
 
 // (The **virtual-module** mechanism — prelude-redesign P2's `VIRTUAL_MODULES` table, backend
@@ -507,35 +566,24 @@ pub fn dispatch_method(
 // last entry, at H5. Every std module is registry-backed now; the whole `Builtin` orchestration
 // family dispatches through the `NativeCtx` seam.)
 
-/// Whether `<module>.<func>` names a callable std-module function — the single predicate the
-/// checker and both backends share to decide what a selective member import (`use std.<mod>.<fn>`)
-/// binds, so all three agree by construction. Covers every registered function plus the handful
-/// of non-registry ones that still dispatch through a per-backend fallback (the `vec` bulk
-/// `*_all` kernels and `fs.list`, both pending `vec`/`fs` refinements — see `noeta-check::stdlib`).
+/// Whether `<module>.<func>` names a callable module function — the single predicate the checker
+/// and both backends share to decide what a selective member import (`use std.<mod>.<fn>`) binds,
+/// so all three agree by construction. Pure registry delegation since package-manager N3.4
+/// migrated the last per-backend fallbacks (the `vec` bulk `*_all` kernels became registered ctx
+/// functions; `fs.list` got its real trailing-optional signature).
 pub fn is_module_function(module: &str, func: &str) -> bool {
     find_function_sig(module, func).is_some()
-        || matches!(
-            (module_name(module), func),
-            (
-                "vec",
-                "add_all" | "sub_all" | "scale_all" | "dot_all" | "length_all"
-            ) | ("fs", "list")
-        )
 }
 
-/// Dispatch a registered module function. Returns the canonical "no such function" error if the
-/// module is unknown (the backends only ever dispatch a name they bound, so that is unreachable
-/// in practice).
+/// See [`noeta_native::registry::dispatch`].
 pub fn dispatch(
     module: &str,
     func: &str,
     host: &mut dyn Host,
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError> {
-    match find_module(module) {
-        Some(m) => (m.dispatch)(func, host, args),
-        None => Err(no_function_error(module, func)),
-    }
+    ensure();
+    noeta_native::registry::dispatch(module, func, host, args)
 }
 
 // --- argument helpers (shared by the module dispatch functions) ---------------------------------
@@ -2153,9 +2201,10 @@ const FS_FNS: &[ExtFn] = &[
         params: &[Str],
         ret: Concrete(SigType::Future(&SigType::Bool)),
     },
+    // Trailing-optional dir, like the sync `list` (package-manager N3.4).
     ExtFn {
         name: "list_async",
-        params: &[Str],
+        params: &[SigType::Optional(&Str)],
         ret: Concrete(SigType::Future(&SigType::List(&Str))),
     },
     ExtFn {
@@ -2183,11 +2232,11 @@ const FS_FNS: &[ExtFn] = &[
         params: &[Str],
         ret: Concrete(SigType::Unit),
     },
-    // `list` is variadic (0 or 1 args); its arity is enforced in dispatch, and the checker
-    // special-cases it (no fixed arity check), so the declared params here are not consulted.
+    // `list([dir])` — the directory argument is trailing-optional (the http-arc H4 machinery,
+    // which post-dates this function's old "checker special-cases the arity" note).
     ExtFn {
         name: "list",
-        params: &[Str],
+        params: &[SigType::Optional(&Str)],
         ret: Concrete(SigType::List(&Str)),
     },
     ExtFn {
@@ -2197,9 +2246,9 @@ const FS_FNS: &[ExtFn] = &[
     },
 ];
 
-// Only the *scalar* `vec`/`quat` ops are registered; the bulk `*_all` kernels stay per-backend.
-// Structural arguments are `Dyn` (the 3/4-`f32` shape is checked at dispatch); object results are
-// `SameAsArg` (same shape as the indicated argument).
+// The *scalar* `vec`/`quat` ops (the bulk `*_all` kernels are ctx functions — see
+// `crate::vec3::VEC_CTX_FNS`). Structural arguments are `Dyn` (the 3/4-`f32` shape is checked at
+// dispatch); object results are `SameAsArg` (same shape as the indicated argument).
 const VEC_FNS: &[ExtFn] = &[
     ExtFn {
         name: "add",
@@ -2388,9 +2437,7 @@ const CORE_MODULES: &[ExtModule] = &[
     ExtModule {
         name: "tracing",
         ctx_functions: crate::tracing::TRACING_CTX_FNS,
-        ctx_dispatch: Some(|func, ctx, args| {
-            crate::tracing::tracing_ctx_dispatch(func, ctx, args)
-        }),
+        ctx_dispatch: Some(|func, ctx, args| crate::tracing::tracing_ctx_dispatch(func, ctx, args)),
         ..ExtModule::DEFAULTS
     },
     // `log` (native OTEL Phase L) — the logs SDK facade. Emits OTel `LogRecord`s auto-correlated to
@@ -2511,6 +2558,7 @@ const HTTP_MODULES: &[ExtModule] = &[
         // The inbound serve loop rides tokio (already linked for `fs`) — no separable native dep, so
         // no ring. A `use std.http.server` program links no reqwest, precisely (P0.3b split).
         ring: None,
+        ..ExtModule::DEFAULTS
     },
 ];
 
@@ -2521,6 +2569,13 @@ const VEC_MODULES: &[ExtModule] = &[
         functions: VEC_FNS,
         dispatch: vec_dispatch,
         deep_marshal: false,
+        // The bulk `*_all` kernels (package-manager N3.4): they read/produce packed buffers
+        // through the raw-buffer ctx seam, so they live in the ctx table — the LAST per-backend
+        // intercepts, migrated.
+        ctx_functions: crate::vec3::VEC_CTX_FNS,
+        ctx_dispatch: Some(crate::vec3::vec_ctx_dispatch),
+        // The same kernels as opt-in METHODS (`impl vec.Kernels for T {}`, kernel-methods K1).
+        bundles: &[crate::vec3::VEC_KERNELS],
         ..ExtModule::DEFAULTS
     },
     ExtModule {
@@ -2536,6 +2591,8 @@ const VEC_MODULES: &[ExtModule] = &[
 /// `synced` CRDT-backed reactive signal (P2).
 const P2P_MODULES: &[ExtModule] = &[
     // `crdt` (p2p P0) — the CRDT constructors; a plain value-in/value-out module like `math`.
+    // **No ring**: the convergence logic is pure Rust (~KB, in `noeta-crdt`) with no native
+    // transport, so a program using only local CRDTs never pulls the p2panda tree.
     ExtModule {
         name: "crdt",
         functions: crate::crdt::CRDT_FNS,
@@ -2544,18 +2601,23 @@ const P2P_MODULES: &[ExtModule] = &[
     },
     // `p2p` (p2p P1) — publish/receive over the `P2p` host capability. `publish` is a plain host
     // effect; `receive` returns a `Future<?bytes>` via `NativeOut::Spawn`, like `fs.read_async`.
+    // Declares the `ring-p2p` ring: a program importing `std.p2p` links the real transport (and
+    // the footprint scan keeps p2panda in its AOT binary); one that doesn't sheds it.
     ExtModule {
         name: "p2p",
         functions: crate::p2p::P2P_FNS,
         dispatch: crate::p2p::p2p_dispatch,
+        ring: Some("ring-p2p"),
         ..ExtModule::DEFAULTS
     },
     // `synced` (p2p P2) — `synced_signal(initial, topic)`, a CRDT-backed signal in the reactive
-    // graph. A ctx module (it owns arena values + drives the graph), like `reactive`.
+    // graph. A ctx module (it owns arena values + drives the graph), like `reactive`. Needs the
+    // real transport to sync with peers, so it declares the `ring-p2p` ring too.
     ExtModule {
         name: "synced",
         ctx_functions: crate::synced::SYNCED_CTX_FNS,
         ctx_dispatch: Some(|func, ctx, args| crate::synced::synced_ctx_dispatch(func, ctx, args)),
+        ring: Some("ring-p2p"),
         ..ExtModule::DEFAULTS
     },
 ];
@@ -2873,6 +2935,49 @@ mod tests {
             dispatch("id", "parse", &mut h, &[NativeValue::Str("nope".into())]),
             Ok(NativeOut::None)
         );
+    }
+
+    #[test]
+    fn every_extern_type_carries_a_namespace_and_qualified_identity() {
+        // Each registered type has a `std.<unit>` namespace; its qualified identity is
+        // `namespace.name`, and `find_type_qualified` recovers it. This is the identity the checker
+        // and runtime will key on so a native `Counter` can coexist with a user's own.
+        let expected = [
+            ("Uuid", "std.id.Uuid"),
+            ("Hasher", "std.crypto.Hasher"),
+            ("Response", "std.http.Response"),
+            ("Request", "std.http.Request"),
+            ("FileHandle", "std.fs.FileHandle"),
+            ("Span", "std.tracing.Span"),
+            ("Counter", "std.metrics.Counter"),
+            ("Histogram", "std.metrics.Histogram"),
+            ("Gauge", "std.metrics.Gauge"),
+            ("Cell", "std.cell.Cell"),
+            ("Signal", "std.reactive.Signal"),
+            ("Computed", "std.reactive.Computed"),
+            ("Effect", "std.reactive.Effect"),
+            ("SyncedSignal", "std.synced.SyncedSignal"),
+            ("GCounter", "std.crdt.GCounter"),
+            ("PnCounter", "std.crdt.PnCounter"),
+            ("GSet", "std.crdt.GSet"),
+        ];
+        for (short, qualified) in expected {
+            let t = find_type(short).expect("registered type");
+            assert_eq!(t.qualified(), qualified, "qualified identity of `{short}`");
+            assert!(
+                std::ptr::eq(find_type_qualified(qualified).unwrap(), t),
+                "find_type_qualified round-trips `{qualified}`"
+            );
+        }
+        // No type was left on the bare `std` default.
+        for t in extensions().iter().flat_map(|e| e.types()) {
+            assert!(
+                t.namespace.contains('.'),
+                "`{}` must declare a `std.<unit>` namespace, got `{}`",
+                t.name,
+                t.namespace
+            );
+        }
     }
 
     #[test]

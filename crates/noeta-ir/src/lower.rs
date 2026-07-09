@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 use noeta_ast::{
     BinaryOp, Expr, ForPattern as AstForPattern, Param, Program as AstProgram, Stmt as AstStmt,
-    StrPart,
+    StrPart, TypeRef,
 };
 use noeta_span::Span;
 
@@ -102,6 +102,9 @@ pub struct LoweringSites<'a> {
     /// representation, so an adapted literal must lower to a narrow [`Const::F32`] rather than the
     /// default [`Const::Float`] — this set is that type-directed hint.
     pub f32_literal_sites: &'a HashSet<Span>,
+    /// Method-bundle call sites (kernel-methods K2) → the resolved `(module, bundle)` route,
+    /// baked into an [`Rvalue::BundleMethod`] instead of the generic [`Rvalue::Method`].
+    pub bundle_call_sites: &'a HashMap<Span, (String, String)>,
 }
 
 /// Lower a whole parsed program to the Core IR, or report the first construct outside the
@@ -119,6 +122,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
     let handles = HashMap::new();
     let bound = HashSet::new();
     let f32_lits = HashSet::new();
+    let bundles = HashMap::new();
     lower_with_sites(
         program,
         LoweringSites {
@@ -131,6 +135,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
             handle_sites: &handles,
             bound_handle_sites: &bound,
             f32_literal_sites: &f32_lits,
+            bundle_call_sites: &bundles,
         },
     )
 }
@@ -162,6 +167,7 @@ pub fn lower_with_sites_opts(
         sites,
         real_isolates,
         synth_step_name: None,
+        type_aliases: collect_type_aliases(program),
     };
     let top = lowerer.lower_body(&program.stmts)?;
     Ok(Program {
@@ -189,9 +195,94 @@ struct Lowerer<'a> {
     /// the first `Expr::Closure` the lowering meets (the step itself, which lowers before anything
     /// nested inside it). A user's own closure therefore always finds `None` and stays anonymous.
     synth_step_name: Option<String>,
+    /// The runtime **narrowing identity** each `use`-imported local type name resolves to, so a
+    /// target (`x is MyId`, `x.as<Uuid>()`) matches the value's runtime tag in both backends (they
+    /// share this lowered IR). Two kinds of entry:
+    ///
+    /// - a **native** type (`use std.id.Uuid [as MyId]`) → its **qualified** identity
+    ///   (`std.id.Uuid`), which is what an extern value reports for narrowing — so a native target
+    ///   never collides with a same-short-named *user* type (whose runtime tag is the bare name).
+    /// - a **user-type alias** (`use App.User as Customer`) → the imported type's own name (`User`),
+    ///   its runtime tag.
+    ///
+    /// A plain (non-aliased) *user* import needs no entry — its local name is already the tag.
+    type_aliases: HashMap<String, String>,
+}
+
+/// Build the narrowing-identity map (see [`Lowerer::type_aliases`]) from a program's `use`
+/// statements. A native-type import resolves to its qualified identity via the registry; a renamed
+/// user-type import resolves to its leaf name.
+fn collect_type_aliases(program: &AstProgram) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for stmt in &program.stmts {
+        let AstStmt::Use { path, names, .. } = stmt else {
+            continue;
+        };
+        let prefix = path.join(".");
+        for n in names {
+            let local = n.alias.clone().unwrap_or_else(|| n.name.clone());
+            let qualified = format!("{prefix}.{}", n.name);
+            if let Some(ext) = noeta_stdlib::registry::find_type_qualified(&qualified) {
+                // A native type: narrows against its qualified identity, whichever local name it
+                // was bound to.
+                map.insert(local, ext.qualified());
+            } else if n.alias.is_some() {
+                // A renamed user (or opaque) import: narrows against the imported leaf name.
+                map.insert(local, n.name.clone());
+            }
+        }
+    }
+    map
 }
 
 impl Lowerer<'_> {
+    /// Rewrite a narrowing target's [`TypeRef`] so any import **alias** resolves to the imported
+    /// type's own name (`MyId` → `Uuid`) — recursively, so `List<MyId>` / `?MyId` are covered too —
+    /// making `is`/`as`/`type_of` match a value's runtime tag. A no-op (plain clone) when the file
+    /// declared no aliases, which is the overwhelmingly common case.
+    fn resolve_type_aliases(&self, ty: &TypeRef) -> TypeRef {
+        if self.type_aliases.is_empty() {
+            return ty.clone();
+        }
+        match ty {
+            TypeRef::Named { name, args, span } => TypeRef::Named {
+                name: self
+                    .type_aliases
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone()),
+                args: args.iter().map(|a| self.resolve_type_aliases(a)).collect(),
+                span: *span,
+            },
+            TypeRef::Union { members, span } => TypeRef::Union {
+                members: members
+                    .iter()
+                    .map(|m| self.resolve_type_aliases(m))
+                    .collect(),
+                span: *span,
+            },
+            TypeRef::Tuple { elements, span } => TypeRef::Tuple {
+                elements: elements
+                    .iter()
+                    .map(|e| self.resolve_type_aliases(e))
+                    .collect(),
+                span: *span,
+            },
+            TypeRef::Fn { params, ret, span } => TypeRef::Fn {
+                params: params
+                    .iter()
+                    .map(|p| self.resolve_type_aliases(p))
+                    .collect(),
+                ret: Box::new(self.resolve_type_aliases(ret)),
+                span: *span,
+            },
+            TypeRef::Optional { inner, span } => TypeRef::Optional {
+                inner: Box::new(self.resolve_type_aliases(inner)),
+                span: *span,
+            },
+        }
+    }
+
     /// Allocate a fresh frame-local temporary.
     fn fresh(&mut self) -> Temp {
         let t = Temp(self.temps);
@@ -1009,6 +1100,22 @@ impl Lowerer<'_> {
                             *span,
                         ));
                     }
+                    // A method-bundle call (kernel-methods K2): the checker resolved this call
+                    // span to a bound bundle — bake the route in.
+                    if let Some((module, bundle)) = self.sites.bundle_call_sites.get(span) {
+                        return Ok(self.emit(
+                            out,
+                            Rvalue::BundleMethod {
+                                receiver,
+                                module: module.clone(),
+                                bundle: bundle.clone(),
+                                name: name.clone(),
+                                args: arg_atoms,
+                                span: *span,
+                            },
+                            *span,
+                        ));
+                    }
                     Ok(self.emit(
                         out,
                         Rvalue::Method {
@@ -1251,7 +1358,7 @@ impl Lowerer<'_> {
                     out,
                     Rvalue::As {
                         operand,
-                        ty: ty.clone(),
+                        ty: self.resolve_type_aliases(ty),
                         span: *span,
                     },
                     *span,
@@ -1263,7 +1370,7 @@ impl Lowerer<'_> {
                     out,
                     Rvalue::TypeTest {
                         operand,
-                        ty: ty.clone(),
+                        ty: self.resolve_type_aliases(ty),
                         span: *span,
                     },
                     *span,

@@ -787,6 +787,19 @@ pub enum Op {
         recipe: Option<Box<noeta_native::TypeRecipe>>,
         span: Span,
     },
+    /// A **method-bundle** method call (kernel-methods K2/K3): `recv.method(args)` statically
+    /// routed to a registered bundle (`impl <module>.<Bundle> for T {}` — the checker verified the
+    /// binding and baked the route). Dispatches through the bundle's shared ctx dispatch with the
+    /// receiver as slot 0; no runtime discovery, so an empty list receiver works.
+    BundleMethod {
+        dst: Reg,
+        recv: Reg,
+        module: NameId,
+        bundle: NameId,
+        method: NameId,
+        args: Box<[Reg]>,
+        span: Span,
+    },
     /// A `match` literal test: if `src` equals the literal, continue; else jump to `fail` (the
     /// next arm). Three variants for the three literal pattern kinds.
     MatchInt {
@@ -1653,6 +1666,24 @@ fn op_repr(
                 n(module),
                 n(func),
                 args.join(", ")
+            )
+        }
+        Op::BundleMethod {
+            dst,
+            recv,
+            module,
+            bundle,
+            method,
+            args,
+            ..
+        } => {
+            let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
+            format!(
+                "BundleMethod r{dst} <- r{recv}.{}({}) via {}::{}",
+                n(method),
+                args.join(", "),
+                n(module),
+                n(bundle)
             )
         }
         Op::IsType { dst, src, target } => {

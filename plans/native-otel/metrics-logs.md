@@ -216,6 +216,15 @@ new deps — reuses `reqwest` + `serde_json` already compiled; all under the exi
 
 **Both new signals COMPLETE. Next: Phase D (docs + close-out).**
 
+- **MERGE ✅** merged updated `main` (69 commits: PM Phase 3, kernel-methods × OTEL, p2p P3, and the
+  **extern-type-namespacing** refactor). Adopted main's `Extension`/`std_unit!` registration model and
+  namespaced `ExtType` (identity `namespace.name`, no global reservation). **Payoff of namespacing:
+  the single `Instrument` was replaced with idiomatic namespaced `Counter`/`Histogram`/`Gauge` under
+  `std.metrics`** (`use std.metrics.{Counter, …}`; they coexist with a user's own `Counter`). Re-added
+  `ExtType.deep_marshal` (survived auto-merge) for the `*_with` map args; L1.5 map-absorption survived
+  main's checker refactor. Removed the now-invalid reserved-name diagnostic (extern types aren't
+  globally reserved). Full gate re-green post-merge.
+
 ## Slices (commit per green slice; full gate = workspace suites + differential + leak + conformance + fmt + clippy)
 
 **Phase 0 — shared scaffolding**

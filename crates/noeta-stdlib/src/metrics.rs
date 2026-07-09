@@ -9,74 +9,69 @@
 //! - Constructors reach host state (get-or-create), so they are **ctx functions** (like the tracing
 //!   surface); the instrument methods only touch the host, so they are **plain dispatch** (like the
 //!   `Span` mutators).
-//! - `.add(n)` / `.add_with(n, attrs)` and `.record(v)` / `.record_with(v, attrs)`. The `*_with`
-//!   split carries a `Map<string, string|int|float|bool>` of attributes, mirroring `std.log` (and
-//!   sidestepping optional-argument methods).
+//! - `Counter.add(n)` / `.add_with(n, attrs)`; `Histogram`/`Gauge` `.record(v)` / `.record_with(v,
+//!   attrs)`. The `*_with` split carries a `Map<string, string|int|float|bool>` of attributes,
+//!   mirroring `std.log` (and sidestepping optional-argument methods).
 //!
-//! **One `Instrument` type, not three.** The four constructors all return a single [`Instrument`]
-//! handle rather than distinct `Counter`/`Histogram`/`Gauge` types. Distinct types would have to
-//! reserve those names (extern-type dispatch is by name → E0049), and `Counter`/`Gauge`/`Histogram`
-//! are far too common as user type names to reserve (they collide across the corpus and real code);
-//! `Instrument` is safe to reserve. The behavior is the instrument's **kind** (set at construction),
-//! not the method name: `.add`/`.record` are interchangeable aliases that both `observe`, dispatched
-//! host-side on the kind (a `counter` sums, a `gauge` takes the last value, …). Users write the
-//! idiomatic verb (`counter.add`, `histogram.record`); the type system does not distinguish them.
+//! **Three distinct types** — `Counter` (also the up/down counter), `Histogram`, `Gauge` — each a
+//! namespaced extern type under `std.metrics`, so `.add` sits only on counters and `.record` only on
+//! histograms/gauges (compile-time method-typing). Namespacing (extern types are `use`-imported, not
+//! globally reserved) is what makes the idiomatic OTel names viable: a native `std.metrics.Counter`
+//! coexists with a user's own `Counter`. Users bring them in with `use std.metrics.{Counter, …}`.
 
 use std::any::Any;
 use std::cmp::Ordering;
 
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    arity_error, ctx_arity, no_function_error, no_method_error, type_error, AttrValue, CtxError,
-    CtxOut, CtxResult, ExternBox, ExternValue, Host, InstrumentId, InstrumentKind, MetricValue,
-    NativeCtx, NativeValue, Scalar, Slot, StdError,
+    AttrValue, CtxError, CtxOut, CtxResult, ExternBox, ExternValue, Host, InstrumentId,
+    InstrumentKind, MetricValue, NativeCtx, NativeValue, Scalar, Slot, StdError, arity_error,
+    ctx_arity, no_function_error, no_method_error, type_error,
 };
 
-/// The reserved surface type name for the single instrument handle (declaring your own is E0049).
-pub const INSTRUMENT_TYPE_NAME: &str = "Instrument";
+/// The surface type names for the three instrument handles. Namespaced under `std.metrics` (see the
+/// registry), so they are `use`-imported, not globally reserved.
+pub const COUNTER_TYPE_NAME: &str = "Counter";
+pub const HISTOGRAM_TYPE_NAME: &str = "Histogram";
+pub const GAUGE_TYPE_NAME: &str = "Gauge";
 
 /// A measurement value — `int` or `float` (a non-numeric is a compile-time type error).
 const NUM_VALUE: SigType = SigType::Union(&[SigType::Int, SigType::Float]);
 
 /// The scalar attribute value union (shared with `std.log`/`std.tracing`).
-const ATTR_VALUE: SigType = SigType::Union(&[
-    SigType::String,
-    SigType::Int,
-    SigType::Float,
-    SigType::Bool,
-]);
+const ATTR_VALUE: SigType =
+    SigType::Union(&[SigType::String, SigType::Int, SigType::Float, SigType::Bool]);
 
 /// The structured-attributes parameter — `Map<string, string|int|float|bool>` (the `*_with` forms).
 const ATTR_MAP: SigType = SigType::Map(&SigType::String, &ATTR_VALUE);
 
 /// `std.metrics`'s instrument constructors — all ctx functions (get-or-create touches host state),
-/// each returning the single `Instrument` handle (its kind is fixed at construction).
+/// each returning its instrument's handle type.
 pub const METRICS_CTX_FNS: &[ExtFn] = &[
     ExtFn {
         name: "counter",
         params: &[SigType::String],
-        ret: RetTy::Concrete(SigType::Named(INSTRUMENT_TYPE_NAME)),
+        ret: RetTy::Concrete(SigType::Named(COUNTER_TYPE_NAME)),
     },
     ExtFn {
         name: "up_down_counter",
         params: &[SigType::String],
-        ret: RetTy::Concrete(SigType::Named(INSTRUMENT_TYPE_NAME)),
+        ret: RetTy::Concrete(SigType::Named(COUNTER_TYPE_NAME)),
     },
     ExtFn {
         name: "histogram",
         params: &[SigType::String],
-        ret: RetTy::Concrete(SigType::Named(INSTRUMENT_TYPE_NAME)),
+        ret: RetTy::Concrete(SigType::Named(HISTOGRAM_TYPE_NAME)),
     },
     ExtFn {
         name: "gauge",
         params: &[SigType::String],
-        ret: RetTy::Concrete(SigType::Named(INSTRUMENT_TYPE_NAME)),
+        ret: RetTy::Concrete(SigType::Named(GAUGE_TYPE_NAME)),
     },
 ];
 
-/// `Instrument` methods — `add`/`record` (interchangeable, kind-dispatched host-side) and their
-/// `*_with` attributed forms. `add` reads best for counters, `record` for histograms/gauges.
-pub const INSTRUMENT_METHODS: &[ExtFn] = &[
+/// `Counter` methods (Counter + UpDownCounter): `add`, and `add_with` for attributed measurements.
+pub const COUNTER_METHODS: &[ExtFn] = &[
     ExtFn {
         name: "add",
         params: &[NUM_VALUE],
@@ -87,6 +82,10 @@ pub const INSTRUMENT_METHODS: &[ExtFn] = &[
         params: &[NUM_VALUE, ATTR_MAP],
         ret: RetTy::Concrete(SigType::Unit),
     },
+];
+
+/// `Histogram`/`Gauge` methods: `record`, and `record_with` for attributed measurements.
+pub const RECORD_METHODS: &[ExtFn] = &[
     ExtFn {
         name: "record",
         params: &[NUM_VALUE],
@@ -99,40 +98,47 @@ pub const INSTRUMENT_METHODS: &[ExtFn] = &[
     },
 ];
 
-/// An instrument handle: the host's opaque [`InstrumentId`] (plain `Copy` data). Methods reach the
-/// host by id; the aggregation state (and the instrument's kind) live host-side, so a handle passed
-/// around refers to one host-side instrument. Not key-capable.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Instrument {
-    pub id: InstrumentId,
+/// Declare an instrument handle extern type — the host's opaque [`InstrumentId`] (plain `Copy` data).
+/// Methods reach the host by id; the aggregation state (and the kind) live host-side. Not key-capable.
+macro_rules! instrument_handle {
+    ($ty:ident, $name:expr) => {
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        pub struct $ty {
+            pub id: InstrumentId,
+        }
+
+        impl ExternValue for $ty {
+            fn type_name(&self) -> &'static str {
+                $name
+            }
+            fn eq_value(&self, other: &dyn ExternValue) -> bool {
+                other.as_any().downcast_ref::<$ty>() == Some(self)
+            }
+            fn cmp_value(&self, _other: &dyn ExternValue) -> Option<Ordering> {
+                None
+            }
+            fn hash_value(&self) -> u64 {
+                0 // not key-capable; never consulted
+            }
+            fn display(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
+                write!(out, "<{} {}>", $name, self.id)
+            }
+            fn clone_box(&self) -> Box<dyn ExternValue> {
+                Box::new(*self)
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+            fn as_any_mut(&mut self) -> &mut dyn Any {
+                self
+            }
+        }
+    };
 }
 
-impl ExternValue for Instrument {
-    fn type_name(&self) -> &'static str {
-        INSTRUMENT_TYPE_NAME
-    }
-    fn eq_value(&self, other: &dyn ExternValue) -> bool {
-        other.as_any().downcast_ref::<Instrument>() == Some(self)
-    }
-    fn cmp_value(&self, _other: &dyn ExternValue) -> Option<Ordering> {
-        None
-    }
-    fn hash_value(&self) -> u64 {
-        0 // not key-capable; never consulted
-    }
-    fn display(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
-        write!(out, "<{INSTRUMENT_TYPE_NAME} {}>", self.id)
-    }
-    fn clone_box(&self) -> Box<dyn ExternValue> {
-        Box::new(*self)
-    }
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
+instrument_handle!(Counter, COUNTER_TYPE_NAME);
+instrument_handle!(Histogram, HISTOGRAM_TYPE_NAME);
+instrument_handle!(Gauge, GAUGE_TYPE_NAME);
 
 /// `std.metrics` ctx dispatch — the instrument constructors (get-or-create). Generic over the ctx so
 /// a compiled-in backend inlines the small ctx ops.
@@ -152,26 +158,95 @@ pub fn metrics_ctx_dispatch<C: NativeCtx + ?Sized>(
     let name = slot_str(ctx, args[0])?;
     // Unit is unset in this surface (`counter(name)`); a `counter(name, unit)` overload is future.
     let id = ctx.host().metric_get_or_create(&name, "", kind);
-    Ok(CtxOut::Out(NativeOut::Extern(ExternBox::new(Instrument { id }))))
+    let out = match kind {
+        InstrumentKind::Counter | InstrumentKind::UpDownCounter => {
+            NativeOut::Extern(ExternBox::new(Counter { id }))
+        }
+        InstrumentKind::Histogram => NativeOut::Extern(ExternBox::new(Histogram { id })),
+        InstrumentKind::Gauge => NativeOut::Extern(ExternBox::new(Gauge { id })),
+    };
+    Ok(CtxOut::Out(out))
 }
 
-/// `Instrument` method dispatch — `add`/`record` (+ `*_with`), all marshalling one measurement to
-/// the host, which aggregates by the instrument's kind. Plain dispatch (the host owns aggregation).
-pub fn instrument_method_dispatch(
+/// `Counter` method dispatch — `add` / `add_with` (plain: the host owns aggregation).
+pub fn counter_method_dispatch(
     recv: &mut dyn ExternValue,
     method: &str,
     host: &mut dyn Host,
     args: &[NativeValue],
 ) -> Result<NativeOut, StdError> {
-    let id = recv
-        .as_any()
-        .downcast_ref::<Instrument>()
-        .expect("instrument method dispatch on a non-Instrument extern")
-        .id;
+    let id = downcast::<Counter>(recv);
     match method {
-        "add" | "record" => observe(host, id, method, args, false),
-        "add_with" | "record_with" => observe(host, id, method, args, true),
-        _ => Err(no_method_error(INSTRUMENT_TYPE_NAME, method)),
+        "add" => observe(host, id, method, args, false),
+        "add_with" => observe(host, id, method, args, true),
+        _ => Err(no_method_error(COUNTER_TYPE_NAME, method)),
+    }
+}
+
+/// `Histogram` method dispatch — `record` / `record_with`.
+pub fn histogram_method_dispatch(
+    recv: &mut dyn ExternValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    record_dispatch(
+        downcast::<Histogram>(recv),
+        HISTOGRAM_TYPE_NAME,
+        method,
+        host,
+        args,
+    )
+}
+
+/// `Gauge` method dispatch — `record` / `record_with`.
+pub fn gauge_method_dispatch(
+    recv: &mut dyn ExternValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    record_dispatch(downcast::<Gauge>(recv), GAUGE_TYPE_NAME, method, host, args)
+}
+
+fn record_dispatch(
+    id: InstrumentId,
+    type_name: &'static str,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match method {
+        "record" => observe(host, id, method, args, false),
+        "record_with" => observe(host, id, method, args, true),
+        _ => Err(no_method_error(type_name, method)),
+    }
+}
+
+/// The [`InstrumentId`] inside any instrument handle (they share the `.id` field).
+fn downcast<T: ExternValue + HasInstrumentId + 'static>(recv: &dyn ExternValue) -> InstrumentId {
+    recv.as_any()
+        .downcast_ref::<T>()
+        .expect("instrument method dispatch on the wrong extern")
+        .instrument_id()
+}
+
+trait HasInstrumentId {
+    fn instrument_id(&self) -> InstrumentId;
+}
+impl HasInstrumentId for Counter {
+    fn instrument_id(&self) -> InstrumentId {
+        self.id
+    }
+}
+impl HasInstrumentId for Histogram {
+    fn instrument_id(&self) -> InstrumentId {
+        self.id
+    }
+}
+impl HasInstrumentId for Gauge {
+    fn instrument_id(&self) -> InstrumentId {
+        self.id
     }
 }
 

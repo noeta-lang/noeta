@@ -1,0 +1,2 @@
+namespace App.Audio;
+pub fn scale(n: int): int { return n + 100; }

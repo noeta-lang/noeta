@@ -1,0 +1,15 @@
+// Kernel-methods K1: a method-bundle binding — `impl vec.Kernels for V3 {}` — validates cleanly
+// when the target is a locally-declared `@packed` struct satisfying the bundle's constraint
+// (three `f32` fields, any layout). The binding itself is inert here (method calls arrive in K3);
+// this pins the impl-site acceptance on both layouts.
+// expect: stdout "bound"
+// expect: exit 0
+use std.{vec}
+
+@packed struct V3 { x: f32; y: f32; z: f32 }
+@packed(layout: column) struct C3 { x: f32; y: f32; z: f32 }
+
+impl vec.Kernels for V3 {}
+impl vec.Kernels for C3 {}
+
+echo "bound"

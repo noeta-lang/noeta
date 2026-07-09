@@ -87,6 +87,7 @@ impl Backend for TreeWalkBackend {
                 handle_sites: &checked.sites.handle_sites,
                 bound_handle_sites: &checked.sites.bound_handle_sites,
                 f32_literal_sites: &checked.sites.f32_literal_sites,
+                bundle_call_sites: &checked.sites.bundle_call_sites,
             },
         )
         .expect("Core-IR lowering is total over the parsed language");
@@ -452,7 +453,13 @@ impl EnumValue {
         let head = if self.is_builtin_result_or_option() {
             self.variant.clone()
         } else {
-            format!("{}.{}", self.enum_name, self.variant)
+            // Display strips a qualified identity to its short name; the identity keyed on for
+            // dispatch/`is`/`as` stays qualified.
+            format!(
+                "{}.{}",
+                noeta_ast::short_type_name(&self.enum_name),
+                self.variant
+            )
         };
         if self.data.is_empty() {
             head
@@ -651,7 +658,13 @@ impl ObjectValue {
             .zip(slots.iter())
             .map(|(f, value)| format!("{}: {}", f.name, value.repr()))
             .collect();
-        format!("{} {{{}}}", self.def.name, parts.join(", "))
+        // Display strips a qualified identity to its short name; the identity keyed on for
+        // dispatch/`is`/`as` stays qualified.
+        format!(
+            "{} {{{}}}",
+            noeta_ast::short_type_name(&self.def.name),
+            parts.join(", ")
+        )
     }
 }
 
@@ -2664,215 +2677,13 @@ impl Interpreter {
         // `NativeCtx` seam: opaque slots + backend re-entry instead of marshalled values. Checked
         // after the plain table — plain functions vastly outnumber ctx ones, and the two name
         // sets are disjoint, so order is behavior-neutral and keeps the common path lean.
+        // (The last per-backend intercept — `vec`'s bulk `*_all` kernels — died with the N3.4
+        // raw-buffer seam: they are ordinary ctx functions now, reached right here.)
         if noeta_stdlib::registry::find_ctx_function(module, func).is_some() {
             return self.call_ctx_function(module, func, args, span);
         }
-        // `vec`'s bulk `*_all` kernels are the only unmigrated native functions and stay per-backend;
-        // every other reachable name is registered, so anything else here is an unknown function.
-        // `module` is the root-qualified identity, so match on its bare name (`std.vec` → `vec`).
-        if noeta_stdlib::registry::module_name(module) == "vec" {
-            return self.call_vec(func, args, span);
-        }
         let error = noeta_stdlib::no_function_error(name, func);
         Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-    }
-
-    /// The `vec` 3D-math module (P-PACK Phase 4.1): scalar Vec3 ops over structural 3-`f32` objects.
-    /// The arithmetic lives in `noeta_stdlib::vec3`, so both backends compute identically; this is glue
-    /// — read the components, dispatch, rebuild a same-shape result (mirrors the VM's `call_vec`).
-    /// The `vec` module's **bulk** kernels over `List<Vec3<f32>>` (P-PACK 4.2). The scalar ops
-    /// (`add`/`dot`/…) migrated to the shared native-extension dispatch; these stay per-backend
-    /// (a packed-layout specialization, not a value-seam concern). Packed inputs take the flat
-    /// autovectorized buffer path; a boxed/demoted operand falls back to a scalar loop.
-    fn call_vec(&mut self, func: &str, args: &[Value], span: Span) -> Eval<Value> {
-        use noeta_stdlib::vec3;
-        match func {
-            "add_all" | "sub_all" => {
-                self.expect_std_arity(func, args, 2, span)?;
-                // `add`/`sub` are element-wise over the flat `f32` array, so they are layout-agnostic:
-                // the same `*_buffers` kernel on two column buffers yields the correct column result
-                // (P-SIMD C3). Handle either layout uniformly — both operands must share it.
-                if let (Some((schema, a)), Some((_, b))) =
-                    (args[0].packed_vec3_any(), args[1].packed_vec3_any())
-                {
-                    if a.len() != b.len() {
-                        return Err(self.vec_len_error(func, span));
-                    }
-                    let out = if func == "add_all" {
-                        vec3::add_buffers(&a, &b)
-                    } else {
-                        vec3::sub_buffers(&a, &b)
-                    };
-                    return Ok(Value::packed_list_from(schema, out));
-                }
-                self.vec_bulk_binary_scalar(func, &args[0], &args[1], span)
-            }
-            "scale_all" => {
-                self.expect_std_arity(func, args, 2, span)?;
-                let s = self.read_scalar_f32(func, &args[1], span)?;
-                // Layout-agnostic like `add`/`sub` — `scale_buffer` on column bytes is a column result.
-                if let Some((schema, a)) = args[0].packed_vec3_any() {
-                    return Ok(Value::packed_list_from(schema, vec3::scale_buffer(&a, s)));
-                }
-                self.vec_map_scalar(func, &args[0], span, |c| vec3::scale(c, s))
-            }
-            "dot_all" => {
-                self.expect_std_arity(func, args, 2, span)?;
-                // Column fast path (P-SIMD C3): read the three contiguous columns directly (no decode)
-                // — `col_dot` autovectorizes and is bit-identical to the AoS reduction.
-                if let (Some((_, a)), Some((_, b))) =
-                    (args[0].packed_vec3_columns(), args[1].packed_vec3_columns())
-                {
-                    if a.len() != b.len() {
-                        return Err(self.vec_len_error(func, span));
-                    }
-                    return Ok(f32_list(&vec3::col_dot(&a, &b)));
-                }
-                if let (Some((_, a)), Some((_, b))) =
-                    (args[0].packed_vec3_data(), args[1].packed_vec3_data())
-                {
-                    if a.len() != b.len() {
-                        return Err(self.vec_len_error(func, span));
-                    }
-                    return Ok(f32_list(&vec3::dot_buffers(&a, &b)));
-                }
-                self.vec_bulk_dot_scalar(func, &args[0], &args[1], span)
-            }
-            "length_all" => {
-                self.expect_std_arity(func, args, 1, span)?;
-                if let Some((_, a)) = args[0].packed_vec3_columns() {
-                    return Ok(f32_list(&vec3::col_length(&a)));
-                }
-                if let Some((_, a)) = args[0].packed_vec3_data() {
-                    return Ok(f32_list(&vec3::length_buffer(&a)));
-                }
-                let elems = self.expect_list(&args[0], func, span)?;
-                let mut scalars = Vec::with_capacity(elems.len());
-                for e in elems.iter() {
-                    scalars.push(vec3::length(self.read_vec3(func, e, span)?));
-                }
-                Ok(f32_list(&scalars))
-            }
-            _ => {
-                let error = noeta_stdlib::no_function_error("vec", func);
-                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-            }
-        }
-    }
-
-    fn vec_len_error(&mut self, func: &str, span: Span) -> Unwind {
-        self.runtime_error(
-            DiagnosticCode::TypeMismatch,
-            span,
-            format!("`vec.{func}` expects two lists of equal length"),
-        )
-    }
-
-    /// Scalar fallback for `add_all`/`sub_all` on boxed/demoted operands.
-    fn vec_bulk_binary_scalar(
-        &mut self,
-        func: &str,
-        xs: &Value,
-        ys: &Value,
-        span: Span,
-    ) -> Eval<Value> {
-        use noeta_stdlib::vec3;
-        let xe = self.expect_list(xs, func, span)?;
-        let ye = self.expect_list(ys, func, span)?;
-        if xe.len() != ye.len() {
-            return Err(self.vec_len_error(func, span));
-        }
-        let mut out = Vec::with_capacity(xe.len());
-        for (x, y) in xe.iter().zip(ye.iter()) {
-            let a = self.read_vec3(func, x, span)?;
-            let b = self.read_vec3(func, y, span)?;
-            let c = if func == "add_all" {
-                vec3::add(a, b)
-            } else {
-                vec3::sub(a, b)
-            };
-            out.push(build_vec3(x, c));
-        }
-        Ok(Value::list(out))
-    }
-
-    /// Scalar fallback for `dot_all`.
-    fn vec_bulk_dot_scalar(
-        &mut self,
-        func: &str,
-        xs: &Value,
-        ys: &Value,
-        span: Span,
-    ) -> Eval<Value> {
-        use noeta_stdlib::vec3;
-        let xe = self.expect_list(xs, func, span)?;
-        let ye = self.expect_list(ys, func, span)?;
-        if xe.len() != ye.len() {
-            return Err(self.vec_len_error(func, span));
-        }
-        let mut scalars = Vec::with_capacity(xe.len());
-        for (x, y) in xe.iter().zip(ye.iter()) {
-            let a = self.read_vec3(func, x, span)?;
-            let b = self.read_vec3(func, y, span)?;
-            scalars.push(vec3::dot(a, b));
-        }
-        Ok(f32_list(&scalars))
-    }
-
-    /// Map a component-wise unary op over a `List<Vec3>` — the `scale_all` scalar fallback.
-    fn vec_map_scalar(
-        &mut self,
-        func: &str,
-        list: &Value,
-        span: Span,
-        op: impl Fn([f32; 3]) -> [f32; 3],
-    ) -> Eval<Value> {
-        let elems = self.expect_list(list, func, span)?;
-        let mut out = Vec::with_capacity(elems.len());
-        for e in elems.iter() {
-            let c = self.read_vec3(func, e, span)?;
-            out.push(build_vec3(e, op(c)));
-        }
-        Ok(Value::list(out))
-    }
-
-    /// Read a Vec3 argument — a struct value with exactly three `f32` fields — into `[f32; 3]`
-    /// (slot order), or a type error.
-    fn read_vec3(&mut self, func: &str, value: &Value, span: Span) -> Eval<[f32; 3]> {
-        if let Value::Object(obj) = value {
-            let slots = obj.slots.borrow();
-            if slots.len() == 3
-                && let (Value::F32(x), Value::F32(y), Value::F32(z)) =
-                    (&slots[0], &slots[1], &slots[2])
-            {
-                return Ok([*x, *y, *z]);
-            }
-        }
-        Err(self.runtime_error(
-            DiagnosticCode::TypeMismatch,
-            span,
-            format!(
-                "`vec.{func}` expects a Vec3 (a struct of three f32 fields), found {}",
-                value.type_name()
-            ),
-        ))
-    }
-
-    /// Read a numeric scalar (`f32`/`float`/`int`) as an `f32` — the `vec.scale` factor.
-    fn read_scalar_f32(&mut self, func: &str, value: &Value, span: Span) -> Eval<f32> {
-        match value {
-            Value::F32(f) => Ok(*f),
-            Value::Float(f) => Ok(*f as f32),
-            Value::Int(i) => Ok(*i as f32),
-            _ => Err(self.runtime_error(
-                DiagnosticCode::TypeMismatch,
-                span,
-                format!(
-                    "`vec.{func}` expects a number factor, found {}",
-                    value.type_name()
-                ),
-            )),
-        }
     }
 
     /// Dispatch a method on an extern-type receiver (extern-types X1) through its registered
@@ -3786,8 +3597,7 @@ impl Interpreter {
                     let ctx = std::mem::take(&mut self.scopes[si][ti].context);
                     let saved = std::mem::replace(&mut self.ctx_current, ctx);
                     let polled = self.poll_once(&future, span);
-                    self.scopes[si][ti].context =
-                        std::mem::replace(&mut self.ctx_current, saved);
+                    self.scopes[si][ti].context = std::mem::replace(&mut self.ctx_current, saved);
                     self.scopes[si][ti].polling = false;
                     if let Some(value) = polled? {
                         self.scopes[si][ti].result = Some(value);
@@ -4141,11 +3951,6 @@ fn cow_concat(left: Value, right: Value) -> Value {
     }
 }
 
-/// A boxed `List<f32>` from scalar results (the output of `dot_all`/`length_all`).
-fn f32_list(scalars: &[f32]) -> Value {
-    Value::list(scalars.iter().map(|&f| Value::F32(f)).collect())
-}
-
 /// Read a numeric receiver (`int`/erased `IntN`, `float`, or `f32`) as the shared
 /// [`noeta_stdlib::NumScalar`] for the conversion tower (S0); `None` for any non-numeric value.
 fn numeric_scalar(value: &Value) -> Option<noeta_stdlib::NumScalar> {
@@ -4155,18 +3960,6 @@ fn numeric_scalar(value: &Value) -> Option<noeta_stdlib::NumScalar> {
         Value::F32(f) => Some(noeta_stdlib::NumScalar::F32(*f)),
         _ => None,
     }
-}
-
-/// Build a Vec3 result with the same type (shape/`def`) as `like`, from three `f32` components
-/// (P-PACK Phase 4). The caller (`call_vec`) has verified `like` is a 3-`f32` object.
-fn build_vec3(like: &Value, c: [f32; 3]) -> Value {
-    let Value::Object(obj) = like else {
-        unreachable!("read_vec3 verified an object")
-    };
-    Value::Object(Rc::new(ObjectValue::new(
-        Rc::clone(&obj.def),
-        vec![Value::F32(c[0]), Value::F32(c[1]), Value::F32(c[2])],
-    )))
 }
 
 /// Construct a built-in `Result`/`Option`/`Ordering` value (`Ok`/`Err`/`some`/`none`, or
@@ -4631,7 +4424,15 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
                 other => match value {
                     Value::Object(object) => object.def.name() == other,
                     Value::Enum(enum_value) => enum_value.enum_name == other,
-                    Value::Extern(e) => e.borrow().type_name() == other,
+                    // An extern value matches by its qualified identity (`std.id.Uuid`) — the target
+                    // an imported native type lowers to — so it never matches a same-short-named
+                    // user type (mirrors the VM's `narrow_matches`).
+                    Value::Extern(e) => {
+                        noeta_stdlib::registry::find_type(e.borrow().type_name())
+                            .map(|t| t.qualified())
+                            .as_deref()
+                            == Some(other)
+                    }
                     _ => false,
                 },
             };
@@ -4704,7 +4505,7 @@ fn marshal_native_arg(value: &Value) -> noeta_stdlib::NativeValue {
 }
 
 /// Project a primitive tree-walker value onto a [`noeta_stdlib::Scalar`], or `None` if not primitive.
-fn value_to_scalar(value: &Value) -> Option<noeta_stdlib::Scalar> {
+pub(crate) fn value_to_scalar(value: &Value) -> Option<noeta_stdlib::Scalar> {
     use noeta_stdlib::Scalar;
     Some(match value {
         Value::Int(n) => Scalar::Int(*n),
@@ -4715,7 +4516,7 @@ fn value_to_scalar(value: &Value) -> Option<noeta_stdlib::Scalar> {
     })
 }
 
-fn scalar_to_value(scalar: noeta_stdlib::Scalar) -> Value {
+pub(crate) fn scalar_to_value(scalar: noeta_stdlib::Scalar) -> Value {
     use noeta_stdlib::Scalar;
     match scalar {
         Scalar::Int(n) => Value::Int(n),
@@ -4764,6 +4565,16 @@ fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
         NativeOut::Bytes(b) => Value::Bytes(Rc::new(b)),
         NativeOut::Unit => Value::Unit,
         NativeOut::List(items) => Value::list(items.into_iter().map(materialize_native).collect()),
+        // A typed bulk-primitive vector (N3.4: a packed reduction's result) converts in one pass.
+        NativeOut::Scalars(v) => {
+            use noeta_stdlib::ScalarVec;
+            Value::list(match v {
+                ScalarVec::Int(xs) => xs.into_iter().map(Value::Int).collect(),
+                ScalarVec::Float(xs) => xs.into_iter().map(Value::Float).collect(),
+                ScalarVec::F32(xs) => xs.into_iter().map(Value::F32).collect(),
+                ScalarVec::Bool(xs) => xs.into_iter().map(Value::Bool).collect(),
+            })
+        }
         // A dynamic `json.parse` object → a string-keyed map (entries arrive in key order).
         NativeOut::Map(entries) => Value::map_value(Rc::new(
             entries
