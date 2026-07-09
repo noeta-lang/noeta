@@ -43,6 +43,22 @@ pub struct Manifest {
     package: Option<PackageMeta>,
     dependencies: BTreeMap<String, Dependency>,
     profiles: BTreeMap<String, Profile>,
+    trust: Trust,
+}
+
+/// The `[trust]` table (package-manager Phase 4) — the **complete, auditable set of every elevated
+/// authority** a consumer grants its dependencies. Empty by default: pulling a dependency gives it
+/// sandboxed library code and nothing more. Authority is granted here, at the **root**, keyed by
+/// **package identity** (`company/package`) — never inherited from a dependency, so a transitive
+/// package can't authorize itself (the anti-supply-chain invariant).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Trust {
+    /// Packages permitted to compile + run their native Rust crate (which also runs its `cargo`
+    /// build — `build.rs`/proc-macros). Any native-declaring package not listed here is refused.
+    pub native: std::collections::BTreeSet<String>,
+    /// Packages permitted to contribute `noeta <subcommand>` CLI commands. A command from an
+    /// unlisted package is silently omitted (a capability the user never asked for).
+    pub commands: std::collections::BTreeSet<String>,
 }
 
 /// The `[package]` table — a package's global identity and version (package-manager P2.0). Absent for
@@ -291,6 +307,7 @@ impl Manifest {
         let table: toml::Table = text.parse().map_err(|err| format!("{err}"))?;
         let package = parse_package(&table)?;
         let dependencies = parse_dependencies(&table)?;
+        let trust = parse_trust(&table)?;
         let mut profiles = BTreeMap::new();
 
         let Some(profiles_value) = table.get("profiles") else {
@@ -298,6 +315,7 @@ impl Manifest {
                 package,
                 dependencies,
                 profiles,
+                trust,
             });
         };
         let profiles_table = profiles_value
@@ -353,12 +371,18 @@ impl Manifest {
             package,
             dependencies,
             profiles,
+            trust,
         })
     }
 
     /// The package's identity, if it declares a `[package]` table (a bare entry script has none).
     pub fn package(&self) -> Option<&PackageMeta> {
         self.package.as_ref()
+    }
+
+    /// The `[trust]` grants — the authority this manifest extends to its dependencies (Phase 4).
+    pub fn trust(&self) -> &Trust {
+        &self.trust
     }
 
     /// The declared dependencies, keyed by local **import root** (the dependency-table key).
@@ -503,6 +527,41 @@ fn parse_dependencies(table: &toml::Table) -> Result<BTreeMap<String, Dependency
         out.insert(key.clone(), parse_dependency(key, value)?);
     }
     Ok(out)
+}
+
+/// Parse the optional `[trust]` table (package-manager Phase 4): `native` and `commands`, each an
+/// array of package identities (`company/package`) the consumer authorizes for that escalation. Each
+/// entry is validated as an identity (so a typo'd grant is a hard error, not a silently ineffective
+/// one). An absent `[trust]` table yields empty grants — the safe default (no dependency may run
+/// native code or add a command).
+fn parse_trust(table: &toml::Table) -> Result<Trust, String> {
+    let Some(value) = table.get("trust") else {
+        return Ok(Trust::default());
+    };
+    let trust_table = value.as_table().ok_or("`trust` must be a table")?;
+    let parse_list = |field: &str| -> Result<std::collections::BTreeSet<String>, String> {
+        let Some(list) = trust_table.get(field) else {
+            return Ok(std::collections::BTreeSet::new());
+        };
+        let array = list
+            .as_array()
+            .ok_or_else(|| format!("`trust.{field}` must be an array of `\"company/package\"`"))?;
+        let mut out = std::collections::BTreeSet::new();
+        for entry in array {
+            let s = entry
+                .as_str()
+                .ok_or_else(|| format!("`trust.{field}` entries must be strings"))?;
+            // Validate the identity shape so a typo (`acme/imagefx` for `acme/imgfx`) fails loudly
+            // rather than silently granting nothing.
+            PackageName::parse(s).map_err(|err| format!("`trust.{field}`: {err}"))?;
+            out.insert(s.to_string());
+        }
+        Ok(out)
+    };
+    Ok(Trust {
+        native: parse_list("native")?,
+        commands: parse_list("commands")?,
+    })
 }
 
 /// Parse one dependency value: a bare SemVer string (`dep = "^1.2"`, the registry shorthand) or a
@@ -671,6 +730,38 @@ mod tests {
         assert!(Manifest::parse(&manifest("")).is_err());
         // A nested relative dir is fine.
         assert!(Manifest::parse(&manifest("rust/imgfx")).is_ok());
+    }
+
+    // --- `[trust]` (package-manager Phase 4) ---------------------------------------------------
+
+    #[test]
+    fn trust_defaults_to_empty() {
+        let m = Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").expect("valid");
+        assert!(m.trust().native.is_empty());
+        assert!(m.trust().commands.is_empty());
+    }
+
+    #[test]
+    fn trust_parses_native_and_command_grants() {
+        let m = Manifest::parse(
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [trust]\n\
+             native = [\"acme/imgfx\", \"acme/simd\"]\n\
+             commands = [\"acme/scaffold\"]\n",
+        )
+        .expect("valid");
+        assert!(m.trust().native.contains("acme/imgfx"));
+        assert!(m.trust().native.contains("acme/simd"));
+        assert!(m.trust().commands.contains("acme/scaffold"));
+        assert!(!m.trust().commands.contains("acme/imgfx"));
+    }
+
+    #[test]
+    fn trust_rejects_a_malformed_identity() {
+        // A typo'd grant must fail loudly, not silently authorize nothing.
+        assert!(Manifest::parse("[trust]\nnative = [\"not-an-identity\"]\n").is_err());
+        assert!(Manifest::parse("[trust]\ncommands = [42]\n").is_err());
+        assert!(Manifest::parse("[trust]\nnative = \"acme/x\"\n").is_err()); // must be an array
     }
 
     #[test]

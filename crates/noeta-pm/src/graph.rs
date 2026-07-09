@@ -125,11 +125,16 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
     // The lock is consulted during the walk (git deps fetched by their pinned SHA — offline when
     // already stored) and refreshed afterwards.
     let lock = crate::lock::Lock::read(&manifest_dir);
+    // The root manifest's `[trust]` is the sole authority (Phase 4): a native-declaring package
+    // anywhere in the tree must be listed here or resolution refuses it. A dependency's own trust
+    // never applies — authority flows top-down from the human.
+    let native_trust = &manifest.trust().native;
     let mut walker = Walker {
         instances: BTreeMap::new(),
         store: None,
         lock: &lock,
         index: None,
+        native_trust,
     };
     let mut root_edges = BTreeMap::new();
     walker.walk(manifest.dependencies(), &manifest_dir, &mut root_edges)?;
@@ -152,6 +157,8 @@ struct Walker<'a> {
     store: Option<Store>,
     lock: &'a crate::lock::Lock,
     index: Option<crate::registry::LocalIndex>,
+    /// The root manifest's `[trust].native` — package identities allowed to run native code (Phase 4).
+    native_trust: &'a std::collections::BTreeSet<String>,
 }
 
 impl Walker<'_> {
@@ -194,6 +201,20 @@ impl Walker<'_> {
             // checked here, where the materialized package root is known, so a git dep's typo'd
             // `native` fails at resolve time with the dependency named, not at compose time.
             if let Some(native) = &pkg.native {
+                // Phase 4 authority gate: a native-declaring package runs arbitrary Rust (its
+                // `cargo` build + the composed code), so it is refused unless the **root** app's
+                // `[trust].native` lists its identity — even when reached transitively. Authority is
+                // never inherited from a dependency, so a package can't smuggle native code in
+                // through its own sub-dependencies; the human sees the whole native footprint.
+                if !self.native_trust.contains(&identity) {
+                    return Err(format!(
+                        "dependency `{key}` (`{identity}`) ships native code (`native = \
+                         \"{native}\"`), which runs arbitrary Rust at build + run time. It is not \
+                         authorized: add `{identity}` to the `[trust].native` list in your \
+                         `noeta.toml` to allow it (this grant is deliberately explicit — a \
+                         dependency, even a transitive one, can never authorize its own native code)."
+                    ));
+                }
                 validate_native_crate(&dir, native)
                     .map_err(|err| format!("dependency `{key}` (`{identity}`): {err}"))?;
             }
@@ -482,18 +503,26 @@ mod tests {
     use super::*;
 
     /// Lay out an app + one path dep under a fresh temp base; the dep declares `native = "native"`
-    /// when `with_crate` says to create the crate dir (Phase 3, N3.1).
-    fn native_dep_project(name: &str, with_crate: bool) -> PathBuf {
+    /// when `with_crate` says to create the crate dir (Phase 3, N3.1). When `trusted`, the app's
+    /// `[trust].native` authorizes `acme/imgfx` (Phase 4) — otherwise resolution refuses the native.
+    fn native_dep_project(name: &str, with_crate: bool, trusted: bool) -> PathBuf {
         let base = std::env::temp_dir().join(format!("noeta_graph_test_{name}"));
         let _ = std::fs::remove_dir_all(&base);
         let app = base.join("app");
         let dep = base.join("imgfx");
         std::fs::create_dir_all(&app).unwrap();
         std::fs::create_dir_all(dep.join("native")).unwrap();
+        let trust = if trusted {
+            "\n[trust]\nnative = [\"acme/imgfx\"]\n"
+        } else {
+            ""
+        };
         std::fs::write(
             app.join("noeta.toml"),
-            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
-             [dependencies]\nfx = { path = \"../imgfx\" }\n",
+            format!(
+                "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+                 [dependencies]\nfx = {{ path = \"../imgfx\" }}\n{trust}"
+            ),
         )
         .unwrap();
         std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
@@ -519,7 +548,7 @@ mod tests {
 
     #[test]
     fn a_native_dep_surfaces_its_entry_crate_and_lock_records_it() {
-        let entry = native_dep_project("native_ok", true);
+        let entry = native_dep_project("native_ok", true, true);
         let graph = resolve_graph(&entry).expect("resolves");
         assert_eq!(graph.native_crates.len(), 1);
         let nc = &graph.native_crates[0];
@@ -542,15 +571,76 @@ mod tests {
 
     #[test]
     fn a_missing_native_crate_fails_at_resolve_time_naming_the_dep() {
-        let entry = native_dep_project("native_missing", false);
+        // Trusted, so it clears the authority gate and reaches the crate-existence check.
+        let entry = native_dep_project("native_missing", false, true);
         let err = resolve_graph(&entry).expect_err("must fail");
         assert!(err.contains("acme/imgfx"), "{err}");
         assert!(err.contains("Cargo.toml"), "{err}");
     }
 
     #[test]
+    fn an_untrusted_native_dep_is_refused() {
+        // Phase 4: a native-declaring dependency the app did not authorize in `[trust].native` is
+        // refused — the mere presence of native code no longer runs arbitrary Rust.
+        let entry = native_dep_project("native_untrusted", true, false);
+        let err = resolve_graph(&entry).expect_err("must be refused");
+        assert!(err.contains("acme/imgfx"), "{err}");
+        assert!(err.contains("[trust].native"), "points at the fix: {err}");
+        assert!(err.contains("native code"), "{err}");
+    }
+
+    #[test]
+    fn a_transitive_native_dep_needs_root_trust() {
+        // The anti-supply-chain invariant: a native package reached *transitively* (app → mid →
+        // imgfx) is still refused unless the ROOT app trusts it — a dependency can't authorize its
+        // own native sub-dependency.
+        let base = std::env::temp_dir().join("noeta_graph_test_native_transitive");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        let mid = base.join("mid");
+        let dep = base.join("imgfx");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&mid).unwrap();
+        std::fs::create_dir_all(dep.join("native")).unwrap();
+        // app trusts NOTHING, and depends on a pure `mid` which itself pulls the native `imgfx`.
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nm = { path = \"../mid\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+        // `mid` "trusts" imgfx in its OWN manifest — which must be ignored (authority isn't inherited).
+        std::fs::write(
+            mid.join("noeta.toml"),
+            "[package]\nname = \"acme/mid\"\nversion = \"1.0.0\"\n\
+             [dependencies]\nfx = { path = \"../imgfx\" }\n\
+             [trust]\nnative = [\"acme/imgfx\"]\n",
+        )
+        .unwrap();
+        std::fs::write(mid.join("m.noe"), "namespace mid.core;\npub fn v(): int { return 1; }\n")
+            .unwrap();
+        std::fs::write(
+            dep.join("noeta.toml"),
+            "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
+        )
+        .unwrap();
+        std::fs::write(dep.join("fx.noe"), "namespace imgfx.fx;\npub fn one(): int { return 1; }\n")
+            .unwrap();
+        std::fs::write(
+            dep.join("native").join("Cargo.toml"),
+            "[package]\nname = \"imgfx-native\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+
+        let err = resolve_graph(&app.join("main.noe")).expect_err("root must authorize native");
+        assert!(err.contains("acme/imgfx"), "{err}");
+        assert!(err.contains("[trust].native"), "{err}");
+    }
+
+    #[test]
     fn a_pure_graph_has_no_native_crates() {
-        let entry = native_dep_project("native_pure", true);
+        let entry = native_dep_project("native_pure", true, false);
         // Rewrite the dep manifest without the `native` key.
         let dep_manifest = entry
             .parent()

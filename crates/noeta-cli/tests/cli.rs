@@ -2552,7 +2552,8 @@ fn composed_project(name: &str) -> PathBuf {
     std::fs::write(
         app.join("noeta.toml"),
         "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
-         [dependencies]\nimgfx = { path = \"../imgfx\" }\n",
+         [dependencies]\nimgfx = { path = \"../imgfx\" }\n\
+         [trust]\nnative = [\"acme/imgfx\"]\ncommands = [\"acme/imgfx\"]\n",
     )
     .unwrap();
     std::fs::write(
