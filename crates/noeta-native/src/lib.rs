@@ -33,8 +33,9 @@ pub use map_key::{ExternKeyRef, MapKey};
 pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
 pub use p2p::{P2pBroker, ReceiveIo};
 pub use registry::{
-    ArenaGetter, CtxTypeDispatch, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut,
-    NativeValue, RetTy, Scalar, ScalarVec, SigType, TypeDispatch, TypeRecipe,
+    ArenaGetter, BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, CtxTypeDispatch,
+    ExtBundle, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut, NativeValue,
+    PackedConstraint, RetTy, Scalar, ScalarVec, SigType, TypeDispatch, TypeRecipe,
 };
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the

@@ -427,6 +427,25 @@ pub fn commands() -> impl Iterator<Item = &'static noeta_native::ExtCommand> {
     noeta_native::registry::commands()
 }
 
+/// See [`noeta_native::registry::find_bundle`] (kernel-methods K0).
+pub fn find_bundle(module: &str, bundle: &str) -> Option<&'static ExtBundle> {
+    ensure();
+    noeta_native::registry::find_bundle(module, bundle)
+}
+
+/// See [`noeta_native::registry::dispatch_bundle_method`] (kernel-methods K0).
+pub fn dispatch_bundle_method(
+    module: &str,
+    bundle: &str,
+    method: &str,
+    ctx: &mut dyn crate::NativeCtx,
+    recv: crate::Slot,
+    args: &[crate::Slot],
+) -> Result<crate::CtxOut, crate::CtxError> {
+    ensure();
+    noeta_native::registry::dispatch_bundle_method(module, bundle, method, ctx, recv, args)
+}
+
 /// See [`noeta_native::registry::find_type`].
 pub fn find_type(name: &str) -> Option<&'static ExtType> {
     ensure();
@@ -2444,6 +2463,7 @@ const HTTP_MODULES: &[ExtModule] = &[
         // The inbound serve loop rides tokio (already linked for `fs`) — no separable native dep, so
         // no ring. A `use std.http.server` program links no reqwest, precisely (P0.3b split).
         ring: None,
+        ..ExtModule::DEFAULTS
     },
 ];
 

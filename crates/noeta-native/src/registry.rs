@@ -303,6 +303,9 @@ pub struct ExtModule {
     /// features (DCE Axis B), retiring the hand-maintained `module_ring`/`fn_ring` tables the CLI
     /// carried. The string must equal the `noeta-aot-runtime` Cargo feature that turns the ring on.
     pub ring: Option<&'static str>,
+    /// The module's **method bundles** (kernel-methods K0): named method sets a user's `@packed`
+    /// type acquires by explicit `impl <module>.<Bundle> for T {}`. Default empty.
+    pub bundles: &'static [ExtBundle],
 }
 
 impl ExtModule {
@@ -317,6 +320,7 @@ impl ExtModule {
         ctx_functions: &[],
         ctx_dispatch: None,
         ring: None,
+        bundles: &[],
     };
 }
 
@@ -425,6 +429,91 @@ impl ExtType {
     };
 }
 
+// --- Method bundles (kernel-methods K0) ----------------------------------------------------------
+//
+// A **method bundle** is the nominal-binding half of the raw-buffer kernel story: N3.4 gave a
+// native function the *capability* to run over a packed list's contiguous bytes, but the surface
+// was free module functions, structurally connected to the user's `@packed` type by nothing but
+// memory layout — invisible to the checker and the LSP. A bundle is a named set of native methods
+// a user type acquires by **explicit opt-in** (`impl vec.Kernels for Px {}`): the checker
+// validates the bundle's structural constraint against the type at the impl site (the shape check
+// moves from runtime dispatch to a compile-time diagnostic), and from the binding on, the type
+// (and `List<T>` for the bulk forms) carries the methods everywhere — typing, dispatch,
+// completion. See `plans/kernel-methods/README.md`.
+
+/// The static twin of the runtime [`crate::PackedView`] check a raw-buffer kernel performs: what
+/// a type binding to the bundle must look like, validated **at the impl site, at compile time**.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackedConstraint {
+    /// Required field kinds, in slot (declared) order — exact arity and kinds.
+    pub fields: &'static [ConstraintField],
+    /// Required storage layout (`Any` for layout-agnostic kernels that branch on
+    /// `PackedView::column` themselves).
+    pub layout: ConstraintLayout,
+}
+
+/// One required field kind in a [`PackedConstraint`] (primitives only — a bundle over nested
+/// packed structs is a later, additive extension).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstraintField {
+    Int,
+    Float,
+    F32,
+    Bool,
+}
+
+/// The storage layout a [`PackedConstraint`] requires of the bound type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstraintLayout {
+    Any,
+    Row,
+    Column,
+}
+
+/// Which receiver carries a [`BundleFn`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleReceiver {
+    /// A method on a value of the bound type itself (`v.dot(w)`).
+    Element,
+    /// A method on a `List<T>` of the bound type (`xs.dot_all(ys)`, `xs.sum()`).
+    Bulk,
+}
+
+/// One bundle method: an ordinary [`ExtFn`] signature (the receiver is *not* in `params` — it
+/// rides as ctx slot 0, the extern-type ctx-method convention, so `RetTy::SameAsArg(0)` means
+/// "same type as the receiver") plus which receiver carries it.
+#[derive(Debug, Clone, Copy)]
+pub struct BundleFn {
+    pub sig: ExtFn,
+    pub receiver: BundleReceiver,
+}
+
+/// A named method bundle contributed by a module (kernel-methods K0). Referenced at the impl site
+/// through the owning module's binding — `use std.{vec}` then `impl vec.Kernels for Px {}` — so
+/// provenance is explicit in the source.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtBundle {
+    /// The bundle's surface name (`Kernels`). Unique within its module.
+    pub name: &'static str,
+    /// What a binding type must look like.
+    pub constraint: PackedConstraint,
+    /// The methods a bound type acquires. Method names are unique across the whole bundle
+    /// (regardless of receiver kind — one name meaning different things on `T` vs `List<T>`
+    /// would be a comprehension hazard; install-time validated).
+    pub methods: &'static [BundleFn],
+    /// The one shared higher-order dispatch (both backends): the bound receiver rides as slot 0.
+    /// Same shape as [`ExtType::ctx_dispatch`] — a `Bulk` method's slot 0 is the list.
+    pub ctx_dispatch: CtxTypeDispatch,
+}
+
+impl ExtBundle {
+    /// The bundle's method named `method`, if any.
+    pub fn method(&self, method: &str) -> Option<&'static BundleFn> {
+        // `methods` is a `&'static` slice, so the reference is `'static` too.
+        self.methods.iter().find(|m| m.sig.name == method)
+    }
+}
+
 /// A bundle of native modules and types registered into the language. Core implements this once
 /// as `StdExtension` (in `noeta-stdlib`); a third-party crate implements it to contribute its own
 /// modules/types.
@@ -523,6 +612,32 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) {
             "duplicate qualified module `{}` in the assembled registry",
             pair[0]
         );
+    }
+    // Method bundles (kernel-methods K0): bundle names unique within their module, method names
+    // unique within their bundle (regardless of receiver kind — one name meaning different things
+    // on `T` vs `List<T>` would be a comprehension hazard).
+    for module in units.iter().flat_map(|e| e.modules()) {
+        for (i, bundle) in module.bundles.iter().enumerate() {
+            for other in &module.bundles[i + 1..] {
+                assert!(
+                    bundle.name != other.name,
+                    "duplicate bundle `{}` in module `{}`",
+                    bundle.name,
+                    module.name
+                );
+            }
+            for (j, method) in bundle.methods.iter().enumerate() {
+                for other in &bundle.methods[j + 1..] {
+                    assert!(
+                        method.sig.name != other.sig.name,
+                        "duplicate method `{}` in bundle `{}.{}`",
+                        method.sig.name,
+                        module.name,
+                        bundle.name
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -635,6 +750,37 @@ pub fn commands() -> impl Iterator<Item = &'static crate::ExtCommand> {
     extensions().iter().flat_map(|e| e.commands())
 }
 
+/// Find a registered method bundle by its owning module (root-qualified or bare, like
+/// [`find_module`]) and its surface name — the impl-site resolution of
+/// `impl <module>.<Bundle> for T {}` (kernel-methods K0).
+pub fn find_bundle(module: &str, bundle: &str) -> Option<&'static ExtBundle> {
+    find_module(module)?
+        .bundles
+        .iter()
+        .find(|b| b.name == bundle)
+}
+
+/// Route a bound bundle-method call to its bundle's shared ctx dispatch (kernel-methods K0) —
+/// the bundle twin of [`dispatch_ctx_method`]; the bound receiver (a value of the bound type for
+/// an `Element` method, the `List<T>` for a `Bulk` one) rides as slot 0.
+pub fn dispatch_bundle_method(
+    module: &str,
+    bundle: &str,
+    method: &str,
+    ctx: &mut dyn crate::NativeCtx,
+    recv: crate::Slot,
+    args: &[crate::Slot],
+) -> Result<crate::CtxOut, crate::CtxError> {
+    match find_bundle(module, bundle) {
+        Some(b) => (b.ctx_dispatch)(method, ctx, recv, args),
+        None => Err(StdError {
+            kind: crate::ErrorKind::UnknownName,
+            message: format!("no bundle `{bundle}` in module `{module}`"),
+        }
+        .into()),
+    }
+}
+
 /// Find a registered extern type by name (extern-types X1).
 pub fn find_type(name: &str) -> Option<&'static ExtType> {
     extensions()
@@ -740,6 +886,112 @@ mod runtime_registry_tests {
     static B_DUP_NAME: Unit = Unit("a.core", "b", &[]);
     static B_DUP_MODULE: Unit = Unit("b.core", "a", &[M_MATH]);
 
+    // --- method bundles (kernel-methods K0) ---
+    const VEC3_CONSTRAINT: PackedConstraint = PackedConstraint {
+        fields: &[
+            ConstraintField::F32,
+            ConstraintField::F32,
+            ConstraintField::F32,
+        ],
+        layout: ConstraintLayout::Any,
+    };
+    const KERNELS: ExtBundle = ExtBundle {
+        name: "Kernels",
+        constraint: VEC3_CONSTRAINT,
+        methods: &[
+            BundleFn {
+                sig: ExtFn {
+                    name: "dot",
+                    params: &[SigType::Dyn],
+                    ret: RetTy::Concrete(SigType::F32),
+                },
+                receiver: BundleReceiver::Element,
+            },
+            BundleFn {
+                sig: ExtFn {
+                    name: "scale_all",
+                    params: &[SigType::F32],
+                    ret: RetTy::SameAsArg(0),
+                },
+                receiver: BundleReceiver::Bulk,
+            },
+        ],
+        ctx_dispatch: |method, _, _, _| {
+            Err(StdError {
+                kind: crate::ErrorKind::UnknownName,
+                message: format!("test bundle never dispatches `{method}`"),
+            }
+            .into())
+        },
+    };
+    const M_VEC: ExtModule = ExtModule {
+        name: "vec",
+        bundles: &[KERNELS],
+        ..ExtModule::DEFAULTS
+    };
+    static G: Unit = Unit("g.core", "g", &[M_VEC]);
+
+    #[test]
+    fn bundle_lookup_and_method_table() {
+        // `find_bundle` needs an installed registry; ride the same process-global default the
+        // lifecycle test seeds (Unit A) by validating structure directly instead.
+        let bundle = M_VEC.bundles.iter().find(|b| b.name == "Kernels").unwrap();
+        assert!(bundle.method("dot").is_some());
+        assert_eq!(
+            bundle.method("scale_all").unwrap().receiver,
+            BundleReceiver::Bulk
+        );
+        assert!(bundle.method("nope").is_none());
+        validate(&[&G]); // well-formed: unique bundle + method names
+    }
+
+    #[test]
+    fn duplicate_bundle_name_in_a_module_is_rejected() {
+        const M_DUP: ExtModule = ExtModule {
+            name: "vec2",
+            bundles: &[KERNELS, KERNELS],
+            ..ExtModule::DEFAULTS
+        };
+        static H: Unit = Unit("h.core", "h", &[M_DUP]);
+        let result = std::panic::catch_unwind(|| validate(&[&H]));
+        assert!(result.is_err(), "duplicate bundle name must panic");
+    }
+
+    #[test]
+    fn duplicate_method_name_in_a_bundle_is_rejected() {
+        const DUP_METHODS: ExtBundle = ExtBundle {
+            methods: &[
+                BundleFn {
+                    sig: ExtFn {
+                        name: "dot",
+                        ..ExtFn::DEFAULTS
+                    },
+                    receiver: BundleReceiver::Element,
+                },
+                // Same name on the other receiver kind is still a conflict (one name, one meaning).
+                BundleFn {
+                    sig: ExtFn {
+                        name: "dot",
+                        ..ExtFn::DEFAULTS
+                    },
+                    receiver: BundleReceiver::Bulk,
+                },
+            ],
+            ..KERNELS
+        };
+        const M_DUP: ExtModule = ExtModule {
+            name: "vec3",
+            bundles: &[DUP_METHODS],
+            ..ExtModule::DEFAULTS
+        };
+        static I: Unit = Unit("i.core", "i", &[M_DUP]);
+        let result = std::panic::catch_unwind(|| validate(&[&I]));
+        assert!(
+            result.is_err(),
+            "duplicate method name in a bundle must panic"
+        );
+    }
+
     #[test]
     fn duplicate_unit_name_is_rejected() {
         let result = std::panic::catch_unwind(|| validate(&[&A, &B_DUP_NAME]));
@@ -764,13 +1016,17 @@ mod runtime_registry_tests {
     #[test]
     fn install_lifecycle() {
         assert!(extensions().is_empty(), "nothing installed at startup");
-        install_default(|| vec![&A]);
-        assert_eq!(extensions().len(), 1);
+        install_default(|| vec![&A, &G]);
+        assert_eq!(extensions().len(), 2);
         assert!(find_module("a.math").is_some());
         assert!(find_module("math").is_some(), "bare-name lookup");
+        // Bundle resolution (kernel-methods K0): qualified and bare module forms.
+        assert!(find_bundle("g.vec", "Kernels").is_some());
+        assert!(find_bundle("vec", "Kernels").is_some(), "bare-name lookup");
+        assert!(find_bundle("g.vec", "Nope").is_none());
         // A second default is a no-op — the first install wins.
-        install_default(|| vec![&A, &A2]);
-        assert_eq!(extensions().len(), 1);
+        install_default(|| vec![&A]);
+        assert_eq!(extensions().len(), 2);
         // An explicit install after anything is installed is a hard error.
         let result = std::panic::catch_unwind(|| install(vec![&A2]));
         assert!(result.is_err(), "install after install_default must panic");
