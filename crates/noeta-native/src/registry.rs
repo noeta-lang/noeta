@@ -422,3 +422,330 @@ pub trait Extension: Sync {
         &[]
     }
 }
+
+// --- the runtime registry (package-manager Phase 3, N3.0) ---------------------------------------
+//
+// The binary's **assembled** extension-unit list and the generic lookup layer over it. This
+// machinery grew up in `noeta-stdlib` around the dogfooded `std` units, but nothing in it is
+// std-specific — and Phase 3's assembly point (the composed-toolchain shim) must not reach through
+// the dogfood crate to register its peers. So the mechanism lives here, in the ABI crate: the shim
+// (or any host binary) calls [`install`] with the full unit list; `noeta-stdlib::registry` remains
+// a facade that lazily installs the std units so the many existing call sites never observe an
+// unseeded registry.
+
+use std::sync::OnceLock;
+
+/// A binary's assembled extension units. `OnceLock` because assembly happens exactly once, at
+/// process start, before any lookup — and because a `static` slice can't be extended at runtime
+/// (the pre-N3.0 registry was a hardwired `static REGISTRY: &[&StdExtension-family]`).
+static INSTALLED: OnceLock<Vec<&'static (dyn Extension + Sync)>> = OnceLock::new();
+
+/// Install the binary's complete extension-unit list — callable **once**, before any lookup.
+///
+/// Uniqueness rules (a violation is a `panic`, not an `Err` — a mis-assembled binary must not
+/// start): extension **names** are unique (`"std.http"`), and **qualified module identities**
+/// (`root() + "." + module.name`) are unique across units. Roots are deliberately shared — the six
+/// std units all root `"std"`.
+///
+/// Panics if something was already installed (including the lazy std default — install before the
+/// first lookup, or the assembly raced a lookup and the binary is misbuilt).
+pub fn install(units: Vec<&'static (dyn Extension + Sync)>) {
+    validate(&units);
+    if INSTALLED.set(units).is_err() {
+        panic!(
+            "extension registry already installed — `install` must run once, before any lookup \
+             (a lookup through the std facade lazily installs the default units)"
+        );
+    }
+}
+
+/// Install `provider()`'s units only if nothing is installed yet — the lazy-default seam the
+/// `noeta-stdlib::registry` facade uses so existing call sites (backends, checker, tests) never
+/// observe an empty registry, while an explicit earlier [`install`] (the composed shim) wins.
+pub fn install_default(provider: fn() -> Vec<&'static (dyn Extension + Sync)>) {
+    INSTALLED.get_or_init(|| {
+        let units = provider();
+        validate(&units);
+        units
+    });
+}
+
+/// The uniqueness sweep behind [`install`]/[`install_default`] — O(n²) over a handful of units.
+fn validate(units: &[&'static (dyn Extension + Sync)]) {
+    for (i, unit) in units.iter().enumerate() {
+        for other in &units[i + 1..] {
+            assert!(
+                unit.name() != other.name(),
+                "duplicate extension unit name `{}` in the assembled registry",
+                unit.name()
+            );
+        }
+    }
+    let mut modules: Vec<String> = units
+        .iter()
+        .flat_map(|e| {
+            e.modules()
+                .iter()
+                .map(|m| format!("{}.{}", e.root(), m.name))
+        })
+        .collect();
+    modules.sort();
+    for pair in modules.windows(2) {
+        assert!(
+            pair[0] != pair[1],
+            "duplicate qualified module `{}` in the assembled registry",
+            pair[0]
+        );
+    }
+}
+
+/// All installed extension units (empty before [`install`]/[`install_default`] — callers outside
+/// the std facade own their seeding).
+pub fn extensions() -> &'static [&'static (dyn Extension + Sync)] {
+    INSTALLED.get().map_or(&[], |v| v.as_slice())
+}
+
+/// Find a registered module by its identity string — a **root-qualified path** (`"std.math"`,
+/// nested `"std.http.client"`) or a bare module name (`"math"`, from tests / legacy literal calls).
+/// A leading segment that names a registered extension root selects that root and matches the
+/// remainder against the module name; otherwise the whole string is matched as a bare name.
+pub fn find_module(name: &str) -> Option<&'static ExtModule> {
+    if let Some((root, module)) = name.split_once('.')
+        && is_extension_root(root)
+    {
+        return extensions()
+            .iter()
+            .filter(|e| e.root() == root)
+            .flat_map(|e| e.modules())
+            .find(|m| m.name == module);
+    }
+    extensions()
+        .iter()
+        .flat_map(|e| e.modules())
+        .find(|m| m.name == name)
+}
+
+/// The registered module name of a (possibly root-qualified) module identity — the identity with
+/// its extension root stripped: `"std.vec"` → `"vec"`, `"std.http.client"` → `"http.client"`, bare
+/// `"vec"` → `"vec"`. This is the `ExtModule::name` the identity resolves to.
+pub fn module_name(module: &str) -> &str {
+    module.split_once('.').map_or(module, |(_root, name)| name)
+}
+
+/// The native-dependency **ring** a module identity resolves to, or `None` for always-on core
+/// (package-manager P1.0). The registry-backed source of truth for the AOT footprint scan's
+/// Cargo-feature selection. An unrecognized identity is `None` (conservative: never strips a ring
+/// for a module the registry doesn't own).
+pub fn ring_of(module: &str) -> Option<&'static str> {
+    find_module(module).and_then(|m| m.ring)
+}
+
+/// Whether `root` is the namespace root of some registered extension (`"std"`, a composed
+/// package's root). A `use <root>.…` import binds a native module iff this holds.
+pub fn is_extension_root(root: &str) -> bool {
+    extensions().iter().any(|e| e.root() == root)
+}
+
+/// Find a registered module by its **fully qualified path** — `["std", "math"]`, or nested
+/// `["std", "http", "client"]`. The first segment selects the extension by [root]; the remainder,
+/// dot-joined, matches the module's registered name. Two extensions with distinct roots never
+/// collide (`std.http` ≠ `guzzle.http`).
+///
+/// [root]: Extension::root
+pub fn find_module_qualified(path: &[String]) -> Option<&'static ExtModule> {
+    let (root, rest) = path.split_first()?;
+    if rest.is_empty() {
+        return None;
+    }
+    let module_name = rest.join(".");
+    extensions()
+        .iter()
+        .filter(|e| e.root() == root.as_str())
+        .flat_map(|e| e.modules())
+        .find(|m| m.name == module_name.as_str())
+}
+
+/// Find a registered function's signature.
+pub fn find_function(module: &str, func: &str) -> Option<&'static ExtFn> {
+    find_module(module)?
+        .functions
+        .iter()
+        .find(|f| f.name == func)
+}
+
+/// Find a registered **higher-order** function's signature (higher-order-abi H0) — the ctx-table
+/// twin of [`find_function`]. The backends route a matched name through the `NativeCtx` seam.
+pub fn find_ctx_function(module: &str, func: &str) -> Option<&'static ExtFn> {
+    find_module(module)?
+        .ctx_functions
+        .iter()
+        .find(|f| f.name == func)
+}
+
+/// A function's signature from **either** table — what the checker and name resolution consult
+/// (they don't care how a call dispatches, only that the name exists and what it types as).
+pub fn find_function_sig(module: &str, func: &str) -> Option<&'static ExtFn> {
+    find_function(module, func).or_else(|| find_ctx_function(module, func))
+}
+
+/// Dispatch a registered higher-order function through the module's [`crate::CtxDispatch`]
+/// (higher-order-abi H0). Mirrors [`dispatch`] for the ctx table.
+pub fn dispatch_ctx(
+    module: &str,
+    func: &str,
+    ctx: &mut dyn crate::NativeCtx,
+    args: &[crate::Slot],
+) -> Result<crate::CtxOut, crate::CtxError> {
+    match find_module(module).and_then(|m| m.ctx_dispatch) {
+        Some(d) => d(func, ctx, args),
+        None => Err(crate::no_function_error(module, func).into()),
+    }
+}
+
+/// Every extension-contributed CLI subcommand (higher-order-abi H6), for the CLI's dynamic
+/// wiring and its unmatched-name dispatch.
+pub fn commands() -> impl Iterator<Item = &'static crate::ExtCommand> {
+    extensions().iter().flat_map(|e| e.commands())
+}
+
+/// Find a registered extern type by name (extern-types X1).
+pub fn find_type(name: &str) -> Option<&'static ExtType> {
+    extensions()
+        .iter()
+        .flat_map(|e| e.types())
+        .find(|t| t.name == name)
+}
+
+/// Find a registered extern type's method signature.
+pub fn find_type_method(type_name: &str, method: &str) -> Option<&'static ExtFn> {
+    find_type(type_name)?
+        .methods
+        .iter()
+        .find(|m| m.name == method)
+}
+
+/// Find a registered extern type's **higher-order** method signature (higher-order-abi H4) —
+/// methods that dispatch through the ctx seam ([`ExtType::ctx_dispatch`]).
+pub fn find_type_ctx_method(type_name: &str, method: &str) -> Option<&'static ExtFn> {
+    find_type(type_name)?
+        .ctx_methods
+        .iter()
+        .find(|m| m.name == method)
+}
+
+/// A type method's signature from **either** table — what the checker consults (it doesn't care
+/// how a call dispatches). The type-method twin of [`find_function_sig`].
+pub fn find_type_method_sig(type_name: &str, method: &str) -> Option<&'static ExtFn> {
+    find_type_method(type_name, method).or_else(|| find_type_ctx_method(type_name, method))
+}
+
+/// Route a **higher-order** method call to its type's ctx dispatch (higher-order-abi H4) — the
+/// type-method twin of [`dispatch_ctx`].
+pub fn dispatch_ctx_method(
+    type_name: &str,
+    method: &str,
+    ctx: &mut dyn crate::NativeCtx,
+    recv: crate::Slot,
+    args: &[crate::Slot],
+) -> Result<crate::CtxOut, crate::CtxError> {
+    match find_type(type_name).and_then(|t| t.ctx_dispatch) {
+        Some(d) => d(method, ctx, recv, args),
+        None => Err(crate::no_method_error(type_name, method).into()),
+    }
+}
+
+/// Dispatch a method on an extern receiver through its registered [`ExtType`]. Returns the
+/// canonical "no such method" error for an unknown method, mirroring [`dispatch`] for modules.
+pub fn dispatch_method(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[crate::NativeValue],
+) -> Result<crate::NativeOut, StdError> {
+    let type_name = recv.type_name();
+    let Some(ext) = find_type(type_name) else {
+        return Err(StdError {
+            kind: crate::ErrorKind::UnknownName,
+            message: format!("`{type_name}` is not a registered type"),
+        });
+    };
+    (ext.dispatch)(recv, method, host, args)
+}
+
+/// Dispatch a registered module function. Returns the canonical "no such function" error if the
+/// module is unknown (the backends only ever dispatch a name they bound, so that is unreachable
+/// in practice).
+pub fn dispatch(
+    module: &str,
+    func: &str,
+    host: &mut dyn Host,
+    args: &[crate::NativeValue],
+) -> Result<crate::NativeOut, StdError> {
+    match find_module(module) {
+        Some(m) => (m.dispatch)(func, host, args),
+        None => Err(crate::no_function_error(module, func)),
+    }
+}
+
+#[cfg(test)]
+mod runtime_registry_tests {
+    use super::*;
+
+    struct Unit(&'static str, &'static str, &'static [ExtModule]);
+    impl Extension for Unit {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn root(&self) -> &'static str {
+            self.1
+        }
+        fn modules(&self) -> &'static [ExtModule] {
+            self.2
+        }
+    }
+
+    const M_MATH: ExtModule = ExtModule {
+        name: "math",
+        ..ExtModule::DEFAULTS
+    };
+    static A: Unit = Unit("a.core", "a", &[M_MATH]);
+    static A2: Unit = Unit("a.extra", "a", &[]);
+    static B_DUP_NAME: Unit = Unit("a.core", "b", &[]);
+    static B_DUP_MODULE: Unit = Unit("b.core", "a", &[M_MATH]);
+
+    #[test]
+    fn duplicate_unit_name_is_rejected() {
+        let result = std::panic::catch_unwind(|| validate(&[&A, &B_DUP_NAME]));
+        assert!(result.is_err(), "duplicate unit name must panic");
+    }
+
+    #[test]
+    fn duplicate_qualified_module_is_rejected() {
+        // Same root (`a`) + same module name (`math`) across two differently-named units.
+        let result = std::panic::catch_unwind(|| validate(&[&A, &B_DUP_MODULE]));
+        assert!(result.is_err(), "duplicate qualified module must panic");
+    }
+
+    #[test]
+    fn shared_root_across_units_is_fine() {
+        // The std pattern: six units all rooted `std`. Distinct names, distinct modules.
+        validate(&[&A, &A2]);
+    }
+
+    // One test drives the whole process-global lifecycle (the `OnceLock` is per-process, so
+    // ordering across #[test] threads would race if split up).
+    #[test]
+    fn install_lifecycle() {
+        assert!(extensions().is_empty(), "nothing installed at startup");
+        install_default(|| vec![&A]);
+        assert_eq!(extensions().len(), 1);
+        assert!(find_module("a.math").is_some());
+        assert!(find_module("math").is_some(), "bare-name lookup");
+        // A second default is a no-op — the first install wins.
+        install_default(|| vec![&A, &A2]);
+        assert_eq!(extensions().len(), 1);
+        // An explicit install after anything is installed is a hard error.
+        let result = std::panic::catch_unwind(|| install(vec![&A2]));
+        assert!(result.is_err(), "install after install_default must panic");
+    }
+}

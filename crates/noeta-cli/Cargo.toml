@@ -6,6 +6,12 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+# The toolchain is a library (`run_cli(extra)`) so a Phase-3 composed shim can embed it whole;
+# the stock binary below is `run_cli(&[])`.
+[lib]
+name = "noeta_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "noeta"
 path = "src/main.rs"

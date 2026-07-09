@@ -43,8 +43,11 @@ the dogfood. Phase 3's assembler (the composed shim) must not reach through the 
 register its peers, so the mechanism moves to the ABI crate (user-confirmed 2026-07-09):
 
 - `noeta-native::registry` gains the **runtime registry**: `OnceLock`-held assembled unit list,
-  `install(units)` (once, before any lookup; duplicate **root** = hard startup error) +
-  `extensions()` + the whole generic lookup layer moved verbatim.
+  `install(units)` (once, before any lookup) + `install_default(provider)` (the facade's lazy
+  seam) + `extensions()` + the whole generic lookup layer moved verbatim. Uniqueness at install:
+  duplicate **unit name** or duplicate **qualified module** (`root + "." + module`) = hard startup
+  error — roots are deliberately shared (the six std units all root `"std"`; an earlier draft
+  wrongly said duplicate root).
 - `noeta-stdlib::registry` becomes a **facade**: same public paths, each function delegates to
   `noeta_native::registry` after lazily ensuring the std units are installed — zero call-site
   churn across backends/checker/tests, no forgot-to-seed failure mode. Std residue stays behind
