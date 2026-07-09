@@ -2533,3 +2533,341 @@ fn a_git_dependency_is_pinned_and_reproduces_offline() {
         .success()
         .stdout(predicate::str::contains("pinned offline value"));
 }
+
+// --- package manager: composed toolchain (Phase 3, N3.2/N3.3) -----------------------------------
+
+/// Lay out an app + a dependency package carrying a **native entry crate** (the Phase-3 proving
+/// package): module `fx` (plain dispatch), extern type `Acc` (plain methods + a higher-order ctx
+/// method), and an `fx-info` ExtCommand. The crate depends on this workspace's `noeta-native` by
+/// path and exports the composition convention symbol `NOETA_EXTENSIONS`.
+fn composed_project(name: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let dep = base.join("imgfx");
+    let krate = dep.join("native");
+    std::fs::create_dir_all(&app).expect("mk app");
+    std::fs::create_dir_all(krate.join("src")).expect("mk crate");
+
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nimgfx = { path = \"../imgfx\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use imgfx.{fx}\n\n\
+         a = fx.acc();\n\
+         a.add(2);\n\
+         a.apply(fn(t) => t * 10);\n\
+         echo fx.double(21);\n\
+         echo a.total();\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("bad.noe"),
+        "use imgfx.{fx}\n\necho fx.double(\"nope\");\n",
+    )
+    .unwrap();
+
+    std::fs::write(
+        dep.join("noeta.toml"),
+        "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
+    )
+    .unwrap();
+
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+    std::fs::write(
+        krate.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"imgfx-native\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+             [lib]\npath = \"src/lib.rs\"\n\n\
+             [dependencies]\nnoeta-native = {{ path = \"{}\" }}\n\n[workspace]\n",
+            workspace.join("crates").join("noeta-native").display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(krate.join("src").join("lib.rs"), IMGFX_NATIVE_SRC).unwrap();
+    app.join("main.noe")
+}
+
+/// The proving extension's Rust source (see [`composed_project`]).
+const IMGFX_NATIVE_SRC: &str = r##"
+//! The Phase-3 proving extension: one module, one extern type with plain + ctx methods, one
+//! CLI command — exercised end-to-end through toolchain composition.
+
+use std::any::Any;
+use std::cmp::Ordering;
+use std::fmt;
+use std::sync::atomic::{AtomicI64, Ordering as AtomicOrd};
+
+use noeta_native::registry::{
+    ExtFn, ExtModule, ExtType, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType,
+};
+use noeta_native::{
+    no_function_error, no_method_error, CommandCtx, CtxError, CtxOut, ErrorKind, ExtCommand,
+    ExternValue, Host, NativeCtx, ParsedArgs, Slot, StdError,
+};
+
+const FX_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "double",
+        params: &[SigType::Int],
+        ret: RetTy::Concrete(SigType::Int),
+    },
+    ExtFn {
+        name: "acc",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Named("Acc")),
+    },
+];
+
+fn fx_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match func {
+        "double" => match args.first() {
+            Some(NativeValue::Scalar(Scalar::Int(n))) => Ok(NativeOut::Scalar(Scalar::Int(n * 2))),
+            _ => Err(StdError {
+                kind: ErrorKind::ArgType,
+                message: "`fx.double` expects an int".to_string(),
+            }),
+        },
+        "acc" => Ok(NativeOut::Extern(noeta_native::ExternBox(Box::new(
+            Acc::default(),
+        )))),
+        _ => Err(no_function_error("fx", func)),
+    }
+}
+
+#[derive(Debug, Default)]
+struct Acc {
+    total: AtomicI64,
+}
+
+impl ExternValue for Acc {
+    fn type_name(&self) -> &'static str {
+        "Acc"
+    }
+    fn eq_value(&self, other: &dyn ExternValue) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Acc>()
+            .is_some_and(|o| o.total.load(AtomicOrd::Relaxed) == self.total.load(AtomicOrd::Relaxed))
+    }
+    fn cmp_value(&self, _other: &dyn ExternValue) -> Option<Ordering> {
+        None
+    }
+    fn hash_value(&self) -> u64 {
+        0
+    }
+    fn display(&self, out: &mut dyn fmt::Write) -> fmt::Result {
+        write!(out, "<acc {}>", self.total.load(AtomicOrd::Relaxed))
+    }
+    fn clone_box(&self) -> Box<dyn ExternValue> {
+        Box::new(Acc {
+            total: AtomicI64::new(self.total.load(AtomicOrd::Relaxed)),
+        })
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+const ACC_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "add",
+        params: &[SigType::Int],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "total",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Int),
+    },
+];
+
+fn acc_method_dispatch(
+    recv: &mut dyn ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let acc = recv
+        .as_any_mut()
+        .downcast_mut::<Acc>()
+        .expect("receiver is an Acc");
+    match method {
+        "add" => match args.first() {
+            Some(NativeValue::Scalar(Scalar::Int(n))) => {
+                acc.total.fetch_add(*n, AtomicOrd::Relaxed);
+                Ok(NativeOut::Unit)
+            }
+            _ => Err(StdError {
+                kind: ErrorKind::ArgType,
+                message: "`Acc.add` expects an int".to_string(),
+            }),
+        },
+        "total" => Ok(NativeOut::Scalar(Scalar::Int(
+            acc.total.load(AtomicOrd::Relaxed),
+        ))),
+        _ => Err(no_method_error("Acc", method)),
+    }
+}
+
+const ACC_CTX_METHODS: &[ExtFn] = &[ExtFn {
+    name: "apply",
+    params: &[SigType::Fn(&[SigType::Int], &SigType::Int)],
+    ret: RetTy::Concrete(SigType::Unit),
+}];
+
+/// `acc.apply(f)` — replace the total with `f(total)`: the higher-order ctx seam, third-party
+/// edition (closure call-back through `NativeCtx`).
+fn acc_ctx_dispatch(
+    method: &str,
+    ctx: &mut dyn NativeCtx,
+    recv: Slot,
+    args: &[Slot],
+) -> Result<CtxOut, CtxError> {
+    match method {
+        "apply" => {
+            let mut total = 0;
+            ctx.with_extern(recv, &mut |e| {
+                if let Some(acc) = e.as_any().downcast_ref::<Acc>() {
+                    total = acc.total.load(AtomicOrd::Relaxed);
+                }
+            })?;
+            let arg = ctx.intern(NativeOut::Scalar(Scalar::Int(total)))?;
+            let out = ctx.call(args[0], &[arg])?;
+            let NativeValue::Scalar(Scalar::Int(new_total)) = ctx.view(out)? else {
+                return Err(StdError {
+                    kind: ErrorKind::ArgType,
+                    message: "`Acc.apply` closure must return an int".to_string(),
+                }
+                .into());
+            };
+            ctx.free(arg);
+            ctx.free(out);
+            ctx.with_extern(recv, &mut |e| {
+                if let Some(acc) = e.as_any().downcast_ref::<Acc>() {
+                    acc.total.store(new_total, AtomicOrd::Relaxed);
+                }
+            })?;
+            Ok(CtxOut::Out(NativeOut::Unit))
+        }
+        _ => Err(no_method_error("Acc", method).into()),
+    }
+}
+
+const FX_INFO: ExtCommand = ExtCommand {
+    name: "fx-info",
+    about: "Prove an extension-contributed command dispatches through composition",
+    args: &[],
+    run: fx_info_run,
+};
+
+fn fx_info_run(_ctx: &mut dyn CommandCtx, _args: &ParsedArgs) -> u8 {
+    println!("imgfx: native extension ok");
+    0
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ImgfxExtension;
+
+impl Extension for ImgfxExtension {
+    fn name(&self) -> &'static str {
+        "imgfx"
+    }
+    fn modules(&self) -> &'static [ExtModule] {
+        &[ExtModule {
+            name: "fx",
+            functions: FX_FNS,
+            dispatch: fx_dispatch,
+            ..ExtModule::DEFAULTS
+        }]
+    }
+    fn types(&self) -> &'static [ExtType] {
+        &[ExtType {
+            name: "Acc",
+            methods: ACC_METHODS,
+            dispatch: acc_method_dispatch,
+            ctx_methods: ACC_CTX_METHODS,
+            ctx_dispatch: Some(acc_ctx_dispatch),
+            ..ExtType::DEFAULTS
+        }]
+    }
+    fn commands(&self) -> &'static [ExtCommand] {
+        &[FX_INFO]
+    }
+}
+
+/// The composition convention (package-manager Phase 3): the entry crate exports its units as a
+/// slice — one crate, any number of units.
+pub static NOETA_EXTENSIONS: &[&(dyn Extension + Sync)] = &[&ImgfxExtension];
+"##;
+
+/// Point the compose build at the workspace's existing debug artifacts (the shim links the
+/// already-built noeta-cli lib in seconds instead of a cold release build).
+fn composed_env(cmd: &mut Command) -> &mut Command {
+    cmd.env("NOETA_COMPOSE_DEBUG", "1").env(
+        "NOETA_COMPOSE_TARGET_DIR",
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).parent().unwrap(),
+    )
+}
+
+#[test]
+fn composed_toolchain_end_to_end() {
+    let entry = composed_project("pm_compose_e2e");
+    let app = entry.parent().unwrap().to_path_buf();
+
+    // 1. First run: composes (banner on stderr), then dispatches the native module, the extern
+    //    type's plain methods, and the higher-order ctx method — through the composed binary.
+    composed_env(&mut lang())
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("42").and(predicate::str::contains("20")))
+        .stderr(predicate::str::contains("composing the toolchain"));
+
+    // 2. Second run: content-addressed cache hit — no compose banner, same output.
+    composed_env(&mut lang())
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("42"))
+        .stderr(predicate::str::contains("composing the toolchain").not());
+
+    // 3. `noeta check` sees the extension's signatures: a wrong-typed argument to the native fn
+    //    is a *static* error (the composed binary IS the checker), and the good file checks clean.
+    composed_env(&mut lang())
+        .arg("check")
+        .arg(app.join("bad.noe"))
+        .assert()
+        .failure();
+    composed_env(&mut lang())
+        .arg("check")
+        .arg(&entry)
+        .assert()
+        .success();
+
+    // 4. An extension-contributed command is an unknown subcommand to the stock binary; the
+    //    cwd-manifest fallback composes (cache hit) and the composed binary dispatches it.
+    composed_env(&mut lang())
+        .arg("fx-info")
+        .current_dir(&app)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("imgfx: native extension ok"));
+}

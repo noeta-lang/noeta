@@ -336,7 +336,21 @@ pub fn run_cli(extra: &'static [&'static (dyn noeta_stdlib::Extension + Sync)]) 
     for ext in noeta_stdlib::registry::commands() {
         cli = cli.subcommand(ext_command_clap(ext));
     }
-    let matches = cli.get_matches();
+    // An unknown subcommand may be a command contributed by a *native dependency* — visible only
+    // inside the app's composed toolchain (Phase 3). Before rendering clap's error, try composing
+    // from the current directory's manifest; if the app has no native deps (or we already are the
+    // composed binary), fall through to the ordinary error.
+    let matches = match cli.try_get_matches() {
+        Ok(matches) => matches,
+        Err(err) => {
+            if err.kind() == clap::error::ErrorKind::InvalidSubcommand
+                && let Some(code) = compose::maybe_delegate_cwd()
+            {
+                return code;
+            }
+            err.exit()
+        }
+    };
     if let Some((name, sub)) = matches.subcommand()
         && let Some(ext) = noeta_stdlib::registry::commands().find(|c| c.name == name)
     {

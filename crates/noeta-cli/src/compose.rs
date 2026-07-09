@@ -62,6 +62,15 @@ pub fn maybe_delegate(entry: &Path) -> Option<ExitCode> {
     }
 }
 
+/// [`maybe_delegate`] keyed on the **current directory**'s manifest — for invocations that carry
+/// no file argument but may only make sense inside a composed toolchain (an unknown subcommand
+/// that is really a native dependency's `ExtCommand`). Returns `None` when there is nothing to
+/// compose, exactly like the entry-file form.
+pub fn maybe_delegate_cwd() -> Option<ExitCode> {
+    let cwd = std::env::current_dir().ok()?;
+    maybe_delegate(&cwd)
+}
+
 /// The uninhabited "success" of [`delegate`] — on unix `exec` replaces the process; elsewhere we
 /// exit with the child's status. Either way, control never comes back.
 enum Never {}
@@ -71,12 +80,13 @@ fn delegate(crates: &[NativeCrate]) -> Result<Never, String> {
     let toolchain = toolchain_source()?;
     let key = compose_key(&entries, &toolchain);
     let dir = compose_dir(&key)?;
-    let binary = dir.join("target").join("release").join(BIN_NAME);
     // Content-addressed: the key covers the entry crates' package trees, the toolchain source
     // form, and the running binary's build identity — a hit means this exact composition already
-    // built, and the whole delegation is one exec.
+    // built (the binary was copied into the compose dir as its own artifact), and the whole
+    // delegation is one exec.
+    let binary = dir.join("bin").join(BIN_NAME);
     if !binary.is_file() {
-        build(&dir, &entries, &toolchain)?;
+        build(&dir, &entries, &toolchain, &binary)?;
     }
     exec(&binary)
 }
@@ -207,9 +217,20 @@ fn compose_dir(key: &str) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Generate the shim crate and `cargo build --release` it. The shim is regenerated on every
-/// (cache-miss) build — it is derived state, never edited.
-fn build(dir: &Path, entries: &[Entry], toolchain: &ToolchainSource) -> Result<(), String> {
+/// Generate the shim crate, `cargo build` it, and copy the produced binary to `cached` (the
+/// compose dir owns its artifact — the cargo target dir is a build detail). The shim is
+/// regenerated on every (cache-miss) build — it is derived state, never edited.
+///
+/// Two env knobs exist for the test suite / development (not user surface):
+/// `NOETA_COMPOSE_DEBUG=1` builds the shim in the debug profile, and `NOETA_COMPOSE_TARGET_DIR`
+/// points cargo at an existing target dir — together they let the e2e tests reuse the
+/// workspace's already-built debug artifacts instead of a cold release build.
+fn build(
+    dir: &Path,
+    entries: &[Entry],
+    toolchain: &ToolchainSource,
+    cached: &Path,
+) -> Result<(), String> {
     std::fs::write(dir.join("Cargo.toml"), shim_cargo_toml(entries, toolchain))
         .map_err(|err| format!("writing shim Cargo.toml: {err}"))?;
     std::fs::write(dir.join("src").join("main.rs"), shim_main_rs(entries))
@@ -220,11 +241,19 @@ fn build(dir: &Path, entries: &[Entry], toolchain: &ToolchainSource) -> Result<(
          dependency set — cached afterwards)",
         names.join(", ")
     );
-    let output = std::process::Command::new("cargo")
-        .arg("build")
-        .arg("--release")
+    let debug = std::env::var_os("NOETA_COMPOSE_DEBUG").is_some();
+    let target_dir = std::env::var_os("NOETA_COMPOSE_TARGET_DIR")
+        .map_or_else(|| dir.join("target"), PathBuf::from);
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("build");
+    if !debug {
+        cmd.arg("--release");
+    }
+    let output = cmd
         .arg("--manifest-path")
         .arg(dir.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(&target_dir)
         .output()
         .map_err(|err| {
             format!(
@@ -238,6 +267,18 @@ fn build(dir: &Path, entries: &[Entry], toolchain: &ToolchainSource) -> Result<(
             String::from_utf8_lossy(&output.stderr)
         ));
     }
+    let built = target_dir
+        .join(if debug { "debug" } else { "release" })
+        .join(BIN_NAME);
+    std::fs::create_dir_all(cached.parent().expect("bin/ parent"))
+        .and_then(|()| std::fs::copy(&built, cached))
+        .map_err(|err| {
+            format!(
+                "caching the composed binary (`{}` → `{}`): {err}",
+                built.display(),
+                cached.display()
+            )
+        })?;
     Ok(())
 }
 
