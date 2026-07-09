@@ -86,6 +86,7 @@ impl Extension for HttpExtension {
 /// The `id` unit's extern type: `Uuid` (X2 — pure, byte-ordered, key-capable).
 const ID_TYPES: &[ExtType] = &[ExtType {
     name: crate::id::TYPE_NAME,
+    namespace: "std.id",
     methods: UUID_METHODS,
     dispatch: uuid_method_dispatch,
     key_capable: true,
@@ -95,6 +96,7 @@ const ID_TYPES: &[ExtType] = &[ExtType {
 /// The `crypto` unit's extern type: the incremental `Hasher` (C3).
 const CRYPTO_TYPES: &[ExtType] = &[ExtType {
     name: crate::crypto::HASHER_TYPE_NAME,
+    namespace: "std.crypto",
     methods: HASHER_METHODS,
     dispatch: hasher_method_dispatch,
     key_capable: false, // `update` mutates — a hasher can never key a map
@@ -106,6 +108,7 @@ const CRYPTO_TYPES: &[ExtType] = &[ExtType {
 const HTTP_TYPES: &[ExtType] = &[
     ExtType {
         name: crate::net::RESPONSE_TYPE_NAME,
+        namespace: "std.http",
         methods: RESPONSE_METHODS,
         dispatch: response_method_dispatch,
         key_capable: false, // a response is not a map key
@@ -113,6 +116,7 @@ const HTTP_TYPES: &[ExtType] = &[
     },
     ExtType {
         name: crate::net::REQUEST_TYPE_NAME,
+        namespace: "std.http",
         methods: REQUEST_METHODS,
         dispatch: request_method_dispatch,
         key_capable: false, // an inbound request is not a map key
@@ -126,6 +130,7 @@ const P2P_TYPES: &[ExtType] = &[
     // the `noeta-crdt` convergence core. All pure — no arena, no ctx seam, not key-capable.
     ExtType {
         name: crate::crdt::GCOUNTER_TYPE_NAME,
+        namespace: "std.crdt",
         methods: crate::crdt::GCOUNTER_METHODS,
         dispatch: crate::crdt::GCOUNTER_DISPATCH,
         traits: crate::crdt::CRDT_TRAITS,
@@ -133,6 +138,7 @@ const P2P_TYPES: &[ExtType] = &[
     },
     ExtType {
         name: crate::crdt::PNCOUNTER_TYPE_NAME,
+        namespace: "std.crdt",
         methods: crate::crdt::PNCOUNTER_METHODS,
         dispatch: crate::crdt::PNCOUNTER_DISPATCH,
         traits: crate::crdt::CRDT_TRAITS,
@@ -140,6 +146,7 @@ const P2P_TYPES: &[ExtType] = &[
     },
     ExtType {
         name: crate::crdt::GSET_TYPE_NAME,
+        namespace: "std.crdt",
         methods: crate::crdt::GSET_METHODS,
         dispatch: crate::crdt::GSET_DISPATCH,
         traits: crate::crdt::CRDT_TRAITS,
@@ -149,6 +156,7 @@ const P2P_TYPES: &[ExtType] = &[
     // methods reach the arena + graph + P2p host, so they live in the ctx table.
     ExtType {
         name: crate::synced::SYNCED_SIGNAL_TYPE_NAME,
+        namespace: "std.synced",
         ctx_methods: crate::synced::SYNCED_CTX_METHODS,
         ctx_dispatch: Some(|method, ctx, recv, args| {
             crate::synced::synced_ctx_method_dispatch(method, ctx, recv, args)
@@ -164,6 +172,7 @@ const CORE_TYPES: &[ExtType] = &[
     // methods reach the `Telemetry` capability by id. NOT key-capable (identifies a host resource).
     ExtType {
         name: crate::telemetry::SPAN_TYPE_NAME,
+        namespace: "std.telemetry",
         methods: crate::telemetry::SPAN_METHODS,
         dispatch: crate::telemetry::span_method_dispatch,
         key_capable: false,
@@ -171,6 +180,7 @@ const CORE_TYPES: &[ExtType] = &[
     },
     ExtType {
         name: "FileHandle",
+        namespace: "std.fs",
         methods: FILE_HANDLE_METHODS,
         dispatch: file_handle_dispatch,
         key_capable: false,
@@ -181,6 +191,7 @@ const CORE_TYPES: &[ExtType] = &[
     // always-open arena read (H5), so the backend inlines it.
     ExtType {
         name: crate::cell::CELL_TYPE_NAME,
+        namespace: "std.cell",
         ctx_methods: crate::cell::CELL_CTX_METHODS,
         // A shim closure picks the `dyn` instantiation of the generic dispatch (the fn-pointer
         // table needs the higher-ranked trait-object lifetime a turbofish cannot name).
@@ -194,6 +205,7 @@ const CORE_TYPES: &[ExtType] = &[
     // state; `get` on both readable kinds is a declared arena read behind the extension's gate.
     ExtType {
         name: crate::reactive::SIGNAL_TYPE_NAME,
+        namespace: "std.reactive",
         ctx_methods: crate::reactive::SIGNAL_CTX_METHODS,
         ctx_dispatch: Some(|method, ctx, recv, args| {
             crate::reactive::signal_ctx_method_dispatch(method, ctx, recv, args)
@@ -203,6 +215,7 @@ const CORE_TYPES: &[ExtType] = &[
     },
     ExtType {
         name: crate::reactive::COMPUTED_TYPE_NAME,
+        namespace: "std.reactive",
         ctx_methods: crate::reactive::COMPUTED_CTX_METHODS,
         ctx_dispatch: Some(|method, ctx, recv, args| {
             crate::reactive::computed_ctx_method_dispatch(method, ctx, recv, args)
@@ -212,6 +225,7 @@ const CORE_TYPES: &[ExtType] = &[
     },
     ExtType {
         name: crate::reactive::EFFECT_TYPE_NAME,
+        namespace: "std.reactive",
         ctx_methods: crate::reactive::EFFECT_CTX_METHODS,
         ctx_dispatch: Some(|method, ctx, recv, args| {
             crate::reactive::effect_ctx_method_dispatch(method, ctx, recv, args)
@@ -425,12 +439,22 @@ pub fn commands() -> impl Iterator<Item = &'static noeta_native::ExtCommand> {
     extensions().iter().flat_map(|e| e.commands())
 }
 
-/// Find a registered extern type by name (extern-types X1).
+/// Find a registered extern type by its short display name (extern-types X1). Ambiguous once two
+/// namespaces own the same short name — [`find_type_qualified`] is the identity-preserving lookup.
 pub fn find_type(name: &str) -> Option<&'static ExtType> {
     extensions()
         .iter()
         .flat_map(|e| e.types())
         .find(|t| t.name == name)
+}
+
+/// Find a registered extern type by its **qualified identity** (`std.id.Uuid` = `namespace.name`) —
+/// the unambiguous lookup that lets a native `std.metrics.Counter` coexist with any other `Counter`.
+pub fn find_type_qualified(qualified: &str) -> Option<&'static ExtType> {
+    extensions()
+        .iter()
+        .flat_map(|e| e.types())
+        .find(|t| t.qualified() == qualified)
 }
 
 /// Find a registered extern type's method signature.
@@ -2843,6 +2867,46 @@ mod tests {
             dispatch("id", "parse", &mut h, &[NativeValue::Str("nope".into())]),
             Ok(NativeOut::None)
         );
+    }
+
+    #[test]
+    fn every_extern_type_carries_a_namespace_and_qualified_identity() {
+        // Each registered type has a `std.<unit>` namespace; its qualified identity is
+        // `namespace.name`, and `find_type_qualified` recovers it. This is the identity the checker
+        // and runtime will key on so a native `Counter` can coexist with a user's own.
+        let expected = [
+            ("Uuid", "std.id.Uuid"),
+            ("Hasher", "std.crypto.Hasher"),
+            ("Response", "std.http.Response"),
+            ("Request", "std.http.Request"),
+            ("FileHandle", "std.fs.FileHandle"),
+            ("Span", "std.telemetry.Span"),
+            ("Cell", "std.cell.Cell"),
+            ("Signal", "std.reactive.Signal"),
+            ("Computed", "std.reactive.Computed"),
+            ("Effect", "std.reactive.Effect"),
+            ("SyncedSignal", "std.synced.SyncedSignal"),
+            ("GCounter", "std.crdt.GCounter"),
+            ("PnCounter", "std.crdt.PnCounter"),
+            ("GSet", "std.crdt.GSet"),
+        ];
+        for (short, qualified) in expected {
+            let t = find_type(short).expect("registered type");
+            assert_eq!(t.qualified(), qualified, "qualified identity of `{short}`");
+            assert!(
+                std::ptr::eq(find_type_qualified(qualified).unwrap(), t),
+                "find_type_qualified round-trips `{qualified}`"
+            );
+        }
+        // No type was left on the bare `std` default.
+        for t in extensions().iter().flat_map(|e| e.types()) {
+            assert!(
+                t.namespace.contains('.'),
+                "`{}` must declare a `std.<unit>` namespace, got `{}`",
+                t.name,
+                t.namespace
+            );
+        }
     }
 
     #[test]
