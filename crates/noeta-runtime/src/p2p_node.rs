@@ -53,11 +53,19 @@ const LOG_ID: LogId = 1;
 /// keeps its identity and synced logs across restarts with no configuration.
 #[derive(Debug, Clone)]
 pub struct P2pConfig {
-    /// The directory holding this node's identity (`identity.key`) and durable store (`store.db`).
-    /// `None` ⇒ the per-user default (`$XDG_DATA_HOME/noeta/p2p`, honoring `NOETA_P2P_DIR`). Two
-    /// distinct replicas on one machine (e.g. an integration test, or two apps) point at two dirs;
-    /// the *same* replica reuses one dir to restart with its prior identity + state.
+    /// An explicit directory holding this node's identity (`identity.key`) and durable store
+    /// (`store.db`). `None` ⇒ the per-user default *for this app* (see [`Self::app_id`]). Two
+    /// distinct replicas on one machine (e.g. an integration test) point at two dirs; the *same*
+    /// replica reuses one dir to restart with its prior identity + state.
     pub data_dir: Option<PathBuf>,
+    /// The **application namespace** the default data dir is keyed on, so two different Noeta apps
+    /// never share one p2p identity/store and clobber each other. Resolved (when `data_dir` is
+    /// `None`) as `$XDG_DATA_HOME/<app>/p2p`, where `<app>` is `$NOETA_P2P_APP` if set, else this
+    /// field, else the executable's own file stem — so a distributed app binary namespaces under
+    /// its own name out of the box, and the toolchain passes the project's package name. `None`
+    /// here just means "fall through to the env/exe-stem default". `$NOETA_P2P_DIR` (an absolute
+    /// path) overrides everything, for a caller that wants one exact location.
+    pub app_id: Option<String>,
     /// If `false`, ignore any data dir and run fully ephemeral (fresh identity, in-memory store) —
     /// the pre-P3.3 behavior, kept for tests and throwaway nodes.
     pub persist: bool,
@@ -72,10 +80,11 @@ impl Default for P2pConfig {
 }
 
 impl P2pConfig {
-    /// The default persistent config: XDG data dir, state persisted across restarts.
+    /// The default persistent config: per-app XDG data dir, state persisted across restarts.
     pub fn persistent() -> P2pConfig {
         P2pConfig {
             data_dir: None,
+            app_id: None,
             persist: true,
         }
     }
@@ -84,6 +93,7 @@ impl P2pConfig {
     pub fn ephemeral() -> P2pConfig {
         P2pConfig {
             data_dir: None,
+            app_id: None,
             persist: false,
         }
     }
@@ -93,8 +103,15 @@ impl P2pConfig {
     pub fn at(dir: impl Into<PathBuf>) -> P2pConfig {
         P2pConfig {
             data_dir: Some(dir.into()),
+            app_id: None,
             persist: true,
         }
+    }
+
+    /// Set the application namespace ([`Self::app_id`]) the default data dir keys on.
+    pub fn with_app(mut self, app_id: Option<String>) -> P2pConfig {
+        self.app_id = app_id;
+        self
     }
 }
 
@@ -181,7 +198,11 @@ impl P2pNode {
         // Resolve where (if anywhere) persistent state lives. A persistent node with a usable data
         // dir loads/saves its identity there and uses an on-disk store; otherwise it is ephemeral.
         let data_dir = if config.persist {
-            match config.data_dir.clone().or_else(default_data_dir) {
+            match config
+                .data_dir
+                .clone()
+                .or_else(|| default_data_dir(config.app_id.as_deref()))
+            {
                 Some(dir) => match ensure_dir(&dir) {
                     Ok(()) => Some(dir),
                     Err(e) => {
@@ -517,42 +538,78 @@ fn set_status(status: &Arc<Mutex<HashMap<String, SyncStatus>>>, topic: &str, nex
     status.lock().unwrap().insert(topic.to_string(), next);
 }
 
-/// The per-user default p2p data dir — `$NOETA_P2P_DIR`, else `$XDG_DATA_HOME/noeta/p2p`, else
-/// `$HOME/.local/share/noeta/p2p` (persistent state, so the XDG *data* dir, not the cache dir).
-/// `None` when no home can be resolved (a bare CI/container), in which case the node runs ephemeral.
-fn default_data_dir() -> Option<PathBuf> {
+/// The per-user default p2p data dir for this application. `$NOETA_P2P_DIR` (an absolute path)
+/// short-circuits everything; otherwise it is `<XDG data dir>/<app>/p2p`, where `<app>` is the
+/// resolved application namespace ([`resolve_app`]) — so **two different Noeta apps never share one
+/// identity/store dir** and clobber each other (the whole point of keying on the app). Persistent
+/// state, so the XDG *data* dir, not the cache dir. `None` when no home can be resolved (a bare
+/// CI/container), in which case the node runs ephemeral.
+fn default_data_dir(app_id: Option<&str>) -> Option<PathBuf> {
     if let Some(dir) = env_path("NOETA_P2P_DIR") {
         return Some(dir);
     }
+    let app = resolve_app(app_id);
+    Some(xdg_data_root()?.join(app).join("p2p"))
+}
+
+/// The application namespace the default data dir is keyed on: `$NOETA_P2P_APP` if set (the explicit
+/// escape hatch, honored in any deployment), else the caller-supplied `app_id` (the toolchain passes
+/// the project's package name), else the running executable's own file stem — so a distributed app
+/// binary namespaces under its own name with no configuration, while the shared `noeta` toolchain
+/// gets a per-project id from the caller. Sanitized so a `company/package` name is a single safe
+/// path segment. Falls back to `"noeta"` only when nothing else is knowable.
+fn resolve_app(app_id: Option<&str>) -> String {
+    let raw = std::env::var("NOETA_P2P_APP")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| app_id.map(str::to_string))
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        })
+        .unwrap_or_else(|| "noeta".to_string());
+    sanitize_segment(&raw)
+}
+
+/// Reduce an app id to one filesystem-safe path segment: keep alphanumerics, `.`, `-`, `_`; map
+/// every other byte (path separators, spaces, the `/` in `company/package`) to `-`. Non-empty.
+fn sanitize_segment(raw: &str) -> String {
+    let mut out: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if out.is_empty() {
+        out.push_str("noeta");
+    }
+    out
+}
+
+/// The per-user XDG *data* root (persistent app state, not cache), OS-appropriate.
+fn xdg_data_root() -> Option<PathBuf> {
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         if let Some(xdg) = env_path("XDG_DATA_HOME") {
-            return Some(xdg.join("noeta").join("p2p"));
+            return Some(xdg);
         }
-        Some(home()?.join(".local").join("share").join("noeta").join("p2p"))
+        Some(home()?.join(".local").join("share"))
     }
     #[cfg(target_os = "macos")]
     {
-        Some(
-            home()?
-                .join("Library")
-                .join("Application Support")
-                .join("noeta")
-                .join("p2p"),
-        )
+        Some(home()?.join("Library").join("Application Support"))
     }
     #[cfg(target_os = "windows")]
     {
         if let Some(local) = env_path("LOCALAPPDATA") {
-            return Some(local.join("noeta").join("p2p"));
+            return Some(local);
         }
-        Some(
-            home()?
-                .join("AppData")
-                .join("Local")
-                .join("noeta")
-                .join("p2p"),
-        )
+        Some(home()?.join("AppData").join("Local"))
     }
 }
 
@@ -763,6 +820,32 @@ mod tests {
         // A fresh ephemeral node has a different identity (nothing loaded).
         let ephemeral = P2pNode::start_with_config(P2pConfig::ephemeral()).expect("ephemeral node");
         assert_ne!(ephemeral.identity(), id1);
+    }
+
+    /// P3.4: the default data dir is namespaced per application, so two different Noeta apps never
+    /// share one identity/store dir. Skipped if an env override is in effect on the test host.
+    #[test]
+    fn default_data_dir_is_namespaced_per_app() {
+        if std::env::var_os("NOETA_P2P_DIR").is_some() || std::env::var_os("NOETA_P2P_APP").is_some()
+        {
+            return; // an env override collapses the namespace; nothing to assert
+        }
+        if let (Some(a), Some(b)) =
+            (default_data_dir(Some("acme/chat")), default_data_dir(Some("acme/wiki")))
+        {
+            assert_ne!(a, b, "different apps get different dirs");
+            assert!(a.to_string_lossy().contains("acme-chat"));
+            assert!(b.to_string_lossy().contains("acme-wiki"));
+            assert!(a.ends_with("p2p"));
+        }
+    }
+
+    #[test]
+    fn sanitize_maps_unsafe_bytes_to_one_segment() {
+        assert_eq!(sanitize_segment("acme/chat"), "acme-chat");
+        assert_eq!(sanitize_segment("a b/c"), "a-b-c");
+        assert_eq!(sanitize_segment("ok_name.1-2"), "ok_name.1-2");
+        assert_eq!(sanitize_segment(""), "noeta");
     }
 
     /// P3.3: with no peer reachable, every topic reports `Offline` — an unjoined topic trivially,

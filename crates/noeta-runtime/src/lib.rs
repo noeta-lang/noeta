@@ -106,6 +106,12 @@ pub struct RealHost {
     /// Only present under the `ring-p2p` ring.
     #[cfg(feature = "ring-p2p")]
     p2p_node: Option<p2p_node::P2pNode>,
+    /// The application namespace the lazily-started node keys its persistent identity/store dir on
+    /// (p2p P3.4) — the toolchain sets it to the running program's package name so two different
+    /// Noeta apps never share one p2p dir. `None` ⇒ the node's own default (exe stem / env). Held
+    /// unconditionally (cheap) though only the `ring-p2p` node reads it.
+    #[cfg_attr(not(feature = "ring-p2p"), allow(dead_code))]
+    p2p_app_id: Option<String>,
 }
 
 /// One inbound listener's shared state. The socket is bound at `net_listen` (runtime-free, via
@@ -146,7 +152,16 @@ impl RealHost {
             p2p: noeta_stdlib::P2pBroker::default(),
             #[cfg(feature = "ring-p2p")]
             p2p_node: None,
+            p2p_app_id: None,
         })
+    }
+
+    /// Set the p2p application namespace ([`Self::p2p_app_id`]) — the running program's package
+    /// name, so its persistent p2p state lives under its own dir rather than a shared one. Builder
+    /// style so the per-isolate factory clones it into each host. A no-op without `ring-p2p`.
+    pub fn with_p2p_app(mut self, app_id: Option<String>) -> RealHost {
+        self.p2p_app_id = app_id;
+        self
     }
 
     /// Override the argument vector this host reports through `args.all()`. Used by
@@ -749,7 +764,9 @@ impl RealHost {
     /// `RealHost`, which tears the node down.
     fn p2p_node(&mut self) -> Result<&p2p_node::P2pNode, StdError> {
         if self.p2p_node.is_none() {
-            self.p2p_node = Some(p2p_node::P2pNode::start()?);
+            // Persistent node, keyed on this app's namespace so its identity/store dir is its own.
+            let config = p2p_node::P2pConfig::persistent().with_app(self.p2p_app_id.clone());
+            self.p2p_node = Some(p2p_node::P2pNode::start_with_config(config)?);
         }
         Ok(self.p2p_node.as_ref().expect("just started"))
     }

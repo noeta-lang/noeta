@@ -931,6 +931,25 @@ fn execute_real_host(
 /// Run an already-compiled [`Module`] against the real host — the shared execution core of
 /// [`execute_real_host`] (source path) and the `.noeb` bundle runner (P-AOT L1.2), which loads a
 /// module directly with no source to compile.
+/// The p2p application namespace for the running program (p2p P3.4): the package name of the
+/// nearest `noeta.toml` (stable and unique per project) when in a package, else the entry script's
+/// file stem — so two different Noeta apps never share one p2p identity/store dir. `None` ⇒ let the
+/// runtime fall back to its own default (the executable's file stem). `args[0]` is the entry path.
+fn p2p_app_namespace(args: &[String]) -> Option<String> {
+    if let Ok(cwd) = std::env::current_dir()
+        && let Some(path) = manifest::find(&cwd)
+        && let Ok(text) = std::fs::read_to_string(&path)
+        && let Ok(parsed) = manifest::Manifest::parse(&text)
+        && let Some(pkg) = parsed.package()
+    {
+        return Some(format!("{}/{}", pkg.name.company, pkg.name.package));
+    }
+    args.first()
+        .map(std::path::Path::new)
+        .and_then(|p| p.file_stem())
+        .map(|s| s.to_string_lossy().into_owned())
+}
+
 fn run_module_real_host(
     module: std::sync::Arc<noeta_bytecode::Module>,
     args: Vec<String>,
@@ -942,11 +961,16 @@ fn run_module_real_host(
     // which surfaces as an isolate failure at the `.await`. The program argument vector (from
     // `noeta run … -- <args>`) is cloned into every isolate's host so a worker's `args.all()` agrees
     // with the main program's.
+    // The p2p application namespace (p2p P3.4): keys each isolate's persistent p2p identity/store
+    // dir on *this* program so two different Noeta apps never collide on one dir. Computed once and
+    // cloned into every isolate's host.
+    let app_id = p2p_app_namespace(&args);
     let factory: noeta_vm::IsolateFactory = std::sync::Arc::new(move || {
         let host: Box<dyn noeta_stdlib::Host> = Box::new(
             noeta_runtime::RealHost::new()
                 .expect("cannot start an isolate's runtime")
-                .with_args(args.clone()),
+                .with_args(args.clone())
+                .with_p2p_app(app_id.clone()),
         );
         let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
             noeta_runtime::RealExecutor::new().expect("cannot start an isolate's async executor"),
