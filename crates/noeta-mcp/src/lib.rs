@@ -13,10 +13,17 @@
 //! content the agent can act on. Later slices add the Ground / Understand / Introspect / Execute
 //! pillars (see `plans/mcp/README.md`).
 
-use noeta_diagnostics::{Diagnostic, Severity};
+mod corpus;
+
+use noeta_diagnostics::{Diagnostic, DiagnosticCode, Severity};
 use noeta_span::{Source, SourceId};
 use rmcp::handler::server::wrapper::{Json, Parameters};
-use rmcp::model::{Implementation, ProtocolVersion, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    Implementation, ListResourcesResult, PaginatedRequestParams, ProtocolVersion,
+    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
+    ServerInfo,
+};
+use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ErrorData, ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -25,14 +32,21 @@ use std::path::Path;
 /// disproportionately raises an agent's first-shot correctness on a language it has never seen.
 const INSTRUCTIONS: &str = "\
 Noeta is an inferred-static typed language (file extension `.noe`). This server exposes the real \
-compiler as tools — every answer is ground truth, not a guess.
+compiler and its documentation as tools — every answer is ground truth, not a guess. You almost \
+certainly have little Noeta in your training data, so ground yourself before writing it.
 
-Workflow:
-- Run `check` on any Noeta code before claiming it compiles. It reports typed diagnostics with \
-stable `E0xxx` codes, severities, source spans (file + 1-based line/column), and help text.
-- Pass code inline via `source`, or point at a file on disk via `file` (sibling `.noe` modules in \
-its directory are resolved so imports type-check).
-- Do not invent syntax or standard-library calls; when unsure, `check` a small snippet first.";
+Tools:
+- `docs_search` / `docs_get` — search and read the language documentation. Start here for any \
+unfamiliar syntax or feature.
+- `examples_find` — find real, CI-tested example programs by feature, concept, or diagnostic code. \
+Copy the idioms rather than inventing them.
+- `check` — type-check Noeta code and get its diagnostics (stable `E0xxx` codes, severities, source \
+spans, help). Pass code inline via `source`, or a path via `file` (sibling `.noe` modules are \
+resolved so imports type-check). Run this before claiming any Noeta code compiles.
+- `explain_diagnostic` — when `check` returns an `E0xxx` code, look up what it means and see the \
+real programs that trigger and fix it.
+
+Do not invent syntax or standard-library calls; search the docs/examples, then `check` a snippet.";
 
 /// A source span rendered for an agent: the raw byte offsets plus the resolved file and 1-based
 /// line/column of the span's start (what an agent needs to point a human — or itself — at the code).
@@ -95,6 +109,106 @@ pub struct CheckArgs {
     pub file: Option<String>,
 }
 
+/// Arguments to `docs_search`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DocsSearchArgs {
+    /// What to look for, e.g. "pattern matching", "how do generics bound a type".
+    pub query: String,
+    /// Max hits to return (default 5).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// The `docs_search` result. Wrapped in an object because MCP tool output schemas must have an
+/// object root (a bare array is rejected).
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DocsSearchOutput {
+    pub hits: Vec<DocHitOut>,
+}
+
+/// One `docs_search` hit: the page + section that matched, with a short snippet.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DocHitOut {
+    /// The page slug — pass to `docs_get` to read the whole page.
+    pub page: String,
+    pub title: String,
+    pub heading: String,
+    /// A GitHub-style heading anchor, so the section can be cited as `page#anchor`.
+    pub anchor: String,
+    pub snippet: String,
+}
+
+/// Arguments to `docs_get`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DocsGetArgs {
+    /// The page slug or title (case-insensitive; a substring works, e.g. `types` → `Type-System`).
+    pub page: String,
+}
+
+/// The `docs_get` result: the page's full markdown, or the index if the page was not found.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DocGetOut {
+    /// True when `page` resolved; false when `available` lists what exists instead.
+    pub found: bool,
+    /// The full markdown (empty when not found).
+    pub markdown: String,
+    /// When not found, the `(slug, title)` of every page so the agent can retry.
+    pub available: Vec<[String; 2]>,
+}
+
+/// Arguments to `examples_find`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ExamplesFindArgs {
+    /// What to look for: a feature ("generics", "async"), a concept, or a diagnostic code.
+    pub query: String,
+    /// Max examples to return (default 5).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// The `examples_find` result (object-wrapped for the same MCP schema reason as `DocsSearchOutput`).
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ExamplesFindOutput {
+    pub examples: Vec<ExampleOut>,
+}
+
+/// One `examples_find` / `explain_diagnostic` example: a real, CI-tested `.noe` program.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ExampleOut {
+    /// The feature directory, e.g. `generics`.
+    pub feature: String,
+    /// The example name, e.g. `bounded`.
+    pub name: String,
+    /// The case's own one-line description (its header comment).
+    pub description: String,
+    /// The full Noeta source.
+    pub code: String,
+    /// Any `E0xxx` diagnostics this example is expected to raise (empty for a passing example).
+    pub expects: Vec<String>,
+}
+
+/// Arguments to `explain_diagnostic`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ExplainArgs {
+    /// The diagnostic code to explain, e.g. `E0007` (case-insensitive; a bare `7` also resolves).
+    pub code: String,
+}
+
+/// The `explain_diagnostic` result: what the code means plus the real programs that trigger it.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ExplainOut {
+    /// The canonical code, e.g. `E0007`.
+    pub code: String,
+    /// A human title derived from the diagnostic's name, e.g. `Type Mismatch`.
+    pub title: String,
+    /// Whether `code` is a known diagnostic.
+    pub known: bool,
+    /// Real, CI-tested example programs that raise this diagnostic (with their descriptions).
+    pub examples: Vec<ExampleOut>,
+    /// Documentation pages that mention this code, as `[slug, title]`.
+    pub docs: Vec<[String; 2]>,
+}
+
 /// The MCP server. Stateless in M0 — each `check` runs on a fresh salsa database (a later slice
 /// will hold one `LangDatabase` across calls for incrementality). The `#[tool_router]` macro
 /// generates the tool table as an associated function, so no per-instance state is needed.
@@ -122,6 +236,104 @@ modules are resolved so imports check). Run this before claiming Noeta code comp
         let sources = resolve_sources(&args)?;
         Ok(Json(run_check(&sources)))
     }
+
+    /// Search the Noeta documentation — the first stop before writing unfamiliar Noeta.
+    #[tool(
+        description = "Search the Noeta language documentation for a concept, syntax, or feature. \
+Returns ranked page sections with snippets; pass a `page` slug to `docs_get` to read the full \
+page. Use this to ground yourself before writing Noeta — do not guess syntax."
+    )]
+    async fn docs_search(
+        &self,
+        Parameters(args): Parameters<DocsSearchArgs>,
+    ) -> Json<DocsSearchOutput> {
+        let limit = args.limit.unwrap_or(5).clamp(1, 25);
+        let hits = corpus::search_docs(&args.query, limit)
+            .into_iter()
+            .map(|h| DocHitOut {
+                page: h.page,
+                title: h.title,
+                heading: h.heading,
+                anchor: h.anchor,
+                snippet: h.snippet,
+            })
+            .collect();
+        Json(DocsSearchOutput { hits })
+    }
+
+    /// Fetch a full documentation page by slug or title.
+    #[tool(
+        description = "Fetch the full markdown of a Noeta documentation page by slug or title (e.g. \
+`Type-System`, `types`, `Pattern Matching`). If not found, returns the index of available pages."
+    )]
+    async fn docs_get(&self, Parameters(args): Parameters<DocsGetArgs>) -> Json<DocGetOut> {
+        match corpus::get_doc(&args.page) {
+            Some(markdown) => Json(DocGetOut {
+                found: true,
+                markdown: markdown.to_string(),
+                available: Vec::new(),
+            }),
+            None => Json(DocGetOut {
+                found: false,
+                markdown: String::new(),
+                available: corpus::doc_index()
+                    .into_iter()
+                    .map(|(slug, title)| [slug, title])
+                    .collect(),
+            }),
+        }
+    }
+
+    /// Find real, runnable example programs for a feature or concept.
+    #[tool(
+        description = "Find real, CI-tested Noeta example programs by feature, concept, or \
+diagnostic code (e.g. `generics`, `pattern matching`, `E0007`). Returns full source with a \
+description — copy the idioms rather than inventing them."
+    )]
+    async fn examples_find(
+        &self,
+        Parameters(args): Parameters<ExamplesFindArgs>,
+    ) -> Json<ExamplesFindOutput> {
+        let limit = args.limit.unwrap_or(5).clamp(1, 25);
+        let examples = corpus::search_examples(&args.query, limit)
+            .into_iter()
+            .map(example_out)
+            .collect();
+        Json(ExamplesFindOutput { examples })
+    }
+
+    /// Explain a diagnostic code with real programs that trigger it.
+    #[tool(
+        description = "Explain a Noeta diagnostic code (e.g. `E0007`): its name, the real CI-tested \
+example programs that raise it (so you can see the cause and the fix), and the docs that cover it. \
+Call this whenever `check` returns a code you want to resolve."
+    )]
+    async fn explain_diagnostic(
+        &self,
+        Parameters(args): Parameters<ExplainArgs>,
+    ) -> Json<ExplainOut> {
+        let code = normalize_code(&args.code);
+        let (title, known) = match diagnostic_title(&code) {
+            Some(t) => (t, true),
+            None => (String::new(), false),
+        };
+        Json(ExplainOut {
+            title,
+            known,
+            // Cap the examples so `explain_diagnostic` stays token-frugal — a common code can appear
+            // in dozens of cases; the `diagnostics/`-dir canonical repros sort first.
+            examples: corpus::examples_for_code(&code)
+                .into_iter()
+                .take(6)
+                .map(example_out)
+                .collect(),
+            docs: corpus::docs_mentioning(&code)
+                .into_iter()
+                .map(|(slug, title)| [slug, title])
+                .collect(),
+            code,
+        })
+    }
 }
 
 #[tool_handler]
@@ -129,10 +341,61 @@ impl ServerHandler for NoetaMcp {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.protocol_version = ProtocolVersion::LATEST;
-        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .build();
         info.server_info = Implementation::from_build_env();
         info.instructions = Some(INSTRUCTIONS.to_string());
         info
+    }
+
+    /// List the documentation pages as browsable resources (`noeta-doc://<slug>`). Examples are not
+    /// listed (there are hundreds) but remain readable by URI (`noeta-example://<feature>/<name>`)
+    /// once surfaced by `examples_find`.
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        let resources = corpus::doc_index()
+            .into_iter()
+            .map(|(slug, title)| {
+                Resource::new(format!("noeta-doc://{slug}"), slug)
+                    .with_title(title)
+                    .with_mime_type("text/markdown")
+            })
+            .collect();
+        Ok(ListResourcesResult::with_all_items(resources))
+    }
+
+    /// Read a `noeta-doc://<slug>` page or a `noeta-example://<feature>/<name>` program.
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        let uri = request.uri;
+        let contents = if let Some(slug) = uri.strip_prefix("noeta-doc://") {
+            corpus::get_doc(slug).map(|md| ResourceContents::text(md, uri.clone()))
+        } else if let Some(rest) = uri.strip_prefix("noeta-example://") {
+            rest.split_once('/').and_then(|(feature, name)| {
+                corpus::get_example(feature, name)
+                    .map(|src| ResourceContents::text(src, uri.clone()))
+            })
+        } else {
+            return Err(ErrorData::invalid_params(
+                format!("unknown resource scheme: {uri}"),
+                None,
+            ));
+        };
+        match contents {
+            Some(c) => Ok(ReadResourceResult::new(vec![c])),
+            None => Err(ErrorData::resource_not_found(
+                format!("no such resource: {uri}"),
+                None,
+            )),
+        }
     }
 }
 
@@ -230,6 +493,57 @@ fn severity_str(severity: Severity) -> &'static str {
         Severity::Warning => "warning",
         Severity::Note => "note",
     }
+}
+
+fn example_out(h: corpus::ExampleHit) -> ExampleOut {
+    ExampleOut {
+        feature: h.feature,
+        name: h.name,
+        description: h.description,
+        code: h.code,
+        expects: h.codes,
+    }
+}
+
+/// Canonicalize a diagnostic code the agent may have typed loosely: `e0007`, `E7`, or a bare `7`
+/// all become `E0007`.
+fn normalize_code(input: &str) -> String {
+    let t = input.trim().to_uppercase();
+    let digits = t.strip_prefix('E').unwrap_or(&t);
+    if !digits.is_empty()
+        && digits.chars().all(|c| c.is_ascii_digit())
+        && let Ok(n) = digits.parse::<u32>()
+    {
+        return format!("E{n:04}");
+    }
+    t
+}
+
+/// The human title for a diagnostic code, derived from its `DiagnosticCode` variant name (the
+/// single source of truth), e.g. `E0007` → `Type Mismatch`. `None` for an unknown code.
+fn diagnostic_title(code: &str) -> Option<String> {
+    DiagnosticCode::ALL
+        .iter()
+        .find(|c| c.code() == code)
+        .map(|c| split_camel_case(&format!("{c:?}")))
+}
+
+/// `TypeMismatch` → `Type Mismatch`. A space is inserted before an uppercase letter that follows a
+/// lowercase one or is followed by a lowercase one (so acronym runs like `IoError` read cleanly).
+fn split_camel_case(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, &ch) in chars.iter().enumerate() {
+        if i > 0 && ch.is_uppercase() {
+            let prev_lower = chars[i - 1].is_lowercase();
+            let next_lower = chars.get(i + 1).is_some_and(|c| c.is_lowercase());
+            if prev_lower || next_lower {
+                out.push(' ');
+            }
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Run the MCP server over stdio, blocking until the client disconnects. Called by the `noeta mcp`

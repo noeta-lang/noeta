@@ -101,6 +101,10 @@ tower-lsp-server = "0.23"
 # with the workspace tokio; only `noeta-mcp` (and the CLI entry point) pull it in.
 rmcp = { version = "2.1", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
 serde = { version = "1", features = ["derive"] }
+# Agent-native tooling (MCP arc, M1 Ground pillar): embed the docs (`docs/*.md`) and example
+# (`tests/conformance/**/*.noe`) corpus into the `noeta` binary at compile time, so the MCP server's
+# retrieval tools work from an installed binary with no repo beside it. Only `noeta-mcp` pulls it in.
+include_dir = "0.7"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 miniz_oxide = "0.8"
 serde_json = "1"
