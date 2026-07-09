@@ -1,8 +1,12 @@
 # Phase 3 — Third-party native packages (static cargo composition)
 
 *Parent: [`README.md`](README.md). Builds on Phase 1's assembled multi-unit `REGISTRY` and Phase 2's
-package system. Status: **SCOPING (2026-07-09)** — slices drafted, open decisions marked; per the
-planning norm, implementation starts when the phase shape is confirmed.*
+package system. Status: **✅ COMPLETE (2026-07-09)** — N3.0–N3.4 + N3.6–N3.8 shipped on branch
+`pm-phase3` (N3.5 finalizers closed as won't-build by user decision). Third-party native packages
+work end to end: manifest `native` key → composed toolchain (run/check/commands, cached, exec-
+delegated) → raw-buffer kernels over the consumer's own `@packed` types, perf-gated; workspace at
+`v0.1.0` with the DEFAULTS additive-evolution convention completed; docs in
+`docs/Native-Extensions.md` ("Writing a native package").*
 
 ## What Phase 3 is
 

@@ -3,7 +3,7 @@
 Native modules (like `math`, `json`, `fs`) are not hardcoded into the runtime — they are registered through one uniform seam, and the core `std` modules are the *dogfooded* extension registered *through* that seam rather than special-cased.
 
 > [!NOTE]
-> This is implementation/runtime plumbing. There is **no third-party package system yet**, so you cannot ship your own native extension crate today — the registry is the internal mechanism, and the API is being proven by having core use it. The `noeta.toml` provider grammar exists and is validated, but the only accepted provider is `"std"` (see [Documentation & Dev Tiers](Documentation-and-Tiers#build-profiles--noetatoml)).
+> Since package-manager Phase 3, this seam is **open to third-party packages**: a dependency can ship a Rust crate that registers native modules, types, and CLI commands, statically composed into the consumer's toolchain by cargo. See [Writing a native package](#writing-a-native-package) below.
 
 ## Why a registry
 
@@ -19,16 +19,18 @@ primitives. Its only dependencies are `compact_str`/`equivalent`/`hashbrown` —
 batteries (no crypto, uuid, JSON, or HTTP client). **`noeta-stdlib`** depends on it, re-exports it
 (`pub use noeta_native::*` — the `core`/`std` relationship), and layers the concrete `std` modules
 and their heavy deps on top. So a third-party extension (and internal mid-end crates like
-`noeta-ir`) links the lean ABI, not the whole standard library. This is an *internal* boundary; the
-*published/frozen* ABI is still a package-manager-milestone concern (see Status).
+`noeta-ir`) links the lean ABI, not the whole standard library. Since package-manager Phase 3 this
+is the *consumed* boundary too: an out-of-tree entry crate depends on `noeta-native` alone, and the
+crates are versioned + git-tagged for the composed shim to pin (see
+[Writing a native package](#writing-a-native-package)).
 
 ## The seam
 
 The registry vocabulary (`noeta-native`, `registry.rs`; the concrete `std` registration and dispatch
 router are in `noeta-stdlib`) is built on a **neutral value-marshalling** layer:
 
-- `NativeValue` — the argument view: `Scalar`, `Str`, `Bytes`, `Object { fields }`, `Packed { layout, bytes }`, `List`, and so on.
-- `NativeOut` — the result view.
+- `NativeValue` — the argument view: `Scalar`, `Str`, `Bytes`, `Object { fields }`, `List`, and so on.
+- `NativeOut` — the result view, including the bulk `Scalars(ScalarVec)` form (one typed vector for a whole reduction result — the `Bytes` idea applied to primitive lists).
 
 Two per-backend functions, written once each — `marshal_native_arg(&Value) -> NativeValue` and `materialize_native(NativeOut, …) -> Value` — replace all the duplicated dispatch. A module function is then just a `DispatchFn = fn(&mut dyn Host, &[NativeValue]) -> Result<NativeOut, StdError>`, **shared across both backends** so the differential holds by construction. The `Host` capability (see below) is threaded through so `fs`/`time`/`random`/`env`/`args` migrate too (pure modules ignore it).
 
@@ -83,6 +85,55 @@ Generic extern types ride on the same signature vocabulary: a constructor return
 
 `std.cell` (`Cell<T>` with `get`/`set`/`update`) is the minimal Class-3 client; `std.reactive` is the full one — graph, flush loop, coalescing, and the E0045 runaway guard are all ordinary Rust in its dispatches. Neither backend knows reactivity exists.
 
+## Raw buffers: `with_packed` and the bulk-kernel ABI
+
+A `List<packed>` is stored as one contiguous byte buffer, and a bulk kernel (a SIMD-amenable column reduction, an image transform) wants exactly those bytes — with **zero per-element traffic**. Three ctx capabilities provide it (package-manager N3.4):
+
+- `with_packed(slot, |view, bytes| …)` — borrow the element layout + raw buffer (the `with_extern` shape). The layout arrives as a neutral read-only `PackedView { fields, byte_size, column, count }`, because the backends hold different concrete schema representations — the same reason `NativeValue`/`SigType` exist.
+- `with_packed_mut(slot, |view, bytes| …)` — transform the buffer **preserving value semantics**: the callback gets a uniquely-owned copy-on-write buffer (in place only under proven sole ownership), and the transformed list arrives as a fresh slot; the input value is never observably mutated.
+- `make_packed_like(like, bytes)` — allocate a result list sharing an existing packed slot's element schema (schemas are backend-interned; the seam names them, never builds them).
+
+The element-wise *fallback* (a boxed, non-packed operand) is expressible in the same shared dispatch through the fused structural reads `object_scalars_at`/`make_object_like_element` (one reused scalar buffer, no per-element slots), and a reduction returns its whole result as one typed vector — `NativeOut::Scalars(ScalarVec::F32(…))` — so the backend converts it in a single pass. The dogfood is the `vec.*_all` family: `add_all`/`sub_all`/`scale_all`/`dot_all`/`length_all` were the **last per-backend native intercepts** in either backend; they are now one registered ctx dispatch, perf-gated at or below the old special-cased numbers (`tests/bench/pm-native/`). A third-party crate registering a column kernel for the *consumer's own* `@packed` type is proven end-to-end in the composition test suite.
+
+## Writing a native package
+
+A dependency package ships native code by naming an **entry crate** in its manifest:
+
+```toml
+# the package's noeta.toml
+[package]
+name = "acme/imgfx"
+version = "1.0.0"
+native = "native"        # relative dir containing the entry crate's Cargo.toml
+```
+
+The entry crate is an ordinary Rust library that depends on `noeta-native` and exports its extension units as a slice — one crate, any number of units (core's own `std` is six units in one crate):
+
+```rust
+use noeta_native::registry::{ExtFn, ExtModule, Extension, /* … */};
+
+struct ImgfxExtension;
+impl Extension for ImgfxExtension {
+    fn name(&self) -> &'static str { "imgfx" }          // root defaults to name()
+    fn modules(&self) -> &'static [ExtModule] { /* fx, … */ }
+    fn types(&self) -> &'static [ExtType] { /* … */ }
+    fn commands(&self) -> &'static [ExtCommand] { /* noeta fx-info, … */ }
+}
+
+/// The composition convention: the symbol the composed toolchain links.
+pub static NOETA_EXTENSIONS: &[&(dyn Extension + Sync)] = &[&ImgfxExtension];
+```
+
+Registration literals should spell only what they use and default the rest — `ExtModule { name, functions, dispatch, ..ExtModule::DEFAULTS }` (same for `ExtType`, `ExtFn`, `ExtCommand`) — so a future optional field is additive rather than breaking.
+
+**What composition does.** The consumer's app never configures any of this: when `noeta run`/`check`/`build`/… sees a dependency graph with native crates, it generates a ~20-line shim crate (depend on the `noeta-cli` *library* + each entry crate; `main` passes the aggregated `NOETA_EXTENSIONS` units into `run_cli`), builds it with cargo, caches the binary content-addressed (keyed on the toolchain's build identity + each entry crate's tree), and **exec-delegates**. The composed binary *is* the app's toolchain: the checker sees the extension's signatures (a wrong-typed argument to a native function is a static error), the LSP its completions, the CLI its commands. A pure-Noeta app never touches any of this. The one requirement composition adds: a consumer of a native-dep package needs a **Rust toolchain** on PATH (the diagnostic says so by name when it's missing) — the composed build then runs once per dependency-set change, and every later invocation is a single exec.
+
+The toolchain's own source resolves in order: `NOETA_TOOLCHAIN_SRC` (a checkout override, hermetic setups) → the workspace the running binary was built in (path deps — the development norm) → a git dependency pinned to the running binary's version tag (`noeta-cli = { git = …, tag = "vX.Y.Z" }` — cargo's own git cache does the fetching).
+
+**Versioning policy (pre-1.0).** The consumed crates (`noeta-native`, `noeta-cli` as a lib, `noeta-stdlib`) are versioned and git-tagged together (`v0.1.0` first). A composed shim pins the toolchain by that tag and cargo unifies the extension's `noeta-native` onto the same source, so compatibility is ordinary source-level semver: **pre-1.0, a minor bump may break extension code**; patch releases are additive. `#[non_exhaustive]` is deliberately not used — the `..DEFAULTS` convention is the additive-evolution mechanism (see the N3.6 audit in `plans/package-manager/phase-3-native.md`).
+
+**Where heavy dependencies belong.** An extension whose implementation needs a heavy native tree should either put the effectful part **behind the `Host` capability seam** (the runtime side, where `noeta build --native` can gate it behind a ring feature — how `std.http`'s reqwest tree stays out of non-http binaries) or accept that its whole crate is the include/exclude unit. Unconditional heavy deps in an always-linked crate cannot be dead-code-eliminated per-program; core's own `crypto`/`id` (~65 KB of sha2/bcrypt/uuid, unconditional in `noeta-stdlib`) are the recorded won't-do-with-trigger example — the extension-unit split makes gating them mechanical if a size budget ever demands it.
+
 ## Extension commands
 
 An extension can contribute a CLI subcommand (`ExtCommand`: name, help, typed `ArgSpec`s, and a `run` fn) — the in-process `cargo clippy` model. The CLI augments its clap parser with each registered command (so `noeta --help` lists them with real parsing/validation) and dispatches a matched name to the extension, which drives a narrow `CommandCtx`: load + check + run a program file on the real host, optionally appending a synthesized trailing entry call. `noeta serve` is the proving client — it is `SERVE_COMMAND` in the std extension, whose entry call is the exact same `server.serve(port, fetch)` a program can write directly.
@@ -93,7 +144,7 @@ All host-coupled effects — filesystem, clock, PRNG, `env`/`args`, entropy, ids
 
 ## Case study: `json.parse::<T>`
 
-The motivating consumer is a native function that builds a value of a type named *only at the call site* — something a user genuinely cannot express in-language. The grammar `module.func::<T>(args)` is an atom (`Expr::TypedModuleCall`). The checker resolves `T` into a neutral `TypeRecipe` (scalar / option / list / string-keyed map / declared-order struct), and a shared lowering bakes it into an `ExtCall` IR node the VM transcribes to `Op::ExtCall`. Both backends marshal the arguments, run the shared recursive `json::parse_typed(text, &recipe)`, and materialize the result — the reference interpreter through its real registered type, the VM through a fresh same-name shape (method dispatch is name-keyed) — so they agree by construction.
+The motivating consumer is a native function that builds a value of a type named *only at the call site* — something a user genuinely cannot express in-language. The grammar `module.func::<T>(args)` is an atom (`Expr::TypedModuleCall`). The checker resolves `T` into a neutral `TypeRecipe` (scalar / option / list / string-keyed map / declared-order struct), and a shared lowering bakes it into a `TypedModuleCall` IR node the VM transcribes to `Op::TypedModuleCall`. Both backends marshal the arguments, run the shared recursive `json::parse_typed(text, &recipe)`, and materialize the result — the reference interpreter through its real registered type, the VM through a fresh same-name shape (method dispatch is name-keyed) — so they agree by construction.
 
 ## Status
 
@@ -104,7 +155,9 @@ The motivating consumer is a native function that builds a value of a type named
 - **Shipped (P-NATIVE):** the ABI (registry vocabulary, `Host` seam, `ExternValue`, `MapKey`, the async `ExternIo`/`Executor` seam, and the Ring 1 primitives) extracted into the lean `noeta-native` crate; `noeta-stdlib` re-exports it and keeps only the concrete `std` modules + their heavy deps. `noeta-ir`/`noeta-bytecode` now build without the crypto/uuid tree. `Uuid` became a newtype in the process — the orphan-rule pattern any extension uses to expose a foreign type.
 - **Shipped (http-server arc):** the **inbound** side of the Network capability (`net_listen`/`net_accept` as an async leaf/`net_reply`), a `Request` extern type, and the `server.serve(port, handler)` construct + `noeta serve` command — a concurrent HTTP server (the sandbox drives a deterministic request script, the real host binds a `TcpListener`).
 - **Shipped (higher-order-abi arc):** the `NativeCtx` higher-order dispatch seam (opaque slots + call/poll/drive/advance, generic-over-ctx dispatches so compiled-in extensions monomorphize while the dyn table serves future dynamic loading); `SigType::Fn` + `Var` type variables with checker bind-and-substitute, and `SigType::Generic` extern types with receiver-seeded methods; the Class-3 machinery (per-run retained arena as an enumerable GC root set + `ExtState`); declared arena reads (`arena_getter`) behind extension-synced gates with a per-call-site route cache; extension CLI commands (`ExtCommand`/`CommandCtx`). **The entire hardcoded `Builtin` orchestration family migrated out of core**: `task.sleep`/`all`/`race`/`map_bounded`, `server.serve`, and all of `std.reactive` (graph and all — `Value::Reactive` and both backends' intercepts deleted; the backends no longer depend on `noeta-reactive`), plus the new `std.cell` (`Cell<T>`), plus `noeta serve` out of the CLI enum. Perf-gated throughout: reads at or below the old intercepts (`signal.get` −6%), write-cycle overhead bounded and recorded (see `plans/higher-order-abi`).
-- **Deferred:** columnar kernels via extensions (blocked on a raw-buffer ABI capability); Host-coupled finalizers (GC free cannot reach the Host — buffered types keep explicit `close()`); and the package/dependency manager that would let `vec`/`quat` physically leave core and third parties register their own crates. That milestone is where the ABI gets *frozen/versioned* (a published contract) and the static std-only registry becomes a dynamic multi-extension registry — the crate boundary (P-NATIVE) and now the full capability surface (this arc) already exist; freezing them does not.
+- **Shipped (package-manager Phase 3):** third-party native packages end to end — the registry mechanism moved into `noeta-native` (install-at-assembly; `noeta-stdlib` is a lazily-seeding facade), the manifest `native` key, the composed-toolchain build + delegation, the raw-buffer ABI (`with_packed`/`with_packed_mut`/`make_packed_like`, `PackedView`, `NativeOut::Scalars`, the fused structural element reads) with the `vec.*_all` family migrated off the **last** per-backend intercepts (perf-gated), external `noeta-<cmd>` binaries, and version `0.1.0` + tags. The registry design test ("could `vec`/`quat` be re-added as a third-party crate with no API change?") is answered by a real out-of-tree proving crate in the composition e2e.
+- **Won't-build (recorded):** *Host-coupled finalizers* — a Rust-side resource in an extern box already finalizes deterministically (RC-zero drops the box, `Drop` runs); a finalizer with `Host` access at free time has no sound access point (values die in release paths carrying no host, including teardown cascades), so buffered types keep explicit `close()`. `ExtType`'s `..DEFAULTS` makes a later `finalizer` field additive if concrete demand appears.
+- **Deferred:** packaged/hermetic *distribution* of the toolchain source (today: workspace path deps or the git+tag fetch), and dynamic loading (the dyn dispatch tables are already in place; every compiled-in extension monomorphizes past them).
 
 ## See also
 
