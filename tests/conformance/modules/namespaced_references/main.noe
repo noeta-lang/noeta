@@ -1,0 +1,31 @@
+// Exercises each reference form against a namespaced (qualified-identity) user type. All resolve to
+// the qualified identity the linker assigned, so both backends dispatch and narrow identically.
+// expect: stdout "75"
+// expect: stdout "true"
+// expect: stdout "7"
+// expect: stdout "15"
+// expect: stdout "110"
+// expect: exit 0
+namespace App.Main;
+use App.Lib.Shape;
+use App.Lib.Wrap;
+use App.Lib.Counter;
+
+fn area(s: Shape): int {
+    return match s {
+        Shape.Circle(r) => 3 * r * r,
+        Shape.Square(side) => side * side,
+    };
+}
+
+echo area(Shape.Circle(5));      // enum-variant construct + match + algebraic payload
+echo Shape.Circle(1) is Shape;   // `is` on a namespaced enum
+
+w: Wrap<int> = Wrap { inner: 7 };
+echo w.inner;                    // generic-argument annotation + field access
+
+c = Counter.new(10);
+echo c.bump(5);                  // method dispatch on a namespaced class
+
+f = Counter.new;                 // associated-function method handle
+echo f(100).bump(10);
