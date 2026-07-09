@@ -44,6 +44,20 @@ pub struct ResolvedGraph {
     /// The pinned packages, keyed by identity, for `noeta.lock` (consumed in P2.4c).
     #[allow(dead_code)]
     pub locked: Vec<LockedPackage>,
+    /// Every native **entry crate** the graph carries (package-manager Phase 3, N3.1) — what the
+    /// composed-toolchain build (N3.2) compiles in. Empty for a pure-Noeta graph, which is the
+    /// signal that no composition is needed. Sorted by identity (deterministic compose key).
+    pub native_crates: Vec<NativeCrate>,
+}
+
+/// A resolved package's native entry crate (Phase 3, N3.1): where the composed build finds its
+/// `Cargo.toml`, validated to exist at resolve time.
+#[derive(Debug, Clone)]
+pub struct NativeCrate {
+    /// The owning package's global identity `company/package`.
+    pub identity: String,
+    /// The crate directory, absolute (package root + the manifest's relative `native` dir).
+    pub crate_dir: PathBuf,
 }
 
 /// A resolved package pinned for the lockfile (package-manager P2.4c).
@@ -57,6 +71,8 @@ pub struct LockedPackage {
     pub content_hash: String,
     /// Where it came from — a local path or a git tag pinned to a commit SHA.
     pub source: ResolvedSource,
+    /// The manifest's relative native-crate dir, recorded in the lock as declared (Phase 3).
+    pub native: Option<String>,
 }
 
 /// A resolved dependency's origin (package-manager P2.4).
@@ -81,6 +97,8 @@ struct Instance {
     dir: PathBuf,
     content_hash: String,
     source: ResolvedSource,
+    /// The manifest's relative native-crate dir, validated against `dir` (Phase 3, N3.1).
+    native: Option<String>,
     /// This package's own `[dependencies]`: local key → resolved child identity.
     edges: BTreeMap<String, String>,
 }
@@ -95,6 +113,7 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
         return Ok(ResolvedGraph {
             packages: Vec::new(),
             locked: Vec::new(),
+            native_crates: Vec::new(),
         });
     };
     let manifest = read_manifest(&manifest_path)?;
@@ -171,6 +190,13 @@ impl Walker<'_> {
                 continue; // already materialized and its subtree walked
             }
 
+            // A declared native crate must exist where the manifest points (Phase 3, N3.1) —
+            // checked here, where the materialized package root is known, so a git dep's typo'd
+            // `native` fails at resolve time with the dependency named, not at compose time.
+            if let Some(native) = &pkg.native {
+                validate_native_crate(&dir, native)
+                    .map_err(|err| format!("dependency `{key}` (`{identity}`): {err}"))?;
+            }
             let content_hash = hash_tree(&dir)
                 .map_err(|err| format!("dependency `{key}`: hashing `{}`: {err}", dir.display()))?;
             // A git source is immutable, so a lock-recorded hash must match — a mismatch means the
@@ -196,6 +222,7 @@ impl Walker<'_> {
                     dir: dir.clone(),
                     content_hash,
                     source,
+                    native: pkg.native.clone(),
                     edges: BTreeMap::new(),
                 },
             );
@@ -375,6 +402,7 @@ fn assemble(
 
     let mut packages = Vec::with_capacity(instances.len());
     let mut locked = Vec::with_capacity(instances.len());
+    let mut native_crates = Vec::new();
     for (identity, inst) in &instances {
         let key = global[identity].clone();
         let dep_renames: BTreeMap<String, String> = inst
@@ -394,12 +422,36 @@ fn assemble(
             version: inst.version.clone(),
             content_hash: inst.content_hash.clone(),
             source: inst.source.clone(),
+            native: inst.native.clone(),
         });
+        if let Some(native) = &inst.native {
+            native_crates.push(NativeCrate {
+                identity: identity.clone(),
+                crate_dir: inst.dir.join(native),
+            });
+        }
     }
     // Sort by global segment so the loader's SourceId assignment and the startup-cache key are
     // deterministic regardless of walk order.
     packages.sort_by(|a, b| a.key.cmp(&b.key));
-    ResolvedGraph { packages, locked }
+    ResolvedGraph {
+        packages,
+        locked,
+        native_crates,
+    }
+}
+
+/// Check a declared native entry crate exists: `<package root>/<native>/Cargo.toml` must be a
+/// file (Phase 3, N3.1). The manifest parser already rejected absolute/`..` values.
+fn validate_native_crate(package_dir: &Path, native: &str) -> Result<(), String> {
+    let crate_dir = package_dir.join(native);
+    if !crate_dir.join("Cargo.toml").is_file() {
+        return Err(format!(
+            "`package.native = \"{native}\"` names no Rust crate — expected `{}`",
+            crate_dir.join("Cargo.toml").display()
+        ));
+    }
+    Ok(())
 }
 
 /// A segment unique among `used`: the preferred `base`, else `base_2`, `base_3`, … Reserves the
@@ -423,4 +475,96 @@ fn read_manifest(path: &Path) -> Result<Manifest, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
     Manifest::parse(&text).map_err(|err| format!("invalid `{}`: {err}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lay out an app + one path dep under a fresh temp base; the dep declares `native = "native"`
+    /// when `with_crate` says to create the crate dir (Phase 3, N3.1).
+    fn native_dep_project(name: &str, with_crate: bool) -> PathBuf {
+        let base = std::env::temp_dir().join(format!("noeta_graph_test_{name}"));
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        let dep = base.join("imgfx");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(dep.join("native")).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nfx = { path = \"../imgfx\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+        std::fs::write(
+            dep.join("noeta.toml"),
+            "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dep.join("fx.noe"),
+            "namespace imgfx.fx;\npub fn one(): int { return 1; }\n",
+        )
+        .unwrap();
+        if with_crate {
+            std::fs::write(
+                dep.join("native").join("Cargo.toml"),
+                "[package]\nname = \"imgfx-native\"\nversion = \"1.0.0\"\n",
+            )
+            .unwrap();
+        }
+        app.join("main.noe")
+    }
+
+    #[test]
+    fn a_native_dep_surfaces_its_entry_crate_and_lock_records_it() {
+        let entry = native_dep_project("native_ok", true);
+        let graph = resolve_graph(&entry).expect("resolves");
+        assert_eq!(graph.native_crates.len(), 1);
+        let nc = &graph.native_crates[0];
+        assert_eq!(nc.identity, "acme/imgfx");
+        assert!(
+            nc.crate_dir.join("Cargo.toml").is_file(),
+            "absolute crate dir"
+        );
+        let locked = graph
+            .locked
+            .iter()
+            .find(|l| l.identity == "acme/imgfx")
+            .expect("locked");
+        assert_eq!(locked.native.as_deref(), Some("native"));
+        // The lockfile text carries the declaration.
+        let lock_text =
+            std::fs::read_to_string(entry.parent().unwrap().join(crate::lock::LOCK_NAME)).unwrap();
+        assert!(lock_text.contains("native = \"native\""), "{lock_text}");
+    }
+
+    #[test]
+    fn a_missing_native_crate_fails_at_resolve_time_naming_the_dep() {
+        let entry = native_dep_project("native_missing", false);
+        let err = resolve_graph(&entry).expect_err("must fail");
+        assert!(err.contains("acme/imgfx"), "{err}");
+        assert!(err.contains("Cargo.toml"), "{err}");
+    }
+
+    #[test]
+    fn a_pure_graph_has_no_native_crates() {
+        let entry = native_dep_project("native_pure", true);
+        // Rewrite the dep manifest without the `native` key.
+        let dep_manifest = entry
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("imgfx")
+            .join("noeta.toml");
+        std::fs::write(
+            &dep_manifest,
+            "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        let graph = resolve_graph(&entry).expect("resolves");
+        assert!(graph.native_crates.is_empty());
+    }
 }

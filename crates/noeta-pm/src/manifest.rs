@@ -54,6 +54,13 @@ pub struct PackageMeta {
     pub version: semver::Version,
     /// The language edition, if pinned (reserved; not yet consumed).
     pub edition: Option<String>,
+    /// The relative directory of this package's native Rust **entry crate** (package-manager
+    /// Phase 3, N3.1): `native = "native"` points at a `Cargo.toml` whose crate exports the
+    /// package's extension units (one crate, any number of units — std's own shape). `None` for a
+    /// pure-Noeta package. Declaring native code is deliberately explicit — it pulls arbitrary
+    /// Rust into a consumer's build, which should never be triggered by the mere presence of a
+    /// directory.
+    pub native: Option<String>,
 }
 
 /// A global package identity `company/package` (package-manager P2.0). The slash is deliberately
@@ -416,11 +423,47 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
                 .to_string(),
         ),
     };
+    let native = match pkg.get("native") {
+        None => None,
+        Some(v) => {
+            let dir = v
+                .as_str()
+                .ok_or("`package.native` must be a string (a relative directory)")?;
+            Some(validate_native_dir(dir)?)
+        }
+    };
     Ok(Some(PackageMeta {
         name,
         version,
         edition,
+        native,
     }))
+}
+
+/// Syntactic validation of a `package.native` value (Phase 3, N3.1): a non-empty **relative**
+/// directory that stays inside the package tree. A git/registry package's tree is materialized
+/// into the shared content-addressed store, so a `..` escape would point at other packages'
+/// content; existence of the directory (and its `Cargo.toml`) is checked at resolve time, where
+/// the package root is known.
+fn validate_native_dir(dir: &str) -> Result<String, String> {
+    if dir.is_empty() {
+        return Err("`package.native` must not be empty".to_string());
+    }
+    let path = std::path::Path::new(dir);
+    if path.is_absolute() {
+        return Err(format!(
+            "`package.native` must be a relative directory (inside the package), got `{dir}`"
+        ));
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "`package.native` must not leave the package tree (`..` in `{dir}`)"
+        ));
+    }
+    Ok(dir.to_string())
 }
 
 /// Parse the optional `[dependencies]` table. Each key is a local **import root** (must be an
@@ -576,6 +619,39 @@ mod tests {
         assert_eq!(pkg.name.root(), "widgets");
         assert_eq!(pkg.version, semver::Version::parse("1.4.2").unwrap());
         assert_eq!(pkg.edition.as_deref(), Some("2026"));
+    }
+
+    // --- `package.native` (package-manager Phase 3, N3.1) --------------------------------------
+
+    #[test]
+    fn parses_a_native_entry_crate() {
+        let m = Manifest::parse(
+            "[package]\n\
+             name = \"acme/imgfx\"\n\
+             version = \"1.0.0\"\n\
+             native = \"native\"\n",
+        )
+        .expect("valid");
+        assert_eq!(m.package().unwrap().native.as_deref(), Some("native"));
+    }
+
+    #[test]
+    fn native_is_absent_for_a_pure_package() {
+        let m = Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").expect("valid");
+        assert_eq!(m.package().unwrap().native, None);
+    }
+
+    #[test]
+    fn native_rejects_absolute_escape_and_empty() {
+        let manifest = |native: &str| {
+            format!("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\nnative = \"{native}\"\n")
+        };
+        assert!(Manifest::parse(&manifest("/abs/dir")).is_err());
+        assert!(Manifest::parse(&manifest("../outside")).is_err());
+        assert!(Manifest::parse(&manifest("ok/../../outside")).is_err());
+        assert!(Manifest::parse(&manifest("")).is_err());
+        // A nested relative dir is fine.
+        assert!(Manifest::parse(&manifest("rust/imgfx")).is_ok());
     }
 
     #[test]

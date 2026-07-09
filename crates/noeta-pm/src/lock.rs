@@ -119,6 +119,9 @@ fn render(locked: &[LockedPackage]) -> String {
                 out.push_str(&format!("sha = {}\n", quote(sha)));
             }
         }
+        if let Some(native) = &pkg.native {
+            out.push_str(&format!("native = {}\n", quote(native)));
+        }
         out.push_str(&format!("hash = {}\n", quote(&pkg.content_hash)));
     }
     out
@@ -161,6 +164,7 @@ mod tests {
                 tag: "v1.0.0".to_string(),
                 sha: "a".repeat(40),
             },
+            native: None,
         }
     }
 
@@ -172,6 +176,7 @@ mod tests {
             source: ResolvedSource::Path {
                 path: PathBuf::from("../local"),
             },
+            native: Some("native".to_string()),
         }
     }
 
