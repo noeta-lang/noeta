@@ -807,6 +807,19 @@ impl P2p for RealHost {
             Ok(self.p2p.poll_sub(sub))
         }
     }
+
+    // Durable variants (synced_signal): under `ring-p2p` they route to the node's log-sync
+    // transport (eventual-consistency catch-up); without the ring the trait defaults fall back to
+    // the ephemeral methods, i.e. the loopback broker (already an append-log with catch-up).
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_publish_durable(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
+        self.p2p_node()?.publish_durable(topic, message)
+    }
+
+    #[cfg(feature = "ring-p2p")]
+    fn p2p_subscribe_durable(&mut self, topic: &str) -> Result<u64, StdError> {
+        self.p2p_node()?.subscribe_durable(topic)
+    }
 }
 
 impl Entropy for RealHost {

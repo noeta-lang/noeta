@@ -133,9 +133,9 @@ pub fn synced_ctx_dispatch<C: NativeCtx + ?Sized>(
                 .ok_or_else(not_a_crdt)?;
             // Subscribe first (cursor at the log start), then announce the initial state, so another
             // replica that later subscribes still sees it and converges.
-            let subscription = ctx.host().p2p_subscribe(&topic).map_err(CtxError::from)?;
+            let subscription = ctx.host().p2p_subscribe_durable(&topic).map_err(CtxError::from)?;
             ctx.host()
-                .p2p_publish(&topic, bytes)
+                .p2p_publish_durable(&topic, bytes)
                 .map_err(CtxError::from)?;
             // The CRDT lives in an arena cell; the node is a signal in the shared reactive graph.
             let cell = ctx.retain(args[0])?;
@@ -191,7 +191,7 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             ctx.free(current_slot);
             self_wake(ctx, handle.node)?;
             ctx.host()
-                .p2p_publish(&handle.topic, bytes)
+                .p2p_publish_durable(&handle.topic, bytes)
                 .map_err(CtxError::from)?;
             Ok(CtxOut::Out(NativeOut::Unit))
         }

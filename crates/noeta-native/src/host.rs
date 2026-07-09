@@ -218,8 +218,30 @@ pub trait P2p {
     fn p2p_subscribe(&mut self, topic: &str) -> Result<u64, StdError>;
 
     /// The next message for subscription `sub` (advancing only its cursor), or `None` once it has
-    /// caught up — what `synced_signal.sync()` drains to merge peers' states.
+    /// caught up — what `synced_signal.sync()` drains to merge peers' states. Shared by ephemeral
+    /// and durable subscriptions (both deliver bytes; the id namespace is one).
     fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError>;
+
+    // --- Durable variants (p2p P3.2): eventual-consistency delivery ---------------------------
+    //
+    // `synced_signal` uses these so replicas **converge even after being offline** — a peer that
+    // joins or reconnects later still receives everything published to the topic, not just what
+    // arrives while it happens to be subscribed. The **default** delegates to the ephemeral
+    // methods, which is exactly right for the sandbox: its broker is an append-only log with a
+    // cursor from the start, so every subscriber already catches up. Only `RealHost` overrides
+    // these — ephemeral maps to gossip (best-effort), durable to p2panda's log-sync protocol
+    // (append-log + catch-up), which is the whole reason for the split.
+
+    /// Durable publish (see above). Default: the ephemeral [`Self::p2p_publish`].
+    fn p2p_publish_durable(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
+        self.p2p_publish(topic, message)
+    }
+
+    /// Durable subscribe (see above). Default: the ephemeral [`Self::p2p_subscribe`]; the id is
+    /// polled through the same [`Self::p2p_poll_sub`].
+    fn p2p_subscribe_durable(&mut self, topic: &str) -> Result<u64, StdError> {
+        self.p2p_subscribe(topic)
+    }
 }
 
 /// Every host-coupled effect the interpreters perform, behind one swappable seam — the union of the

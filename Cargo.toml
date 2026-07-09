@@ -151,6 +151,11 @@ bcrypt = { version = "0.17", default-features = false, features = ["alloc"] }
 # `Hash`/`Topic` types; `futures-util` drives the gossip subscription stream in the drain task.
 p2panda-net = "0.7"
 p2panda-core = "0.7"
+# Durable synced_signal transport (p2p P3.2): the log-sync store + sync-event types. `SqliteStore`
+# (in-memory `temporary()`) holds the append-only operation logs; `p2panda-sync` provides the
+# `TopicLogSyncEvent`/`Operation` sync surface. Same gated `ring-p2p` tree as p2panda-net.
+p2panda-store = "0.7"
+p2panda-sync = "0.7"
 futures-util = "0.3"
 
 [workspace.lints.rust]

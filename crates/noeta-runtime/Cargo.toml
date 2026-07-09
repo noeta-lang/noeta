@@ -22,6 +22,8 @@ reqwest = { workspace = true, optional = true }
 # real peers. Only `noeta run --features` / a build declaring the ring links p2panda.
 p2panda-net = { workspace = true, optional = true }
 p2panda-core = { workspace = true, optional = true }
+p2panda-store = { workspace = true, optional = true }
+p2panda-sync = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 
 [features]
@@ -37,7 +39,13 @@ ring-http-client = ["dep:reqwest"]
 # dep-free loopback broker (single-node), which is also the always-compiled sandbox side. (The
 # oracle suite never builds `noeta-runtime`, so it stays p2panda-free regardless.) Pinned exactly
 # (`p2panda-net = "0.7"`) so the pre-1.0 dep can't break the default build via an auto-update.
-ring-p2p = ["dep:p2panda-net", "dep:p2panda-core", "dep:futures-util"]
+ring-p2p = [
+    "dep:p2panda-net",
+    "dep:p2panda-core",
+    "dep:p2panda-store",
+    "dep:p2panda-sync",
+    "dep:futures-util",
+]
 
 [dev-dependencies]
 criterion = { workspace = true }

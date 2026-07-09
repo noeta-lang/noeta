@@ -27,15 +27,25 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use futures_util::StreamExt;
-use p2panda_core::Hash;
+use p2panda_core::{Body, Hash, Header, Operation, SeqNum, SigningKey};
 use p2panda_net::gossip::GossipHandle;
 use p2panda_net::iroh_mdns::MdnsDiscoveryMode;
-use p2panda_net::{AddressBook, Discovery, Endpoint, Gossip, MdnsDiscovery};
+use p2panda_net::sync::SyncHandle;
+use p2panda_net::{AddressBook, Discovery, Endpoint, Gossip, LogSync, MdnsDiscovery};
+use p2panda_store::operations::OperationStore;
+use p2panda_store::topics::TopicStore;
+use p2panda_store::{SqliteStore, SqliteStoreBuilder, Transaction};
+use p2panda_sync::protocols::TopicLogSyncEvent;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 use crate::io_error;
 use noeta_stdlib::StdError;
+
+/// Every node keeps a single append-only log for its own operations; the durable (log-sync)
+/// transport hard-codes its id, matching p2panda's `chat` example.
+type LogId = u64;
+const LOG_ID: LogId = 1;
 
 /// A long-lived p2panda-net node bridging the async gossip overlay to the synchronous [`P2p`]
 /// capability. One per `RealHost` (per isolate), started lazily.
@@ -53,6 +63,19 @@ pub struct P2pNode {
     /// topic → the single default subscription backing the topic-level `p2p.receive` (P1's default
     /// reader), created lazily so `poll_default` mirrors the broker's one-implicit-reader semantics.
     default_subs: Mutex<HashMap<String, u64>>,
+
+    // --- Durable (log-sync) transport (p2p P3.2), backing synced_signal ---
+    /// This node's Ed25519 identity — signs every operation it appends to its log, and is the
+    /// endpoint's key, so a peer attributes received operations to this author.
+    signing_key: SigningKey,
+    /// The append-only operation log store (in-memory SQLite). Holds this node's log and peers'
+    /// synced logs, giving a late-joining replica the full history to converge from.
+    store: SqliteStore,
+    /// The log-sync engine (over `store` + the endpoint + gossip). Joins a topic via `stream`.
+    log_sync: LogSync<SqliteStore, LogId, ()>,
+    /// topic → its durable state: the sync handle (join), plus this author's log tip (seq + backlink)
+    /// so appends stay a correct append-only chain.
+    durable: Mutex<HashMap<String, DurableTopic>>,
     // Discovery/endpoint components: kept alive for the node's lifetime (their background tasks run
     // on `runtime`), otherwise unused directly.
     _endpoint: Endpoint,
@@ -61,6 +84,14 @@ pub struct P2pNode {
     /// mDNS is best-effort — `None` when the environment has no usable multicast (a sandbox/CI),
     /// in which case the node still works over manually-wired or relay-discovered peers.
     _mdns: Option<MdnsDiscovery>,
+}
+
+/// One topic's durable (log-sync) state: the sync handle it was joined with, plus this author's
+/// log tip so the next append links correctly.
+struct DurableTopic {
+    handle: SyncHandle<Operation, TopicLogSyncEvent>,
+    seq_num: SeqNum,
+    backlink: Option<Hash>,
 }
 
 impl std::fmt::Debug for P2pNode {
@@ -81,12 +112,18 @@ impl P2pNode {
             .build()
             .map_err(|e| io_error(format!("cannot start the p2p node runtime: {e}")))?;
 
+        // This node's persistent-for-the-session identity (ephemeral in P3.2 — persisting it to
+        // disk is P3.3). It signs the endpoint AND every log operation, so peers attribute synced
+        // operations to this author.
+        let signing_key = SigningKey::generate();
+
         let node = runtime.block_on(async {
             let address_book = AddressBook::builder()
                 .spawn()
                 .await
                 .map_err(|e| io_error(format!("p2p address book: {e}")))?;
             let endpoint = Endpoint::builder(address_book.clone())
+                .signing_key(signing_key.clone())
                 .spawn()
                 .await
                 .map_err(|e| io_error(format!("p2p endpoint: {e}")))?;
@@ -111,9 +148,20 @@ impl P2pNode {
                 .spawn()
                 .await
                 .map_err(|e| io_error(format!("p2p gossip: {e}")))?;
-            Ok::<_, StdError>((address_book, endpoint, discovery, mdns, gossip))
+            // The durable transport: an in-memory append-log store + the log-sync engine over the
+            // same endpoint/gossip. `synced_signal` publishes/subscribes through this. (In-memory
+            // for P3.2 — a persistent on-disk store for true offline-restart is a P3.3 config.)
+            let store = SqliteStoreBuilder::memory()
+                .build()
+                .await
+                .map_err(|e| io_error(format!("p2p store: {e}")))?;
+            let log_sync = LogSync::<_, LogId, _>::builder(store.clone(), endpoint.clone(), gossip.clone())
+                .spawn()
+                .await
+                .map_err(|e| io_error(format!("p2p log-sync: {e}")))?;
+            Ok::<_, StdError>((address_book, endpoint, discovery, mdns, gossip, store, log_sync))
         })?;
-        let (address_book, endpoint, discovery, mdns, gossip) = node;
+        let (address_book, endpoint, discovery, mdns, gossip, store, log_sync) = node;
 
         Ok(P2pNode {
             runtime,
@@ -122,6 +170,10 @@ impl P2pNode {
             subs: Mutex::new(HashMap::new()),
             next_sub: AtomicU64::new(0),
             default_subs: Mutex::new(HashMap::new()),
+            signing_key,
+            store,
+            log_sync,
+            durable: Mutex::new(HashMap::new()),
             _endpoint: endpoint,
             _address_book: address_book,
             _discovery: discovery,
@@ -212,6 +264,137 @@ impl P2pNode {
         };
         Ok(self.poll_sub(sub))
     }
+
+    // --- Durable transport (p2p P3.2): log-sync, backing synced_signal --------------------------
+
+    /// Join the topic's log-sync stream (idempotent): associate this author's log with the topic in
+    /// the store, then open the sync stream in live mode. Cached in `durable`.
+    fn ensure_durable(&self, topic: &str) -> Result<(), StdError> {
+        if self.durable.lock().unwrap().contains_key(topic) {
+            return Ok(());
+        }
+        let handle = self.runtime.block_on(async {
+            let permit = self
+                .store
+                .begin()
+                .await
+                .map_err(|e| io_error(format!("p2p store: {e}")))?;
+            self.store
+                .associate(&Self::topic_of(topic), &self.signing_key.verifying_key(), &LOG_ID)
+                .await
+                .map_err(|e| io_error(format!("p2p store associate: {e}")))?;
+            self.store
+                .commit(permit)
+                .await
+                .map_err(|e| io_error(format!("p2p store commit: {e}")))?;
+            self.log_sync
+                .stream(Self::topic_of(topic), true)
+                .await
+                .map_err(|e| io_error(format!("p2p log-sync join `{topic}`: {e}")))
+        })?;
+        self.durable
+            .lock()
+            .unwrap()
+            .entry(topic.to_string())
+            .or_insert(DurableTopic {
+                handle,
+                seq_num: 0,
+                backlink: None,
+            });
+        Ok(())
+    }
+
+    /// Durable publish: append `message` as a signed operation to this author's log (persisted in
+    /// the store), then hand it to log-sync — delivered to current peers *and* to any peer that
+    /// syncs later. This is the eventual-consistency guarantee `synced_signal` relies on.
+    pub fn publish_durable(&self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
+        self.ensure_durable(topic)?;
+        let mut durable = self.durable.lock().unwrap();
+        let entry = durable.get_mut(topic).expect("ensured above");
+        let body = Body::new(&message);
+        let (hash, operation) =
+            create_operation(&self.signing_key, &body, entry.seq_num, entry.backlink);
+        self.runtime.block_on(async {
+            let permit = self
+                .store
+                .begin()
+                .await
+                .map_err(|e| io_error(format!("p2p store: {e}")))?;
+            self.store
+                .insert_operation(&hash, &operation, &LOG_ID)
+                .await
+                .map_err(|e| io_error(format!("p2p store insert: {e}")))?;
+            self.store
+                .commit(permit)
+                .await
+                .map_err(|e| io_error(format!("p2p store commit: {e}")))
+        })?;
+        entry
+            .handle
+            .publish(operation)
+            .map_err(|e| io_error(format!("p2p log-sync publish: {e}")))?;
+        entry.seq_num += 1;
+        entry.backlink = Some(hash);
+        Ok(())
+    }
+
+    /// Durable subscribe: drain the topic's log-sync stream, forwarding each received operation's
+    /// payload into a channel `poll_sub` reads (same id space as gossip subscriptions).
+    pub fn subscribe_durable(&self, topic: &str) -> Result<u64, StdError> {
+        self.ensure_durable(topic)?;
+        let (tx, rx) = mpsc::unbounded_channel();
+        {
+            let durable = self.durable.lock().unwrap();
+            let entry = durable.get(topic).expect("ensured above");
+            let mut stream = self
+                .runtime
+                .block_on(entry.handle.subscribe())
+                .map_err(|e| io_error(format!("p2p log-sync subscribe: {e}")))?;
+            self.runtime.spawn(async move {
+                while let Some(Ok(from_sync)) = stream.next().await {
+                    // Only new operations carry a payload to merge; session-lifecycle events are
+                    // ignored here (a `SyncStatus` surface consumes them in a later slice).
+                    if let TopicLogSyncEvent::OperationReceived { operation, .. } = from_sync.event
+                        && let Some(body) = operation.body
+                        && tx.send(body.to_bytes()).is_err()
+                    {
+                        break; // receiver gone
+                    }
+                }
+            });
+        }
+        let id = self.next_sub.fetch_add(1, Ordering::Relaxed);
+        self.subs.lock().unwrap().insert(id, rx);
+        Ok(id)
+    }
+}
+
+/// Build a signed, sequence-numbered, back-linked operation for this author's log (verbatim from
+/// p2panda's `chat` example): the append-only-log entry that log-sync distributes.
+fn create_operation(
+    signing_key: &SigningKey,
+    body: &Body,
+    seq_num: SeqNum,
+    backlink: Option<Hash>,
+) -> (Hash, Operation) {
+    let mut header = Header {
+        version: 1,
+        verifying_key: signing_key.verifying_key(),
+        signature: None,
+        payload_size: body.size(),
+        payload_hash: Some(body.hash()),
+        seq_num,
+        backlink,
+        extensions: (),
+    };
+    header.sign(signing_key);
+    let hash = header.hash();
+    let operation = Operation {
+        hash,
+        header,
+        body: Some(body.to_owned()),
+    };
+    (hash, operation)
 }
 
 #[cfg(test)]
@@ -224,6 +407,36 @@ mod tests {
     /// Two real nodes on the same topic (discovered over mDNS) exchange a gossip message. Not
     /// hermetic — needs real multicast/networking — so `#[ignore]`, run explicitly:
     /// `cargo test -p noeta-runtime --features ring-p2p -- --ignored two_nodes`.
+    /// The durable (log-sync) catch-up guarantee that gossip lacks: node A publishes **before**
+    /// node B exists, and B still receives it once it joins and syncs A's log. Not hermetic (real
+    /// networking) — run explicitly:
+    /// `cargo test -p noeta-runtime --features ring-p2p -- --ignored durable_catch_up`.
+    #[test]
+    #[ignore = "needs real networking (mDNS multicast); run explicitly"]
+    fn durable_catch_up_reaches_a_late_joiner() {
+        let a = P2pNode::start().expect("node a");
+        // A subscribes (joins the overlay) and publishes durably — this goes into A's log.
+        let _sub_a = a.subscribe_durable("room").expect("a subscribes");
+        a.publish_durable("room", b"durable state".to_vec())
+            .expect("a publishes durably");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+
+        // B starts LATE — after A already published — and subscribes. Over gossip it would miss
+        // the message; over log-sync it syncs A's log and catches up.
+        let b = P2pNode::start().expect("node b");
+        let sub_b = b.subscribe_durable("room").expect("b subscribes");
+
+        let mut received = None;
+        for _ in 0..200 {
+            if let Some(bytes) = b.poll_sub(sub_b) {
+                received = Some(bytes);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(received.as_deref(), Some(&b"durable state"[..]));
+    }
+
     #[test]
     #[ignore = "needs real networking (mDNS multicast); run explicitly"]
     fn two_nodes_exchange_a_gossip_message() {
