@@ -46,6 +46,7 @@ pub mod json;
 pub mod log;
 pub mod map_key;
 pub mod math;
+pub mod metrics;
 pub mod net;
 pub mod p2p;
 pub mod quat;

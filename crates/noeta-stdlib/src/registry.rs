@@ -169,6 +169,18 @@ const CORE_TYPES: &[ExtType] = &[
         key_capable: false,
         ..ExtType::DEFAULTS
     },
+    // The metrics `Instrument` handle (native OTEL Phase M) — mutable, effectful, host-coupled like
+    // `Span`: its methods reach the `Metrics` capability by id. One reserved type (not three: the
+    // OTel `Counter`/`Gauge`/`Histogram` names are far too common in user code to reserve); the kind
+    // is host-side. Reserved (E0049); not key-capable.
+    ExtType {
+        name: crate::metrics::INSTRUMENT_TYPE_NAME,
+        methods: crate::metrics::INSTRUMENT_METHODS,
+        dispatch: crate::metrics::instrument_method_dispatch,
+        key_capable: false,
+        deep_marshal: true, // `add_with`/`record_with(_, attrs)` take a `Map` argument
+        ..ExtType::DEFAULTS
+    },
     ExtType {
         name: "FileHandle",
         methods: FILE_HANDLE_METHODS,
@@ -2388,6 +2400,15 @@ const CORE_MODULES: &[ExtModule] = &[
         name: "log",
         ctx_functions: crate::log::LOG_CTX_FNS,
         ctx_dispatch: Some(|func, ctx, args| crate::log::log_ctx_dispatch(func, ctx, args)),
+        ..ExtModule::DEFAULTS
+    },
+    // `metrics` (native OTEL Phase M) — the metrics SDK facade. Instrument constructors are
+    // get-or-create over host-owned aggregation, so they are ctx functions; the `Counter`/`Histogram`/
+    // `Gauge` handle methods are plain (host-only). Aggregation + export live host-side.
+    ExtModule {
+        name: "metrics",
+        ctx_functions: crate::metrics::METRICS_CTX_FNS,
+        ctx_dispatch: Some(|func, ctx, args| crate::metrics::metrics_ctx_dispatch(func, ctx, args)),
         ..ExtModule::DEFAULTS
     },
     ExtModule {

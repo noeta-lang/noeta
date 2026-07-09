@@ -729,8 +729,14 @@ impl<'m> Vm<'m> {
         {
             return self.call_ctx_type_method(ext.name, recv, method, args, span);
         }
-        let nargs: Vec<noeta_stdlib::NativeValue> =
-            args.iter().map(|a| marshal_native_arg(*a)).collect();
+        // A type declaring `deep_marshal` (the metrics instruments' `*_with(_, attrs)`) projects a
+        // container argument to a full `NativeValue` tree; every other type uses the cheap shallow
+        // projection (containers → `Opaque`).
+        let deep = ext.is_some_and(|t| t.deep_marshal);
+        let nargs: Vec<noeta_stdlib::NativeValue> = args
+            .iter()
+            .map(|a| if deep { a.to_native_deep() } else { marshal_native_arg(*a) })
+            .collect();
         let host = &mut *self.host;
         let result = recv
             .with_extern_mut(|e| noeta_stdlib::registry::dispatch_method(e, method, host, &nargs));
