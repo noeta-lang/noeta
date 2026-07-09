@@ -2381,6 +2381,15 @@ const CORE_MODULES: &[ExtModule] = &[
         }),
         ..ExtModule::DEFAULTS
     },
+    // `log` (native OTEL Phase L) — the logs SDK facade. Emits OTel `LogRecord`s auto-correlated to
+    // the active span, so its functions read the per-task active-span stack and are ctx functions
+    // (like `tracing`). Records go host-side (recorder / OTLP `/v1/logs` exporter), never to stdout.
+    ExtModule {
+        name: "log",
+        ctx_functions: crate::log::LOG_CTX_FNS,
+        ctx_dispatch: Some(|func, ctx, args| crate::log::log_ctx_dispatch(func, ctx, args)),
+        ..ExtModule::DEFAULTS
+    },
     ExtModule {
         name: "args",
         functions: ARGS_FNS,

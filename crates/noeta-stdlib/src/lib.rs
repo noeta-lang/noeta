@@ -43,6 +43,7 @@ pub mod host;
 pub mod id;
 pub mod iter;
 pub mod json;
+pub mod log;
 pub mod map_key;
 pub mod math;
 pub mod net;
