@@ -24,6 +24,11 @@
 pub mod executor;
 pub use executor::RealExecutor;
 
+// Real p2p transport (p2p P3) — only compiled under the `ring-p2p` ring, which pulls the heavy
+// p2panda/iroh dependency tree. Off by default; `RealHost` keeps the loopback broker.
+#[cfg(feature = "ring-p2p")]
+pub mod p2p_node;
+
 use noeta_stdlib::net::accept_outcome;
 use noeta_stdlib::{
     Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, NativeOut, NetRequest,

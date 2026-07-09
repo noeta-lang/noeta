@@ -15,6 +15,14 @@ getrandom = { workspace = true }
 # stack (rustls/ring/hyper/h2) — dropped by `noeta build --native`'s per-ring footprint selection
 # (DCE Axis B). Default-on: the toolchain and every non-tailored build keep the full client.
 reqwest = { workspace = true, optional = true }
+# Real p2p transport (p2p P3): the `P2p` capability on `RealHost` backed by a p2panda-net node
+# (gossip + log-sync over iroh/QUIC). Optional and OFF by default — pre-1.0, a heavy dep tree
+# (iroh/QUIC/rustls), and needs the `iroh-gossip` git `[patch]` in the workspace Cargo.toml. Off ⇒
+# `RealHost` keeps the single-node loopback broker (P1); a program still runs locally, just without
+# real peers. Only `noeta run --features` / a build declaring the ring links p2panda.
+p2panda-net = { workspace = true, optional = true }
+p2panda-core = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
 
 [features]
 default = ["ring-http-client"]
@@ -22,6 +30,10 @@ default = ["ring-http-client"]
 # that errors (never reached — a program that doesn't import `std.http` never calls it), and reqwest
 # is absent from the link.
 ring-http-client = ["dep:reqwest"]
+# The real-p2p ring (p2p P3): pulls a p2panda-net node into `RealHost`. Off ⇒ `RealHost`'s `P2p`
+# stays the loopback broker (single-node). Deliberately not in `default` — pre-1.0 dependency,
+# quarantined from mainline + the oracle suite.
+ring-p2p = ["dep:p2panda-net", "dep:p2panda-core", "dep:futures-util"]
 
 [dev-dependencies]
 criterion = { workspace = true }

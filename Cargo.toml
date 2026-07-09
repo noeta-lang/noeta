@@ -145,6 +145,13 @@ hmac = { version = "0.12", default-features = false }
 # hmac verify twins rely on) — already in-tree transitively via `hmac`; never hand-roll this.
 subtle = { version = "2", default-features = false }
 bcrypt = { version = "0.17", default-features = false, features = ["alloc"] }
+# Real p2p transport (p2p P3, behind noeta-runtime's `ring-p2p` feature — OFF by default): a
+# p2panda-net node (gossip + log-sync over iroh/QUIC). Pre-1.0; pinned exactly because its
+# user-facing API may break before 1.0. Never in a default build. `p2panda-core` supplies the
+# `Hash`/`Topic` types; `futures-util` drives the gossip subscription stream in the drain task.
+p2panda-net = "0.7"
+p2panda-core = "0.7"
+futures-util = "0.3"
 
 [workspace.lints.rust]
 # Quarantine unsafe: forbidden workspace-wide in M0. The first crates that may
