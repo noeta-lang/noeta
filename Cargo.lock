@@ -3876,6 +3876,7 @@ dependencies = [
  "p2panda-spaces",
  "p2panda-store",
  "p2panda-sync",
+ "postcard",
  "reqwest 0.12.28",
  "tokio",
 ]

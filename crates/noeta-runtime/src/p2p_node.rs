@@ -40,7 +40,12 @@ use p2panda_sync::protocols::TopicLogSyncEvent;
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::{self, UnboundedReceiver};
 
+use p2panda_encryption::Rng;
+use p2panda_encryption::crypto::x25519::SecretKey;
+use p2panda_spaces::Credentials;
+
 use crate::io_error;
+use crate::p2p_crypto::CryptoGroups;
 use noeta_stdlib::{StdError, SyncStatus};
 
 /// Every node keeps a single append-only log for its own operations; the durable (log-sync)
@@ -148,6 +153,15 @@ pub struct P2pNode {
     /// topic → its live [`SyncStatus`] (p2p P3.3), shared with the drain task that updates it from
     /// the log-sync session lifecycle. `Arc` because the task outlives the borrow that spawns it.
     status: Arc<Mutex<HashMap<String, SyncStatus>>>,
+
+    // --- Group encryption (p2p P3.4b), backing an encrypted synced_signal ---
+    /// Where persistent state lives (identity, store, and the encryption credentials/store), or
+    /// `None` for an ephemeral node. Kept so the lazily-built [`CryptoGroups`] can find its files.
+    data_dir: Option<PathBuf>,
+    /// This node's group-encryption component, built lazily on first encrypted use and cached (a
+    /// plaintext-only program never constructs it). Its identity is the node's [`signing_key`], so
+    /// encryption membership is keyed on the same peer id as the transport.
+    crypto: Mutex<Option<CryptoGroups>>,
     // Discovery/endpoint components: kept alive for the node's lifetime (their background tasks run
     // on `runtime`), otherwise unused directly.
     _endpoint: Endpoint,
@@ -291,6 +305,8 @@ impl P2pNode {
             log_sync,
             durable: Mutex::new(HashMap::new()),
             status: Arc::new(Mutex::new(HashMap::new())),
+            data_dir,
+            crypto: Mutex::new(None),
             _endpoint: endpoint,
             _address_book: address_book,
             _discovery: discovery,
@@ -531,6 +547,51 @@ impl P2pNode {
             .copied()
             .unwrap_or(SyncStatus::Offline)
     }
+
+    // --- Group encryption (p2p P3.4b) ---------------------------------------------------------
+
+    /// This node's group-encryption component, built on first use and cached. The encryption actor
+    /// is the node's own signing key (loaded via persisted [`Credentials`] whose signing key is the
+    /// node identity), so membership is keyed on the same peer id as the transport. A persistent
+    /// node keeps its encryption store (`spaces.db`) and credentials (`credentials.key`) in its data
+    /// dir; an ephemeral node builds both in memory.
+    fn crypto(&self) -> Result<CryptoGroups, StdError> {
+        let mut guard = self.crypto.lock().unwrap();
+        if let Some(existing) = guard.as_ref() {
+            return Ok(existing.clone());
+        }
+        let rng = Rng::default();
+        let credentials = match &self.data_dir {
+            Some(dir) => load_or_create_credentials(&dir.join("credentials.key"), &self.signing_key, &rng),
+            None => {
+                let identity_secret = SecretKey::from_rng(&rng)
+                    .map_err(|e| io_error(format!("cannot generate encryption identity: {e}")))?;
+                Credentials::from_keys(self.signing_key.clone(), identity_secret)
+            }
+        };
+        let spaces_url = self
+            .data_dir
+            .as_ref()
+            .map(|dir| format!("sqlite://{}", dir.join("spaces.db").display()));
+        let store = self
+            .runtime
+            .block_on(async {
+                match &spaces_url {
+                    Some(url) => SqliteStoreBuilder::new().database_url(url).build().await,
+                    None => SqliteStoreBuilder::memory().build().await,
+                }
+            })
+            .map_err(|e| io_error(format!("cannot open group-encryption store: {e}")))?;
+        let crypto = CryptoGroups::new(store, credentials, rng)?;
+        *guard = Some(crypto.clone());
+        Ok(crypto)
+    }
+
+    /// The hex actor id of this node's group-encryption identity. Equal to [`Self::identity`] — the
+    /// encryption group and the transport share one peer id.
+    pub fn crypto_group_id(&self) -> Result<String, StdError> {
+        Ok(self.crypto()?.id().to_hex())
+    }
 }
 
 /// Set (overwrite) a topic's [`SyncStatus`], used by the drain task as session events arrive.
@@ -667,6 +728,44 @@ fn load_or_create_identity(path: &Path) -> SigningKey {
         );
     }
     key
+}
+
+/// Load this node's group-encryption [`Credentials`] from `path`, or derive + persist fresh ones.
+/// The signing key is always the node's transport identity (`signing_key`), so the encryption actor
+/// id equals the node's peer id; the paired x25519 identity secret (needed for key agreement, and
+/// which the crypto library will not expose as raw bytes) is generated once and the whole
+/// `Credentials` persisted via serde. A file whose identity no longer matches, or is unreadable, is
+/// regenerated with a warning — the node still runs, just with a fresh (this-session) encryption
+/// secret.
+fn load_or_create_credentials(path: &Path, signing_key: &SigningKey, rng: &Rng) -> Credentials {
+    if let Ok(bytes) = std::fs::read(path) {
+        match postcard::from_bytes::<Credentials>(&bytes) {
+            Ok(creds) if creds.verifying_key() == signing_key.verifying_key() => return creds,
+            Ok(_) => eprintln!(
+                "noeta p2p: credentials file {} does not match the node identity; regenerating",
+                path.display()
+            ),
+            Err(_) => eprintln!(
+                "noeta p2p: credentials file {} is malformed; regenerating",
+                path.display()
+            ),
+        }
+    }
+    let identity_secret =
+        SecretKey::from_rng(rng).expect("x25519 identity secret from the system rng");
+    let credentials = Credentials::from_keys(signing_key.clone(), identity_secret);
+    match postcard::to_allocvec(&credentials) {
+        Ok(bytes) => {
+            if let Err(e) = write_private(path, &bytes) {
+                eprintln!(
+                    "noeta p2p: cannot persist credentials to {} ({e}); encryption identity is ephemeral this session",
+                    path.display()
+                );
+            }
+        }
+        Err(e) => eprintln!("noeta p2p: cannot serialize credentials ({e}); not persisting"),
+    }
+    credentials
 }
 
 /// Write `bytes` to `path`, owner-only (`0600`) on Unix.
@@ -838,6 +937,36 @@ mod tests {
             assert!(b.to_string_lossy().contains("acme-wiki"));
             assert!(a.ends_with("p2p"));
         }
+    }
+
+    /// P3.4b: the group-encryption identity is the node's own identity (same peer id for membership
+    /// and transport), and — like the transport identity — it persists across a restart against the
+    /// same data dir (the x25519 secret is regenerated only when the file is absent/mismatched).
+    #[test]
+    fn crypto_identity_matches_node_identity_and_persists() {
+        let dir = TempDir::new("crypto-id");
+
+        let (node_id, group_id) = {
+            let node = P2pNode::start_with_config(P2pConfig::at(&dir.0)).expect("node 1");
+            (node.identity(), node.crypto_group_id().expect("group id"))
+        };
+        assert_eq!(
+            group_id, node_id,
+            "the encryption actor id equals the node's transport identity"
+        );
+        assert!(dir.0.join("credentials.key").exists(), "credentials written");
+
+        // Restart from the same dir: the credentials (and thus the group actor id) persist.
+        let second = P2pNode::start_with_config(P2pConfig::at(&dir.0)).expect("node 2");
+        assert_eq!(
+            second.crypto_group_id().expect("group id"),
+            group_id,
+            "credentials persist across restart"
+        );
+
+        // A fresh ephemeral node gets a different encryption identity.
+        let ephemeral = P2pNode::start_with_config(P2pConfig::ephemeral()).expect("ephemeral");
+        assert_ne!(ephemeral.crypto_group_id().expect("group id"), group_id);
     }
 
     #[test]

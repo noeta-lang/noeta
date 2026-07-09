@@ -30,6 +30,9 @@ p2panda-spaces = { workspace = true, optional = true }
 p2panda-auth = { workspace = true, optional = true }
 p2panda-encryption = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
+# Serialize the node's group-encryption `Credentials` to disk (p2p P3.4b) and (later) spaces
+# operations for the wire. Compact, no_std-friendly; only pulled in with the p2p ring.
+postcard = { workspace = true, optional = true }
 
 [features]
 default = ["ring-http-client", "ring-p2p"]
@@ -53,6 +56,7 @@ ring-p2p = [
     "dep:p2panda-auth",
     "dep:p2panda-encryption",
     "dep:futures-util",
+    "dep:postcard",
 ]
 
 [dev-dependencies]
