@@ -1122,6 +1122,20 @@ impl Interpreter {
                 // type onto the freshly-built value (R2b.2) — the tree-walker twin of the VM's node tag.
                 result.map(|v| tag_enum_reflect(v, reflect))
             }
+            // A bound method-bundle call (kernel-methods K3): the route was baked at the call
+            // site — straight to the bundle's shared ctx dispatch, receiver as slot 0.
+            noeta_ir::Rvalue::BundleMethod {
+                receiver,
+                module,
+                bundle,
+                name,
+                args,
+                span,
+            } => {
+                let recv = self.eval_ir_atom(receiver, frame)?;
+                let values = self.eval_ir_atoms(args, frame)?;
+                self.call_bundle_method(module, bundle, name, recv, &values, *span)
+            }
             noeta_ir::Rvalue::Field {
                 receiver,
                 name,

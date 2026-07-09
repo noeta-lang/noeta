@@ -613,9 +613,76 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
-        // Seed the table directly — receiver as slot 0, arguments after it — and index the
-        // argument slots from a stack buffer: a hot `set(v)` loop then builds no vectors at all
-        // (the table itself is pooled).
+        self.ctx_receiver_call(
+            recv,
+            args,
+            span,
+            &format!("{type_name}.{method}"),
+            // Compiled-in extensions dispatch through the monomorphized route (every ctx op
+            // inlines); anything else falls back to the dyn table (H5 perf).
+            |ctx, arg_slots| {
+                noeta_stdlib::registry::static_dispatch_ctx_method(
+                    type_name, method, ctx, 0, arg_slots,
+                )
+                .unwrap_or_else(|| {
+                    noeta_stdlib::registry::dispatch_ctx_method(
+                        type_name, method, ctx, 0, arg_slots,
+                    )
+                })
+            },
+            || {
+                noeta_stdlib::registry::find_type_ctx_method(type_name, method)
+                    .map(|f| f.ret)
+                    .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit))
+            },
+        )
+    }
+
+    /// Call a bound method-bundle method (kernel-methods K3): the compiler baked the
+    /// `(module, bundle)` route at the call site, so this goes straight to the bundle's shared
+    /// ctx dispatch — the bundle twin of [`Vm::call_ctx_type_method`], receiver as slot 0.
+    pub(crate) fn call_bundle_method(
+        &mut self,
+        module: &str,
+        bundle: &str,
+        method: &str,
+        recv: Value,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        self.ctx_receiver_call(
+            recv,
+            args,
+            span,
+            &format!("{module}::{bundle}.{method}"),
+            |ctx, arg_slots| {
+                noeta_stdlib::registry::dispatch_bundle_method(
+                    module, bundle, method, ctx, 0, arg_slots,
+                )
+            },
+            || {
+                noeta_stdlib::registry::find_bundle(module, bundle)
+                    .and_then(|b| b.method(method))
+                    .map(|m| m.sig.ret)
+                    .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit))
+            },
+        )
+    }
+
+    /// The shared receiver-seeded ctx-call shape (extern-type ctx methods + bundle methods):
+    /// seed the table directly — receiver as slot 0, arguments after it — index the argument
+    /// slots from a stack buffer (a hot `set(v)` loop builds no vectors; the table is pooled),
+    /// run `dispatch`, and unwrap the outcome. `ret` resolves the declared `RetTy` lazily — only
+    /// a data (`CtxOut::Out`) result pays the lookup.
+    fn ctx_receiver_call(
+        &mut self,
+        recv: Value,
+        args: &[Value],
+        span: Span,
+        label: &str,
+        dispatch: impl FnOnce(&mut VmCtx<'_, 'm>, &[Slot]) -> Result<CtxOut, CtxError>,
+        ret: impl FnOnce() -> noeta_stdlib::RetTy,
+    ) -> Result<Value, Abort> {
         let mut ctx = VmCtx::new(self, &[], span);
         ctx.insert_seed(recv);
         for &a in args {
@@ -632,14 +699,7 @@ impl<'m> Vm<'m> {
             slot_vec = (1..=args.len() as Slot).collect::<Vec<_>>();
             &slot_vec
         };
-        // Compiled-in extensions dispatch through the monomorphized route (every ctx op
-        // inlines); anything else falls back to the dyn table (H5 perf).
-        let outcome = noeta_stdlib::registry::static_dispatch_ctx_method(
-            type_name, method, &mut ctx, 0, arg_slots,
-        )
-        .unwrap_or_else(|| {
-            noeta_stdlib::registry::dispatch_ctx_method(type_name, method, &mut ctx, 0, arg_slots)
-        });
+        let outcome = dispatch(&mut ctx, arg_slots);
         match outcome {
             Ok(CtxOut::Slot(slot)) => {
                 let result = ctx.take(slot);
@@ -649,7 +709,7 @@ impl<'m> Vm<'m> {
                     Err(_) => Err(self.error(
                         DiagnosticCode::Panic,
                         span,
-                        format!("internal: `{type_name}.{method}` returned a freed slot"),
+                        format!("internal: `{label}` returned a freed slot"),
                     )),
                 }
             }
@@ -676,9 +736,7 @@ impl<'m> Vm<'m> {
             }
             Ok(CtxOut::Out(out)) => {
                 drop(ctx);
-                let ret = noeta_stdlib::registry::find_type_ctx_method(type_name, method)
-                    .map(|f| f.ret)
-                    .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit));
+                let ret = ret();
                 // Shape derivation sees the receiver at index 0, as the slots do.
                 let mut all = Vec::with_capacity(args.len() + 1);
                 all.push(recv);

@@ -155,6 +155,13 @@ pub struct Sites {
     /// Bound-handle sites (`value.method` in value position, EX.2b) → lowered to
     /// [`Rvalue::BoundHandle`] (the receiver captured into the handle).
     pub bound_handle_sites: HashSet<Span>,
+    /// Method-bundle call sites (kernel-methods K2): each bound bundle-method call span → the
+    /// statically resolved route `(module qualified identity, bundle name)`. Lowering bakes the
+    /// route into the call, so runtime dispatch is **call-site-resolved** — no shape-keyed
+    /// discovery, and an empty list receiver dispatches fine. (The flip side, documented: a
+    /// bundle method is not reachable through a `dyn` receiver — `dyn` stays the escape hatch;
+    /// a runtime binding table would be an additive later extension.)
+    pub bundle_call_sites: HashMap<Span, (String, String)>,
     /// Bare float-literal spans adapted into an `f32` context (P-NUM-SYM) — the type-directed hint
     /// that makes lowering emit a narrow `Const::F32` instead of the default `Const::Float`. A pure
     /// function of the program (both backends narrow identically), like the other site maps.
@@ -666,6 +673,8 @@ struct SiteMaps {
     /// Bare float-literal spans adapted into an `f32` context (P-NUM-SYM) — lowering reads this (via
     /// [`Checked::f32_literal_sites`]) to emit a narrow `Const::F32` for the literal.
     f32_literal_sites: HashSet<Span>,
+    /// Method-bundle call sites (kernel-methods K2) — see [`Sites::bundle_call_sites`].
+    bundle_call_sites: HashMap<Span, (String, String)>,
 }
 
 impl SiteMaps {
@@ -686,6 +695,7 @@ impl SiteMaps {
             handle_sites: self.handle_sites,
             bound_handle_sites: self.bound_handle_sites,
             f32_literal_sites: self.f32_literal_sites,
+            bundle_call_sites: self.bundle_call_sites,
             destructor_relevance,
         }
     }
@@ -4860,6 +4870,14 @@ impl Checker {
                     self.note_map_packed(&r, call_span);
                     return Type::List(Box::new(r));
                 }
+                // A method-bundle method (kernel-methods K2): the receiver is a bound `@packed`
+                // type (`Element`) or a `List<T>` of one (`Bulk`). Resolution is static: the
+                // route is recorded at the call span for lowering to bake in — so dispatch is
+                // call-site-resolved (an empty list receiver works) and a `dyn` receiver simply
+                // never reaches here (the documented escape-hatch behavior).
+                if let Some(ret) = self.bundle_method_call(&recv, name, args, span, call_span) {
+                    return ret;
+                }
                 let ret = self.method_call_return(&recv, name);
                 // A method call on a concrete primitive with no such built-in method is an error,
                 // mirroring the non-indexable check (`42[0]`). `dyn`/holes defer (their result is
@@ -5453,6 +5471,43 @@ impl Checker {
 
     /// The return type of a method call `recv.name(...)`: a built-in method, a user-declared
     /// method, or — when the receiver defers to runtime (`dyn`/hole) — the deferred type itself.
+    /// Type a method-bundle method call (kernel-methods K2): an `Element` method on a bound
+    /// `@packed` type, or a `Bulk` method on a `List<T>` of one. On a hit: checks arity and
+    /// argument types against the bundle's declared signature (nominal — the shape requirement
+    /// was already verified at the impl site), records the call-site route for lowering, and
+    /// returns the method's type under the receiver-at-0 convention. `None` = not a bundle
+    /// method; the caller falls through to the ordinary paths.
+    fn bundle_method_call(
+        &mut self,
+        recv: &Type,
+        name: &str,
+        args: &[Type],
+        span: Span,
+        call_span: Span,
+    ) -> Option<Type> {
+        use noeta_stdlib::BundleReceiver;
+        let (type_name, receiver_kind) = match recv {
+            Type::Named(n, targs) if targs.is_empty() => (n, BundleReceiver::Element),
+            Type::List(elem) => match elem.as_ref() {
+                Type::Named(n, targs) if targs.is_empty() => (n, BundleReceiver::Bulk),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let bindings = self.bundle_impls.get(type_name)?;
+        let (route, method) = bindings.iter().find_map(|b| {
+            b.bundle
+                .method(name)
+                .filter(|m| m.receiver == receiver_kind)
+                .map(|m| ((b.module.clone(), b.bundle.name.to_string()), m))
+        })?;
+        let params = stdlib::bundle_method_params(&method.sig, args);
+        let required = noeta_stdlib::SigType::required_count(method.sig.params);
+        self.check_args(&params, required, args, &[], span, name);
+        self.sites.bundle_call_sites.insert(call_span, route);
+        Some(stdlib::bundle_method_return(&method.sig, recv, args))
+    }
+
     fn method_call_return(&self, recv: &Type, name: &str) -> Type {
         if let Some(t) = stdlib::method_return(recv, name) {
             return t;

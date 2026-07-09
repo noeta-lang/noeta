@@ -681,6 +681,31 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
     })
 }
 
+/// A bundle method's parameter types under the receiver-at-0 convention (kernel-methods K2):
+/// the receiver is NOT in `params` (it rides as ctx slot 0), so binding and substitution run
+/// over the call's own arguments exactly like a module function's.
+pub(super) fn bundle_method_params(f: &registry::ExtFn, args: &[Type]) -> Vec<Type> {
+    let bindings = bind_params(f.params, args);
+    f.params
+        .iter()
+        .map(|p| sig_to_type_bound(p, &bindings))
+        .collect()
+}
+
+/// A bundle method's return type under the receiver-at-0 convention (kernel-methods K2):
+/// `SameAsArg(0)` is **the receiver's type** (`xs.add_all(ys)` returns `xs`'s own `List<T>`),
+/// `SameAsArg(i > 0)` the call's argument `i - 1`.
+pub(super) fn bundle_method_return(f: &registry::ExtFn, recv: &Type, args: &[Type]) -> Type {
+    use registry::RetTy;
+    match f.ret {
+        RetTy::Concrete(s) => sig_to_type_bound(&s, &bind_params(f.params, args)),
+        RetTy::SameAsArg(0) => recv.clone(),
+        RetTy::SameAsArg(i) => args.get(i - 1).cloned().unwrap_or(Type::Dyn),
+        RetTy::NumericPreserving => numeric_preserving(args),
+        RetTy::TypeArg => Type::Unknown,
+    }
+}
+
 /// Kind-preserving numeric result (`math.abs`/`min`/`max`): `int` if every argument is concretely
 /// `int`, `float` if any is `float`, else a numeric hole (not yet known — gradual, not `dyn`).
 fn numeric_preserving(args: &[Type]) -> Type {

@@ -543,6 +543,13 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.extend(args.iter().copied());
         }
+        Op::BundleMethod {
+            dst, recv, args, ..
+        } => {
+            f.def = Some(*dst);
+            f.uses.push(*recv);
+            f.uses.extend(args.iter().copied());
+        }
         Op::Return { src } => {
             f.uses.push(*src);
             f.fallthrough = false;
@@ -1001,6 +1008,15 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         }
         Op::TypedModuleCall { dst, args, .. } => {
             m(dst);
+            for r in args.iter_mut() {
+                m(r);
+            }
+        }
+        Op::BundleMethod {
+            dst, recv, args, ..
+        } => {
+            m(dst);
+            m(recv);
             for r in args.iter_mut() {
                 m(r);
             }

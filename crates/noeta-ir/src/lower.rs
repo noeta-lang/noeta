@@ -102,6 +102,9 @@ pub struct LoweringSites<'a> {
     /// representation, so an adapted literal must lower to a narrow [`Const::F32`] rather than the
     /// default [`Const::Float`] — this set is that type-directed hint.
     pub f32_literal_sites: &'a HashSet<Span>,
+    /// Method-bundle call sites (kernel-methods K2) → the resolved `(module, bundle)` route,
+    /// baked into an [`Rvalue::BundleMethod`] instead of the generic [`Rvalue::Method`].
+    pub bundle_call_sites: &'a HashMap<Span, (String, String)>,
 }
 
 /// Lower a whole parsed program to the Core IR, or report the first construct outside the
@@ -119,6 +122,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
     let handles = HashMap::new();
     let bound = HashSet::new();
     let f32_lits = HashSet::new();
+    let bundles = HashMap::new();
     lower_with_sites(
         program,
         LoweringSites {
@@ -131,6 +135,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
             handle_sites: &handles,
             bound_handle_sites: &bound,
             f32_literal_sites: &f32_lits,
+            bundle_call_sites: &bundles,
         },
     )
 }
@@ -1004,6 +1009,22 @@ impl Lowerer<'_> {
                                 method,
                                 args: arg_atoms,
                                 bits,
+                                span: *span,
+                            },
+                            *span,
+                        ));
+                    }
+                    // A method-bundle call (kernel-methods K2): the checker resolved this call
+                    // span to a bound bundle — bake the route in.
+                    if let Some((module, bundle)) = self.sites.bundle_call_sites.get(span) {
+                        return Ok(self.emit(
+                            out,
+                            Rvalue::BundleMethod {
+                                receiver,
+                                module: module.clone(),
+                                bundle: bundle.clone(),
+                                name: name.clone(),
+                                args: arg_atoms,
                                 span: *span,
                             },
                             *span,

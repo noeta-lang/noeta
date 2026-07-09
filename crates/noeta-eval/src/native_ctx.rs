@@ -498,19 +498,78 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
+        self.ctx_receiver_call(
+            recv,
+            args,
+            span,
+            &format!("{type_name}.{method}"),
+            // Same monomorphized route as the VM (identical fn either way — the instantiation
+            // only decides inlining).
+            |ctx, arg_slots| {
+                noeta_stdlib::registry::static_dispatch_ctx_method(
+                    type_name, method, ctx, 0, arg_slots,
+                )
+                .unwrap_or_else(|| {
+                    noeta_stdlib::registry::dispatch_ctx_method(
+                        type_name, method, ctx, 0, arg_slots,
+                    )
+                })
+            },
+            || {
+                noeta_stdlib::registry::find_type_ctx_method(type_name, method)
+                    .map(|f| f.ret)
+                    .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit))
+            },
+        )
+    }
+
+    /// Call a bound method-bundle method (kernel-methods K3) — the tree-walker twin of the VM's
+    /// `call_bundle_method`: the compiler baked the route, receiver rides as slot 0.
+    pub(crate) fn call_bundle_method(
+        &mut self,
+        module: &str,
+        bundle: &str,
+        method: &str,
+        recv: Value,
+        args: &[Value],
+        span: Span,
+    ) -> Eval<Value> {
+        self.ctx_receiver_call(
+            recv,
+            args,
+            span,
+            &format!("{module}::{bundle}.{method}"),
+            |ctx, arg_slots| {
+                noeta_stdlib::registry::dispatch_bundle_method(
+                    module, bundle, method, ctx, 0, arg_slots,
+                )
+            },
+            || {
+                noeta_stdlib::registry::find_bundle(module, bundle)
+                    .and_then(|b| b.method(method))
+                    .map(|m| m.sig.ret)
+                    .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit))
+            },
+        )
+    }
+
+    /// The shared receiver-seeded ctx-call shape (extern-type ctx methods + bundle methods) —
+    /// the tree-walker twin of the VM's `ctx_receiver_call`.
+    fn ctx_receiver_call(
+        &mut self,
+        recv: Value,
+        args: &[Value],
+        span: Span,
+        label: &str,
+        dispatch: impl FnOnce(&mut EvalCtx<'_>, &[Slot]) -> Result<CtxOut, CtxError>,
+        ret: impl FnOnce() -> noeta_stdlib::RetTy,
+    ) -> Eval<Value> {
         let mut all = Vec::with_capacity(args.len() + 1);
         all.push(recv);
         all.extend_from_slice(args);
         let mut ctx = EvalCtx::new(self, &all, span);
         let arg_slots: Vec<Slot> = (1..all.len() as Slot).collect();
-        // Same monomorphized route as the VM (identical fn either way — the instantiation only
-        // decides inlining).
-        let outcome = noeta_stdlib::registry::static_dispatch_ctx_method(
-            type_name, method, &mut ctx, 0, &arg_slots,
-        )
-        .unwrap_or_else(|| {
-            noeta_stdlib::registry::dispatch_ctx_method(type_name, method, &mut ctx, 0, &arg_slots)
-        });
+        let outcome = dispatch(&mut ctx, &arg_slots);
         match outcome {
             Ok(CtxOut::Slot(slot)) => {
                 let result = ctx.take(slot);
@@ -520,7 +579,7 @@ impl Interpreter {
                     Err(_) => Err(self.runtime_error(
                         DiagnosticCode::Panic,
                         span,
-                        format!("internal: `{type_name}.{method}` returned a freed slot"),
+                        format!("internal: `{label}` returned a freed slot"),
                     )),
                 }
             }
@@ -543,10 +602,7 @@ impl Interpreter {
             }
             Ok(CtxOut::Out(out)) => {
                 drop(ctx);
-                let ret = noeta_stdlib::registry::find_type_ctx_method(type_name, method)
-                    .map(|f| f.ret)
-                    .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit));
-                Ok(materialize_ext(out, ret, &all))
+                Ok(materialize_ext(out, ret(), &all))
             }
             Err(CtxError::Std(e)) => {
                 drop(ctx);
