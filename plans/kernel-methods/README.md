@@ -1,7 +1,14 @@
 # Kernel methods — extension method bundles for packed types
 
-*Status: **DRAFT FOR REVIEW (2026-07-09)** — design written post-PM-Phase-3 from the kernel
-integration discussion; no implementation until the shape is confirmed.*
+*Status: **✅ K0–K6 COMPLETE (2026-07-09, branch `kernel-methods`)** — bundles registered
+(`ExtBundle` on `ExtModule.bundles`), bound (`impl vec.Kernels for T {}`, impl-site constraint
+validation), typed + lowered (call-site-resolved `Op::BundleMethod` — a deliberate deviation from
+this plan's runtime shape-keyed table: an empty list receiver works, dispatch costs nothing, `dyn`
+documented as unreachable; a runtime table stays additive), dispatched by both backends through
+the shared `ctx_receiver_call` shape, surfaced in member completion, dogfooded (`vec.Kernels`
+Element + Bulk), perf-gated at parity (method ≡ module, −0.3%/−2.1%), and proven third-party
+through toolchain composition (`fx.Pixels` in the composed e2e). Follow-on (std.vec hybrid
+package with canonical types) below remains future work.*
 
 ## Motivation
 

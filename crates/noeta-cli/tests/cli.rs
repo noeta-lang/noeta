@@ -2566,11 +2566,13 @@ fn composed_project(name: &str) -> PathBuf {
          echo a.total();\n\n\
          // The raw-buffer seam, third-party edition (N3.4): the extension's column kernel\n\
          // reduces the app's own @packed type, and its COW-mutating kernel produces a new list.\n\
+         impl fx.Pixels for Px {}\n\
          ps = [Px { r: 0.25f32, g: 1.0f32, b: 2.0f32 }, Px { r: 0.5f32, g: 1.0f32, b: 2.0f32 }];\n\
          echo fx.sum_r(ps);\n\
          bright = fx.brighten_all(ps, 0.5f32);\n\
          echo bright[1].g;\n\
-         echo ps[1].g;\n",
+         echo ps[1].g;\n\
+         echo ps.brighten(2.0f32)[0].r;\n",
     )
     .unwrap();
     std::fs::write(
@@ -2615,7 +2617,8 @@ use std::fmt;
 use std::sync::atomic::{AtomicI64, Ordering as AtomicOrd};
 
 use noeta_native::registry::{
-    ExtFn, ExtModule, ExtType, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType,
+    BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, ExtBundle, ExtFn, ExtModule,
+    ExtType, Extension, NativeOut, NativeValue, PackedConstraint, RetTy, Scalar, SigType,
 };
 use noeta_native::{
     no_function_error, no_method_error, CommandCtx, CtxError, CtxOut, ErrorKind, ExtCommand,
@@ -2866,6 +2869,48 @@ fn fx_info_run(_ctx: &mut dyn CommandCtx, _args: &ParsedArgs) -> u8 {
     0
 }
 
+// A third-party METHOD BUNDLE (kernel-methods K6): the consumer's own @packed pixel type opts in
+// with `impl fx.Pixels for Px {}` and gains `ps.brighten(delta)` — same COW raw-buffer kernel as
+// `fx.brighten_all`, in method position, statically routed through the composed toolchain.
+const PIXELS_BUNDLE: ExtBundle = ExtBundle {
+    name: "Pixels",
+    constraint: PackedConstraint {
+        fields: &[
+            ConstraintField::F32,
+            ConstraintField::F32,
+            ConstraintField::F32,
+        ],
+        layout: ConstraintLayout::Any,
+    },
+    methods: &[BundleFn {
+        sig: ExtFn {
+            name: "brighten",
+            params: &[SigType::F32],
+            ret: RetTy::SameAsArg(0),
+        },
+        receiver: BundleReceiver::Bulk,
+    }],
+    ctx_dispatch: pixels_bundle_dispatch,
+};
+
+fn pixels_bundle_dispatch(
+    method: &str,
+    ctx: &mut dyn NativeCtx,
+    recv: noeta_native::Slot,
+    args: &[noeta_native::Slot],
+) -> Result<CtxOut, CtxError> {
+    match method {
+        // `ps.brighten(delta)` ≡ `fx.brighten_all(ps, delta)` — one kernel, two surfaces.
+        "brighten" => {
+            let mut all = Vec::with_capacity(args.len() + 1);
+            all.push(recv);
+            all.extend_from_slice(args);
+            fx_ctx_dispatch("brighten_all", ctx, &all)
+        }
+        _ => Err(no_method_error("fx.Pixels", method).into()),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ImgfxExtension;
 
@@ -2880,6 +2925,7 @@ impl Extension for ImgfxExtension {
             dispatch: fx_dispatch,
             ctx_functions: FX_CTX_FNS,
             ctx_dispatch: Some(fx_ctx_dispatch),
+            bundles: &[PIXELS_BUNDLE],
             ..ExtModule::DEFAULTS
         }]
     }
@@ -2938,7 +2984,8 @@ fn composed_toolchain_end_to_end() {
             predicate::str::contains("42")
                 .and(predicate::str::contains("20"))
                 .and(predicate::str::contains("0.75"))
-                .and(predicate::str::contains("1.5\n1.0")),
+                .and(predicate::str::contains("1.5\n1.0"))
+                .and(predicate::str::contains("2.25")),
         )
         .stderr(predicate::str::contains("composing the toolchain"));
 

@@ -95,6 +95,37 @@ A `List<packed>` is stored as one contiguous byte buffer, and a bulk kernel (a S
 
 The element-wise *fallback* (a boxed, non-packed operand) is expressible in the same shared dispatch through the fused structural reads `object_scalars_at`/`make_object_like_element` (one reused scalar buffer, no per-element slots), and a reduction returns its whole result as one typed vector — `NativeOut::Scalars(ScalarVec::F32(…))` — so the backend converts it in a single pass. The dogfood is the `vec.*_all` family: `add_all`/`sub_all`/`scale_all`/`dot_all`/`length_all` were the **last per-backend native intercepts** in either backend; they are now one registered ctx dispatch, perf-gated at or below the old special-cased numbers (`tests/bench/pm-native/`). A third-party crate registering a column kernel for the *consumer's own* `@packed` type is proven end-to-end in the composition test suite.
 
+## Method bundles: `impl vec.Kernels for Px {}`
+
+Raw-buffer kernels as free functions are structurally connected to the data (`vec.dot_all(xs, ys)`
+accepts any 3×`f32` packed list) — invisible to the checker and the editor. A **method bundle** is
+the nominal binding on top (kernel-methods arc): a module registers a named set of methods with a
+**structural constraint** (`ExtBundle { name, constraint, methods, ctx_dispatch }` on
+`ExtModule::bundles` — each method `Element`, on a value of the bound type, or `Bulk`, on a
+`List<T>` of it), and a user type opts in explicitly:
+
+```noe
+use std.{vec}
+
+@packed struct Px { x: f32; y: f32; z: f32 }
+impl vec.Kernels for Px {}          // constraint checked HERE, at compile time
+
+d  = xs.dot_all(ys)                 // Bulk: methods on List<Px> — same kernel as vec.dot_all
+v2 = v.normalize()                  // Element: methods on Px itself
+```
+
+The binding is what makes the whole toolchain smart: the impl site validates the shape requirement
+(three `f32` fields — a mismatch is a compile-time diagnostic naming expected vs found), method
+calls type nominally (`SameAsArg(0)` = the receiver's own type, so `xs.add_all(ys)[0].x` resolves
+statically), member completion lists the bound methods, and conflicts are rejected receiver-aware
+(an `Element` method against the type's own methods/fields, a `Bulk` method against built-in list
+methods). Dispatch is **call-site-resolved**: the checker bakes the `(module, bundle)` route into
+the compiled call — zero runtime discovery, an empty list receiver works, and the method form
+measures at parity with the module-function form (`tests/bench/kernel-methods/`). The flip side:
+bundle methods are not reachable through a `dyn` receiver (`dyn` stays the escape hatch; a runtime
+binding table would be additive). `std.vec`'s `Kernels` is the dogfood; a third-party bundle over
+the consumer's own packed type is proven through toolchain composition in the CLI e2e.
+
 ## Writing a native package
 
 A dependency package ships native code by naming an **entry crate** in its manifest:
