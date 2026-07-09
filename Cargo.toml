@@ -69,6 +69,9 @@ noeta-fmt = { path = "crates/noeta-fmt" }
 # Package manager (package-manager P2): manifest + transitive resolver + git/store/lock + registry
 # index. A library (not in the CLI binary) so `noeta-lsp`/`noeta-db` can resolve dependencies too.
 noeta-pm = { path = "crates/noeta-pm" }
+# Agent-native tooling: the `noeta mcp` Model Context Protocol server (agent adapter over the
+# salsa graph + VM — the third editor-tooling leg after lsp/dap). See plans/mcp/README.md.
+noeta-mcp = { path = "crates/noeta-mcp" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
 logos = "0.16"
@@ -93,6 +96,10 @@ clap = { version = "4", features = ["derive"] }
 # Language-server framework (editor-tooling milestone): the maintained community fork of
 # tower-lsp — async LanguageServer trait + JSON-RPC transport, composes with our tokio.
 tower-lsp-server = "0.23"
+# Agent-native tooling (MCP arc): the official Rust MCP SDK. Server + macros (the `#[tool]` /
+# `#[tool_router]` surface) + stdio transport + schemars-backed tool-parameter schemas. Composes
+# with the workspace tokio; only `noeta-mcp` (and the CLI entry point) pull it in.
+rmcp = { version = "2.1", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 miniz_oxide = "0.8"

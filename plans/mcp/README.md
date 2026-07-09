@@ -1,6 +1,6 @@
 # Agent-native tooling — `noeta mcp` Model Context Protocol server
 
-**Status: planning (proposal for sign-off).** This is the third leg of the editor-tooling story —
+**Status: M0 done; M1 next.** `noeta mcp` runs over stdio (`rmcp` 2.1), advertises instructions + the `check` tool, and returns typed diagnostics for inline or on-disk Noeta — verified by a real client⇄server round-trip. This is the third leg of the editor-tooling story —
 after `noeta lsp` (a *read* adapter over the salsa graph, shipped) and `noeta dap` (a *control*
 adapter over the running VM, shipped). The MCP server is the adapter for a **different consumer**: an
 AI coding agent. It is the feature that makes Noeta genuinely agent-native — the roadmap has always
@@ -292,7 +292,7 @@ and the debug driver.
 
 | # | Slice | Delivers | Notes |
 |---|-------|----------|-------|
-| **M0** | Server skeleton + `check` + instructions | An agent can connect and get real diagnostics | `noeta-mcp` crate + `noeta mcp` subcommand; MCP handshake, capability + **instructions** advertisement; one tool, `check` — wired to the parallel `noeta check` arc's engine (lint + static-verify + type), falling back to `linked_checked_ide` diagnostics until that entry is exposed. **Protocol/SDK decision (#2) lands here.** The single highest-value tool, first. |
+| **M0** ✅ | Server skeleton + `check` + instructions | An agent can connect and get real diagnostics | `noeta-mcp` crate + `noeta mcp` subcommand; `rmcp` 2.1 over stdio; MCP handshake, tools capability + **instructions** advertisement; one tool, `check`, over the `linked_checked` query — returns `{ok, diagnostics[{code, severity, message, span{file,line,column,start,end}, labels, help}]}` for inline `source` or a `file` (sibling `.noe` modules resolved). Tested by direct-logic units + a client⇄server duplex round-trip fixture. Wraps the parallel `noeta check` (lint + static-verify) engine when it exposes a reusable entry. **Protocol/SDK decision (#2) landed: `rmcp`.** |
 | **M1** | Ground — docs + examples + explain | The agent writes idiomatic Noeta from real sources | `docs_search`/`docs_get`/`examples_find` over the in-memory corpus index; `explain_diagnostic`; docs+examples also exposed as MCP **resources**. No compiler state beyond the index. |
 | **M2** | Ground — stdlib surface | The agent stops inventing stdlib calls | `stdlib_api` renders the native registry + reflection manifest into module/function/method signatures. |
 | **M3** | Understand (cheap half) + Introspect | Semantic + artifact queries with zero refactor | `type_at`, `symbols`, `ast`, `bytecode`, `module_graph`, `pipeline`, `reflect` — all on public `noeta-db`/`noeta-ast`/`noeta-check`. Ships the byte-offset↔position helper (astral-plane unit tests). |

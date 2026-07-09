@@ -1,0 +1,29 @@
+[package]
+name = "noeta-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The MCP server reads diagnostics off the salsa graph exactly as the LSP does (M0 = the `check`
+# tool over `linked_checked`); later slices grow to drive the VM like the DAP. The `run` set minus
+# the executor, plus the MCP SDK.
+noeta-span = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-db = { workspace = true }
+noeta-loader = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "rt-multi-thread", "macros"] }
+rmcp = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+# The in-process round-trip fixture drives a real MCP session (client ⇄ server over an in-memory
+# duplex), so the test build additionally needs the `client` role and the async-rw transport. These
+# features are test-only (dev-dep feature unification is scoped to this crate's own test build).
+rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
