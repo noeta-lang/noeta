@@ -13,8 +13,11 @@
 //! content the agent can act on. Later slices add the Ground / Understand / Introspect / Execute
 //! pillars (see `plans/mcp/README.md`).
 
+mod analyze;
 mod corpus;
+mod introspect;
 mod stdlib;
+mod understand;
 
 use noeta_diagnostics::{DiagnosticCode, JsonDiagnostic, to_json};
 use noeta_span::{Source, SourceId, SourceMap};
@@ -48,6 +51,10 @@ spans, help). Pass code inline via `source`, or a path via `file` (sibling `.noe
 resolved so imports type-check). Run this before claiming any Noeta code compiles.
 - `explain_diagnostic` — when `check` returns an `E0xxx` code, look up what it means and see the \
 real programs that trigger and fix it.
+- `type_at` / `symbols` — the inferred type at a symbol/position, and a file's declaration outline.
+- `ast` / `bytecode` / `pipeline` / `module_graph` / `reflect` — inspect the compiler's artifacts: \
+the syntax tree, the VM disassembly, a per-stage health summary, the `use` import graph, and the \
+`@role` architectural graph.
 
 Do not invent syntax or standard-library calls; search the docs/examples, then `check` a snippet.";
 
@@ -156,6 +163,49 @@ pub struct ExampleOut {
     pub expects: Vec<String>,
 }
 
+/// A `check`-style source input shared by the M3 analysis tools: inline `source` OR a `file` path.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct AnalyzeArgs {
+    /// Inline Noeta source to analyze. Provide this or `file`.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Path to a `.noe` file to analyze. Sibling `.noe` modules are resolved. Provide this or `source`.
+    #[serde(default)]
+    pub file: Option<String>,
+}
+
+/// Arguments to `type_at`: a source, plus a site addressed by `symbol` name or `line`/`column`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TypeAtArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// A symbol name to locate (its first whole-word occurrence in the entry file). Preferred over a
+    /// position for an agent that has a name, not a cursor.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// 1-based line of the site (use with `column` when no `symbol` is given).
+    #[serde(default)]
+    pub line: Option<u32>,
+    /// 1-based, UTF-8-byte column of the site.
+    #[serde(default)]
+    pub column: Option<u32>,
+}
+
+/// Arguments to `reflect`: a source, plus an optional architectural-role filter.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ReflectArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Narrow to declarations bearing this role — the bare variant (`EntryPoint`) or qualified
+    /// (`Semantic.EntryPoint`), case-insensitive. Omit for every role.
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
 /// Arguments to `stdlib_api`.
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct StdlibApiArgs {
@@ -212,7 +262,7 @@ modules are resolved so imports check). Run this before claiming Noeta code comp
         &self,
         Parameters(args): Parameters<CheckArgs>,
     ) -> Result<Json<CheckOutput>, ErrorData> {
-        let sources = resolve_sources(&args)?;
+        let sources = resolve_sources(&args.source, &args.file)?;
         Ok(Json(run_check(&sources)))
     }
 
@@ -294,6 +344,110 @@ truth."
         Parameters(args): Parameters<StdlibApiArgs>,
     ) -> Json<stdlib::StdlibApiOutput> {
         Json(stdlib::query(args.module.as_deref()))
+    }
+
+    /// The inferred type at a symbol or position — the compiler's own answer, not a guess.
+    #[tool(
+        description = "Report the inferred type at a site in Noeta code. Address the site by \
+`symbol` (a name — its first occurrence in the entry file) or by 1-based `line`+`column`. Returns \
+the tightest typed expression's type in surface syntax. Ground truth from the type checker."
+    )]
+    async fn type_at(
+        &self,
+        Parameters(args): Parameters<TypeAtArgs>,
+    ) -> Result<Json<understand::TypeAtOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(understand::type_at(
+            &prepared,
+            args.symbol.as_deref(),
+            args.line,
+            args.column,
+        )))
+    }
+
+    /// The declaration outline of a file — functions, types, and their members.
+    #[tool(
+        description = "Outline the declarations in Noeta code — top-level functions, structs, \
+classes, enums, and impls, with their fields, variants, and methods as children (each with its \
+source span). The map an agent reads before navigating a file."
+    )]
+    async fn symbols(
+        &self,
+        Parameters(args): Parameters<AnalyzeArgs>,
+    ) -> Result<Json<understand::SymbolsOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(understand::symbols(&prepared)))
+    }
+
+    /// The pretty-printed AST — the parsed syntax tree with spans.
+    #[tool(
+        description = "Return the parsed syntax tree of Noeta code as pretty-printed S-expressions \
+with `@start..end` byte spans — the compiler's own AST rendering. For understanding exactly how a \
+construct parsed."
+    )]
+    async fn ast(
+        &self,
+        Parameters(args): Parameters<AnalyzeArgs>,
+    ) -> Result<Json<introspect::AstOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(introspect::ast(&prepared)))
+    }
+
+    /// The VM bytecode disassembly — what actually runs.
+    #[tool(
+        description = "Disassemble Noeta code to its register-VM bytecode (opcodes, constant pool, \
+per-function protos) — what actually executes, including which fast paths fired. Or the first \
+construct the VM does not support, with the reason."
+    )]
+    async fn bytecode(
+        &self,
+        Parameters(args): Parameters<AnalyzeArgs>,
+    ) -> Result<Json<introspect::BytecodeOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(introspect::bytecode(&prepared)))
+    }
+
+    /// A per-stage health summary: lex → parse → check → compile.
+    #[tool(
+        description = "Summarize a Noeta program's compile pipeline stage by stage — token count, \
+top-level item count, type-check error/warning counts, and whether it compiles to bytecode (with \
+the first blocking reason). A quick 'what's the shape / where does it fall over' glance."
+    )]
+    async fn pipeline(
+        &self,
+        Parameters(args): Parameters<AnalyzeArgs>,
+    ) -> Result<Json<introspect::PipelineOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(introspect::pipeline(&prepared)))
+    }
+
+    /// The module dependency graph — `namespace`/`use` import edges.
+    #[tool(
+        description = "Report the workspace's module graph: each file's declared `namespace` and \
+the modules it imports via `use` (with the imported names). The import structure of a multi-file \
+Noeta program."
+    )]
+    async fn module_graph(
+        &self,
+        Parameters(args): Parameters<AnalyzeArgs>,
+    ) -> Result<Json<introspect::ModuleGraphOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(introspect::module_graph(&prepared)))
+    }
+
+    /// The `@role`/`@semantic` architectural graph plus the attribute manifest and declared types.
+    #[tool(
+        description = "Reflect over Noeta code: the `@role(Enum.Variant)` architectural graph \
+(entry points, trust/persistence boundaries, sinks, layers), the `#[...]` attribute manifest, and \
+the declared types — exactly what the program's own `roles_of()`/`attributes_of()` see. Filter with \
+`role`."
+    )]
+    async fn reflect(
+        &self,
+        Parameters(args): Parameters<ReflectArgs>,
+    ) -> Result<Json<introspect::ReflectOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(introspect::reflect(&prepared, args.role.as_deref())))
     }
 
     /// Explain a diagnostic code with real programs that trigger it.
@@ -393,10 +547,14 @@ impl ServerHandler for NoetaMcp {
     }
 }
 
-/// Turn `check`'s arguments into the ordered source list (entry first, then sibling modules) that
-/// the salsa `Workspace` is built from. Inline `source` is a lone entry; a `file` pulls in siblings.
-fn resolve_sources(args: &CheckArgs) -> Result<Vec<Source>, ErrorData> {
-    match (&args.source, &args.file) {
+/// Turn a `check`-style `source`/`file` pair into the ordered source list (entry first, then
+/// sibling modules) that the salsa `Workspace` is built from. Inline `source` is a lone entry; a
+/// `file` pulls in siblings. Shared by `check` and every M3 analysis tool (see [`analyze::prepare`]).
+pub(crate) fn resolve_sources(
+    source: &Option<String>,
+    file: &Option<String>,
+) -> Result<Vec<Source>, ErrorData> {
+    match (source, file) {
         (Some(text), None) => Ok(vec![Source::new(
             SourceId::FIRST,
             "<inline>".to_string(),
@@ -563,11 +721,7 @@ mod tests {
 
     #[test]
     fn missing_arguments_is_an_invalid_params_error() {
-        let err = resolve_sources(&CheckArgs {
-            source: None,
-            file: None,
-        })
-        .unwrap_err();
+        let err = resolve_sources(&None, &None).unwrap_err();
         assert!(err.message.contains("source"));
     }
 
@@ -675,6 +829,63 @@ mod tests {
             .as_str()
             .expect("a rendered signature string");
         assert!(sig.starts_with("fn "), "signature was {sig:?}");
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+
+    /// M3 gate fixture: drive a real MCP session and call `type_at` — an Introspect/Understand tool
+    /// is advertised and answers a `symbol` query with a type straight off the salsa graph.
+    #[tokio::test]
+    async fn round_trip_type_at_over_a_duplex() {
+        use rmcp::model::CallToolRequestParams;
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+
+        let client = ().serve(client_io).await.expect("client initializes");
+
+        let tools = client
+            .list_tools(Default::default())
+            .await
+            .expect("tools/list");
+        for expected in [
+            "type_at",
+            "symbols",
+            "ast",
+            "bytecode",
+            "module_graph",
+            "reflect",
+        ] {
+            assert!(
+                tools.tools.iter().any(|t| t.name == expected),
+                "{expected} tool advertised"
+            );
+        }
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "source".to_string(),
+            serde_json::Value::String(
+                "fn f(): int {\n  xs = [1, 2, 3];\n  return xs.len();\n}\n".to_string(),
+            ),
+        );
+        arguments.insert(
+            "symbol".to_string(),
+            serde_json::Value::String("xs".to_string()),
+        );
+        let mut params = CallToolRequestParams::default();
+        params.name = "type_at".into();
+        params.arguments = Some(arguments);
+        let result = client.call_tool(params).await.expect("tools/call type_at");
+
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["found"], serde_json::json!(true));
+        assert_eq!(structured["type"], serde_json::json!("List<int>"));
 
         client.cancel().await.expect("client shuts down");
         server.abort();

@@ -11,6 +11,9 @@ rust-version.workspace = true
 # tool over `linked_checked`); later slices grow to drive the VM like the DAP. The `run` set minus
 # the executor, plus the MCP SDK.
 noeta-span = { workspace = true }
+# M3 Introspect/Understand tools read the parsed AST directly: `Pretty` (the `ast` tool), the
+# declaration walk (`symbols`), `use`/`namespace` (`module_graph`), and `reflect::build` (`reflect`).
+noeta-ast = { workspace = true }
 # `schema` feature = the `JsonDiagnostic` family derives `JsonSchema`, so the `check` tool returns
 # the *same* canonical shape as `noeta check --format json` — agent and CLI never disagree.
 noeta-diagnostics = { workspace = true, features = ["schema"] }

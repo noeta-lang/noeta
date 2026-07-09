@@ -3865,6 +3865,7 @@ name = "noeta-mcp"
 version = "0.1.0"
 dependencies = [
  "include_dir",
+ "noeta-ast",
  "noeta-db",
  "noeta-diagnostics",
  "noeta-loader",
