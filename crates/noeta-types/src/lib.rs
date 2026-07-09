@@ -459,13 +459,9 @@ impl Type {
     }
 }
 
-/// The human-facing **short name** of a (possibly namespace-qualified) `Type::Named` identity: the
-/// segment after the final `.`, so a qualified extern identity `std.id.Uuid` — and, later, a
-/// qualified user identity `App.Models.User` — displays as `Uuid` / `User`. A bare name (no `.`) is
-/// returned unchanged. Identity/equality still use the full qualified string; only display strips it.
-pub fn short_type_name(name: &str) -> &str {
-    name.rsplit_once('.').map_or(name, |(_, short)| short)
-}
+/// Re-exported from `noeta-ast`, the lowest crate both the type lattice and the runtime value
+/// display share, so a qualified identity strips to its short display name in exactly one place.
+pub use noeta_ast::short_type_name;
 
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

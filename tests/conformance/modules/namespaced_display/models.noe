@@ -1,0 +1,14 @@
+// The declaring module for the display test. Both types are namespaced, so their runtime identities
+// are qualified (`App.Shapes.Point` / `App.Shapes.Color`) — but that identity is for dispatch and
+// `is`/`as`, never for human-facing output.
+namespace App.Shapes;
+
+pub struct Point {
+    x: int
+    y: int
+}
+
+pub enum Color {
+    Red;
+    Green
+}

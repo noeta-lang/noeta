@@ -17,6 +17,15 @@ mod syntax_kind;
 pub use pretty::Pretty;
 pub use syntax_kind::SyntaxKind;
 
+/// The human-facing **short name** of a (possibly namespace-qualified) type identity: the segment
+/// after the final `.`, so a qualified extern identity `std.id.Uuid` or a qualified user identity
+/// `App.Models.User` displays as `Uuid` / `User`. A bare name (no `.`) is returned unchanged.
+/// Identity/equality/dispatch use the full qualified string; only *display* strips it — the one
+/// canonical place both the type lattice (`noeta-types`) and the runtime value display share.
+pub fn short_type_name(name: &str) -> &str {
+    name.rsplit_once('.').map_or(name, |(_, short)| short)
+}
+
 /// A whole program: a sequence of top-level statements.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program {
