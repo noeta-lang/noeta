@@ -248,6 +248,25 @@ pub fn dependency_packages(entry: &Path) -> Result<Vec<noeta_loader::DepPackage>
     Ok(crate::graph::resolve_graph(entry)?.packages)
 }
 
+/// The `[package] name` of a **cargo** manifest — what a composed-toolchain shim writes into its
+/// dependency line for a native entry crate (package-manager Phase 3, N3.2). Kept here because
+/// `noeta-pm` owns the toml dependency; this reads cargo's manifest, not ours.
+pub fn cargo_package_name(crate_dir: &Path) -> Result<String, String> {
+    let path = crate_dir.join("Cargo.toml");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
+    let table: toml::Table = text
+        .parse()
+        .map_err(|err| format!("`{}` is not valid TOML: {err}", path.display()))?;
+    table
+        .get("package")
+        .and_then(|p| p.as_table())
+        .and_then(|p| p.get("name"))
+        .and_then(|n| n.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| format!("`{}` has no `[package] name`", path.display()))
+}
+
 /// Resolve the [`FmtConfig`] for a target directory: discover the nearest `noeta.toml`, read its
 /// optional `[fmt]` table, and overlay any values on the defaults. A missing manifest or missing
 /// `[fmt]` table yields [`FmtConfig::default`] (so `noeta fmt` works with zero configuration).

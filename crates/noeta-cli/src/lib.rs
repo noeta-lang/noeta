@@ -39,6 +39,8 @@ use noeta_vm::{SessionOutput, VmBackend, VmSession};
 // `noeta-db` resolve dependencies through the same code; the CLI names its modules unqualified.
 use noeta_pm::{graph, lock, manifest, registry};
 
+mod compose;
+
 #[derive(Parser)]
 #[command(name = "noeta", version, about = "The Noeta toolchain")]
 struct Cli {
@@ -1048,6 +1050,9 @@ fn cmd_run(
     no_cache: bool,
     args: &[String],
 ) -> ExitCode {
+    if let Some(code) = compose::maybe_delegate(file) {
+        return code;
+    }
     // P-AOT L1.2: a `.noeb` bundle runs directly — no source, no compile. Sniff the magic (cheap,
     // and we need the bytes to load it anyway); anything else is source, handled below. Tiers are a
     // *build*-time concern (they are already baked into the bundle), so `--tier`/`--profile` on a
@@ -1109,6 +1114,9 @@ fn cmd_check(
     profile: &Option<String>,
     format: OutputFormat,
 ) -> ExitCode {
+    if let Some(code) = compose::maybe_delegate(path) {
+        return code;
+    }
     use noeta_diagnostics::Severity;
 
     // The active tier set — resolved once and applied to every file — is the union of a `--profile`'s
@@ -1357,6 +1365,12 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
     ) -> u8 {
         use noeta_ast::{Expr, Stmt};
         use noeta_span::Span;
+
+        // An extension command drives a program run; a native-dep app delegates to its composed
+        // toolchain like every other verb (composition failure is fatal, never a stock fallback).
+        if compose::maybe_delegate(file).is_some() {
+            return 1;
+        }
 
         // Resolve dependency packages so `noeta serve` (and any entry-call command) sees the same
         // cross-package `use <dep-key>.…` the plain `run` path does (package-manager P2.1c).
@@ -1738,6 +1752,9 @@ fn source_key_name(source: &Source) -> &str {
 /// inspecting codegen (which ops a construct lowers to, whether a reuse/in-place fast path fired,
 /// how names/constants are laid out). A type error prints diagnostics and exits non-zero, like `run`.
 fn cmd_dump(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -> ExitCode {
+    if let Some(code) = compose::maybe_delegate(file) {
+        return code;
+    }
     // Same whole-file compile as `run` (so the disassembly is exactly what the VM runs), and a cache
     // participant — a cached module is byte-identical to a fresh compile, so the disassembly matches.
     match compile_whole_file(file, tiers, profile, false) {
@@ -1764,6 +1781,9 @@ fn cmd_build(
     tiers: &[String],
     profile: &Option<String>,
 ) -> ExitCode {
+    if let Some(code) = compose::maybe_delegate(file) {
+        return code;
+    }
     if exe && native {
         eprintln!("lang: --exe and --native are mutually exclusive");
         return ExitCode::from(2);
@@ -2234,6 +2254,9 @@ fn cmd_test(
     group: &Option<String>,
     profile: &Option<String>,
 ) -> ExitCode {
+    if let Some(code) = compose::maybe_delegate(file) {
+        return code;
+    }
     if let Some(code) = profile_gate(file, profile, "test") {
         return code;
     }
@@ -2689,6 +2712,9 @@ fn cmd_bench(
     iterations_override: Option<u64>,
     profile: &Option<String>,
 ) -> ExitCode {
+    if let Some(code) = compose::maybe_delegate(file) {
+        return code;
+    }
     if let Some(code) = profile_gate(file, profile, "bench") {
         return code;
     }
@@ -2868,6 +2894,9 @@ fn fmt_per_iter(ns: f64) -> String {
 /// program is not type-checked or run; doc extraction works on a parse alone, so docs can be pulled
 /// from work-in-progress code.
 fn cmd_doc(file: &std::path::Path, profile: &Option<String>) -> ExitCode {
+    if let Some(code) = compose::maybe_delegate(file) {
+        return code;
+    }
     if let Some(code) = profile_gate(file, profile, "doc") {
         return code;
     }
@@ -3033,6 +3062,12 @@ fn repl_bootstrap(
 }
 
 fn cmd_repl(check: bool, load: Option<PathBuf>) -> ExitCode {
+    // A `--load` bootstrap is a program run — a native-dep app's REPL must be the composed one.
+    if let Some(file) = &load
+        && let Some(code) = compose::maybe_delegate(file)
+    {
+        return code;
+    }
     let stdin = io::stdin();
     // The optional per-entry type checker (session-checker C2): `Some` = every entry is checked
     // against the accumulated session before it runs; an erroring entry prints diagnostics and is
