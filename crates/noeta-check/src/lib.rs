@@ -3068,6 +3068,23 @@ impl Checker {
                 self.note_construction(expected, *span);
                 expected.clone()
             }
+            // A non-empty map literal absorbs an expected `Map<K, V>`: check each key against `K`
+            // and each value against `V`, so heterogeneous values that are each a member of `V` (a
+            // union, or `dyn`) are accepted instead of being cross-unified into a single element
+            // type (`{"route": "/x", "status": 200}` against `Map<string, string|int|float|bool>`).
+            // The map analogue of the list arm; the empty case is the preceding arm.
+            Expr::Map { entries, span } if matches!(expected, Type::Map(..)) => {
+                let Type::Map(kty, vty) = expected else {
+                    unreachable!()
+                };
+                for (k, v) in entries {
+                    self.check(k, kty, env);
+                    self.check(v, vty, env);
+                }
+                let ty = Type::Map(kty.clone(), vty.clone());
+                self.note_construction(&ty, *span);
+                ty
+            }
             // `none` absorbs an expected `Option<T>` (`?T`): it carries no payload, so it simply
             // adopts the expectation instead of leaking an inference hole.
             Expr::Ident { name, .. } if name == "none" && matches!(expected, Type::Option(_)) => {
@@ -3423,15 +3440,20 @@ impl Checker {
             Expr::Call {
                 callee, args, span, ..
             } => {
-                // Bidirectional closure arguments (the dyn-closure gap): a closure's parameter
-                // types come from the CALLEE's resolved signature, so closure arguments are
-                // deferred (placeholder `Unknown`) and typed by `synth_call` once the signature is
-                // known. Everything else synthesizes as before.
+                // Bidirectional literal arguments: a closure's parameter types — and a container
+                // literal's expected element/value type — come from the CALLEE's resolved signature,
+                // so both are deferred (placeholder `Unknown`) and typed by `synth_call` once the
+                // signature is known (a `{"route": "/x", "status": 200}` map literal then absorbs a
+                // `Map<string, string|int|float|bool>` parameter, checking each value against the
+                // union instead of cross-unifying them). Everything else synthesizes as before.
                 let arg_types: Vec<Type> = args
                     .iter()
-                    .map(|a| match a {
-                        Expr::Closure { .. } => Type::Unknown,
-                        _ => self.synth(a, env),
+                    .map(|a| {
+                        if is_deferred_literal_arg(a) {
+                            Type::Unknown
+                        } else {
+                            self.synth(a, env)
+                        }
                     })
                     .collect();
                 self.synth_call(callee, &arg_types, args, *span, env)
@@ -4410,7 +4432,7 @@ impl Checker {
         env: &mut Env,
     ) {
         for (i, expr) in arg_exprs.iter().enumerate() {
-            if !matches!(expr, Expr::Closure { .. }) {
+            if !is_deferred_literal_arg(expr) {
                 continue;
             }
             let Some(slot) = args.get_mut(i) else {
@@ -4419,8 +4441,18 @@ impl Checker {
             if !matches!(slot, Type::Unknown) {
                 continue;
             }
-            *slot = match params.get(i) {
-                Some(expected @ Type::Fn { .. }) => self.check(expr, expected, env),
+            // Absorb the expected parameter type where it can guide the literal — a `Fn` for a
+            // closure, a `List`/`Map` for a container literal; anything else (a mismatched param, or
+            // an unknown one) synthesizes standalone, preserving the pre-deferral behavior (the
+            // mismatch is then caught by `check_args`' assignability check).
+            *slot = match (expr, params.get(i)) {
+                (Expr::Closure { .. }, Some(expected @ Type::Fn { .. })) => {
+                    self.check(expr, expected, env)
+                }
+                (
+                    Expr::List { .. } | Expr::Map { .. },
+                    Some(expected @ (Type::List(_) | Type::Map(..))),
+                ) => self.check(expr, expected, env),
                 _ => self.synth(expr, env),
             };
         }
@@ -4442,7 +4474,7 @@ impl Checker {
         // exactly as before the deferral existed. A closure's type is never `Unknown` once typed,
         // so the placeholder is an unambiguous marker.
         for (i, expr) in arg_exprs.iter().enumerate() {
-            if matches!(expr, Expr::Closure { .. }) && matches!(args.get(i), Some(Type::Unknown)) {
+            if is_deferred_literal_arg(expr) && matches!(args.get(i), Some(Type::Unknown)) {
                 self.synth(expr, env);
             }
         }
@@ -5161,12 +5193,20 @@ impl Checker {
             // pinned by `xs` before `f` is looked at — and its now-known type (the inferred
             // return especially) then binds any parameter the earlier arguments did not
             // (`fn pick<T>(f: () -> T): T`).
-            if let Some(expr @ Expr::Closure { .. }) = arg_exprs.get(i)
+            if let Some(expr) = arg_exprs.get(i)
+                && is_deferred_literal_arg(expr)
                 && matches!(args[i], Type::Unknown)
             {
                 let expected = erase_type_params(apply_subst(raw, &subst), &tps);
-                args[i] = match &expected {
-                    Type::Fn { .. } => self.check(expr, &expected, env),
+                // Absorb the (substituted) parameter type into the deferred literal — a `Fn` into a
+                // closure, a `List`/`Map` into a container literal — so its resolved type then binds
+                // any still-unbound type parameter below; a mismatched or unguiding param synthesizes
+                // standalone (unchanged from the closure-only behavior).
+                args[i] = match (expr, &expected) {
+                    (Expr::Closure { .. }, Type::Fn { .. }) => self.check(expr, &expected, env),
+                    (Expr::List { .. } | Expr::Map { .. }, Type::List(_) | Type::Map(..)) => {
+                        self.check(expr, &expected, env)
+                    }
                     _ => self.synth(expr, env),
                 };
             }
@@ -6151,6 +6191,19 @@ fn unify_element(acc: &Type, next: &Type) -> Option<Type> {
 /// `Option`, so those are *not* uninferable. This is the syntactic trigger for `E0023` on an
 /// immutable, un-annotated binding, so a hole inherited from an arbitrary call result is never
 /// mistaken for one.
+/// Whether a call argument is a **deferred literal** — a closure or a container literal whose type
+/// is best driven top-down by the callee's parameter. Such arguments are placeheld as `Unknown` at
+/// the call site and finalized once the signature is resolved (`finalize_closure_args` /
+/// `check_generic_call`), with a standalone-synth safety net in `synth_call` for callees that never
+/// resolve a matching parameter. This lets a heterogeneous map/list literal absorb an expected
+/// `Map<K, V>` / `List<T>` (union or `dyn` value type) instead of being cross-unified.
+fn is_deferred_literal_arg(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Closure { .. } | Expr::List { .. } | Expr::Map { .. }
+    )
+}
+
 fn is_uninferable_literal(expr: &Expr) -> bool {
     match expr {
         Expr::List { items, .. } => items.is_empty(),
