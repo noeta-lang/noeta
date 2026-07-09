@@ -423,8 +423,85 @@ pub fn soa_length(a: &SoaVec3) -> Vec<f32> {
 // falls back to an element-wise loop over `object_scalars`/`make_object_like`, exactly the boxed
 // path the old intercepts had.
 
-use crate::registry::{ExtFn, NativeOut, NativeValue, RetTy, Scalar, ScalarVec, SigType};
+use crate::registry::{
+    BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, ExtBundle, ExtFn, NativeOut,
+    NativeValue, PackedConstraint, RetTy, Scalar, ScalarVec, SigType,
+};
 use crate::{CtxError, CtxOut, CtxResult, NativeCtx, PackedField, PackedView, Slot, ctx_arity};
+
+/// The `vec.Kernels` method bundle (kernel-methods K1/K5): the bulk `*_all` family as **methods**
+/// a user's Vec3-shaped `@packed` struct acquires by `impl vec.Kernels for T {}` — the nominal,
+/// checker-verified surface over the same kernels the module functions expose. The receiver rides
+/// as slot 0 (so `RetTy::SameAsArg(0)` = "same type as the receiver"), and each method's `params`
+/// exclude it: `xs.dot_all(ys)` ≡ `vec.dot_all(xs, ys)`.
+pub(crate) const VEC_KERNELS: ExtBundle = ExtBundle {
+    name: "Kernels",
+    constraint: PackedConstraint {
+        fields: &[
+            ConstraintField::F32,
+            ConstraintField::F32,
+            ConstraintField::F32,
+        ],
+        layout: ConstraintLayout::Any,
+    },
+    methods: &[
+        BundleFn {
+            sig: ExtFn {
+                name: "add_all",
+                params: &[SigType::Dyn],
+                ret: RetTy::SameAsArg(0),
+            },
+            receiver: BundleReceiver::Bulk,
+        },
+        BundleFn {
+            sig: ExtFn {
+                name: "sub_all",
+                params: &[SigType::Dyn],
+                ret: RetTy::SameAsArg(0),
+            },
+            receiver: BundleReceiver::Bulk,
+        },
+        BundleFn {
+            sig: ExtFn {
+                name: "scale_all",
+                params: &[SigType::Dyn],
+                ret: RetTy::SameAsArg(0),
+            },
+            receiver: BundleReceiver::Bulk,
+        },
+        BundleFn {
+            sig: ExtFn {
+                name: "dot_all",
+                params: &[SigType::Dyn],
+                ret: RetTy::Concrete(SigType::List(&SigType::F32)),
+            },
+            receiver: BundleReceiver::Bulk,
+        },
+        BundleFn {
+            sig: ExtFn {
+                name: "length_all",
+                params: &[],
+                ret: RetTy::Concrete(SigType::List(&SigType::F32)),
+            },
+            receiver: BundleReceiver::Bulk,
+        },
+    ],
+    ctx_dispatch: vec_bundle_dispatch,
+};
+
+/// The bundle's dispatch: prepend the receiver and run the exact module dispatch —
+/// `xs.dot_all(ys)` and `vec.dot_all(xs, ys)` are one code path by construction.
+fn vec_bundle_dispatch(
+    method: &str,
+    ctx: &mut dyn NativeCtx,
+    recv: Slot,
+    args: &[Slot],
+) -> Result<CtxOut, CtxError> {
+    let mut all = Vec::with_capacity(args.len() + 1);
+    all.push(recv);
+    all.extend_from_slice(args);
+    vec_ctx_dispatch(method, ctx, &all)
+}
 
 /// The bulk kernels' signatures. Structural arguments are `Dyn` (any 3-`f32`-field struct is a
 /// Vec3 — checked at dispatch); the element-wise ops return their first argument's type, the

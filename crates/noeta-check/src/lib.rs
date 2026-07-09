@@ -691,6 +691,18 @@ impl SiteMaps {
     }
 }
 
+/// One method-bundle binding (kernel-methods K1): which registered bundle a type acquired via
+/// `impl <module>.<Bundle> for T {}`, and through which module identity runtime dispatch routes.
+#[derive(Clone)]
+struct BoundBundle {
+    /// The owning module's root-qualified identity (`"std.vec"`).
+    module: String,
+    bundle: &'static noeta_stdlib::ExtBundle,
+    /// The binding's trait span — conflict reporting orders by it (the textually-later binding
+    /// carries the diagnostic).
+    span: Span,
+}
+
 // `Clone` so a [`SessionChecker`] entry is transactional (clone-before, restore-on-error) —
 // prompt-scale state, so the per-entry clone is cheap insurance, never a hot path.
 #[derive(Clone, Default)]
@@ -764,6 +776,12 @@ struct Checker {
     /// `(trait_name, trait_span)` occurrences. Collected in pass 1 so each type's coherence check
     /// (`check_coherence`) counts standalone impls alongside its `@derive`s and in-body `impl`s.
     standalone_impls: HashMap<String, Vec<(String, Span)>>,
+    /// Method-bundle bindings (kernel-methods K1): target type name → the native bundles it
+    /// explicitly bound via `impl <module>.<Bundle> for T {}`, each with the module's
+    /// root-qualified identity (the runtime dispatch key). Resolved in a post-collect sweep so a
+    /// binding is visible to method typing regardless of statement order; validated (packed
+    /// target, constraint, conflicts) at the impl site in pass 2.
+    bundle_impls: HashMap<String, Vec<BoundBundle>>,
     /// Every struct marked `@attribute` — the names usable in `#[...]` annotation position (P2.5,
     /// the opt-in that replaced the `Attribute` marker trait). The E0029 capability gate and
     /// `attributes_of::<T>()` both consult this set. Attributes are **structs only**.
@@ -1596,6 +1614,42 @@ impl Checker {
                 _ => {}
             }
         }
+        // Method-bundle bindings (kernel-methods K1) resolve after the whole collect walk, so a
+        // binding is visible to method typing regardless of where the `impl` sits relative to
+        // the `use` that binds its module. Resolution failures stay silent here — pass 2's
+        // `check_bundle_impl` reports them at the impl site.
+        for stmt in &program.stmts {
+            if let Stmt::Impl(decl) = stmt
+                && let Some((module, bundle)) = self.resolve_bundle_ref(&decl.trait_name)
+            {
+                let bindings = self.bundle_impls.entry(decl.target.clone()).or_default();
+                // A duplicate binding of the same bundle is a coherence error (reported there);
+                // don't double-record it, or method typing would see each method twice.
+                if !bindings
+                    .iter()
+                    .any(|b| b.module == module && b.bundle.name == bundle.name)
+                {
+                    bindings.push(BoundBundle {
+                        module,
+                        bundle,
+                        span: decl.trait_span,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Resolve a dotted trait path (`vec.Kernels`) to its registered bundle: everything before
+    /// the last dot is a bound module name (`use std.{vec}`), the last segment the bundle.
+    /// `None` when the module binding or the bundle doesn't exist — the impl-site check reports.
+    fn resolve_bundle_ref(
+        &self,
+        trait_name: &str,
+    ) -> Option<(String, &'static noeta_stdlib::ExtBundle)> {
+        let (module_ref, bundle_name) = trait_name.rsplit_once('.')?;
+        let qualified = self.modules.get(module_ref)?;
+        let bundle = noeta_stdlib::registry::find_bundle(qualified, bundle_name)?;
+        Some((qualified.clone(), bundle))
     }
 
     /// Pass 2: check every top-level statement with a fresh global scope.
@@ -2806,6 +2860,20 @@ impl Checker {
     /// restriction are enforced by the caller, [`Self::check_standalone_impl`].)
     fn check_trait_impl(&mut self, trait_name: &str, trait_span: Span, methods: &[FnDecl]) {
         let Some(t) = BuiltinTrait::from_name(trait_name) else {
+            // A dotted path in an in-body impl is a method-bundle reference (kernel-methods K1)
+            // used in the wrong position — bundles bind through the standalone form only.
+            if trait_name.contains('.') {
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    trait_span,
+                    "a method bundle binds with a standalone impl, not an in-body block"
+                        .to_string(),
+                )
+                .help(format!(
+                    "write `impl {trait_name} for <Type> {{}}` at the top level"
+                ));
+                return;
+            }
             self.error(
                 DiagnosticCode::UnknownTrait,
                 trait_span,
@@ -2862,6 +2930,12 @@ impl Checker {
     /// Coherence is enforced together with the target's `@derive`s/in-body impls in
     /// [`Self::check_coherence`].
     fn check_standalone_impl(&mut self, decl: &ImplDecl) {
+        // A dotted trait path is a method-bundle binding (kernel-methods K1) with its own
+        // validation — bundle resolution, packed-target + constraint checks, conflict rules.
+        if decl.trait_name.contains('.') {
+            self.check_bundle_impl(decl);
+            return;
+        }
         if !self.records.contains_key(&decl.target) && !self.enums.contains_key(&decl.target) {
             self.error(
                 DiagnosticCode::UnknownType,
@@ -2890,6 +2964,115 @@ impl Checker {
         }
         self.check_trait_impl(&decl.trait_name, decl.trait_span, &decl.methods);
     }
+
+    /// Validate a method-bundle binding `impl <module>.<Bundle> for T {}` (kernel-methods K1).
+    /// The binding itself was recorded during collect (so method typing sees it regardless of
+    /// statement order); this reports every impl-site violation: an unresolvable path, a
+    /// non-empty body (the methods are native), a target that isn't a locally-declared `@packed`
+    /// struct, a constraint mismatch (the shape check the raw-buffer kernels used to make at
+    /// runtime, moved to compile time), and method-name conflicts with the target's own methods
+    /// or an earlier binding's.
+    fn check_bundle_impl(&mut self, decl: &ImplDecl) {
+        let (module_ref, bundle_name) = decl.trait_name.rsplit_once('.').expect("dotted path");
+        if !self.modules.contains_key(module_ref) {
+            self.error(
+                DiagnosticCode::UnknownTrait,
+                decl.trait_span,
+                format!(
+                    "unknown module `{module_ref}` in bundle path `{}`",
+                    decl.trait_name
+                ),
+            )
+            .help("bind the module first — e.g. `use std.{vec}` brings `vec` into scope");
+            return;
+        }
+        let Some((_, bundle)) = self.resolve_bundle_ref(&decl.trait_name) else {
+            self.error(
+                DiagnosticCode::UnknownTrait,
+                decl.trait_span,
+                format!("module `{module_ref}` has no method bundle `{bundle_name}`"),
+            );
+            return;
+        };
+        if !decl.methods.is_empty() {
+            self.error(
+                DiagnosticCode::InvalidImpl,
+                decl.span,
+                "a bundle binding takes an empty body — its methods are native",
+            )
+            .help(format!(
+                "`impl {} for {} {{}}` acquires the bundle's methods as the extension declares them",
+                decl.trait_name, decl.target
+            ));
+        }
+        let target_ty = Type::Named(decl.target.clone(), vec![]);
+        let Some(layout) = self.packed_layout(&target_ty) else {
+            self.error(
+                DiagnosticCode::InvalidImpl,
+                decl.target_span,
+                format!(
+                    "`{}` cannot bind `{}`: a method bundle binds to a `@packed` struct declared \
+                     in this module",
+                    decl.target, decl.trait_name
+                ),
+            )
+            .help("mark the target `@packed` — bundles are packed-operations method sets");
+            return;
+        };
+        if let Some(message) = constraint_mismatch(&layout, &bundle.constraint) {
+            self.error(
+                DiagnosticCode::InvalidImpl,
+                decl.target_span,
+                format!(
+                    "`{}` does not satisfy `{}`: {message}",
+                    decl.target, decl.trait_name
+                ),
+            );
+            return;
+        }
+        // Conflicts, reported on the binding (the textually-later party): a bundle method may
+        // not collide with the target's own declared methods, nor with a method an earlier
+        // binding already contributed.
+        let mut conflicts: Vec<String> = Vec::new();
+        for m in bundle.methods {
+            if self
+                .methods
+                .contains_key(&(decl.target.clone(), m.sig.name.to_string()))
+            {
+                conflicts.push(format!(
+                    "`{}` already declares a method `{}`",
+                    decl.target, m.sig.name
+                ));
+            }
+        }
+        for earlier in self.bundle_impls.get(&decl.target).into_iter().flatten() {
+            // Only bindings textually before this one (single-report discipline, like
+            // `check_coherence`); skip this binding's own collect record.
+            if earlier.bundle.name == bundle_name || earlier.span.start >= decl.trait_span.start {
+                continue;
+            }
+            for m in bundle.methods {
+                if earlier.bundle.method(m.sig.name).is_some() {
+                    conflicts.push(format!(
+                        "`{}` already acquires `{}` from bundle `{}`",
+                        decl.target, m.sig.name, earlier.bundle.name
+                    ));
+                }
+            }
+        }
+        for conflict in conflicts {
+            self.error(
+                DiagnosticCode::ConflictingTraitImpl,
+                decl.trait_span,
+                format!(
+                    "{conflict} — binding `{}` would make the name ambiguous",
+                    decl.trait_name
+                ),
+            );
+        }
+    }
+
+    // (constraint_mismatch, the bundle-constraint comparison, is a free function below the impl.)
 
     /// Enforce **trait coherence** (overlap/uniqueness) on a single type: a trait may be
     /// implemented at most once, counting both a `@derive(T)` directive and an `impl T { }` block
@@ -6232,6 +6415,72 @@ fn variant_field_type(p: &Param) -> Type {
 /// an explicit `self.field` resolves through [`Checker::synth_member`] to the field's declared type
 /// (a concrete field keeps it precisely, e.g. `List<u64>`; a generic field erases to `dyn` via the
 /// same parameter substitution as bare field access). Structs/classes bind this exactly as enums do.
+/// Compare a `@packed` struct's resolved layout against a bundle's declared constraint
+/// (kernel-methods K1) — the compile-time twin of the runtime `PackedView` check a raw-buffer
+/// kernel performs. `None` = satisfied; `Some(message)` names exactly what disagrees.
+fn constraint_mismatch(
+    layout: &noeta_ast::reflect::PackedLayout,
+    constraint: &noeta_stdlib::PackedConstraint,
+) -> Option<String> {
+    use noeta_ast::reflect::PackedKind;
+    use noeta_stdlib::{ConstraintField, ConstraintLayout};
+    fn render(fields: &[ConstraintField]) -> String {
+        fields
+            .iter()
+            .map(|f| match f {
+                ConstraintField::Int => "int",
+                ConstraintField::Float => "float",
+                ConstraintField::F32 => "f32",
+                ConstraintField::Bool => "bool",
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+    let kinds: Option<Vec<ConstraintField>> = layout
+        .fields
+        .iter()
+        .map(|f| match f.kind {
+            PackedKind::Int => Some(ConstraintField::Int),
+            PackedKind::Float => Some(ConstraintField::Float),
+            PackedKind::F32 => Some(ConstraintField::F32),
+            PackedKind::Bool => Some(ConstraintField::Bool),
+            // Constraints cover primitive fields only (a bundle over nested packed structs is a
+            // later, additive extension).
+            PackedKind::Struct(_) => None,
+        })
+        .collect();
+    let Some(kinds) = kinds else {
+        return Some(
+            "the bundle's constraint covers primitive fields only; the type has a nested packed \
+             field"
+                .to_string(),
+        );
+    };
+    if kinds != constraint.fields {
+        return Some(format!(
+            "the bundle requires fields ({}), found ({})",
+            render(constraint.fields),
+            render(&kinds)
+        ));
+    }
+    match constraint.layout {
+        ConstraintLayout::Any => {}
+        ConstraintLayout::Row if layout.column => {
+            return Some(
+                "the bundle requires row layout; the type is `@packed(layout: column)`".to_string(),
+            );
+        }
+        ConstraintLayout::Column if !layout.column => {
+            return Some(
+                "the bundle requires column layout — mark the type `@packed(layout: column)`"
+                    .to_string(),
+            );
+        }
+        _ => {}
+    }
+    None
+}
+
 fn self_type(name: &str, type_params: &[TypeParam]) -> Type {
     Type::Named(
         name.to_string(),

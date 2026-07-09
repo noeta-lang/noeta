@@ -2479,6 +2479,8 @@ const VEC_MODULES: &[ExtModule] = &[
         // intercepts, migrated.
         ctx_functions: crate::vec3::VEC_CTX_FNS,
         ctx_dispatch: Some(crate::vec3::vec_ctx_dispatch),
+        // The same kernels as opt-in METHODS (`impl vec.Kernels for T {}`, kernel-methods K1).
+        bundles: &[crate::vec3::VEC_KERNELS],
         ..ExtModule::DEFAULTS
     },
     ExtModule {

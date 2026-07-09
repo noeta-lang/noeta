@@ -2263,10 +2263,31 @@ where
                 },
             );
         let class_method = method.clone().map(ClassMember::Method);
+        // A trait reference: a bare built-in name (`Clone`) or a dotted path into a native
+        // module's method bundles (`vec.Kernels`, kernel-methods K1). Joined into one dotted
+        // name; the span covers the whole path.
+        let trait_path = id
+            .clone()
+            .then(
+                just(T::Dot)
+                    .ignore_then(id.clone())
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .map(|((first, first_span), rest)| {
+                let mut name: String = first;
+                let mut span = first_span;
+                for (seg, seg_span) in rest {
+                    name.push('.');
+                    name.push_str(&seg);
+                    span.end = seg_span.end;
+                }
+                (name, span)
+            });
         // `impl Trait { fn ... }` — implementing a built-in trait lights up its operator/protocol.
         // The body is just methods; they are flattened into the class's method table below.
         let class_impl = just(T::ImplKw)
-            .ignore_then(id.clone())
+            .ignore_then(trait_path.clone())
             .then(
                 method
                     .clone()
@@ -2353,7 +2374,7 @@ where
         // {}`). The `for Type` is what distinguishes it from the class-body `impl Trait { ... }`
         // above. The checker requires `Type` to be declared in the same module (orphan rule).
         let standalone_impl = just(T::ImplKw)
-            .ignore_then(id.clone())
+            .ignore_then(trait_path.clone())
             .then_ignore(just(T::ForKw))
             .then(id.clone())
             .then(
