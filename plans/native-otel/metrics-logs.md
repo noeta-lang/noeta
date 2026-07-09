@@ -185,6 +185,25 @@ new deps — reuses `reqwest` + `serde_json` already compiled; all under the exi
    fresh surface: *exported, trace-correlated* records, not `print`. A bridge that also mirrors records
    to stdout is a separate decision, out of this arc (log records go to the OTLP sink only).
 
+## Progress
+
+- **P-1 ✅** (`01355bf`) rename std.telemetry → std.tracing / trait `Telemetry` → `Tracing`.
+- **P0 ✅** (`7c660f4`) three-signal `Host` split (`Tracing`/`Metrics`/`Logging`, eleven-arm union) +
+  multi-signal `OtlpExporter` (per-signal endpoints + `OTEL_{SIGNAL}_EXPORTER=none`) + shared
+  `resource()`/`otlp_post`; cached `tel_logs_enabled`/`tel_metrics_enabled` on both backends.
+- **L0 ✅** (`d9313fc`) logs ABI (`Severity`/`LogRecord`) + `log_emit` + sandbox recorder + `logs_to_json`
+  (`v1/logs`) + RealHost buffer/flush.
+- **L1 ✅** (`e3949fb`) `std.log` module (`info`/`debug`/`warn`/`error` + generic `log`), ctx-dispatched,
+  active-span correlation; logs sink-parity oracle.
+- **L1.5 ✅** (`6958d8`) **checker prerequisite** (not in the original plan — verify-first item hit the
+  anticipated wall): map literals now absorb an expected `Map<K,V>` value type bidirectionally
+  (container literals join closures as deferred call args). Unblocks `Map<string, union>` at the call
+  site; the plan's fallback (builder/variadic) was **not** needed. User-approved scope into noeta-check.
+- **L2 ✅** (`63e115f`) `std.log` structured attributes (`*_with(msg, attrs)`), `Map<string, union>`
+  literal accepted; non-scalar value → E0007. Logs signal COMPLETE end-to-end.
+
+**Next: Phase M (metrics).**
+
 ## Slices (commit per green slice; full gate = workspace suites + differential + leak + conformance + fmt + clippy)
 
 **Phase 0 — shared scaffolding**
