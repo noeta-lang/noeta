@@ -2871,3 +2871,37 @@ fn composed_toolchain_end_to_end() {
         .success()
         .stdout(predicate::str::contains("imgfx: native extension ok"));
 }
+
+#[test]
+#[cfg(unix)]
+fn an_unknown_subcommand_falls_back_to_a_noeta_prefixed_binary_on_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_external_cmd");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let tool = dir.join("noeta-hello");
+    std::fs::write(
+        &tool,
+        "#!/bin/sh\necho \"hello from external: $1\"\nexit 7\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // PATH includes only our dir — the fallback finds `noeta-hello`, forwards trailing args, and
+    // the exit code passes through.
+    lang()
+        .arg("hello")
+        .arg("world")
+        .env("PATH", &dir)
+        .assert()
+        .code(7)
+        .stdout(predicate::str::contains("hello from external: world"));
+
+    // Without the binary on PATH the ordinary clap error renders (exit 2, mentions the name).
+    lang()
+        .arg("hello")
+        .env("PATH", env!("CARGO_TARGET_TMPDIR"))
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("hello"));
+}

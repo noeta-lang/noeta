@@ -343,10 +343,18 @@ pub fn run_cli(extra: &'static [&'static (dyn noeta_stdlib::Extension + Sync)]) 
     let matches = match cli.try_get_matches() {
         Ok(matches) => matches,
         Err(err) => {
-            if err.kind() == clap::error::ErrorKind::InvalidSubcommand
-                && let Some(code) = compose::maybe_delegate_cwd()
-            {
-                return code;
+            if err.kind() == clap::error::ErrorKind::InvalidSubcommand {
+                // A command contributed by a *native dependency* exists only inside the app's
+                // composed toolchain — compose from the cwd manifest first.
+                if let Some(code) = compose::maybe_delegate_cwd() {
+                    return code;
+                }
+                // Then the external-binary form (Phase 3, N3.7 — the `cargo-<name>` model): an
+                // executable `noeta-<cmd>` on PATH serves `noeta <cmd> …`. Registered
+                // (compiled-in) commands never reach here — clap knows them.
+                if let Some(code) = external_command_fallback(&err) {
+                    return code;
+                }
             }
             err.exit()
         }
@@ -1316,6 +1324,49 @@ fn noe_files(root: &std::path::Path) -> Vec<PathBuf> {
 
 /// Build the clap subcommand for an extension-contributed command (higher-order-abi H6) from
 /// its declared [`noeta_stdlib::ArgSpec`]s — real help text and validation, same as a core verb.
+/// The external-binary command form (package-manager Phase 3, N3.7 — the `cargo-<name>` model):
+/// `noeta <cmd>` with an unknown `<cmd>` looks for an executable `noeta-<cmd>` on `PATH` and runs
+/// it with everything after the subcommand as its argv, forwarding the exit code. Returns `None`
+/// (letting clap's error render) when the name can't be extracted or no such binary exists.
+fn external_command_fallback(err: &clap::Error) -> Option<ExitCode> {
+    let name = err
+        .get(clap::error::ContextKind::InvalidSubcommand)
+        .and_then(|v| match v {
+            clap::error::ContextValue::String(s) => Some(s.clone()),
+            _ => None,
+        })?;
+    let binary = format!("noeta-{name}");
+    let path = std::env::var_os("PATH")?;
+    let found = std::env::split_paths(&path)
+        .map(|dir| dir.join(&binary))
+        .find(|candidate| is_executable(candidate))?;
+    // Forward everything after the subcommand token (global flags before it are noeta's own).
+    let args: Vec<std::ffi::OsString> = std::env::args_os()
+        .skip(1)
+        .skip_while(|a| *a != *name.as_str())
+        .skip(1)
+        .collect();
+    let status = std::process::Command::new(&found)
+        .args(&args)
+        .status()
+        .map_err(|e| eprintln!("lang: running `{}` failed: {e}", found.display()))
+        .ok()?;
+    Some(ExitCode::from(status.code().unwrap_or(1) as u8))
+}
+
+/// Whether `path` is an existing executable file (the PATH-probe test for external commands).
+fn is_executable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
 fn ext_command_clap(ext: &'static noeta_stdlib::ExtCommand) -> clap::Command {
     let mut cmd = clap::Command::new(ext.name).about(ext.about);
     for spec in ext.args {
