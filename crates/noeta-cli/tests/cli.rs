@@ -2558,11 +2558,19 @@ fn composed_project(name: &str) -> PathBuf {
     std::fs::write(
         app.join("main.noe"),
         "use imgfx.{fx}\n\n\
+         @packed(layout: column) struct Px { r: f32; g: f32; b: f32 }\n\n\
          a = fx.acc();\n\
          a.add(2);\n\
          a.apply(fn(t) => t * 10);\n\
          echo fx.double(21);\n\
-         echo a.total();\n",
+         echo a.total();\n\n\
+         // The raw-buffer seam, third-party edition (N3.4): the extension's column kernel\n\
+         // reduces the app's own @packed type, and its COW-mutating kernel produces a new list.\n\
+         ps = [Px { r: 0.25f32, g: 1.0f32, b: 2.0f32 }, Px { r: 0.5f32, g: 1.0f32, b: 2.0f32 }];\n\
+         echo fx.sum_r(ps);\n\
+         bright = fx.brighten_all(ps, 0.5f32);\n\
+         echo bright[1].g;\n\
+         echo ps[1].g;\n",
     )
     .unwrap();
     std::fs::write(
@@ -2644,6 +2652,83 @@ fn fx_dispatch(
             Acc::default(),
         )))),
         _ => Err(no_function_error("fx", func)),
+    }
+}
+
+// The raw-buffer seam (package-manager N3.4), third-party edition: kernels over the CONSUMER's
+// own `@packed` pixel type — a column reduction (zero per-element traffic) and a COW-mutating
+// transform producing a new list.
+const FX_CTX_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "sum_r",
+        params: &[SigType::Dyn],
+        ret: RetTy::Concrete(SigType::F32),
+    },
+    ExtFn {
+        name: "brighten_all",
+        params: &[SigType::Dyn, SigType::F32],
+        ret: RetTy::SameAsArg(0),
+    },
+];
+
+fn packed_error(func: &str) -> CtxError {
+    StdError {
+        kind: ErrorKind::ArgType,
+        message: format!("`fx.{func}` expects a packed pixel list"),
+    }
+    .into()
+}
+
+fn fx_ctx_dispatch(
+    func: &str,
+    ctx: &mut dyn NativeCtx,
+    args: &[Slot],
+) -> Result<CtxOut, CtxError> {
+    match func {
+        // Sum the first (`r`) component across the buffer, layout-aware through the neutral
+        // view: a column list's `r`s are one contiguous run; a row list strides.
+        "sum_r" => {
+            let mut sum: Option<f32> = None;
+            ctx.with_packed(args[0], &mut |v, bytes| {
+                if v.fields.len() == 3 {
+                    let (run, step) = if v.column {
+                        (&bytes[..v.count * 4], 4)
+                    } else {
+                        (bytes, v.byte_size)
+                    };
+                    sum = Some(
+                        run.chunks(step)
+                            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                            .sum(),
+                    );
+                }
+            })?;
+            match sum {
+                Some(s) => Ok(CtxOut::Out(NativeOut::Scalar(Scalar::F32(s)))),
+                None => Err(packed_error(func)),
+            }
+        }
+        // Add `delta` to every component — value semantics through the copy-on-write mutable
+        // borrow; the transformed list arrives as a fresh slot, the input stays intact.
+        "brighten_all" => {
+            let NativeValue::Scalar(Scalar::F32(delta)) = ctx.view(args[1])? else {
+                return Err(StdError {
+                    kind: ErrorKind::ArgType,
+                    message: "`fx.brighten_all` expects an f32 delta".to_string(),
+                }
+                .into());
+            };
+            match ctx.with_packed_mut(args[0], &mut |_, bytes| {
+                for c in bytes.chunks_exact_mut(4) {
+                    let v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]) + delta;
+                    c.copy_from_slice(&v.to_le_bytes());
+                }
+            })? {
+                Some(result) => Ok(CtxOut::Slot(result)),
+                None => Err(packed_error(func)),
+            }
+        }
+        _ => Err(no_function_error("fx", func).into()),
     }
 }
 
@@ -2793,6 +2878,8 @@ impl Extension for ImgfxExtension {
             name: "fx",
             functions: FX_FNS,
             dispatch: fx_dispatch,
+            ctx_functions: FX_CTX_FNS,
+            ctx_dispatch: Some(fx_ctx_dispatch),
             ..ExtModule::DEFAULTS
         }]
     }
@@ -2831,13 +2918,20 @@ fn composed_toolchain_end_to_end() {
     let app = entry.parent().unwrap().to_path_buf();
 
     // 1. First run: composes (banner on stderr), then dispatches the native module, the extern
-    //    type's plain methods, and the higher-order ctx method — through the composed binary.
+    //    type's plain methods, the higher-order ctx method, and the raw-buffer kernels (N3.4:
+    //    `sum_r` reduces the app's own @packed column type; `brighten_all` produces a new list
+    //    while — copy-on-write — the input stays intact: 1.5 then 1.0) — all composed.
     composed_env(&mut lang())
         .arg("run")
         .arg(&entry)
         .assert()
         .success()
-        .stdout(predicate::str::contains("42").and(predicate::str::contains("20")))
+        .stdout(
+            predicate::str::contains("42")
+                .and(predicate::str::contains("20"))
+                .and(predicate::str::contains("0.75"))
+                .and(predicate::str::contains("1.5\n1.0")),
+        )
         .stderr(predicate::str::contains("composing the toolchain"));
 
     // 2. Second run: content-addressed cache hit — no compose banner, same output.
