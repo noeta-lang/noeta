@@ -9,7 +9,10 @@
 //! T0 is a skeleton: spans buffer and flush as one OTLP/JSON POST at a size threshold or on host
 //! teardown. A real batch span processor (time-triggered, off the request path) is a later slice.
 
-use noeta_stdlib::{AttrValue, LogRecord, Severity, SpanData, SpanKind, SpanStatus};
+use noeta_stdlib::{
+    AttrValue, HistogramPoint, LogRecord, MetricData, MetricPoints, MetricValue, NumberPoint,
+    Severity, SpanData, SpanKind, SpanStatus, Temporality,
+};
 use serde_json::{Value, json};
 
 /// Flush the span buffer once it reaches this many spans (a minimal batch; the proper time-based
@@ -94,6 +97,11 @@ impl OtlpExporter {
     /// The OTLP/JSON `ExportLogsServiceRequest` body for `records`.
     pub(crate) fn logs_request_body(&self, records: &[LogRecord]) -> Value {
         logs_to_json(records, &self.service_name)
+    }
+
+    /// The OTLP/JSON `ExportMetricsServiceRequest` body for collected `metrics`.
+    pub(crate) fn metrics_request_body(&self, metrics: &[MetricData]) -> Value {
+        metrics_to_json(metrics, &self.service_name)
     }
 }
 
@@ -200,6 +208,82 @@ fn log_to_json(r: &LogRecord) -> Value {
         obj["spanId"] = Value::String(hex(&ctx.span_id));
     }
     obj
+}
+
+/// Build the OTLP/JSON `ExportMetricsServiceRequest` for a batch of collected metrics (one resource,
+/// one scope). Number data points carry `asInt` (stringified int64) or `asDouble`; histogram points
+/// carry stringified `count`/`bucketCounts` and double `sum`/`explicitBounds`. `aggregationTemporality`
+/// is the OTel enum int (Cumulative=2, Delta=1).
+pub(crate) fn metrics_to_json(metrics: &[MetricData], service_name: &str) -> Value {
+    let metrics_json: Vec<Value> = metrics.iter().map(metric_to_json).collect();
+    json!({
+        "resourceMetrics": [{
+            "resource": resource(service_name),
+            "scopeMetrics": [{
+                "scope": { "name": "noeta", "version": env!("CARGO_PKG_VERSION") },
+                "metrics": metrics_json
+            }]
+        }]
+    })
+}
+
+fn metric_to_json(m: &MetricData) -> Value {
+    let temporality = temporality_code(m.temporality);
+    let mut obj = json!({ "name": m.name.as_str(), "unit": m.unit.as_str() });
+    match &m.points {
+        MetricPoints::Sum { points, monotonic } => {
+            obj["sum"] = json!({
+                "dataPoints": points.iter().map(number_point_to_json).collect::<Vec<_>>(),
+                "aggregationTemporality": temporality,
+                "isMonotonic": monotonic,
+            });
+        }
+        MetricPoints::Gauge(points) => {
+            obj["gauge"] = json!({
+                "dataPoints": points.iter().map(number_point_to_json).collect::<Vec<_>>(),
+            });
+        }
+        MetricPoints::Histogram(points) => {
+            obj["histogram"] = json!({
+                "dataPoints": points.iter().map(histogram_point_to_json).collect::<Vec<_>>(),
+                "aggregationTemporality": temporality,
+            });
+        }
+    }
+    obj
+}
+
+fn number_point_to_json(p: &NumberPoint) -> Value {
+    let mut obj = json!({
+        "attributes": p.attributes.iter().map(|(k, v)| attr_kv(k, v)).collect::<Vec<_>>(),
+        "startTimeUnixNano": nanos(p.start_unix_ms),
+        "timeUnixNano": nanos(p.unix_ms),
+    });
+    match p.value {
+        // int64 as a string, double as a JSON number — the OTLP/JSON number-point encoding.
+        MetricValue::Int(i) => obj["asInt"] = Value::String(i.to_string()),
+        MetricValue::Float(f) => obj["asDouble"] = json!(f),
+    }
+    obj
+}
+
+fn histogram_point_to_json(p: &HistogramPoint) -> Value {
+    json!({
+        "attributes": p.attributes.iter().map(|(k, v)| attr_kv(k, v)).collect::<Vec<_>>(),
+        "startTimeUnixNano": nanos(p.start_unix_ms),
+        "timeUnixNano": nanos(p.unix_ms),
+        "count": p.count.to_string(),
+        "sum": p.sum,
+        "explicitBounds": p.bounds,
+        "bucketCounts": p.buckets.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+    })
+}
+
+fn temporality_code(t: Temporality) -> u8 {
+    match t {
+        Temporality::Delta => 1,
+        Temporality::Cumulative => 2,
+    }
 }
 
 /// The OTel severity **number** for a level (one representative per severity group: TRACE=1,
@@ -387,6 +471,47 @@ mod tests {
         assert_eq!(recs[1]["severityText"], "ERROR");
         assert!(recs[1].get("traceId").is_none());
         assert!(recs[1].get("spanId").is_none());
+    }
+
+    #[test]
+    fn otlp_metrics_json_shape_is_valid() {
+        use noeta_stdlib::{InstrumentKind, MetricStore};
+        let mut store = MetricStore::default();
+        let c = store.get_or_create("http.requests", "{request}", InstrumentKind::Counter);
+        let h = store.get_or_create("latency", "ms", InstrumentKind::Histogram);
+        store.observe(
+            c,
+            MetricValue::Int(2),
+            vec![("method".into(), AttrValue::Str("GET".into()))],
+            10,
+        );
+        store.observe(h, MetricValue::Float(7.0), vec![], 10);
+        let data = store.collect(100);
+
+        let body = metrics_to_json(&data, "svc");
+        let rm = &body["resourceMetrics"][0];
+        assert_eq!(rm["resource"]["attributes"][0]["value"]["stringValue"], "svc");
+        let metrics = &rm["scopeMetrics"][0]["metrics"];
+
+        // Counter → sum, monotonic, cumulative (temporality 2), asInt string.
+        let sum = &metrics[0]["sum"];
+        assert_eq!(metrics[0]["name"], "http.requests");
+        assert_eq!(sum["isMonotonic"], true);
+        assert_eq!(sum["aggregationTemporality"], 2);
+        let dp = &sum["dataPoints"][0];
+        assert_eq!(dp["asInt"], "2");
+        assert_eq!(dp["startTimeUnixNano"], "10000000");
+        assert_eq!(dp["timeUnixNano"], "100000000");
+        assert_eq!(dp["attributes"][0]["value"]["stringValue"], "GET");
+
+        // Histogram → count/bucketCounts strings, sum + explicitBounds doubles.
+        let hist = &metrics[1]["histogram"];
+        assert_eq!(hist["aggregationTemporality"], 2);
+        let hdp = &hist["dataPoints"][0];
+        assert_eq!(hdp["count"], "1"); // one observation, uint64 as a string
+        assert_eq!(hdp["sum"], 7.0);
+        assert_eq!(hdp["bucketCounts"][2], "1"); // 7.0 → <=10 (bounds index 2)
+        assert_eq!(hdp["explicitBounds"][1], 5.0);
     }
 
     #[test]

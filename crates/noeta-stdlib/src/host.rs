@@ -15,7 +15,8 @@ use crate::env;
 use crate::fs::Vfs;
 use crate::random;
 use noeta_native::{
-    AttrValue, LogRecord, SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, TraceContext,
+    AttrValue, InstrumentId, InstrumentKind, LogRecord, MetricData, MetricStore, MetricValue,
+    SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, TraceContext,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -80,6 +81,13 @@ struct TelRecorder {
     /// An optional external sink that also receives every emitted [`LogRecord`] — the logs analogue
     /// of `sink`, installed by [`SandboxHost::set_log_sink`] for the logs parity oracle.
     log_sink: Option<Arc<Mutex<Vec<LogRecord>>>>,
+    /// Host-side metric aggregation (native OTEL Phase M). Shared logic with the real host, so a
+    /// given call sequence collects byte-identically.
+    metrics: MetricStore,
+    /// An optional external sink that receives the collected [`MetricData`] at **teardown** (the
+    /// deterministic collection point for the sandbox); installed by [`SandboxHost::set_metric_sink`]
+    /// for the metrics parity oracle. Metrics aggregate during the run and collect once on drop.
+    metric_sink: Option<Arc<Mutex<Vec<MetricData>>>>,
 }
 
 /// The sandbox's inbound-server state: the fixed request script (see
@@ -116,6 +124,8 @@ impl SandboxHost {
                 sink: None,
                 logs: Vec::new(),
                 log_sink: None,
+                metrics: MetricStore::default(),
+                metric_sink: None,
             },
         }
     }
@@ -145,6 +155,27 @@ impl SandboxHost {
     /// after the host is dropped at teardown. No effect on normal runs (the sink stays `None`).
     pub fn set_log_sink(&mut self, sink: Arc<Mutex<Vec<LogRecord>>>) {
         self.tel.log_sink = Some(sink);
+    }
+
+    /// Install a shared sink that receives the collected [`MetricData`] when this host is dropped —
+    /// the deterministic teardown-only collection the metrics parity oracle asserts on (the sandbox
+    /// never collects mid-run, so wall-time periodicity can't perturb it). No effect on normal runs.
+    pub fn set_metric_sink(&mut self, sink: Arc<Mutex<Vec<MetricData>>>) {
+        self.tel.metric_sink = Some(sink);
+    }
+}
+
+// Collect aggregated metrics to the sink exactly once, at teardown — the sandbox's deterministic
+// collection point (the `Host` is moved into the VM and dropped at end-of-run; a plain run never
+// clones it, and isolates get fresh hosts, so this fires once per host). Only the oracle installs a
+// sink, so normal runs do nothing here.
+impl Drop for SandboxHost {
+    fn drop(&mut self) {
+        if let Some(sink) = &self.tel.metric_sink {
+            let now = SANDBOX_EPOCH_MS + self.clock;
+            let data = self.tel.metrics.collect(now);
+            sink.lock().expect("metric sink not poisoned").extend(data);
+        }
     }
 }
 
@@ -492,6 +523,25 @@ impl Metrics for SandboxHost {
     // sandbox and conformance can assert on the collected series.
     fn tel_metrics_enabled(&self) -> bool {
         true
+    }
+
+    fn metric_get_or_create(&mut self, name: &str, unit: &str, kind: InstrumentKind) -> InstrumentId {
+        self.tel.metrics.get_or_create(name, unit, kind)
+    }
+
+    fn metric_observe(
+        &mut self,
+        inst: InstrumentId,
+        value: MetricValue,
+        attrs: Vec<(compact_str::CompactString, AttrValue)>,
+    ) {
+        let now = SANDBOX_EPOCH_MS + self.clock;
+        self.tel.metrics.observe(inst, value, attrs, now);
+    }
+
+    fn metric_collect(&mut self) -> Vec<MetricData> {
+        let now = SANDBOX_EPOCH_MS + self.clock;
+        self.tel.metrics.collect(now)
     }
 }
 

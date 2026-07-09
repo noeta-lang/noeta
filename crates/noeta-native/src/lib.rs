@@ -37,8 +37,9 @@ pub use registry::{
     NativeValue, RetTy, Scalar, SigType, TypeDispatch, TypeRecipe,
 };
 pub use telemetry::{
-    AttrValue, LogRecord, Logging, Metrics, Severity, SpanData, SpanEvent, SpanId, SpanKind,
-    SpanStatus, Tracing, TraceContext,
+    AttrValue, DEFAULT_HISTOGRAM_BOUNDS, HistogramPoint, InstrumentId, InstrumentKind, LogRecord,
+    Logging, MetricData, MetricPoints, MetricStore, MetricValue, Metrics, NumberPoint, Severity,
+    SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, Temporality, Tracing, TraceContext,
 };
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the

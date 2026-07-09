@@ -30,9 +30,10 @@ mod telemetry;
 use compact_str::CompactString;
 use noeta_stdlib::net::accept_outcome;
 use noeta_stdlib::{
-    AttrValue, Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, LogRecord,
-    Logging, Metrics, NativeOut, NetRequest, NetResponse, Network, P2p, ReadSource, RealBody, Rng,
-    SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, StdError, Tracing, TraceContext,
+    AttrValue, Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, InstrumentId,
+    InstrumentKind, LogRecord, Logging, MetricData, MetricStore, MetricValue, Metrics, NativeOut,
+    NetRequest, NetResponse, Network, P2p, ReadSource, RealBody, Rng, SpanData, SpanEvent, SpanId,
+    SpanKind, SpanStatus, StdError, Tracing, TraceContext,
 };
 // Only the outbound-client (`ring-http-client`) path builds an `ExternBox` response body.
 #[cfg(feature = "ring-http-client")]
@@ -128,6 +129,9 @@ struct RealTelemetry {
     /// Emitted log records awaiting export (flushed at [`telemetry::FLUSH_THRESHOLD`] or teardown).
     #[cfg(feature = "telemetry")]
     logs_buffer: Vec<LogRecord>,
+    /// Host-side metric aggregation (native OTEL Phase M) — the same shared store the sandbox uses,
+    /// so aggregation is byte-identical. Collected on the periodic reader (M2) + a teardown flush.
+    metrics: MetricStore,
 }
 
 impl RealTelemetry {
@@ -142,6 +146,7 @@ impl RealTelemetry {
             buffer: Vec::new(),
             #[cfg(feature = "telemetry")]
             logs_buffer: Vec::new(),
+            metrics: MetricStore::default(),
         }
     }
 }
@@ -1013,6 +1018,25 @@ impl Metrics for RealHost {
             false
         }
     }
+
+    fn metric_get_or_create(&mut self, name: &str, unit: &str, kind: InstrumentKind) -> InstrumentId {
+        self.tel.metrics.get_or_create(name, unit, kind)
+    }
+
+    fn metric_observe(
+        &mut self,
+        inst: InstrumentId,
+        value: MetricValue,
+        attrs: Vec<(CompactString, AttrValue)>,
+    ) {
+        let now = self.clock_unix_ms();
+        self.tel.metrics.observe(inst, value, attrs, now);
+    }
+
+    fn metric_collect(&mut self) -> Vec<MetricData> {
+        let now = self.clock_unix_ms();
+        self.tel.metrics.collect(now)
+    }
 }
 
 impl RealHost {
@@ -1076,6 +1100,21 @@ impl RealHost {
         self.tel.logs_buffer.clear();
     }
 
+    /// Collect and export the aggregated metrics as one OTLP/JSON POST to the metrics endpoint.
+    /// Best-effort. Called at teardown here (M0); the periodic reader (M2) calls the same path.
+    #[cfg(feature = "telemetry")]
+    fn flush_metrics(&mut self) {
+        let now = self.clock_unix_ms();
+        let Some((endpoint, headers, body)) = self.tel.exporter.as_ref().and_then(|e| {
+            let endpoint = e.metrics_endpoint.clone()?;
+            let data = self.tel.metrics.collect(now);
+            (!data.is_empty()).then(|| (endpoint, e.headers.clone(), e.metrics_request_body(&data)))
+        }) else {
+            return;
+        };
+        self.otlp_post(&endpoint, &headers, &body);
+    }
+
     /// POST one OTLP/JSON body to `url` with `headers`, on the host's runtime. Shared by all three
     /// signals' flush paths. Best-effort — an export failure never affects the program.
     #[cfg(feature = "telemetry")]
@@ -1098,6 +1137,7 @@ impl Drop for RealHost {
     fn drop(&mut self) {
         self.flush_telemetry();
         self.flush_logs();
+        self.flush_metrics();
     }
 }
 
