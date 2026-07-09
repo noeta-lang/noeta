@@ -221,6 +221,34 @@ mod tests {
     /// The node boots and its gossip pipeline runs: join a topic, publish (to no one), subscribe,
     /// and confirm a non-blocking poll is empty. Real cross-node delivery is exercised by the
     /// two-node integration test (P3.1); this pins that the async bridge itself works.
+    /// Two real nodes on the same topic (discovered over mDNS) exchange a gossip message. Not
+    /// hermetic — needs real multicast/networking — so `#[ignore]`, run explicitly:
+    /// `cargo test -p noeta-runtime --features ring-p2p -- --ignored two_nodes`.
+    #[test]
+    #[ignore = "needs real networking (mDNS multicast); run explicitly"]
+    fn two_nodes_exchange_a_gossip_message() {
+        let a = P2pNode::start().expect("node a");
+        let b = P2pNode::start().expect("node b");
+        // Both subscribe first (gossip is ephemeral — only messages published after subscribing
+        // arrive), then give discovery a moment to connect the overlay.
+        let sub_b = b.subscribe("room").expect("b subscribes");
+        let _sub_a = a.subscribe("room").expect("a subscribes");
+        std::thread::sleep(std::time::Duration::from_secs(3));
+
+        a.publish("room", b"hi from a".to_vec()).expect("a publishes");
+
+        // Poll b for up to ~15s (discovery + delivery are not instant).
+        let mut received = None;
+        for _ in 0..150 {
+            if let Some(bytes) = b.poll_sub(sub_b) {
+                received = Some(bytes);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(received.as_deref(), Some(&b"hi from a"[..]));
+    }
+
     #[test]
     fn node_starts_and_the_gossip_pipeline_runs() {
         let node = P2pNode::start().expect("node starts");
