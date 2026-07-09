@@ -203,6 +203,71 @@ impl SigType {
             .take_while(|p| !matches!(p, SigType::Optional(_)))
             .count()
     }
+
+    /// Render this signature type in **surface Noeta syntax**, matching the checker's own `Type`
+    /// display (`void`, `Option<T>`, `A | B`, `fn(..) -> ..`) — so a signature read from the
+    /// registry and a type printed in a diagnostic are the same text. This is the one canonical
+    /// registry-signature renderer; every tooling surface that shows a registry signature (LSP
+    /// completion detail, the MCP `stdlib_api` tool, future doc generation) formats through it
+    /// rather than keeping its own lossy copy.
+    ///
+    /// The type-variable spelling is positional (`Var(0)` → `T`, `Var(1)` → `U`, …), the informal
+    /// convention the docs use for generic positions. A trailing-[`SigType::Optional`] *parameter*
+    /// renders as `T?` — an arity marker, distinct from the value type [`SigType::Option`].
+    pub fn render(&self) -> String {
+        match self {
+            SigType::Int => "int".to_string(),
+            SigType::Float => "float".to_string(),
+            SigType::F32 => "f32".to_string(),
+            SigType::Bool => "bool".to_string(),
+            SigType::String => "string".to_string(),
+            SigType::Bytes => "bytes".to_string(),
+            SigType::Unit => "void".to_string(),
+            SigType::Dyn => "dyn".to_string(),
+            SigType::List(t) => format!("List<{}>", t.render()),
+            SigType::Option(t) => format!("Option<{}>", t.render()),
+            SigType::Map(k, v) => format!("Map<{}, {}>", k.render(), v.render()),
+            SigType::Future(t) => format!("Future<{}>", t.render()),
+            SigType::Named(n) => (*n).to_string(),
+            SigType::Union(ts) => ts
+                .iter()
+                .map(SigType::render)
+                .collect::<Vec<_>>()
+                .join(" | "),
+            SigType::Optional(t) => format!("{}?", t.render()),
+            SigType::Fn(params, ret) => format!(
+                "fn({}) -> {}",
+                params
+                    .iter()
+                    .map(SigType::render)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                ret.render()
+            ),
+            SigType::Var(n) => type_var_name(*n),
+            SigType::BoundedVar(n, bound) => format!("{}: {}", type_var_name(*n), bound),
+            SigType::Generic(name, args) => format!(
+                "{}<{}>",
+                name,
+                args.iter()
+                    .map(SigType::render)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
+
+/// Signature-level type-variable names — `Var(0)` → `T`, `Var(1)` → `U`, … then `T2`, `T3`, … past
+/// the single-letter run.
+fn type_var_name(n: u8) -> String {
+    const LETTERS: &[u8] = b"TUVWXYZ";
+    let i = n as usize;
+    if i < LETTERS.len() {
+        (LETTERS[i] as char).to_string()
+    } else {
+        format!("T{}", i - LETTERS.len() + 2)
+    }
 }
 
 /// How a function's **return type** is determined. Most are [`RetTy::Concrete`]; the rest capture
@@ -219,6 +284,25 @@ pub enum RetTy {
     /// concrete `T` arrives as a [`TypeRecipe`] the checker records at the call site and the backend
     /// threads into the dispatch (call-site-typed construction).
     TypeArg,
+}
+
+impl RetTy {
+    /// Render the return type in surface syntax, resolving the polymorphic forms against the
+    /// signature's `params` where they reference them. Companion to [`SigType::render`].
+    pub fn render(&self, params: &[SigType]) -> String {
+        match self {
+            RetTy::Concrete(s) => s.render(),
+            // Same type as a positional argument (`vec.add(v, w): typeof v`).
+            RetTy::SameAsArg(n) => params
+                .get(*n)
+                .map(SigType::render)
+                .unwrap_or_else(|| "dyn".to_string()),
+            // `int` when every argument is concretely `int`, else `float`.
+            RetTy::NumericPreserving => "int | float".to_string(),
+            // Named at the call site by a turbofish (`json.parse::<T>(): T`).
+            RetTy::TypeArg => "T /* call-site type: name it with ::<T> */".to_string(),
+        }
+    }
 }
 
 /// A recursive build recipe for a call-site type argument (`json.parse::<T>`). The checker resolves
@@ -268,6 +352,21 @@ impl ExtFn {
         params: &[],
         ret: RetTy::Concrete(SigType::Unit),
     };
+
+    /// The whole signature in surface syntax — `fn split(string, string): List<string>`. Native
+    /// parameters carry no names in the registry, so parameters render as their types positionally.
+    pub fn render(&self) -> String {
+        format!(
+            "fn {}({}): {}",
+            self.name,
+            self.params
+                .iter()
+                .map(SigType::render)
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.ret.render(self.params)
+        )
+    }
 }
 
 /// A module's dispatch: given the function name, the host seam, and the projected arguments, run
@@ -892,6 +991,66 @@ pub fn dispatch(
     match find_module(module) {
         Some(m) => (m.dispatch)(func, host, args),
         None => Err(crate::no_function_error(module, func)),
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    #[test]
+    fn sig_render_matches_checker_display_conventions() {
+        // The canonical spellings agree with `noeta_types::Type`'s Display: `void`, `Option<T>`,
+        // `A | B`, `fn(..) -> ..` — a registry signature and a diagnostic show the same text.
+        assert_eq!(SigType::Unit.render(), "void");
+        assert_eq!(SigType::Option(&SigType::Int).render(), "Option<int>");
+        assert_eq!(
+            SigType::Union(&[SigType::String, SigType::Bytes]).render(),
+            "string | bytes"
+        );
+        assert_eq!(
+            SigType::Fn(&[SigType::Named("Request")], &SigType::Dyn).render(),
+            "fn(Request) -> dyn"
+        );
+        assert_eq!(
+            SigType::Map(&SigType::String, &SigType::String).render(),
+            "Map<string, string>"
+        );
+        assert_eq!(
+            SigType::Future(&SigType::Named("Response")).render(),
+            "Future<Response>"
+        );
+        // Trailing-optional parameter: an arity marker, not the Option value type.
+        assert_eq!(SigType::Optional(&SigType::Int).render(), "int?");
+        // Type variables: positional letters, then numbered.
+        assert_eq!(SigType::Var(0).render(), "T");
+        assert_eq!(SigType::Var(1).render(), "U");
+        assert_eq!(SigType::Var(7).render(), "T2");
+        assert_eq!(SigType::BoundedVar(0, "Mergeable").render(), "T: Mergeable");
+        assert_eq!(
+            SigType::Generic("Cell", &[SigType::Var(0)]).render(),
+            "Cell<T>"
+        );
+    }
+
+    #[test]
+    fn ext_fn_render_is_the_full_surface_signature() {
+        let f = ExtFn {
+            name: "get",
+            params: &[
+                SigType::String,
+                SigType::Optional(&SigType::Map(&SigType::String, &SigType::String)),
+            ],
+            ret: RetTy::Concrete(SigType::Named("Response")),
+        };
+        assert_eq!(f.render(), "fn get(string, Map<string, string>?): Response");
+
+        let same_as = ExtFn {
+            name: "add",
+            params: &[SigType::Named("vec3"), SigType::Named("vec3")],
+            ret: RetTy::SameAsArg(0),
+        };
+        assert_eq!(same_as.render(), "fn add(vec3, vec3): vec3");
     }
 }
 

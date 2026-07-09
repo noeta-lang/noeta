@@ -10,7 +10,7 @@
 //! projection of static registry data, so it needs no database and no host.
 
 use noeta_stdlib::registry;
-use noeta_stdlib::{ExtFn, ExtType, RetTy, SigType};
+use noeta_stdlib::{ExtFn, ExtType, SigType};
 use rmcp::schemars;
 use serde::Serialize;
 
@@ -43,6 +43,27 @@ pub struct ModuleApi {
     pub ring: Option<String>,
     /// Every function the module exposes, in registration order.
     pub functions: Vec<FnSig>,
+    /// The module's **method bundles** (kernel methods): named method sets a user type acquires by
+    /// explicit opt-in — `impl <module>.<Bundle> for T {}` — validated against the bundle's
+    /// structural constraint at compile time. Empty for most modules.
+    pub bundles: Vec<BundleApi>,
+}
+
+/// One method bundle rendered for an agent: its opt-in syntax, what a binding type must look like,
+/// and the methods the type (and `List<T>`, for the bulk forms) acquires.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct BundleApi {
+    /// The bundle's surface name, e.g. `Kernels`.
+    pub name: String,
+    /// The opt-in a user writes, e.g. `impl vec.Kernels for MyType {}`.
+    pub impl_syntax: String,
+    /// The structural constraint a binding type must satisfy, e.g.
+    /// `@packed struct with fields (f32, f32, f32), column layout`.
+    pub constraint: String,
+    /// Methods acquired on a value of the bound type itself (`v.dot(w)`).
+    pub element_methods: Vec<FnSig>,
+    /// Methods acquired on a `List<T>` of the bound type (`xs.dot_all(ys)`).
+    pub bulk_methods: Vec<FnSig>,
 }
 
 /// One extern value type rendered for an agent: its name, the built-in traits it satisfies, and its
@@ -51,6 +72,10 @@ pub struct ModuleApi {
 pub struct TypeApi {
     /// The type name as it appears in Noeta source, e.g. `Uuid`, `Response`.
     pub name: String,
+    /// The namespace the type lives under (extern-type namespacing) — its qualified identity is
+    /// `namespace.name` (`std.id.Uuid`), and it must be **imported** to use its short name:
+    /// `use std.id.Uuid` (extern types are no longer globally reserved).
+    pub namespace: String,
     /// Built-in traits this type declares (e.g. `Mergeable`), empty for most.
     pub traits: Vec<String>,
     /// Every instance method, in declaration order.
@@ -94,8 +119,8 @@ fn query_filtered(q: &str) -> StdlibApiOutput {
             not_found: false,
         };
     }
-    // 2. An extern type name (`Uuid`, `Response`).
-    if let Some(t) = registry::find_type(q) {
+    // 2. An extern type name — short (`Uuid`, unique across namespaces) or qualified (`std.id.Uuid`).
+    if let Some(t) = registry::resolve_type(q).or_else(|| registry::find_type_qualified(q)) {
         return StdlibApiOutput {
             modules: Vec::new(),
             types: vec![render_type(t)],
@@ -174,10 +199,58 @@ fn render_module(qname: String, m: &noeta_stdlib::ExtModule) -> ModuleApi {
         .chain(m.ctx_functions.iter())
         .map(render_fn)
         .collect();
+    let bundles = m
+        .bundles
+        .iter()
+        .map(|b| render_bundle(&qname, m.name, b))
+        .collect();
     ModuleApi {
         module: qname,
         ring: m.ring.map(str::to_string),
         functions,
+        bundles,
+    }
+}
+
+fn render_bundle(qualified: &str, module: &str, b: &noeta_stdlib::ExtBundle) -> BundleApi {
+    use noeta_stdlib::{BundleReceiver, ConstraintField, ConstraintLayout};
+    // The impl site names the bundle through the module *binding* (`use std.{vec}` then
+    // `impl vec.Kernels for T {}`), so the short module name is the one to show.
+    let impl_syntax = format!(
+        "use {qualified} … impl {module}.{} for YourType {{}}",
+        b.name
+    );
+    let fields = b
+        .constraint
+        .fields
+        .iter()
+        .map(|f| match f {
+            ConstraintField::Int => "int",
+            ConstraintField::Float => "float",
+            ConstraintField::F32 => "f32",
+            ConstraintField::Bool => "bool",
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let layout = match b.constraint.layout {
+        ConstraintLayout::Any => "any layout",
+        ConstraintLayout::Row => "row layout",
+        ConstraintLayout::Column => "column layout",
+    };
+    let (mut element_methods, mut bulk_methods) = (Vec::new(), Vec::new());
+    for m in b.methods {
+        let sig = render_fn(&m.sig);
+        match m.receiver {
+            BundleReceiver::Element => element_methods.push(sig),
+            BundleReceiver::Bulk => bulk_methods.push(sig),
+        }
+    }
+    BundleApi {
+        name: b.name.to_string(),
+        impl_syntax,
+        constraint: format!("@packed struct with fields ({fields}), {layout}"),
+        element_methods,
+        bulk_methods,
     }
 }
 
@@ -190,84 +263,21 @@ fn render_type(t: &ExtType) -> TypeApi {
         .collect();
     TypeApi {
         name: t.name.to_string(),
+        namespace: t.namespace.to_string(),
         traits: t.traits.iter().map(|s| s.to_string()).collect(),
         methods,
     }
 }
 
+/// Project an [`ExtFn`] into the tool's shape. The rendering itself is the canonical
+/// [`ExtFn::render`]/[`SigType::render`] in `noeta-native` — the same renderer the LSP's
+/// completion detail uses, so every tooling surface shows one syntax.
 fn render_fn(f: &ExtFn) -> FnSig {
-    let params: Vec<String> = f.params.iter().map(render_sig).collect();
-    let returns = render_ret(&f.ret, f.params);
-    let signature = format!("fn {}({}): {}", f.name, params.join(", "), returns);
     FnSig {
         name: f.name.to_string(),
-        signature,
-        params,
-        returns,
-    }
-}
-
-/// Render a [`SigType`] into surface Noeta syntax — the form an agent should write.
-fn render_sig(sig: &SigType) -> String {
-    match sig {
-        SigType::Int => "int".to_string(),
-        SigType::Float => "float".to_string(),
-        SigType::F32 => "f32".to_string(),
-        SigType::Bool => "bool".to_string(),
-        SigType::String => "string".to_string(),
-        SigType::Bytes => "bytes".to_string(),
-        SigType::Unit => "()".to_string(),
-        SigType::Dyn => "dyn".to_string(),
-        SigType::List(t) => format!("List<{}>", render_sig(t)),
-        // A nullable value type renders with the surface `?` suffix.
-        SigType::Option(t) => format!("{}?", render_sig(t)),
-        SigType::Map(k, v) => format!("Map<{}, {}>", render_sig(k), render_sig(v)),
-        SigType::Future(t) => format!("Future<{}>", render_sig(t)),
-        SigType::Named(n) => (*n).to_string(),
-        SigType::Union(ts) => ts.iter().map(render_sig).collect::<Vec<_>>().join("|"),
-        // A trailing-optional *parameter*: the argument (and every one after it) may be omitted.
-        SigType::Optional(t) => format!("{}?", render_sig(t)),
-        SigType::Fn(params, ret) => format!(
-            "Fn({}) -> {}",
-            params.iter().map(render_sig).collect::<Vec<_>>().join(", "),
-            render_sig(ret)
-        ),
-        SigType::Var(n) => type_var_name(*n),
-        SigType::BoundedVar(n, bound) => format!("{}: {}", type_var_name(*n), bound),
-        SigType::Generic(name, args) => format!(
-            "{}<{}>",
-            name,
-            args.iter().map(render_sig).collect::<Vec<_>>().join(", ")
-        ),
-    }
-}
-
-/// Render a [`RetTy`] into surface syntax, resolving the polymorphic forms against the call's
-/// parameter types where they reference them.
-fn render_ret(ret: &RetTy, params: &[SigType]) -> String {
-    match ret {
-        RetTy::Concrete(s) => render_sig(s),
-        // Same type as a positional argument (`vec.add(v, w): typeof v`).
-        RetTy::SameAsArg(n) => params
-            .get(*n)
-            .map(render_sig)
-            .unwrap_or_else(|| "dyn".to_string()),
-        // `int` when every argument is concretely `int`, else `float`.
-        RetTy::NumericPreserving => "int|float".to_string(),
-        // Named at the call site by a turbofish (`json.parse::<T>(): T`).
-        RetTy::TypeArg => "T /* call-site type: name it with ::<T> */".to_string(),
-    }
-}
-
-/// Signature-level type variable names — `Var(0)` → `T`, `Var(1)` → `U`, … then `T2`, `T3`, … past
-/// the single-letter run. Matches the informal `T`/`U` the docs use for generic positions.
-fn type_var_name(n: u8) -> String {
-    const LETTERS: &[u8] = b"TUVWXYZ";
-    let i = n as usize;
-    if i < LETTERS.len() {
-        (LETTERS[i] as char).to_string()
-    } else {
-        format!("T{}", i - LETTERS.len() + 2)
+        signature: f.render(),
+        params: f.params.iter().map(SigType::render).collect(),
+        returns: f.ret.render(f.params),
     }
 }
 
@@ -352,11 +362,50 @@ mod tests {
         assert!(!out.modules.is_empty(), "catalog returned as fallback");
     }
 
+    // (SigType/RetTy/ExtFn rendering itself is covered where it lives — `noeta-native`'s
+    // `render_tests` — since the renderer is shared with the LSP's completion detail.)
+
     #[test]
-    fn type_var_names_are_stable() {
-        assert_eq!(type_var_name(0), "T");
-        assert_eq!(type_var_name(1), "U");
-        assert_eq!(type_var_name(6), "Z");
-        assert_eq!(type_var_name(7), "T2");
+    fn types_carry_their_namespace() {
+        // Extern types are namespace-scoped (`std.id.Uuid`) and imported like user types — the
+        // agent needs the namespace to write the `use`.
+        let out = query(Some("Uuid"));
+        assert_eq!(out.types.len(), 1);
+        assert_eq!(out.types[0].name, "Uuid");
+        assert!(
+            !out.types[0].namespace.is_empty(),
+            "Uuid should carry its namespace"
+        );
+        // The qualified identity resolves too.
+        let qualified = format!("{}.Uuid", out.types[0].namespace);
+        let out2 = query(Some(&qualified));
+        assert_eq!(out2.types.len(), 1, "qualified {qualified} should resolve");
+        assert_eq!(out2.types[0].name, "Uuid");
+    }
+
+    #[test]
+    fn bundles_surface_with_opt_in_syntax() {
+        // kernel-methods: `vec` contributes the `Kernels` bundle; agents must see the opt-in
+        // (`impl vec.Kernels for T {}`), the structural constraint, and both method receivers.
+        let out = query(Some("std.vec"));
+        assert_eq!(out.modules.len(), 1);
+        let bundles = &out.modules[0].bundles;
+        assert!(
+            !bundles.is_empty(),
+            "std.vec should contribute at least one bundle"
+        );
+        let kernels = &bundles[0];
+        assert!(
+            kernels
+                .impl_syntax
+                .contains(&format!("impl vec.{} for", kernels.name)),
+            "opt-in syntax was {:?}",
+            kernels.impl_syntax
+        );
+        assert!(kernels.constraint.contains("@packed"));
+        assert!(
+            !kernels.element_methods.is_empty() || !kernels.bulk_methods.is_empty(),
+            "bundle should list its methods"
+        );
     }
 }
