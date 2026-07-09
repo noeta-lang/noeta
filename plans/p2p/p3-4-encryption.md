@@ -55,10 +55,27 @@ We compose p2panda's pieces rather than invent crypto. What we must build/wire:
   (`set_groups_state`/`set_space_state`/`*_persisted`) are `#[cfg(test/test_utils)]` — so the
   **production integration persists via `p2panda-stream`'s spaces processor + orderer**, not the raw
   Manager. b.1 adopts that. (The spike used a dev-only `ring-p2p-testkit` feature for those helpers.)
-- **P3.4b.1 — encrypted durable path.** Bind the spike to `RealHost`/the node as a parallel encrypted
-  transport; keep the plaintext path unchanged. Encrypt/decrypt `synced_signal` bodies through a space.
+- **P3.4b.1 — encrypted durable path. ✅ DONE.** Bound the assembly to the node behind the public
+  store traits, no `test_utils`. Three green sub-slices:
+  - **b.1.0** (`869bbbc8`): `CryptoGroups` — the production component. The manager is store-backed and
+    stateless between calls, so persist each returned auth/space delta via the **public**
+    `set_*_state_tx` store traits (`persist_groups`/`persist_space`), mirroring the crate's test-only
+    `*_persisted`. Key bundles flow as real `KeyBundle` operations. Dropped the `ring-p2p-testkit`
+    crutch — the spike test now runs on the production path.
+  - **b.1.1** (`e63b5c28`): node owns a lazily-built `CryptoGroups` whose actor id **is** the node
+    identity (`Credentials::from_keys(node_key, x25519_secret)`), with the whole `Credentials`
+    persisted via serde (`credentials.key`, 0600) since the x25519 secret can't be read out as bytes;
+    isolated `spaces.db` store. `crypto_group_id() == identity()`, persists across restart.
+  - **b.1.2** (`f9eb76b8`): `SpacesOp::to_wire`/`from_wire` — spaces ops carry all data (incl.
+    ciphertext) in the header extensions with an empty body, so the CBOR header **is** the wire form;
+    hash recomputed + signature verified on receipt. The e2e crypto test routes every hand-off
+    through the wire.
 - **P3.4b.2 — membership + surface.** `.members()/.encrypted()`; add/remove with key rotation; the
-  control-message replication + causal ordering over the topic.
+  control-message replication + causal ordering over the topic. **Design note:** encryption is
+  *transparent to program semantics* (the decrypted value equals the plaintext value), so the
+  deterministic **sandbox treats an encrypted synced_signal as a pass-through** (membership recorded,
+  bytes flow in-clear inside the in-process broker — no real peers to hide from), keeping the oracle
+  byte-identical; only `RealHost` does real crypto. This mirrors `p2p_identity`/`sync_status`.
 - **P3.4b.3 — multi-node tests.** Two real nodes in a group converge on encrypted state; a
   non-member node on the topic gets ciphertext it cannot read; a removed member stops decrypting new
   state. The real end-to-end proof (`#[ignore]`, run explicitly, like the other real-network tests).
