@@ -103,18 +103,58 @@ linker rewrite. Full gate per slice: differential + leak + conformance + diagnos
 Reuses A's identity/display/alias machinery, extended to the linker + user types. The larger, riskier
 half; each slice keeps the existing single-namespace corpus green.
 
-- **B0** — linker assigns each user decl a qualified identity from its module namespace and rewrites
-  intra-/cross-module type references to qualified form (extend `reroot_program`/`link_core`). E0020 →
-  duplicate *qualified* identity; local-name clash stays a per-file check. Existing corpus: types
-  become `App.Main.Foo` internally, short display → behavior-preserving.
-- **B1** — backends key on qualified user identity (`Shape.name`/`TypeDef.name`, method route tables,
-  `is`/`as`, reflection `TypeRepr`) with short display. Differential green.
-- **B2** — checker namespace-aware resolution: unadorned name → current-namespace-qualified or
-  imported-qualified; `use`/alias → qualified; unify with the extern resolution path from A4.
+### Approved concrete design (investigated 2026-07-09)
+
+**Where qualification happens: the linker (`link_core`), before flattening.** IR lowering and the
+checker both run on the *already-merged* `Program`, where per-module namespace context is gone — a
+reference to `User` inside merged module `App.A`'s body and a reference to `User` in the entry look
+identical post-flatten. Only the linker still has each module's namespace + its own `use`s. So the
+linker rewrites **decl names AND every type reference** to qualified form per-module, producing a
+fully-qualified flat `Program`. Downstream is then trivial: the backends already key on `decl.name`
+(→ qualified for free) and the checker sees qualified names it can resolve directly.
+
+**Scope: only types declared in a *namespaced* module get qualified.** A file with no `namespace`
+decl keeps bare names (its map is empty → byte-identical). 537/547 corpus files have no namespace, so
+they are untouched; only the 10 namespaced `modules/*` fixtures + `demo/orders.noe` are affected.
+
+**Differential safety.** Single-file cases bypass the linker on *both* backends (`compare_backends` →
+`reference_run`/`VmBackend` on the same unlinked parse) → both bare → identical. Multi-file cases run
+*both* backends off the same `noeta_db::linked` program (`compare_backends_workspace`) → both
+qualified identically. Coexistence of two same-named types only arises multi-file, always via the
+linker. No path mixes bare-vs-qualified across the two backends.
+
+**Reference-form surface the linker walker must cover** (verified against `noeta-ast`): `TypeRef::Named.name`
+(all annotations, `is`/`as` targets, `AttributesOf`/`FromBytes`/`Channel`/`TypedModuleCall` type args,
+enum backing), `ObjectLit.type_name` (constructor), `Expr::Ident.name` (static-call/enum-path base
+`User.new`/`E.Empty` — a `Var` atom at runtime), `Pattern::Variant.type_name` + `Pattern::IsType.ty`,
+`ImplDecl.target`, `Attribute.name`/`AttrValue` nominal names, and each decl's own `name`. Externs
+(`use std.id.Uuid`) never resolve to a pool module → excluded from the map → stay bare → handled by
+the Phase-A checker/IR extern path unchanged.
+
+**Aliasing fix (folds the linker into A's alias model).** `link_core` currently keys `origins`/merge on
+the import *leaf* (`name.name`), so `use App.A.User as AUser` + `use App.B.User as BUser` collide (both
+leaf `User`). Switch the origin/merge key to `name.local()` (alias-aware); the E0020 *local-name* clash
+(import vs local decl, or two imports sharing a local name) stays, resolved by aliasing.
+
+### Slices
+
+- **B0a** — `noeta-loader::qualify` module: the pure per-module reference-qualification walker
+  (`qualify_stmt(&mut Stmt, &QMap)`) + map builder (`build_module_map`), with unit tests. No wiring.
+- **B0b** — wire into `link_core`: per-module maps (entry + pool, keyed by namespace), rewrite each
+  merged decl with its source-module map + entry statements with the entry map, alias-aware
+  origin/merge key. Update loader unit tests to qualified identities. Multi-file corpus + differential
+  green.
+- **B1** — short-display split so `type_of`/error messages read short even with qualified identities:
+  `short_type_name` at `TypeRepr::Display` and any user-facing type stringification. Verify differential
+  (no observable change) + the namespaced corpus.
+- **B2** — checker: confirm qualified user names resolve end-to-end (admission, method routing, enum
+  variant paths, `MethodHandle`/`AttributesOf` residuals); add any missing reference form. Mostly a
+  verification slice since the linker pre-qualifies.
 - **B3** — conformance: two same-named user types from different namespaces coexist via aliases; the
-  native-vs-user `Counter` case; E0027 un-imported / E0020 clash cases. Differential agrees.
-- **B4** — unify: extern + user types share one identity/resolution/display path; remove residual
-  asymmetry; update `docs/resources` + confirm LSP/salsa parity. Final gate.
+  native-vs-user `Counter` case; E0020 clash / private-import cases. Differential agrees.
+- **B4** — unify: extern + user types share one identity/resolution/display path; fold what the linker
+  now covers out of the checker/IR extern maps where clean; update `docs/resources` + confirm LSP/salsa
+  parity. Final gate.
 
 ## Risks / watch-list
 
