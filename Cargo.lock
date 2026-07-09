@@ -1869,6 +1869,7 @@ dependencies = [
  "noeta-native",
  "noeta-parser",
  "noeta-span",
+ "noeta-stdlib",
  "noeta-types",
 ]
 

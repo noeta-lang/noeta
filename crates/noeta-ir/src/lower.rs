@@ -190,30 +190,44 @@ struct Lowerer<'a> {
     /// the first `Expr::Closure` the lowering meets (the step itself, which lowers before anything
     /// nested inside it). A user's own closure therefore always finds `None` and stays anonymous.
     synth_step_name: Option<String>,
-    /// Import **aliases** (`use std.id.Uuid as MyId` → `{"MyId": "Uuid"}`) — the local rename mapped
-    /// back to the imported type's own name, which is the name a runtime value is tagged with. A
-    /// narrowing target (`x is MyId`, `x.as<MyId>()`) is rewritten through this so it matches the
-    /// value's runtime tag; a non-aliased import (`use std.id.Uuid`) needs no entry, its local name
-    /// already being the runtime name. The one seam that makes `is`/`as`/`type_of` alias-aware in
-    /// both backends at once (they share this lowered IR).
+    /// The runtime **narrowing identity** each `use`-imported local type name resolves to, so a
+    /// target (`x is MyId`, `x.as<Uuid>()`) matches the value's runtime tag in both backends (they
+    /// share this lowered IR). Two kinds of entry:
+    ///
+    /// - a **native** type (`use std.id.Uuid [as MyId]`) → its **qualified** identity
+    ///   (`std.id.Uuid`), which is what an extern value reports for narrowing — so a native target
+    ///   never collides with a same-short-named *user* type (whose runtime tag is the bare name).
+    /// - a **user-type alias** (`use App.User as Customer`) → the imported type's own name (`User`),
+    ///   its runtime tag.
+    ///
+    /// A plain (non-aliased) *user* import needs no entry — its local name is already the tag.
     type_aliases: HashMap<String, String>,
 }
 
-/// Build the import-alias map (see [`Lowerer::type_aliases`]) from a program's `use` statements:
-/// each renamed leaf `use … <Name> as <Alias>` contributes `Alias → Name`. Only aliases are
-/// recorded — a plain import's local name is already the runtime name, so it needs no rewrite.
+/// Build the narrowing-identity map (see [`Lowerer::type_aliases`]) from a program's `use`
+/// statements. A native-type import resolves to its qualified identity via the registry; a renamed
+/// user-type import resolves to its leaf name.
 fn collect_type_aliases(program: &AstProgram) -> HashMap<String, String> {
-    let mut aliases = HashMap::new();
+    let mut map = HashMap::new();
     for stmt in &program.stmts {
-        if let AstStmt::Use { names, .. } = stmt {
-            for n in names {
-                if let Some(alias) = &n.alias {
-                    aliases.insert(alias.clone(), n.name.clone());
-                }
+        let AstStmt::Use { path, names, .. } = stmt else {
+            continue;
+        };
+        let prefix = path.join(".");
+        for n in names {
+            let local = n.alias.clone().unwrap_or_else(|| n.name.clone());
+            let qualified = format!("{prefix}.{}", n.name);
+            if let Some(ext) = noeta_stdlib::registry::find_type_qualified(&qualified) {
+                // A native type: narrows against its qualified identity, whichever local name it
+                // was bound to.
+                map.insert(local, ext.qualified());
+            } else if n.alias.is_some() {
+                // A renamed user (or opaque) import: narrows against the imported leaf name.
+                map.insert(local, n.name.clone());
             }
         }
     }
-    aliases
+    map
 }
 
 impl Lowerer<'_> {
