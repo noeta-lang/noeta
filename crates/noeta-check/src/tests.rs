@@ -1121,7 +1121,10 @@ fn reserved_native_type_names_reject_type_declarations() {
     // A registered **extern** type's name is no longer reserved — extern types are namespace-scoped
     // and `use`-imported, so a user may freely declare one (it carries a distinct qualified
     // identity and never conflates with the native type).
-    assert_eq!(codes("struct FileHandle { x: int }\n"), Vec::<String>::new());
+    assert_eq!(
+        codes("struct FileHandle { x: int }\n"),
+        Vec::<String>::new()
+    );
     assert_eq!(codes("class Response { x: int }\n"), Vec::<String>::new());
     // An unreserved name stays declarable.
     assert_eq!(codes("struct Handle2 { x: int }\n"), Vec::<String>::new());

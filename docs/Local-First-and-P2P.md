@@ -127,7 +127,7 @@ Because a synced signal is an ordinary node in the reactivity graph, everything 
 
 Add a third argument — a **member set** — to make a synced signal end-to-end encrypted to exactly those peers. Every state it publishes crosses the wire encrypted; a node outside the set sees only ciphertext it cannot read.
 
-```noeta
+```noeta ignore
 use std.{crdt}
 use std.synced.{synced_signal}
 
@@ -144,7 +144,7 @@ Membership is not fixed for life — you can change it at runtime:
 - `.add_member(peer_id)` — admit a peer to the group (welcomed once its key arrives on the topic).
 - `.remove_member(peer_id)` — remove a peer and **rotate the group key**, so the removed peer can no longer decrypt state published afterward (revocation).
 
-```noeta
+```noeta ignore
 tally.add_member(carol_id)      // carol can now read new state
 tally.remove_member(bob_id)     // bob is revoked — the key rotates; he can't read anything published now on
 ```

@@ -193,7 +193,9 @@ pub fn synced_ctx_dispatch<C: NativeCtx + ?Sized>(
                             _ => Err(type_error("synced_signal", "a list of peer-id strings")),
                         })
                         .collect::<Result<Vec<_>, _>>()?,
-                    _ => return Err(type_error("synced_signal", "a list of peer-id strings").into()),
+                    _ => {
+                        return Err(type_error("synced_signal", "a list of peer-id strings").into());
+                    }
                 },
                 None => Vec::new(),
             };
@@ -207,9 +209,13 @@ pub fn synced_ctx_dispatch<C: NativeCtx + ?Sized>(
             // (`members` given) routes through the group transport, which encrypts the announce to
             // the declared members; a plaintext signal uses the durable transport directly.
             let subscription = if members.is_empty() {
-                ctx.host().p2p_subscribe_durable(&topic).map_err(CtxError::from)?
+                ctx.host()
+                    .p2p_subscribe_durable(&topic)
+                    .map_err(CtxError::from)?
             } else {
-                ctx.host().p2p_group_open(&topic, &members).map_err(CtxError::from)?
+                ctx.host()
+                    .p2p_group_open(&topic, &members)
+                    .map_err(CtxError::from)?
             };
             if members.is_empty() {
                 ctx.host()

@@ -155,7 +155,9 @@ impl Forge<Conditions> for NoetaForge {
                 u32,
                 Hash,
             >>::get_latest_entry_tx(
-                &self.store, &self.signing_key.verifying_key(), &SPACES_LOG_ID
+                &self.store,
+                &self.signing_key.verifying_key(),
+                &SPACES_LOG_ID,
             )
             .await?
             .map(|op| (op.header.seq_num + 1, Some(op.hash)))
@@ -257,7 +259,11 @@ impl std::fmt::Debug for CryptoGroups {
 impl CryptoGroups {
     /// Build a group-encryption manager over `store`, using `credentials` (this actor's signing key
     /// + identity secret) as its identity and `rng` for key generation.
-    pub fn new(store: SqliteStore, credentials: Credentials, rng: Rng) -> Result<CryptoGroups, StdError> {
+    pub fn new(
+        store: SqliteStore,
+        credentials: Credentials,
+        rng: Rng,
+    ) -> Result<CryptoGroups, StdError> {
         let spaces_store = NoetaSpacesStore::new(store.clone());
         let forge = NoetaForge::new(store.clone(), credentials.signing_key());
         let manager = NoetaManager::new(spaces_store.clone(), forge, credentials, rng)
@@ -611,13 +617,14 @@ impl EncryptedGroup {
             .members
             .iter()
             .copied()
-            .filter(|m| {
-                *m != self.me && self.known_bundles.contains(m) && !self.added.contains(m)
-            })
+            .filter(|m| *m != self.me && self.known_bundles.contains(m) && !self.added.contains(m))
             .collect();
         let mut wire = Vec::new();
         for member in eligible {
-            let add_ops = self.crypto.add(self.space_id, member, Access::read()).await?;
+            let add_ops = self
+                .crypto
+                .add(self.space_id, member, Access::read())
+                .await?;
             self.added.insert(member);
             for op in &add_ops {
                 wire.push(op.to_wire());
@@ -838,7 +845,15 @@ mod tests {
             let mut bob_in: VecDeque<Vec<u8>> = a_init.into();
             let mut alice_dec: Vec<Vec<u8>> = Vec::new();
             let mut bob_dec: Vec<Vec<u8>> = Vec::new();
-            pump(&mut alice, &mut bob, &mut alice_in, &mut bob_in, &mut alice_dec, &mut bob_dec).await;
+            pump(
+                &mut alice,
+                &mut bob,
+                &mut alice_in,
+                &mut bob_in,
+                &mut alice_dec,
+                &mut bob_dec,
+            )
+            .await;
 
             // Identify the creator (which manages membership) and the member it will remove.
             let alice_is_creator = alice.creator;
@@ -851,8 +866,20 @@ mod tests {
             } else {
                 bob.publish(before.clone()).await.unwrap()
             };
-            if alice_is_creator { bob_in.extend(ops) } else { alice_in.extend(ops) }
-            pump(&mut alice, &mut bob, &mut alice_in, &mut bob_in, &mut alice_dec, &mut bob_dec).await;
+            if alice_is_creator {
+                bob_in.extend(ops)
+            } else {
+                alice_in.extend(ops)
+            }
+            pump(
+                &mut alice,
+                &mut bob,
+                &mut alice_in,
+                &mut bob_in,
+                &mut alice_dec,
+                &mut bob_dec,
+            )
+            .await;
 
             // The creator removes the other member (rotating the key), then publishes a second
             // secret the removed member must not be able to read.
@@ -867,10 +894,26 @@ mod tests {
             } else {
                 bob.publish(after.clone()).await.unwrap()
             });
-            if alice_is_creator { bob_in.extend(ops) } else { alice_in.extend(ops) }
-            pump(&mut alice, &mut bob, &mut alice_in, &mut bob_in, &mut alice_dec, &mut bob_dec).await;
+            if alice_is_creator {
+                bob_in.extend(ops)
+            } else {
+                alice_in.extend(ops)
+            }
+            pump(
+                &mut alice,
+                &mut bob,
+                &mut alice_in,
+                &mut bob_in,
+                &mut alice_dec,
+                &mut bob_dec,
+            )
+            .await;
 
-            let removed_dec = if alice_is_creator { &bob_dec } else { &alice_dec };
+            let removed_dec = if alice_is_creator {
+                &bob_dec
+            } else {
+                &alice_dec
+            };
             assert!(
                 removed_dec.iter().any(|d| d == &before),
                 "the member decrypted state from while it was a member"

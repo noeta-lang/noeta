@@ -347,7 +347,10 @@ impl SyncStatus {
 /// Object-safe on purpose (IO is never a hot path, so the dynamic dispatch is immaterial). The
 /// blanket impl means any type providing all nine capabilities *is* a `Host` automatically — there
 /// is nothing extra to implement.
-pub trait Host: FileSystem + Rng + Clock + Env + Entropy + Ids + Network + P2p + crate::Telemetry {}
+pub trait Host:
+    FileSystem + Rng + Clock + Env + Entropy + Ids + Network + P2p + crate::Telemetry
+{
+}
 impl<T: FileSystem + Rng + Clock + Env + Entropy + Ids + Network + P2p + crate::Telemetry> Host
     for T
 {

@@ -408,8 +408,7 @@ impl<'m> Vm<'m> {
                     let ctx = std::mem::take(&mut self.scopes[si][ti].context);
                     let saved = std::mem::replace(&mut self.ctx_current, ctx);
                     let polled = self.poll_once(future, span);
-                    self.scopes[si][ti].context =
-                        std::mem::replace(&mut self.ctx_current, saved);
+                    self.scopes[si][ti].context = std::mem::replace(&mut self.ctx_current, saved);
                     self.scopes[si][ti].polling = false;
                     if let Poll::Ready(value) = polled? {
                         self.scopes[si][ti].result = Some(value);
@@ -569,8 +568,15 @@ impl<'m> Vm<'m> {
         let trace = self.outbound_trace_context();
         let (tx, rx) = std::sync::mpsc::channel();
         let thread_handle = std::thread::spawn(move || {
-            let msg =
-                run_isolate_worker(&module, &factory, proto, iso_args, wire_globals, trace, span);
+            let msg = run_isolate_worker(
+                &module,
+                &factory,
+                proto,
+                iso_args,
+                wire_globals,
+                trace,
+                span,
+            );
             let _ = tx.send(msg);
             // The result landing is cross-thread progress: wake the parent's parked scheduler
             // (P-PAR S3) so it harvests immediately instead of sleeping out its stall quantum.

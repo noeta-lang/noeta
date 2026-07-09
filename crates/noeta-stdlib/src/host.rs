@@ -5,10 +5,10 @@
 //! conformance and `--differential` always run. It owns the *bytes* the capabilities read/write, so
 //! it stays with the modules ([`crate::fs`], [`crate::random`], [`crate::net`]) whose state it holds.
 
+pub use noeta_native::Telemetry;
 pub use noeta_native::host::{
     Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, P2p, ReadSource, Rng,
 };
-pub use noeta_native::Telemetry;
 
 use crate::StdError;
 use crate::env;

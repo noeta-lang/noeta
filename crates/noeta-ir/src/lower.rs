@@ -246,20 +246,33 @@ impl Lowerer<'_> {
         }
         match ty {
             TypeRef::Named { name, args, span } => TypeRef::Named {
-                name: self.type_aliases.get(name).cloned().unwrap_or_else(|| name.clone()),
+                name: self
+                    .type_aliases
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone()),
                 args: args.iter().map(|a| self.resolve_type_aliases(a)).collect(),
                 span: *span,
             },
             TypeRef::Union { members, span } => TypeRef::Union {
-                members: members.iter().map(|m| self.resolve_type_aliases(m)).collect(),
+                members: members
+                    .iter()
+                    .map(|m| self.resolve_type_aliases(m))
+                    .collect(),
                 span: *span,
             },
             TypeRef::Tuple { elements, span } => TypeRef::Tuple {
-                elements: elements.iter().map(|e| self.resolve_type_aliases(e)).collect(),
+                elements: elements
+                    .iter()
+                    .map(|e| self.resolve_type_aliases(e))
+                    .collect(),
                 span: *span,
             },
             TypeRef::Fn { params, ret, span } => TypeRef::Fn {
-                params: params.iter().map(|p| self.resolve_type_aliases(p)).collect(),
+                params: params
+                    .iter()
+                    .map(|p| self.resolve_type_aliases(p))
+                    .collect(),
                 ret: Box::new(self.resolve_type_aliases(ret)),
                 span: *span,
             },

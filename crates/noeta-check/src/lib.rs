@@ -1432,9 +1432,16 @@ impl Checker {
                             (r.name.clone(), m.name.clone()),
                             m.body.iter().any(|s| s.mentions("self")),
                         );
-                        let raw_params: Vec<Type> = m.params.iter().map(|p| param_type(p, &self.extern_types)).collect();
+                        let raw_params: Vec<Type> = m
+                            .params
+                            .iter()
+                            .map(|p| param_type(p, &self.extern_types))
+                            .collect();
                         let raw_ret = async_return(
-                            m.ret.as_ref().map(|t| from_ref_q(t, &self.extern_types)).unwrap_or(Type::Unknown),
+                            m.ret
+                                .as_ref()
+                                .map(|t| from_ref_q(t, &self.extern_types))
+                                .unwrap_or(Type::Unknown),
                             m.is_async,
                         );
                         let params = raw_params
@@ -1545,9 +1552,16 @@ impl Checker {
                             (c.name.clone(), m.name.clone()),
                             m.body.iter().any(|s| s.mentions("self")),
                         );
-                        let raw_params: Vec<Type> = m.params.iter().map(|p| param_type(p, &self.extern_types)).collect();
+                        let raw_params: Vec<Type> = m
+                            .params
+                            .iter()
+                            .map(|p| param_type(p, &self.extern_types))
+                            .collect();
                         let raw_ret = async_return(
-                            m.ret.as_ref().map(|t| from_ref_q(t, &self.extern_types)).unwrap_or(Type::Unknown),
+                            m.ret
+                                .as_ref()
+                                .map(|t| from_ref_q(t, &self.extern_types))
+                                .unwrap_or(Type::Unknown),
                             m.is_async,
                         );
                         let params = raw_params
@@ -1585,7 +1599,11 @@ impl Checker {
                             // which is `Unknown` for a positional payload whose type parses into the
                             // `Param`'s *name* — an `Unknown` that silently classified an enum wrapping
                             // a `class` as `Send`, unlike the equivalent struct.)
-                            fields: v.fields.iter().map(|v| variant_field_type(v, &self.extern_types)).collect(),
+                            fields: v
+                                .fields
+                                .iter()
+                                .map(|v| variant_field_type(v, &self.extern_types))
+                                .collect(),
                         })
                         .collect();
                     self.enums.insert(e.name.clone(), variants);
@@ -1627,9 +1645,16 @@ impl Checker {
                             (e.name.clone(), m.name.clone()),
                             m.body.iter().any(|s| s.mentions("self")),
                         );
-                        let raw_params: Vec<Type> = m.params.iter().map(|p| param_type(p, &self.extern_types)).collect();
+                        let raw_params: Vec<Type> = m
+                            .params
+                            .iter()
+                            .map(|p| param_type(p, &self.extern_types))
+                            .collect();
                         let raw_ret = async_return(
-                            m.ret.as_ref().map(|t| from_ref_q(t, &self.extern_types)).unwrap_or(Type::Unknown),
+                            m.ret
+                                .as_ref()
+                                .map(|t| from_ref_q(t, &self.extern_types))
+                                .unwrap_or(Type::Unknown),
                             m.is_async,
                         );
                         let params = raw_params
@@ -1661,11 +1686,18 @@ impl Checker {
                     // and enforce its bounds (S4.2); a non-generic function carries `None`.
                     let tps: HashSet<String> =
                         f.type_params.iter().map(|p| p.name.clone()).collect();
-                    let raw_params: Vec<Type> = f.params.iter().map(|p| param_type(p, &self.extern_types)).collect();
+                    let raw_params: Vec<Type> = f
+                        .params
+                        .iter()
+                        .map(|p| param_type(p, &self.extern_types))
+                        .collect();
                     // An `async fn f(): T` call produces `Future<T>` (Track A); wrap before erasure so
                     // the erased signature and the generic instantiation both carry the future.
                     let raw_ret = async_return(
-                        f.ret.as_ref().map(|t| from_ref_q(t, &self.extern_types)).unwrap_or(Type::Unknown),
+                        f.ret
+                            .as_ref()
+                            .map(|t| from_ref_q(t, &self.extern_types))
+                            .unwrap_or(Type::Unknown),
                         f.is_async,
                     );
                     let params = raw_params
@@ -3762,7 +3794,10 @@ impl Checker {
                 let ret = self.closure_body_type(body, declared.as_ref(), env);
                 env.pop();
                 Type::Fn {
-                    params: params.iter().map(|p| param_type(p, &self.extern_types)).collect(),
+                    params: params
+                        .iter()
+                        .map(|p| param_type(p, &self.extern_types))
+                        .collect(),
                     ret: Box::new(ret),
                 }
             }
@@ -6600,7 +6635,9 @@ fn qualify_externs(t: Type, xt: &HashMap<String, String>) -> Type {
 
 /// The declared type of a field, or `Unknown` when unannotated.
 fn field_type(ty: &Option<TypeRef>, xt: &HashMap<String, String>) -> Type {
-    ty.as_ref().map(|t| from_ref_q(t, xt)).unwrap_or(Type::Unknown)
+    ty.as_ref()
+        .map(|t| from_ref_q(t, xt))
+        .unwrap_or(Type::Unknown)
 }
 
 /// The type of one enum-variant payload field (R2b). A **positional** payload (`Leaf(T)`, `V(int)`)

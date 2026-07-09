@@ -194,7 +194,10 @@ impl std::fmt::Debug for P2pNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("P2pNode")
             .field("topics", &self.handles.lock().map(|h| h.len()).unwrap_or(0))
-            .field("subscriptions", &self.subs.lock().map(|s| s.len()).unwrap_or(0))
+            .field(
+                "subscriptions",
+                &self.subs.lock().map(|s| s.len()).unwrap_or(0),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -295,11 +298,20 @@ impl P2pNode {
                 None => SqliteStoreBuilder::memory().build().await,
             }
             .map_err(|e| io_error(format!("p2p store: {e}")))?;
-            let log_sync = LogSync::<_, LogId, _>::builder(store.clone(), endpoint.clone(), gossip.clone())
-                .spawn()
-                .await
-                .map_err(|e| io_error(format!("p2p log-sync: {e}")))?;
-            Ok::<_, StdError>((address_book, endpoint, discovery, mdns, gossip, store, log_sync))
+            let log_sync =
+                LogSync::<_, LogId, _>::builder(store.clone(), endpoint.clone(), gossip.clone())
+                    .spawn()
+                    .await
+                    .map_err(|e| io_error(format!("p2p log-sync: {e}")))?;
+            Ok::<_, StdError>((
+                address_book,
+                endpoint,
+                discovery,
+                mdns,
+                gossip,
+                store,
+                log_sync,
+            ))
         })?;
         let (address_book, endpoint, discovery, mdns, gossip, store, log_sync) = node;
 
@@ -425,7 +437,11 @@ impl P2pNode {
                 .await
                 .map_err(|e| io_error(format!("p2p store: {e}")))?;
             self.store
-                .associate(&Self::topic_of(topic), &self.signing_key.verifying_key(), &LOG_ID)
+                .associate(
+                    &Self::topic_of(topic),
+                    &self.signing_key.verifying_key(),
+                    &LOG_ID,
+                )
                 .await
                 .map_err(|e| io_error(format!("p2p store associate: {e}")))?;
             self.store
@@ -574,7 +590,9 @@ impl P2pNode {
         }
         let rng = Rng::default();
         let credentials = match &self.data_dir {
-            Some(dir) => load_or_create_credentials(&dir.join("credentials.key"), &self.signing_key, &rng),
+            Some(dir) => {
+                load_or_create_credentials(&dir.join("credentials.key"), &self.signing_key, &rng)
+            }
             None => {
                 let identity_secret = SecretKey::from_rng(&rng)
                     .map_err(|e| io_error(format!("cannot generate encryption identity: {e}")))?;
@@ -628,7 +646,10 @@ impl P2pNode {
                 inbox: VecDeque::new(),
             },
         );
-        self.group_subs.lock().unwrap().insert(sub, topic.to_string());
+        self.group_subs
+            .lock()
+            .unwrap()
+            .insert(sub, topic.to_string());
         Ok(sub)
     }
 
@@ -1024,7 +1045,8 @@ mod tests {
         let _sub_a = a.subscribe("room").expect("a subscribes");
         std::thread::sleep(std::time::Duration::from_secs(3));
 
-        a.publish("room", b"hi from a".to_vec()).expect("a publishes");
+        a.publish("room", b"hi from a".to_vec())
+            .expect("a publishes");
 
         // Poll b for up to ~15s (discovery + delivery are not instant).
         let mut received = None;
@@ -1061,7 +1083,11 @@ mod tests {
         drop(first); // release the store/socket before restarting against the same dir
 
         let second = P2pNode::start_with_config(P2pConfig::at(&dir.0)).expect("node 2");
-        assert_eq!(second.identity(), id1, "restart reuses the persisted identity");
+        assert_eq!(
+            second.identity(),
+            id1,
+            "restart reuses the persisted identity"
+        );
         assert!(dir.0.join("identity.key").exists(), "identity file written");
 
         // A fresh ephemeral node has a different identity (nothing loaded).
@@ -1073,13 +1099,15 @@ mod tests {
     /// share one identity/store dir. Skipped if an env override is in effect on the test host.
     #[test]
     fn default_data_dir_is_namespaced_per_app() {
-        if std::env::var_os("NOETA_P2P_DIR").is_some() || std::env::var_os("NOETA_P2P_APP").is_some()
+        if std::env::var_os("NOETA_P2P_DIR").is_some()
+            || std::env::var_os("NOETA_P2P_APP").is_some()
         {
             return; // an env override collapses the namespace; nothing to assert
         }
-        if let (Some(a), Some(b)) =
-            (default_data_dir(Some("acme/chat")), default_data_dir(Some("acme/wiki")))
-        {
+        if let (Some(a), Some(b)) = (
+            default_data_dir(Some("acme/chat")),
+            default_data_dir(Some("acme/wiki")),
+        ) {
             assert_ne!(a, b, "different apps get different dirs");
             assert!(a.to_string_lossy().contains("acme-chat"));
             assert!(b.to_string_lossy().contains("acme-wiki"));
@@ -1102,7 +1130,10 @@ mod tests {
             group_id, node_id,
             "the encryption actor id equals the node's transport identity"
         );
-        assert!(dir.0.join("credentials.key").exists(), "credentials written");
+        assert!(
+            dir.0.join("credentials.key").exists(),
+            "credentials written"
+        );
 
         // Restart from the same dir: the credentials (and thus the group actor id) persist.
         let second = P2pNode::start_with_config(P2pConfig::at(&dir.0)).expect("node 2");
@@ -1134,8 +1165,12 @@ mod tests {
         ];
         let a_is_creator = a.crypto_group_id().unwrap() == *members.iter().min().unwrap();
 
-        let sub_a = a.group_open("secure/room", &members).expect("a opens group");
-        let sub_b = b.group_open("secure/room", &members).expect("b opens group");
+        let sub_a = a
+            .group_open("secure/room", &members)
+            .expect("a opens group");
+        let sub_b = b
+            .group_open("secure/room", &members)
+            .expect("b opens group");
         // Give discovery + the key-bundle/welcome handshake time to flow; polling both drives it
         // (each poll processes received ops and broadcasts any welcomes).
         for _ in 0..50 {
@@ -1217,7 +1252,10 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        assert!(!leaked, "a removed member must not decrypt post-revocation state");
+        assert!(
+            !leaked,
+            "a removed member must not decrypt post-revocation state"
+        );
     }
 
     #[test]
