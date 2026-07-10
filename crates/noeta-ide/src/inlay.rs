@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use noeta_ast::reflect::TypeRepr;
+use noeta_ast::reflect::{PackedLayout, TypeRepr};
 use noeta_ast::{ClosureBody, Expr, FnDecl, Program, Stmt, StrPart};
 use noeta_span::{SourceId, Span};
 
@@ -51,6 +51,7 @@ pub struct TypeHint {
 pub fn type_hints(
     program: &Program,
     expr_types: &HashMap<Span, TypeRepr>,
+    packed_layouts: &HashMap<String, PackedLayout>,
     source: SourceId,
 ) -> Vec<TypeHint> {
     let declarations: HashSet<Span> = DefUse::build(program).binding_spans().collect();
@@ -60,6 +61,7 @@ pub fn type_hints(
         program,
         declarations: &declarations,
         expr_types,
+        packed_layouts,
         hints: &mut hints,
     };
     for stmt in &program.stmts {
@@ -75,6 +77,8 @@ struct Walker<'a> {
     program: &'a Program,
     declarations: &'a HashSet<Span>,
     expr_types: &'a HashMap<Span, TypeRepr>,
+    /// Name→layout of every `@packed` struct — drives the compact storage suffix on a type label.
+    packed_layouts: &'a HashMap<String, PackedLayout>,
     hints: &'a mut Vec<TypeHint>,
 }
 
@@ -94,7 +98,7 @@ impl Walker<'_> {
                 {
                     self.hints.push(TypeHint {
                         offset: name_span.end,
-                        label: format!(": {repr}"),
+                        label: format!(": {repr}{}", self.storage_suffix(repr)),
                         kind: HintKind::Type,
                     });
                 }
@@ -147,6 +151,26 @@ impl Walker<'_> {
         }
     }
 
+    /// A compact storage marker appended to a type label when storage is non-default: `· packed`
+    /// (a `@packed` nominal), `· flat` / `· SoA` (a `List<packed>`, row- vs column-major). Empty for
+    /// ordinary boxed storage — the suffix only decorates labels that already appear, so hint noise
+    /// stays constant; byte sizes stay hover-only (see [`crate::layout_note`]).
+    fn storage_suffix(&self, repr: &TypeRepr) -> &'static str {
+        let layout_of =
+            |repr: &TypeRepr| crate::nominal_name(repr).and_then(|n| self.packed_layouts.get(n));
+        match repr {
+            TypeRepr::List(elem) => match layout_of(elem) {
+                Some(layout) if layout.column => " · SoA",
+                Some(_) => " · flat",
+                None => "",
+            },
+            other => match layout_of(other) {
+                Some(_) => " · packed",
+                None => "",
+            },
+        }
+    }
+
     fn stmts(&mut self, stmts: &[Stmt]) {
         for stmt in stmts {
             self.stmt(stmt);
@@ -184,7 +208,7 @@ impl Walker<'_> {
                         {
                             self.hints.push(TypeHint {
                                 offset: param.name_span.end,
-                                label: format!(": {ty}"),
+                                label: format!(": {ty}{}", self.storage_suffix(ty)),
                                 kind: HintKind::Type,
                             });
                         }

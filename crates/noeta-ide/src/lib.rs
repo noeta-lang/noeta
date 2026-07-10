@@ -423,7 +423,7 @@ impl DocumentStore {
         };
         let ide = noeta_db::linked_checked_ide(db, cache.workspace);
         Some(
-            inlay::type_hints(program, &ide.expr_types, SourceId::FIRST)
+            inlay::type_hints(program, &ide.expr_types, &ide.packed_layouts, SourceId::FIRST)
                 .into_iter()
                 .filter(|hint| start <= hint.offset && hint.offset <= end)
                 .map(|hint| (index.position(hint.offset, encoding), hint.label, hint.kind))
@@ -1261,6 +1261,40 @@ mod tests {
         assert!(
             !hints.iter().any(|(line, _)| *line == 3),
             "reassignment must not hint: {hints:?}"
+        );
+    }
+
+    #[test]
+    fn inlay_hints_mark_packed_storage_compactly() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///packed.noe",
+            "@packed struct Vec3 { x: f32; y: f32; z: f32 }\n\
+             @packed(layout: column) struct Cell { n: int; on: bool }\n\
+             v = Vec3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }\n\
+             vs = [v]\n\
+             cs = [Cell { n: 1, on: true }]\n\
+             ns = [1, 2, 3]\n"
+                .to_string(),
+        );
+        let hints = hints_of(&store, "file:///packed.noe");
+        // A packed nominal is marked; its lists say flat (row-major) or SoA (column-major);
+        // ordinary boxed storage is unmarked.
+        assert!(
+            hints.contains(&(2, ": Vec3 · packed".to_string())),
+            "packed nominal: {hints:?}"
+        );
+        assert!(
+            hints.contains(&(3, ": List<Vec3> · flat".to_string())),
+            "row-major flat list: {hints:?}"
+        );
+        assert!(
+            hints.contains(&(4, ": List<Cell> · SoA".to_string())),
+            "column-major list: {hints:?}"
+        );
+        assert!(
+            hints.contains(&(5, ": List<int>".to_string())),
+            "boxed list stays unmarked: {hints:?}"
         );
     }
 
