@@ -1,0 +1,8 @@
+// `@derive(Serialize<Json>)` requires every field to have a JSON form. A function value has
+// none, so the derive is rejected statically (E0050).
+// expect: error E0050 at 5:9
+// expect: exit 1
+@derive(Serialize<Json>)
+struct Handler {
+    callback: (int) -> int
+}

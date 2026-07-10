@@ -2817,7 +2817,7 @@ impl Checker {
             self.check_attrs(&f.attrs, TargetKind::Field);
         }
         self.validate_field_defaults(&r.fields, env);
-        self.check_derives(&r.derives);
+        self.check_derives(&r.name, &r.derives);
         let standalone = self.standalone_for(&r.name);
         // A struct carries in-body `impl Trait { }` blocks and inherent methods (the unified body),
         // checked exactly as a class's — coherence over its impls, then each method body.
@@ -2854,7 +2854,7 @@ impl Checker {
             self.check_attrs(&f.attrs, TargetKind::Field);
         }
         self.validate_field_defaults(&c.fields, env);
-        self.check_derives(&c.derives);
+        self.check_derives(&c.name, &c.derives);
         let standalone = self.standalone_for(&c.name);
         self.check_coherence(&c.derives, &c.impls, &standalone);
         self.check_attrs(&c.attrs, TargetKind::Class);
@@ -2890,7 +2890,7 @@ impl Checker {
             }
             self.check_attrs(&variant.attrs, TargetKind::Variant);
         }
-        self.check_derives(&e.derives);
+        self.check_derives(&e.name, &e.derives);
         let standalone = self.standalone_for(&e.name);
         // An enum carries in-body `impl Trait { }` blocks and inherent methods (the unified body,
         // object-model slice 3), checked exactly as a class's — coherence over its impls, then each
@@ -3345,7 +3345,7 @@ impl Checker {
     /// arguments must resolve. The compiler synthesizes the listed impls from the type's fields,
     /// parameterized by the arguments (e.g. `Serialize<Json>`'s format). The only parameterized
     /// derivable trait today is `Serialize<Format>`.
-    fn check_derives(&mut self, derives: &[DeriveSpec]) {
+    fn check_derives(&mut self, type_name: &str, derives: &[DeriveSpec]) {
         for spec in derives {
             let Some(t) = BuiltinTrait::from_name(&spec.name) else {
                 self.error(
@@ -3391,6 +3391,166 @@ impl Checker {
             if spec.name == "Serialize" {
                 self.check_serialize_format(&spec.args[0]);
             }
+            self.check_derive_field_constraint(type_name, t, spec.span);
+        }
+    }
+
+    /// The field constraint behind a derive (E0050): every field (struct/class) or variant payload
+    /// (enum) must be able to support the derived behavior at runtime — `Comparable` needs an
+    /// ordering, `Serialize` needs a JSON form. Rejects only what can **never** work (a `List` field
+    /// has no ordering under any values); value-dependent cases (`dyn`, unions, extern contracts)
+    /// stay permitted and defer to the runtime, and a field mentioning one of the type's own generic
+    /// parameters is deferred to the instantiation site (conditional derive). Runs after `collect`,
+    /// so forward references resolve.
+    fn check_derive_field_constraint(&mut self, type_name: &str, t: BuiltinTrait, span: Span) {
+        let ok = |checker: &Self, ty: &Type| match t {
+            BuiltinTrait::Comparable => checker.type_orderable(ty, &mut Vec::new()),
+            BuiltinTrait::Serialize => checker.type_serializable(ty, &mut Vec::new()),
+            _ => true,
+        };
+        if matches!(t, BuiltinTrait::Comparable | BuiltinTrait::Serialize) {
+            let params: Vec<String> = self
+                .generic_types
+                .get(type_name)
+                .cloned()
+                .unwrap_or_default();
+            let offender = if let Some(fields) = self.records.get(type_name) {
+                fields
+                    .iter()
+                    .find(|(_, ty)| !mentions_param(ty, &params) && !ok(self, ty))
+                    .map(|(fname, ty)| (format!("field `{fname}`"), ty.clone()))
+            } else {
+                self.enums.get(type_name).and_then(|variants| {
+                    variants.iter().find_map(|v| {
+                        v.fields
+                            .iter()
+                            .find(|ty| !mentions_param(ty, &params) && !ok(self, ty))
+                            .map(|ty| (format!("variant `{}`'s payload", v.name), ty.clone()))
+                    })
+                })
+            };
+            if let Some((place, ty)) = offender {
+                let (need, fix) = match t {
+                    BuiltinTrait::Comparable => ("no ordering", "remove `Comparable`"),
+                    _ => ("no serialized form", "remove `Serialize`"),
+                };
+                self.error(
+                    DiagnosticCode::UnderivableTrait,
+                    span,
+                    format!(
+                        "cannot derive `{}` for `{type_name}`: {place} has type `{ty}`, which has {need}",
+                        t.name(),
+                    ),
+                )
+                .help(format!("{fix}, or change {place} to a supported type"));
+            }
+        }
+    }
+
+    /// Whether a value of type `ty` has a defined ordering at runtime — the static mirror of the
+    /// runtime `compare_primitive`/`compare_field` pair (which recurses into nested struct/class
+    /// fields and enum payloads **structurally**, regardless of the nested type's own derives).
+    /// `false` only for kinds that can never order (containers, tuples, `bytes`, functions);
+    /// value-dependent kinds (`dyn`, holes, unions, extern contracts like `Uuid`) are permissive.
+    /// `visited` guards recursive nominals, like [`Self::is_send`].
+    fn type_orderable(&self, ty: &Type, visited: &mut Vec<String>) -> bool {
+        match ty {
+            Type::Unknown
+            | Type::Dyn
+            | Type::Int
+            | Type::Float
+            | Type::F32
+            | Type::F64
+            | Type::IntN { .. }
+            | Type::Bool
+            | Type::String => true,
+            // A union's members order value-dependently (two ints do, an int and a string don't);
+            // like `dyn`, that is the runtime's call, not a statically-impossible ordering.
+            Type::Union(_) => true,
+            // `?T` / `Result<T, E>` are the prelude enums — ordered by variant then payload (the
+            // same structural rule as a named enum), so orderability follows the payloads.
+            Type::Option(e) => self.type_orderable(e, visited),
+            Type::Result(a, b) => self.type_orderable(a, visited) && self.type_orderable(b, visited),
+            Type::Named(name, args) => match self.type_kinds.get(name) {
+                Some(noeta_types::TypeKind::Struct) | Some(noeta_types::TypeKind::Class) => {
+                    if visited.iter().any(|v| v == name) {
+                        return true; // recursive nominal — covered by the outer frame
+                    }
+                    visited.push(name.clone());
+                    let subst = self.type_arg_subst(name, args);
+                    let ordered = self.records.get(name).is_none_or(|fs| {
+                        fs.iter()
+                            .all(|(_, t)| self.type_orderable(&apply_subst(t, &subst), visited))
+                    });
+                    visited.pop();
+                    ordered
+                }
+                Some(noeta_types::TypeKind::Enum) => {
+                    if visited.iter().any(|v| v == name) {
+                        return true;
+                    }
+                    visited.push(name.clone());
+                    let subst = self.type_arg_subst(name, args);
+                    let ordered = self.enums.get(name).is_none_or(|vs| {
+                        vs.iter().all(|v| {
+                            v.fields
+                                .iter()
+                                .all(|t| self.type_orderable(&apply_subst(t, &subst), visited))
+                        })
+                    });
+                    visited.pop();
+                    ordered
+                }
+                // An unknown-kind nominal (an extern type like `Uuid`, or the prelude `Ordering`)
+                // orders through its runtime contract — permissive, the contract decides.
+                None => true,
+            },
+            // No runtime ordering exists for these under any values.
+            Type::Unit
+            | Type::Bytes
+            | Type::List(_)
+            | Type::Map(..)
+            | Type::Set(_)
+            | Type::Tuple(_)
+            | Type::Fn { .. }
+            | Type::Kind(_) => false,
+        }
+    }
+
+    /// Whether a value of type `ty` has a JSON form — the field constraint behind
+    /// `@derive(Serialize<Json>)`. Only function values can never serialize; containers and
+    /// nominals recurse (with the [`Self::is_send`]-style `visited` guard); everything
+    /// value-dependent stays permissive.
+    fn type_serializable(&self, ty: &Type, visited: &mut Vec<String>) -> bool {
+        match ty {
+            Type::Fn { .. } | Type::Kind(_) => false,
+            Type::List(e) | Type::Set(e) | Type::Option(e) => self.type_serializable(e, visited),
+            Type::Map(k, v) | Type::Result(k, v) => {
+                self.type_serializable(k, visited) && self.type_serializable(v, visited)
+            }
+            Type::Tuple(elems) | Type::Union(elems) => {
+                elems.iter().all(|e| self.type_serializable(e, visited))
+            }
+            Type::Named(name, args) => {
+                if visited.iter().any(|v| v == name) {
+                    return true;
+                }
+                visited.push(name.clone());
+                let subst = self.type_arg_subst(name, args);
+                let fields_ok = self.records.get(name).is_none_or(|fs| {
+                    fs.iter()
+                        .all(|(_, t)| self.type_serializable(&apply_subst(t, &subst), visited))
+                }) && self.enums.get(name).is_none_or(|vs| {
+                    vs.iter().all(|v| {
+                        v.fields
+                            .iter()
+                            .all(|t| self.type_serializable(&apply_subst(t, &subst), visited))
+                    })
+                });
+                visited.pop();
+                fields_ok
+            }
+            _ => true,
         }
     }
 
@@ -6356,6 +6516,30 @@ fn params_to_dyn(ty: &Type, params: &[String]) -> Type {
     }
     let subst: HashMap<String, Type> = params.iter().map(|p| (p.clone(), Type::Dyn)).collect();
     apply_subst(ty, &subst)
+}
+
+/// Whether `ty` mentions one of `params` (bare `T` or nested, `List<T>`), deeply. Used by the
+/// derive field constraint (E0050) to defer parameter-typed fields to the instantiation site.
+fn mentions_param(ty: &Type, params: &[String]) -> bool {
+    if params.is_empty() {
+        return false;
+    }
+    match ty {
+        Type::Named(n, args) => {
+            params.iter().any(|p| p == n) || args.iter().any(|a| mentions_param(a, params))
+        }
+        Type::List(t) | Type::Set(t) | Type::Option(t) => mentions_param(t, params),
+        Type::Map(k, v) | Type::Result(k, v) => {
+            mentions_param(k, params) || mentions_param(v, params)
+        }
+        Type::Tuple(elems) | Type::Union(elems) => {
+            elems.iter().any(|e| mentions_param(e, params))
+        }
+        Type::Fn { params: ps, ret } => {
+            ps.iter().any(|p| mentions_param(p, params)) || mentions_param(ret, params)
+        }
+        _ => false,
+    }
 }
 
 /// Substitute resolved type parameters into a type, deeply. An unresolved parameter is left as its
