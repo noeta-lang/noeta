@@ -1516,12 +1516,20 @@ where
                 }
             });
 
-        // `roles_of()` — the semantic-role index query (P2.7). A keyword + empty `()` (no
-        // type-argument; the index spans all role-tagged attributes), yielding `List<RoleBinding>`.
+        // `roles_of()` / `roles_of::<RoleEnum>()` — the semantic-role index query (P2.7). A keyword,
+        // an *optional* `::<E>` turbofish scoping the query to one role enum (mirroring
+        // `attributes_of`), and a trailing `()`. Bare `roles_of()` spans all role-tagged attributes;
+        // `roles_of::<Semantic>()` returns only `Semantic` bindings. Yields `List<RoleBinding>`.
         let roles_of = just(T::RolesOfKw)
+            .ignore_then(
+                just(T::ColonColon)
+                    .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+                    .or_not(),
+            )
             .then_ignore(just(T::LParen))
             .then_ignore(just(T::RParen))
-            .map_with(move |_, e| Expr::RolesOf {
+            .map_with(move |ty, e| Expr::RolesOf {
+                ty,
                 span: ctx.to_span(e.span()),
             });
 

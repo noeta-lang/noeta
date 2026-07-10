@@ -1,0 +1,66 @@
+// `roles_of::<E>()` scopes the semantic-role index to a single `@semantic` enum — the turbofish
+// mirror of `attributes_of::<T>()`. `roles_of::<Semantic>()` yields only bindings whose role is a
+// `Semantic` variant (skipping the `WebRole` one), and `roles_of::<WebRole>()` only the `WebRole`
+// binding. The enum is compile-time resolved (closed-world); both backends filter the shared
+// reflection index identically, so the scoped query agrees across the differential by construction.
+// expect: stdout "semantic: handleUsers=entry"
+// expect: stdout "semantic: writeUser=sink"
+// expect: stdout "web: renderHome=controller"
+// expect: exit 0
+@semantic
+enum WebRole {
+    Controller;
+    Middleware;
+}
+
+@attribute(Function)
+@role(Semantic.EntryPoint)
+struct Route {
+    path: string
+}
+
+@attribute
+@role(Semantic.Sink)
+struct Persist {
+    table: string
+}
+
+@attribute(Function)
+@role(WebRole.Controller)
+struct Page {
+    path: string
+}
+
+#[Route("/users")]
+fn handleUsers(): int {
+    return 1;
+}
+
+#[Persist("users")]
+fn writeUser(): int {
+    return 2;
+}
+
+#[Page("/")]
+fn renderHome(): int {
+    return 3;
+}
+
+// Scoped to Semantic → only the two Semantic-role bindings, in declaration order.
+for b in roles_of::<Semantic>() {
+    n = match b.role {
+        Semantic.EntryPoint => "entry",
+        Semantic.Sink => "sink",
+        _ => "other",
+    };
+    echo "semantic: ${b.target}=${n}";
+}
+
+// Scoped to WebRole → only the WebRole binding.
+for b in roles_of::<WebRole>() {
+    n = match b.role {
+        WebRole.Controller => "controller",
+        _ => "other",
+    };
+    echo "web: ${b.target}=${n}";
+}

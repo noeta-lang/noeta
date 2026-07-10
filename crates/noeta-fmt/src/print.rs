@@ -1391,7 +1391,12 @@ impl Printer<'_> {
                 Doc::text(">"),
                 self.arg_list(args)?,
             ]),
-            Expr::RolesOf { .. } => Doc::text("roles_of()"),
+            Expr::RolesOf { ty: Some(ty), .. } => Doc::concat([
+                Doc::text("roles_of::<"),
+                self.type_ref(ty)?,
+                Doc::text(">()"),
+            ]),
+            Expr::RolesOf { ty: None, .. } => Doc::text("roles_of()"),
             Expr::Invoke {
                 recv, name, args, ..
             } => Doc::concat([

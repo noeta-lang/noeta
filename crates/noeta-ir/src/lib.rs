@@ -480,8 +480,9 @@ pub enum Rvalue {
     MakeChannel { capacity: Atom, span: Span },
     /// `attributes_of::<T>()` — the manifest's `#[T(...)]` attributes.
     AttributesOf { ty: TypeRef, span: Span },
-    /// `roles_of()` — the `(declaration, Role)` index.
-    RolesOf { span: Span },
+    /// `roles_of()` / `roles_of::<RoleEnum>()` — the `(declaration, Role)` index, optionally scoped
+    /// to a single role enum.
+    RolesOf { ty: Option<TypeRef>, span: Span },
     /// `invoke(recv, name, args)` — fallible by-name dispatch.
     Invoke {
         recv: Atom,

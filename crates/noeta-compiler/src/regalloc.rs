@@ -470,7 +470,7 @@ fn op_facts(op: &Op) -> OpFacts {
         Op::LoadPending { dst } => f.def = Some(*dst),
         Op::ScopeBegin | Op::ScopeEnd { .. } => {}
         Op::AttributesOf { dst, .. } => f.def = Some(*dst),
-        Op::RolesOf { dst } => f.def = Some(*dst),
+        Op::RolesOf { dst, .. } => f.def = Some(*dst),
         Op::TypeOf { dst, src } => {
             f.def = Some(*dst);
             f.uses.push(*src);
@@ -949,7 +949,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::LoadPending { dst } => m(dst),
         Op::ScopeBegin | Op::ScopeEnd { .. } => {}
         Op::AttributesOf { dst, .. } => m(dst),
-        Op::RolesOf { dst } => m(dst),
+        Op::RolesOf { dst, .. } => m(dst),
         Op::TypeOf { dst, src } => {
             m(dst);
             m(src);

@@ -772,9 +772,12 @@ impl Pretty for Expr {
                 capacity.pretty(out, level + 1);
                 out.push(')');
             }
-            Expr::RolesOf { span: s } => {
-                out.push_str(&format!("(roles_of {})", span(*s)));
-            }
+            Expr::RolesOf { ty, span: s } => match ty {
+                Some(ty) => {
+                    out.push_str(&format!("(roles_of {} {})", type_ref_str(ty), span(*s)))
+                }
+                None => out.push_str(&format!("(roles_of {})", span(*s))),
+            },
             Expr::TypedModuleCall {
                 recv,
                 func,
