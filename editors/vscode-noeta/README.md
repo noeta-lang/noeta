@@ -22,6 +22,13 @@ features backed by the compiler itself.
   - **Document outline** — the symbol tree for breadcrumbs and `@`-symbol search.
   - **Completion** — keywords, in-scope names, a receiver type's members after `.`, and type names in
     annotation position.
+  - **Call hierarchy** — `Shift+Alt+H` peeks a function's callers/callees (cross-module) over the
+    compiler's static call graph, `@role` bindings shown on each item.
+  - **Role lenses & request traces** — `@role`-bearing declarations show a
+    `⚑ Enum.Variant · trace request path` lens; clicking opens a read-only trace document that
+    unfolds the full static path from that entry point (boundaries summary, clickable `path:line`
+    links, external/dynamic calls labeled honestly). Also **Noeta: Trace Request Path** in the
+    palette for the active file's whole architectural surface.
 - **Debugging** (`noeta dap`) — run a `.noe` file under the compiler's own bytecode VM (JIT off, so
   every frame is inspectable) through VS Code's debug UI:
   - **Breakpoints** — click the gutter of any executable line; **stepping** — step over / into / out,

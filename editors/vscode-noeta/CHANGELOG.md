@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.7.0
+
+Adds **architecture navigation** over the compiler's static call graph (the same engine the
+`noeta mcp` agent tools read):
+
+- **Call hierarchy**: `Shift+Alt+H` on any function peeks its callers/callees in VS Code's native
+  tree — cross-module, with each item's `@role` bindings in the detail and passed-as-value uses
+  marked `reference`. External/dynamic callees are omitted here (no source location) and appear in
+  the trace view instead.
+- **Role CodeLenses**: declarations bearing a `@role` show `⚑ Enum.Variant · trace request path`;
+  clicking opens the **trace view** — a read-only `noeta-trace:` document unfolding the full
+  static path from that entry point, with a `boundaries reached` summary and clickable
+  `path:line` links on every node. External/dynamic calls and cycles are labeled, never guessed.
+- **Noeta: Trace Request Path** (palette) traces the active file's whole architectural surface
+  (every role-bearing function).
+
+Internal: one shared `noetaCommand()` toolchain resolver (`src/toolchain.js`); all commands use
+the `Noeta` palette category.
+
 ## 0.6.0
 
 Adds **run/build tasks**: a `noeta` task type (`run` / `build [--native|--exe]`, authorable in
