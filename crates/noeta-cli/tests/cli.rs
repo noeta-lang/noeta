@@ -2304,6 +2304,29 @@ fn a_registry_dependency_without_a_package_is_an_error() {
         .stderr(predicate::str::contains("names no package"));
 }
 
+#[test]
+fn publishing_a_package_with_a_path_dependency_is_rejected() {
+    // Phase 4 #3: a published package must depend only via the registry — a path/git dependency
+    // would leave a consumer unable to resolve it. The lint fails before touching git.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_publish_lint");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("noeta.toml"),
+        "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n\
+         [dependencies]\nhelper = { path = \"../helper\" }\n",
+    )
+    .unwrap();
+    lang()
+        .current_dir(&base)
+        .env("NOETA_REGISTRY_DIR", base.join("registry"))
+        .args(["publish", "--git", "https://example.com/acme/lib", "--tag", "v1.0.0"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("depend only via the registry"))
+        .stderr(predicate::str::contains("helper"));
+}
+
 // --- package manager: git-tag dependencies (P2.3) -----------------------------------------------
 
 /// Run a `git` command in `cwd`, asserting success (identity env set so commits work in CI).

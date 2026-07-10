@@ -567,13 +567,57 @@ fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
         Ok(p) => p,
         Err(code) => return code,
     };
-    let (name, version) = match manifest::current_package(&manifest_path) {
-        Ok(pkg) => pkg,
+    let manifest = match manifest::load(&manifest_path) {
+        Ok(manifest) => manifest,
         Err(err) => {
             eprintln!("lang: {err}");
             return ExitCode::from(1);
         }
     };
+    let Some(pkg) = manifest.package() else {
+        eprintln!(
+            "lang: `{}` has no `[package]` table — only a package (with a name + version) can be \
+             published",
+            manifest_path.display()
+        );
+        return ExitCode::from(1);
+    };
+    let name = format!("{}/{}", pkg.name.company, pkg.name.package);
+    let version = pkg.version.clone();
+
+    // A published package must depend **only via the registry** (Phase 4, follow-up #3): a path
+    // dependency can't travel to a consumer, and a git dependency isn't expressible in the index's
+    // (identity, req) shape — so a consumer resolving this release from the index would silently miss
+    // it and fail to build. Reject up front (before touching git), naming the offending dependency.
+    let mut deps: Vec<registry::Dep> = Vec::new();
+    for (key, dep) in manifest.dependencies() {
+        match dep {
+            manifest::Dependency::Registry {
+                package: Some(pkg),
+                req,
+            } => deps.push(registry::Dep {
+                package: format!("{}/{}", pkg.company, pkg.package),
+                req: req.clone(),
+            }),
+            manifest::Dependency::Registry { package: None, .. } => {
+                eprintln!(
+                    "lang: dependency `{key}` is a registry dependency but names no `package = \
+                     \"company/pkg\"` — a published package's dependencies must each name their \
+                     registry identity."
+                );
+                return ExitCode::from(1);
+            }
+            manifest::Dependency::Path { .. } | manifest::Dependency::Git { .. } => {
+                eprintln!(
+                    "lang: dependency `{key}` is a path/git dependency — a published package must \
+                     depend only via the registry (`{key} = {{ version = \"…\", package = \
+                     \"company/pkg\" }}`), so consumers can resolve it. Publish aborted."
+                );
+                return ExitCode::from(1);
+            }
+        }
+    }
+
     let tag = tag
         .map(str::to_string)
         .unwrap_or_else(|| format!("v{version}"));
@@ -599,31 +643,6 @@ fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
         tag: tag.clone(),
         sha: sha.clone(),
     };
-    // Record this package's **registry** dependencies (Phase 4, S5c) so the index can serve them to
-    // the resolver — the crates.io-index model that lets version ranges resolve without cloning every
-    // candidate. Path deps can't travel and git deps don't fit the (identity, req) shape, so only
-    // registry deps are recorded; a published package should depend via the registry.
-    let manifest = match manifest::load(&manifest_path) {
-        Ok(manifest) => manifest,
-        Err(err) => {
-            eprintln!("lang: {err}");
-            return ExitCode::from(1);
-        }
-    };
-    let deps: Vec<registry::Dep> = manifest
-        .dependencies()
-        .values()
-        .filter_map(|dep| match dep {
-            manifest::Dependency::Registry {
-                package: Some(pkg),
-                req,
-            } => Some(registry::Dep {
-                package: format!("{}/{}", pkg.company, pkg.package),
-                req: req.clone(),
-            }),
-            _ => None,
-        })
-        .collect();
     let release = registry::Release {
         version: version.clone(),
         coords,
