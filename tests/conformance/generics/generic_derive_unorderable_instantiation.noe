@@ -1,0 +1,12 @@
+// A generic derive is conditional: `Box<List<int>>` does NOT satisfy `Comparable` (the
+// instantiated field is a `List`, which has no ordering), so `<` on it is a compile-time error —
+// not a runtime failure.
+// expect: error E0007 at 12:6
+// expect: exit 1
+@derive(Comparable)
+struct Box<T> {
+    value: T
+}
+a = Box { value: [1] }
+b = Box { value: [2] }
+echo a < b

@@ -1,0 +1,23 @@
+// Operators on CONCRETE generic operands. A generic derive is conditional (derive-soundness S4):
+// `Box<int>` orders through the derived structural comparison, while a hand-written
+// `impl Comparable` is unconditional — `Pair<List<int>>` dispatches the author's `compare`
+// whatever the instantiation. Identical on both backends.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: exit 0
+@derive(Comparable)
+struct Box<T> {
+    value: T
+}
+
+struct Pair<T> {
+    value: T
+    impl Comparable {
+        fn compare(other: Pair<T>): Ordering { return Ordering.Less; }
+    }
+}
+
+echo Box { value: 1 } < Box { value: 2 };
+echo Box { value: 2 } < Box { value: 1 };
+echo Pair { value: [1] } < Pair { value: [2] };
