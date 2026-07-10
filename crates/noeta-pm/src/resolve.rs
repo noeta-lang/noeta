@@ -294,6 +294,35 @@ mod tests {
     }
 
     #[test]
+    fn backtracks_past_a_greedy_dead_end() {
+        // The case a greedy resolver gets *wrong* (Phase 4, S5b): picking the highest `foo` forces an
+        // incompatible `bar`, but a solution exists at a lower `foo`. PubGrub backtracks to find it.
+        //   root → foo ^1, baz ^1
+        //   foo 1.1 → bar ^2 ;  foo 1.0 → bar ^1 ;  baz 1.0 → bar ^1 ;  bar ∈ {1.0, 2.0}
+        let mut reg = MemRegistry::default();
+        reg.add("acme/foo", "1.1.0", &[("acme/bar", "^2.0")]);
+        reg.add("acme/foo", "1.0.0", &[("acme/bar", "^1.0")]);
+        reg.add("acme/baz", "1.0.0", &[("acme/bar", "^1.0")]);
+        reg.add("acme/bar", "1.0.0", &[]);
+        reg.add("acme/bar", "2.0.0", &[]);
+        let sln = resolve(
+            &reg,
+            "root",
+            &v("0.0.0"),
+            &[
+                ("acme/foo".to_string(), req("^1.0")),
+                ("acme/baz".to_string(), req("^1.0")),
+            ],
+        )
+        .expect("a solution exists — the resolver must backtrack to find it");
+        // Greedy would pick foo 1.1 → bar 2.0 → clash with baz's bar ^1 and report "no solution".
+        // Backtracking selects foo 1.0 + bar 1.0, satisfying everyone.
+        assert_eq!(sln["acme/foo"], v("1.0.0"), "backtracked to the compatible foo");
+        assert_eq!(sln["acme/bar"], v("1.0.0"));
+        assert_eq!(sln["acme/baz"], v("1.0.0"));
+    }
+
+    #[test]
     fn an_unsatisfiable_constraint_reports_a_conflict() {
         let mut reg = MemRegistry::default();
         reg.add("acme/http", "1.0.0", &[("acme/bytes", "^2.0")]);

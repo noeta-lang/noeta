@@ -141,11 +141,16 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
         lock: &lock,
         index: None,
         native_trust,
+        solution: BTreeMap::new(),
     };
+    // Phase 4, S5b: first *select versions* — gather the candidate graph (materialize the path/git
+    // spine, query the index for every registry candidate + its deps) and run PubGrub. This backtracks
+    // over version ranges, so a solvable diamond resolves to a compatible set instead of a greedy
+    // false conflict. The walk then materializes exactly the solved versions.
+    walker.solve(&manifest, &manifest_dir)?;
     let mut root_edges = BTreeMap::new();
     walker.walk(manifest.dependencies(), &manifest_dir, &mut root_edges)?;
 
-    validate_with_resolver(&walker.instances, &root_edges)?;
     let graph = assemble(walker.instances, &root_edges, &manifest.trust().commands);
 
     // Refresh the lockfile (best-effort: a read-only project must not fail a build). Skipped for a
@@ -165,6 +170,11 @@ struct Walker<'a> {
     index: Option<Box<dyn crate::registry::Index>>,
     /// The root manifest's `[trust].native` — package identities allowed to run native code (Phase 4).
     native_trust: &'a std::collections::BTreeSet<String>,
+    /// The resolved `identity → version` map (Phase 4, S5b), computed by [`Walker::solve`] before the
+    /// walk. The walk materializes each registry dependency at *its* selected version rather than
+    /// greedily picking the highest; empty until `solve` runs (a pure path/git graph leaves registry
+    /// selection unused).
+    solution: BTreeMap<String, Version>,
 }
 
 impl Walker<'_> {
@@ -283,9 +293,10 @@ impl Walker<'_> {
                 Ok((dir, ResolvedSource::Path { path: path.clone() }))
             }
             Dependency::Git { url, tag } => self.fetch_git(key, url, tag, None),
-            Dependency::Registry { package, req } => {
-                // Resolve the registry identity + requirement to git coordinates, then materialize
-                // exactly as a `git` dependency (the registry is a name→coords index, not a store).
+            Dependency::Registry { package, .. } => {
+                // Materialize the **resolver-selected** version (Phase 4, S5b): the PubGrub solve
+                // already chose one compatible version per identity, so look up the coordinates of
+                // `solution[identity]` in the index rather than greedily re-picking the highest.
                 let package = package.as_ref().ok_or_else(|| {
                     format!(
                         "dependency `{key}` is a registry dependency but names no package — add \
@@ -294,9 +305,19 @@ impl Walker<'_> {
                     )
                 })?;
                 let name = format!("{}/{}", package.company, package.package);
+                let version = self.solution.get(&name).cloned().ok_or_else(|| {
+                    format!("dependency `{key}` (`{name}`) is not in the resolved version set")
+                })?;
                 let index = self.index()?;
-                let (_version, coords) = crate::registry::resolve_coords(index, &name, req)
-                    .map_err(|err| format!("dependency `{key}`: {err}"))?;
+                let coords = index
+                    .releases(&name)
+                    .map_err(|err| format!("dependency `{key}`: {err}"))?
+                    .into_iter()
+                    .find(|r| r.version == version)
+                    .map(|r| r.coords)
+                    .ok_or_else(|| {
+                        format!("dependency `{key}` (`{name}`): resolved version {version} is not in the index")
+                    })?;
                 // The registry pins the SHA (Phase 4, S2), so a first resolve fetches by it rather
                 // than trusting the tag's current target.
                 self.fetch_git(key, &coords.url, &coords.tag, Some(&coords.sha))
@@ -358,55 +379,173 @@ impl Walker<'_> {
         }
         Ok(self.index.as_deref().expect("just opened"))
     }
+
+    /// Select one compatible version per package (Phase 4, S5b) and store it in `self.solution`.
+    /// Gathers the candidate graph — the **path/git spine** (materialized to learn each package's
+    /// identity, version, and dependency edges) plus every reachable **registry candidate** (queried
+    /// from the index, which serves per-version deps, so no cloning) — then runs PubGrub, which
+    /// backtracks over version ranges. A local/git source **overrides** the registry for that identity
+    /// (a single pinned version), matching Cargo's source precedence.
+    fn solve(&mut self, manifest: &Manifest, manifest_dir: &Path) -> Result<(), String> {
+        let mut path_git: BTreeMap<String, PathGitCandidate> = BTreeMap::new();
+        let mut registry: BTreeMap<String, Vec<crate::registry::Release>> = BTreeMap::new();
+        let mut registry_queue: Vec<String> = Vec::new();
+
+        // Root's direct dependencies as resolver requirements; path/git deps are materialized here to
+        // learn their identities + edges, registry identities are queued for index loading.
+        let root_deps =
+            self.gather(manifest.dependencies(), manifest_dir, &mut path_git, &mut registry_queue)?;
+
+        // Transitively load every registry candidate (and the identities its releases depend on) from
+        // the index — a path/git-overridden identity is skipped (its single version already wins).
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        while let Some(identity) = registry_queue.pop() {
+            if path_git.contains_key(&identity) || !seen.insert(identity.clone()) {
+                continue;
+            }
+            let releases = self
+                .index()?
+                .releases(&identity)
+                .map_err(|err| format!("registry package `{identity}`: {err}"))?;
+            for release in &releases {
+                for dep in &release.deps {
+                    if !path_git.contains_key(&dep.package) && !seen.contains(&dep.package) {
+                        registry_queue.push(dep.package.clone());
+                    }
+                }
+            }
+            registry.insert(identity, releases);
+        }
+
+        let candidates = Candidates {
+            path_git: &path_git,
+            registry: &registry,
+        };
+        // The synthetic root identity can't collide with a real `company/package` (no slash).
+        self.solution = crate::resolve::resolve(
+            &candidates,
+            "\u{0}root",
+            &Version::new(0, 0, 0),
+            &root_deps,
+        )?;
+        Ok(())
+    }
+
+    /// Recursively materialize the path/git dependencies in `deps` (learning each one's identity,
+    /// version, and edges) and collect registry identities into `registry_queue`. Returns this level's
+    /// requirements as `(child identity, requirement)` for the resolver — a path/git edge is an exact
+    /// `=version`, a registry edge is its declared range. Part of [`Walker::solve`].
+    fn gather(
+        &mut self,
+        deps: &BTreeMap<String, Dependency>,
+        base_dir: &Path,
+        path_git: &mut BTreeMap<String, PathGitCandidate>,
+        registry_queue: &mut Vec<String>,
+    ) -> Result<Vec<(String, VersionReq)>, String> {
+        let mut reqs = Vec::new();
+        for (key, dep) in deps {
+            match dep {
+                Dependency::Path { .. } | Dependency::Git { .. } => {
+                    let (dir, _source) = self.materialize(key, dep, base_dir)?;
+                    let child_manifest =
+                        read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
+                            .map_err(|err| format!("dependency `{key}`: {err}"))?;
+                    let pkg = child_manifest.package().ok_or_else(|| {
+                        format!(
+                            "dependency `{key}` at `{}` has no `[package]` table",
+                            dir.display()
+                        )
+                    })?;
+                    let identity = format!("{}/{}", pkg.name.company, pkg.name.package);
+                    reqs.push((identity.clone(), exact_req(&pkg.version)));
+                    if !path_git.contains_key(&identity) {
+                        // Insert a placeholder before recursing so a dependency cycle terminates.
+                        path_git.insert(
+                            identity.clone(),
+                            PathGitCandidate {
+                                version: pkg.version.clone(),
+                                deps: Vec::new(),
+                            },
+                        );
+                        let child_reqs =
+                            self.gather(child_manifest.dependencies(), &dir, path_git, registry_queue)?;
+                        path_git
+                            .get_mut(&identity)
+                            .expect("just inserted")
+                            .deps = child_reqs;
+                    }
+                }
+                Dependency::Registry { package, req } => {
+                    let package = package.as_ref().ok_or_else(|| {
+                        format!(
+                            "dependency `{key}` is a registry dependency but names no package — add \
+                             `package = \"company/pkg\"`"
+                        )
+                    })?;
+                    let identity = format!("{}/{}", package.company, package.package);
+                    reqs.push((identity.clone(), req.clone()));
+                    registry_queue.push(identity);
+                }
+            }
+        }
+        Ok(reqs)
+    }
 }
 
-/// Run the PubGrub resolver over the materialized graph as the authoritative selection/validation
-/// pass (package-manager P2.4). With exact git/path pins each identity has a single candidate version
-/// and an edge is an exact `=version` requirement, so this confirms a consistent solution and surfaces
-/// PubGrub's explainable report on the (walk-already-caught, but defensively re-checked) conflict case.
-/// When the registry lands (P2.5) the same call performs real range selection.
-fn validate_with_resolver(
-    instances: &BTreeMap<String, Instance>,
-    root_edges: &BTreeMap<String, String>,
-) -> Result<(), String> {
-    let registry = GraphRegistry { instances };
-    let root_deps: Vec<(String, VersionReq)> = root_edges
-        .values()
-        .map(|identity| (identity.clone(), exact_req(&instances[identity].version)))
-        .collect();
-    // The synthetic root identity can't collide with a real `company/package` (no slash).
-    crate::resolve::resolve(&registry, "\u{0}root", &Version::new(0, 0, 0), &root_deps).map(|_| ())
-}
-
-/// An exact `=x.y.z` requirement — how a git/path pin presents to the resolver.
+/// An exact `=x.y.z` requirement — how a path/git pin presents to the resolver.
 fn exact_req(version: &Version) -> VersionReq {
     VersionReq::parse(&format!("={version}")).expect("=<version> is always a valid requirement")
 }
 
-/// A [`crate::resolve::Registry`] backed by the walk's materialized instances: each identity offers
-/// exactly its one pinned version, whose dependencies are exact-pinned edges.
-struct GraphRegistry<'a> {
-    instances: &'a BTreeMap<String, Instance>,
+/// A path/git package as a resolver candidate (Phase 4, S5b): its single pinned version and its
+/// dependency edges. A local/git source is authoritative, so it offers exactly one version.
+struct PathGitCandidate {
+    version: Version,
+    /// `(child identity, requirement)` — a path/git child is `=version`, a registry child its range.
+    deps: Vec<(String, VersionReq)>,
 }
 
-impl crate::resolve::Registry for GraphRegistry<'_> {
+/// The candidate graph fed to PubGrub (Phase 4, S5b): path/git packages (each a single pinned
+/// version, overriding the registry for that identity) and registry packages (all published versions
+/// from the index, with their per-version deps). This is what lets the resolver backtrack over ranges.
+struct Candidates<'a> {
+    path_git: &'a BTreeMap<String, PathGitCandidate>,
+    registry: &'a BTreeMap<String, Vec<crate::registry::Release>>,
+}
+
+impl crate::resolve::Registry for Candidates<'_> {
     fn versions(&self, package: &str) -> Vec<Version> {
-        self.instances
-            .get(package)
-            .map(|i| vec![i.version.clone()])
-            .unwrap_or_default()
+        if let Some(candidate) = self.path_git.get(package) {
+            vec![candidate.version.clone()] // a local/git source overrides the registry
+        } else {
+            self.registry
+                .get(package)
+                .map(|releases| releases.iter().map(|r| r.version.clone()).collect())
+                .unwrap_or_default()
+        }
     }
 
-    fn dependencies(&self, package: &str, _version: &Version) -> Vec<(String, VersionReq)> {
-        self.instances
-            .get(package)
-            .map(|i| {
-                i.edges
-                    .values()
-                    .map(|child| (child.clone(), exact_req(&self.instances[child].version)))
-                    .collect()
-            })
-            .unwrap_or_default()
+    fn dependencies(&self, package: &str, version: &Version) -> Vec<(String, VersionReq)> {
+        if let Some(candidate) = self.path_git.get(package) {
+            if &candidate.version == version {
+                candidate.deps.clone()
+            } else {
+                Vec::new()
+            }
+        } else if let Some(releases) = self.registry.get(package) {
+            releases
+                .iter()
+                .find(|r| &r.version == version)
+                .map(|r| {
+                    r.deps
+                        .iter()
+                        .map(|d| (d.package.clone(), d.req.clone()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        }
     }
 }
 

@@ -2329,6 +2329,133 @@ fn git_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Commit `manifest` as this repo's `noeta.toml` and tag it — one released version per call.
+fn commit_version(repo: &std::path::Path, tag: &str, manifest: &str) {
+    std::fs::write(repo.join("noeta.toml"), manifest).unwrap();
+    git_in(&["add", "."], repo);
+    git_in(&["commit", "-q", "-m", tag], repo);
+    git_in(&["tag", tag], repo);
+}
+
+/// The commit SHA a tag points at (for the registry index entry).
+fn git_sha(repo: &std::path::Path, tag: &str) -> String {
+    let out = std::process::Command::new("git")
+        .args(["-C", repo.to_str().unwrap(), "rev-parse", tag])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+#[test]
+fn a_registry_diamond_backtracks_to_a_compatible_set() {
+    // The end-to-end proof of PubGrub range resolution (Phase 4, S5): a diamond where the greedy
+    // pick (highest `foo`) forces an incompatible `bar`, but a lower `foo` resolves. The walk must
+    // read candidate deps from the index and backtrack — a greedy resolver would fail here.
+    //   app → foo ^1.0, baz ^1.0
+    //   foo 1.1 → bar ^2.0 ;  foo 1.0 → bar ^1.0 ;  baz 1.0 → bar ^1.0 ;  bar ∈ {1.0, 2.0}
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_diamond");
+    let _ = std::fs::remove_dir_all(&base);
+    let reg = base.join("registry");
+    let app = base.join("app");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&reg).unwrap();
+
+    let dep = |name: &str, req: &str| {
+        format!("[dependencies]\nd = {{ version = \"{req}\", package = \"{name}\" }}\n")
+    };
+    let make_repo = |name: &str| {
+        let repo = base.join(name.replace('/', "_"));
+        std::fs::create_dir_all(&repo).unwrap();
+        git_in(&["init", "-q"], &repo);
+        repo
+    };
+
+    // foo: 1.0.0 (bar ^1.0) then 1.1.0 (bar ^2.0).
+    let foo = make_repo("foo");
+    commit_version(
+        &foo,
+        "v1.0.0",
+        &format!("[package]\nname = \"acme/foo\"\nversion = \"1.0.0\"\n{}", dep("acme/bar", "^1.0")),
+    );
+    commit_version(
+        &foo,
+        "v1.1.0",
+        &format!("[package]\nname = \"acme/foo\"\nversion = \"1.1.0\"\n{}", dep("acme/bar", "^2.0")),
+    );
+    // bar: 1.0.0 then 2.0.0 (no deps).
+    let bar = make_repo("bar");
+    commit_version(&bar, "v1.0.0", "[package]\nname = \"acme/bar\"\nversion = \"1.0.0\"\n");
+    commit_version(&bar, "v2.0.0", "[package]\nname = \"acme/bar\"\nversion = \"2.0.0\"\n");
+    // baz: 1.0.0 (bar ^1.0).
+    let baz = make_repo("baz");
+    commit_version(
+        &baz,
+        "v1.0.0",
+        &format!("[package]\nname = \"acme/baz\"\nversion = \"1.0.0\"\n{}", dep("acme/bar", "^1.0")),
+    );
+
+    // Write the registry index entries (each version → git coords + deps), matching LocalIndex format.
+    let entry = |file: &str, body: String| std::fs::write(reg.join(file), body).unwrap();
+    let version = |v: &str, url: &std::path::Path, tag: &str, deps: &str| {
+        format!(
+            "[[version]]\nversion = \"{v}\"\nurl = \"{}\"\ntag = \"{tag}\"\nsha = \"{}\"\n{deps}",
+            url.display(),
+            git_sha(url, tag)
+        )
+    };
+    entry(
+        "acme__foo.toml",
+        format!(
+            "{}{}",
+            version("1.0.0", &foo, "v1.0.0", "[[version.deps]]\npackage = \"acme/bar\"\nreq = \"^1.0\"\n"),
+            version("1.1.0", &foo, "v1.1.0", "[[version.deps]]\npackage = \"acme/bar\"\nreq = \"^2.0\"\n"),
+        ),
+    );
+    entry(
+        "acme__bar.toml",
+        format!(
+            "{}{}",
+            version("1.0.0", &bar, "v1.0.0", ""),
+            version("2.0.0", &bar, "v2.0.0", ""),
+        ),
+    );
+    entry(
+        "acme__baz.toml",
+        version("1.0.0", &baz, "v1.0.0", "[[version.deps]]\npackage = \"acme/bar\"\nreq = \"^1.0\"\n"),
+    );
+
+    // The app depends on foo ^1.0 and baz ^1.0 by version (the deps are resolved, not used).
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\n\
+         foo = { version = \"^1.0\", package = \"acme/foo\" }\n\
+         baz = { version = \"^1.0\", package = \"acme/baz\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 42;\n").unwrap();
+
+    // A greedy resolver would error (foo 1.1 → bar 2.0 clashes with baz's bar ^1.0). Success means
+    // the walk backtracked to foo 1.0 + bar 1.0.
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout("42\n");
+
+    // The lock records the backtracked set: only 1.0.0 versions, never 1.1.0 / 2.0.0.
+    let lock = std::fs::read_to_string(app.join("noeta.lock")).expect("lock written");
+    assert!(lock.contains("acme/foo"), "{lock}");
+    assert!(lock.contains("acme/bar"), "{lock}");
+    assert!(!lock.contains("1.1.0"), "foo must resolve to 1.0.0, not 1.1.0:\n{lock}");
+    assert!(!lock.contains("2.0.0"), "bar must resolve to 1.0.0, not 2.0.0:\n{lock}");
+}
+
 #[test]
 fn a_git_tag_dependency_is_fetched_and_run() {
     if !git_available() {
