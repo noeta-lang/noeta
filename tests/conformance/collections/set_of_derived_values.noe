@@ -1,0 +1,29 @@
+// Sets of derived-`Comparable` VALUE kinds (structs, enums): canonicalization, membership, add,
+// remove, and union all order structurally — the same ordering `<` and `.sorted()` use. A set
+// stores a sorted snapshot, so only value kinds are admitted (a `class` element stays the
+// runtime unorderable error: a reference could be mutated after insertion, silently breaking the
+// canonical order).
+// expect: stdout "2"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "3"
+// expect: stdout "1"
+// expect: stdout "2"
+// expect: stdout "true"
+// expect: exit 0
+@derive(Comparable)
+struct P { x: int }
+
+@derive(Comparable)
+enum Pri { Low; High }
+
+ps = [P { x: 2 }, P { x: 1 }, P { x: 2 }].to_set();
+echo ps.len();
+echo ps.contains(P { x: 1 });
+echo ps.contains(P { x: 3 });
+echo ps.add(P { x: 3 }).len();
+echo ps.remove(P { x: 1 }).len();
+
+es = [Pri.High, Pri.Low, Pri.High].to_set();
+echo es.len();
+echo [Pri.Low].to_set().union(es) == es;

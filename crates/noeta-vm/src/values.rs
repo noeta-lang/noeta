@@ -215,13 +215,14 @@ pub(crate) fn canonical_set(items: &[Value]) -> Option<Vec<Value>> {
     }
     if items
         .iter()
-        .any(|&item| compare_primitive(items[0], item).is_none())
+        .any(|&item| noeta_value::set_order(items[0], item).is_none())
     {
         return None;
     }
     let mut canonical = items.to_vec();
-    canonical.sort_by(|&a, &b| compare_primitive(a, b).unwrap_or(std::cmp::Ordering::Equal));
-    canonical.dedup_by(|&mut a, &mut b| compare_primitive(a, b) == Some(std::cmp::Ordering::Equal));
+    canonical.sort_by(|&a, &b| noeta_value::set_order(a, b).unwrap_or(std::cmp::Ordering::Equal));
+    canonical
+        .dedup_by(|&mut a, &mut b| noeta_value::set_order(a, b) == Some(std::cmp::Ordering::Equal));
     Some(canonical)
 }
 

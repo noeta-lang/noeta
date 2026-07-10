@@ -512,11 +512,16 @@ impl DocumentStore {
         };
         let ide = noeta_db::linked_checked_ide(db, cache.workspace);
         Some(
-            inlay::type_hints(program, &ide.expr_types, &ide.packed_layouts, SourceId::FIRST)
-                .into_iter()
-                .filter(|hint| start <= hint.offset && hint.offset <= end)
-                .map(|hint| (index.position(hint.offset, encoding), hint.label, hint.kind))
-                .collect(),
+            inlay::type_hints(
+                program,
+                &ide.expr_types,
+                &ide.packed_layouts,
+                SourceId::FIRST,
+            )
+            .into_iter()
+            .filter(|hint| start <= hint.offset && hint.offset <= end)
+            .map(|hint| (index.position(hint.offset, encoding), hint.label, hint.kind))
+            .collect(),
         )
     }
 
@@ -2198,7 +2203,11 @@ mod tests {
         );
         let at = |line, character| {
             store
-                .hover_type("file:///p.noe", Position { line, character }, Encoding::Utf8)
+                .hover_type(
+                    "file:///p.noe",
+                    Position { line, character },
+                    Encoding::Utf8,
+                )
                 .map(|(repr, note, _range)| (repr.to_string(), note))
         };
         // The `Vec3 { … }` literal (line 1) is a packed nominal.
@@ -2226,7 +2235,11 @@ mod tests {
         );
         let note_at = |line, character| {
             store
-                .hover_type("file:///q.noe", Position { line, character }, Encoding::Utf8)
+                .hover_type(
+                    "file:///q.noe",
+                    Position { line, character },
+                    Encoding::Utf8,
+                )
                 .and_then(|(_repr, note, _range)| note)
         };
         assert_eq!(note_at(1, 4), None); // the `P { … }` literal

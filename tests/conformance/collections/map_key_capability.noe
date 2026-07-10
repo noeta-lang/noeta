@@ -1,0 +1,11 @@
+// A map literal keyed by a type with no runtime key form — here a user struct, even a
+// derived-`Comparable` one — is rejected statically (the runtime accepts only strings and
+// key-capable extern types; structural object keys do not exist yet). Previously this
+// type-checked and failed at the first insertion.
+// expect: error E0007 at 10:5
+// expect: exit 1
+@derive(Comparable, Equatable)
+struct P { x: int }
+
+m = { P { x: 1 }: "one" }
+echo m.len()

@@ -3050,7 +3050,8 @@ impl Checker {
                     )
                     .help(
                         "key-capable types are strings, key-capable extern types (e.g. `Uuid`), \
-                         and `@packed` structs of int/bool fields",
+                         and `@packed` structs of int/bool fields; a set additionally admits any \
+                         value kind (struct/enum) ordering structurally",
                     );
                 }
                 for arg in args {
@@ -3101,6 +3102,18 @@ impl Checker {
             return Some(layout_key_capable(&layout));
         }
         if self.records.contains_key(key_name) || self.enums.contains_key(key_name) {
+            // A set additionally admits any **value kind** (derive-soundness follow-up F2): a
+            // non-packed struct or an enum orders structurally (`set_order` — the same total
+            // ordering `@derive(Comparable)` and `.sorted()` use), so `Set<P>`/`Set<Dir>` are
+            // fine. A `class` stays out of both roles: a set stores a sorted snapshot, and a
+            // reference could be mutated after insertion. Maps still need a `MapKey` form, which
+            // only the packed/int/string/extern kinds above have.
+            if for_set {
+                return Some(!matches!(
+                    self.type_kinds.get(key_name),
+                    Some(noeta_types::TypeKind::Class)
+                ));
+            }
             return Some(false);
         }
         None
@@ -4227,15 +4240,15 @@ impl Checker {
                         );
                     val_ty = Type::Dyn; // recover as a mixed map
                 }
-                // A literal keyed by a non-key-capable extern type is rejected statically
-                // (extern-types X4), matching the `Map<K, _>` formation gate.
+                // A literal keyed by a type without a runtime key form is rejected statically
+                // (extern-types X4 / P-PKEY S3), matching the `Map<K, _>` formation gate.
                 if let Type::Named(key_name, _) = &key_ty
                     && self.named_key_capable(key_name, false) == Some(false)
                 {
                     self.error(
                         DiagnosticCode::TypeMismatch,
                         *span,
-                        format!("`{key_name}` cannot key a map: it is not a key-capable type"),
+                        format!("`{key_ty}` cannot key a map: it is not a key-capable type"),
                     )
                     .help(
                         "key-capable types are strings, key-capable extern types (e.g. `Uuid`), \

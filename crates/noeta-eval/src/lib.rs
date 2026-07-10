@@ -4979,23 +4979,41 @@ pub(crate) fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp:
     }
 }
 
-/// Build a set's canonical form from `items`: every element must be mutually orderable (a single
-/// orderable primitive — int, float, or string); the result is sorted and de-duplicated. Returns
-/// `None` if any element is non-orderable or of a different kind, so the caller raises the shared
-/// unorderable error. Mirrors the VM's `canonical_set` so both backends build identical sets.
+/// The ordering that admits a value into a **set** (canonicalization, `add`/`remove`, `to_set`):
+/// the total structural [`compare_field`] ordering, except a `class` instance (either side) is
+/// refused — a set stores its elements sorted, and a reference type could be mutated *after*
+/// insertion, silently breaking the canonical-order invariant. Value kinds (primitives, structs,
+/// enums) are snapshots. Mirrors the VM's `noeta_value::set_order`.
+fn set_order(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    let is_class = |v: &Value| matches!(v, Value::Object(o) if !o.def.is_struct);
+    if is_class(a) || is_class(b) {
+        return None;
+    }
+    // Primitives, externs, and key-capable `@packed` structs order through `compare_primitive`
+    // first — preserving P-PKEY's content order exactly (including its cross-type by-name order
+    // over capable packed structs); any other value kind (a plain struct, an enum) falls back to
+    // the total structural ordering. Mirrors the VM's `set_order`.
+    compare_primitive(a, b).or_else(|| compare_field(a, b))
+}
+
+/// Build a set's canonical form from `items`: every element must be mutually orderable (an
+/// orderable primitive, or a derived-`Comparable`-style value kind — see [`set_order`]); the
+/// result is sorted and de-duplicated. Returns `None` if any element is non-orderable or of a
+/// different kind, so the caller raises the shared unorderable error. Mirrors the VM's
+/// `canonical_set` so both backends build identical sets.
 fn canonical_set(items: &[Value]) -> Option<Vec<Value>> {
     if items.is_empty() {
         return Some(Vec::new());
     }
     if items
         .iter()
-        .any(|item| compare_primitive(&items[0], item).is_none())
+        .any(|item| set_order(&items[0], item).is_none())
     {
         return None;
     }
     let mut canonical = items.to_vec();
-    canonical.sort_by(|a, b| compare_primitive(a, b).unwrap_or(std::cmp::Ordering::Equal));
-    canonical.dedup_by(|a, b| compare_primitive(a, b) == Some(std::cmp::Ordering::Equal));
+    canonical.sort_by(|a, b| set_order(a, b).unwrap_or(std::cmp::Ordering::Equal));
+    canonical.dedup_by(|a, b| set_order(a, b) == Some(std::cmp::Ordering::Equal));
     Some(canonical)
 }
 

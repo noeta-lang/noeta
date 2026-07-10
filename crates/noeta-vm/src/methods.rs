@@ -822,13 +822,13 @@ impl<'m> Vm<'m> {
             noeta_stdlib::MapMethod::Remove => {
                 self.stdlib_arity(name, args, 1, span)?;
                 let key = self.map_update_key(consume_key, args[0], name, span)?;
-                let removed = match &key {
-                    noeta_stdlib::MapKey::Str(k) => map.map_remove(k.as_str()),
-                    noeta_stdlib::MapKey::Extern(e) => map.map_remove_extern(&**e),
-                    owned @ (noeta_stdlib::MapKey::Int(_) | noeta_stdlib::MapKey::Packed { .. }) => {
-                        map.map_remove_key(owned)
-                    }
-                };
+                let removed =
+                    match &key {
+                        noeta_stdlib::MapKey::Str(k) => map.map_remove(k.as_str()),
+                        noeta_stdlib::MapKey::Extern(e) => map.map_remove_extern(&**e),
+                        owned @ (noeta_stdlib::MapKey::Int(_)
+                        | noeta_stdlib::MapKey::Packed { .. }) => map.map_remove_key(owned),
+                    };
                 if let Some(old) = removed {
                     self.release_value(old);
                 }
@@ -951,7 +951,7 @@ impl<'m> Vm<'m> {
         // with anything, so a first-element probe of `None` (empty) takes the in-place path.
         let orderable = set
             .set_first()
-            .is_none_or(|first| compare_primitive(first, target).is_some());
+            .is_none_or(|first| noeta_value::set_order(first, target).is_some());
         match method {
             noeta_stdlib::SetMethod::Add => {
                 if !orderable {

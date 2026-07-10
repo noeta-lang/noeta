@@ -158,7 +158,12 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
     walker.walk(manifest.dependencies(), &manifest_dir, &mut root_edges)?;
 
     let scope_keys = walker.scope_keys;
-    let graph = assemble(walker.instances, &root_edges, &manifest.trust().commands, scope_keys);
+    let graph = assemble(
+        walker.instances,
+        &root_edges,
+        &manifest.trust().commands,
+        scope_keys,
+    );
 
     // Refresh the lockfile (best-effort: a read-only project must not fail a build). Skipped for a
     // manifest with no resolved dependencies, so a bare-`[profiles]` project grows no lock.
@@ -470,8 +475,12 @@ impl Walker<'_> {
 
         // Root's direct dependencies as resolver requirements; path/git deps are materialized here to
         // learn their identities + edges, registry identities are queued for index loading.
-        let root_deps =
-            self.gather(manifest.dependencies(), manifest_dir, &mut path_git, &mut registry_queue)?;
+        let root_deps = self.gather(
+            manifest.dependencies(),
+            manifest_dir,
+            &mut path_git,
+            &mut registry_queue,
+        )?;
 
         // Transitively load every registry candidate (and the identities its releases depend on) from
         // the index — a path/git-overridden identity is skipped (its single version already wins).
@@ -499,12 +508,8 @@ impl Walker<'_> {
             registry: &registry,
         };
         // The synthetic root identity can't collide with a real `company/package` (no slash).
-        self.solution = crate::resolve::resolve(
-            &candidates,
-            "\u{0}root",
-            &Version::new(0, 0, 0),
-            &root_deps,
-        )?;
+        self.solution =
+            crate::resolve::resolve(&candidates, "\u{0}root", &Version::new(0, 0, 0), &root_deps)?;
         Ok(())
     }
 
@@ -524,9 +529,8 @@ impl Walker<'_> {
             match dep {
                 Dependency::Path { .. } | Dependency::Git { .. } => {
                     let (dir, _source) = self.materialize(key, dep, base_dir)?;
-                    let child_manifest =
-                        read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
-                            .map_err(|err| format!("dependency `{key}`: {err}"))?;
+                    let child_manifest = read_manifest(&dir.join(crate::manifest::MANIFEST_NAME))
+                        .map_err(|err| format!("dependency `{key}`: {err}"))?;
                     let pkg = child_manifest.package().ok_or_else(|| {
                         format!(
                             "dependency `{key}` at `{}` has no `[package]` table",
@@ -544,12 +548,13 @@ impl Walker<'_> {
                                 deps: Vec::new(),
                             },
                         );
-                        let child_reqs =
-                            self.gather(child_manifest.dependencies(), &dir, path_git, registry_queue)?;
-                        path_git
-                            .get_mut(&identity)
-                            .expect("just inserted")
-                            .deps = child_reqs;
+                        let child_reqs = self.gather(
+                            child_manifest.dependencies(),
+                            &dir,
+                            path_git,
+                            registry_queue,
+                        )?;
+                        path_git.get_mut(&identity).expect("just inserted").deps = child_reqs;
                     }
                 }
                 Dependency::Registry { package, req } => {
@@ -854,8 +859,11 @@ mod tests {
                 "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
             )
             .unwrap();
-            std::fs::write(dep.join("fx.noe"), "namespace imgfx.fx;\npub fn one(): int { return 1; }\n")
-                .unwrap();
+            std::fs::write(
+                dep.join("fx.noe"),
+                "namespace imgfx.fx;\npub fn one(): int { return 1; }\n",
+            )
+            .unwrap();
             std::fs::write(
                 dep.join("native").join("Cargo.toml"),
                 "[package]\nname = \"imgfx-native\"\nversion = \"1.0.0\"\n",
@@ -911,15 +919,21 @@ mod tests {
              [trust]\nnative = [\"acme/imgfx\"]\n",
         )
         .unwrap();
-        std::fs::write(mid.join("m.noe"), "namespace mid.core;\npub fn v(): int { return 1; }\n")
-            .unwrap();
+        std::fs::write(
+            mid.join("m.noe"),
+            "namespace mid.core;\npub fn v(): int { return 1; }\n",
+        )
+        .unwrap();
         std::fs::write(
             dep.join("noeta.toml"),
             "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
         )
         .unwrap();
-        std::fs::write(dep.join("fx.noe"), "namespace imgfx.fx;\npub fn one(): int { return 1; }\n")
-            .unwrap();
+        std::fs::write(
+            dep.join("fx.noe"),
+            "namespace imgfx.fx;\npub fn one(): int { return 1; }\n",
+        )
+        .unwrap();
         std::fs::write(
             dep.join("native").join("Cargo.toml"),
             "[package]\nname = \"imgfx-native\"\nversion = \"1.0.0\"\n",
