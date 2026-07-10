@@ -1,7 +1,15 @@
 # IDE architecture navigation — call hierarchy, role lenses, trace UI
 
-**Status: U0–U2 done; U3 awaits its go/no-go (use U1+U2 first).** Branch `ide-ui`, worktree
+**Status: U0–U3 done (arc complete on the branch, unmerged).** Branch `ide-ui`, worktree
 `.claude/worktrees/ide-ui` (rebased onto main `362b4873`, which merged the profiler VS Code UI).
+
+U3 got its go with an expanded scope (user, 2026-07-10): the Architecture sidebar, **plus** test
+integration and **profile slices**. Tests went through VS Code's native Testing API rather than
+the sidebar (decision 1: native surfaces first — the Test Explorer + gutter run-arrows come free);
+discovery is the server's `noeta/tests` (the runner's own `activate_tiers` walk), execution the
+new `noeta test --json [--name <fn>]` machine seam. Profile slices: a function is the slice
+marker — "Profile Focused on This Function" runs the sampling profiler and the flame view
+re-roots every stack at that function (viewer-side post-processing; no compiler changes).
 
 - **U0** `722e3a09` — hierarchy queries on the `DocumentStore` (+ `4a60eb2f` extension unification).
 - **U1** `bfe6065e` — LSP call hierarchy; engine generalized so expansion works from files the user
@@ -10,8 +18,14 @@
   (span-carrying, MCP converts + its tests gate parity), `role_lenses`/`trace_document` on the
   store, LSP `code_lens` + `noeta/trace` custom request, extension 0.7.0 (`src/trace.js`:
   `noeta.showTrace`, `noeta-trace:` content provider, `path:line` DocumentLinkProvider).
+- **U3** `19b0d319`+ext — engine `architecture`/`architecture_children`/`tests` store queries (+
+  walker fix: a leaf at the depth limit no longer over-reports truncation), LSP
+  `noeta/architecture[Children]`+`noeta/tests`, CLI `noeta test --name/--json`; extension:
+  Architecture activity-bar view (`src/architecture.js`), Testing-API explorer (`src/tests.js`),
+  profile focus (`runProfile(mode, focus)` + flame-view stack re-rooting with a focus bar).
 - End-to-end smoke: a scripted stdio session against the real `noeta lsp` binary exercises
-  initialize/codeLens/prepare+incoming+outgoing/noeta trace and asserts each answer.
+  initialize/codeLens/prepare+incoming+outgoing/noeta trace/architecture(+children)/tests and
+  asserts each answer.
 
 The role-graph work (merged, `fef79e06`) gave agents a role-enriched architectural graph: the
 `@role` index with source locations, roles on the `symbols` outline and `module_graph` nodes, the

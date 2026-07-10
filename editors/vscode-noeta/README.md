@@ -29,6 +29,13 @@ features backed by the compiler itself.
     unfolds the full static path from that entry point (boundaries summary, clickable `path:line`
     links, external/dynamic calls labeled honestly). Also **Noeta: Trace Request Path** in the
     palette for the active file's whole architectural surface.
+  - **Architecture sidebar** — the Noeta activity-bar view lists every `@role` and its bearers,
+    unfolding each function's calls lazily; jump to source, or use the context menu for the full
+    trace, the call hierarchy, or a focused profile run.
+- **Testing** — `@test` fns appear in VS Code's Test Explorer with run arrows in the editor
+  gutter (discovered by the compiler's own tier walk); runs use `noeta test --json` under the
+  hood, so a failure shows its assertion message and captured output. `#[Skip]`/`#[Name]`/
+  `#[Group]` are honored, and single tests run with `--name`.
 - **Debugging** (`noeta dap`) — run a `.noe` file under the compiler's own bytecode VM (JIT off, so
   every frame is inspectable) through VS Code's debug UI:
   - **Breakpoints** — click the gutter of any executable line; **stepping** — step over / into / out,
@@ -49,6 +56,9 @@ features backed by the compiler itself.
     Profile Line Annotations** (`noeta.profile.lineAnnotations` turns them off).
   - **Noeta: Profile File (Instrumenting)** — exact per-function call counts and self/total time
     in the same view.
+  - **Profile slices** — "Profile Focused on This Function" (Architecture view context menu)
+    re-roots every sample stack at that function, so the flame graph shows only the part of the
+    run you care about; a bar reports the slice's share and one click restores the whole run.
   - The program's own output streams to the **Noeta Profile** output channel. The view opens any
     `*.noeprof.json` artifact — standard speedscope JSON (a CLI-made profile drops right in, and
     the same file still loads at [speedscope.app](https://www.speedscope.app)) or the

@@ -503,11 +503,69 @@
     // Sampling: speedscope JSON — one "sampled" profile over a shared frame table.
     const frames = message.profile.shared?.frames ?? [];
     const profile = (message.profile.profiles ?? [])[0];
-    const samples = profile?.samples ?? [];
-    const weights = profile?.weights ?? [];
-    if (samples.length === 0) {
+    const allSamples = profile?.samples ?? [];
+    const allWeights = profile?.weights ?? [];
+    if (allSamples.length === 0) {
       app.append(el("div", "message", "The profile contains no samples (the program may have run too briefly to sample)."));
       return;
+    }
+    const body = el("div", "sampling-body");
+    app.append(body);
+    renderSampling(body, frames, allSamples, allWeights, meta.focus || null);
+  }
+
+  /** Whether a frame belongs to the function `name` (`--lines` leaf frames are `fn:line`). */
+  function frameIs(frame, name) {
+    return frame.name === name || frame.name.startsWith(name + ":");
+  }
+
+  /**
+   * Render the sampling views into `container`, optionally **focused** (a profile slice, ide-ui
+   * U3): with a focus function, every sample stack is re-rooted at its first occurrence of that
+   * function and stacks that never pass through it are dropped — the flame graph and table show
+   * only the part of the run the user asked about, with a bar reporting the slice's share and a
+   * one-click way back to the whole run.
+   */
+  function renderSampling(container, frames, allSamples, allWeights, focus) {
+    container.replaceChildren();
+    let samples = allSamples;
+    let weights = allWeights;
+    if (focus) {
+      samples = [];
+      weights = [];
+      for (let i = 0; i < allSamples.length; i++) {
+        const at = allSamples[i].findIndex((idx) => frameIs(frames[idx], focus));
+        if (at >= 0) {
+          samples.push(allSamples[i].slice(at));
+          weights.push(allWeights[i]);
+        }
+      }
+      const kept = weights.reduce((a, b) => a + b, 0);
+      const total = allWeights.reduce((a, b) => a + b, 0);
+      const bar = el("div", "focus-bar");
+      bar.append(
+        el(
+          "span",
+          "focus-text",
+          `⊙ focused on ${focus} — ${fmtInt(kept)} of ${fmtInt(total)} samples (${fmtPct(kept / (total || 1))})`,
+        ),
+      );
+      const clear = el("button", "focus-clear", "Show whole run");
+      clear.addEventListener("click", () =>
+        renderSampling(container, frames, allSamples, allWeights, null),
+      );
+      bar.append(clear);
+      container.append(bar);
+      if (samples.length === 0) {
+        container.append(
+          el(
+            "div",
+            "message",
+            `No samples pass through ${focus} — it may run too briefly to sample or be unreached on this input.`,
+          ),
+        );
+        return;
+      }
     }
 
     const tree = buildTree(samples, weights);
@@ -541,7 +599,7 @@
       buttons[name] = tab;
       tabs.append(tab);
     }
-    app.append(tabs, flame, table);
+    container.append(tabs, flame, table);
     buttons.flame.click();
   }
 

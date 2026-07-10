@@ -204,6 +204,27 @@
         "title": "Trace Request Path",
         "icon": "$(type-hierarchy)",
         "category": "Noeta"
+      },
+      {
+        "command": "noeta.architectureRefresh",
+        "title": "Refresh Architecture View",
+        "icon": "$(refresh)",
+        "category": "Noeta"
+      },
+      {
+        "command": "noeta.archTrace",
+        "title": "Trace Request Path from Here",
+        "category": "Noeta"
+      },
+      {
+        "command": "noeta.archCallHierarchy",
+        "title": "Show Call Hierarchy",
+        "category": "Noeta"
+      },
+      {
+        "command": "noeta.archProfileFocused",
+        "title": "Profile Focused on This Function",
+        "category": "Noeta"
       }
     ],
     "menus": {
@@ -231,20 +252,40 @@
       ],
       "commandPalette": [
         {
-          "command": "noeta.run",
-          "when": "editorLangId == noeta"
+          "command": "noeta.archTrace",
+          "when": "false"
         },
         {
-          "command": "noeta.buildNative",
-          "when": "editorLangId == noeta"
+          "command": "noeta.archCallHierarchy",
+          "when": "false"
         },
         {
-          "command": "noeta.profileFile",
-          "when": "editorLangId == noeta"
+          "command": "noeta.archProfileFocused",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "noeta.architectureRefresh",
+          "when": "view == noetaArchitecture",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "noeta.archTrace",
+          "when": "view == noetaArchitecture && viewItem == noetaArchFn",
+          "group": "noeta@1"
         },
         {
-          "command": "noeta.profileFileInstrumented",
-          "when": "editorLangId == noeta"
+          "command": "noeta.archCallHierarchy",
+          "when": "view == noetaArchitecture && viewItem == noetaArchFn",
+          "group": "noeta@2"
+        },
+        {
+          "command": "noeta.archProfileFocused",
+          "when": "view == noetaArchitecture && viewItem == noetaArchFn",
+          "group": "noeta@3"
         }
       ]
     },
@@ -277,6 +318,25 @@
           "description": "Trace the JSON-RPC traffic between VS Code and the Noeta language server, in the server's output channel."
         }
       }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "noeta",
+          "title": "Noeta",
+          "icon": "media/noeta-activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "noeta": [
+        {
+          "id": "noetaArchitecture",
+          "name": "Architecture",
+          "icon": "media/noeta-activity.svg",
+          "contextualTitle": "Noeta Architecture"
+        }
+      ]
     }
   },
   "dependencies": {
