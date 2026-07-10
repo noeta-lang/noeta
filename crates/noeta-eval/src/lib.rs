@@ -4770,9 +4770,12 @@ pub(crate) fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp:
         // key-capable kind; `None` for unordered kinds. Mirrors the VM's `compare_primitive`.
         (Value::Extern(a), Value::Extern(b)) => a.borrow().cmp_value(&**b.borrow()),
         _ => {
+            // `f32` widens to f64 like any other numeric pairing — mirrors the VM's
+            // `compare_primitive` (`noeta_value::ops`), which orders f32 the same way.
             let num = |v: &Value| match v {
                 Value::Int(i) => Some(*i as f64),
                 Value::Float(f) => Some(*f),
+                Value::F32(f) => Some(f64::from(*f)),
                 _ => None,
             };
             num(left)?.partial_cmp(&num(right)?)
