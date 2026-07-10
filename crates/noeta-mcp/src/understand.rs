@@ -116,6 +116,9 @@ pub struct SymbolNode {
     /// useful. Parameter *types* are omitted here — call `type_at` or `ast` for precise types.
     pub detail: Option<String>,
     pub location: SpanLoc,
+    /// The architectural roles this declaration bears (`Enum.Variant`, from `@role`-tagged
+    /// attributes it carries) — the same index `reflect` serves, placed on the map itself.
+    pub roles: Vec<String>,
     pub children: Vec<SymbolNode>,
 }
 
@@ -126,12 +129,53 @@ pub fn symbols(p: &Prepared) -> SymbolsOutput {
     let parsed = noeta_db::ast(&p.db, analyze::entry_program(p));
     let program: &Program = &parsed.0.program;
     let index = LineIndex::new(p.entry_text());
-    let symbols = program
+    let mut symbols: Vec<SymbolNode> = program
         .stmts
         .iter()
         .filter_map(|stmt| symbol_node(stmt, &index))
         .collect();
+
+    // Annotate the outline with the `@role` index (over the merged program, so a role conferred by
+    // an attribute declared in a sibling module still lands; entry-file targets only, since the
+    // outline is entry-file only). Nested members key as `Type.member`, matching the index.
+    let linked = noeta_db::linked(&p.db, p.ws);
+    let role_program: &Program = match &linked.0 {
+        Ok(prog) => prog,
+        Err(_) => program,
+    };
+    let info = noeta_ast::reflect::build(role_program);
+    let mut role_map: std::collections::HashMap<&str, Vec<String>> =
+        std::collections::HashMap::new();
+    for r in &info.roles {
+        if analyze::in_entry(r.target_span) {
+            role_map
+                .entry(r.target.as_str())
+                .or_default()
+                .push(format!("{}.{}", r.enum_name, r.variant));
+        }
+    }
+    annotate_roles(&mut symbols, None, &role_map);
     SymbolsOutput { symbols }
+}
+
+/// Attach roles to each node: a top-level node keys by its name, a member by `Parent.name` (the
+/// index's `Type.member` convention). `impl` nodes have no single name and never match.
+fn annotate_roles(
+    nodes: &mut [SymbolNode],
+    parent: Option<&str>,
+    role_map: &std::collections::HashMap<&str, Vec<String>>,
+) {
+    for node in nodes {
+        let key = match parent {
+            Some(parent) => format!("{parent}.{}", node.name),
+            None => node.name.clone(),
+        };
+        if let Some(roles) = role_map.get(key.as_str()) {
+            node.roles = roles.clone();
+        }
+        let name = node.name.clone();
+        annotate_roles(&mut node.children, Some(&name), role_map);
+    }
 }
 
 fn symbol_node(stmt: &Stmt, index: &LineIndex) -> Option<SymbolNode> {
@@ -141,6 +185,7 @@ fn symbol_node(stmt: &Stmt, index: &LineIndex) -> Option<SymbolNode> {
             kind: "function".to_string(),
             detail: Some(fn_detail(f)),
             location: index.span_loc(f.span),
+            roles: Vec::new(),
             children: Vec::new(),
         },
         Stmt::Struct(d) => SymbolNode {
@@ -148,6 +193,7 @@ fn symbol_node(stmt: &Stmt, index: &LineIndex) -> Option<SymbolNode> {
             kind: "struct".to_string(),
             detail: None,
             location: index.span_loc(d.span),
+            roles: Vec::new(),
             children: fields_and_methods(&d.fields, &d.methods, index),
         },
         Stmt::Class(d) => SymbolNode {
@@ -155,6 +201,7 @@ fn symbol_node(stmt: &Stmt, index: &LineIndex) -> Option<SymbolNode> {
             kind: "class".to_string(),
             detail: None,
             location: index.span_loc(d.span),
+            roles: Vec::new(),
             children: fields_and_methods(&d.fields, &d.methods, index),
         },
         Stmt::Enum(d) => {
@@ -166,6 +213,7 @@ fn symbol_node(stmt: &Stmt, index: &LineIndex) -> Option<SymbolNode> {
                     kind: "variant".to_string(),
                     detail: None,
                     location: index.span_loc(v.span),
+                    roles: Vec::new(),
                     children: Vec::new(),
                 })
                 .collect();
@@ -175,6 +223,7 @@ fn symbol_node(stmt: &Stmt, index: &LineIndex) -> Option<SymbolNode> {
                 kind: "enum".to_string(),
                 detail: None,
                 location: index.span_loc(d.span),
+                roles: Vec::new(),
                 children,
             }
         }
@@ -183,6 +232,7 @@ fn symbol_node(stmt: &Stmt, index: &LineIndex) -> Option<SymbolNode> {
             kind: "impl".to_string(),
             detail: None,
             location: index.span_loc(d.span),
+            roles: Vec::new(),
             children: d.methods.iter().map(|m| method_node(m, index)).collect(),
         },
         _ => return None,
@@ -202,6 +252,7 @@ fn fields_and_methods(
             kind: "field".to_string(),
             detail: None,
             location: index.span_loc(f.span),
+            roles: Vec::new(),
             children: Vec::new(),
         })
         .collect();
@@ -215,6 +266,7 @@ fn method_node(f: &noeta_ast::FnDecl, index: &LineIndex) -> SymbolNode {
         kind: "method".to_string(),
         detail: Some(fn_detail(f)),
         location: index.span_loc(f.span),
+        roles: Vec::new(),
         children: Vec::new(),
     }
 }
@@ -294,5 +346,27 @@ enum Color { Red; Green }
         // The function detail lists parameter names.
         let handle = out.symbols.iter().find(|s| s.name == "handle").unwrap();
         assert_eq!(handle.detail.as_deref(), Some("fn handle(n)"));
+    }
+
+    #[test]
+    fn symbols_carries_architectural_roles() {
+        // `@role(Semantic.EntryPoint)` rides the `Route` attribute; `handle` bears `#[Route]`, so
+        // the outline node for `handle` shows the role — the architecture on the map itself.
+        let src = "\
+@attribute
+@role(Semantic.EntryPoint)
+struct Route { path: string }
+
+#[Route(\"/x\")]
+fn handle(n: int): int { return n }
+
+fn helper(): int { return 1 }
+";
+        let p = prepare(&Some(src.to_string()), &None).unwrap();
+        let out = symbols(&p);
+        let handle = out.symbols.iter().find(|s| s.name == "handle").unwrap();
+        assert_eq!(handle.roles, vec!["Semantic.EntryPoint"]);
+        let helper = out.symbols.iter().find(|s| s.name == "helper").unwrap();
+        assert!(helper.roles.is_empty(), "unannotated fn carries no role");
     }
 }
