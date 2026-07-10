@@ -778,6 +778,22 @@ fn cmd_audit(path: &std::path::Path) -> ExitCode {
         "\n  {native_count} package(s) run native code, {command_count} may add CLI commands — all \
          authorized (an unauthorized native dependency would have failed resolution)."
     );
+
+    // Provenance (Phase 4 #2): the scopes whose signing keys are pinned. Resolution *enforces*
+    // verification (a bad signature or a changed key fails the resolve), so a successful audit means
+    // every signed release verified against its pinned key.
+    println!("\n  Provenance (pinned signing keys):");
+    if graph.scope_keys.is_empty() {
+        println!("    (none — no registry dependency carried a signed release)");
+    } else {
+        for (scope, key) in &graph.scope_keys {
+            println!("    {scope}: {}…", &key[..key.len().min(16)]);
+        }
+        println!(
+            "    signed releases from these scopes verified during resolution; a changed key or bad \
+             signature aborts the build."
+        );
+    }
     ExitCode::SUCCESS
 }
 

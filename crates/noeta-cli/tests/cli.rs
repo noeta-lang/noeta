@@ -2370,6 +2370,83 @@ fn git_sha(repo: &std::path::Path, tag: &str) -> String {
 }
 
 #[test]
+fn provenance_signs_verifies_and_pins_the_scope_key() {
+    // End-to-end provenance (Phase 4 #2): `noeta key new` → a signed publish → a consumer that
+    // verifies the signature and pins the scope key (TOFU); then a *changed* key is rejected.
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_provenance");
+    let _ = std::fs::remove_dir_all(&base);
+    let reg = base.join("registry");
+    let repo = base.join("greet_repo");
+    let app = base.join("app");
+    let key = base.join("signing.key");
+    for d in [&reg, &repo, &app] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+
+    // A tagged package repo (registry-form deps only — none here).
+    git_in(&["init", "-q"], &repo);
+    std::fs::write(
+        repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("m.noe"), "namespace greet.core;\npub fn v(): int { return 1; }\n")
+        .unwrap();
+    git_in(&["add", "."], &repo);
+    git_in(&["commit", "-q", "-m", "r"], &repo);
+    git_in(&["tag", "v1.0.0"], &repo);
+
+    // Generate a signing key.
+    lang()
+        .args(["key", "new", "--out", key.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("public key"));
+
+    // Publish, signed (cwd = the package repo so it finds greet's manifest).
+    lang()
+        .current_dir(&repo)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_SIGNING_KEY", &key)
+        .args(["publish", "--git", repo.to_str().unwrap(), "--tag", "v1.0.0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[signed]"));
+
+    // The consumer resolves it, verifies the signature, and pins the scope key.
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 42;\n").unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout("42\n");
+    let lock = std::fs::read_to_string(app.join("noeta.lock")).expect("lock written");
+    assert!(lock.contains("[[scope]]"), "scope key pinned: {lock}");
+    assert!(lock.contains("acme"), "scope name pinned: {lock}");
+
+    // TOFU: replace the registry's scope key with a *different* one — a later resolve must reject it.
+    std::fs::write(reg.join("scope__acme.pub"), format!("{}\n", "c".repeat(64))).unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("changed"));
+}
+
+#[test]
 fn a_registry_diamond_backtracks_to_a_compatible_set() {
     // The end-to-end proof of PubGrub range resolution (Phase 4, S5): a diamond where the greedy
     // pick (highest `foo`) forces an incompatible `bar`, but a lower `foo` resolves. The walk must

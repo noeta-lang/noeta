@@ -43,6 +43,10 @@ pub struct Lock {
     git_pins: BTreeMap<(String, String), String>,
     /// package identity → content hash (integrity check for immutable git sources).
     hashes: BTreeMap<String, String>,
+    /// scope (`company`) → **pinned** Ed25519 public key (hex), for provenance (Phase 4 #2). Pinned
+    /// trust-on-first-use: once a scope's key is recorded here, a later registry that serves a
+    /// different key is rejected — so a registry compromised *after* first use can't forge releases.
+    scope_keys: BTreeMap<String, String>,
 }
 
 impl Lock {
@@ -80,6 +84,17 @@ impl Lock {
                 }
             }
         }
+        if let Some(scopes) = table.get("scope").and_then(|v| v.as_array()) {
+            for entry in scopes {
+                let Some(s) = entry.as_table() else { continue };
+                if let (Some(scope), Some(key)) = (
+                    s.get("name").and_then(|v| v.as_str()),
+                    s.get("public_key").and_then(|v| v.as_str()),
+                ) {
+                    lock.scope_keys.insert(scope.to_string(), key.to_string());
+                }
+            }
+        }
         lock
     }
 
@@ -94,10 +109,15 @@ impl Lock {
     pub fn content_hash(&self, identity: &str) -> Option<&str> {
         self.hashes.get(identity).map(String::as_str)
     }
+
+    /// The pinned public key for `scope`, if the lock records one (provenance TOFU, Phase 4 #2).
+    pub fn scope_key(&self, scope: &str) -> Option<&str> {
+        self.scope_keys.get(scope).map(String::as_str)
+    }
 }
 
-/// Serialize the resolved packages to `noeta.lock` text (deterministic, sorted by identity).
-fn render(locked: &[LockedPackage]) -> String {
+/// Serialize the resolved packages + pinned scope keys to `noeta.lock` text (deterministic, sorted).
+fn render(locked: &[LockedPackage], scope_keys: &BTreeMap<String, String>) -> String {
     let mut sorted: Vec<&LockedPackage> = locked.iter().collect();
     sorted.sort_by(|a, b| a.identity.cmp(&b.identity));
     let mut out = String::new();
@@ -124,6 +144,12 @@ fn render(locked: &[LockedPackage]) -> String {
         }
         out.push_str(&format!("hash = {}\n", quote(&pkg.content_hash)));
     }
+    // Pinned scope public keys (provenance TOFU): once written, a later differing key is rejected.
+    for (scope, key) in scope_keys {
+        out.push_str("\n[[scope]]\n");
+        out.push_str(&format!("name = {}\n", quote(scope)));
+        out.push_str(&format!("public_key = {}\n", quote(key)));
+    }
     out
 }
 
@@ -131,9 +157,13 @@ fn render(locked: &[LockedPackage]) -> String {
 /// (temp file + rename). Best-effort at the call site: a read-only project shouldn't fail a build, so
 /// the caller may ignore the error — but the error is returned so a dedicated verb (`noeta update`)
 /// can surface it.
-pub fn write(dir: &Path, locked: &[LockedPackage]) -> io::Result<()> {
+pub fn write(
+    dir: &Path,
+    locked: &[LockedPackage],
+    scope_keys: &BTreeMap<String, String>,
+) -> io::Result<()> {
     let path = dir.join(LOCK_NAME);
-    let text = render(locked);
+    let text = render(locked, scope_keys);
     if std::fs::read_to_string(&path).is_ok_and(|existing| existing == text) {
         return Ok(()); // unchanged
     }
@@ -185,7 +215,9 @@ mod tests {
         let dir = std::env::temp_dir().join("noeta_lock_test_roundtrip");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        write(&dir, &[git_pkg(), path_pkg()]).unwrap();
+        let mut scope_keys = BTreeMap::new();
+        scope_keys.insert("acme".to_string(), "b".repeat(64));
+        write(&dir, &[git_pkg(), path_pkg()], &scope_keys).unwrap();
 
         let lock = Lock::read(&dir);
         assert_eq!(
@@ -196,6 +228,9 @@ mod tests {
         assert_eq!(lock.content_hash("acme/local"), Some("cafe"));
         // A path package records no git pin.
         assert_eq!(lock.git_pin("../local", ""), None);
+        // The pinned scope key round-trips (provenance TOFU, Phase 4 #2).
+        assert_eq!(lock.scope_key("acme"), Some("b".repeat(64).as_str()));
+        assert_eq!(lock.scope_key("nobody"), None);
     }
 
     #[test]
@@ -203,13 +238,13 @@ mod tests {
         let dir = std::env::temp_dir().join("noeta_lock_test_nochurn");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        write(&dir, &[git_pkg()]).unwrap();
+        write(&dir, &[git_pkg()], &BTreeMap::new()).unwrap();
         let first = std::fs::metadata(dir.join(LOCK_NAME))
             .unwrap()
             .modified()
             .unwrap();
         // A no-op write must not touch the file (same content).
-        write(&dir, &[git_pkg()]).unwrap();
+        write(&dir, &[git_pkg()], &BTreeMap::new()).unwrap();
         let second = std::fs::metadata(dir.join(LOCK_NAME))
             .unwrap()
             .modified()

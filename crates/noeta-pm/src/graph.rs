@@ -53,6 +53,10 @@ pub struct ResolvedGraph {
     /// shim so `run_cli` registers a dependency's `noeta <cmd>` only when its package is
     /// command-trusted; std's own commands (root `"std"`) are always allowed. Sorted + deduped.
     pub trusted_command_roots: Vec<String>,
+    /// scope (`company`) → the Ed25519 public key the registry served for it (provenance, Phase 4
+    /// #2), to be **pinned** in `noeta.lock` (trust-on-first-use). Empty when no registry dependency
+    /// carried a scope key.
+    pub scope_keys: BTreeMap<String, String>,
 }
 
 /// A resolved package's native entry crate (Phase 3, N3.1): where the composed build finds its
@@ -120,6 +124,7 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
             locked: Vec::new(),
             native_crates: Vec::new(),
             trusted_command_roots: Vec::new(),
+            scope_keys: BTreeMap::new(),
         });
     };
     let manifest = read_manifest(&manifest_path)?;
@@ -142,6 +147,7 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
         index: None,
         native_trust,
         solution: BTreeMap::new(),
+        scope_keys: BTreeMap::new(),
     };
     // Phase 4, S5b: first *select versions* — gather the candidate graph (materialize the path/git
     // spine, query the index for every registry candidate + its deps) and run PubGrub. This backtracks
@@ -151,12 +157,13 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
     let mut root_edges = BTreeMap::new();
     walker.walk(manifest.dependencies(), &manifest_dir, &mut root_edges)?;
 
-    let graph = assemble(walker.instances, &root_edges, &manifest.trust().commands);
+    let scope_keys = walker.scope_keys;
+    let graph = assemble(walker.instances, &root_edges, &manifest.trust().commands, scope_keys);
 
     // Refresh the lockfile (best-effort: a read-only project must not fail a build). Skipped for a
     // manifest with no resolved dependencies, so a bare-`[profiles]` project grows no lock.
     if !graph.locked.is_empty() {
-        let _ = crate::lock::write(&manifest_dir, &graph.locked);
+        let _ = crate::lock::write(&manifest_dir, &graph.locked, &graph.scope_keys);
     }
     Ok(graph)
 }
@@ -175,6 +182,9 @@ struct Walker<'a> {
     /// greedily picking the highest; empty until `solve` runs (a pure path/git graph leaves registry
     /// selection unused).
     solution: BTreeMap<String, Version>,
+    /// scope → public key served by the registry, gathered while materializing registry deps
+    /// (provenance, Phase 4 #2); pinned into `noeta.lock` afterwards.
+    scope_keys: BTreeMap<String, String>,
 }
 
 impl Walker<'_> {
@@ -308,16 +318,31 @@ impl Walker<'_> {
                 let version = self.solution.get(&name).cloned().ok_or_else(|| {
                     format!("dependency `{key}` (`{name}`) is not in the resolved version set")
                 })?;
-                let index = self.index()?;
-                let coords = index
+                let scope = package.company.clone();
+                let scope_key = self
+                    .index()?
+                    .scope_key(&scope)
+                    .map_err(|err| format!("dependency `{key}`: {err}"))?;
+                let release = self
+                    .index()?
                     .releases(&name)
                     .map_err(|err| format!("dependency `{key}`: {err}"))?
                     .into_iter()
                     .find(|r| r.version == version)
-                    .map(|r| r.coords)
                     .ok_or_else(|| {
                         format!("dependency `{key}` (`{name}`): resolved version {version} is not in the index")
                     })?;
+                // Provenance (Phase 4 #2): pin the scope key trust-on-first-use, reject a changed key,
+                // and verify the release signature (when the `provenance` feature is on).
+                self.check_provenance(
+                    key,
+                    &name,
+                    &version,
+                    &release.coords.sha,
+                    release.signature.as_deref(),
+                    scope_key.as_deref(),
+                )?;
+                let coords = release.coords;
                 // The registry pins the SHA (Phase 4, S2), so a first resolve fetches by it rather
                 // than trusting the tag's current target.
                 self.fetch_git(key, &coords.url, &coords.tag, Some(&coords.sha))
@@ -357,6 +382,58 @@ impl Walker<'_> {
                 sha: fetched.sha,
             },
         ))
+    }
+
+    /// Provenance check for a resolved registry release (Phase 4, #2). Two parts:
+    ///  1. **Key TOFU** (always, no crypto): a scope's public key is pinned in `noeta.lock` on first
+    ///     use; a later registry serving a *different* key for that scope is rejected — this is what
+    ///     defends a registry compromised *after* first use. The effective key is recorded to re-pin.
+    ///  2. **Signature verification** (only with the `provenance` feature — the CLI; the LSP does the
+    ///     key checks but skips the crypto): a signed release must verify against the effective key.
+    ///
+    /// An **unsigned** release is allowed (unverified) while provenance is adopted gradually; `noeta
+    /// audit` surfaces which dependencies are verified.
+    fn check_provenance(
+        &mut self,
+        key: &str,
+        name: &str,
+        version: &Version,
+        sha: &str,
+        signature: Option<&str>,
+        served_key: Option<&str>,
+    ) -> Result<(), String> {
+        let scope = name.split('/').next().unwrap_or(name);
+        let pinned = self.lock.scope_key(scope).map(str::to_string);
+        if let (Some(pinned), Some(served)) = (&pinned, served_key)
+            && pinned != served
+        {
+            return Err(format!(
+                "dependency `{key}` (`{name}`): the registry's public key for scope `{scope}` \
+                 changed from the one pinned in `{}` — a moved or compromised signing key. Reconcile \
+                 with the maintainer, then run `noeta update` to re-pin.",
+                crate::lock::LOCK_NAME
+            ));
+        }
+        let effective = pinned.or_else(|| served_key.map(str::to_string));
+        if let Some(k) = &effective {
+            // Re-pin (stable) / pin on first use.
+            self.scope_keys.insert(scope.to_string(), k.clone());
+        }
+        #[cfg(feature = "provenance")]
+        if let Some(sig) = signature {
+            let Some(k) = &effective else {
+                return Err(format!(
+                    "dependency `{key}` (`{name}`) is signed, but scope `{scope}` has no public key \
+                     to verify it against"
+                ));
+            };
+            let attestation = crate::provenance::Attestation { name, version, sha };
+            crate::provenance::verify(&attestation, sig, k)
+                .map_err(|err| format!("dependency `{key}` (`{name}`): provenance {err}"))?;
+        }
+        #[cfg(not(feature = "provenance"))]
+        let _ = (signature, version, sha);
+        Ok(())
     }
 
     /// The package store, opened on first use (only a git dependency needs it).
@@ -557,6 +634,7 @@ fn assemble(
     instances: BTreeMap<String, Instance>,
     root_edges: &BTreeMap<String, String>,
     trusted_commands: &std::collections::BTreeSet<String>,
+    scope_keys: BTreeMap<String, String>,
 ) -> ResolvedGraph {
     // Global segment per identity. Direct dependencies keep the consumer's key (so the entry's
     // `use <key>.…` needs no rewrite); transitive-only packages get a unique synthesized segment.
@@ -625,6 +703,7 @@ fn assemble(
         locked,
         native_crates,
         trusted_command_roots,
+        scope_keys,
     }
 }
 
