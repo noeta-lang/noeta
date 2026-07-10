@@ -282,7 +282,7 @@ impl Walker<'_> {
                 let dir = joined.canonicalize().unwrap_or(joined);
                 Ok((dir, ResolvedSource::Path { path: path.clone() }))
             }
-            Dependency::Git { url, tag } => self.fetch_git(key, url, tag),
+            Dependency::Git { url, tag } => self.fetch_git(key, url, tag, None),
             Dependency::Registry { package, req } => {
                 // Resolve the registry identity + requirement to git coordinates, then materialize
                 // exactly as a `git` dependency (the registry is a name→coords index, not a store).
@@ -297,22 +297,31 @@ impl Walker<'_> {
                 let index = self.index()?;
                 let (_version, coords) = crate::registry::resolve_coords(index, &name, req)
                     .map_err(|err| format!("dependency `{key}`: {err}"))?;
-                self.fetch_git(key, &coords.url, &coords.tag)
+                // The registry pins the SHA (Phase 4, S2), so a first resolve fetches by it rather
+                // than trusting the tag's current target.
+                self.fetch_git(key, &coords.url, &coords.tag, Some(&coords.sha))
             }
         }
     }
 
-    /// Materialize a git `url`@`tag` into the store, honoring the lockfile pin (package-manager P2.4).
-    /// Shared by a direct `git` dependency and a resolved registry dependency. If the lock pins the
-    /// SHA and its tree is stored, no network is touched (offline); otherwise the tag is resolved at
-    /// the remote.
+    /// Materialize a git `url`@`tag` into the store (package-manager P2.4). Shared by a direct `git`
+    /// dependency (`registry_sha = None`) and a resolved registry dependency (`registry_sha = Some`,
+    /// the index-pinned commit). The SHA to fetch is, in precedence: the **lockfile** pin (the
+    /// reproducibility authority once written) → the **registry** pin (closes trust-on-first-use on a
+    /// first registry resolve) → an `ls-remote` of the tag (a bare `git` dep's first fetch). A pinned
+    /// SHA already in the store needs no network at all.
     fn fetch_git(
         &mut self,
         key: &str,
         url: &str,
         tag: &str,
+        registry_sha: Option<&str>,
     ) -> Result<(PathBuf, ResolvedSource), String> {
-        let pin = self.lock.git_pin(url, tag).map(str::to_string);
+        let pin = self
+            .lock
+            .git_pin(url, tag)
+            .or(registry_sha)
+            .map(str::to_string);
         let store = self.store()?;
         let fetched = match &pin {
             Some(sha) => crate::git::fetch_pinned(url, tag, sha, store),

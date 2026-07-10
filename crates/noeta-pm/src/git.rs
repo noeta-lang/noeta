@@ -64,6 +64,12 @@ fn materialize_sha(url: &str, tag: &str, sha: String, store: &Store) -> Result<F
     })
 }
 
+/// Resolve `url`@`tag` to the commit SHA it currently points at, without cloning (package-manager
+/// Phase 4, S2) — used by `noeta publish` to pin the SHA into the registry index at publish time.
+pub fn resolve_tag_sha(url: &str, tag: &str) -> Result<String, String> {
+    ls_remote_tag(url, tag)
+}
+
 /// Resolve `tag` to its commit SHA at the remote, without cloning (a lightweight network call). For
 /// an **annotated** tag `ls-remote` prints both the tag object and its peeled commit (`…^{}`); the
 /// peeled commit is the one a checkout lands on, so it is preferred. A missing tag is an error.

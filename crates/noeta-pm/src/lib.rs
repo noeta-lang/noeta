@@ -22,3 +22,7 @@ pub mod registry;
 mod git;
 mod resolve;
 mod store;
+
+/// Resolve a git `url`@`tag` to its current commit SHA (package-manager Phase 4, S2) — the one git
+/// operation `noeta publish` needs, to pin the SHA into the registry index at publish time.
+pub use git::resolve_tag_sha;

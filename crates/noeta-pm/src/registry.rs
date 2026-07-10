@@ -25,11 +25,17 @@ use std::path::PathBuf;
 
 use semver::{Version, VersionReq};
 
-/// The git coordinates a registry release resolves to (package-manager P2.5).
+/// The git coordinates a registry release resolves to (package-manager P2.5). The **commit SHA** the
+/// tag resolved to at publish time is pinned here too (Phase 4, S2): the index — not just the
+/// lockfile — is authoritative on "this version = this commit", so a *first* registry resolve fetches
+/// by the pinned SHA rather than trusting whatever the tag currently points at, and a moved tag is
+/// caught against the index. Immutability keys on the whole coordinate, so a tag that moves to a new
+/// SHA can't silently replace a published version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitCoords {
     pub url: String,
     pub tag: String,
+    pub sha: String,
 }
 
 /// The registry index contract: look up a package's published versions (each with its git
@@ -126,7 +132,8 @@ impl Index for LocalIndex {
             for entry in entries {
                 let Some(t) = entry.as_table() else { continue };
                 let get = |k: &str| t.get(k).and_then(|v| v.as_str());
-                if let (Some(ver), Some(url), Some(tag)) = (get("version"), get("url"), get("tag"))
+                if let (Some(ver), Some(url), Some(tag), Some(sha)) =
+                    (get("version"), get("url"), get("tag"), get("sha"))
                     && let Ok(version) = Version::parse(ver)
                 {
                     out.push((
@@ -134,6 +141,7 @@ impl Index for LocalIndex {
                         GitCoords {
                             url: url.to_string(),
                             tag: tag.to_string(),
+                            sha: sha.to_string(),
                         },
                     ));
                 }
@@ -162,6 +170,7 @@ impl Index for LocalIndex {
             text.push_str(&format!("version = {}\n", quote(&v.to_string())));
             text.push_str(&format!("url = {}\n", quote(&c.url)));
             text.push_str(&format!("tag = {}\n", quote(&c.tag)));
+            text.push_str(&format!("sha = {}\n", quote(&c.sha)));
         }
         std::fs::write(self.file_for(name), text)
             .map_err(|err| format!("cannot write registry entry for `{name}`: {err}"))
@@ -187,6 +196,7 @@ mod tests {
         GitCoords {
             url: "https://example.com/guzzle/http".to_string(),
             tag: tag.to_string(),
+            sha: format!("{tag}-sha"),
         }
     }
 

@@ -574,13 +574,24 @@ fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // Pin the commit SHA at publish time (Phase 4, S2): the index — not just a consumer's lockfile —
+    // records "this version = this commit", so a first registry resolve fetches the exact commit and
+    // a later tag move is caught. A tag that doesn't resolve is a publish error (nothing to pin).
+    let sha = match noeta_pm::resolve_tag_sha(git, &tag) {
+        Ok(sha) => sha,
+        Err(err) => {
+            eprintln!("lang: cannot resolve `{git}`@`{tag}` to a commit to pin: {err}");
+            return ExitCode::from(1);
+        }
+    };
     let coords = registry::GitCoords {
         url: git.to_string(),
         tag: tag.clone(),
+        sha: sha.clone(),
     };
     match registry::Index::publish(&index, &name, &version, &coords) {
         Ok(()) => {
-            println!("published `{name}` {version} → {git}#{tag}");
+            println!("published `{name}` {version} → {git}#{tag} ({sha})");
             ExitCode::SUCCESS
         }
         Err(err) => {
