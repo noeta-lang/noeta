@@ -4004,13 +4004,16 @@ impl<'m> Vm<'m> {
                             let key_value = regs[fbase + *key_reg as usize];
                             let key = match key_value.as_compact_string() {
                                 Some(s) => noeta_stdlib::MapKey::Str(s),
-                                None => match key_value.packed_map_key() {
-                                    Some(k) => k,
-                                    None => key_value.with_extern(|e| {
-                                        noeta_stdlib::MapKey::Extern(noeta_stdlib::ExternBox(
-                                            e.clone_box(),
-                                        ))
-                                    }),
+                                None => match key_value.as_int() {
+                                    Some(i) => noeta_stdlib::MapKey::Int(i),
+                                    None => match key_value.packed_map_key() {
+                                        Some(k) => k,
+                                        None => key_value.with_extern(|e| {
+                                            noeta_stdlib::MapKey::Extern(noeta_stdlib::ExternBox(
+                                                e.clone_box(),
+                                            ))
+                                        }),
+                                    },
                                 },
                             };
                             let value = regs[fbase + *value_reg as usize];
@@ -4035,6 +4038,8 @@ impl<'m> Vm<'m> {
                     Op::RequireMapKey { reg, span } => {
                         let v = regs[fbase + *reg as usize];
                         let ok = v.is_string()
+                            // P-PKEY S4: ints key maps (`float` stays excluded — NaN).
+                            || v.as_int().is_some()
                             || (v.is_extern()
                                 && v.with_extern(noeta_stdlib::map_key::extern_key_capable))
                             // P-PKEY: a key-capable `@packed` struct keys a map by content.
@@ -4641,10 +4646,26 @@ impl<'m> Vm<'m> {
                                     ));
                                 }
                                 None => {
-                                    // Not a string: a key-capable extern value probes through
-                                    // the contract (extern-types X4), a key-capable packed
-                                    // struct by its content snapshot (P-PKEY); anything else is
-                                    // the existing type error.
+                                    // Not a string: an int keys directly (P-PKEY S4), a
+                                    // key-capable extern value probes through the contract
+                                    // (extern-types X4), a key-capable packed struct by its
+                                    // content snapshot (P-PKEY); anything else is the existing
+                                    // type error.
+                                    if let Some(i) = idx.as_int() {
+                                        if let Some(element) =
+                                            v.map_get_key(&noeta_stdlib::MapKey::Int(i))
+                                        {
+                                            retain(element);
+                                            set_reg(regs, fbase, *dst, element);
+                                            pc += 1;
+                                            continue;
+                                        }
+                                        return Err(self.error(
+                                            DiagnosticCode::KeyNotFound,
+                                            *span,
+                                            format!("map has no key {i}"),
+                                        ));
+                                    }
                                     if idx.is_extern()
                                         && idx
                                             .with_extern(noeta_stdlib::map_key::extern_key_capable)

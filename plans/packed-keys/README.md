@@ -1,6 +1,6 @@
 # Packed keys — `@packed` structs as Map keys and Set elements
 
-*Status: **IN PROGRESS** (2026-07-10, branch `packed-keys`). Tag: P-PKEY.*
+*Status: **S0–S4 COMPLETE** (2026-07-10, branch `packed-keys`). Tag: P-PKEY.*
 
 ## Motivation
 
@@ -128,6 +128,14 @@ derives display on demand; key builds format nothing), and the field walk borrow
 `keys()` returning real values, deterministic field-wise order) — not a speed win on short keys.
 They should win where string keys exceed SSO (nested/long keys) or where key *construction*
 dominates less.
+
+**S4 (int keys, follow-on landed):** `MapKey::Int` — `int` + the erased `{i,u}N` family key
+maps; `float`/`f32`/`bool` and user records/enums are rejected statically (the checker's
+key-capability now covers every named type). An int key is an immediate: zero-allocation build,
+one-word hash. Measured on a 200k ID-counting map (release, pinned, alternating min-of-13):
+int keys **39.7 ms** vs string keys 45.8 ms — **1.15× faster** with identical output (the win is
+bounded by the shared loop/arithmetic cost per iteration; the map-op portion shrinks much more).
+A spatial grid can also pack `(x, y)` into one int key manually to ride this path.
 
 **Follow-up path if the perf matters** (not started): a zero-alloc probe adapter
 (`Equivalent<MapKey>` + a canonical hash walked directly off the object's slots — kills the

@@ -89,7 +89,7 @@ echo { host, scheme } // shorthand: { "host": host, "scheme": scheme }
 
 Iterating a map (`for v in m`) yields values in key order; equality is structural (order-independent).
 
-A map's key type `K` is `string`, a **key-capable** native type, or a **key-capable `@packed` struct** — immutable, totally ordered, stably hashed. `Uuid` is a key-capable native type: `Map<Uuid, Order>` works end to end (index, `set`/`remove`, `keys()` returns the `Uuid`s), and `Set<Uuid>` orders by the id's bytes, so v7 ids sort by creation time. A mutable native type (`FileHandle`) is rejected statically. `int` keys are not supported (yet).
+A map's key type `K` is `string`, `int` (or any fixed-width integer — `Map<u8, V>` works), a **key-capable** native type, or a **key-capable `@packed` struct** — immutable, totally ordered, stably hashed. Int keys are the leanest kind (an immediate: zero-allocation, one-word hash) and iterate in numeric order: `{1: "one", -7: "neg"}` displays negatives first, and `keys()` returns real ints. `Uuid` is a key-capable native type: `Map<Uuid, Order>` works end to end. A mutable native type (`FileHandle`), `float`/`f32` (NaN makes float keys a footgun), and `bool` are rejected statically.
 
 A `@packed` struct whose fields are all integers/`bool` (or nested such structs) keys a map **by content** — the spatial-hash idiom:
 

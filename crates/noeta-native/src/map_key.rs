@@ -21,11 +21,14 @@ use std::hash::{Hash, Hasher};
 
 use crate::ExternBox;
 
-/// A map key: a string (the overwhelmingly common case, in the P-SSO compact representation), a
-/// key-capable extern value, or a key-capable `@packed` struct (P-PKEY).
+/// A map key: a string (the overwhelmingly common case, in the P-SSO compact representation), an
+/// integer (P-PKEY S4 — `int` and the erased fixed-width family; an immediate, so the fastest
+/// key kind: zero-allocation build, one-word hash), a key-capable extern value, or a key-capable
+/// `@packed` struct (P-PKEY).
 #[derive(Debug, Clone)]
 pub enum MapKey {
     Str(compact_str::CompactString),
+    Int(i64),
     Extern(ExternBox),
     /// A key-capable `@packed` struct's snapshot: the qualified type name and the field values
     /// in declaration order ([`PackedKeyField`] — plain data, so the key holds no backend heap
@@ -145,6 +148,7 @@ impl MapKey {
     pub fn render(&self) -> String {
         match self {
             MapKey::Str(s) => format!("{s:?}"),
+            MapKey::Int(i) => i.to_string(),
             MapKey::Extern(e) => e.display_string(),
             MapKey::Packed { type_name, fields } => packed_names::display(type_name, fields),
         }
@@ -155,6 +159,7 @@ impl MapKey {
     pub fn as_native_str(&self) -> String {
         match self {
             MapKey::Str(s) => s.as_str().to_owned(),
+            MapKey::Int(i) => i.to_string(),
             MapKey::Extern(e) => e.display_string(),
             MapKey::Packed { type_name, fields } => packed_names::display(type_name, fields),
         }
@@ -164,7 +169,7 @@ impl MapKey {
     pub fn as_str(&self) -> Option<&str> {
         match self {
             MapKey::Str(s) => Some(s.as_str()),
-            MapKey::Extern(_) | MapKey::Packed { .. } => None,
+            MapKey::Int(_) | MapKey::Extern(_) | MapKey::Packed { .. } => None,
         }
     }
 }
@@ -177,6 +182,7 @@ impl Hash for MapKey {
     fn hash<H: Hasher>(&self, h: &mut H) {
         match self {
             MapKey::Str(s) => s.as_str().hash(h),
+            MapKey::Int(i) => i.hash(h),
             MapKey::Extern(e) => h.write_u64(e.hash_value()),
             MapKey::Packed { type_name, fields } => {
                 type_name.as_str().hash(h);
@@ -190,6 +196,7 @@ impl PartialEq for MapKey {
     fn eq(&self, other: &MapKey) -> bool {
         match (self, other) {
             (MapKey::Str(a), MapKey::Str(b)) => a == b,
+            (MapKey::Int(a), MapKey::Int(b)) => a == b,
             (MapKey::Extern(a), MapKey::Extern(b)) => a.eq_value(&**b),
             (
                 MapKey::Packed {
@@ -209,21 +216,23 @@ impl PartialEq for MapKey {
 impl Eq for MapKey {}
 
 /// The total key order every order-observing accessor uses (display, `keys()`, iteration,
-/// destructor walks): strings by content; extern keys by `(type_name, cmp_value)`; packed keys
-/// by `(type_name, fields)` — field-wise semantic order in declaration order. Cross-kind
-/// `Str < Extern < Packed` (arbitrary but fixed; a typed map never mixes kinds, so this only
-/// steadies `dyn` paths).
+/// destructor walks): ints numerically; strings by content; extern keys by
+/// `(type_name, cmp_value)`; packed keys by `(type_name, fields)` — field-wise semantic order in
+/// declaration order. Cross-kind `Int < Str < Extern < Packed` (arbitrary but fixed; a typed map
+/// never mixes kinds, so this only steadies `dyn` paths).
 impl Ord for MapKey {
     fn cmp(&self, other: &MapKey) -> Ordering {
-        // Cross-kind rank: Str(0) < Extern(1) < Packed(2).
+        // Cross-kind rank: Int(0) < Str(1) < Extern(2) < Packed(3).
         fn rank(k: &MapKey) -> u8 {
             match k {
-                MapKey::Str(_) => 0,
-                MapKey::Extern(_) => 1,
-                MapKey::Packed { .. } => 2,
+                MapKey::Int(_) => 0,
+                MapKey::Str(_) => 1,
+                MapKey::Extern(_) => 2,
+                MapKey::Packed { .. } => 3,
             }
         }
         match (self, other) {
+            (MapKey::Int(a), MapKey::Int(b)) => a.cmp(b),
             (MapKey::Str(a), MapKey::Str(b)) => a.cmp(b),
             (MapKey::Extern(a), MapKey::Extern(b)) => a
                 .type_name()

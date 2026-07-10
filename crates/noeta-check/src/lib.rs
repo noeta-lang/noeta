@@ -3045,13 +3045,14 @@ impl Checker {
     }
 
     /// Check-time key-capability of a **named** type in `Map<K, _>` key / `Set<T>` element
-    /// position (P-PKEY S3): `Some(true)` for a key-capable extern or a key-capable `@packed`
-    /// struct (all fields int/`{i,u}N`/bool or nested such structs — no floats), `Some(false)`
-    /// for a known user record/enum or non-capable extern (statically certain to abort at
-    /// runtime — the divergence this closes), and `None` when the name is not a resolvable
-    /// concrete type here (a generic parameter, an unknown — other diagnostics own those) or a
-    /// primitive (`Map<int, _>` stays a runtime concern; tightening primitives is a separate
-    /// language decision).
+    /// position (P-PKEY S3/S4): `Some(true)` for `string`, the integer family (S4 — `int` and
+    /// every fixed-width `{i,u}N`, erased to the same word), a key-capable extern, or a
+    /// key-capable `@packed` struct (all fields int/`{i,u}N`/bool or nested such structs — no
+    /// floats); `Some(false)` for `float`/`f32`/`bool` (floats: the NaN footgun; bool:
+    /// deliberate — two possible keys is a smell, use fields), a known user record/enum, or a
+    /// non-capable extern (statically certain to abort at runtime); `None` when the name is not
+    /// a resolvable concrete type here (a generic parameter, an unknown — other diagnostics own
+    /// those).
     fn named_key_capable(&self, key_name: &str) -> Option<bool> {
         fn layout_key_capable(layout: &noeta_ast::reflect::PackedLayout) -> bool {
             use noeta_ast::reflect::PackedKind;
@@ -3061,8 +3062,14 @@ impl Checker {
                 PackedKind::Struct(inner) => layout_key_capable(inner),
             })
         }
-        if key_name == "string" {
+        if matches!(
+            key_name,
+            "string" | "int" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
+        ) {
             return Some(true);
+        }
+        if matches!(key_name, "float" | "f32" | "bool") {
+            return Some(false);
         }
         if let Some(ext) = self.imported_extern(key_name) {
             return Some(ext.key_capable);

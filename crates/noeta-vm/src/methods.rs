@@ -679,6 +679,7 @@ impl<'m> Vm<'m> {
                     keys.into_iter()
                         .map(|k| match k {
                             noeta_stdlib::MapKey::Str(s) => Value::string(s.as_str()),
+                            noeta_stdlib::MapKey::Int(i) => Value::int(i),
                             noeta_stdlib::MapKey::Extern(e) => Value::extern_value(e),
                             noeta_stdlib::MapKey::Packed {
                                 type_name, fields, ..
@@ -822,7 +823,9 @@ impl<'m> Vm<'m> {
                 let removed = match &key {
                     noeta_stdlib::MapKey::Str(k) => map.map_remove(k.as_str()),
                     noeta_stdlib::MapKey::Extern(e) => map.map_remove_extern(&**e),
-                    packed @ noeta_stdlib::MapKey::Packed { .. } => map.map_remove_key(packed),
+                    owned @ (noeta_stdlib::MapKey::Int(_) | noeta_stdlib::MapKey::Packed { .. }) => {
+                        map.map_remove_key(owned)
+                    }
                 };
                 if let Some(old) = removed {
                     self.release_value(old);
@@ -850,6 +853,9 @@ impl<'m> Vm<'m> {
             Ok(noeta_stdlib::MapKey::Str(key.take_string_in_place()))
         } else if let Some(k) = key.as_compact_string() {
             Ok(noeta_stdlib::MapKey::Str(k))
+        } else if let Some(i) = key.as_int() {
+            // P-PKEY S4: an int key (immediate or boxed) — the zero-allocation kind.
+            Ok(noeta_stdlib::MapKey::Int(i))
         } else if key.is_extern() && key.with_extern(noeta_stdlib::map_key::extern_key_capable) {
             Ok(key.with_extern(|e| {
                 noeta_stdlib::MapKey::Extern(noeta_stdlib::ExternBox(e.clone_box()))
@@ -898,6 +904,9 @@ impl<'m> Vm<'m> {
     ) -> Result<Option<Value>, Abort> {
         if let Some(found) = key.with_str(|k| map.map_get(k)) {
             return Ok(found);
+        }
+        if let Some(i) = key.as_int() {
+            return Ok(map.map_get_key(&noeta_stdlib::MapKey::Int(i)));
         }
         if key.is_extern() && key.with_extern(noeta_stdlib::map_key::extern_key_capable) {
             return Ok(key.with_extern(|e| map.map_get_extern(e)));

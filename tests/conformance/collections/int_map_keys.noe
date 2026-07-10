@@ -1,0 +1,44 @@
+// P-PKEY S4: `int` (and the erased fixed-width family) keys maps — literals, index, set/remove/
+// has/get_or, keys() (real ints again), display in numeric order (negatives first), boxed
+// (>48-bit) keys, and u8-typed keys all agree across both backends. Cross-kind order is fixed
+// (ints before strings) but a typed map never mixes kinds.
+// expect: stdout "one"
+// expect: stdout "2"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "fallback"
+// expect: stdout "{-7: "neg", 1: "one"}"
+// expect: stdout "[-7, 1]"
+// expect: stdout "-6"
+// expect: stdout "1"
+// expect: stdout "big"
+// expect: stdout "byte"
+// expect: exit 1
+// expect: error E0018 at 44:6
+
+m = {1: "one", -7: "neg"}
+echo m[1]
+echo m.len()
+echo m.has(-7)
+echo m.has(99)
+echo m.get_or(3, "fallback")
+echo m
+echo m.keys()
+echo m.keys()[0] + 1
+
+mut n = m.remove(1)
+echo n.len()
+
+// Boxed (>48-bit) int keys round-trip by value.
+big = 1 << 55
+mut b: Map<int, string> = {}
+b[big] = "big"
+echo b[(1 << 54) * 2]
+
+// The erased fixed-width family keys the same way.
+mut u: Map<u8, string> = {}
+u[255u8] = "byte"
+echo u[255u8]
+
+// A missing int key aborts with the key in the message (E0018), like string keys.
+echo m[42]

@@ -2887,6 +2887,7 @@ impl Interpreter {
                     .keys()
                     .map(|k| match k {
                         noeta_stdlib::MapKey::Str(s) => Value::Str(s.as_str().to_owned()),
+                        noeta_stdlib::MapKey::Int(i) => Value::Int(*i),
                         noeta_stdlib::MapKey::Extern(e) => {
                             Value::Extern(Rc::new(RefCell::new(e.clone())))
                         }
@@ -4509,6 +4510,8 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
 pub(crate) fn value_map_key(value: &Value) -> Option<noeta_stdlib::MapKey> {
     match value {
         Value::Str(s) => Some(noeta_stdlib::MapKey::from(s.as_str())),
+        // P-PKEY S4: ints key maps (`float` stays excluded — NaN).
+        Value::Int(i) => Some(noeta_stdlib::MapKey::Int(*i)),
         Value::Extern(e) if noeta_stdlib::map_key::extern_key_capable(&**e.borrow()) => {
             Some(noeta_stdlib::MapKey::Extern(e.borrow().clone()))
         }
