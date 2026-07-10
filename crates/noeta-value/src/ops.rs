@@ -340,6 +340,22 @@ fn enum_structural_compare(left: Value, right: Value) -> Option<Ordering> {
     Some(Ordering::Equal)
 }
 
+/// The ordering that admits a value into a **set** (canonicalization, `add`/`remove`, `to_set`):
+/// [`compare_values`], except a `class` instance (either side) is refused. A set stores its
+/// elements sorted, and a reference type could be mutated *after* insertion, silently breaking the
+/// canonical-order invariant — value kinds (primitives, structs, enums) are snapshots, so they
+/// stay where they were ordered. Mirrors the tree-walker's `set_order`.
+pub fn set_order(left: Value, right: Value) -> Option<Ordering> {
+    let is_class = |v: Value| {
+        v.shape()
+            .is_some_and(|s| s.kind == noeta_object::ShapeKind::Class)
+    };
+    if is_class(left) || is_class(right) {
+        return None;
+    }
+    compare_values(left, right)
+}
+
 /// The **total structural ordering** of two values, where one exists: an object pair recurses
 /// field-wise (so derived `Comparable` orders objects-of-objects lexicographically all the way
 /// down), an enum pair orders by variant index then payload (how an `?int`/enum field inside a

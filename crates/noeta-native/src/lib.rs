@@ -245,7 +245,8 @@ pub fn unorderable_error(method: &str) -> StdError {
     StdError {
         kind: ErrorKind::ArgType,
         message: format!(
-            "method `{method}` requires values of a single orderable type (int, float, or string)"
+            "method `{method}` requires values of a single orderable type (a primitive, or a value \
+             type — struct/enum — ordering structurally)"
         ),
     }
 }

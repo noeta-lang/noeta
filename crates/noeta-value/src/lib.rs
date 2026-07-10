@@ -32,7 +32,7 @@ pub use heap::{
 pub use ids::{ChannelId, ScopeId, TaskId};
 pub use ops::{
     OpError, apply_binary, apply_binary_wide, apply_unary, compare_primitive, compare_values,
-    structural_compare,
+    set_order, structural_compare,
 };
 
 use std::collections::BTreeMap;
@@ -1668,7 +1668,7 @@ impl Value {
         if self.is_set() {
             let inserted = heap::with_payload_mut(self, |p| match p {
                 Payload::Set(items) => match items.binary_search_by(|&item| {
-                    compare_primitive(item, value).unwrap_or(std::cmp::Ordering::Equal)
+                    set_order(item, value).unwrap_or(std::cmp::Ordering::Equal)
                 }) {
                     Ok(_) => false,
                     Err(pos) => {
@@ -1698,7 +1698,7 @@ impl Value {
         if self.is_set() {
             let removed = heap::with_payload_mut(self, |p| match p {
                 Payload::Set(items) => match items.binary_search_by(|&item| {
-                    compare_primitive(item, target).unwrap_or(std::cmp::Ordering::Equal)
+                    set_order(item, target).unwrap_or(std::cmp::Ordering::Equal)
                 }) {
                     Ok(pos) => Some(items.remove(pos)),
                     Err(_) => None,

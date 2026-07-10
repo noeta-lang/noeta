@@ -905,7 +905,7 @@ impl<'m> Vm<'m> {
         // with anything, so a first-element probe of `None` (empty) takes the in-place path.
         let orderable = set
             .set_first()
-            .is_none_or(|first| compare_primitive(first, target).is_some());
+            .is_none_or(|first| noeta_value::set_order(first, target).is_some());
         match method {
             noeta_stdlib::SetMethod::Add => {
                 if !orderable {

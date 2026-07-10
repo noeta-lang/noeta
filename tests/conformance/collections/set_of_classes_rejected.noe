@@ -1,0 +1,11 @@
+// A `class` element is NOT admitted into a set, even when it derives `Comparable`: a set stores
+// a sorted snapshot, and a reference type could be mutated after insertion, silently breaking
+// the canonical-order invariant. Value kinds (structs/enums) are admitted instead — see
+// set_of_derived_values.noe.
+// expect: error E0007 at 11:6
+// expect: exit 1
+@derive(Comparable)
+class C {
+    pub x: int
+}
+echo [C { x: 1 }].to_set().len();
