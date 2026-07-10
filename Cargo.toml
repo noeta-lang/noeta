@@ -58,7 +58,11 @@ noeta-reactive = { path = "crates/noeta-reactive" }
 # M3 CRDT convergence core (p2p/local-first P0): state-based merge algebra — dep-free, value-less,
 # the data-convergence layer of the local-first stack (§9.15), wrapped by `std.crdt`.
 noeta-crdt = { path = "crates/noeta-crdt" }
-# M2 editor tooling: the `noeta lsp` language server over the noeta-db salsa query graph
+# M2 editor tooling: the shared IDE engine (MCP M5) — DocumentStore + resolve/completion/signature/
+# symbols over the noeta-db salsa graph, wire-protocol-free so `noeta lsp` and `noeta mcp` both
+# adapt over the one implementation.
+noeta-ide = { path = "crates/noeta-ide" }
+# M2 editor tooling: the `noeta lsp` language server — a tower-lsp wire adapter over noeta-ide
 noeta-lsp = { path = "crates/noeta-lsp" }
 # M2 editor tooling: the `noeta dap` Debug Adapter Protocol server over the production VM
 noeta-dap = { path = "crates/noeta-dap" }

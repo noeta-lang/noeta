@@ -1,23 +1,50 @@
-//! Byte-offset → LSP position conversion, encoding-aware.
+//! Byte-offset → editor position conversion, encoding-aware.
 //!
-//! The compiler speaks in **byte offsets** (a [`Span`] is a `[start, end)` byte range). LSP speaks
-//! in `(line, character)` [`Position`]s where `character` is counted in the client-negotiated
-//! encoding's code units — UTF-16 by default, UTF-8 when the client opts in (LSP 3.17). Neither
-//! equals the compiler's own char-column bookkeeping (`Source::line_col`), so this module owns the
-//! conversion:
+//! The compiler speaks in **byte offsets** (a [`Span`] is a `[start, end)` byte range). Editors
+//! speak in `(line, character)` [`Position`]s where `character` is counted in the negotiated
+//! encoding's code units — UTF-16 by the LSP default, UTF-8 when the client opts in (LSP 3.17).
+//! Neither equals the compiler's own char-column bookkeeping (`Source::line_col`), so this module
+//! owns the conversion:
 //!
 //! - **UTF-8:** the character offset within a line is just the byte offset within the line.
 //! - **UTF-16:** it is the number of UTF-16 code units, so an astral-plane scalar (4 UTF-8 bytes,
 //!   2 UTF-16 units, 1 `char`) counts as 2.
 
 use noeta_span::Span;
-use tower_lsp_server::ls_types::{Position, Range};
 
 /// The position encoding negotiated with the client at `initialize`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
     Utf8,
     Utf16,
+}
+
+/// A zero-based `(line, character)` position, `character` counted in [`Encoding`] code units.
+/// Field-compatible with the LSP wire `Position`, but owned here so the engine stays
+/// wire-protocol-free; adapters convert at their boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Position {
+    pub line: u32,
+    pub character: u32,
+}
+
+impl Position {
+    pub fn new(line: u32, character: u32) -> Position {
+        Position { line, character }
+    }
+}
+
+/// A half-open `[start, end)` position range — the positional form of a [`Span`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Range {
+    pub start: Position,
+    pub end: Position,
+}
+
+impl Range {
+    pub fn new(start: Position, end: Position) -> Range {
+        Range { start, end }
+    }
 }
 
 /// A line-start index over one document's text, for repeated offset→position lookups. Borrows the

@@ -47,6 +47,7 @@ pub fn from_decl(decl: &FnDecl, active: usize) -> SignatureData {
 /// The call the cursor is inside: the callee name, the 0-based active argument index, and — when the
 /// call is a method call `recv.callee(` — the span of the receiver `recv` (so the caller can resolve
 /// its type and find the method). `receiver` is `None` for a plain function call.
+#[derive(Debug)]
 pub struct CallContext {
     pub callee: String,
     pub active: usize,

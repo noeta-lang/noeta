@@ -3768,6 +3768,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-ide"
+version = "0.1.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-check",
+ "noeta-db",
+ "noeta-diagnostics",
+ "noeta-fmt",
+ "noeta-lexer",
+ "noeta-parser",
+ "noeta-pm",
+ "noeta-span",
+ "noeta-stdlib",
+ "salsa",
+]
+
+[[package]]
 name = "noeta-ir"
 version = "0.1.0"
 dependencies = [
@@ -3845,17 +3862,8 @@ dependencies = [
 name = "noeta-lsp"
 version = "0.1.0"
 dependencies = [
- "noeta-ast",
- "noeta-check",
- "noeta-db",
  "noeta-diagnostics",
- "noeta-fmt",
- "noeta-lexer",
- "noeta-parser",
- "noeta-pm",
- "noeta-span",
- "noeta-stdlib",
- "salsa",
+ "noeta-ide",
  "tokio",
  "tower-lsp-server",
 ]
