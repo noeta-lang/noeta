@@ -4883,8 +4883,7 @@ pub(crate) fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp:
 /// insertion, silently breaking the canonical-order invariant. Value kinds (primitives, structs,
 /// enums) are snapshots. Mirrors the VM's `noeta_value::set_order`.
 fn set_order(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
-    let is_class =
-        |v: &Value| matches!(v, Value::Object(o) if !o.def.is_struct);
+    let is_class = |v: &Value| matches!(v, Value::Object(o) if !o.def.is_struct);
     if is_class(a) || is_class(b) {
         return None;
     }

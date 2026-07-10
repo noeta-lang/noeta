@@ -220,11 +220,9 @@ pub(crate) fn canonical_set(items: &[Value]) -> Option<Vec<Value>> {
         return None;
     }
     let mut canonical = items.to_vec();
+    canonical.sort_by(|&a, &b| noeta_value::set_order(a, b).unwrap_or(std::cmp::Ordering::Equal));
     canonical
-        .sort_by(|&a, &b| noeta_value::set_order(a, b).unwrap_or(std::cmp::Ordering::Equal));
-    canonical.dedup_by(|&mut a, &mut b| {
-        noeta_value::set_order(a, b) == Some(std::cmp::Ordering::Equal)
-    });
+        .dedup_by(|&mut a, &mut b| noeta_value::set_order(a, b) == Some(std::cmp::Ordering::Equal));
     Some(canonical)
 }
 
