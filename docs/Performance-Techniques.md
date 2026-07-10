@@ -36,6 +36,8 @@ NaN-boxing and shapes optimize *dispatch*, but do nothing for *data layout* — 
 
 So the type system distinguishes flexible dynamic objects (the default) from **packed value types** (flat, unboxed, cache-friendly). A `List<Vec3>` is stored as a flat `PackedList { schema, bytes }` buffer rather than an array of object pointers, and the bulk kernels stream over the raw `&[u8]` byte-direct (`f32::from_le_bytes`/`to_le_bytes`, which fold to plain little-endian loads/stores). These kernels stay per-backend so both call the *same* Rust code and the differential pins the result.
 
+The layout is visible in the editor: hovering a packed value or list shows the storage fact (`@packed — 12 bytes`; `flat packed storage — 12 bytes/element, column-major (SoA)`), and inlay type hints mark it compactly (`: List<Vec3> · flat`, `· SoA`) — see [Editor and AI Tooling](Editor-and-AI-Tooling).
+
 ### The instructive negative result
 
 **Explicit SIMD was measured slower and dropped.** The `wide` crate (`f32x8`) was tried twice — on the array-of-structs buffer and again on struct-of-arrays columns — and regressed **1.8×–9×** both times. Two reasons:

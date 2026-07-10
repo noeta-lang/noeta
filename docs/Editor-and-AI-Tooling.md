@@ -33,14 +33,14 @@ What it does today:
 | Feature | Notes |
 |---|---|
 | **Live diagnostics** | Every `E0xxx` with its span, on every keystroke (incremental `didChange`). |
-| **Hover types** | The inferred static type of the expression under the cursor, in surface syntax (`List<int>`, `Result<Order, OrderError>`). |
+| **Hover types** | The inferred static type of the expression under the cursor, in surface syntax (`List<int>`, `Result<Order, OrderError>`). Non-default storage adds a fact line: a `@packed` type shows `@packed — 12 bytes`, a `List<packed>` shows `flat packed storage — 12 bytes/element, row-major` (or `column-major (SoA)` for `@packed(layout: column)`). |
 | **Go to definition** | Cross-module: a name defined in an imported module resolves to that file. |
 | **Find references / rename** | Including struct/class **members**; rename is prepare-checked so you can't rename what isn't renameable. |
 | **Completion** | Identifiers in scope, members after `.` (including the bare-dot and mid-whitespace trigger positions), and **type positions** (annotations, signatures). |
 | **Signature help** | Parameter hints while typing a call — free functions and methods. |
 | **Document outline** | Types, functions, methods for the breadcrumb/symbol views. |
 | **Semantic tokens** | Compiler-accurate token coloring layered over the static grammar. |
-| **Inlay hints** | rust-analyzer style, same spelling as hover: the inferred type of every un-annotated binding (`mut xs`&nbsp;`: List<int>`&nbsp;`= …`) and of inference-typed closure parameters; parameter **names** at call sites (`scale(`&nbsp;`factor:`&nbsp;`2, …)`). Annotated bindings, reassignments, same-named identifier arguments, and uninferred (`dyn`) params show nothing. Toggle with VS Code's `editor.inlayHints.enabled`. |
+| **Inlay hints** | rust-analyzer style, same spelling as hover: the inferred type of every un-annotated binding (`mut xs`&nbsp;`: List<int>`&nbsp;`= …`) and of inference-typed closure parameters; parameter **names** at call sites (`scale(`&nbsp;`factor:`&nbsp;`2, …)`). Annotated bindings, reassignments, same-named identifier arguments, and uninferred (`dyn`) params show nothing. Packed storage is marked compactly on the type label (`: Vec3 · packed`, `: List<Vec3> · flat`, `: List<Cell> · SoA`); byte sizes stay hover-only. Toggle with VS Code's `editor.inlayHints.enabled`. |
 
 The same salsa graph powers the [debugger](Debugging)'s launch compile and the conformance
 harness, so all three tools read one source of truth.
@@ -89,7 +89,7 @@ and `mcp` alike.
 
 **Understand** — the compiler's semantic answers:
 - `check` — type-check code; the same JSON diagnostics `noeta check --format json` emits.
-- `type_at` / `symbols` — the inferred type at a symbol/position; a file's declaration outline.
+- `type_at` / `symbols` — the inferred type at a symbol/position (plus a `layout` storage fact for `@packed`/flat-list types, same wording as editor hover); a file's declaration outline.
 - `definition` / `references` / `completions` / `signature` — navigation over the **same
   `noeta-ide` engine the language server serves**, so agent and editor can never disagree; a `file`
   entry resolves cross-file through sibling modules and dependency packages.
