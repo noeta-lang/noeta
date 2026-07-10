@@ -55,7 +55,10 @@ the **production VM** — same bytecode, JIT unarmed. See [Debugging](Debugging)
 
 `noeta profile` reports where a program spends its time — an exact per-function call-count/self-time
 table (`--instrument`) or a wall-time **flamegraph** (folded / SVG / speedscope). Same production VM,
-tier-0, and — like the debugger — outside the differential oracle. See [Profiling](Profiling).
+tier-0, and — like the debugger — outside the differential oracle. The VS Code extension renders
+profiles **in-editor**: an interactive flame-graph view with click-to-source, a sortable function
+table, and hot-line annotations in the source itself (**Noeta: Profile File** in the run-button
+dropdown). See [Profiling](Profiling).
 
 ## The agent surface (`noeta mcp`)
 

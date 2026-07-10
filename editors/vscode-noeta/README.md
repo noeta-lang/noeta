@@ -30,6 +30,22 @@ features backed by the compiler itself.
     read straight from the live VM.
   - Press **F5** on a `.noe` file to debug it (no `launch.json` needed); output appears in the Debug
     Console. See **Debugging** below.
+- **Profiling** (`noeta profile`) — profile a `.noe` file and read the result without leaving the
+  editor:
+  - **Noeta: Profile File (Sampling)** — in the run-button dropdown or the command palette — runs
+    the wall-clock sampling profiler and opens an interactive **flame graph**: click to zoom (with
+    breadcrumbs, `esc` resets), hover for sample counts, double-click or ctrl/cmd+click a frame to
+    jump to its source line. A **Functions** tab shows the sortable per-function table (self/total
+    samples, hottest line).
+  - **Hot-line annotations** — after a sampling run, the profiled sources show each hot line's
+    share of samples inline (`▕ 12.4%`), cleared when you edit the file or with **Noeta: Clear
+    Profile Line Annotations** (`noeta.profile.lineAnnotations` turns them off).
+  - **Noeta: Profile File (Instrumenting)** — exact per-function call counts and self/total time
+    in the same view.
+  - The program's own output streams to the **Noeta Profile** output channel. The view opens any
+    `*.noeprof.json` artifact — standard speedscope JSON (a CLI-made profile drops right in, and
+    the same file still loads at [speedscope.app](https://www.speedscope.app)) or the
+    instrumenting profiler's JSON. Sampling rate: `noeta.profile.hz`.
 - **AI agents** (`noeta mcp`) — on VS Code 1.101+ the extension registers the compiler's Model
   Context Protocol server with the editor, so an agent (Copilot agent mode and friends) can search
   the language docs and examples, `check` code, navigate symbols with the same engine the language

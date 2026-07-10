@@ -76,6 +76,22 @@ main               1     480.173µs        1.480s    0.0%  (app.noe:1)
 
 `--format json` emits the same rows as JSON (`-o rows.json` to a file).
 
+## In VS Code
+
+The [Noeta extension](Editor-and-AI-Tooling) has the profiler built in. **Noeta: Profile File
+(Sampling)** (also in the editor's run-button dropdown) profiles the active `.noe` file and opens
+the result in a **flame graph view** — click to zoom, double-click (or ctrl/cmd+click) a frame to
+jump to its source, with a sortable per-function table on the second tab. The profiled program's
+own output streams to the *Noeta Profile* output channel, and the hot **source lines get annotated
+in place** with their share of samples (cleared on edit, or with *Noeta: Clear Profile Line
+Annotations*). **Noeta: Profile File (Instrumenting)** shows the exact calls/self/total table in
+the same view.
+
+The view is a renderer for the standard artifacts above: it opens any `*.noeprof.json` file —
+speedscope JSON (whose frames carry structured `file`/`line`/`col`) or the instrumenting JSON — so
+a profile taken on the CLI drops into the editor view, and the same file still loads at
+[speedscope.app](https://www.speedscope.app).
+
 ## Tier-0, and what it means
 
 A profile session runs **tier-0** (the interpreter, JIT unarmed) — the same decision the
