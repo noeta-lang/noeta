@@ -2,9 +2,10 @@
 
 [![CI](https://github.com/nsrosenqvist/noeta/actions/workflows/ci.yml/badge.svg)](https://github.com/nsrosenqvist/noeta/actions/workflows/ci.yml)
 
-> **A language for shipping reactive applications as single binaries — web, desktop, or service — with a type system that makes illegal states unrepresentable.**
+> **AI-native, human-first.**
+> A language for shipping reactive applications as single binaries — web, desktop, or service — with a type system that makes illegal states unrepresentable.
 
-Noeta is a new, general-purpose programming language built from scratch in Rust. It reads cleanly and familiarly, but underneath it pairs an ML-grade type system with a runtime engineered for correctness and speed.
+Noeta is a new, general-purpose programming language built from scratch in Rust — currently **pre-alpha**. It reads cleanly and familiarly, but underneath it pairs an ML-grade type system with a runtime engineered for correctness and speed.
 
 ```noeta
 enum OrderError { Empty; NegativePrice(index: int) }
@@ -28,6 +29,7 @@ echo match validate(cart) {
 
 ## Why it's interesting
 
+- **AI-native, human-first.** Built for a world where agents write much of the code — the type system makes machine-written code mechanically checkable, and the toolchain speaks agent natively (`noeta mcp`, LSP, structured diagnostics) — but every surface decision answers to human readability first. Code an agent wrote should be code you *want* to review and own.
 - **Correct by construction.** Algebraic data types, `Result`-typed errors, exhaustive matching, real generics, and inferred-static typing with `dyn` as the one explicit escape — illegal states don't compile.
 - **Fast without a tracing GC.** A register bytecode VM over NaN-boxed values and shape-based objects with inline caches; memory is *compiled* — precise reference counting with in-place reuse and a cycle-collector backstop, no stop-the-world pauses.
 - **Value/reference by intent.** `struct` is a value (copy-on-write, structural equality); `class` is a reference (identity, in-place mutation). The same axis decides what's safe to send across an isolate.
@@ -35,7 +37,7 @@ echo match validate(cart) {
 - **Batteries and tooling.** A layered standard library and a toolchain that runs, tests, benchmarks, and documents your code — `run`, `repl`, `test`, `bench`, `doc`.
 
 > [!NOTE]
-> **Status: pre-alpha, not public.** The **language core and tooling are complete and usable** — full syntax, the type system, traits/generics/derives, modules, the standard library, real host IO, concurrency, and the CLI all ship today. The larger north-star vision — server-side reactivity (`signal`/`computed`/`effect`), a bundled HTTP/WS server, desktop packaging, an embedded LSP, and an agentic MCP surface — is the roadmap, not yet built. The [wiki](docs/Home.md) marks the boundary between the two everywhere.
+> **Status: pre-alpha, not public.** The **language core and tooling are complete and usable** — full syntax, the type system, traits/generics/derives, modules, the standard library, real host IO, concurrency, server-side reactivity (`signal`/`computed`/`effect`), a bundled HTTP server, native ahead-of-time builds (`noeta build --native`), a package manager, and the `noeta lsp` / `noeta dap` / `noeta mcp` editor & agent tooling all ship today. Still on the roadmap: WebSockets/LiveView and desktop packaging. Until alpha, anything may change without notice — syntax, stdlib, and file formats included. The [wiki](docs/Home.md) marks the plan-vs-reality boundary everywhere.
 
 ## Try it
 
