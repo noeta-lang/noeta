@@ -31,7 +31,7 @@ pub use host::{
     Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, P2p, ReadSource, Rng,
     SyncStatus,
 };
-pub use map_key::{ExternKeyRef, MapKey};
+pub use map_key::{ExternKeyRef, MapKey, PackedKeyField};
 pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
 pub use p2p::{P2pBroker, ReceiveIo};
 pub use registry::{

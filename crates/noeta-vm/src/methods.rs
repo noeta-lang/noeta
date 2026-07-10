@@ -467,7 +467,13 @@ impl<'m> Vm<'m> {
         let deep = ext.is_some_and(|t| t.deep_marshal);
         let nargs: Vec<noeta_stdlib::NativeValue> = args
             .iter()
-            .map(|a| if deep { a.to_native_deep() } else { marshal_native_arg(*a) })
+            .map(|a| {
+                if deep {
+                    a.to_native_deep()
+                } else {
+                    marshal_native_arg(*a)
+                }
+            })
             .collect();
         let host = &mut *self.host;
         let result = recv
@@ -667,12 +673,16 @@ impl<'m> Vm<'m> {
                 self.stdlib_arity(name, args, 0, span)?;
                 let keys = map.map_keys().expect("map receiver");
                 // A string key becomes a fresh string value; an extern key a fresh extern value
-                // (its box cloned — a key is a snapshot).
+                // (its box cloned — a key is a snapshot); a packed key rebuilds its struct value
+                // from the content snapshot (P-PKEY).
                 Ok(Value::list(
                     keys.into_iter()
                         .map(|k| match k {
                             noeta_stdlib::MapKey::Str(s) => Value::string(s.as_str()),
                             noeta_stdlib::MapKey::Extern(e) => Value::extern_value(e),
+                            noeta_stdlib::MapKey::Packed {
+                                type_name, fields, ..
+                            } => self.packed_key_value(&type_name, &fields),
                         })
                         .collect(),
                 ))
@@ -812,6 +822,7 @@ impl<'m> Vm<'m> {
                 let removed = match &key {
                     noeta_stdlib::MapKey::Str(k) => map.map_remove(k.as_str()),
                     noeta_stdlib::MapKey::Extern(e) => map.map_remove_extern(&**e),
+                    packed @ noeta_stdlib::MapKey::Packed { .. } => map.map_remove_key(packed),
                 };
                 if let Some(old) = removed {
                     self.release_value(old);
@@ -843,10 +854,37 @@ impl<'m> Vm<'m> {
             Ok(key.with_extern(|e| {
                 noeta_stdlib::MapKey::Extern(noeta_stdlib::ExternBox(e.clone_box()))
             }))
+        } else if let Some(k) = key.packed_map_key() {
+            // P-PKEY: a key-capable `@packed` struct snapshots its content.
+            Ok(k)
         } else {
             let error = noeta_stdlib::map_key::map_key_error(key.type_name());
             Err(self.error(stdlib_error_code(error.kind), span, error.message))
         }
+    }
+
+    /// Rebuild a packed key's struct value (P-PKEY) — the `keys()` direction. The key's content
+    /// snapshot carries the field values; the canonical interned shape comes from the module's
+    /// shape table by name (a key of type `T` implies `T` is declared in this module).
+    fn packed_key_value(&self, type_name: &str, fields: &[noeta_stdlib::PackedKeyField]) -> Value {
+        let shape = self
+            .module
+            .shapes
+            .iter()
+            .find(|s| s.kind == noeta_object::ShapeKind::Struct && s.name == type_name)
+            .unwrap_or_else(|| panic!("packed key type `{type_name}` must be declared"));
+        let shape = noeta_object::intern_shape(shape.clone());
+        let slots = fields
+            .iter()
+            .map(|f| match f {
+                noeta_stdlib::PackedKeyField::Int(i) => Value::int(*i),
+                noeta_stdlib::PackedKeyField::Bool(b) => Value::bool(*b),
+                noeta_stdlib::PackedKeyField::Struct(name, inner) => {
+                    self.packed_key_value(name, inner)
+                }
+            })
+            .collect();
+        Value::object(shape, slots)
     }
 
     /// Probe a map by a key argument — a borrowed `&str` (no clone) or the extern contract
@@ -863,6 +901,11 @@ impl<'m> Vm<'m> {
         }
         if key.is_extern() && key.with_extern(noeta_stdlib::map_key::extern_key_capable) {
             return Ok(key.with_extern(|e| map.map_get_extern(e)));
+        }
+        // P-PKEY: probe by the packed content snapshot. Builds the key (a few plain words) —
+        // fine for a cold probe; a hot packed-key loop goes through the same shape either way.
+        if let Some(k) = key.packed_map_key() {
+            return Ok(map.map_get_key(&k));
         }
         let error = noeta_stdlib::map_key::map_key_error(key.type_name());
         Err(self.error(stdlib_error_code(error.kind), span, error.message))

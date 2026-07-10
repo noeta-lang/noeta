@@ -497,6 +497,12 @@ pub struct TypeDef {
     /// the VM `Shape::structural_eq`, computed from the same inputs so both backends agree — even on
     /// a *nested* class field, where the method-dispatch path is unavailable.
     structural_eq: bool,
+    /// Whether values of this type may **key a `Map` / member a `Set`** (P-PKEY): a key-capable
+    /// `@packed` struct. A `Cell` because capability settles by fixpoint — a later declaration
+    /// can complete a forward-referenced nested chain, and the interpreter re-stamps every
+    /// settled type's (`Rc`-shared) def then. Mirrors the VM's `Shape::key_capable`, computed
+    /// from the same shared `noeta_ast::key_capable_packed`.
+    key_capable: std::cell::Cell<bool>,
     /// Whether the type `@derive(Comparable)`s without a hand-written `compare`: its instances
     /// get structural field-wise ordering for `< <= > >=`.
     derives_comparable: bool,
@@ -1591,6 +1597,7 @@ impl Interpreter {
                     // An opaque import has no known fields; treat `==` structurally (matches the
                     // VM's `ShapeKind::Opaque` default), not as class identity.
                     structural_eq: true,
+                    key_capable: std::cell::Cell::new(false),
                     derives_comparable: false,
                     derives_tojson: false,
                     opaque: true,
@@ -2883,6 +2890,10 @@ impl Interpreter {
                         noeta_stdlib::MapKey::Extern(e) => {
                             Value::Extern(Rc::new(RefCell::new(e.clone())))
                         }
+                        // P-PKEY: rebuild the packed struct value from the content snapshot.
+                        noeta_stdlib::MapKey::Packed {
+                            type_name, fields, ..
+                        } => self.packed_key_value(type_name, fields),
                     })
                     .collect();
                 Ok(Value::list(keys))
@@ -2922,6 +2933,27 @@ impl Interpreter {
     }
 
     /// Read a map-key argument (string or key-capable extern), raising the shared map-key error
+    /// Rebuild a packed key's struct value (P-PKEY) — the `keys()` direction, mirroring the
+    /// VM's `packed_key_value`. The key's content snapshot carries the field values; the
+    /// `TypeDef` comes from the global scope by name (types are top-level, and a key of type
+    /// `T` implies `T` is declared).
+    fn packed_key_value(&self, type_name: &str, fields: &[noeta_stdlib::PackedKeyField]) -> Value {
+        let Some(Value::Type(def)) = self.globals.lookup(type_name) else {
+            panic!("packed key type `{type_name}` must be declared");
+        };
+        let slots = fields
+            .iter()
+            .map(|f| match f {
+                noeta_stdlib::PackedKeyField::Int(i) => Value::Int(*i),
+                noeta_stdlib::PackedKeyField::Bool(b) => Value::Bool(*b),
+                noeta_stdlib::PackedKeyField::Struct(name, inner) => {
+                    self.packed_key_value(name, inner)
+                }
+            })
+            .collect();
+        Value::Object(Rc::new(ObjectValue::new(def, slots)))
+    }
+
     /// otherwise. Mirrors the VM's `map_update_key`/`map_probe` gate.
     fn expect_map_key(
         &mut self,
@@ -4310,6 +4342,8 @@ fn fresh_type_def(name: &str, fields: &[String], is_struct: bool) -> TypeDef {
         is_struct,
         // No derive context here; a struct compares structurally, a class by identity.
         structural_eq: is_struct,
+        // Reflection-materialized: no packed context (mirrors the VM's fresh `Shape` default).
+        key_capable: std::cell::Cell::new(false),
         derives_comparable: false,
         derives_tojson: false,
         opaque: false,
@@ -4467,17 +4501,48 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
     }
 }
 
-/// Extract the owned [`noeta_stdlib::MapKey`] a map operation keys by: a string, or a
-/// key-capable extern value (a boxed snapshot — extern-types X4). `None` for anything else;
-/// the caller raises the shared map-key error. Mirrors the VM's key extraction.
+/// Extract the owned [`noeta_stdlib::MapKey`] a map operation keys by: a string, a key-capable
+/// extern value (a boxed snapshot — extern-types X4), or a key-capable `@packed` struct (a
+/// content snapshot — P-PKEY, gated by the interpreter's `key_capable_packed` fixpoint, the same
+/// shared computation the VM bakes into `Shape::key_capable`). `None` for anything else; the
+/// caller raises the shared map-key error. Mirrors the VM's key extraction.
 pub(crate) fn value_map_key(value: &Value) -> Option<noeta_stdlib::MapKey> {
     match value {
         Value::Str(s) => Some(noeta_stdlib::MapKey::from(s.as_str())),
         Value::Extern(e) if noeta_stdlib::map_key::extern_key_capable(&**e.borrow()) => {
             Some(noeta_stdlib::MapKey::Extern(e.borrow().clone()))
         }
+        Value::Object(o) if o.def.key_capable.get() => Some(noeta_stdlib::MapKey::packed(
+            o.def.name(),
+            packed_key_fields(o)?,
+            value.display(),
+        )),
         _ => None,
     }
+}
+
+/// The [`value_map_key`] field walk (P-PKEY): the object's slots in declaration order as plain
+/// [`noeta_stdlib::PackedKeyField`] data. `None` on a slot the capability contract excludes —
+/// defensive (a key-capable type's slots are ints/bools/nested-capable by construction), so the
+/// caller falls back to the ordinary key error rather than corrupting a map. Mirrors
+/// `Value::packed_key_fields` on the VM side.
+fn packed_key_fields(object: &ObjectValue) -> Option<Vec<noeta_stdlib::PackedKeyField>> {
+    object
+        .slots
+        .borrow()
+        .iter()
+        .map(|v| match v {
+            Value::Int(i) => Some(noeta_stdlib::PackedKeyField::Int(*i)),
+            Value::Bool(b) => Some(noeta_stdlib::PackedKeyField::Bool(*b)),
+            Value::Object(o) if o.def.key_capable.get() => {
+                Some(noeta_stdlib::PackedKeyField::Struct(
+                    o.def.name().into(),
+                    packed_key_fields(o)?.into_boxed_slice(),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Project a tree-walker `Value` onto the native-extension registry's argument view. One of the

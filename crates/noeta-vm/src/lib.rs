@@ -3992,15 +3992,19 @@ impl<'m> Vm<'m> {
                             Vec::with_capacity(entries.len());
                         for (key_reg, value_reg) in entries.iter() {
                             // Validated by the preceding `RequireMapKey`: a string (its P-SSO
-                            // compact clone) or a key-capable extern value (a boxed snapshot).
+                            // compact clone), a key-capable packed struct (a content snapshot,
+                            // P-PKEY), or a key-capable extern value (a boxed snapshot).
                             let key_value = regs[fbase + *key_reg as usize];
                             let key = match key_value.as_compact_string() {
                                 Some(s) => noeta_stdlib::MapKey::Str(s),
-                                None => key_value.with_extern(|e| {
-                                    noeta_stdlib::MapKey::Extern(noeta_stdlib::ExternBox(
-                                        e.clone_box(),
-                                    ))
-                                }),
+                                None => match key_value.packed_map_key() {
+                                    Some(k) => k,
+                                    None => key_value.with_extern(|e| {
+                                        noeta_stdlib::MapKey::Extern(noeta_stdlib::ExternBox(
+                                            e.clone_box(),
+                                        ))
+                                    }),
+                                },
                             };
                             let value = regs[fbase + *value_reg as usize];
                             retain(value);
@@ -4025,7 +4029,9 @@ impl<'m> Vm<'m> {
                         let v = regs[fbase + *reg as usize];
                         let ok = v.is_string()
                             || (v.is_extern()
-                                && v.with_extern(noeta_stdlib::map_key::extern_key_capable));
+                                && v.with_extern(noeta_stdlib::map_key::extern_key_capable))
+                            // P-PKEY: a key-capable `@packed` struct keys a map by content.
+                            || v.shape().is_some_and(|s| s.key_capable);
                         if !ok {
                             let error = noeta_stdlib::map_key::map_key_error(v.type_name());
                             return Err(self.error(
@@ -4629,8 +4635,9 @@ impl<'m> Vm<'m> {
                                 }
                                 None => {
                                     // Not a string: a key-capable extern value probes through
-                                    // the contract (extern-types X4); anything else is the
-                                    // existing type error.
+                                    // the contract (extern-types X4), a key-capable packed
+                                    // struct by its content snapshot (P-PKEY); anything else is
+                                    // the existing type error.
                                     if idx.is_extern()
                                         && idx
                                             .with_extern(noeta_stdlib::map_key::extern_key_capable)
@@ -4638,6 +4645,19 @@ impl<'m> Vm<'m> {
                                         if let Some(element) =
                                             idx.with_extern(|e| v.map_get_extern(e))
                                         {
+                                            retain(element);
+                                            set_reg(regs, fbase, *dst, element);
+                                            pc += 1;
+                                            continue;
+                                        }
+                                        return Err(self.error(
+                                            DiagnosticCode::KeyNotFound,
+                                            *span,
+                                            format!("map has no key {}", idx.display()),
+                                        ));
+                                    }
+                                    if let Some(k) = idx.packed_map_key() {
+                                        if let Some(element) = v.map_get_key(&k) {
                                             retain(element);
                                             set_reg(regs, fbase, *dst, element);
                                             pc += 1;

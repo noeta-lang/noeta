@@ -30,7 +30,13 @@ make float keys a footgun; a deliberate bit-pattern opt-in can come later). The 
 computes exactly this shape (`packed_layout`, `crates/noeta-check/src/packed.rs:219`); the arc
 narrows it (no floats) into a `key_capable_packed` predicate.
 
-### Identity and order: the memcomparable encoding
+### Identity and order: the content snapshot
+
+*(As built in S1: the design below was superseded by a structured **field-values snapshot** —
+`PackedKeyField::{Int, Bool, Struct}` in declaration order — because `map.keys()` must
+reconstruct full struct values from keys, which raw bytes cannot do without a schema. The
+derived field-wise `Ord` gives the same semantic order the memcomparable bytes would have; the
+key also carries the value's display form for render/JSON, excluded from identity.)*
 
 A packed key's identity is **(qualified type name, canonical field bytes)** — name-based like the
 namespaced-types arc (backend-neutral: the eval reference has no `&'static Shape`), bytes in the
