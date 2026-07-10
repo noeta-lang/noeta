@@ -244,6 +244,99 @@ struct TraceResult {
     content: Option<String>,
 }
 
+/// A located node of the Architecture view (`noeta/architecture[Children]`, ide-ui U3). Positions
+/// are **UTF-16** line/character regardless of the negotiated encoding — custom requests bypass
+/// the client library's position conversion, and the consumer is the VS Code extension (JS string
+/// semantics).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchNodeWire {
+    name: String,
+    roles: Vec<String>,
+    uri: Option<String>,
+    line: Option<u32>,
+    character: Option<u32>,
+    reference: bool,
+    external: bool,
+    dynamic: bool,
+    cycle: bool,
+    expandable: bool,
+}
+
+impl From<noeta_ide::ArchNode> for ArchNodeWire {
+    fn from(node: noeta_ide::ArchNode) -> ArchNodeWire {
+        ArchNodeWire {
+            name: node.name,
+            roles: node.roles,
+            uri: node.uri,
+            line: node.range.map(|r| r.start.line),
+            character: node.range.map(|r| r.start.character),
+            reference: node.reference,
+            external: node.external,
+            dynamic: node.dynamic,
+            cycle: node.cycle,
+            expandable: node.expandable,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchitectureParams {
+    uri: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchitectureResult {
+    roles: Option<Vec<ArchRoleWire>>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchRoleWire {
+    role: String,
+    bearers: Vec<ArchNodeWire>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchChildrenParams {
+    uri: String,
+    function: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchChildrenResult {
+    children: Option<Vec<ArchNodeWire>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TestsParams {
+    uri: String,
+}
+
+/// `noeta/tests` answer: the file's `@test` fns (UTF-16 positions, like the architecture wire).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestsResult {
+    tests: Option<Vec<TestItemWire>>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestItemWire {
+    name: String,
+    display: Option<String>,
+    group: Option<String>,
+    skipped: bool,
+    line: u32,
+    character: u32,
+    end_line: u32,
+}
+
 /// Pick the position encoding: prefer UTF-8 when the client advertises support for it (LSP 3.17),
 /// so the server can use the compiler's native byte offsets directly; otherwise fall back to the
 /// protocol default, UTF-16.
@@ -294,6 +387,65 @@ impl Backend {
             store.trace_document(&params.uri, params.from.as_deref())
         };
         Ok(TraceResult { content })
+    }
+
+    /// `noeta/architecture` (ide-ui U3): the workspace's role surface — role groups with their
+    /// located bearers — for the Architecture tree view's top level.
+    async fn noeta_architecture(&self, params: ArchitectureParams) -> Result<ArchitectureResult> {
+        let roles = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.architecture(&params.uri, Encoding::Utf16)
+        };
+        Ok(ArchitectureResult {
+            roles: roles.map(|groups| {
+                groups
+                    .into_iter()
+                    .map(|g| ArchRoleWire {
+                        role: g.role,
+                        bearers: g.bearers.into_iter().map(ArchNodeWire::from).collect(),
+                    })
+                    .collect()
+            }),
+        })
+    }
+
+    /// `noeta/architectureChildren` (ide-ui U3): one lazily-unfolded call level for a tree node.
+    async fn noeta_architecture_children(
+        &self,
+        params: ArchChildrenParams,
+    ) -> Result<ArchChildrenResult> {
+        let children = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.architecture_children(&params.uri, &params.function, Encoding::Utf16)
+        };
+        Ok(ArchChildrenResult {
+            children: children.map(|nodes| nodes.into_iter().map(ArchNodeWire::from).collect()),
+        })
+    }
+
+    /// `noeta/tests` (ide-ui U3): the file's `@test` fns — the runner's own discovery walk, so
+    /// the editor's test explorer and `noeta test` can never disagree.
+    async fn noeta_tests(&self, params: TestsParams) -> Result<TestsResult> {
+        let tests = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.tests(&params.uri, Encoding::Utf16)
+        };
+        Ok(TestsResult {
+            tests: tests.map(|items| {
+                items
+                    .into_iter()
+                    .map(|t| TestItemWire {
+                        name: t.name,
+                        display: t.display,
+                        group: t.group,
+                        skipped: t.skipped,
+                        line: t.range.start.line,
+                        character: t.range.start.character,
+                        end_line: t.range.end.line,
+                    })
+                    .collect()
+            }),
+        })
     }
 
     /// Type-check `uri`'s current text and push its diagnostics to the client. A no-op for a URI
@@ -851,6 +1003,14 @@ async fn serve() {
         // The trace document (ide-ui U2) — a custom request, since LSP has no "render me a
         // read-only report" method; the VS Code extension opens the answer as `noeta-trace:`.
         .custom_method("noeta/trace", Backend::noeta_trace)
+        // The Architecture view + test explorer (ide-ui U3): the role surface, lazy call levels,
+        // and `@test` discovery — all custom requests read by the VS Code extension.
+        .custom_method("noeta/architecture", Backend::noeta_architecture)
+        .custom_method(
+            "noeta/architectureChildren",
+            Backend::noeta_architecture_children,
+        )
+        .custom_method("noeta/tests", Backend::noeta_tests)
         .finish();
     Server::new(stdin, stdout, socket).serve(service).await;
 }

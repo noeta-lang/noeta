@@ -104,6 +104,45 @@ pub struct RoleLens {
     pub traceable: bool,
 }
 
+/// One node of the Architecture view (ide-ui U3): a role bearer, or a callee reached from one —
+/// located when it lives in source, honestly labeled when it doesn't.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArchNode {
+    pub name: String,
+    /// The `Enum.Variant` roles this declaration bears.
+    pub roles: Vec<String>,
+    /// The declaration's location; absent for external/dynamic leaves.
+    pub uri: Option<String>,
+    pub range: Option<Range>,
+    /// Reached as a passed value rather than a syntactic call.
+    pub reference: bool,
+    pub external: bool,
+    pub dynamic: bool,
+    pub cycle: bool,
+    /// Has further outgoing calls — the tree can expand it (lazily, one level per request).
+    pub expandable: bool,
+}
+
+/// One Architecture-view group: a role and every declaration bearing it, in declaration order.
+#[derive(Debug, Clone)]
+pub struct ArchRole {
+    pub role: String,
+    pub bearers: Vec<ArchNode>,
+}
+
+/// One `@test` fn discovered in a document (ide-ui U3): what the editor's test explorer lists and
+/// the gutter run-arrows anchor to. `name` is the fn to pass to `noeta test --name`; `display` is
+/// the `#[Name("…")]` label when present.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TestItem {
+    pub name: String,
+    pub display: Option<String>,
+    pub group: Option<String>,
+    pub skipped: bool,
+    /// The test fn's declaration range in the document.
+    pub range: Range,
+}
+
 /// One open document's workspace: the salsa [`Workspace`] input (its entry plus the sibling `.noe`
 /// modules discovered in the entry's directory) and, per [`SourceId`], the module's URI and salsa
 /// input. The entry is always [`SourceId::FIRST`] (index 0). Rebuilt when the file *set* changes;
@@ -1212,6 +1251,135 @@ impl DocumentStore {
         Some(format!("{path}:{line}"))
     }
 
+    /// The workspace's architectural surface (ide-ui U3): every `@role`, with its bearers, in
+    /// declaration order — the Architecture view's top level. A bearer that is a graph function
+    /// is expandable (its outgoing calls unfold lazily via
+    /// [`architecture_children`](Self::architecture_children)); a role on a non-function
+    /// declaration is a located, non-expandable entry.
+    pub fn architecture(&self, uri: &str, encoding: Encoding) -> Option<Vec<ArchRole>> {
+        let (cache, _) = self.workspace_of(uri)?;
+        let (graph, info) = self.call_graph(cache);
+        let roles_map = trace::roles_by_target(&info);
+        let mut groups: Vec<ArchRole> = Vec::new();
+        for r in &info.roles {
+            let role = format!("{}.{}", r.enum_name, r.variant);
+            let (uri, range) = match self.locate(cache, r.target_span, encoding) {
+                Some((uri, range)) => (Some(uri), Some(range)),
+                None => (None, None),
+            };
+            let expandable = graph
+                .function_named(&r.target)
+                .is_some_and(|idx| graph.edges_from(Some(idx)).next().is_some());
+            let node = ArchNode {
+                name: r.target.clone(),
+                roles: roles_map.get(&r.target).cloned().unwrap_or_default(),
+                uri,
+                range,
+                reference: false,
+                external: false,
+                dynamic: false,
+                cycle: false,
+                expandable,
+            };
+            match groups.iter_mut().find(|g| g.role == role) {
+                Some(group) => {
+                    if !group.bearers.contains(&node) {
+                        group.bearers.push(node);
+                    }
+                }
+                None => groups.push(ArchRole {
+                    role,
+                    bearers: vec![node],
+                }),
+            }
+        }
+        Some(groups)
+    }
+
+    /// One lazily-unfolded level of the Architecture view: what `function` (a graph name —
+    /// `handle`, `Counter.bump`) calls or references, external/dynamic callees as labeled leaves.
+    /// An unknown function yields no children (the view shows a leaf), not an error.
+    pub fn architecture_children(
+        &self,
+        uri: &str,
+        function: &str,
+        encoding: Encoding,
+    ) -> Option<Vec<ArchNode>> {
+        let (cache, _) = self.workspace_of(uri)?;
+        let (graph, info) = self.call_graph(cache);
+        let Some(idx) = graph.function_named(function) else {
+            return Some(Vec::new());
+        };
+        let walked = trace::walk(
+            &graph,
+            &trace::roles_by_target(&info),
+            &[idx],
+            1,
+            trace::NODE_BUDGET,
+        );
+        let Some(root) = walked.roots.first() else {
+            return Some(Vec::new());
+        };
+        Some(
+            root.children
+                .iter()
+                .map(|child| {
+                    let (uri, range) = match child
+                        .decl_span
+                        .and_then(|s| self.locate(cache, s, encoding))
+                    {
+                        Some((uri, range)) => (Some(uri), Some(range)),
+                        None => (None, None),
+                    };
+                    ArchNode {
+                        name: child.name.clone(),
+                        roles: child.roles.clone(),
+                        uri,
+                        range,
+                        reference: child.kind == trace::TraceKind::Reference,
+                        external: child.external,
+                        dynamic: child.dynamic,
+                        cycle: child.cycle,
+                        // At depth 1 a function child with further calls is exactly the one the
+                        // walk marked `truncated` (children cut by the depth limit).
+                        expandable: child.truncated && !child.cycle,
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// The `@test` fns declared in `uri` (ide-ui U3), in source order — what the editor's test
+    /// explorer lists and its gutter run-arrows anchor to. Discovery is the runner's own
+    /// [`activate_tiers`](noeta_check::activate_tiers) walk over the merged program, filtered to
+    /// this file, so the explorer and `noeta test` can never disagree about what a test is.
+    pub fn tests(&self, uri: &str, encoding: Encoding) -> Option<Vec<TestItem>> {
+        let (cache, source) = self.workspace_of(uri)?;
+        let db = &self.db;
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, cache.entry());
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        let activated = noeta_check::activate_tiers(program, &["test"]);
+        let index = LineIndex::new(self.source_text(cache, source)?);
+        Some(
+            activated
+                .tests
+                .iter()
+                .filter(|t| t.span.source == source)
+                .map(|t| TestItem {
+                    name: t.name.clone(),
+                    display: attr_str(&t.attrs, "Name"),
+                    group: attr_str(&t.attrs, "Group"),
+                    skipped: t.attrs.iter().any(|a| a.name == "Skip"),
+                    range: index.range(t.span, encoding),
+                })
+                .collect(),
+        )
+    }
+
     /// The call-graph context of `uri`'s workspace: the static graph over the merged program plus
     /// the reflection index (`@role`/attribute bindings with their target spans) — the same
     /// [`callgraph`]+[`reflect`](noeta_ast::reflect) join the MCP `trace` tool serves, so editor
@@ -1315,6 +1483,20 @@ fn to_document_symbol(
             .map(|child| to_document_symbol(index, child, encoding))
             .collect(),
     }
+}
+
+/// The first string argument of the attribute named `name` (`#[Name("…")]`, `#[Group("…")]`), if
+/// the declaration carries it.
+fn attr_str(attrs: &[noeta_ast::Attribute], name: &str) -> Option<String> {
+    attrs
+        .iter()
+        .find(|a| a.name == name)?
+        .args
+        .iter()
+        .find_map(|arg| match &arg.value {
+            noeta_ast::AttrValue::Str(s) => Some(s.clone()),
+            _ => None,
+        })
 }
 
 /// Convert a `file:` document URI to a filesystem path. Returns `None` for any other scheme (e.g.
@@ -3193,6 +3375,74 @@ echo handle(1)
             doc.contains("matches no role binding and no function"),
             "{doc}"
         );
+    }
+
+    #[test]
+    fn architecture_groups_roles_and_marks_expandability() {
+        let store = hier_store();
+        let arch = store
+            .architecture("file:///hier.noe", Encoding::Utf16)
+            .expect("open document");
+        let roles: Vec<&str> = arch.iter().map(|g| g.role.as_str()).collect();
+        assert_eq!(roles, vec!["Semantic.EntryPoint", "Semantic.Persistence"]);
+        let handle = &arch[0].bearers[0];
+        assert_eq!(handle.name, "handle");
+        assert!(handle.expandable, "handle has outgoing calls");
+        assert_eq!(handle.range.as_ref().map(|r| r.start.line), Some(11));
+        let save = &arch[1].bearers[0];
+        assert_eq!(save.name, "save");
+        assert!(!save.expandable, "save calls nothing");
+    }
+
+    #[test]
+    fn architecture_children_unfold_one_level_with_honest_leaves() {
+        let store = hier_store();
+        let children = store
+            .architecture_children("file:///hier.noe", "handle", Encoding::Utf16)
+            .expect("open document");
+        let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["validate", "save"]);
+        assert!(
+            children[0].expandable,
+            "validate has an external call to unfold"
+        );
+        assert!(!children[1].expandable);
+        // The next level shows the external leaf, located nowhere, not expandable.
+        let leaves = store
+            .architecture_children("file:///hier.noe", "validate", Encoding::Utf16)
+            .expect("open document");
+        let math = leaves
+            .iter()
+            .find(|c| c.name == "math.sqrt")
+            .expect("external leaf");
+        assert!(math.external && math.uri.is_none() && !math.expandable);
+        // Unknown function → empty, not an error.
+        assert!(
+            store
+                .architecture_children("file:///hier.noe", "nope", Encoding::Utf16)
+                .expect("open document")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn tests_discovers_test_fns_with_their_metadata() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///t.noe",
+            "fn add(a: int, b: int): int { return a + b }\n\n@test {\n  fn adds(): void {\n    assert(add(1, 2) == 3)\n  }\n  #[Skip]\n  #[Name(\"slow one\")]\n  fn slow(): void {\n    assert(true)\n  }\n}\n"
+                .to_string(),
+        );
+        let tests = store
+            .tests("file:///t.noe", Encoding::Utf16)
+            .expect("open document");
+        assert_eq!(tests.len(), 2, "{tests:?}");
+        assert_eq!(tests[0].name, "adds");
+        assert!(!tests[0].skipped);
+        assert_eq!(tests[0].range.start.line, 3);
+        assert_eq!(tests[1].name, "slow");
+        assert!(tests[1].skipped);
+        assert_eq!(tests[1].display.as_deref(), Some("slow one"));
     }
 
     #[test]

@@ -235,7 +235,10 @@ impl Tracer<'_> {
             external: false,
             dynamic: false,
             cycle,
-            truncated: truncated || (at_depth_limit && !cycle),
+            // `truncated` is already exact: the cut-children branch above sets it only when
+            // there *were* edges to cut (a leaf at the depth limit is a leaf, not a truncation —
+            // the MCP original over-reported here), and the budget loop sets it on a mid-list cut.
+            truncated,
             children,
         }
     }
