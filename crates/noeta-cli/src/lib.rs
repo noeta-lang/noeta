@@ -207,6 +207,10 @@ enum Command {
     /// Debug Adapter Protocol on stdin/stdout. Runs a program under the production VM (JIT unarmed
     /// for full introspection) with breakpoints, stepping, and variable inspection.
     Dap,
+    /// Run the Noeta MCP server over stdio (Model Context Protocol). Started by an AI agent client
+    /// (e.g. the VS Code extension or `claude mcp add`); speaks JSON-RPC on stdin/stdout. Exposes
+    /// the compiler as agent tools — `check` first, then docs/examples, semantic queries, and more.
+    Mcp,
     /// Profile a program and report where it spends its time. Runs the file under the production VM
     /// tier-0 (JIT unarmed, so every frame is observable) and prints a profile to stderr; the
     /// program's own stdout is forwarded verbatim. A dev-time tool, distinct from the `--profile`
@@ -449,6 +453,7 @@ pub fn run_cli(
         Command::Repl { no_check, load } => cmd_repl(!no_check, load),
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),
+        Command::Mcp => cmd_mcp(),
         Command::Profile {
             file,
             instrument,
@@ -985,6 +990,12 @@ fn cmd_lsp() -> ExitCode {
 /// Start the Noeta debug adapter over stdio, blocking until the editor client disconnects.
 fn cmd_dap() -> ExitCode {
     noeta_dap::run_stdio();
+    ExitCode::SUCCESS
+}
+
+/// Start the Noeta MCP server over stdio, blocking until the agent client disconnects.
+fn cmd_mcp() -> ExitCode {
+    noeta_mcp::run_stdio();
     ExitCode::SUCCESS
 }
 

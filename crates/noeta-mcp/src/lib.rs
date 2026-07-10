@@ -1,0 +1,1466 @@
+//! `noeta mcp` — the Model Context Protocol server: Noeta's agent-native tooling adapter.
+//!
+//! This is the third leg of the editor-tooling story. Where `noeta lsp` is a *read* adapter over
+//! the compiler's salsa query graph (for a human at a cursor) and `noeta dap` is a *control*
+//! adapter over the running VM (for a human debug UI), `noeta mcp` is the adapter for an **AI
+//! agent** — a consumer that addresses code by name/snippet, has ~zero Noeta in its training data,
+//! and lives in a tight "does this compile, what's wrong, what does `E0007` mean" loop.
+//!
+//! M0 stands up the server skeleton (MCP handshake + capability/instructions advertisement over
+//! stdio, via the official `rmcp` SDK) and the single highest-value tool: [`check`], which runs a
+//! program through the same whole-workspace `linked_checked` query the LSP reads and returns the
+//! typed diagnostics (`E0xxx` code, severity, span → file/line/col, message, labels) as structured
+//! content the agent can act on. Later slices add the Ground / Understand / Introspect / Execute
+//! pillars (see `plans/mcp/README.md`).
+
+mod analyze;
+mod corpus;
+mod debug;
+mod execute;
+mod format;
+mod introspect;
+mod navigate;
+mod stdlib;
+mod understand;
+
+use noeta_diagnostics::{DiagnosticCode, JsonDiagnostic, to_json};
+use noeta_span::{Source, SourceId, SourceMap};
+use rmcp::handler::server::wrapper::{Json, Parameters};
+use rmcp::model::{
+    Implementation, ListResourcesResult, PaginatedRequestParams, ProtocolVersion,
+    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
+    ServerInfo,
+};
+use rmcp::service::{RequestContext, RoleServer};
+use rmcp::{ErrorData, ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+/// The always-on orientation shipped in the MCP `instructions` field — cheap, and it
+/// disproportionately raises an agent's first-shot correctness on a language it has never seen.
+const INSTRUCTIONS: &str = "\
+Noeta is an inferred-static typed language (file extension `.noe`). This server exposes the real \
+compiler and its documentation as tools — every answer is ground truth, not a guess. You almost \
+certainly have little Noeta in your training data, so ground yourself before writing it.
+
+Tools:
+- `docs_search` / `docs_get` — search and read the language documentation. Start here for any \
+unfamiliar syntax or feature.
+- `examples_find` — find real, CI-tested example programs by feature, concept, or diagnostic code. \
+Copy the idioms rather than inventing them.
+- `stdlib_api` — list the real standard-library module/function/method signatures from the \
+compiler's own registry. Call this before writing any `std.*` call — do not guess stdlib APIs.
+- `check` — type-check Noeta code and get its diagnostics (stable `E0xxx` codes, severities, source \
+spans, help). Pass code inline via `source`, or a path via `file` (sibling `.noe` modules are \
+resolved so imports type-check). Run this before claiming any Noeta code compiles.
+- `explain_diagnostic` — when `check` returns an `E0xxx` code, look up what it means and see the \
+real programs that trigger and fix it.
+- `type_at` / `symbols` — the inferred type at a symbol/position, and a file's declaration outline.
+- `definition` / `references` / `completions` / `signature` — navigate code with the same engine \
+the editor uses: where a symbol is declared (cross-file), every place it is used, what completes \
+at a position, and the signature of the call under a position.
+- `ast` / `bytecode` / `pipeline` / `module_graph` / `reflect` — inspect the compiler's artifacts: \
+the syntax tree, the VM disassembly, a per-stage health summary, the `use` import graph, and the \
+`@role` architectural graph.
+- `run` / `eval` / `test` — actually execute code: run a program (stdout/exit/traceback), evaluate \
+an expression (value + type), or run its `@test` blocks. Sandboxed and deterministic by default \
+(pass `real: true` for the real host); every run is bounded by liveness limits.
+- `debug_start` / `debug_inspect` / `debug_step` / `debug_eval` / `debug_stop` — interactively \
+debug a program: pause at entry or breakpoints, read the call stack and live locals, step by \
+line, evaluate expressions in a paused frame, resume. A runaway resume pauses with reason \
+`limit` instead of hanging. The ground-truth way to inspect live state at a line.
+- `format` — format Noeta source into its canonical style.
+
+Do not invent syntax or standard-library calls; search the docs/examples, then `check` a snippet. \
+When you claim code works, `run` or `test` it — do not assert behavior you have not executed.";
+
+/// The `check` tool's result. The per-diagnostic shape is `noeta_diagnostics::JsonDiagnostic` — the
+/// *same* canonical form `noeta check --format json` emits — so an agent parses one schema whether it
+/// calls this tool or the CLI. `ok` and the counts are the MCP-friendly summary on top.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct CheckOutput {
+    /// True when there are no `error`-severity diagnostics (warnings/notes may still be present).
+    pub ok: bool,
+    /// The number of error-severity diagnostics.
+    pub errors: usize,
+    /// The number of warning-severity diagnostics.
+    pub warnings: usize,
+    /// Every diagnostic, resolved to file + line/column + byte offsets, in checker order.
+    pub diagnostics: Vec<JsonDiagnostic>,
+}
+
+/// Arguments to `check`: inline `source` OR a `file` path (exactly one).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct CheckArgs {
+    /// Inline Noeta source to check. Provide this or `file`.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Path to a `.noe` file to check. Sibling `.noe` files in its directory are resolved as
+    /// modules so `use` imports type-check. Provide this or `source`.
+    #[serde(default)]
+    pub file: Option<String>,
+}
+
+/// Arguments to `docs_search`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DocsSearchArgs {
+    /// What to look for, e.g. "pattern matching", "how do generics bound a type".
+    pub query: String,
+    /// Max hits to return (default 5).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// The `docs_search` result. Wrapped in an object because MCP tool output schemas must have an
+/// object root (a bare array is rejected).
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DocsSearchOutput {
+    pub hits: Vec<DocHitOut>,
+}
+
+/// One `docs_search` hit: the page + section that matched, with a short snippet.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DocHitOut {
+    /// The page slug — pass to `docs_get` to read the whole page.
+    pub page: String,
+    pub title: String,
+    pub heading: String,
+    /// A GitHub-style heading anchor, so the section can be cited as `page#anchor`.
+    pub anchor: String,
+    pub snippet: String,
+}
+
+/// Arguments to `docs_get`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DocsGetArgs {
+    /// The page slug or title (case-insensitive; a substring works, e.g. `types` → `Type-System`).
+    pub page: String,
+}
+
+/// The `docs_get` result: the page's full markdown, or the index if the page was not found.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DocGetOut {
+    /// True when `page` resolved; false when `available` lists what exists instead.
+    pub found: bool,
+    /// The full markdown (empty when not found).
+    pub markdown: String,
+    /// When not found, the `(slug, title)` of every page so the agent can retry.
+    pub available: Vec<[String; 2]>,
+}
+
+/// Arguments to `examples_find`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ExamplesFindArgs {
+    /// What to look for: a feature ("generics", "async"), a concept, or a diagnostic code.
+    pub query: String,
+    /// Max examples to return (default 5).
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// The `examples_find` result (object-wrapped for the same MCP schema reason as `DocsSearchOutput`).
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ExamplesFindOutput {
+    pub examples: Vec<ExampleOut>,
+}
+
+/// One `examples_find` / `explain_diagnostic` example: a real, CI-tested `.noe` program.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ExampleOut {
+    /// The feature directory, e.g. `generics`.
+    pub feature: String,
+    /// The example name, e.g. `bounded`.
+    pub name: String,
+    /// The case's own one-line description (its header comment).
+    pub description: String,
+    /// The full Noeta source.
+    pub code: String,
+    /// Any `E0xxx` diagnostics this example is expected to raise (empty for a passing example).
+    pub expects: Vec<String>,
+}
+
+/// A `check`-style source input shared by the M3 analysis tools: inline `source` OR a `file` path.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct AnalyzeArgs {
+    /// Inline Noeta source to analyze. Provide this or `file`.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Path to a `.noe` file to analyze. Sibling `.noe` modules are resolved. Provide this or `source`.
+    #[serde(default)]
+    pub file: Option<String>,
+}
+
+/// Arguments to `type_at`: a source, plus a site addressed by `symbol` name or `line`/`column`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TypeAtArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// A symbol name to locate (its first whole-word occurrence in the entry file). Preferred over a
+    /// position for an agent that has a name, not a cursor.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// 1-based line of the site (use with `column` when no `symbol` is given).
+    #[serde(default)]
+    pub line: Option<u32>,
+    /// 1-based, UTF-8-byte column of the site.
+    #[serde(default)]
+    pub column: Option<u32>,
+}
+
+/// Arguments to `definition`/`references`: a source, plus a site addressed by `symbol` name or
+/// `line`/`column` (same addressing as `type_at`).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct NavigateArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// A symbol name to locate (its first whole-word occurrence in the entry file). Preferred over a
+    /// position for an agent that has a name, not a cursor.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// 1-based line of the site (use with `column` when no `symbol` is given).
+    #[serde(default)]
+    pub line: Option<u32>,
+    /// 1-based, UTF-8-byte column of the site.
+    #[serde(default)]
+    pub column: Option<u32>,
+    /// `references` only: include the declaration among the results (default true).
+    #[serde(default)]
+    pub include_declaration: Option<bool>,
+}
+
+/// Arguments to `completions`/`signature`: a source plus a required 1-based position.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct PositionArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// 1-based line of the position.
+    pub line: u32,
+    /// 1-based, UTF-8-byte column of the position (for completions after a `.`, the column just
+    /// past the dot).
+    pub column: u32,
+}
+
+/// Arguments to `debug_start`: a source, optional breakpoints, and the host choice.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DebugStartArgs {
+    /// Inline Noeta source to debug. Provide this or `file`.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Path to a `.noe` file to debug (sibling modules resolve). Provide this or `source`.
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Breakpoints to arm before the run starts (1-based lines; entry file unless `file` is set
+    /// on the breakpoint).
+    #[serde(default)]
+    pub breakpoints: Option<Vec<debug::BreakpointArg>>,
+    /// Pause before the first instruction. Defaults to true when no breakpoints are given.
+    #[serde(default)]
+    pub stop_on_entry: Option<bool>,
+    /// Run on the real host (real disk/env/network) instead of the deterministic sandbox.
+    #[serde(default)]
+    pub real: Option<bool>,
+}
+
+/// Arguments addressing an existing debug session.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DebugSessionArgs {
+    /// The session id `debug_start` returned.
+    pub session: u64,
+}
+
+/// Arguments to `debug_step`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DebugStepArgs {
+    /// The session id `debug_start` returned.
+    pub session: u64,
+    /// `continue` (to the next breakpoint/limit/exit), or a line-granular `over` / `into` / `out`
+    /// step. Defaults to `over`.
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+/// Arguments to `debug_eval`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DebugEvalArgs {
+    /// The session id `debug_start` returned.
+    pub session: u64,
+    /// The expression (or statements — a trailing bare expression is the value) to evaluate in
+    /// the paused frame's scope.
+    pub expr: String,
+    /// Which stack frame's scope to evaluate in (index from the reported frames, innermost = 0).
+    #[serde(default)]
+    pub frame: Option<usize>,
+}
+
+/// Arguments to `reflect`: a source, plus an optional architectural-role filter.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ReflectArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Narrow to declarations bearing this role — the bare variant (`EntryPoint`) or qualified
+    /// (`Semantic.EntryPoint`), case-insensitive. Omit for every role.
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
+/// Arguments to `stdlib_api`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct StdlibApiArgs {
+    /// A module identity (`std.math`, or bare `math`; a prefix like `http` expands to
+    /// `std.http.client`/`std.http.server`) or an extern type name (`Uuid`, `Response`) to narrow to.
+    /// Omit to list the entire standard-library surface.
+    #[serde(default)]
+    pub module: Option<String>,
+}
+
+/// Arguments to `run`: a source, plus how to run it — real host, program args, and liveness limits.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct RunArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Program arguments (`args.all()`), for a `file` run against the real host. Ignored under the
+    /// deterministic sandbox.
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    /// Run against the **real host** (real disk/env/network) instead of the deterministic sandbox
+    /// (in-memory fs, logical clock, seeded random, pure network). Default false. Real effects are
+    /// gated by your own tool approval.
+    #[serde(default)]
+    pub real: Option<bool>,
+    /// Liveness limits (timeout / step budget / output cap). All optional and defaulted; always on.
+    #[serde(default)]
+    pub limits: Option<execute::RunLimits>,
+}
+
+/// Arguments to `eval`: an expression, optional prior `context`, and the real-host opt-in.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct EvalArgs {
+    /// The Noeta expression to evaluate (e.g. `1 + 2`, `[1, 2, 3].map(fn(x) { return x * 2; })`).
+    pub expr: String,
+    /// Prior statements/bindings/definitions run before `expr` (e.g. `xs = [1, 2, 3];`), REPL-style.
+    #[serde(default)]
+    pub context: Option<String>,
+    /// Evaluate against the real host instead of the sandbox. Default false.
+    #[serde(default)]
+    pub real: Option<bool>,
+}
+
+/// Arguments to `test`: a source with `@test` blocks, an optional filter, and the real-host opt-in.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TestArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Keep only tests whose name or `#[Group(...)]` contains this substring (case-insensitive).
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// Run the tests against the real host instead of the sandbox. Default false.
+    #[serde(default)]
+    pub real: Option<bool>,
+}
+
+/// Arguments to `explain_diagnostic`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct ExplainArgs {
+    /// The diagnostic code to explain, e.g. `E0007` (case-insensitive; a bare `7` also resolves).
+    pub code: String,
+}
+
+/// The `explain_diagnostic` result: what the code means plus the real programs that trigger it.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ExplainOut {
+    /// The canonical code, e.g. `E0007`.
+    pub code: String,
+    /// A human title derived from the diagnostic's name, e.g. `Type Mismatch`.
+    pub title: String,
+    /// Whether `code` is a known diagnostic.
+    pub known: bool,
+    /// Real, CI-tested example programs that raise this diagnostic (with their descriptions).
+    pub examples: Vec<ExampleOut>,
+    /// Documentation pages that mention this code, as `[slug, title]`.
+    pub docs: Vec<[String; 2]>,
+}
+
+/// The MCP server. Analysis tools are stateless — each runs on a fresh salsa database (a later
+/// slice may hold one `LangDatabase` across calls for incrementality). The `debug_*` sessions are
+/// the stateful exception: live program runs keyed by session id, shared across handler clones.
+#[derive(Clone, Debug, Default)]
+pub struct NoetaMcp {
+    debug: debug::Registry,
+}
+
+impl NoetaMcp {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[tool_router]
+impl NoetaMcp {
+    /// Type-check Noeta code and return its diagnostics — the agent's compile feedback loop.
+    #[tool(
+        description = "Type-check Noeta (.noe) code and return its diagnostics (stable E0xxx code, \
+severity, source span, message, help). Provide `source` (inline) or `file` (a path; sibling .noe \
+modules are resolved so imports check). Run this before claiming Noeta code compiles."
+    )]
+    async fn check(
+        &self,
+        Parameters(args): Parameters<CheckArgs>,
+    ) -> Result<Json<CheckOutput>, ErrorData> {
+        let sources = resolve_sources(&args.source, &args.file)?;
+        Ok(Json(run_check(&sources)))
+    }
+
+    /// Search the Noeta documentation — the first stop before writing unfamiliar Noeta.
+    #[tool(
+        description = "Search the Noeta language documentation for a concept, syntax, or feature. \
+Returns ranked page sections with snippets; pass a `page` slug to `docs_get` to read the full \
+page. Use this to ground yourself before writing Noeta — do not guess syntax."
+    )]
+    async fn docs_search(
+        &self,
+        Parameters(args): Parameters<DocsSearchArgs>,
+    ) -> Json<DocsSearchOutput> {
+        let limit = args.limit.unwrap_or(5).clamp(1, 25);
+        let hits = corpus::search_docs(&args.query, limit)
+            .into_iter()
+            .map(|h| DocHitOut {
+                page: h.page,
+                title: h.title,
+                heading: h.heading,
+                anchor: h.anchor,
+                snippet: h.snippet,
+            })
+            .collect();
+        Json(DocsSearchOutput { hits })
+    }
+
+    /// Fetch a full documentation page by slug or title.
+    #[tool(
+        description = "Fetch the full markdown of a Noeta documentation page by slug or title (e.g. \
+`Type-System`, `types`, `Pattern Matching`). If not found, returns the index of available pages."
+    )]
+    async fn docs_get(&self, Parameters(args): Parameters<DocsGetArgs>) -> Json<DocGetOut> {
+        match corpus::get_doc(&args.page) {
+            Some(markdown) => Json(DocGetOut {
+                found: true,
+                markdown: markdown.to_string(),
+                available: Vec::new(),
+            }),
+            None => Json(DocGetOut {
+                found: false,
+                markdown: String::new(),
+                available: corpus::doc_index()
+                    .into_iter()
+                    .map(|(slug, title)| [slug, title])
+                    .collect(),
+            }),
+        }
+    }
+
+    /// Find real, runnable example programs for a feature or concept.
+    #[tool(
+        description = "Find real, CI-tested Noeta example programs by feature, concept, or \
+diagnostic code (e.g. `generics`, `pattern matching`, `E0007`). Returns full source with a \
+description — copy the idioms rather than inventing them."
+    )]
+    async fn examples_find(
+        &self,
+        Parameters(args): Parameters<ExamplesFindArgs>,
+    ) -> Json<ExamplesFindOutput> {
+        let limit = args.limit.unwrap_or(5).clamp(1, 25);
+        let examples = corpus::search_examples(&args.query, limit)
+            .into_iter()
+            .map(example_out)
+            .collect();
+        Json(ExamplesFindOutput { examples })
+    }
+
+    /// Enumerate the real standard-library surface so the agent stops inventing stdlib calls.
+    #[tool(
+        description = "List the real Noeta standard-library surface — module and function signatures \
+(and extern-type methods) straight from the compiler's native registry, the same source the type \
+checker uses. Pass `module` (e.g. `std.math`, `math`, `http`, or a type like `Uuid`) to narrow; \
+omit it for the whole surface. Use this instead of guessing stdlib calls — the signatures are ground \
+truth."
+    )]
+    async fn stdlib_api(
+        &self,
+        Parameters(args): Parameters<StdlibApiArgs>,
+    ) -> Json<stdlib::StdlibApiOutput> {
+        Json(stdlib::query(args.module.as_deref()))
+    }
+
+    /// The inferred type at a symbol or position — the compiler's own answer, not a guess.
+    #[tool(
+        description = "Report the inferred type at a site in Noeta code. Address the site by \
+`symbol` (a name — its first occurrence in the entry file) or by 1-based `line`+`column`. Returns \
+the tightest typed expression's type in surface syntax. Ground truth from the type checker."
+    )]
+    async fn type_at(
+        &self,
+        Parameters(args): Parameters<TypeAtArgs>,
+    ) -> Result<Json<understand::TypeAtOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(understand::type_at(
+            &prepared,
+            args.symbol.as_deref(),
+            args.line,
+            args.column,
+        )))
+    }
+
+    /// Where the symbol at a site is declared — possibly in another file.
+    #[tool(
+        description = "Find where a symbol in Noeta code is declared. Address the site by `symbol` \
+(a name) or 1-based `line`+`column`. Resolves through the same engine the editor uses — \
+shadowing-correct locals, members via the receiver's type, imports into sibling modules and \
+dependency packages (pass `file` for cross-file resolution). Returns the location and its source \
+line."
+    )]
+    async fn definition(
+        &self,
+        Parameters(args): Parameters<NavigateArgs>,
+    ) -> Result<Json<navigate::DefinitionOutput>, ErrorData> {
+        let opened = navigate::open(&args.source, &args.file)?;
+        Ok(Json(navigate::definition(
+            &opened,
+            args.symbol.as_deref(),
+            args.line,
+            args.column,
+        )))
+    }
+
+    /// Every use of the symbol at a site.
+    #[tool(
+        description = "List every reference to a symbol in Noeta code — each use plus the \
+declaration (set `include_declaration: false` to drop it). Address the site by `symbol` or \
+1-based `line`+`column`. Value symbols resolve scope-aware; member symbols match by the \
+receiver's type, so a same-named member on another type is not swept in. Cross-file with `file`."
+    )]
+    async fn references(
+        &self,
+        Parameters(args): Parameters<NavigateArgs>,
+    ) -> Result<Json<navigate::ReferencesOutput>, ErrorData> {
+        let opened = navigate::open(&args.source, &args.file)?;
+        Ok(Json(navigate::references(
+            &opened,
+            args.symbol.as_deref(),
+            args.line,
+            args.column,
+            args.include_declaration.unwrap_or(true),
+        )))
+    }
+
+    /// What completes at a position.
+    #[tool(
+        description = "List completion candidates at a 1-based `line`+`column` in Noeta code — \
+the same engine the editor uses. After a `.` it offers the receiver type's fields, variants, and \
+methods (only); in a type-annotation position, type names; otherwise keywords, declarations, and \
+the bindings in scope. Useful for discovering what an object offers."
+    )]
+    async fn completions(
+        &self,
+        Parameters(args): Parameters<PositionArgs>,
+    ) -> Result<Json<navigate::CompletionsOutput>, ErrorData> {
+        let opened = navigate::open(&args.source, &args.file)?;
+        Ok(Json(navigate::completions(&opened, args.line, args.column)))
+    }
+
+    /// The signature of the call a position is inside.
+    #[tool(
+        description = "Report the signature of the function or method call surrounding a 1-based \
+`line`+`column` in Noeta code, with the active parameter. Token-based, so it works mid-edit with \
+an unclosed call; method calls resolve the receiver's type."
+    )]
+    async fn signature(
+        &self,
+        Parameters(args): Parameters<PositionArgs>,
+    ) -> Result<Json<navigate::SignatureOutput>, ErrorData> {
+        let opened = navigate::open(&args.source, &args.file)?;
+        Ok(Json(navigate::signature(&opened, args.line, args.column)))
+    }
+
+    /// The declaration outline of a file — functions, types, and their members.
+    #[tool(
+        description = "Outline the declarations in Noeta code — top-level functions, structs, \
+classes, enums, and impls, with their fields, variants, and methods as children (each with its \
+source span). The map an agent reads before navigating a file."
+    )]
+    async fn symbols(
+        &self,
+        Parameters(args): Parameters<AnalyzeArgs>,
+    ) -> Result<Json<understand::SymbolsOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(understand::symbols(&prepared)))
+    }
+
+    /// The pretty-printed AST — the parsed syntax tree with spans.
+    #[tool(
+        description = "Return the parsed syntax tree of Noeta code as pretty-printed S-expressions \
+with `@start..end` byte spans — the compiler's own AST rendering. For understanding exactly how a \
+construct parsed."
+    )]
+    async fn ast(
+        &self,
+        Parameters(args): Parameters<AnalyzeArgs>,
+    ) -> Result<Json<introspect::AstOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(introspect::ast(&prepared)))
+    }
+
+    /// The VM bytecode disassembly — what actually runs.
+    #[tool(
+        description = "Disassemble Noeta code to its register-VM bytecode (opcodes, constant pool, \
+per-function protos) — what actually executes, including which fast paths fired. Or the first \
+construct the VM does not support, with the reason."
+    )]
+    async fn bytecode(
+        &self,
+        Parameters(args): Parameters<AnalyzeArgs>,
+    ) -> Result<Json<introspect::BytecodeOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(introspect::bytecode(&prepared)))
+    }
+
+    /// A per-stage health summary: lex → parse → check → compile.
+    #[tool(
+        description = "Summarize a Noeta program's compile pipeline stage by stage — token count, \
+top-level item count, type-check error/warning counts, and whether it compiles to bytecode (with \
+the first blocking reason). A quick 'what's the shape / where does it fall over' glance."
+    )]
+    async fn pipeline(
+        &self,
+        Parameters(args): Parameters<AnalyzeArgs>,
+    ) -> Result<Json<introspect::PipelineOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(introspect::pipeline(&prepared)))
+    }
+
+    /// The module dependency graph — `namespace`/`use` import edges.
+    #[tool(
+        description = "Report the workspace's module graph: each file's declared `namespace` and \
+the modules it imports via `use` (with the imported names). The import structure of a multi-file \
+Noeta program."
+    )]
+    async fn module_graph(
+        &self,
+        Parameters(args): Parameters<AnalyzeArgs>,
+    ) -> Result<Json<introspect::ModuleGraphOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(introspect::module_graph(&prepared)))
+    }
+
+    /// The `@role`/`@semantic` architectural graph plus the attribute manifest and declared types.
+    #[tool(
+        description = "Reflect over Noeta code: the `@role(Enum.Variant)` architectural graph \
+(entry points, trust/persistence boundaries, sinks, layers), the `#[...]` attribute manifest, and \
+the declared types — exactly what the program's own `roles_of()`/`attributes_of()` see. Filter with \
+`role`."
+    )]
+    async fn reflect(
+        &self,
+        Parameters(args): Parameters<ReflectArgs>,
+    ) -> Result<Json<introspect::ReflectOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(introspect::reflect(&prepared, args.role.as_deref())))
+    }
+
+    /// Run a program and report what it did — stdout, exit, traceback — under liveness limits.
+    #[tool(
+        description = "Run Noeta code and report what happened: stdout, exit code, any runtime panic \
+(with a traceback), and whether a liveness limit stopped it. Runs against the deterministic sandbox \
+by default (in-memory fs, logical clock, seeded random) — pass `real: true` for the real host \
+(disk/env/network) to test end-to-end behavior. Every run is bounded by a timeout, an instruction \
+budget, and an output cap (tune via `limits`). A program that does not type-check is not run."
+    )]
+    async fn run(
+        &self,
+        Parameters(args): Parameters<RunArgs>,
+    ) -> Result<Json<execute::RunOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        let out = execute::run(
+            &prepared,
+            args.args.unwrap_or_default(),
+            args.real.unwrap_or(false),
+            &args.limits.unwrap_or_default(),
+        )?;
+        Ok(Json(out))
+    }
+
+    /// Evaluate an expression against an optional context — a one-shot REPL.
+    #[tool(
+        description = "Evaluate a Noeta expression and get its value and type — a one-shot REPL. \
+Provide `context` (prior bindings/definitions, e.g. `xs = [1, 2, 3];`) that run before `expr`. \
+Sandbox by default; `real: true` uses the real host. Use this to check what an expression produces \
+without writing a whole program."
+    )]
+    async fn eval(&self, Parameters(args): Parameters<EvalArgs>) -> Json<execute::EvalOutput> {
+        Json(execute::eval(
+            &args.expr,
+            args.context.as_deref(),
+            args.real.unwrap_or(false),
+        ))
+    }
+
+    /// Run a program's `@test` blocks and report each case.
+    #[tool(
+        description = "Run the `@test` blocks in Noeta code and report each case (pass/fail/skip, \
+with the failing assertion and any stdout). Honors `#[Data([...])]` rows, `#[Skip]`, `#[Name]`, and \
+`#[Group]`; `filter` keeps only tests whose name or group matches. Sandbox by default; `real: true` \
+uses the real host."
+    )]
+    async fn test(
+        &self,
+        Parameters(args): Parameters<TestArgs>,
+    ) -> Result<Json<execute::TestOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(execute::test(
+            &prepared,
+            args.filter.as_deref(),
+            args.real.unwrap_or(false),
+        )))
+    }
+
+    /// Start an interactive debug session.
+    #[tool(
+        description = "Start debugging a Noeta program: compile it with debug info and run it \
+paused under the VM's debugger. Arm `breakpoints` (1-based lines) or stop at entry (the default \
+with no breakpoints). Returns a session id plus the first stop — the paused stack with live \
+locals — or the exit if it ran through. Sandboxed by default (`real: true` for the real host); \
+every resume is budget-bounded, so a runaway program pauses (reason `limit`) instead of hanging."
+    )]
+    async fn debug_start(
+        &self,
+        Parameters(args): Parameters<DebugStartArgs>,
+    ) -> Result<Json<debug::DebugStateOutput>, ErrorData> {
+        Ok(Json(
+            debug::start(
+                &self.debug,
+                args.source,
+                args.file,
+                args.breakpoints.unwrap_or_default(),
+                args.stop_on_entry,
+                args.real.unwrap_or(false),
+            )
+            .await?,
+        ))
+    }
+
+    /// The current state of a debug session.
+    #[tool(
+        description = "Report a debug session's current state without resuming it: paused (with \
+the stack and live locals), running, or exited (with stdout and exit code)."
+    )]
+    async fn debug_inspect(
+        &self,
+        Parameters(args): Parameters<DebugSessionArgs>,
+    ) -> Result<Json<debug::DebugStateOutput>, ErrorData> {
+        Ok(Json(debug::inspect(&self.debug, args.session)?))
+    }
+
+    /// Resume a paused session and report the next stop.
+    #[tool(
+        description = "Resume a paused debug session and wait for the next stop: `mode` is \
+`continue` (to the next breakpoint, budget limit, or exit) or a line-granular step — `over` \
+(default), `into` (descend into calls), `out` (run to the caller). Returns the new paused state \
+(stack + locals) or the exit (stdout + exit code)."
+    )]
+    async fn debug_step(
+        &self,
+        Parameters(args): Parameters<DebugStepArgs>,
+    ) -> Result<Json<debug::DebugStateOutput>, ErrorData> {
+        Ok(Json(
+            debug::step(
+                &self.debug,
+                args.session,
+                args.mode.as_deref().unwrap_or("over"),
+            )
+            .await?,
+        ))
+    }
+
+    /// Evaluate an expression in a paused frame.
+    #[tool(
+        description = "Evaluate a Noeta expression in a paused debug session's frame — the frame's \
+locals, the program's functions, types, and globals are all in scope; statements work and a \
+trailing bare expression is the value. Type-checked against the program before running; execution \
+is budget-bounded, and the program stays paused either way. The debugger's REPL."
+    )]
+    async fn debug_eval(
+        &self,
+        Parameters(args): Parameters<DebugEvalArgs>,
+    ) -> Result<Json<debug::DebugEvalOutput>, ErrorData> {
+        Ok(Json(
+            debug::eval(
+                &self.debug,
+                args.session,
+                &args.expr,
+                args.frame.unwrap_or(0),
+            )
+            .await?,
+        ))
+    }
+
+    /// Terminate a debug session.
+    #[tool(
+        description = "Terminate a debug session (running or paused), wait for it to unwind, and \
+report the final state — the program's stdout so far and its exit code. Frees the session slot."
+    )]
+    async fn debug_stop(
+        &self,
+        Parameters(args): Parameters<DebugSessionArgs>,
+    ) -> Result<Json<debug::DebugStateOutput>, ErrorData> {
+        Ok(Json(debug::stop(&self.debug, args.session).await?))
+    }
+
+    /// Format Noeta source into its canonical style.
+    #[tool(
+        description = "Format Noeta code into its canonical style (the same formatter `noeta fmt` \
+runs) and return the result. Reports whether the source was already canonical, and declines (leaving \
+the source untouched) if it does not parse — format never guesses at broken source."
+    )]
+    async fn format(
+        &self,
+        Parameters(args): Parameters<AnalyzeArgs>,
+    ) -> Result<Json<format::FormatOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(format::format(&prepared)))
+    }
+
+    /// Explain a diagnostic code with real programs that trigger it.
+    #[tool(
+        description = "Explain a Noeta diagnostic code (e.g. `E0007`): its name, the real CI-tested \
+example programs that raise it (so you can see the cause and the fix), and the docs that cover it. \
+Call this whenever `check` returns a code you want to resolve."
+    )]
+    async fn explain_diagnostic(
+        &self,
+        Parameters(args): Parameters<ExplainArgs>,
+    ) -> Json<ExplainOut> {
+        let code = normalize_code(&args.code);
+        let (title, known) = match diagnostic_title(&code) {
+            Some(t) => (t, true),
+            None => (String::new(), false),
+        };
+        Json(ExplainOut {
+            title,
+            known,
+            // Cap the examples so `explain_diagnostic` stays token-frugal — a common code can appear
+            // in dozens of cases; the `diagnostics/`-dir canonical repros sort first.
+            examples: corpus::examples_for_code(&code)
+                .into_iter()
+                .take(6)
+                .map(example_out)
+                .collect(),
+            docs: corpus::docs_mentioning(&code)
+                .into_iter()
+                .map(|(slug, title)| [slug, title])
+                .collect(),
+            code,
+        })
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for NoetaMcp {
+    fn get_info(&self) -> ServerInfo {
+        let mut info = ServerInfo::default();
+        info.protocol_version = ProtocolVersion::LATEST;
+        info.capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .build();
+        info.server_info = Implementation::from_build_env();
+        info.instructions = Some(INSTRUCTIONS.to_string());
+        info
+    }
+
+    /// List the documentation pages as browsable resources (`noeta-doc://<slug>`). Examples are not
+    /// listed (there are hundreds) but remain readable by URI (`noeta-example://<feature>/<name>`)
+    /// once surfaced by `examples_find`.
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        let resources = corpus::doc_index()
+            .into_iter()
+            .map(|(slug, title)| {
+                Resource::new(format!("noeta-doc://{slug}"), slug)
+                    .with_title(title)
+                    .with_mime_type("text/markdown")
+            })
+            .collect();
+        Ok(ListResourcesResult::with_all_items(resources))
+    }
+
+    /// Read a `noeta-doc://<slug>` page or a `noeta-example://<feature>/<name>` program.
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, ErrorData> {
+        let uri = request.uri;
+        let contents = if let Some(slug) = uri.strip_prefix("noeta-doc://") {
+            corpus::get_doc(slug).map(|md| ResourceContents::text(md, uri.clone()))
+        } else if let Some(rest) = uri.strip_prefix("noeta-example://") {
+            rest.split_once('/').and_then(|(feature, name)| {
+                corpus::get_example(feature, name)
+                    .map(|src| ResourceContents::text(src, uri.clone()))
+            })
+        } else {
+            return Err(ErrorData::invalid_params(
+                format!("unknown resource scheme: {uri}"),
+                None,
+            ));
+        };
+        match contents {
+            Some(c) => Ok(ReadResourceResult::new(vec![c])),
+            None => Err(ErrorData::resource_not_found(
+                format!("no such resource: {uri}"),
+                None,
+            )),
+        }
+    }
+}
+
+/// Turn a `check`-style `source`/`file` pair into the ordered source list (entry first, then
+/// sibling modules) that the salsa `Workspace` is built from. Inline `source` is a lone entry; a
+/// `file` pulls in siblings. Shared by `check` and every M3 analysis tool (see [`analyze::prepare`]).
+pub(crate) fn resolve_sources(
+    source: &Option<String>,
+    file: &Option<String>,
+) -> Result<Vec<Source>, ErrorData> {
+    match (source, file) {
+        (Some(text), None) => Ok(vec![Source::new(
+            SourceId::FIRST,
+            "<inline>".to_string(),
+            text.clone(),
+        )]),
+        (None, Some(path)) => {
+            let raw = noeta_loader::read_workspace(Path::new(path))
+                .map_err(|e| ErrorData::invalid_params(format!("cannot read {path}: {e}"), None))?;
+            let mut sources = Vec::with_capacity(raw.modules.len() + 1);
+            sources.push(raw.entry);
+            sources.extend(raw.modules);
+            Ok(sources)
+        }
+        (Some(_), Some(_)) => Err(ErrorData::invalid_params(
+            "provide either `source` or `file`, not both",
+            None,
+        )),
+        (None, None) => Err(ErrorData::invalid_params(
+            "provide `source` (inline code) or `file` (a path)",
+            None,
+        )),
+    }
+}
+
+/// Run the whole-workspace check over `sources` (entry at index 0) and resolve the diagnostics into
+/// the canonical `JsonDiagnostic` form (the same one `noeta check --format json` emits). Uses a
+/// fresh `LangDatabase` — the memoization is per call in M0.
+fn run_check(sources: &[Source]) -> CheckOutput {
+    let db = noeta_db::LangDatabase::default();
+    let (entry, modules) = sources
+        .split_first()
+        .expect("resolve_sources always yields at least the entry");
+    let ws = noeta_db::workspace(&db, entry, modules);
+    let checked = noeta_db::linked_checked(&db, ws);
+    // The `SourceMap` resolves each diagnostic's span → file + line/column (entry is SourceId 0).
+    let source_map = SourceMap::new(sources.to_vec());
+    let diagnostics: Vec<JsonDiagnostic> = checked
+        .diagnostics
+        .iter()
+        .map(|d| to_json(&source_map, d))
+        .collect();
+    let errors = diagnostics.iter().filter(|d| d.severity == "error").count();
+    let warnings = diagnostics
+        .iter()
+        .filter(|d| d.severity == "warning")
+        .count();
+    CheckOutput {
+        ok: errors == 0,
+        errors,
+        warnings,
+        diagnostics,
+    }
+}
+
+fn example_out(h: corpus::ExampleHit) -> ExampleOut {
+    ExampleOut {
+        feature: h.feature,
+        name: h.name,
+        description: h.description,
+        code: h.code,
+        expects: h.codes,
+    }
+}
+
+/// Canonicalize a diagnostic code the agent may have typed loosely: `e0007`, `E7`, or a bare `7`
+/// all become `E0007`.
+fn normalize_code(input: &str) -> String {
+    let t = input.trim().to_uppercase();
+    let digits = t.strip_prefix('E').unwrap_or(&t);
+    if !digits.is_empty()
+        && digits.chars().all(|c| c.is_ascii_digit())
+        && let Ok(n) = digits.parse::<u32>()
+    {
+        return format!("E{n:04}");
+    }
+    t
+}
+
+/// The human title for a diagnostic code, derived from its `DiagnosticCode` variant name (the
+/// single source of truth), e.g. `E0007` → `Type Mismatch`. `None` for an unknown code.
+fn diagnostic_title(code: &str) -> Option<String> {
+    DiagnosticCode::ALL
+        .iter()
+        .find(|c| c.code() == code)
+        .map(|c| split_camel_case(&format!("{c:?}")))
+}
+
+/// `TypeMismatch` → `Type Mismatch`. A space is inserted before an uppercase letter that follows a
+/// lowercase one or is followed by a lowercase one (so acronym runs like `IoError` read cleanly).
+fn split_camel_case(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::with_capacity(name.len() + 4);
+    for (i, &ch) in chars.iter().enumerate() {
+        if i > 0 && ch.is_uppercase() {
+            let prev_lower = chars[i - 1].is_lowercase();
+            let next_lower = chars.get(i + 1).is_some_and(|c| c.is_lowercase());
+            if prev_lower || next_lower {
+                out.push(' ');
+            }
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Run the MCP server over stdio, blocking until the client disconnects. Called by the `noeta mcp`
+/// CLI subcommand. Builds a dedicated multi-threaded tokio runtime (the CLI's `main` is
+/// synchronous), mirroring `noeta_lsp::run_stdio` / `noeta_dap::run_stdio`.
+pub fn run_stdio() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build the MCP-server tokio runtime");
+    runtime.block_on(serve());
+}
+
+async fn serve() {
+    let transport = rmcp::transport::stdio();
+    match NoetaMcp::new().serve(transport).await {
+        Ok(service) => {
+            if let Err(err) = service.waiting().await {
+                eprintln!("noeta mcp: server loop ended: {err}");
+            }
+        }
+        Err(err) => eprintln!("noeta mcp: failed to start: {err}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check_source(text: &str) -> CheckOutput {
+        run_check(&[Source::new(
+            SourceId::FIRST,
+            "<inline>".to_string(),
+            text.to_string(),
+        )])
+    }
+
+    #[test]
+    fn clean_program_has_no_diagnostics() {
+        let out = check_source("fn main(): int {\n  return 1;\n}\n");
+        assert!(out.ok, "expected ok, got {:?}", out.diagnostics);
+        assert!(out.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn type_error_is_reported_with_code_and_position() {
+        // A type mismatch surfaces as an error-severity diagnostic with a stable code and a span
+        // that resolves to a 1-based line/column in the inline source.
+        let out = check_source("fn main(): int {\n  return \"x\";\n}\n");
+        assert!(!out.ok, "expected an error, got a clean check");
+        assert_eq!(out.errors, 1);
+        let err = out
+            .diagnostics
+            .iter()
+            .find(|d| d.severity == "error")
+            .expect("an error diagnostic");
+        assert!(err.code.starts_with('E'), "code was {:?}", err.code);
+        assert_eq!(err.file, "<inline>");
+        assert!(err.location.line >= 1 && err.location.column >= 1);
+    }
+
+    #[test]
+    fn missing_arguments_is_an_invalid_params_error() {
+        let err = resolve_sources(&None, &None).unwrap_err();
+        assert!(err.message.contains("source"));
+    }
+
+    #[test]
+    fn server_advertises_instructions_and_tools() {
+        let info = NoetaMcp::new().get_info();
+        assert!(
+            info.instructions
+                .as_deref()
+                .unwrap_or_default()
+                .contains("check")
+        );
+        assert!(info.capabilities.tools.is_some());
+    }
+
+    /// The gate fixture: drive a real MCP session (client ⇄ server over an in-memory duplex) and
+    /// assert the wire contract — `check` is listed, and calling it returns structured diagnostics.
+    #[tokio::test]
+    async fn round_trip_check_over_a_duplex() {
+        use rmcp::model::CallToolRequestParams;
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+
+        let client = ().serve(client_io).await.expect("client initializes");
+
+        let tools = client
+            .list_tools(Default::default())
+            .await
+            .expect("tools/list");
+        assert!(
+            tools.tools.iter().any(|t| t.name == "check"),
+            "check tool advertised"
+        );
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "source".to_string(),
+            serde_json::Value::String("fn main(): int {\n  return \"x\";\n}\n".to_string()),
+        );
+        let mut params = CallToolRequestParams::default();
+        params.name = "check".into();
+        params.arguments = Some(arguments);
+        let result = client.call_tool(params).await.expect("tools/call check");
+
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["ok"], serde_json::json!(false));
+        assert_eq!(
+            structured["diagnostics"][0]["code"],
+            serde_json::json!("E0007")
+        );
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+
+    /// M2 gate fixture: drive a real MCP session and call `stdlib_api` with a module filter — the
+    /// tool is advertised and returns rendered signatures straight from the native registry.
+    #[tokio::test]
+    async fn round_trip_stdlib_api_over_a_duplex() {
+        use rmcp::model::CallToolRequestParams;
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+
+        let client = ().serve(client_io).await.expect("client initializes");
+
+        let tools = client
+            .list_tools(Default::default())
+            .await
+            .expect("tools/list");
+        assert!(
+            tools.tools.iter().any(|t| t.name == "stdlib_api"),
+            "stdlib_api tool advertised"
+        );
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "module".to_string(),
+            serde_json::Value::String("std.math".to_string()),
+        );
+        let mut params = CallToolRequestParams::default();
+        params.name = "stdlib_api".into();
+        params.arguments = Some(arguments);
+        let result = client
+            .call_tool(params)
+            .await
+            .expect("tools/call stdlib_api");
+
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["not_found"], serde_json::json!(false));
+        assert_eq!(
+            structured["modules"][0]["module"],
+            serde_json::json!("std.math")
+        );
+        let sig = structured["modules"][0]["functions"][0]["signature"]
+            .as_str()
+            .expect("a rendered signature string");
+        assert!(sig.starts_with("fn "), "signature was {sig:?}");
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+
+    /// M3 gate fixture: drive a real MCP session and call `type_at` — an Introspect/Understand tool
+    /// is advertised and answers a `symbol` query with a type straight off the salsa graph.
+    #[tokio::test]
+    async fn round_trip_type_at_over_a_duplex() {
+        use rmcp::model::CallToolRequestParams;
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+
+        let client = ().serve(client_io).await.expect("client initializes");
+
+        let tools = client
+            .list_tools(Default::default())
+            .await
+            .expect("tools/list");
+        for expected in [
+            "type_at",
+            "symbols",
+            "ast",
+            "bytecode",
+            "module_graph",
+            "reflect",
+        ] {
+            assert!(
+                tools.tools.iter().any(|t| t.name == expected),
+                "{expected} tool advertised"
+            );
+        }
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "source".to_string(),
+            serde_json::Value::String(
+                "fn f(): int {\n  xs = [1, 2, 3];\n  return xs.len();\n}\n".to_string(),
+            ),
+        );
+        arguments.insert(
+            "symbol".to_string(),
+            serde_json::Value::String("xs".to_string()),
+        );
+        let mut params = CallToolRequestParams::default();
+        params.name = "type_at".into();
+        params.arguments = Some(arguments);
+        let result = client.call_tool(params).await.expect("tools/call type_at");
+
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["found"], serde_json::json!(true));
+        assert_eq!(structured["type"], serde_json::json!("List<int>"));
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+
+    /// M4 gate fixture: drive a real MCP session and call `run` — an Execute-pillar tool is
+    /// advertised and runs a program against the sandbox, returning its stdout and clean exit.
+    #[tokio::test]
+    async fn round_trip_run_over_a_duplex() {
+        use rmcp::model::CallToolRequestParams;
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+
+        let client = ().serve(client_io).await.expect("client initializes");
+
+        let tools = client
+            .list_tools(Default::default())
+            .await
+            .expect("tools/list");
+        for expected in ["run", "eval", "test", "format"] {
+            assert!(
+                tools.tools.iter().any(|t| t.name == expected),
+                "{expected} tool advertised"
+            );
+        }
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "source".to_string(),
+            serde_json::Value::String("echo \"from mcp\";\n".to_string()),
+        );
+        let mut params = CallToolRequestParams::default();
+        params.name = "run".into();
+        params.arguments = Some(arguments);
+        let result = client.call_tool(params).await.expect("tools/call run");
+
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["ran"], serde_json::json!(true));
+        assert_eq!(structured["ok"], serde_json::json!(true));
+        assert_eq!(structured["host"], serde_json::json!("sandbox"));
+        assert!(
+            structured["stdout"]
+                .as_str()
+                .expect("stdout string")
+                .contains("from mcp")
+        );
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+
+    /// M5 slice gate: the navigation tools are advertised and `definition` resolves over a real
+    /// client⇄server duplex.
+    #[tokio::test]
+    async fn round_trip_definition_over_a_duplex() {
+        use rmcp::model::CallToolRequestParams;
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+
+        let client = ().serve(client_io).await.expect("client initializes");
+
+        let tools = client
+            .list_tools(Default::default())
+            .await
+            .expect("tools/list");
+        for expected in ["definition", "references", "completions", "signature"] {
+            assert!(
+                tools.tools.iter().any(|t| t.name == expected),
+                "{expected} tool advertised"
+            );
+        }
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "source".to_string(),
+            serde_json::Value::String("fn greet(): int { return 1 }\ntotal = greet()".to_string()),
+        );
+        arguments.insert(
+            "symbol".to_string(),
+            serde_json::Value::String("greet".to_string()),
+        );
+        let mut params = CallToolRequestParams::default();
+        params.name = "definition".into();
+        params.arguments = Some(arguments);
+        let result = client
+            .call_tool(params)
+            .await
+            .expect("tools/call definition");
+
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["found"], serde_json::json!(true));
+        assert_eq!(
+            structured["location"]["range"]["start"]["line"],
+            serde_json::json!(1)
+        );
+        assert!(
+            structured["snippet"]
+                .as_str()
+                .expect("snippet string")
+                .contains("fn greet")
+        );
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+
+    /// M6 slice gate: the debug tools are advertised and a start → eval → stop session round-trips
+    /// over a real client⇄server duplex.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn round_trip_debug_session_over_a_duplex() {
+        use rmcp::model::CallToolRequestParams;
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+
+        let client = ().serve(client_io).await.expect("client initializes");
+
+        let tools = client
+            .list_tools(Default::default())
+            .await
+            .expect("tools/list");
+        for expected in [
+            "debug_start",
+            "debug_inspect",
+            "debug_step",
+            "debug_eval",
+            "debug_stop",
+        ] {
+            assert!(
+                tools.tools.iter().any(|t| t.name == expected),
+                "{expected} tool advertised"
+            );
+        }
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "source".to_string(),
+            serde_json::Value::String("total = 7\necho total\n".to_string()),
+        );
+        let mut params = CallToolRequestParams::default();
+        params.name = "debug_start".into();
+        params.arguments = Some(arguments);
+        let started = client.call_tool(params).await.expect("debug_start");
+        let started = started.structured_content.expect("structured content");
+        assert_eq!(started["state"], serde_json::json!("paused"));
+        assert_eq!(started["reason"], serde_json::json!("entry"));
+        let session = started["session"].as_u64().expect("session id");
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert("session".to_string(), serde_json::json!(session));
+        arguments.insert(
+            "expr".to_string(),
+            serde_json::Value::String("1 + 2".to_string()),
+        );
+        let mut params = CallToolRequestParams::default();
+        params.name = "debug_eval".into();
+        params.arguments = Some(arguments);
+        let evaled = client.call_tool(params).await.expect("debug_eval");
+        let evaled = evaled.structured_content.expect("structured content");
+        assert_eq!(evaled["ok"], serde_json::json!(true));
+        assert_eq!(evaled["value"], serde_json::json!("3"));
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert("session".to_string(), serde_json::json!(session));
+        let mut params = CallToolRequestParams::default();
+        params.name = "debug_stop".into();
+        params.arguments = Some(arguments);
+        let stopped = client.call_tool(params).await.expect("debug_stop");
+        let stopped = stopped.structured_content.expect("structured content");
+        assert_eq!(stopped["state"], serde_json::json!("exited"));
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+}

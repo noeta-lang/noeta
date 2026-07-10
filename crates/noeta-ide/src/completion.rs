@@ -198,13 +198,16 @@ pub fn bundle_members(
             members.push(Candidate {
                 label: m.sig.name.to_string(),
                 kind: CandidateKind::Method,
+                // Parameter types via the canonical registry-signature renderer
+                // (`SigType::render` in noeta-native, shared with the MCP `stdlib_api` tool),
+                // with the bundle provenance as a suffix.
                 detail: Some(format!(
                     "fn {}({}) [{}.{}]",
                     m.sig.name,
                     m.sig
                         .params
                         .iter()
-                        .map(sig_type_name)
+                        .map(noeta_stdlib::SigType::render)
                         .collect::<Vec<_>>()
                         .join(", "),
                     module,
@@ -214,25 +217,6 @@ pub fn bundle_members(
         }
     }
     members
-}
-
-/// A short display name for a bundle signature's parameter type (completion detail only).
-fn sig_type_name(sig: &noeta_stdlib::SigType) -> String {
-    use noeta_stdlib::SigType;
-    match sig {
-        SigType::Int => "int".to_string(),
-        SigType::Float => "float".to_string(),
-        SigType::F32 => "f32".to_string(),
-        SigType::Bool => "bool".to_string(),
-        SigType::String => "string".to_string(),
-        SigType::Bytes => "bytes".to_string(),
-        SigType::Unit => "unit".to_string(),
-        SigType::List(t) => format!("List<{}>", sig_type_name(t)),
-        SigType::Option(t) => format!("?{}", sig_type_name(t)),
-        SigType::Named(n) => (*n).to_string(),
-        SigType::Optional(t) => format!("{}?", sig_type_name(t)),
-        _ => "dyn".to_string(),
-    }
 }
 
 fn push_methods(members: &mut Vec<Candidate>, methods: &[noeta_ast::FnDecl]) {

@@ -6,23 +6,13 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+# A thin tower-lsp wire adapter: every language feature lives in noeta-ide (the shared IDE engine,
+# MCP M5), so this crate needs only the engine, the diagnostic model it maps onto the wire, and the
+# transport.
+
 [dependencies]
-noeta-span = { workspace = true }
-noeta-ast = { workspace = true }
-noeta-lexer = { workspace = true }
+noeta-ide = { workspace = true }
 noeta-diagnostics = { workspace = true }
-noeta-db = { workspace = true }
-# Dependency resolution (package-manager P2.1c): the editor resolves the same dependency packages the
-# CLI does, so cross-package `use <dep-key>.…` resolves in hover/goto/completion.
-noeta-pm = { workspace = true }
-# Member completion on a bare `.` re-lexes/parses/checks a lightly-munged buffer off the salsa graph
-# (the dangling `.` otherwise drops the statement, so the receiver never gets a type).
-noeta-parser = { workspace = true }
-noeta-check = { workspace = true }
-noeta-stdlib = { workspace = true }
-noeta-fmt = { workspace = true }
-# For the `Setter` trait — the salsa-generated `set_text` on `SourceProgram` needs it in scope.
-salsa = { workspace = true }
 # tokio: the workspace pin gives us rt/io-util/time; the server also needs the stdio driver
 # (`io-std`) for the JSON-RPC transport, a worker pool (`rt-multi-thread`), and `#[tokio::main]`
 # (`macros`). Feature-unified with the rest of the workspace's tokio usage.

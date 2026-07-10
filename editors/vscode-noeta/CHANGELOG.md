@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.0
+
+Registers the **`noeta mcp` server** with the editor's language-model API (VS Code 1.101+), so AI
+agents running in the editor (Copilot agent mode and friends) discover the compiler's tools
+automatically — no manual MCP configuration:
+
+- ~26 tools of compiler ground truth: documentation/example search, `check` diagnostics,
+  type-at-position, definition/references/completions/signature (the same engine the language
+  server uses), AST/bytecode/reflection introspection, sandboxed `run`/`eval`/`test`, interactive
+  `debug_*` sessions, and `format`.
+- Uses the existing `noeta.server.path` setting (the same `noeta` binary serves `lsp`, `dap`, and
+  `mcp`). Hosts without the MCP API skip the registration quietly; everything else keeps working.
+- Requires VS Code **1.101** or later (the MCP provider API); this is the new minimum for the
+  extension.
+
 ## 0.4.0
 
 Adds **formatting** via the `noeta lsp` server (the same engine as `noeta fmt`):

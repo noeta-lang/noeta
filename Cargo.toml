@@ -58,7 +58,11 @@ noeta-reactive = { path = "crates/noeta-reactive" }
 # M3 CRDT convergence core (p2p/local-first P0): state-based merge algebra — dep-free, value-less,
 # the data-convergence layer of the local-first stack (§9.15), wrapped by `std.crdt`.
 noeta-crdt = { path = "crates/noeta-crdt" }
-# M2 editor tooling: the `noeta lsp` language server over the noeta-db salsa query graph
+# M2 editor tooling: the shared IDE engine (MCP M5) — DocumentStore + resolve/completion/signature/
+# symbols over the noeta-db salsa graph, wire-protocol-free so `noeta lsp` and `noeta mcp` both
+# adapt over the one implementation.
+noeta-ide = { path = "crates/noeta-ide" }
+# M2 editor tooling: the `noeta lsp` language server — a tower-lsp wire adapter over noeta-ide
 noeta-lsp = { path = "crates/noeta-lsp" }
 # M2 editor tooling: the `noeta dap` Debug Adapter Protocol server over the production VM
 noeta-dap = { path = "crates/noeta-dap" }
@@ -69,6 +73,9 @@ noeta-fmt = { path = "crates/noeta-fmt" }
 # Package manager (package-manager P2): manifest + transitive resolver + git/store/lock + registry
 # index. A library (not in the CLI binary) so `noeta-lsp`/`noeta-db` can resolve dependencies too.
 noeta-pm = { path = "crates/noeta-pm" }
+# Agent-native tooling: the `noeta mcp` Model Context Protocol server (agent adapter over the
+# salsa graph + VM — the third editor-tooling leg after lsp/dap). See plans/mcp/README.md.
+noeta-mcp = { path = "crates/noeta-mcp" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
 logos = "0.16"
@@ -96,7 +103,19 @@ clap = { version = "4", features = ["derive"] }
 # Language-server framework (editor-tooling milestone): the maintained community fork of
 # tower-lsp — async LanguageServer trait + JSON-RPC transport, composes with our tokio.
 tower-lsp-server = "0.23"
+# Agent-native tooling (MCP arc): the official Rust MCP SDK. Server + macros (the `#[tool]` /
+# `#[tool_router]` surface) + stdio transport + schemars-backed tool-parameter schemas. Composes
+# with the workspace tokio; only `noeta-mcp` (and the CLI entry point) pull it in.
+rmcp = { version = "2.1", default-features = false, features = ["server", "macros", "transport-io", "schemars"] }
+# JSON-Schema derive for tool-parameter and output types. Pinned to the major `rmcp` depends on so
+# the `JsonSchema` trait is the same one the MCP SDK consumes. Also feature-gated onto
+# `noeta-diagnostics` (feature `schema`) so its canonical `JsonDiagnostic` describes itself for MCP.
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
+# Agent-native tooling (MCP arc, M1 Ground pillar): embed the docs (`docs/*.md`) and example
+# (`tests/conformance/**/*.noe`) corpus into the `noeta` binary at compile time, so the MCP server's
+# retrieval tools work from an installed binary with no repo beside it. Only `noeta-mcp` pulls it in.
+include_dir = "0.7"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 miniz_oxide = "0.8"
 serde_json = "1"

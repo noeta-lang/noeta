@@ -1,0 +1,33 @@
+[package]
+name = "noeta-ide"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# The shared IDE engine (MCP M5, extracted from noeta-lsp): DocumentStore + the analysis modules
+# (offsets/resolve/completion/signature/symbols/inlay/semtokens) over the noeta-db salsa graph.
+# Deliberately wire-protocol-free — no tower-lsp, no tokio — so `noeta lsp` (JSON-RPC) and
+# `noeta mcp` (MCP tools) are both thin adapters over the one implementation and can never drift.
+
+[dependencies]
+noeta-span = { workspace = true }
+noeta-ast = { workspace = true }
+noeta-lexer = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-db = { workspace = true }
+# Dependency resolution (package-manager P2.1c): the editor resolves the same dependency packages the
+# CLI does, so cross-package `use <dep-key>.…` resolves in hover/goto/completion.
+noeta-pm = { workspace = true }
+# Member completion on a bare `.` re-lexes/parses/checks a lightly-munged buffer off the salsa graph
+# (the dangling `.` otherwise drops the statement, so the receiver never gets a type).
+noeta-parser = { workspace = true }
+noeta-check = { workspace = true }
+noeta-stdlib = { workspace = true }
+noeta-fmt = { workspace = true }
+# For the `Setter` trait — the salsa-generated `set_text` on `SourceProgram` needs it in scope.
+salsa = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,62 @@
+[package]
+name = "noeta-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The MCP server reads diagnostics off the salsa graph exactly as the LSP does (M0 = the `check`
+# tool over `linked_checked`); later slices grow to drive the VM like the DAP. The `run` set minus
+# the executor, plus the MCP SDK.
+noeta-span = { workspace = true }
+# M3 Introspect/Understand tools read the parsed AST directly: `Pretty` (the `ast` tool), the
+# declaration walk (`symbols`), `use`/`namespace` (`module_graph`), and `reflect::build` (`reflect`).
+noeta-ast = { workspace = true }
+# `schema` feature = the `JsonDiagnostic` family derives `JsonSchema`, so the `check` tool returns
+# the *same* canonical shape as `noeta check --format json` — agent and CLI never disagree.
+noeta-diagnostics = { workspace = true, features = ["schema"] }
+noeta-db = { workspace = true }
+noeta-loader = { workspace = true }
+# The native-extension registry (M2 `stdlib_api`): enumerate every registered module/function/type +
+# its `SigType` signatures, rendered into agent-readable Noeta signatures. Re-exports `noeta-native`'s
+# ABI vocabulary (SigType/RetTy/ExtFn/ExtModule/ExtType), so the tool reads the same single source of
+# truth the checker maps onto `Type`.
+noeta-stdlib = { workspace = true }
+# M4 Execute pillar (`run`/`eval`/`test`): drive the bytecode VM directly. `run` compiles via the
+# salsa `linked_bytecode` query and runs the module against the sandbox (or real) host through the
+# `Debugger` seam — a per-op hook enforces the always-on liveness limits (decision #5). `eval` rides
+# `VmSession` (the REPL engine); `test` runs each `@test` case as a `VmSession` entry. `activate_tiers`
+# + `check_all` come from `noeta-check`; `RealHost`/`RealExecutor` (the real-host opt-in) from
+# `noeta-runtime`; the interactive-fragment parser (`eval`) from `noeta-parser`.
+noeta-vm = { workspace = true }
+noeta-check = { workspace = true }
+noeta-parser = { workspace = true }
+noeta-runtime = { workspace = true }
+# M4 transform leg: `format` wraps the parallel `noeta fmt` arc's reusable `format_source` entry
+# (decision #6) — the MCP does not reimplement the formatter.
+noeta-fmt = { workspace = true }
+# M5: definition/references/completions/signature ride the shared IDE engine — the same resolver
+# the LSP serves, so agent and editor can never disagree.
+noeta-ide = { workspace = true }
+# M6: debug_* sessions compile with debug info through the live session compiler (the DAP launch
+# pipeline, host-agnostic) and drive the VM's Debugger seam directly.
+noeta-lexer = { workspace = true }
+noeta-compiler = { workspace = true }
+noeta-bytecode = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "rt-multi-thread", "macros"] }
+rmcp = { workspace = true }
+serde = { workspace = true }
+# Embeds the docs + example corpus (see workspace manifest note) for the M1 Ground-pillar tools.
+include_dir = { workspace = true }
+
+[dev-dependencies]
+# The in-process round-trip fixture drives a real MCP session (client ⇄ server over an in-memory
+# duplex), so the test build additionally needs the `client` role and the async-rw transport. These
+# features are test-only (dev-dep feature unification is scoped to this crate's own test build).
+rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

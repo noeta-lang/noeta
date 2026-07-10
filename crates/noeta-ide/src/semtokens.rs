@@ -33,6 +33,18 @@ pub enum SemKind {
 /// indices into it.
 pub const LEGEND: [&str; 4] = ["type", "function", "variable", "property"];
 
+/// One delta-encoded semantic token, per the LSP wire layout (`token_type` indexes [`LEGEND`]).
+/// Field-compatible with the wire `SemanticToken`, owned here so the engine stays
+/// wire-protocol-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SemanticToken {
+    pub delta_line: u32,
+    pub delta_start: u32,
+    pub length: u32,
+    pub token_type: u32,
+    pub token_modifiers_bitset: u32,
+}
+
 /// The classified identifier spans of `program`, each a single token. Sorted by position with at most
 /// one classification per span (the first source wins). Value references come from the def/use index
 /// (function vs variable by what the use resolves to), member accesses are properties, and the
