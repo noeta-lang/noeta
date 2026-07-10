@@ -85,20 +85,57 @@ pub struct Report {
     pub flamegraph: Option<Flamegraph>,
 }
 
-/// A sampled flamegraph: every distinct call stack that was sampled, with its sample count.
+/// A sampled flamegraph: a shared table of resolved frames plus every distinct call stack that was
+/// sampled (as index chains into that table), with its sample count. The same shape speedscope
+/// uses, so structured emitters map onto it directly; the folded text derives the labels.
 #[derive(Debug, Clone)]
 pub struct Flamegraph {
     /// Total samples taken across the run.
     pub total: u64,
+    /// The shared frame table, indexed by [`FoldedStack::frames`]. Ordered by first use across the
+    /// sorted stacks, so the table (like the stacks) is deterministic under the op-clock.
+    pub frames: Vec<FrameInfo>,
     /// One folded stack per distinct sampled call chain, sorted for a stable (diffable) order.
     pub stacks: Vec<FoldedStack>,
 }
 
-/// One folded stack: the chain of frame labels root → leaf, and how many samples landed on it.
+impl Flamegraph {
+    /// The label chain of a stack, root → leaf — the folded-text view of an index chain.
+    pub fn labels<'a>(&'a self, stack: &'a FoldedStack) -> impl Iterator<Item = &'a str> {
+        stack
+            .frames
+            .iter()
+            .map(|&i| self.frames[i as usize].label.as_str())
+    }
+}
+
+/// One resolved frame in the shared table: the folded display label plus its structured source
+/// location, so an emitter (or an editor UI) can map the frame back to source without parsing the
+/// label. Frame identity is the label: with line attribution the same function appears once per
+/// sampled leaf line (`hot:4`, `hot:5`) *and* once bare when it is an interior frame.
+#[derive(Debug, Clone)]
+pub struct FrameInfo {
+    /// The folded display label: `fib`, `hot:4` (line-attributed leaf), or `<anonymous>@file:line`.
+    pub label: String,
+    /// The bare function name (`"fib"`, `"Point.mag"`), or `"<anonymous>"` for a closure/thunk.
+    pub name: String,
+    /// The source file the frame resolves to, if known.
+    pub file: Option<String>,
+    /// The 1-based source line: the sampled leaf line for a line-attributed frame, otherwise the
+    /// line the function is defined on.
+    pub line: Option<u32>,
+    /// The 1-based column of the function's definition, if known. `None` for a line-attributed
+    /// leaf frame (several pcs merge into one line, so no single column is honest).
+    pub col: Option<u32>,
+}
+
+/// One folded stack: the chain of frame-table indices root → leaf, and how many samples landed
+/// on it.
 #[derive(Debug, Clone)]
 pub struct FoldedStack {
-    /// Frame labels from the outermost (`main`) to the innermost (leaf) frame.
-    pub frames: Vec<String>,
+    /// Indices into [`Flamegraph::frames`] from the outermost (`main`) to the innermost (leaf)
+    /// frame.
+    pub frames: Vec<u32>,
     /// Sample count for this exact stack.
     pub count: u64,
 }
@@ -148,20 +185,37 @@ pub fn profile(path: &Path, mode: Mode) -> Report {
     }
 }
 
-/// The display label for a prototype: its function name, or `<anonymous>@file:line` for a nameless
-/// closure/thunk (so distinct anonymous frames stay distinguishable in a flamegraph).
-fn proto_label(compiled: &session::Compiled, proto: u32) -> String {
+/// Resolve a prototype to its [`FrameInfo`]: name + definition site, and the display label — the
+/// function name, or `<anonymous>@file:line` for a nameless closure/thunk (so distinct anonymous
+/// frames stay distinguishable in a flamegraph).
+fn proto_frame(compiled: &session::Compiled, proto: u32) -> FrameInfo {
     let chunk = &compiled.module.protos[proto as usize];
-    if let Some(name) = &chunk.name {
-        return name.clone();
-    }
-    match chunk.def_span {
+    let (file, line, col) = match chunk.def_span {
         Some(span) => {
-            let file = compiled.sources.source(span.source).name();
-            let line = compiled.sources.line_col(span).line;
-            format!("<anonymous>@{file}:{line}")
+            let lc = compiled.sources.line_col(span);
+            (
+                Some(compiled.sources.source(span.source).name().to_string()),
+                Some(lc.line),
+                Some(lc.col),
+            )
         }
-        None => "<anonymous>".to_string(),
+        None => (None, None, None),
+    };
+    let name = chunk
+        .name
+        .clone()
+        .unwrap_or_else(|| "<anonymous>".to_string());
+    let label = match (&chunk.name, &file, line) {
+        (Some(name), ..) => name.clone(),
+        (None, Some(file), Some(line)) => format!("<anonymous>@{file}:{line}"),
+        (None, ..) => name.clone(),
+    };
+    FrameInfo {
+        label,
+        name,
+        file,
+        line,
+        col,
     }
 }
 
@@ -180,15 +234,18 @@ pub fn top_functions(report: &Report, n: usize) -> Vec<(String, u64, f64)> {
     let Some(flame) = &report.flamegraph else {
         return Vec::new();
     };
-    let mut by_leaf: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    // Frame identity is the table index (one per label), so aggregating by index is aggregating
+    // by label.
+    let mut by_leaf: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
     for stack in &flame.stacks {
-        if let Some(leaf) = stack.frames.last() {
-            *by_leaf.entry(leaf.as_str()).or_insert(0) += stack.count;
+        if let Some(&leaf) = stack.frames.last() {
+            *by_leaf.entry(leaf).or_insert(0) += stack.count;
         }
     }
     let mut rows: Vec<(String, u64, f64)> = by_leaf
         .into_iter()
-        .map(|(label, samples)| {
+        .map(|(leaf, samples)| {
+            let label = &flame.frames[leaf as usize].label;
             let pct = if flame.total > 0 {
                 100.0 * samples as f64 / flame.total as f64
             } else {
@@ -259,33 +316,82 @@ fn resolve_flamegraph(
         .expect("the sample mode installs a SampleCollector");
     let (total, raw) = collector.finish();
 
-    // Resolve each raw stack to frame *labels*, then re-aggregate by label chain: in
-    // line-attribution mode several distinct leaf pcs on the same source line resolve to the same
-    // `fn:line` label, so they must merge into one folded entry (without lines the keys are already
-    // unique per chain, so this is a no-op).
-    let mut merged: std::collections::HashMap<Vec<String>, u64> = std::collections::HashMap::new();
+    // Resolve each raw stack to frames, interning by *label*, then re-aggregate by the interned
+    // chain: in line-attribution mode several distinct leaf pcs on the same source line resolve to
+    // the same `fn:line` label, so they must merge into one folded entry (without lines the keys
+    // are already unique per chain, so this is a no-op).
+    let mut frame_index: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut frames: Vec<FrameInfo> = Vec::new();
+    let mut intern = |frame: FrameInfo| -> u32 {
+        if let Some(&i) = frame_index.get(&frame.label) {
+            return i;
+        }
+        let i = frames.len() as u32;
+        frame_index.insert(frame.label.clone(), i);
+        frames.push(frame);
+        i
+    };
+    let mut merged: std::collections::HashMap<Vec<u32>, u64> = std::collections::HashMap::new();
     for folded in raw {
-        let mut frames: Vec<String> = folded
+        let mut chain: Vec<FrameInfo> = folded
             .chain
             .iter()
-            .map(|&proto| proto_label(compiled, proto))
+            .map(|&proto| proto_frame(compiled, proto))
             .collect();
         if folded.leaf_pc != 0
-            && let (Some(&leaf_proto), Some(last)) = (folded.chain.last(), frames.last_mut())
+            && let (Some(&leaf_proto), Some(last)) = (folded.chain.last(), chain.last_mut())
             && let Some(line) = leaf_line(compiled, leaf_proto, folded.leaf_pc as usize)
         {
-            last.push_str(&format!(":{line}"));
+            last.label.push_str(&format!(":{line}"));
+            last.line = Some(line);
+            last.col = None;
         }
-        *merged.entry(frames).or_insert(0) += folded.count;
+        let indices: Vec<u32> = chain.into_iter().map(&mut intern).collect();
+        *merged.entry(indices).or_insert(0) += folded.count;
     }
 
     let mut stacks: Vec<FoldedStack> = merged
         .into_iter()
         .map(|(frames, count)| FoldedStack { frames, count })
         .collect();
-    // Heaviest stacks first; ties broken by the folded label so the order is deterministic.
-    stacks.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.frames.cmp(&b.frames)));
-    Flamegraph { total, stacks }
+    // Heaviest stacks first; ties broken by the folded label chain so the order is deterministic
+    // (the intern order above follows the collector's hash-map iteration, so indices can't be the
+    // tiebreak — labels can).
+    stacks.sort_by(|a, b| {
+        b.count.cmp(&a.count).then_with(|| {
+            let la: Vec<&str> = a
+                .frames
+                .iter()
+                .map(|&i| frames[i as usize].label.as_str())
+                .collect();
+            let lb: Vec<&str> = b
+                .frames
+                .iter()
+                .map(|&i| frames[i as usize].label.as_str())
+                .collect();
+            la.cmp(&lb)
+        })
+    });
+
+    // Renumber the frame table in first-use order over the *sorted* stacks, so the table itself is
+    // deterministic (diffable speedscope output under the op-clock), not hash-iteration-ordered.
+    let mut renumber: Vec<Option<u32>> = vec![None; frames.len()];
+    let mut ordered: Vec<FrameInfo> = Vec::with_capacity(frames.len());
+    for stack in &mut stacks {
+        for idx in &mut stack.frames {
+            let new = *renumber[*idx as usize].get_or_insert_with(|| {
+                ordered.push(frames[*idx as usize].clone());
+                (ordered.len() - 1) as u32
+            });
+            *idx = new;
+        }
+    }
+
+    Flamegraph {
+        total,
+        frames: ordered,
+        stacks,
+    }
 }
 
 fn report_from(
@@ -320,7 +426,7 @@ pub fn render_folded(report: &Report) -> String {
     };
     let mut out = String::new();
     for stack in &flame.stacks {
-        out.push_str(&stack.frames.join(";"));
+        out.push_str(&flame.labels(stack).collect::<Vec<_>>().join(";"));
         out.push(' ');
         out.push_str(&stack.count.to_string());
         out.push('\n');

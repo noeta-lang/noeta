@@ -264,13 +264,9 @@ fn sampling_attributes_most_samples_to_the_hot_function() {
     let flame = report.flamegraph.as_ref().unwrap();
     // Stacks are sorted heaviest-first; the top one is the hot loop, rooted at the top-level frame.
     let top = &flame.stacks[0];
+    assert_eq!(flame.labels(top).last(), Some("hot"), "leaf is `hot`");
     assert_eq!(
-        top.frames.last().map(String::as_str),
-        Some("hot"),
-        "leaf is `hot`"
-    );
-    assert_eq!(
-        top.frames.first().map(String::as_str),
+        flame.labels(top).next(),
         Some("main"),
         "rooted at top level"
     );
@@ -358,7 +354,7 @@ fn wall_clock_sampling_produces_a_profile() {
         flame
             .stacks
             .iter()
-            .any(|s| s.frames.iter().any(|f| f == "hot")),
+            .any(|s| flame.labels(s).any(|f| f == "hot")),
         "the hot function appears in the profile"
     );
 }
@@ -432,6 +428,81 @@ fn speedscope_is_valid_and_well_formed() {
             );
         }
     }
+    // Frames carry the structured source location (speedscope-schema `file`/`line`/`col`), so a
+    // consumer can jump to source without parsing the label.
+    let hot = json["shared"]["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == "hot")
+        .expect("the hot function is a frame");
+    assert!(
+        hot["file"].as_str().unwrap().ends_with(".noe"),
+        "frame carries its source file: {hot}"
+    );
+    assert_eq!(hot["line"], 1, "…its 1-based definition line");
+    assert_eq!(hot["col"], 1, "…and its 1-based definition column");
+}
+
+#[test]
+fn frame_table_is_structured_and_line_attribution_overrides_the_leaf_line() {
+    let path = fixture("frameinfo", HOT_SRC);
+    let report = noeta_prof::profile(
+        &path,
+        Mode::Sample {
+            clock: SampleClock::Ops { every: 1000 },
+            lines: true,
+        },
+    );
+    let flame = report.flamegraph.as_ref().unwrap();
+
+    // Interior `hot` frames don't exist here (hot is always the leaf), but `main` is interior:
+    // its frame resolves to the definition site.
+    let main = flame
+        .frames
+        .iter()
+        .find(|f| f.label == "main")
+        .expect("main frame in the table");
+    assert_eq!(main.name, "main");
+
+    // The line-attributed leaf: label `hot:<line>`, `line` = the sampled line (not the definition
+    // line 1), bare `name`, a file, and no column (several pcs merge into one line).
+    let leaf = flame
+        .frames
+        .iter()
+        .find(|f| f.label.starts_with("hot:"))
+        .expect("line-attributed hot leaf in the table");
+    assert_eq!(leaf.name, "hot", "name stays bare");
+    let line = leaf.line.expect("attributed line");
+    assert_eq!(
+        leaf.label,
+        format!("hot:{line}"),
+        "label and structured line agree"
+    );
+    assert!(line > 1, "the sampled line is inside the body: {line}");
+    assert!(
+        leaf.file.as_deref().unwrap().ends_with(".noe"),
+        "leaf frame carries its file"
+    );
+    assert_eq!(leaf.col, None, "no single column for a merged line");
+}
+
+#[test]
+fn speedscope_frame_table_is_deterministic_under_the_op_clock() {
+    // The whole artifact — frame table order included — must be byte-identical across op-clock
+    // runs, or profile diffs churn.
+    let path = fixture("det_speedscope", HOT_SRC);
+    let mode = Mode::Sample {
+        clock: SampleClock::Ops { every: 1000 },
+        lines: false,
+    };
+    let a = noeta_prof::profile(&path, mode);
+    let b = noeta_prof::profile(&path, mode);
+    assert_eq!(
+        noeta_prof::render(&a, Format::Speedscope).unwrap(),
+        noeta_prof::render(&b, Format::Speedscope).unwrap(),
+        "speedscope output is byte-identical across runs"
+    );
 }
 
 #[test]
@@ -463,7 +534,7 @@ fn line_attribution_labels_the_leaf_with_its_source_line() {
     );
     let flame = report.flamegraph.as_ref().unwrap();
     // The hot leaf now carries its source line (`hot:<line>`), and the while-loop line dominates.
-    let leaf = flame.stacks[0].frames.last().unwrap();
+    let leaf = flame.labels(&flame.stacks[0]).last().unwrap();
     assert!(
         leaf.starts_with("hot:"),
         "leaf carries a source line: {leaf}"
@@ -494,12 +565,9 @@ fn line_attribution_is_off_by_default() {
         },
     );
     let flame = report.flamegraph.as_ref().unwrap();
-    // Without `--lines`, leaf labels are bare function names (no `:line` suffix).
+    // Without `--lines`, frame labels are bare function names (no `:line` suffix).
     assert!(
-        flame
-            .stacks
-            .iter()
-            .all(|s| s.frames.iter().all(|f| !f.contains(':'))),
+        flame.frames.iter().all(|f| !f.label.contains(':')),
         "no line suffixes without --lines"
     );
 }
