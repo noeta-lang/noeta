@@ -1,0 +1,46 @@
+// P-PKEY S1: a key-capable `@packed` struct (all fields int/{i,u}N/bool, or nested such structs)
+// keys a map by CONTENT — insert, overwrite, index, has, get_or, remove, keys(), and display all
+// work, and map iteration order over packed keys is field-wise semantic order (negatives first),
+// deterministic across both backends. A rebuilt `keys()` element is a full struct value again.
+// expect: stdout "43"
+// expect: stdout "2"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "7"
+// expect: stdout "0"
+// expect: stdout "{Cell {x: -1, y: 9}: 7, Cell {x: 3, y: 4}: 43}"
+// expect: stdout "[Cell {x: -1, y: 9}, Cell {x: 3, y: 4}]"
+// expect: stdout "-1"
+// expect: stdout "1"
+// expect: stdout "{Pair {a: Cell {x: 1, y: 2}, flag: true}: 5}"
+// expect: exit 0
+
+@packed struct Cell { x: int; y: int }
+@packed struct Pair { a: Cell; flag: bool }
+
+mut grid: Map<Cell, int> = {}
+grid[Cell { x: 3, y: 4 }] = 42
+grid[Cell { x: -1, y: 9 }] = 7
+grid[Cell { x: 3, y: 4 }] = 43
+
+echo grid[Cell { x: 3, y: 4 }]
+echo grid.len()
+echo grid.has(Cell { x: -1, y: 9 })
+echo grid.has(Cell { x: 0, y: 0 })
+echo grid.get_or(Cell { x: -1, y: 9 }, 0)
+echo grid.get_or(Cell { x: 5, y: 5 }, 0)
+echo grid
+echo grid.keys()
+
+// A rebuilt key is a real struct value: fields read back.
+ks = grid.keys()
+echo ks[0].x
+
+grid = grid.remove(Cell { x: -1, y: 9 })
+echo grid.len()
+
+// Nested packed structs and bools take part in key identity.
+mut m: Map<Pair, int> = {}
+m[Pair { a: Cell { x: 1, y: 2 }, flag: true }] = 5
+m[Pair { a: Cell { x: 1, y: 2 }, flag: true }] = 5
+echo m

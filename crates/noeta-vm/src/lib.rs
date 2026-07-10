@@ -2091,6 +2091,13 @@ impl<'m> Vm<'m> {
             .cloned()
             .map(noeta_object::intern_shape)
             .collect();
+        // P-PKEY: register each key-capable type's field names once, so a packed map key —
+        // which carries only (type name, field values) — can derive its display on demand.
+        for shape in &shapes {
+            if shape.key_capable {
+                noeta_stdlib::map_key::packed_names::register(&shape.name, shape.fields.iter());
+            }
+        }
         let mut packed_schemas: Vec<&'static noeta_object::PackedSchema> =
             Vec::with_capacity(module.packed_schemas.len());
         for def in &module.packed_schemas {
@@ -3992,15 +3999,22 @@ impl<'m> Vm<'m> {
                             Vec::with_capacity(entries.len());
                         for (key_reg, value_reg) in entries.iter() {
                             // Validated by the preceding `RequireMapKey`: a string (its P-SSO
-                            // compact clone) or a key-capable extern value (a boxed snapshot).
+                            // compact clone), a key-capable packed struct (a content snapshot,
+                            // P-PKEY), or a key-capable extern value (a boxed snapshot).
                             let key_value = regs[fbase + *key_reg as usize];
                             let key = match key_value.as_compact_string() {
                                 Some(s) => noeta_stdlib::MapKey::Str(s),
-                                None => key_value.with_extern(|e| {
-                                    noeta_stdlib::MapKey::Extern(noeta_stdlib::ExternBox(
-                                        e.clone_box(),
-                                    ))
-                                }),
+                                None => match key_value.as_int() {
+                                    Some(i) => noeta_stdlib::MapKey::Int(i),
+                                    None => match key_value.packed_map_key() {
+                                        Some(k) => k,
+                                        None => key_value.with_extern(|e| {
+                                            noeta_stdlib::MapKey::Extern(noeta_stdlib::ExternBox(
+                                                e.clone_box(),
+                                            ))
+                                        }),
+                                    },
+                                },
                             };
                             let value = regs[fbase + *value_reg as usize];
                             retain(value);
@@ -4024,8 +4038,12 @@ impl<'m> Vm<'m> {
                     Op::RequireMapKey { reg, span } => {
                         let v = regs[fbase + *reg as usize];
                         let ok = v.is_string()
+                            // P-PKEY S4: ints key maps (`float` stays excluded — NaN).
+                            || v.as_int().is_some()
                             || (v.is_extern()
-                                && v.with_extern(noeta_stdlib::map_key::extern_key_capable));
+                                && v.with_extern(noeta_stdlib::map_key::extern_key_capable))
+                            // P-PKEY: a key-capable `@packed` struct keys a map by content.
+                            || v.shape().is_some_and(|s| s.key_capable);
                         if !ok {
                             let error = noeta_stdlib::map_key::map_key_error(v.type_name());
                             return Err(self.error(
@@ -4640,9 +4658,26 @@ impl<'m> Vm<'m> {
                                     ));
                                 }
                                 None => {
-                                    // Not a string: a key-capable extern value probes through
-                                    // the contract (extern-types X4); anything else is the
-                                    // existing type error.
+                                    // Not a string: an int keys directly (P-PKEY S4), a
+                                    // key-capable extern value probes through the contract
+                                    // (extern-types X4), a key-capable packed struct by its
+                                    // content snapshot (P-PKEY); anything else is the existing
+                                    // type error.
+                                    if let Some(i) = idx.as_int() {
+                                        if let Some(element) =
+                                            v.map_get_key(&noeta_stdlib::MapKey::Int(i))
+                                        {
+                                            retain(element);
+                                            set_reg(regs, fbase, *dst, element);
+                                            pc += 1;
+                                            continue;
+                                        }
+                                        return Err(self.error(
+                                            DiagnosticCode::KeyNotFound,
+                                            *span,
+                                            format!("map has no key {i}"),
+                                        ));
+                                    }
                                     if idx.is_extern()
                                         && idx
                                             .with_extern(noeta_stdlib::map_key::extern_key_capable)
@@ -4650,6 +4685,19 @@ impl<'m> Vm<'m> {
                                         if let Some(element) =
                                             idx.with_extern(|e| v.map_get_extern(e))
                                         {
+                                            retain(element);
+                                            set_reg(regs, fbase, *dst, element);
+                                            pc += 1;
+                                            continue;
+                                        }
+                                        return Err(self.error(
+                                            DiagnosticCode::KeyNotFound,
+                                            *span,
+                                            format!("map has no key {}", idx.display()),
+                                        ));
+                                    }
+                                    if let Some(k) = idx.packed_map_key() {
+                                        if let Some(element) = v.map_get_key(&k) {
                                             retain(element);
                                             set_reg(regs, fbase, *dst, element);
                                             pc += 1;
@@ -8267,6 +8315,35 @@ mod tests {
         let (result, trace) = run_traced("fn f(): int {\n  return 1;\n}\necho f();\n");
         assert_eq!(result.exit_code, 0);
         assert!(trace.is_empty(), "clean run must not trace: {trace:?}");
+    }
+
+    /// P-PKEY S0: the compiler bakes key-capability into `Module.shapes` — a `@packed` struct of
+    /// int/bool fields (or a nested chain of them, forward references included) is `key_capable`;
+    /// a float-field packed struct and a plain struct are not. Plumbing only — no behavior reads
+    /// the flag yet.
+    #[test]
+    fn shapes_carry_packed_key_capability() {
+        let src = "@packed struct Outer { m: Mid }\n@packed struct Mid { c: Cell; n: i64 }\n@packed struct Cell { x: int; y: bool }\n@packed struct Vec2f { x: f32; y: f32 }\nstruct Plain { x: int }\no = Outer { m: Mid { c: Cell { x: 1, y: true }, n: 2i64 } }\nv = Vec2f { x: 1.0, y: 2.0 }\np = Plain { x: 1 }\necho o.m.n\n";
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).expect("compiles");
+        let flag = |name: &str| {
+            module
+                .shapes
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("shape {name} missing"))
+                .key_capable
+        };
+        assert!(flag("Cell"), "all-int/bool packed struct is key-capable");
+        assert!(flag("Mid"), "nested capable chain");
+        assert!(
+            flag("Outer"),
+            "forward reference resolves through the fixpoint"
+        );
+        assert!(!flag("Vec2f"), "float fields disqualify");
+        assert!(!flag("Plain"), "a non-packed struct is not key-capable");
     }
 
     /// Compile a source program to a [`Module`] (or panic if it's outside the VM subset), for the

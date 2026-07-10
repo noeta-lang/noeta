@@ -1,0 +1,11 @@
+// Bool set elements: `false < true` (derive-soundness bool ordering) makes bools orderable, so a
+// bool set canonicalizes like any other — and the `Set<bool>` annotation passes the checker's
+// key-capability gate (bool splits by role: set member yes, map key no — P-PKEY S4 reconciled).
+// expect: stdout "{false, true}"
+// expect: stdout "2"
+// expect: stdout "true"
+// expect: exit 0
+mut s: Set<bool> = #{true, false, true}
+echo s
+echo s.len()
+echo s.contains(false)

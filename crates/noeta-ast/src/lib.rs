@@ -342,6 +342,66 @@ pub fn derives_trait(derives: &[DeriveSpec], trait_name: &str) -> bool {
     derives.iter().any(|d| d.name == trait_name)
 }
 
+/// The named field types of a `@packed` struct, for the key-capability fixpoint (P-PKEY):
+/// `Some(per-field entries)` for a packed declaration — each entry the field's plain `Named`
+/// type name, or `None` for a field that can never be key-capable (untyped, generic, optional,
+/// tuple, union, function) — and `None` for a non-packed declaration. Used by both backends and
+/// the checker so all agree on which packed structs may key a `Map` / member a `Set`.
+pub fn packed_named_fields(decl: &StructDecl) -> Option<Vec<Option<String>>> {
+    decl.packed.as_ref()?;
+    Some(
+        decl.fields
+            .iter()
+            .map(|f| match &f.ty {
+                Some(TypeRef::Named { name, args, .. }) if args.is_empty() => Some(name.clone()),
+                _ => None,
+            })
+            .collect(),
+    )
+}
+
+/// The field types a key-capable packed struct may use directly (P-PKEY): the integer family and
+/// `bool`. **Floats are deliberately excluded** — NaN ≠ NaN and `-0.0 == 0.0` make float keys a
+/// footgun; a bit-pattern opt-in can come later.
+fn key_capable_primitive(name: &str) -> bool {
+    matches!(
+        name,
+        "int" | "bool" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
+    )
+}
+
+/// The **key-capable** packed structs of a program (P-PKEY): a `@packed` struct every one of
+/// whose fields is a key-capable primitive ([`key_capable_primitive`]: the integer family and
+/// `bool`, no floats) or another key-capable packed struct. `packed` maps each packed struct's
+/// name to its [`packed_named_fields`] entries — callers accumulate it across declarations (a
+/// REPL session declares incrementally) and re-run this fixpoint, so every consumer (checker,
+/// both backends) computes the same set from the same declarations.
+pub fn key_capable_packed(
+    packed: &std::collections::HashMap<String, Vec<Option<String>>>,
+) -> std::collections::HashSet<String> {
+    let mut capable: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Fixpoint: grow `capable` until stable (nested packed structs may be declared in any order).
+    loop {
+        let mut grew = false;
+        for (name, fields) in packed {
+            if capable.contains(name) {
+                continue;
+            }
+            let ok = fields.iter().all(|f| match f {
+                Some(ty) => key_capable_primitive(ty) || capable.contains(ty),
+                None => false,
+            });
+            if ok {
+                capable.insert(name.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            return capable;
+        }
+    }
+}
+
 /// A generic type parameter on a declaration: a name and its trait **bounds** (`<T: Comparable>`,
 /// `<T: Comparable + Display>`). Bounds are built-in trait names the checker validates and (S4.2)
 /// enforces where the generic is instantiated; an empty `bounds` is an unbounded `<T>`. Erased at
@@ -1428,5 +1488,64 @@ pub fn ordering_variant(ordering: std::cmp::Ordering) -> &'static str {
         std::cmp::Ordering::Less => "Less",
         std::cmp::Ordering::Equal => "Equal",
         std::cmp::Ordering::Greater => "Greater",
+    }
+}
+
+#[cfg(test)]
+mod key_capable_tests {
+    use super::key_capable_packed;
+    use std::collections::HashMap;
+
+    fn map(entries: &[(&str, &[Option<&str>])]) -> HashMap<String, Vec<Option<String>>> {
+        entries
+            .iter()
+            .map(|(name, fields)| {
+                (
+                    name.to_string(),
+                    fields.iter().map(|f| f.map(str::to_string)).collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// P-PKEY: primitives qualify, floats disqualify, nested capability resolves regardless of
+    /// declaration order, and a disqualified link poisons the whole chain.
+    #[test]
+    fn key_capability_fixpoint() {
+        let packed = map(&[
+            // All-int/bool: capable.
+            ("Cell", &[Some("int"), Some("bool"), Some("u32")]),
+            // A float field: never capable (bit-pattern keys are a later opt-in).
+            ("Vec2", &[Some("f32"), Some("f32")]),
+            // Nested chains, "declared" in reverse order: Outer -> Mid -> Cell.
+            ("Mid", &[Some("Cell"), Some("i64")]),
+            ("Outer", &[Some("Mid")]),
+            // Nested through a float struct: poisoned.
+            ("Sprite", &[Some("Vec2"), Some("int")]),
+            // An unresolvable/non-named field entry: never capable.
+            ("Odd", &[None]),
+        ]);
+        let capable = key_capable_packed(&packed);
+        assert!(capable.contains("Cell"));
+        assert!(capable.contains("Mid"));
+        assert!(
+            capable.contains("Outer"),
+            "fixpoint spans declaration order"
+        );
+        assert!(!capable.contains("Vec2"), "float fields disqualify");
+        assert!(
+            !capable.contains("Sprite"),
+            "a poisoned link poisons the chain"
+        );
+        assert!(!capable.contains("Odd"));
+        assert_eq!(capable.len(), 3);
+    }
+
+    /// An empty packed struct is (vacuously) capable; an empty program yields an empty set.
+    #[test]
+    fn key_capability_edges() {
+        assert!(key_capable_packed(&HashMap::new()).is_empty());
+        let capable = key_capable_packed(&map(&[("Unit", &[])]));
+        assert!(capable.contains("Unit"));
     }
 }

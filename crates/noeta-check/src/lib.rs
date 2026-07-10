@@ -3036,8 +3036,7 @@ impl Checker {
                     span: key_span,
                     ..
                 }) = key_position
-                    && let Some(ext) = self.imported_extern(key_name)
-                    && !ext.key_capable
+                    && self.named_key_capable(key_name, name == "Set") == Some(false)
                 {
                     let role = if name == "Map" {
                         "key a map"
@@ -3049,13 +3048,62 @@ impl Checker {
                         *key_span,
                         format!("`{key_name}` cannot {role}: it is not a key-capable type"),
                     )
-                    .help("key-capable types are immutable with a total order (e.g. `Uuid`)");
+                    .help(
+                        "key-capable types are strings, key-capable extern types (e.g. `Uuid`), \
+                         and `@packed` structs of int/bool fields",
+                    );
                 }
                 for arg in args {
                     self.check_type_ref(arg);
                 }
             }
         }
+    }
+
+    /// Check-time key-capability of a **named** type in `Map<K, _>` key / `Set<T>` element
+    /// position (P-PKEY S3/S4): `Some(true)` for `string`, the integer family (S4 — `int` and
+    /// every fixed-width `{i,u}N`, erased to the same word), a key-capable extern, or a
+    /// key-capable `@packed` struct (all fields int/`{i,u}N`/bool or nested such structs — no
+    /// floats); `Some(false)` for `float`/`f32` (the NaN footgun), `bool` in MAP position
+    /// (`for_set` splits the role: an orderable `Set<bool>` is fine), a known user record/enum, or a
+    /// non-capable extern (statically certain to abort at runtime); `None` when the name is not
+    /// a resolvable concrete type here (a generic parameter, an unknown — other diagnostics own
+    /// those).
+    fn named_key_capable(&self, key_name: &str, for_set: bool) -> Option<bool> {
+        fn layout_key_capable(layout: &noeta_ast::reflect::PackedLayout) -> bool {
+            use noeta_ast::reflect::PackedKind;
+            layout.fields.iter().all(|f| match &f.kind {
+                PackedKind::Int | PackedKind::Bool => true,
+                PackedKind::Float | PackedKind::F32 => false,
+                PackedKind::Struct(inner) => layout_key_capable(inner),
+            })
+        }
+        if matches!(
+            key_name,
+            "string" | "int" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
+        ) {
+            return Some(true);
+        }
+        if matches!(key_name, "float" | "f32") {
+            return Some(false);
+        }
+        // `bool` splits by role (post derive-soundness: bool is orderable, `false < true`):
+        // a `Set<bool>` is fine — the runtime canonicalizes it like any orderable element — but
+        // a map key needs a `MapKey` kind, which bool deliberately lacks (two possible keys is a
+        // smell; use fields). The gates pass their role via `for_set`.
+        if key_name == "bool" {
+            return Some(for_set);
+        }
+        if let Some(ext) = self.imported_extern(key_name) {
+            return Some(ext.key_capable);
+        }
+        if let Some(layout) = self.packed_layout(&Type::Named(key_name.to_string(), Vec::new())) {
+            return Some(layout_key_capable(&layout));
+        }
+        if self.records.contains_key(key_name) || self.enums.contains_key(key_name) {
+            return Some(false);
+        }
+        None
     }
 
     // ----- traits: impl coherence and derive validation (M1.8) -----
@@ -4182,15 +4230,17 @@ impl Checker {
                 // A literal keyed by a non-key-capable extern type is rejected statically
                 // (extern-types X4), matching the `Map<K, _>` formation gate.
                 if let Type::Named(key_name, _) = &key_ty
-                    && let Some(ext) = self.imported_extern(key_name)
-                    && !ext.key_capable
+                    && self.named_key_capable(key_name, false) == Some(false)
                 {
                     self.error(
                         DiagnosticCode::TypeMismatch,
                         *span,
                         format!("`{key_name}` cannot key a map: it is not a key-capable type"),
                     )
-                    .help("key-capable types are immutable with a total order (e.g. `Uuid`)");
+                    .help(
+                        "key-capable types are strings, key-capable extern types (e.g. `Uuid`), \
+                         and `@packed` structs of int/bool fields",
+                    );
                 }
                 let ty = Type::Map(Box::new(key_ty), Box::new(val_ty));
                 self.note_construction(&ty, *span);
