@@ -22,6 +22,7 @@ const {
   debug,
   lm,
   DebugAdapterExecutable,
+  EventEmitter,
   McpStdioServerDefinition,
 } = require("vscode");
 const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
@@ -98,7 +99,18 @@ function registerMcp(context) {
   ) {
     return;
   }
+  // Re-announce the definition when the executable path setting changes, so the editor picks up
+  // the new binary without a reload.
+  const changed = new EventEmitter();
+  context.subscriptions.push(
+    workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("noeta.server.path")) {
+        changed.fire();
+      }
+    }),
+  );
   const provider = {
+    onDidChangeMcpServerDefinitions: changed.event,
     provideMcpServerDefinitions() {
       return [new McpStdioServerDefinition("noeta", noetaCommand(), ["mcp"])];
     },
@@ -108,6 +120,7 @@ function registerMcp(context) {
   };
   context.subscriptions.push(
     lm.registerMcpServerDefinitionProvider("noeta.mcp", provider),
+    changed,
   );
 }
 
