@@ -99,6 +99,42 @@ pub trait ProfileHook: Send {
     fn into_any(self: Box<Self>) -> Box<dyn std::any::Any>;
 }
 
+/// The debug-console evaluation budget (MCP M6b): a fragment run is bounded by wall clock and by
+/// instruction count — whichever trips first. Wall clock is the interactive bound (a console
+/// answer seconds late is already useless); the step cap is the deterministic backstop.
+const DEBUG_EVAL_TIMEOUT_MS: u64 = 5_000;
+const DEBUG_EVAL_MAX_STEPS: u64 = 500_000_000;
+/// How many steps between wall-clock samples during a fragment run (an `Instant::now()` per op
+/// would dominate tier-0 dispatch).
+const DEBUG_EVAL_CLOCK_INTERVAL: u64 = 4_096;
+
+/// The budget-only [`Debugger`] armed around a nested console-fragment run (see
+/// [`Vm::run_installed_fragment`]): counts instructions, samples the deadline periodically, and
+/// terminates the fragment when either bound trips — it never pauses, so evaluating `f(x)` still
+/// never breaks inside `f`.
+struct EvalBudget {
+    steps: u64,
+    deadline: std::time::Instant,
+    /// Set on a trip so the caller can distinguish "the budget stopped it" from an ordinary
+    /// fragment abort (the terminate surfaces as `Err(Abort)` either way).
+    tripped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Debugger for EvalBudget {
+    fn before_op(&mut self, _proto: u32, _pc: usize, _view: &DebugView) -> DebugAction {
+        self.steps += 1;
+        if self.steps > DEBUG_EVAL_MAX_STEPS
+            || (self.steps.is_multiple_of(DEBUG_EVAL_CLOCK_INTERVAL)
+                && std::time::Instant::now() >= self.deadline)
+        {
+            self.tripped
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return DebugAction::Terminate;
+        }
+        DebugAction::Continue
+    }
+}
+
 /// What the VM does after consulting the [`Debugger`] for an instruction.
 #[derive(Debug)]
 pub enum DebugAction {
@@ -6281,6 +6317,38 @@ impl<'m> Vm<'m> {
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, String> {
+        // Liveness bound (MCP M6b): the nested run executes with the session's own debugger held
+        // out of `self` (so a fragment never trips a breakpoint), which also meant nothing could
+        // stop it — an infinite-loop watch expression hung the paused session. Arm a budget-only
+        // debugger over the same per-op seam for exactly this run: on a trip it terminates the
+        // *fragment* (an ordinary nested abort — the paused program is untouched and resumable).
+        let tripped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saved = self.debugger.take();
+        self.debugger = Some(Box::new(EvalBudget {
+            steps: 0,
+            deadline: std::time::Instant::now()
+                + std::time::Duration::from_millis(DEBUG_EVAL_TIMEOUT_MS),
+            tripped: Arc::clone(&tripped),
+        }));
+        let result = self.run_installed_fragment_inner(entry, args, span);
+        self.debugger = saved;
+        if tripped.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(format!(
+                "the evaluation was stopped after exceeding the debug-console budget \
+                 ({DEBUG_EVAL_TIMEOUT_MS} ms / {DEBUG_EVAL_MAX_STEPS} steps — a runaway loop?); \
+                 the program is still paused"
+            ));
+        }
+        result
+    }
+
+    /// The unbudgeted core of [`Vm::run_installed_fragment`].
+    fn run_installed_fragment_inner(
+        &mut self,
+        entry: u32,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, String> {
         match self.run_thunk(entry, &[]) {
             Ok(v) => release(v),
             Err(Abort) => return Err(self.last_diag_message()),
@@ -7857,6 +7925,46 @@ mod tests {
             before,
             "teardown after fragment installs returns residency to baseline"
         );
+    }
+
+    /// M6b (MCP arc): a runaway console fragment (`while true { … }`) is STOPPED by the
+    /// evaluation budget — the nested run executes with the session debugger held out of `self`,
+    /// so without the budget nothing could interrupt it and the paused session hung forever. The
+    /// trip is an ordinary nested abort: the paused program is untouched and the very next
+    /// fragment evaluates normally.
+    #[test]
+    fn console_fragment_evaluation_is_bounded() {
+        let arena = typed_arena::Arena::new();
+        let mut vm = debug_session_vm(&arena, "mut base = 10\necho base\n");
+        vm.run_top();
+        let frames = vec![Frame {
+            proto: 0,
+            base: 0,
+            pc: 0,
+            ret_dst: 0,
+            ret_transform: RetTransform::None,
+            upvalues: Vec::new(),
+        }];
+        let regs = vec![Value::unit(); vm.module.protos[0].num_registers as usize];
+
+        let text = "mut i = 0\nwhile true { i = i + 1 }";
+        let program = fragment(text);
+        let DebugEvalOutcome::Error(message) =
+            vm.debug_eval_fragment(&program, 0, false, text, &frames, &regs)
+        else {
+            panic!("a runaway fragment must be stopped, not hang");
+        };
+        assert!(message.contains("budget"), "got: {message}");
+
+        // The session survives the trip: a follow-up fragment evaluates against intact state.
+        let text = "base + 1";
+        let program = fragment(text);
+        let DebugEvalOutcome::Value { text: v, .. } =
+            vm.debug_eval_fragment(&program, 0, false, text, &frames, &regs)
+        else {
+            panic!("the session must survive a budget trip");
+        };
+        assert_eq!(v, "11");
     }
 
     /// U3 (tooling-unification): a re-evaluated watch — same text, same scope shape — reuses its
