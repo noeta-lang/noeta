@@ -2,6 +2,11 @@
 
 ## 0.6.0
 
+Adds **run/build tasks**: a `noeta` task type (`run` / `build [--native|--exe]`, authorable in
+`tasks.json`) with a TaskProvider for the active file — the native build is the default build task
+(Ctrl+Shift+B) — plus **Noeta: Run File** and **Noeta: Build Native Executable** commands in the
+editor title bar's run menu.
+
 Adds the **profiler UI** (`noeta profile`):
 
 - **Noeta: Profile File (Sampling)** and **(Instrumenting)** commands (run-button dropdown +

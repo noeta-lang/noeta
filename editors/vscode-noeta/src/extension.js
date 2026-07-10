@@ -8,19 +8,28 @@
 //
 // It also wires the **debugger**: pressing F5 on a `.noe` file launches `noeta dap` (the Debug Adapter
 // Protocol server) and drives it through VS Code's generic debug UI — breakpoints, stepping, the call
-// stack, and variables. And it registers the **MCP server** (`noeta mcp`) with the editor's language-
-// model API, so AI agents running in the editor discover the compiler's tools automatically. The same
-// `noeta` binary serves all three roles, so one `noeta.server.path` setting points at all of them.
+// stack, and variables. It contributes **build/run tasks** (a `noeta` task type plus the Run/Build
+// buttons on the editor title bar) that shell out to `noeta run` and `noeta build [--native]`. And it
+// registers the **MCP server** (`noeta mcp`) with the editor's language-model API, so AI agents running
+// in the editor discover the compiler's tools automatically. The same `noeta` binary serves every role,
+// so one `noeta.server.path` setting points at all of them.
 //
 // Plain JavaScript on purpose: the extension runs directly after `npm install`, with no build step to
 // get out of sync with the source.
 
+const path = require("path");
 const {
   workspace,
   window,
   commands,
   debug,
   lm,
+  tasks,
+  Task,
+  TaskScope,
+  TaskGroup,
+  ProcessExecution,
+  Uri,
   DebugAdapterExecutable,
   EventEmitter,
   McpStdioServerDefinition,
@@ -83,6 +92,129 @@ function registerDebugging(context) {
   context.subscriptions.push(
     debug.registerDebugConfigurationProvider("noeta", provider),
   );
+}
+
+/** The absolute path of the `.noe` file in the active editor, or undefined if none is focused. */
+function activeNoeFile() {
+  const editor = window.activeTextEditor;
+  if (editor && editor.document.languageId === "noeta") {
+    return editor.document.uri.fsPath;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve a task definition's `file` to a concrete path. A concrete path is used as-is; an empty or
+ * still-unsubstituted (`${…}`) value falls back to the active `.noe` editor.
+ */
+function resolveTaskFile(definitionFile) {
+  if (definitionFile && !definitionFile.includes("${")) {
+    return definitionFile;
+  }
+  return activeNoeFile();
+}
+
+/** The `noeta` argv for a task definition: `run <file> [-- args…]` or `build <file> [--native|--exe]`. */
+function taskArgs(definition, file) {
+  if (definition.command === "run") {
+    const extra =
+      Array.isArray(definition.args) && definition.args.length
+        ? ["--", ...definition.args]
+        : [];
+    return ["run", file, ...extra];
+  }
+  // build: --native (machine code) or --exe (self-contained bytecode); neither ⇒ a plain `.noeb`.
+  const flags = definition.native ? ["--native"] : definition.exe ? ["--exe"] : [];
+  return ["build", file, ...flags];
+}
+
+/** A short, file-scoped label for a provided task, e.g. `run app.noe` or `build native app.noe`. */
+function taskLabel(definition, file) {
+  const base = path.basename(file);
+  if (definition.command === "run") {
+    return `run ${base}`;
+  }
+  const kind = definition.native ? "build native" : definition.exe ? "build exe" : "build";
+  return `${kind} ${base}`;
+}
+
+/** The workspace folder owning `file`, or the workspace as a whole when the file is outside any folder. */
+function taskScope(file) {
+  const folder = workspace.getWorkspaceFolder(Uri.file(file));
+  return folder || TaskScope.Workspace;
+}
+
+/** Build a VS Code Task that shells out to the `noeta` binary for the given definition + concrete file. */
+function noetaTask(definition, file) {
+  const task = new Task(
+    definition,
+    taskScope(file),
+    taskLabel(definition, file),
+    "noeta",
+    new ProcessExecution(noetaCommand(), taskArgs(definition, file)),
+    [],
+  );
+  // Make the native build the workspace's default build task (Ctrl+Shift+B): it's the only task we
+  // put in the Build group, so the shortcut runs it without prompting.
+  if (definition.command === "build" && definition.native) {
+    task.group = TaskGroup.Build;
+  }
+  return task;
+}
+
+/**
+ * Register the `noeta` task type: `provideTasks` offers run/build tasks for the active file (so they
+ * appear in "Run Task" and the native build binds to Ctrl+Shift+B), and `resolveTask` completes tasks
+ * a user authored in `tasks.json`.
+ */
+function registerTasks(context) {
+  const provider = {
+    provideTasks() {
+      const file = activeNoeFile();
+      if (!file) {
+        return [];
+      }
+      return [
+        noetaTask({ type: "noeta", command: "run", file }, file),
+        noetaTask({ type: "noeta", command: "build", native: true, file }, file),
+        noetaTask({ type: "noeta", command: "build", file }, file),
+      ];
+    },
+    resolveTask(task) {
+      const definition = task.definition;
+      if (definition.type !== "noeta" || !definition.command) {
+        return undefined;
+      }
+      const file = resolveTaskFile(definition.file);
+      if (!file) {
+        return undefined;
+      }
+      // Keep the user's authored name/scope; supply the concrete execution VS Code requires.
+      const resolved = new Task(
+        definition,
+        task.scope || taskScope(file),
+        task.name,
+        "noeta",
+        new ProcessExecution(noetaCommand(), taskArgs(definition, file)),
+        task.problemMatchers,
+      );
+      if (definition.command === "build" && definition.native) {
+        resolved.group = TaskGroup.Build;
+      }
+      return resolved;
+    },
+  };
+  context.subscriptions.push(tasks.registerTaskProvider("noeta", provider));
+}
+
+/** Run a one-off `noeta` task for the active `.noe` file (backs the Run/Build editor-title buttons). */
+function runActiveFileTask(definition) {
+  const file = activeNoeFile();
+  if (!file) {
+    window.showErrorMessage("Open a .noe file to run this Noeta command.");
+    return;
+  }
+  tasks.executeTask(noetaTask({ ...definition, file }, file));
 }
 
 /**
@@ -153,11 +285,21 @@ function activate(context) {
       await client.restart();
       window.showInformationMessage("Noeta language server restarted.");
     }),
+    // One-click Run / Build-native for the active file (also on the editor title bar's run menu).
+    commands.registerCommand("noeta.run", () =>
+      runActiveFileTask({ type: "noeta", command: "run" }),
+    ),
+    commands.registerCommand("noeta.buildNative", () =>
+      runActiveFileTask({ type: "noeta", command: "build", native: true }),
+    ),
   );
 
   // Wire the debugger (independent of the language client — breakpoints work even if the server fails
   // to launch).
   registerDebugging(context);
+
+  // Contribute the `noeta` build/run task type.
+  registerTasks(context);
 
   // Offer `noeta mcp` to the editor's AI agents (no-op on hosts without the MCP API).
   registerMcp(context);
