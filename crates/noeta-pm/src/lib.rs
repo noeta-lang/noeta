@@ -17,6 +17,11 @@ pub mod lock;
 pub mod manifest;
 pub mod registry;
 
+/// Package provenance — Ed25519-signed attestations binding a release to its commit (Phase 4, #2).
+/// Behind the `provenance` feature (CLI-only; the LSP and offline consumers don't pull the crypto).
+#[cfg(feature = "provenance")]
+pub mod provenance;
+
 // Internal to the crate: the git fetch, the content-addressed store, and the pure resolver are
 // implementation details the public modules above compose (the CLI never names them directly).
 mod git;

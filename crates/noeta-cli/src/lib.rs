@@ -311,6 +311,23 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Manage the Ed25519 signing key used to attest published packages (package-manager Phase 4).
+    Key {
+        #[command(subcommand)]
+        action: KeyAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum KeyAction {
+    /// Generate a fresh signing keypair. Writes the **private** key to a file (keep it secret) and
+    /// prints the **public** key to register with your registry scope (`noeta publish` signs with the
+    /// private key; consumers verify with the public one).
+    New {
+        /// Where to write the private key (default: `noeta-signing.key` in the current directory).
+        #[arg(long, default_value = "noeta-signing.key")]
+        out: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -463,6 +480,7 @@ pub fn run_cli(
         Command::Update => cmd_update(),
         Command::Publish { git, tag } => cmd_publish(&git, tag.as_deref()),
         Command::Audit { path } => cmd_audit(&path),
+        Command::Key { action } => cmd_key(&action),
     }
 }
 
@@ -757,6 +775,43 @@ fn render_trust_list(set: &std::collections::BTreeSet<String>) -> String {
     } else {
         set.iter().cloned().collect::<Vec<_>>().join(", ")
     }
+}
+
+/// `noeta key new` — generate an Ed25519 signing keypair (package-manager Phase 4, #2). The private
+/// key is written to a file (kept secret); the public key is printed to register with the registry
+/// scope. `noeta publish` signs releases with the private key; consumers verify with the public one.
+fn cmd_key(action: &KeyAction) -> ExitCode {
+    let KeyAction::New { out } = action;
+    let keypair = match noeta_pm::provenance::generate_keypair() {
+        Ok(keypair) => keypair,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(err) = write_private_key(out, &keypair.private_hex) {
+        eprintln!("lang: cannot write `{}`: {err}", out.display());
+        return ExitCode::from(1);
+    }
+    println!("wrote private signing key to {} (keep it secret)", out.display());
+    println!("public key — register this with your registry scope:");
+    println!("  {}", keypair.public_hex);
+    println!(
+        "`noeta publish` reads the private key from NOETA_SIGNING_KEY (a path) or `{}`.",
+        out.display()
+    );
+    ExitCode::SUCCESS
+}
+
+/// Write a private key to `path`, `0600` on unix (a signing key must not be world-readable).
+fn write_private_key(path: &std::path::Path, private_hex: &str) -> std::io::Result<()> {
+    std::fs::write(path, format!("{private_hex}\n"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 /// Find the nearest `noeta.toml` from the current directory, or print a diagnostic and return a

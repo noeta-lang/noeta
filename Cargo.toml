@@ -82,6 +82,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # OS entropy for RealHost's `Entropy` capability (id-entropy U1): UUID v4/v7 random bits must be
 # real entropy on the real host (the sandbox uses its own seeded SplitMix64 stream instead).
 getrandom = "0.3"
+# Ed25519 signing for package provenance (package-manager Phase 4, #2) — CLI-only, behind the
+# `provenance` feature so pure/offline consumers and the LSP don't pull it.
+ed25519-dalek = "2"
 # RFC 9562 UUID type + builders for the first-class `Uuid` (extern-types X2). Deliberately
 # default-features = false: the self-generating constructors (`new_v4`/`new_v7`, behind the
 # `v4`/`v7` features) stay OUT so the Host seam remains the only entropy/time source —

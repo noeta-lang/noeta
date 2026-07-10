@@ -3833,6 +3833,8 @@ dependencies = [
 name = "noeta-pm"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek 2.2.0",
+ "getrandom 0.3.4",
  "noeta-cache",
  "noeta-check",
  "noeta-fmt",
