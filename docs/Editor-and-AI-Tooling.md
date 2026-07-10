@@ -1,9 +1,9 @@
 # Editor & AI Tooling
 
-Noeta's editor story ships in three layers, all in-tree: **static syntax highlighting** (TextMate +
-tree-sitter grammars), a **language server** (`noeta lsp`), and a **debugger** (`noeta dap`, on its
-own page: [Debugging](Debugging)). The planned **agentic MCP surface** is the one piece still on the
-roadmap.
+Noeta's editor story ships in four layers, all in-tree: **static syntax highlighting** (TextMate +
+tree-sitter grammars), a **language server** (`noeta lsp`), a **debugger** (`noeta dap`, on its own
+page: [Debugging](Debugging)), and an **agent surface** (`noeta mcp`) — a Model Context Protocol
+server that hands AI coding agents the same compiler ground truth the editor gets.
 
 ## Syntax highlighting
 
@@ -57,16 +57,60 @@ the **production VM** — same bytecode, JIT unarmed. See [Debugging](Debugging)
 table (`--instrument`) or a wall-time **flamegraph** (folded / SVG / speedscope). Same production VM,
 tier-0, and — like the debugger — outside the differential oracle. See [Profiling](Profiling).
 
-## The agentic MCP surface (roadmap)
+## The agent surface (`noeta mcp`)
 
-The remaining planned piece. The compiler already builds a queryable **reflection manifest** of a
-program's declarations, their `#[…]` attributes, and their `@role(…)` semantic tags (see
-[Attributes & Reflection](Attributes-and-Reflection)); the intent is an MCP server exposing that
-labeled architectural graph to AI agents — which declarations are entry points, trust boundaries,
-persistence boundaries, sinks, or layers, and how data flows between them. The manifest and the
-semantic-role vocabulary exist; the protocol server does not yet. Until it lands, treat mentions of
-"MCP tools" in design documents as forward-looking.
+`noeta mcp` is a **Model Context Protocol** server over stdio — the compiler's adapter for an AI
+coding agent, the way `noeta lsp` is its adapter for an editor and `noeta dap` for a debug UI.
+Agents have essentially no Noeta in their training data, so the server's first job is **grounding**:
+every answer comes from the real compiler, its real documentation, and its CI-tested examples — not
+from a model's guess.
 
-Also useful to an agent (or a human) today: `noeta dump <file>` prints the exact VM bytecode a
-program compiles to — what actually runs, which fast paths fired, how names and constants are laid
-out. See [The CLI](The-CLI#noeta-dump).
+Register it with an agent, e.g. Claude Code:
+
+```sh
+claude mcp add noeta -- noeta mcp
+```
+
+In **VS Code 1.101+** the Noeta extension registers the server automatically (via the editor's MCP
+provider API), so agents running in the editor — Copilot agent mode and friends — discover it with
+no configuration; the extension's `noeta.server.path` setting points at the binary for `lsp`, `dap`,
+and `mcp` alike.
+
+### The tools
+
+**Ground** — orient before writing a line:
+- `docs_search` / `docs_get` — search and read this documentation (also exposed as MCP *resources*).
+- `examples_find` — CI-tested example programs by feature, concept, or diagnostic code.
+- `stdlib_api` — the real standard-library signatures, straight from the compiler's own registry.
+- `explain_diagnostic` — what an `E0xxx` means, with real programs that trigger and fix it.
+
+**Understand** — the compiler's semantic answers:
+- `check` — type-check code; the same JSON diagnostics `noeta check --format json` emits.
+- `type_at` / `symbols` — the inferred type at a symbol/position; a file's declaration outline.
+- `definition` / `references` / `completions` / `signature` — navigation over the **same
+  `noeta-ide` engine the language server serves**, so agent and editor can never disagree; a `file`
+  entry resolves cross-file through sibling modules and dependency packages.
+
+**Introspect** — the compiler's artifacts:
+- `ast` / `bytecode` / `pipeline` / `module_graph` — the syntax tree, the VM disassembly, a
+  per-stage health summary, and the `use` import graph.
+- `reflect` — the [attributes & `@role` reflection manifest](Attributes-and-Reflection): which
+  declarations are entry points, trust boundaries, persistence boundaries, sinks, or layers.
+
+**Execute** — run and observe, not just read:
+- `run` / `eval` / `test` — run a program (stdout/exit/traceback), evaluate an expression
+  (value + type), run `@test` blocks. **Sandboxed and deterministic by default** (in-memory fs,
+  logical clock, seeded random; `real: true` opts into the real host), and always bounded by
+  liveness limits — a runaway loop is stopped, never hung.
+- `debug_start` / `debug_inspect` / `debug_step` / `debug_eval` / `debug_stop` — interactive debug
+  sessions over the VM's own debugger seam: pause at entry or breakpoints, read the call stack and
+  live locals, step by line, evaluate expressions in a paused frame (type-checked against the
+  program first). A runaway `continue` lands in an inspectable `limit` **pause** — for an agent
+  chasing an infinite loop, seeing the live counter mid-spin *is* the diagnosis.
+
+**Transform**:
+- `format` — canonical formatting, the same engine as `noeta fmt`; declines on unparseable source.
+
+Also useful to an agent (or a human): `noeta dump <file>` prints the exact VM bytecode a program
+compiles to — what actually runs, which fast paths fired, how names and constants are laid out. See
+[The CLI](The-CLI#noeta-dump).

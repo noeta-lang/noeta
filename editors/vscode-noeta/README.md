@@ -30,6 +30,11 @@ features backed by the compiler itself.
     read straight from the live VM.
   - Press **F5** on a `.noe` file to debug it (no `launch.json` needed); output appears in the Debug
     Console. See **Debugging** below.
+- **AI agents** (`noeta mcp`) — on VS Code 1.101+ the extension registers the compiler's Model
+  Context Protocol server with the editor, so an agent (Copilot agent mode and friends) can search
+  the language docs and examples, `check` code, navigate symbols with the same engine the language
+  server uses, inspect the AST/bytecode/reflection manifest, run code in a sandbox, and drive
+  interactive debug sessions — all ground truth from the compiler, discovered automatically.
 - **Syntax highlighting** for the full Noeta surface:
   - keywords — control flow, declarations (`fn`/`struct`/`class`/`enum`/`impl`), concurrency (`async`/`spawn`/`isolate`/`channel`), and the operator words `as`/`is`
   - the three string forms — `"…"`, `'…'`, and backtick templates — with `${…}` interpolation holes highlighted as embedded expressions and `\${` recognized as an escape

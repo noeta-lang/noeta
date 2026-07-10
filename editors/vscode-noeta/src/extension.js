@@ -8,13 +8,22 @@
 //
 // It also wires the **debugger**: pressing F5 on a `.noe` file launches `noeta dap` (the Debug Adapter
 // Protocol server) and drives it through VS Code's generic debug UI — breakpoints, stepping, the call
-// stack, and variables. The same `noeta` binary serves both roles, so one `noeta.server.path` setting
-// points at both.
+// stack, and variables. And it registers the **MCP server** (`noeta mcp`) with the editor's language-
+// model API, so AI agents running in the editor discover the compiler's tools automatically. The same
+// `noeta` binary serves all three roles, so one `noeta.server.path` setting points at all of them.
 //
 // Plain JavaScript on purpose: the extension runs directly after `npm install`, with no build step to
 // get out of sync with the source.
 
-const { workspace, window, commands, debug, DebugAdapterExecutable } = require("vscode");
+const {
+  workspace,
+  window,
+  commands,
+  debug,
+  lm,
+  DebugAdapterExecutable,
+  McpStdioServerDefinition,
+} = require("vscode");
 const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
 
 /** The configured path to the `noeta` executable (on `PATH` by default). Shared by the LSP and DAP. */
@@ -74,6 +83,34 @@ function registerDebugging(context) {
   );
 }
 
+/**
+ * Register the Noeta MCP server with the editor's language-model API (VS Code 1.101+), so an AI
+ * agent running in the editor (Copilot agent mode and friends) discovers `noeta mcp` without any
+ * manual configuration — the compiler's own docs/check/navigate/run/debug tools, over stdio.
+ */
+function registerMcp(context) {
+  // A host without the MCP API (an older VS Code, or a fork that doesn't ship `vscode.lm`): skip
+  // quietly — highlighting, the language server, and the debugger all still work.
+  if (
+    !lm ||
+    typeof lm.registerMcpServerDefinitionProvider !== "function" ||
+    typeof McpStdioServerDefinition !== "function"
+  ) {
+    return;
+  }
+  const provider = {
+    provideMcpServerDefinitions() {
+      return [new McpStdioServerDefinition("noeta", noetaCommand(), ["mcp"])];
+    },
+    resolveMcpServerDefinition(server) {
+      return server;
+    },
+  };
+  context.subscriptions.push(
+    lm.registerMcpServerDefinitionProvider("noeta.mcp", provider),
+  );
+}
+
 function activate(context) {
   /** @type {import("vscode-languageclient/node").LanguageClientOptions} */
   const clientOptions = {
@@ -107,6 +144,9 @@ function activate(context) {
   // Wire the debugger (independent of the language client — breakpoints work even if the server fails
   // to launch).
   registerDebugging(context);
+
+  // Offer `noeta mcp` to the editor's AI agents (no-op on hosts without the MCP API).
+  registerMcp(context);
 
   // Starting the client spawns the server; a failure to launch (e.g. `noeta` not on `PATH`) surfaces
   // in the "Noeta Language Server" output channel.
