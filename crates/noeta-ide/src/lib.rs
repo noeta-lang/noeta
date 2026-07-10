@@ -57,12 +57,20 @@ pub struct TextEdit {
     pub new_text: String,
 }
 
+/// The name of the synthetic caller representing the program's **top-level statements** — Noeta's
+/// entry point (there is no `main`). Adapters treat an item with this name as an anchor to jump
+/// to, never a node to expand (its selection range sits on a call site, not a declaration).
+pub const TOP_LEVEL: &str = "(top level)";
+
 /// A function in the call hierarchy (ide-ui U0): its name (`Type.method` for methods), the `@role`
 /// bindings it bears (`Enum.Variant`, from the merged program's reflection index — the item
 /// detail), and where it lives. Field-compatible with the LSP `CallHierarchyItem` essentials.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HierarchyItem {
     pub name: String,
+    /// [`SymbolKind::Method`] for a method, else [`SymbolKind::Function`] (including the synthetic
+    /// `(top level)` caller — Noeta's entry is the top-level statement sequence).
+    pub kind: SymbolKind,
     pub roles: Vec<String>,
     pub uri: String,
     /// The whole declaration.
@@ -863,20 +871,59 @@ impl DocumentStore {
         )
     }
 
+    /// The workspace serving `uri` and the [`SourceId`] `uri` carries within it: an open document
+    /// is its own workspace's entry; otherwise any open workspace that discovered `uri` as a
+    /// sibling or dependency module answers for it (same merged program either way). This is what
+    /// lets call-hierarchy expansion continue from an item in a file the user never opened — the
+    /// hierarchy requests address items by `(uri, selection range)`, not by the entry document.
+    fn workspace_of(&self, uri: &str) -> Option<(&WorkspaceCache, SourceId)> {
+        if let Some(cache) = self.workspaces.get(uri) {
+            return Some((cache, SourceId::FIRST));
+        }
+        self.workspaces.values().find_map(|cache| {
+            let idx = cache
+                .source_uris
+                .iter()
+                .position(|u| u == uri)
+                .or_else(|| {
+                    cache
+                        .dep_uris
+                        .iter()
+                        .position(|u| u == uri)
+                        .map(|i| i + cache.programs.len())
+                })?;
+            Some((cache, SourceId(idx as u32)))
+        })
+    }
+
+    /// The source text of `source` within `cache` (entry + siblings, then dependency modules —
+    /// the same id layout [`Self::locate`] maps).
+    fn source_text(&self, cache: &WorkspaceCache, source: SourceId) -> Option<&String> {
+        let idx = source.0 as usize;
+        let program = if idx < cache.programs.len() {
+            cache.programs.get(idx)?
+        } else {
+            cache.dep_programs.get(idx - cache.programs.len())?
+        };
+        Some(program.text(&self.db))
+    }
+
     /// The function the cursor addresses, as a call-hierarchy item (ide-ui U0): its declared name,
     /// the `@role` bindings it bears, and its location. The cursor may be on the function's name,
     /// on a call/reference site (resolving to the callee), or anywhere inside the declaration.
-    /// `None` if the document is unknown or the cursor addresses no function.
+    /// `uri` may be any file of an open workspace, not just an open document (see
+    /// [`Self::workspace_of`]). `None` if no workspace covers the file or the cursor addresses no
+    /// function.
     pub fn function_at(
         &self,
         uri: &str,
         position: Position,
         encoding: Encoding,
     ) -> Option<HierarchyItem> {
-        let cache = self.workspaces.get(uri)?;
-        let offset = LineIndex::new(cache.entry().text(&self.db)).offset(position, encoding);
+        let (cache, source) = self.workspace_of(uri)?;
+        let offset = LineIndex::new(self.source_text(cache, source)?).offset(position, encoding);
         let (graph, roles) = self.call_graph(cache);
-        let idx = graph.function_at(offset, SourceId::FIRST)?;
+        let idx = graph.function_at(offset, source)?;
         self.hierarchy_item(cache, &graph, &roles, idx, encoding)
     }
 
@@ -890,10 +937,10 @@ impl DocumentStore {
         position: Position,
         encoding: Encoding,
     ) -> Option<Vec<HierarchyCall>> {
-        let cache = self.workspaces.get(uri)?;
-        let offset = LineIndex::new(cache.entry().text(&self.db)).offset(position, encoding);
+        let (cache, source) = self.workspace_of(uri)?;
+        let offset = LineIndex::new(self.source_text(cache, source)?).offset(position, encoding);
         let (graph, roles) = self.call_graph(cache);
-        let caller = graph.function_at(offset, SourceId::FIRST)?;
+        let caller = graph.function_at(offset, source)?;
 
         // Group the caller's edges by callee, first-site order (edges are already source-ordered).
         let mut groups: Vec<(usize, Vec<(Range, bool)>)> = Vec::new();
@@ -930,10 +977,10 @@ impl DocumentStore {
         position: Position,
         encoding: Encoding,
     ) -> Option<Vec<HierarchyCall>> {
-        let cache = self.workspaces.get(uri)?;
-        let offset = LineIndex::new(cache.entry().text(&self.db)).offset(position, encoding);
+        let (cache, source) = self.workspace_of(uri)?;
+        let offset = LineIndex::new(self.source_text(cache, source)?).offset(position, encoding);
         let (graph, roles) = self.call_graph(cache);
-        let target = graph.function_at(offset, SourceId::FIRST)?;
+        let target = graph.function_at(offset, source)?;
 
         // One group per caller: `(caller, flagged sites, the sites' URI — the caller's document)`.
         type CallerGroup = (Option<usize>, Vec<(Range, bool)>, String);
@@ -957,7 +1004,8 @@ impl DocumentStore {
                     let item = match caller {
                         Some(idx) => self.hierarchy_item(cache, &graph, &roles, idx, encoding)?,
                         None => HierarchyItem {
-                            name: "(top level)".to_string(),
+                            name: TOP_LEVEL.to_string(),
+                            kind: SymbolKind::Function,
                             roles: Vec::new(),
                             uri: site_uri,
                             range: sites[0].0,
@@ -1020,6 +1068,11 @@ impl DocumentStore {
         let (_, range) = self.locate(cache, f.decl_span, encoding)?;
         Some(HierarchyItem {
             name: f.name.clone(),
+            kind: if f.method {
+                SymbolKind::Method
+            } else {
+                SymbolKind::Function
+            },
             roles: roles.get(&f.name).cloned().unwrap_or_default(),
             uri,
             range,
@@ -2879,6 +2932,33 @@ echo handle(1)
             calls[0].item.uri
         );
         assert_eq!(calls[0].sites[0].0.start.line, 1);
+    }
+
+    #[test]
+    fn hierarchy_answers_for_an_unopened_sibling_file() {
+        // Expanding a cross-file node hands back the *sibling's* URI — which the user never
+        // opened. The query must resolve through the open workspace that discovered it.
+        let dir = temp_workspace(
+            "hierarchy_unopened",
+            &[(
+                "util.noe",
+                "namespace App.Util;\npub fn helper(): int { return 1 }\n",
+            )],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let util_uri = path_to_uri(&dir.join("util.noe"));
+        let mut store = DocumentStore::default();
+        store.open(
+            &entry_uri,
+            "use App.Util.helper;\nfn work(): int { return helper() }\necho work()\n".to_string(),
+        );
+        let into_helper = store
+            .incoming_calls(&util_uri, Position::new(1, 8), Encoding::Utf16)
+            .expect("a sibling file answers through the open workspace");
+        assert_eq!(into_helper.len(), 1, "calls: {into_helper:?}");
+        assert_eq!(into_helper[0].item.name, "work");
+        assert!(into_helper[0].item.uri.ends_with("main.noe"));
+        assert_eq!(into_helper[0].sites[0].0.start.line, 1);
     }
 
     #[test]

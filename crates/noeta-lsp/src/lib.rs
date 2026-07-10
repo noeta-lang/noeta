@@ -13,7 +13,7 @@
 
 use std::sync::Mutex;
 
-use noeta_ide::{DocumentStore, Encoding, LineIndex, completion, inlay, semtokens};
+use noeta_ide::{DocumentStore, Encoding, LineIndex, TOP_LEVEL, completion, inlay, semtokens};
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server};
@@ -154,6 +154,50 @@ fn to_document_symbol(symbol: noeta_ide::DocumentSymbol) -> DocumentSymbol {
                 .collect()
         }),
     }
+}
+
+/// The call-hierarchy item detail line: the function's `@role` bindings, plus a marker when the
+/// group reaches it only as a **passed value** (never a syntactic call — a callback or handler
+/// registration). This is where the engine's static-analysis honesty surfaces in the native UI.
+fn hierarchy_detail(roles: &[String], reference_only: bool) -> Option<String> {
+    let mut parts: Vec<&str> = roles.iter().map(String::as_str).collect();
+    if reference_only {
+        parts.push("reference (passed as value)");
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// Map an engine [`HierarchyItem`](noeta_ide::HierarchyItem) (spans already resolved) to the LSP
+/// wire item. `None` if its URI does not parse (the item would not be navigable).
+fn to_call_hierarchy_item(
+    item: noeta_ide::HierarchyItem,
+    detail: Option<String>,
+) -> Option<CallHierarchyItem> {
+    let kind = match item.kind {
+        noeta_ide::SymbolKind::Method => SymbolKind::METHOD,
+        _ => SymbolKind::FUNCTION,
+    };
+    Some(CallHierarchyItem {
+        name: item.name,
+        kind,
+        tags: None,
+        detail,
+        uri: item.uri.parse().ok()?,
+        range: wire_range(item.range),
+        selection_range: wire_range(item.selection_range),
+        data: None,
+    })
+}
+
+/// Map one engine [`HierarchyCall`](noeta_ide::HierarchyCall) group to `(wire item, fromRanges)` —
+/// the shared shape of incoming and outgoing answers (both directions' `fromRanges` live in the
+/// caller's document, which is how the engine returns them).
+fn to_hierarchy_call(call: noeta_ide::HierarchyCall) -> Option<(CallHierarchyItem, Vec<Range>)> {
+    let reference_only = call.sites.iter().all(|(_, is_call)| !is_call);
+    let detail = hierarchy_detail(&call.item.roles, reference_only);
+    let item = to_call_hierarchy_item(call.item, detail)?;
+    let ranges = call.sites.into_iter().map(|(r, _)| wire_range(r)).collect();
+    Some((item, ranges))
 }
 
 /// Pick the position encoding: prefer UTF-8 when the client advertises support for it (LSP 3.17),
@@ -305,6 +349,9 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![".".to_string()]),
                     ..Default::default()
                 }),
+                // Call hierarchy (ide-ui U1) over the shared static call graph — the same
+                // engine the MCP `trace` tool reads; items carry `@role` bindings in the detail.
+                call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -633,6 +680,81 @@ impl LanguageServer for Backend {
         self.client.publish_diagnostics(uri, Vec::new(), None).await;
         self.publish_all().await;
     }
+
+    async fn prepare_call_hierarchy(
+        &self,
+        params: CallHierarchyPrepareParams,
+    ) -> Result<Option<Vec<CallHierarchyItem>>> {
+        let position_params = params.text_document_position_params;
+        let uri = position_params.text_document.uri;
+        let item = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.function_at(
+                uri.as_str(),
+                ide_position(position_params.position),
+                self.encoding(),
+            )
+        };
+        Ok(item.and_then(|item| {
+            let detail = hierarchy_detail(&item.roles, false);
+            to_call_hierarchy_item(item, detail).map(|item| vec![item])
+        }))
+    }
+
+    /// Expansion requests address the function by the **item** the client holds (its URI +
+    /// selection range) — which may be a workspace file the user never opened; the store resolves
+    /// it through the open workspace that discovered it.
+    async fn incoming_calls(
+        &self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        let item = params.item;
+        // The synthetic `(top level)` caller is an anchor, not a traversable function — its
+        // selection range sits on a call site, which would re-resolve to the callee.
+        if item.name == TOP_LEVEL {
+            return Ok(Some(Vec::new()));
+        }
+        let calls = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.incoming_calls(
+                item.uri.as_str(),
+                ide_position(item.selection_range.start),
+                self.encoding(),
+            )
+        };
+        Ok(calls.map(|calls| {
+            calls
+                .into_iter()
+                .filter_map(to_hierarchy_call)
+                .map(|(from, from_ranges)| CallHierarchyIncomingCall { from, from_ranges })
+                .collect()
+        }))
+    }
+
+    async fn outgoing_calls(
+        &self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        let item = params.item;
+        if item.name == TOP_LEVEL {
+            return Ok(Some(Vec::new()));
+        }
+        let calls = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.outgoing_calls(
+                item.uri.as_str(),
+                ide_position(item.selection_range.start),
+                self.encoding(),
+            )
+        };
+        Ok(calls.map(|calls| {
+            calls
+                .into_iter()
+                .filter_map(to_hierarchy_call)
+                .map(|(to, from_ranges)| CallHierarchyOutgoingCall { to, from_ranges })
+                .collect()
+        }))
+    }
 }
 
 /// Run the language server over stdio, blocking until the client disconnects. Called by the
@@ -683,6 +805,57 @@ mod tests {
         assert_eq!(wire_position(ide_position(p)), p);
         let r = Range::new(Position::new(0, 1), Position::new(2, 4));
         assert_eq!(wire_range(ide_range(r)), r);
+    }
+
+    #[test]
+    fn call_hierarchy_maps_to_wire_items_with_roles_in_detail() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///h.noe",
+            "@attribute\n@role(Semantic.EntryPoint)\nstruct Route { path: string }\n\n#[Route(\"/x\")]\nfn handle(): int { return work() }\nfn work(): int { return 1 }\necho handle()\n"
+                .to_string(),
+        );
+        // Prepare on `handle`'s name (line 5) → a wire item with the role in the detail.
+        let item = store
+            .function_at(
+                "file:///h.noe",
+                noeta_ide::Position::new(5, 4),
+                Encoding::Utf8,
+            )
+            .expect("cursor on a fn name");
+        let detail = hierarchy_detail(&item.roles, false);
+        let wire = to_call_hierarchy_item(item, detail).expect("uri parses");
+        assert_eq!(wire.name, "handle");
+        assert_eq!(wire.kind, SymbolKind::FUNCTION);
+        assert_eq!(wire.detail.as_deref(), Some("Semantic.EntryPoint"));
+        assert_eq!(wire.selection_range.start.line, 5);
+
+        // Outgoing from handle → work, sites in handle's document (fromRanges).
+        let outgoing = store
+            .outgoing_calls(
+                "file:///h.noe",
+                noeta_ide::Position::new(5, 4),
+                Encoding::Utf8,
+            )
+            .expect("handle resolves");
+        let (to, from_ranges) = to_hierarchy_call(outgoing.into_iter().next().unwrap()).unwrap();
+        assert_eq!(to.name, "work");
+        assert_eq!(to.detail, None, "no roles, syntactic call — no detail line");
+        assert_eq!(from_ranges.len(), 1);
+        assert_eq!(from_ranges[0].start.line, 5);
+    }
+
+    #[test]
+    fn reference_only_groups_are_marked_in_the_detail() {
+        assert_eq!(
+            hierarchy_detail(&["Semantic.EntryPoint".to_string()], true).as_deref(),
+            Some("Semantic.EntryPoint · reference (passed as value)")
+        );
+        assert_eq!(
+            hierarchy_detail(&[], true).as_deref(),
+            Some("reference (passed as value)")
+        );
+        assert_eq!(hierarchy_detail(&[], false), None);
     }
 
     #[test]

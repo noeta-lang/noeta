@@ -33,6 +33,9 @@ pub struct FnNode {
     /// The whole declaration's span — the containment range that assigns call sites to this
     /// function.
     pub decl_span: Span,
+    /// True for a method (declared inside a type or `impl`); false for a top-level `fn`. The name
+    /// alone cannot tell (`Counter.bump` vs the namespace-qualified fn `App.Util.helper`).
+    pub method: bool,
 }
 
 /// Who an edge points at.
@@ -119,6 +122,7 @@ pub fn build(program: &Program, expr_types: &HashMap<Span, TypeRepr>, texts: &[&
                 name: decl.name.clone(),
                 name_span: decl.name_span,
                 decl_span: decl.span,
+                method: false,
             }),
             Stmt::Struct(decl) => {
                 for m in &decl.methods {
@@ -236,6 +240,7 @@ fn method_node(type_name: &str, method: &noeta_ast::FnDecl) -> FnNode {
         name: format!("{type_name}.{}", method.name),
         name_span: method.name_span,
         decl_span: method.span,
+        method: true,
     }
 }
 
