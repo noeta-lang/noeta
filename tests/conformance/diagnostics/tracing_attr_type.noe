@@ -2,6 +2,6 @@
 // passing a non-scalar is a static type error, not a runtime one — the "build it right" typing.
 // expect: error E0007 at 7:1
 // expect: exit 1
-use std.{telemetry}
+use std.{tracing}
 
-telemetry.span("x").set_attribute("bad", [1, 2]).end()
+tracing.span("x").set_attribute("bad", [1, 2]).end()

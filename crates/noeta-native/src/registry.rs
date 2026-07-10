@@ -415,6 +415,12 @@ pub struct ExtType {
     /// `T: Mergeable` bound (or any built-in-trait bound) is satisfied by this type. The CRDT types
     /// declare `["Mergeable"]`; a non-built-in name is ignored. Default empty.
     pub traits: &'static [&'static str],
+    /// Whether plain-`methods` arguments are **deep-marshalled** (a `Map`/`List`/object argument
+    /// projects to a full [`crate::NativeValue`] tree) rather than the cheap shallow projection
+    /// (containers → `Opaque`). The extern-type analogue of [`ExtModule::deep_marshal`]; set it for a
+    /// type whose methods take a container argument (the metrics instruments' `*_with(_, attrs)`).
+    /// Default `false` — most extern methods take scalars/handles.
+    pub deep_marshal: bool,
 }
 
 impl ExtType {
@@ -435,6 +441,7 @@ impl ExtType {
         ctx_dispatch: None,
         arena_getter: None,
         traits: &[],
+        deep_marshal: false,
     };
 
     /// The type's **qualified identity** (`std.id.Uuid`) — `namespace.name`. This is the string the

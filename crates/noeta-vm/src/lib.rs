@@ -2753,7 +2753,7 @@ impl<'m> Vm<'m> {
     /// `List<RoleBinding>` — each `{ target: string, role: Role }`. Shapes are built fresh; because
     /// shape equality is structural (name + variant + fields), the `Role` enum and `RoleBinding`
     /// struct match the tree-walker's by construction. (P2.7.)
-    fn materialize_roles(&self) -> Value {
+    fn materialize_roles(&self, role_enum: Option<&str>) -> Value {
         let binding_shape = noeta_object::intern_shape(Shape::object(
             ShapeKind::Struct,
             "RoleBinding",
@@ -2764,6 +2764,8 @@ impl<'m> Vm<'m> {
             .reflection
             .roles
             .iter()
+            // `roles_of::<E>()` keeps only bindings of enum `E`; bare `roles_of()` keeps all.
+            .filter(|r| role_enum.is_none_or(|e| r.enum_name == e))
             .map(|r| {
                 Value::object(
                     binding_shape,
@@ -5285,8 +5287,9 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
-                    Op::RolesOf { dst } => {
-                        let result = self.materialize_roles();
+                    Op::RolesOf { dst, role_enum } => {
+                        let filter = role_enum.map(|e| module.name(e));
+                        let result = self.materialize_roles(filter);
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }

@@ -16,8 +16,9 @@
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
     ArgKind, ArgSpec, AttrValue, CtxError, CtxOut, CtxResult, EntryArg, EntryCall, ErrorKind,
-    ExtCommand, NativeCtx, NativeValue, NetRequest, NetResponse, Scalar, Slot, SpanId, SpanKind,
-    SpanStatus, StdError, TraceContext, ctx_arity, no_function_error, panic_error,
+    ExtCommand, InstrumentId, InstrumentKind, MetricValue, NativeCtx, NativeValue, NetRequest,
+    NetResponse, Scalar, Slot, SpanId, SpanKind, SpanStatus, StdError, TraceContext, ctx_arity,
+    no_function_error, panic_error,
 };
 
 use crate::net::{REQUEST_TYPE_NAME, Request, request_header, request_path};
@@ -80,6 +81,25 @@ struct InFlight {
     fut: Slot,
     span: Option<SpanId>,
     context: Vec<u64>,
+    /// Auto-instrumentation metrics state for this request (M3; `None` when metrics are off): the
+    /// arrival time + method/route needed to record the duration histogram and balance the
+    /// active-requests counter at completion.
+    metrics: Option<ServerMetrics>,
+}
+
+/// Per-request metrics auto-instrumentation state (M3). Captured at accept, consumed at completion.
+struct ServerMetrics {
+    start_ms: u64,
+    method: String,
+    route: String,
+}
+
+/// The two instrument handles the server auto-instrumentation records into (M3), created once per
+/// `serve` when metrics are enabled: the request-duration histogram and the active-requests
+/// up/down counter. `None` when metrics are off — the whole per-request metrics path short-circuits.
+struct ServerInstruments {
+    duration: InstrumentId,
+    active: InstrumentId,
 }
 
 /// The reply for a handler that errors or returns a non-`Response`.
@@ -124,6 +144,21 @@ pub fn http_ctx_dispatch(
             // Auto-instrumentation gate: only wrap requests in a SERVER span when telemetry is
             // actually configured, so an unconfigured `noeta serve` does zero span work per request.
             let tracing = ctx.host().tel_enabled();
+            // The metrics twin (M3): each request records `http.server.request.duration` and
+            // balances `http.server.active_requests`. Gated on metrics being enabled; the two
+            // instruments are created once (get-or-create) up front.
+            let instruments = ctx.host().tel_metrics_enabled().then(|| ServerInstruments {
+                duration: ctx.host().metric_get_or_create(
+                    "http.server.request.duration",
+                    "s",
+                    InstrumentKind::Histogram,
+                ),
+                active: ctx.host().metric_get_or_create(
+                    "http.server.active_requests",
+                    "{request}",
+                    InstrumentKind::UpDownCounter,
+                ),
+            });
             // Each in-flight handler carries the SERVER span it runs under (`None` when tracing is
             // off), ended when the handler replies so the span's duration is the request's — plus
             // its own **task-local context** seeded with that span (T5b): handler futures are polled
@@ -151,12 +186,26 @@ pub fn http_ctx_dispatch(
                                 Some(request) => {
                                     ctx.free(accepted);
                                     let conn = request_conn(ctx, request)?;
-                                    // Open the SERVER span (parented on the inbound `traceparent`)
-                                    // before the handler runs, so its start marks request arrival.
-                                    let span = if tracing {
-                                        Some(start_server_span(ctx, request)?)
+                                    // Derive the OTel request inputs once when either signal is on —
+                                    // the span and the metrics share the name/method/route/parent.
+                                    let inputs = if tracing || instruments.is_some() {
+                                        Some(request_server_inputs(ctx, request)?)
                                     } else {
                                         None
+                                    };
+                                    // Open the SERVER span (parented on the inbound `traceparent`)
+                                    // before the handler runs, so its start marks request arrival.
+                                    let span = match (tracing, &inputs) {
+                                        (true, Some(i)) => Some(start_server_span(ctx, i)),
+                                        _ => None,
+                                    };
+                                    // Start the request's metrics (M3): +1 active_requests, and the
+                                    // arrival time for the duration histogram at completion.
+                                    let metrics = match (&instruments, &inputs) {
+                                        (Some(inst), Some(i)) => {
+                                            Some(start_server_metrics(ctx, inst, i))
+                                        }
+                                        _ => None,
                                     };
                                     // The handler's task-local context, seeded with its SERVER
                                     // span (empty when tracing is off — the swaps stay no-ops).
@@ -176,13 +225,16 @@ pub fn http_ctx_dispatch(
                                             fut,
                                             span,
                                             context,
+                                            metrics,
                                         }),
                                         Err(CtxError::Abort) => {
                                             end_server_span(ctx, span, 500);
+                                            end_server_metrics(ctx, &instruments, metrics, 500);
                                             reply(ctx, conn, server_error())?;
                                         }
                                         Err(e) => {
                                             end_server_span(ctx, span, 500);
+                                            end_server_metrics(ctx, &instruments, metrics, 500);
                                             return Err(e);
                                         }
                                     }
@@ -221,8 +273,15 @@ pub fn http_ctx_dispatch(
                             ctx.free(value);
                             let response = response.unwrap_or_else(server_error);
                             // End the span with the reply's status before writing it, so the span's
-                            // duration is the handler's and its status reflects the outcome.
+                            // duration is the handler's and its status reflects the outcome; record
+                            // the request's metrics (duration + -1 active) at the same boundary.
                             end_server_span(ctx, span, response.status);
+                            end_server_metrics(
+                                ctx,
+                                &instruments,
+                                in_flight[k].metrics.take(),
+                                response.status,
+                            );
                             reply(ctx, conn, response)?;
                             true
                         }
@@ -230,6 +289,7 @@ pub fn http_ctx_dispatch(
                         Err(CtxError::Abort) => {
                             ctx.free(fut);
                             end_server_span(ctx, span, 500);
+                            end_server_metrics(ctx, &instruments, in_flight[k].metrics.take(), 500);
                             reply(ctx, conn, server_error())?;
                             true
                         }
@@ -262,32 +322,100 @@ pub fn http_ctx_dispatch(
     }
 }
 
-/// Open the auto-instrumentation **SERVER** span for an accepted request: named `"{method} {route}"`,
-/// parented on the inbound W3C `traceparent` (so the server span continues the client's trace; a
-/// missing/malformed header → a fresh root, the forgiving-reader rule), with the OTel HTTP
-/// semantic-convention request attributes. The handler's spans do not auto-nest under it yet — that
-/// needs per-task async context (T5); this span is the correctly-parented, timed root per request.
-fn start_server_span(ctx: &mut dyn NativeCtx, request: Slot) -> CtxResult<SpanId> {
-    // Pull the owned span inputs out under the extern borrow, then start the span (which needs the
-    // host) once the borrow has ended.
+/// Derive the OTel request inputs from an accepted request (the name/method/route/parent shared by
+/// the SERVER span and the auto-metrics). Pulls the owned inputs out under the extern borrow so the
+/// host is free afterward.
+fn request_server_inputs(ctx: &mut dyn NativeCtx, request: Slot) -> CtxResult<ServerSpanInputs> {
     let mut inputs: Option<ServerSpanInputs> = None;
     ctx.with_extern(request, &mut |e| {
         if let Some(r) = e.as_any().downcast_ref::<Request>() {
             inputs = Some(server_span_inputs(&r.inner));
         }
     })?;
-    let ServerSpanInputs {
-        name,
-        method,
-        route,
-        parent,
-    } = inputs.expect("accept yields a Request extern value");
-    let span = ctx.host().tel_span_start(&name, SpanKind::Server, parent);
-    ctx.host()
-        .tel_span_set_attr(span, "http.request.method", AttrValue::Str(method.into()));
-    ctx.host()
-        .tel_span_set_attr(span, "url.path", AttrValue::Str(route.into()));
-    Ok(span)
+    Ok(inputs.expect("accept yields a Request extern value"))
+}
+
+/// Open the auto-instrumentation **SERVER** span for an accepted request: named `"{method} {route}"`,
+/// parented on the inbound W3C `traceparent` (so the server span continues the client's trace; a
+/// missing/malformed header → a fresh root, the forgiving-reader rule), with the OTel HTTP
+/// semantic-convention request attributes.
+fn start_server_span(ctx: &mut dyn NativeCtx, inputs: &ServerSpanInputs) -> SpanId {
+    let span = ctx
+        .host()
+        .tel_span_start(&inputs.name, SpanKind::Server, inputs.parent);
+    ctx.host().tel_span_set_attr(
+        span,
+        "http.request.method",
+        AttrValue::Str(inputs.method.as_str().into()),
+    );
+    ctx.host().tel_span_set_attr(
+        span,
+        "url.path",
+        AttrValue::Str(inputs.route.as_str().into()),
+    );
+    span
+}
+
+/// Start a request's auto-metrics (M3): increment `http.server.active_requests` (+1, keyed by
+/// method + route) and capture the arrival time for the duration histogram at completion.
+fn start_server_metrics(
+    ctx: &mut dyn NativeCtx,
+    inst: &ServerInstruments,
+    inputs: &ServerSpanInputs,
+) -> ServerMetrics {
+    let start_ms = ctx.host().clock_unix_ms();
+    ctx.host().metric_observe(
+        inst.active,
+        MetricValue::Int(1),
+        active_request_attrs(&inputs.method, &inputs.route),
+    );
+    ServerMetrics {
+        start_ms,
+        method: inputs.method.clone(),
+        route: inputs.route.clone(),
+    }
+}
+
+/// End a request's auto-metrics (M3; a no-op when metrics are off / `metrics` is `None`): record the
+/// `http.server.request.duration` histogram (seconds, keyed by method + route + status) and balance
+/// `http.server.active_requests` (−1, matching the +1's method + route key).
+fn end_server_metrics(
+    ctx: &mut dyn NativeCtx,
+    inst: &Option<ServerInstruments>,
+    metrics: Option<ServerMetrics>,
+    status: u16,
+) {
+    let (Some(inst), Some(m)) = (inst, metrics) else {
+        return;
+    };
+    let end_ms = ctx.host().clock_unix_ms();
+    // Duration in seconds (OTel unit `s`); the sandbox's logical clock does not advance within a
+    // request, so this reads 0.0 there — the real host's shared wall clock gives true durations.
+    let duration_s = end_ms.saturating_sub(m.start_ms) as f64 / 1000.0;
+    let mut duration_attrs = active_request_attrs(&m.method, &m.route);
+    duration_attrs.push((
+        "http.response.status_code".into(),
+        AttrValue::Int(status as i64),
+    ));
+    ctx.host().metric_observe(
+        inst.duration,
+        MetricValue::Float(duration_s),
+        duration_attrs,
+    );
+    ctx.host().metric_observe(
+        inst.active,
+        MetricValue::Int(-1),
+        active_request_attrs(&m.method, &m.route),
+    );
+}
+
+/// The attribute set shared by the active-requests +1/−1 (method + route). Kept in one place so the
+/// increment and decrement land in the same series (otherwise the gauge never returns to zero).
+fn active_request_attrs(method: &str, route: &str) -> Vec<(compact_str::CompactString, AttrValue)> {
+    vec![
+        ("http.request.method".into(), AttrValue::Str(method.into())),
+        ("http.route".into(), AttrValue::Str(route.into())),
+    ]
 }
 
 /// The pure inputs a request contributes to its SERVER span, split off the ctx seam so the OTel

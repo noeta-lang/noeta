@@ -1453,7 +1453,14 @@ impl Lowerer<'_> {
                 },
                 *span,
             )),
-            Expr::RolesOf { span } => Ok(self.emit(out, Rvalue::RolesOf { span: *span }, *span)),
+            Expr::RolesOf { ty, span } => Ok(self.emit(
+                out,
+                Rvalue::RolesOf {
+                    ty: ty.clone(),
+                    span: *span,
+                },
+                *span,
+            )),
             Expr::Invoke {
                 recv,
                 name,

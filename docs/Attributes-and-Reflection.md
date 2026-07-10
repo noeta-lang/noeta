@@ -91,9 +91,9 @@ for r in routes {
 }
 ```
 
-### `roles_of(): List<RoleBinding>`
+### `roles_of(): List<RoleBinding>` / `roles_of::<RoleEnum>(): List<RoleBinding>`
 
-The compile-time `(declaration, role)` index built from `@role(...)` tags — each binding has a `.target` and a `.role`.
+The compile-time `(declaration, role)` index built from `@role(...)` tags — each binding has a `.target` and a `.role`. The optional turbofish scopes the query to a single `@semantic` enum (the mirror of `attributes_of::<T>()`): `roles_of::<Semantic>()` returns only the bindings whose role is a `Semantic` variant, while bare `roles_of()` returns the whole index. The enum is resolved at compile time (closed-world); naming a non-`@semantic` type is an error (E0031).
 
 ### `invoke(recv, name, args): Result<dyn, dyn>`
 

@@ -397,7 +397,10 @@ impl Printer<'_> {
                 format!("from_bytes<{}>({})", ty, atom(blob))
             }
             Rvalue::AttributesOf { ty, .. } => format!("attributes_of<{}>", type_ref(ty)),
-            Rvalue::RolesOf { .. } => "roles_of()".to_string(),
+            Rvalue::RolesOf { ty, .. } => match ty {
+                Some(ty) => format!("roles_of<{}>", type_ref(ty)),
+                None => "roles_of()".to_string(),
+            },
             Rvalue::Invoke {
                 recv, name, args, ..
             } => format!("invoke({}, {}, {})", atom(recv), atom(name), atom(args)),

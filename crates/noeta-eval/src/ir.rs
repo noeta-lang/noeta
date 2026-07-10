@@ -1478,7 +1478,13 @@ impl Interpreter {
                     Value::Receiver(ChannelId::from_index(id)),
                 ])))
             }
-            noeta_ir::Rvalue::RolesOf { .. } => Ok(self.materialize_roles()),
+            noeta_ir::Rvalue::RolesOf { ty, .. } => {
+                let role_enum = ty.as_ref().and_then(|ty| match ty {
+                    noeta_ir::TypeRef::Named { name, .. } => Some(name.as_str()),
+                    _ => None,
+                });
+                Ok(self.materialize_roles(role_enum))
+            }
             noeta_ir::Rvalue::Invoke {
                 recv,
                 name,

@@ -1630,7 +1630,7 @@ impl Interpreter {
     /// `List<RoleBinding>` — each `{ target: string, role: Role }`. Builds fresh `TypeDef`s/enum
     /// values; the VM builds the matching shapes the same way, so the values agree by construction.
     /// (P2.7.)
-    fn materialize_roles(&self) -> Value {
+    fn materialize_roles(&self, role_enum: Option<&str>) -> Value {
         let binding_def = Rc::new(fresh_type_def(
             "RoleBinding",
             &["target".to_string(), "role".to_string()],
@@ -1640,6 +1640,8 @@ impl Interpreter {
             .reflection
             .roles
             .iter()
+            // `roles_of::<E>()` keeps only bindings of enum `E`; bare `roles_of()` keeps all.
+            .filter(|r| role_enum.is_none_or(|e| r.enum_name == e))
             .map(|r| {
                 // `binding_def` is `{ target, role }` — build the slots in that order.
                 let slots = vec![
@@ -2705,7 +2707,15 @@ impl Interpreter {
             let recv = Value::Extern(Rc::clone(cell));
             return self.call_ctx_type_method(type_name, recv, name, args, span);
         }
-        let nargs: Vec<noeta_stdlib::NativeValue> = args.iter().map(marshal_native_arg).collect();
+        // A type declaring `deep_marshal` (the metrics instruments' `*_with(_, attrs)`) projects a
+        // container argument to a full `NativeValue` tree; every other type uses the shallow
+        // projection — mirrors the VM's `call_extern_method`.
+        let deep = noeta_stdlib::registry::find_type(type_name).is_some_and(|t| t.deep_marshal);
+        let nargs: Vec<noeta_stdlib::NativeValue> = if deep {
+            args.iter().map(value_to_native_deep).collect()
+        } else {
+            args.iter().map(marshal_native_arg).collect()
+        };
         // `cell` is an independent `Rc`, so borrowing it and `self.host` at once is fine (the
         // FileHandle discipline).
         let result = noeta_stdlib::registry::dispatch_method(

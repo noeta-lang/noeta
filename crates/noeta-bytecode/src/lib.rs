@@ -712,11 +712,14 @@ pub enum Op {
         dst: Reg,
         type_name: NameId,
     },
-    /// `roles_of()`: `dst = List<RoleBinding>` — the `(declaration, Role)` semantic-role index from
-    /// the module's reflection info, each entry materialized into a `RoleBinding { target, role }`.
-    /// Compile-time resolved (closed-world); reads `Module::reflection`. (P2.7.)
+    /// `roles_of()` / `roles_of::<RoleEnum>()`: `dst = List<RoleBinding>` — the `(declaration, Role)`
+    /// semantic-role index from the module's reflection info, each entry materialized into a
+    /// `RoleBinding { target, role }`. Compile-time resolved (closed-world); reads
+    /// `Module::reflection`. (P2.7.) `role_enum` is `Some(name)` for the turbofish form, keeping only
+    /// bindings whose role enum matches (mirroring `AttributesOf`); `None` yields the whole index.
     RolesOf {
         dst: Reg,
+        role_enum: Option<NameId>,
     },
     /// `type_of(value)`: `dst = Type` — the runtime [`noeta_ast::reflect`] head-constructor descriptor
     /// of the value in `src` (`List(Dyn)`, `Named("Route")`, `Int`, …). Generics are erased at
@@ -1637,7 +1640,10 @@ fn op_repr(
         Op::AttributesOf { dst, type_name } => {
             format!("AttributesOf r{dst} <- attributes_of::<{}>()", n(type_name))
         }
-        Op::RolesOf { dst } => format!("RolesOf     r{dst} <- roles_of()"),
+        Op::RolesOf { dst, role_enum } => match role_enum {
+            Some(e) => format!("RolesOf     r{dst} <- roles_of::<{}>()", n(e)),
+            None => format!("RolesOf     r{dst} <- roles_of()"),
+        },
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
         Op::FromBytes {
             dst, src, schema, ..

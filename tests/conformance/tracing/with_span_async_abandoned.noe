@@ -4,11 +4,11 @@
 // 0 — the span simply stays unended (recorder/exporter only consume ended spans).
 // expect: stdout "made"
 // expect: exit 0
-use std.{telemetry}
+use std.{tracing}
 
 async fn never(): int {
     return 1
 }
 
-fut = telemetry.with_span("orphan", never)
+fut = tracing.with_span("orphan", never)
 echo "made"

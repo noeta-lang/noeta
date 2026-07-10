@@ -37,9 +37,10 @@ pub mod p2p_crypto;
 use compact_str::CompactString;
 use noeta_stdlib::net::accept_outcome;
 use noeta_stdlib::{
-    AttrValue, Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, NativeOut,
+    AttrValue, Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, InstrumentId,
+    InstrumentKind, LogRecord, Logging, MetricData, MetricStore, MetricValue, Metrics, NativeOut,
     NetRequest, NetResponse, Network, P2p, ReadSource, RealBody, Rng, SpanData, SpanEvent, SpanId,
-    SpanKind, SpanStatus, StdError, Telemetry, TraceContext,
+    SpanKind, SpanStatus, StdError, TraceContext, Tracing,
 };
 // Only the outbound-client (`ring-http-client`) path builds an `ExternBox` response body.
 #[cfg(feature = "ring-http-client")]
@@ -143,6 +144,19 @@ struct RealTelemetry {
     /// Ended spans awaiting export (flushed at [`telemetry::FLUSH_THRESHOLD`] or on teardown).
     #[cfg(feature = "telemetry")]
     buffer: Vec<SpanData>,
+    /// Emitted log records awaiting export (flushed at [`telemetry::FLUSH_THRESHOLD`] or teardown).
+    #[cfg(feature = "telemetry")]
+    logs_buffer: Vec<LogRecord>,
+    /// Host-side metric aggregation (native OTEL Phase M) — the same shared store the sandbox uses,
+    /// so aggregation is byte-identical. Behind an `Arc<Mutex<_>>` because the **periodic export
+    /// reader** (M2) reads it from a background thread while the interpreter records into it.
+    metrics: Arc<Mutex<MetricStore>>,
+    /// The metrics periodic-export reader (M2): a background thread that snapshots [`Self::metrics`]
+    /// every `OTEL_METRIC_EXPORT_INTERVAL` and POSTs it, plus a final flush on shutdown. Lazily
+    /// spawned on the first instrument creation when metrics are enabled; `None` otherwise. Dropping
+    /// it signals shutdown and joins (the thread does the final export).
+    #[cfg(feature = "telemetry")]
+    metric_exporter: Option<MetricExporter>,
 }
 
 impl RealTelemetry {
@@ -155,6 +169,11 @@ impl RealTelemetry {
             exporter: telemetry::OtlpExporter::from_env(),
             #[cfg(feature = "telemetry")]
             buffer: Vec::new(),
+            #[cfg(feature = "telemetry")]
+            logs_buffer: Vec::new(),
+            metrics: Arc::new(Mutex::new(MetricStore::default())),
+            #[cfg(feature = "telemetry")]
+            metric_exporter: None,
         }
     }
 }
@@ -956,13 +975,17 @@ impl Env for RealHost {
     }
 }
 
-impl Telemetry for RealHost {
+impl Tracing for RealHost {
     fn tel_enabled(&self) -> bool {
-        // On when an OTLP endpoint is configured (and the `telemetry` feature is compiled in);
-        // otherwise the null sink, and auto-instrumentation short-circuits.
+        // On when an OTLP **traces** endpoint is configured (and the `telemetry` feature is compiled
+        // in); otherwise the null sink, and auto-instrumentation short-circuits. Traces can be turned
+        // off independently of logs/metrics via `OTEL_TRACES_EXPORTER=none`.
         #[cfg(feature = "telemetry")]
         {
-            self.tel.exporter.is_some()
+            self.tel
+                .exporter
+                .as_ref()
+                .is_some_and(|e| e.traces_endpoint.is_some())
         }
         #[cfg(not(feature = "telemetry"))]
         {
@@ -1085,13 +1108,115 @@ impl Telemetry for RealHost {
     }
 }
 
+impl Logging for RealHost {
+    fn tel_logs_enabled(&self) -> bool {
+        // On when an OTLP **logs** endpoint is configured (and the `telemetry` feature is compiled
+        // in). Independent of traces/metrics — one signal can be on while the others are off.
+        #[cfg(feature = "telemetry")]
+        {
+            self.tel
+                .exporter
+                .as_ref()
+                .is_some_and(|e| e.logs_endpoint.is_some())
+        }
+        #[cfg(not(feature = "telemetry"))]
+        {
+            false
+        }
+    }
+
+    #[cfg(feature = "telemetry")]
+    fn log_emit(&mut self, record: LogRecord) {
+        // Null sink for logs — no logs endpoint (or no exporter at all).
+        if self
+            .tel
+            .exporter
+            .as_ref()
+            .is_none_or(|e| e.logs_endpoint.is_none())
+        {
+            return;
+        }
+        self.tel.logs_buffer.push(record);
+        if self.tel.logs_buffer.len() >= telemetry::FLUSH_THRESHOLD {
+            self.flush_logs();
+        }
+    }
+
+    #[cfg(not(feature = "telemetry"))]
+    fn log_emit(&mut self, _record: LogRecord) {}
+}
+
+impl Metrics for RealHost {
+    fn tel_metrics_enabled(&self) -> bool {
+        // On when an OTLP **metrics** endpoint is configured (and the `telemetry` feature is compiled
+        // in). Independent of traces/logs — one signal can be on while the others are off.
+        #[cfg(feature = "telemetry")]
+        {
+            self.tel
+                .exporter
+                .as_ref()
+                .is_some_and(|e| e.metrics_endpoint.is_some())
+        }
+        #[cfg(not(feature = "telemetry"))]
+        {
+            false
+        }
+    }
+
+    fn metric_get_or_create(
+        &mut self,
+        name: &str,
+        unit: &str,
+        kind: InstrumentKind,
+    ) -> InstrumentId {
+        // The first instrument creation lazily starts the periodic export reader (real host + metrics
+        // enabled only), so a program that never uses metrics pays for no thread.
+        #[cfg(feature = "telemetry")]
+        self.ensure_metric_exporter();
+        self.tel
+            .metrics
+            .lock()
+            .expect("metric store not poisoned")
+            .get_or_create(name, unit, kind)
+    }
+
+    fn metric_observe(
+        &mut self,
+        inst: InstrumentId,
+        value: MetricValue,
+        attrs: Vec<(CompactString, AttrValue)>,
+    ) {
+        let now = self.clock_unix_ms();
+        self.tel
+            .metrics
+            .lock()
+            .expect("metric store not poisoned")
+            .observe(inst, value, attrs, now);
+    }
+
+    fn metric_collect(&mut self) -> Vec<MetricData> {
+        let now = self.clock_unix_ms();
+        self.tel
+            .metrics
+            .lock()
+            .expect("metric store not poisoned")
+            .collect(now)
+    }
+}
+
 impl RealHost {
-    /// Route an ended span to the exporter (feature on + endpoint configured) or drop it (null
-    /// sink / feature off). Buffers and flushes in minimal batches.
+    /// Route an ended span to the exporter (feature on + traces endpoint configured) or drop it
+    /// (null sink / feature off). Buffers and flushes in minimal batches.
     #[cfg(feature = "telemetry")]
     fn record_ended_span(&mut self, span: SpanData) {
-        if self.tel.exporter.is_none() {
-            return; // null sink — no endpoint configured
+        // Null sink for traces — no traces endpoint (or no exporter at all).
+        if self
+            .tel
+            .exporter
+            .as_ref()
+            .is_none_or(|e| e.traces_endpoint.is_none())
+        {
+            return;
         }
         self.tel.buffer.push(span);
         if self.tel.buffer.len() >= telemetry::FLUSH_THRESHOLD {
@@ -1106,40 +1231,254 @@ impl RealHost {
     /// export failure never affects the program (telemetry is a side effect).
     #[cfg(feature = "telemetry")]
     fn flush_telemetry(&mut self) {
-        let Some(exporter) = self.tel.exporter.as_ref() else {
+        let Some((endpoint, headers, body)) = self.tel.exporter.as_ref().and_then(|e| {
+            let endpoint = e.traces_endpoint.clone()?;
+            (!self.tel.buffer.is_empty()).then(|| {
+                (
+                    endpoint,
+                    e.headers.clone(),
+                    e.request_body(&self.tel.buffer),
+                )
+            })
+        }) else {
+            // No traces endpoint, or nothing buffered — drop any buffered spans and return.
             self.tel.buffer.clear();
             return;
         };
-        if self.tel.buffer.is_empty() {
+        self.otlp_post(&endpoint, &headers, &body);
+        self.tel.buffer.clear();
+    }
+
+    /// Export the buffered log records as one OTLP/JSON POST to the logs endpoint. Best-effort,
+    /// mirroring [`flush_telemetry`](Self::flush_telemetry) for the logs signal.
+    #[cfg(feature = "telemetry")]
+    fn flush_logs(&mut self) {
+        let Some((endpoint, headers, body)) = self.tel.exporter.as_ref().and_then(|e| {
+            let endpoint = e.logs_endpoint.clone()?;
+            (!self.tel.logs_buffer.is_empty()).then(|| {
+                (
+                    endpoint,
+                    e.headers.clone(),
+                    e.logs_request_body(&self.tel.logs_buffer),
+                )
+            })
+        }) else {
+            self.tel.logs_buffer.clear();
+            return;
+        };
+        self.otlp_post(&endpoint, &headers, &body);
+        self.tel.logs_buffer.clear();
+    }
+
+    /// Lazily start the metrics periodic-export reader on the first instrument creation — real host,
+    /// `telemetry` feature, and a configured metrics endpoint only. Idempotent (spawns at most once
+    /// per host). A program that never creates an instrument never spawns the thread.
+    #[cfg(feature = "telemetry")]
+    fn ensure_metric_exporter(&mut self) {
+        if self.tel.metric_exporter.is_some() {
             return;
         }
-        let body = exporter.request_body(&self.tel.buffer);
-        let endpoint = exporter.traces_endpoint.clone();
-        let headers = exporter.headers.clone();
+        let Some((endpoint, headers, service_name)) = self.tel.exporter.as_ref().and_then(|e| {
+            Some((
+                e.metrics_endpoint.clone()?,
+                e.headers.clone(),
+                e.service_name().to_string(),
+            ))
+        }) else {
+            return; // metrics not configured — no reader
+        };
+        self.tel.metric_exporter = Some(spawn_metric_exporter(
+            Arc::clone(&self.tel.metrics),
+            self.http.clone(),
+            endpoint,
+            headers,
+            service_name,
+            metric_export_interval(),
+        ));
+    }
+
+    /// POST one OTLP/JSON body to `url` with `headers`, on the host's runtime. Shared by all three
+    /// signals' flush paths. Best-effort — an export failure never affects the program.
+    #[cfg(feature = "telemetry")]
+    fn otlp_post(&self, url: &str, headers: &[(String, String)], body: &serde_json::Value) {
         let http = self.http.clone();
         let _ = self.runtime.block_on(async move {
-            let mut req = http.post(&endpoint).json(&body);
-            for (k, v) in &headers {
+            let mut req = http.post(url).json(body);
+            for (k, v) in headers {
                 req = req.header(k.as_str(), v.as_str());
             }
             req.send().await
         });
-        self.tel.buffer.clear();
     }
 }
 
-// Flush any buffered spans when the host (isolate) is torn down. Runs before the `runtime` field
-// drops (explicit `Drop::drop` precedes field drops), so `block_on` is still valid here.
+// Flush any buffered spans and logs when the host (isolate) is torn down. Runs before the `runtime`
+// field drops (explicit `Drop::drop` precedes field drops), so `block_on` is still valid here.
 #[cfg(feature = "telemetry")]
 impl Drop for RealHost {
     fn drop(&mut self) {
         self.flush_telemetry();
+        self.flush_logs();
+        // Drop the periodic reader: it signals shutdown, does a final export of the cumulative
+        // aggregation, and joins — the metrics teardown flush. (No reader ⇒ no metrics recorded.)
+        self.tel.metric_exporter.take();
     }
+}
+
+/// The metrics export interval from `OTEL_METRIC_EXPORT_INTERVAL` (milliseconds, OTel spec), default
+/// 60s. A non-positive / unparseable value falls back to the default.
+#[cfg(feature = "telemetry")]
+fn metric_export_interval() -> std::time::Duration {
+    let ms = std::env::var("OTEL_METRIC_EXPORT_INTERVAL")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&ms| ms > 0)
+        .unwrap_or(60_000);
+    std::time::Duration::from_millis(ms)
+}
+
+/// The metrics periodic-export reader (M2): a background thread snapshotting the shared
+/// [`MetricStore`] on an interval and POSTing the cumulative OTLP/JSON, plus a final export on
+/// shutdown. Real-host-only (the sandbox collects deterministically at teardown instead).
+#[cfg(feature = "telemetry")]
+struct MetricExporter {
+    /// Sending (or dropping) this signals the reader to do its final export and stop.
+    shutdown: std::sync::mpsc::Sender<()>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(feature = "telemetry")]
+impl std::fmt::Debug for MetricExporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetricExporter").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "telemetry")]
+impl Drop for MetricExporter {
+    fn drop(&mut self) {
+        let _ = self.shutdown.send(());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Spawn the periodic-export reader thread. It owns its own current-thread tokio runtime (the
+/// interpreter's runtime belongs to the interpreter thread and cannot be driven here); the `reqwest`
+/// client is cheaply cloneable and runtime-agnostic. Best-effort throughout — an export failure, or
+/// a failure to build the runtime, never affects the program.
+#[cfg(feature = "telemetry")]
+fn spawn_metric_exporter(
+    store: Arc<Mutex<MetricStore>>,
+    http: reqwest::Client,
+    endpoint: String,
+    headers: Vec<(String, String)>,
+    service_name: String,
+    interval: std::time::Duration,
+) -> MetricExporter {
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    let (shutdown, rx) = mpsc::channel::<()>();
+    let handle = std::thread::Builder::new()
+        .name("noeta-otel-metrics".into())
+        .spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            loop {
+                // Wake on the interval (a periodic export) or on shutdown (the final export).
+                let stop = !matches!(rx.recv_timeout(interval), Err(RecvTimeoutError::Timeout));
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                // Cumulative temporality: each export is the full running snapshot.
+                let data = store
+                    .lock()
+                    .expect("metric store not poisoned")
+                    .collect(now);
+                if !data.is_empty() {
+                    let body = telemetry::metrics_to_json(&data, &service_name);
+                    let _ = rt.block_on(async {
+                        let mut req = http.post(&endpoint).json(&body);
+                        for (k, v) in &headers {
+                            req = req.header(k.as_str(), v.as_str());
+                        }
+                        req.send().await
+                    });
+                }
+                if stop {
+                    break;
+                }
+            }
+        })
+        .ok();
+    MetricExporter { shutdown, handle }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M2 — the metrics periodic-export reader actually POSTs the aggregated OTLP/JSON. Runs the
+    /// reader against a local `TcpListener` (a stand-in collector) with a short interval, records a
+    /// counter into the shared store, and asserts the received request is an OTLP metrics body
+    /// carrying the aggregated value. A short client timeout keeps the shutdown/final export from
+    /// blocking on the unaccepted connection, so `drop`ping the reader (shutdown + join) is prompt.
+    #[cfg(feature = "telemetry")]
+    #[test]
+    fn periodic_reader_posts_the_aggregated_metrics() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let addr = listener.local_addr().unwrap();
+        let endpoint = format!("http://{addr}/v1/metrics");
+
+        let store = Arc::new(Mutex::new(MetricStore::default()));
+        {
+            let mut s = store.lock().unwrap();
+            let id = s.get_or_create("hits", "", InstrumentKind::Counter);
+            s.observe(id, MetricValue::Int(5), Vec::new(), 1_000);
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap();
+        let exporter = spawn_metric_exporter(
+            Arc::clone(&store),
+            client,
+            endpoint,
+            Vec::new(),
+            "svc".to_string(),
+            std::time::Duration::from_millis(50),
+        );
+
+        // Accept the first periodic tick's POST and read its request.
+        let (mut stream, _) = listener.accept().expect("reader connects");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .ok();
+        let mut buf = vec![0u8; 8192];
+        let n = stream.read(&mut buf).expect("read the request");
+        let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n");
+
+        drop(exporter); // shutdown + join (final export times out on the unaccepted socket)
+
+        assert!(
+            request.contains("resourceMetrics"),
+            "posted an OTLP metrics body; got:\n{request}"
+        );
+        assert!(request.contains("hits"), "carries the instrument name");
+        assert!(
+            request.contains("\"asInt\":\"5\""),
+            "carries the aggregated counter value"
+        );
+    }
 
     /// The `RealHost` p2p wiring under `ring-p2p`: the trait methods lazily start a real p2panda
     /// node and route through it (rather than the loopback broker). Single node, so no delivery —

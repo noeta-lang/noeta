@@ -1,9 +1,9 @@
 // A user may now declare a type whose short name matches a native extern type — `Span` is a native
-// type (`std.telemetry.Span`), but a program that does not import it is free to define its own
+// type (`std.tracing.Span`), but a program that does not import it is free to define its own
 // `struct Span`. The names never conflate: the native type carries the qualified identity
-// `std.telemetry.Span`, the user's is a distinct nominal type. (This declaration used to be E0049;
-// making extern types namespace-scoped is what unblocks it — and, by the same rule, lets a future
-// native `Counter`/`Gauge` coexist with the many user programs that declare their own `Counter`.)
+// `std.tracing.Span`, the user's is a distinct nominal type. (This declaration used to be E0049;
+// making extern types namespace-scoped is what unblocks it — and, by the same rule, lets the native
+// `std.metrics.Counter`/`Gauge` coexist with the many user programs that declare their own `Counter`.)
 // expect: stdout "span 7"
 // expect: stdout "true"
 // expect: exit 0

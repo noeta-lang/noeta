@@ -334,7 +334,7 @@ deterministic sandbox (tests) `server.serve` instead drives a fixed, documented 
 through the handler and returns — so a served program is reproducible and terminates in-oracle,
 the inbound mirror of the client's pure responder.
 
-## `telemetry`
+## `tracing`
 
 Production distributed tracing, emitted as OpenTelemetry ([Observability](Observability)). The
 scoped `with_span(name, body)` is the primary API; `span(name) -> Span` (with `set_attribute` /
@@ -342,9 +342,9 @@ scoped `with_span(name, body)` is the primary API; `span(name) -> Span` (with `s
 traceparent)` bridge W3C context across boundaries Noeta doesn't own.
 
 ```noeta ignore
-use std.{telemetry}
-telemetry.with_span("checkout", fn(): void {
-    span = telemetry.span("charge")
+use std.{tracing}
+tracing.with_span("checkout", fn(): void {
+    span = tracing.span("charge")
     span.set_attribute("amount", 4200)
     // … work …
     span.end()
@@ -356,6 +356,40 @@ configures a collector pays nothing. Once configured, server requests, async wor
 isolate messages are **auto-instrumented** into connected traces with no code changes. `Span` is a
 reserved type name (declaring your own is **E0049**); a non-scalar `set_attribute` value is a
 compile error (**E0007**). Full surface, config, and design on [Observability](Observability).
+
+## `log`
+
+OpenTelemetry **log records** ([Observability](Observability)), auto-correlated to the active span
+(trace + span id) — not `print`. `log.info` / `debug` / `warn` / `error` (and the generic
+`log.log(severity, message)`); the `*_with(message, attrs)` forms attach a `Map<string,
+string|int|float|bool>` of attributes.
+
+```noeta ignore
+use std.{log}
+log.info("server started")
+log.error_with("checkout failed", {"order": 42, "stage": "charge"})
+```
+
+Opt-in like tracing; a `log.info(...)` is free when no logs endpoint is configured. A log inside a
+`with_span` (or a server request) carries that span's ids automatically.
+
+## `metrics`
+
+OpenTelemetry **metrics** ([Observability](Observability)) — aggregated host-side into time series.
+`metrics.counter` / `up_down_counter` / `histogram` / `gauge` are get-or-create by name, returning a
+`Counter` / `Histogram` / `Gauge` handle; counters record with `.add(n)`, histograms/gauges with
+`.record(v)` (plus the `.add_with(n, attrs)` / `.record_with(v, attrs)` attributed forms).
+
+```noeta ignore
+use std.{metrics}
+hits = metrics.counter("http.requests")
+hits.add_with(1, {"route": "/orders", "status": 200})
+```
+
+`Counter`/`Histogram`/`Gauge` are namespaced extern types under `std.metrics` — `use`-imported (they
+coexist with a user's own `Counter`), needed only when you annotate one. Server requests are
+auto-instrumented with an `http.server.request.duration` histogram and an `http.server.active_requests`
+counter. Keep attribute cardinality low — each distinct attribute set is a stored series.
 
 ## `vec` & `quat`
 

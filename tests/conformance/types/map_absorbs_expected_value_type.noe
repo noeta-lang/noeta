@@ -1,0 +1,18 @@
+// A non-empty map literal absorbs an expected `Map<K, V>` — at a binding annotation OR a call
+// argument — by checking each value against `V` instead of cross-unifying the values. So a
+// heterogeneous literal is accepted where a `dyn` (or union) value type is expected, the map twin
+// of the list arm's bidirectional absorption. In synthesis position (no expectation) a heterogeneous
+// map is still an error (see `map_heterogeneous_values.noe`).
+// expect: stdout "ok"
+// expect: stdout "2"
+// expect: exit 0
+fn describe(m: Map<string, dyn>): string {
+    return "ok"
+}
+
+// Call-argument absorption: the mixed literal flows into the `Map<string, dyn>` parameter.
+echo describe({"route": "/x", "status": 200, "on": true})
+
+// Binding absorption, then read a value back (the map really is a usable `Map<string, dyn>`).
+attrs: Map<string, dyn> = {"a": 1, "b": "two"}
+echo attrs.len()

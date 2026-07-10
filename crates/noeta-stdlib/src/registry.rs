@@ -189,13 +189,45 @@ const P2P_TYPES: &[ExtType] = &[
 /// and the reactive handles (H5).
 const CORE_TYPES: &[ExtType] = &[
     // `Span` (native OTEL T1) — a mutable, effectful, host-coupled handle (like `FileHandle`): its
-    // methods reach the `Telemetry` capability by id. NOT key-capable (identifies a host resource).
+    // methods reach the `Tracing` capability by id. NOT key-capable (identifies a host resource).
     ExtType {
-        name: crate::telemetry::SPAN_TYPE_NAME,
-        namespace: "std.telemetry",
-        methods: crate::telemetry::SPAN_METHODS,
-        dispatch: crate::telemetry::span_method_dispatch,
+        name: crate::tracing::SPAN_TYPE_NAME,
+        namespace: "std.tracing",
+        methods: crate::tracing::SPAN_METHODS,
+        dispatch: crate::tracing::span_method_dispatch,
         key_capable: false,
+        ..ExtType::DEFAULTS
+    },
+    // The metrics instrument handles (native OTEL Phase M) — mutable, effectful, host-coupled like
+    // `Span`: their methods reach the `Metrics` capability by id. Namespaced under `std.metrics`, so
+    // the idiomatic OTel names are `use`-imported (not globally reserved) and coexist with a user's
+    // own `Counter`. Not key-capable; `deep_marshal` so the `*_with(_, attrs)` map argument arrives
+    // as a full `NativeValue`.
+    ExtType {
+        name: crate::metrics::COUNTER_TYPE_NAME,
+        namespace: "std.metrics",
+        methods: crate::metrics::COUNTER_METHODS,
+        dispatch: crate::metrics::counter_method_dispatch,
+        key_capable: false,
+        deep_marshal: true,
+        ..ExtType::DEFAULTS
+    },
+    ExtType {
+        name: crate::metrics::HISTOGRAM_TYPE_NAME,
+        namespace: "std.metrics",
+        methods: crate::metrics::RECORD_METHODS,
+        dispatch: crate::metrics::histogram_method_dispatch,
+        key_capable: false,
+        deep_marshal: true,
+        ..ExtType::DEFAULTS
+    },
+    ExtType {
+        name: crate::metrics::GAUGE_TYPE_NAME,
+        namespace: "std.metrics",
+        methods: crate::metrics::RECORD_METHODS,
+        dispatch: crate::metrics::gauge_method_dispatch,
+        key_capable: false,
+        deep_marshal: true,
         ..ExtType::DEFAULTS
     },
     ExtType {
@@ -2398,16 +2430,32 @@ const CORE_MODULES: &[ExtModule] = &[
         deep_marshal: false,
         ..ExtModule::DEFAULTS
     },
-    // `telemetry` (native OTEL T1–T2) — the tracing SDK facade. `span`/`with_span`/`current_context`
+    // `tracing` (native OTEL T1–T2) — the tracing SDK facade. `span`/`with_span`/`current_context`
     // reach the per-run active-span stack (and `with_span` calls a closure), so they are ctx
     // functions; the `Span` type's own methods stay plain (they only touch the host). The span tree
     // lives host-side (recorder / OTLP exporter).
     ExtModule {
-        name: "telemetry",
-        ctx_functions: crate::telemetry::TELEMETRY_CTX_FNS,
-        ctx_dispatch: Some(|func, ctx, args| {
-            crate::telemetry::telemetry_ctx_dispatch(func, ctx, args)
-        }),
+        name: "tracing",
+        ctx_functions: crate::tracing::TRACING_CTX_FNS,
+        ctx_dispatch: Some(|func, ctx, args| crate::tracing::tracing_ctx_dispatch(func, ctx, args)),
+        ..ExtModule::DEFAULTS
+    },
+    // `log` (native OTEL Phase L) — the logs SDK facade. Emits OTel `LogRecord`s auto-correlated to
+    // the active span, so its functions read the per-task active-span stack and are ctx functions
+    // (like `tracing`). Records go host-side (recorder / OTLP `/v1/logs` exporter), never to stdout.
+    ExtModule {
+        name: "log",
+        ctx_functions: crate::log::LOG_CTX_FNS,
+        ctx_dispatch: Some(|func, ctx, args| crate::log::log_ctx_dispatch(func, ctx, args)),
+        ..ExtModule::DEFAULTS
+    },
+    // `metrics` (native OTEL Phase M) — the metrics SDK facade. Instrument constructors are
+    // get-or-create over host-owned aggregation, so they are ctx functions; the `Counter`/`Histogram`/
+    // `Gauge` handle methods are plain (host-only). Aggregation + export live host-side.
+    ExtModule {
+        name: "metrics",
+        ctx_functions: crate::metrics::METRICS_CTX_FNS,
+        ctx_dispatch: Some(|func, ctx, args| crate::metrics::metrics_ctx_dispatch(func, ctx, args)),
         ..ExtModule::DEFAULTS
     },
     ExtModule {
@@ -2900,7 +2948,10 @@ mod tests {
             ("Response", "std.http.Response"),
             ("Request", "std.http.Request"),
             ("FileHandle", "std.fs.FileHandle"),
-            ("Span", "std.telemetry.Span"),
+            ("Span", "std.tracing.Span"),
+            ("Counter", "std.metrics.Counter"),
+            ("Histogram", "std.metrics.Histogram"),
+            ("Gauge", "std.metrics.Gauge"),
             ("Cell", "std.cell.Cell"),
             ("Signal", "std.reactive.Signal"),
             ("Computed", "std.reactive.Computed"),
