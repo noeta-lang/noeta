@@ -1881,6 +1881,44 @@ fn map_to_non_packed_struct_is_not_recorded() {
     assert_eq!(n, 0);
 }
 
+// --- `Checked::packed_layouts` — the name-keyed IDE storage-fact index ---
+
+/// Parse + check `text` and return the name→layout table the IDE reads.
+fn packed_layout_table(text: &str) -> std::collections::HashMap<String, PackedLayout> {
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "test program must parse cleanly: {:?}",
+        parsed.diagnostics
+    );
+    super::check_all(&parsed.program).packed_layouts
+}
+
+#[test]
+fn packed_layouts_index_every_packed_struct_by_name() {
+    let table = packed_layout_table(
+        "@packed struct Vec3 { x: f32; y: f32; z: f32 }\n\
+         @packed(layout: column) struct Particle { n: int; alive: bool }\n\
+         struct Boxed { s: string }\n\
+         echo 1\n",
+    );
+    assert_eq!(table.len(), 2, "non-packed `Boxed` is absent: {table:?}");
+    let vec3 = &table["Vec3"];
+    assert!(!vec3.column);
+    assert_eq!(vec3.byte_size(), 12); // 3 × f32
+    let particle = &table["Particle"];
+    assert!(particle.column);
+    assert_eq!(particle.byte_size(), 9); // int(8) + bool(1)
+}
+
+#[test]
+fn packed_layouts_empty_without_packed_structs() {
+    let table = packed_layout_table("struct P { x: int; y: int }\necho 1\n");
+    assert!(table.is_empty());
+}
+
 #[test]
 fn plain_field_read_is_not_fusable() {
     // A field read whose receiver is not an index expression is untouched.

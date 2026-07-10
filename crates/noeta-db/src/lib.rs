@@ -113,6 +113,9 @@ pub struct Checked {
     /// Method-bundle bindings by target type (kernel-methods K4) — what member completion reads
     /// to offer bound methods.
     pub bundle_bindings: std::collections::HashMap<String, Vec<(String, String)>>,
+    /// Every `@packed` struct's flat layout by type name — the IDE storage-fact index hover and
+    /// inlay hints read (see [`noeta_check::Checked::packed_layouts`]).
+    pub packed_layouts: std::collections::HashMap<String, noeta_ast::reflect::PackedLayout>,
 }
 
 /// Compiler output: a [`Module`], or the first construct outside the VM's subset.
@@ -206,6 +209,7 @@ fn from_check_output(out: noeta_check::Checked) -> Checked {
         expr_types: out.expr_types,
         sites: out.sites,
         bundle_bindings: out.bundle_bindings,
+        packed_layouts: out.packed_layouts,
     }
 }
 
@@ -433,6 +437,7 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             expr_types: std::collections::HashMap::new(),
             sites: noeta_check::Sites::default(),
             bundle_bindings: std::collections::HashMap::new(),
+            packed_layouts: std::collections::HashMap::new(),
         },
     }
 }
@@ -450,6 +455,7 @@ pub fn linked_checked_ide(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             expr_types: std::collections::HashMap::new(),
             sites: noeta_check::Sites::default(),
             bundle_bindings: std::collections::HashMap::new(),
+            packed_layouts: std::collections::HashMap::new(),
         },
     }
 }

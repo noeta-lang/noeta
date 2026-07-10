@@ -109,6 +109,12 @@ pub struct Checked {
     /// reads it to offer bound methods in member completion; a handful of entries, so it is
     /// populated on every run.
     pub bundle_bindings: HashMap<String, Vec<(String, String)>>,
+    /// Every `@packed` struct's flat layout, by type name — the IDE's storage-fact index (hover and
+    /// inlay hints read it to say "this type is packed, this list is flat/column-major"). An IDE
+    /// read-side index like [`Checked::expr_types`], not a compile input — which is why it lives
+    /// beside [`Sites`], not inside it; a handful of entries, so it is populated on every run, like
+    /// [`Checked::bundle_bindings`].
+    pub packed_layouts: HashMap<String, noeta_ast::reflect::PackedLayout>,
 }
 
 /// The checker's **compile-input bundle**: every span-keyed codegen hint plus destructor relevance,
@@ -227,6 +233,7 @@ pub fn check_all_session(program: &Program) -> (Checked, SessionChecker) {
         expr_types: checker.sites.expr_types.clone(),
         sites: checker.sites.clone().into_sites(checker.relevance.clone()),
         bundle_bindings: checker.bundle_bindings_public(),
+        packed_layouts: checker.packed_layouts_public(),
     };
     (checked, SessionChecker { checker, env })
 }
@@ -1049,6 +1056,7 @@ impl Checker {
     /// (`check_all` moves; the session flavor clones and keeps the checker alive instead).
     fn into_checked(self) -> Checked {
         let bundle_bindings = self.bundle_bindings_public();
+        let packed_layouts = self.packed_layouts_public();
         let relevance = self.relevance;
         let mut sites = self.sites;
         let expr_types = std::mem::take(&mut sites.expr_types);
@@ -1057,7 +1065,21 @@ impl Checker {
             expr_types,
             sites: sites.into_sites(relevance),
             bundle_bindings,
+            packed_layouts,
         }
+    }
+
+    /// Every `@packed` struct's flat layout, by type name — the IDE storage-fact index
+    /// ([`Checked::packed_layouts`]). A malformed packed struct (a field E0038 already diagnosed)
+    /// yields no layout and is simply absent.
+    fn packed_layouts_public(&self) -> HashMap<String, noeta_ast::reflect::PackedLayout> {
+        self.packed_structs
+            .iter()
+            .filter_map(|name| {
+                let ty = Type::Named(name.clone(), Vec::new());
+                Some((name.clone(), self.packed_layout(&ty)?))
+            })
+            .collect()
     }
 
     /// The bundle bindings as the public `(module, bundle)` form (kernel-methods K4) — what the
