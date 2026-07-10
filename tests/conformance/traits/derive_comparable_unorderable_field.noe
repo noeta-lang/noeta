@@ -1,0 +1,9 @@
+// `@derive(Comparable)` requires every field to have a defined ordering. A `List` has none
+// (under any values), so the derive is rejected statically (E0050) instead of type-checking and
+// then failing at the first runtime comparison.
+// expect: error E0050 at 6:9
+// expect: exit 1
+@derive(Comparable)
+struct Basket {
+    items: List<int>
+}

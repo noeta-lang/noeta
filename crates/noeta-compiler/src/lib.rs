@@ -644,11 +644,19 @@ enum TypeInfo {
     /// index (an enum `fn` is callable as an associated function `E.f(...)` and as an instance
     /// method `value.f(...)`, exactly like a class method — the unified body, object-model slice 3).
     Enum {
-        variants: HashMap<String, Vec<String>>,
+        variants: HashMap<String, VariantSlots>,
         fns: HashMap<String, u32>,
     },
     /// A `use`-imported stub whose real field set is unknown until a literal supplies it.
     Opaque,
+}
+
+/// One enum variant's compile-time record: its **declaration index** (what derived `Comparable`
+/// orders by — baked into the variant's [`Shape`]) and its positional data-field names.
+#[derive(Clone)]
+struct VariantSlots {
+    index: u32,
+    fields: Vec<String>,
 }
 
 /// Accumulates the prototype table, the shape/method side tables, and the top-level type
@@ -791,7 +799,16 @@ impl ModuleCompiler {
             TypeInfo::Enum {
                 variants: ["Less", "Equal", "Greater"]
                     .into_iter()
-                    .map(|v| (v.to_string(), Vec::new()))
+                    .enumerate()
+                    .map(|(i, v)| {
+                        (
+                            v.to_string(),
+                            VariantSlots {
+                                index: i as u32,
+                                fields: Vec::new(),
+                            },
+                        )
+                    })
                     .collect(),
                 fns: HashMap::new(),
             },
@@ -878,13 +895,31 @@ impl ModuleCompiler {
                     let variants = decl
                         .variants
                         .iter()
-                        .map(|v| {
+                        .enumerate()
+                        .map(|(i, v)| {
                             (
                                 v.name.clone(),
-                                v.fields.iter().map(|f| f.name.clone()).collect(),
+                                VariantSlots {
+                                    index: i as u32,
+                                    fields: v.fields.iter().map(|f| f.name.clone()).collect(),
+                                },
                             )
                         })
                         .collect();
+                    // Enum derives, same precedence rules as a struct/class: a hand-written
+                    // `compare`/`to_json` (via an `impl` block) beats the derived version. Ordering
+                    // is variant declaration index, then payload fields (the shape carries the
+                    // index — see `Shape::variant_index`).
+                    if noeta_ast::derives_trait(&decl.derives, "Comparable")
+                        && !decl.methods.iter().any(|m| m.name == "compare")
+                    {
+                        self.comparable_derives.push(decl.name.clone());
+                    }
+                    if noeta_ast::derives_trait(&decl.derives, "Serialize")
+                        && !decl.methods.iter().any(|m| m.name == "to_json")
+                    {
+                        self.tojson_derives.push(decl.name.clone());
+                    }
                     // Reserve a prototype per method, shared by associated-fn and instance-method
                     // dispatch (the unified body, object-model slice 3).
                     let mut fns = HashMap::new();
@@ -1275,12 +1310,16 @@ impl ModuleCompiler {
     /// constructor, `Ok(x)`/`none`, rather than `Type.Variant`). The data carried varies at
     /// the use site, so the shape needs no declared field names.
     fn builtin_enum_shape(&mut self, enum_name: &str, variant: &str) -> u32 {
-        self.intern_shape(Shape::enum_variant(
-            enum_name.to_string(),
-            variant.to_string(),
-            Vec::new(),
-            true,
-        ))
+        // The built-in enums' defined variant order: `none < some`, `Ok < Err` (derived
+        // `Comparable` over an `?T`/`Result` payload orders by variant, then payload).
+        let index = match variant {
+            "none" | "Ok" => 0,
+            _ => 1,
+        };
+        self.intern_shape(
+            Shape::enum_variant(enum_name.to_string(), variant.to_string(), Vec::new(), true)
+                .with_variant_index(index),
+        )
     }
 }
 
@@ -3551,13 +3590,13 @@ impl<'m> FnCompiler<'m> {
         } = receiver
         {
             enum Member {
-                EmptyVariant,
+                EmptyVariant(u32),
                 Unsupported(&'static str),
                 FieldAccess,
             }
             let kind = match self.module.types.get(type_name) {
                 Some(TypeInfo::Enum { variants, .. }) => match variants.get(name) {
-                    Some(fields) if fields.is_empty() => Member::EmptyVariant,
+                    Some(v) if v.fields.is_empty() => Member::EmptyVariant(v.index),
                     Some(_) => Member::Unsupported("data-carrying variant used without arguments"),
                     None => Member::Unsupported("unknown enum variant"),
                 },
@@ -3565,13 +3604,11 @@ impl<'m> FnCompiler<'m> {
                 None => Member::FieldAccess,
             };
             match kind {
-                Member::EmptyVariant => {
-                    let shape = self.module.intern_shape(Shape::enum_variant(
-                        type_name.clone(),
-                        name.to_string(),
-                        Vec::new(),
-                        false,
-                    ));
+                Member::EmptyVariant(index) => {
+                    let shape = self.module.intern_shape(
+                        Shape::enum_variant(type_name.clone(), name.to_string(), Vec::new(), false)
+                            .with_variant_index(index),
+                    );
                     self.code.push(Op::MakeEnum {
                         dst,
                         shape,
@@ -3803,19 +3840,22 @@ impl<'m> FnCompiler<'m> {
         reflect: Option<u32>,
         dst: Reg,
     ) -> Result<(), Unsupported> {
-        let fields = match self.module.types.get(type_name) {
+        let slots = match self.module.types.get(type_name) {
             Some(TypeInfo::Enum { variants, .. }) => match variants.get(variant) {
-                Some(fields) => fields.clone(),
+                Some(slots) => slots.clone(),
                 None => return unsupported("unknown enum variant"),
             },
             _ => unreachable!("make_enum is only reached for enum types"),
         };
-        let shape = self.module.intern_shape(Shape::enum_variant(
-            type_name.to_string(),
-            variant.to_string(),
-            fields,
-            false,
-        ));
+        let shape = self.module.intern_shape(
+            Shape::enum_variant(
+                type_name.to_string(),
+                variant.to_string(),
+                slots.fields,
+                false,
+            )
+            .with_variant_index(slots.index),
+        );
         let mut consumed = Vec::new();
         let mut arg_regs = Vec::with_capacity(args.len());
         for a in args {
@@ -3849,14 +3889,12 @@ impl<'m> FnCompiler<'m> {
         };
         let mut cases: Vec<(String, u32)> = variants
             .into_iter()
-            .filter(|(_, fields)| fields.is_empty())
-            .map(|(vname, _)| {
-                let shape = self.module.intern_shape(Shape::enum_variant(
-                    type_name.to_string(),
-                    vname.clone(),
-                    Vec::new(),
-                    false,
-                ));
+            .filter(|(_, slots)| slots.fields.is_empty())
+            .map(|(vname, slots)| {
+                let shape = self.module.intern_shape(
+                    Shape::enum_variant(type_name.to_string(), vname.clone(), Vec::new(), false)
+                        .with_variant_index(slots.index),
+                );
                 (vname, shape)
             })
             .collect();

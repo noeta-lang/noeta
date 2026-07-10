@@ -394,6 +394,13 @@ impl Builtin {
 pub struct EnumDef {
     name: String,
     variants: Vec<VariantInfo>,
+    /// `@derive(Comparable)` without a hand-written `compare` (derive-soundness S3): `< <= > >=`
+    /// order by variant declaration index, then payload fields — the enum twin of
+    /// [`TypeDef::derives_comparable`].
+    derives_comparable: bool,
+    /// `@derive(Serialize<Json>)` without a hand-written `to_json` — gates the synthesized
+    /// `.to_json()` (the variant rendering `json.stringify` produces).
+    derives_tojson: bool,
     /// Inherent + `impl`-block methods (the unified body, object-model slice 3), compiled to
     /// closures capturing the definition (global) scope — exactly like a struct/class's `methods`.
     /// An instance call `value.m(...)` and an associated call `Enum.f(...)` both resolve here; the
@@ -408,6 +415,14 @@ impl EnumDef {
 
     fn variant(&self, name: &str) -> Option<&VariantInfo> {
         self.variants.iter().find(|v| v.name == name)
+    }
+
+    /// The variant's declaration index — the primary key of derived `Comparable` on enums.
+    fn variant_index(&self, name: &str) -> usize {
+        self.variants
+            .iter()
+            .position(|v| v.name == name)
+            .unwrap_or(usize::MAX)
     }
 
     fn method(&self, name: &str) -> Option<&Rc<Closure>> {
@@ -427,6 +442,10 @@ pub struct EnumValue {
     enum_name: String,
     variant: String,
     data: Vec<Value>,
+    /// The variant's declaration index — derived `Comparable`'s primary key (variant order, then
+    /// payload). Type metadata like the VM `Shape::variant_index`: **excluded from `PartialEq`**
+    /// (equality compares name/variant/data).
+    variant_index: usize,
     /// The reflected type for a **generic** enum-variant construction (runtime type-argument
     /// reflection, R2b.2), `Some` only for a generic enum — so `type_of` recovers its type arguments
     /// after a `dyn` launder. `None` for a non-generic enum / an ordinary construction. Invisible to
@@ -1198,6 +1217,8 @@ impl Interpreter {
                         field_names: Vec::new(),
                     })
                     .collect(),
+                derives_comparable: false,
+                derives_tojson: false,
                 methods: HashMap::new(),
             })),
             false,
@@ -1869,6 +1890,7 @@ impl Interpreter {
             enum_name: def.name().to_string(),
             variant: variant.to_string(),
             data: args,
+            variant_index: def.variant_index(variant),
             reflect: None,
         })))
     }
@@ -1908,6 +1930,7 @@ impl Interpreter {
         if matched {
             let value = Value::Enum(Rc::new(EnumValue {
                 enum_name: def.name().to_string(),
+                variant_index: def.variant_index(&key),
                 variant: key,
                 data: vec![],
                 reflect: None,
@@ -2092,6 +2115,17 @@ impl Interpreter {
             && let Some(method) = def.method(name)
         {
             return self.call_enum_method(receiver.clone(), &Rc::clone(method), args, span);
+        }
+        // `e.to_json()` on an enum that `@derive(Serialize<Json>)`s (so has no hand-written
+        // `to_json`): the variant rendering `json.stringify` produces — the enum twin of the
+        // object arm below (and of the VM's enum method-dispatch gate).
+        if let Value::Enum(e) = &receiver
+            && name == "to_json"
+            && args.is_empty()
+            && let Some(Value::EnumType(def)) = self.scope.lookup(&e.enum_name)
+            && def.derives_tojson
+        {
+            return Ok(Value::Str(value_to_json(&receiver)));
         }
         // `x.compare(y)` — the `Ordering` of two primitives. This is the value a `Comparable`
         // impl returns (typically by delegating to a field's `compare`); it lights up nothing on
@@ -2468,11 +2502,12 @@ impl Interpreter {
             noeta_stdlib::ListMethod::Sorted => {
                 self.expect_std_arity(name, args, 0, span)?;
                 // Every element must be mutually orderable with the first (homogeneous numbers
-                // or strings); otherwise there is no total order to sort by. A stable sort then
-                // keeps equal elements in input order, matching the VM exactly.
+                // or strings — or derived-`Comparable` structs/enums, which order structurally
+                // via `compare_field`); otherwise there is no total order to sort by. A stable
+                // sort then keeps equal elements in input order, matching the VM exactly.
                 if items
                     .iter()
-                    .any(|item| compare_primitive(&items[0], item).is_none())
+                    .any(|item| compare_field(&items[0], item).is_none())
                 {
                     let error = noeta_stdlib::unorderable_error(name);
                     return Err(self.runtime_error(
@@ -2482,7 +2517,7 @@ impl Interpreter {
                     ));
                 }
                 let mut sorted = items.to_vec();
-                sorted.sort_by(|a, b| compare_primitive(a, b).unwrap_or(std::cmp::Ordering::Equal));
+                sorted.sort_by(|a, b| compare_field(a, b).unwrap_or(std::cmp::Ordering::Equal));
                 Ok(Value::list(sorted))
             }
             noeta_stdlib::ListMethod::Slice => {
@@ -3857,6 +3892,25 @@ impl Interpreter {
                     _ => result,
                 });
             }
+            // Derived structural comparison on an enum: `@derive(Comparable)` without a
+            // hand-written `compare` orders by variant declaration index, then payload fields —
+            // the enum twin of the object arm above (and of the VM's `enum_structural_compare`).
+            if op.comparable_method().is_some() && def.derives_comparable {
+                return match enum_structural_compare(e, &right) {
+                    Some(ordering) => Ok(Value::Bool(
+                        op.ordering_satisfies(noeta_ast::ordering_variant(ordering)),
+                    )),
+                    None => Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "cannot compare {} and {}",
+                            left.type_name(),
+                            right.type_name()
+                        ),
+                    )),
+                };
+            }
         }
         match ops::apply_binary(op, &left, &right) {
             Ok(value) => Ok(value),
@@ -3969,10 +4023,18 @@ fn numeric_scalar(value: &Value) -> Option<noeta_stdlib::NumScalar> {
 /// they participate in `match` and equality like any enum; only `Result`/`Option`'s display and
 /// the `?`/`??` operators treat them specially.
 fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
+    // The built-in enums' defined variant order (`none < some`, `Ok < Err`,
+    // `Less < Equal < Greater`) — must agree with the VM's shape indices.
+    let variant_index = match variant {
+        "none" | "Ok" | "Less" => 0,
+        "some" | "Err" | "Equal" => 1,
+        _ => 2,
+    };
     Value::Enum(Rc::new(EnumValue {
         enum_name: enum_name.to_string(),
         variant: variant.to_string(),
         data,
+        variant_index,
         reflect: None,
     }))
 }
@@ -4671,13 +4733,42 @@ fn object_structural_compare(left: &ObjectValue, right: &Value) -> Option<std::c
 }
 
 /// Compare one field of two structurally-compared objects: a nested object recurses (matching the
-/// VM's `compare_field`), anything else goes through [`compare_primitive`]. `None` is an
-/// incomparable pairing, which the caller turns into a runtime type error.
+/// VM's `compare_field`), a nested enum pair orders by variant index then payload (how an
+/// `?int`/enum field inside a derived struct orders), anything else goes through
+/// [`compare_primitive`]. `None` is an incomparable pairing, which the caller turns into a
+/// runtime type error.
 fn compare_field(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     match a {
         Value::Object(la) => object_structural_compare(la, b),
+        Value::Enum(la) => enum_structural_compare(la, b),
         _ => compare_primitive(a, b),
     }
+}
+
+/// Two same-enum values order by variant **declaration index**, then payload slots
+/// lexicographically — the enum half of derived `Comparable`. Mirrors the VM's
+/// `enum_structural_compare` (`noeta_value::ops`). `None` if `right` is not the same enum.
+fn enum_structural_compare(left: &EnumValue, right: &Value) -> Option<std::cmp::Ordering> {
+    let Value::Enum(rb) = right else {
+        return None;
+    };
+    if left.enum_name != rb.enum_name {
+        return None;
+    }
+    match left.variant_index.cmp(&rb.variant_index) {
+        std::cmp::Ordering::Equal => {}
+        other => return Some(other),
+    }
+    if left.data.len() != rb.data.len() {
+        return None;
+    }
+    for (a, b) in left.data.iter().zip(rb.data.iter()) {
+        match compare_field(a, b)? {
+            std::cmp::Ordering::Equal => continue,
+            other => return Some(other),
+        }
+    }
+    Some(std::cmp::Ordering::Equal)
 }
 
 /// The JSON encoding synthesized by `@derive(Serialize<Json>)`. The byte-for-byte mirror of the VM's
@@ -4766,13 +4857,19 @@ pub(crate) fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp:
     match (left, right) {
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
         (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
+        // `false < true` — bool is checker-declared `Comparable`, so derived structural compare
+        // and `.compare()` order it. Mirrors the VM's `compare_primitive`.
+        (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
         // Extern-type values order through their contract (extern-types X1) — a total order per
         // key-capable kind; `None` for unordered kinds. Mirrors the VM's `compare_primitive`.
         (Value::Extern(a), Value::Extern(b)) => a.borrow().cmp_value(&**b.borrow()),
         _ => {
+            // `f32` widens to f64 like any other numeric pairing — mirrors the VM's
+            // `compare_primitive` (`noeta_value::ops`), which orders f32 the same way.
             let num = |v: &Value| match v {
                 Value::Int(i) => Some(*i as f64),
                 Value::Float(f) => Some(*f),
+                Value::F32(f) => Some(f64::from(*f)),
                 _ => None,
             };
             num(left)?.partial_cmp(&num(right)?)

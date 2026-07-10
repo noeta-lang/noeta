@@ -1,0 +1,26 @@
+// `@derive(Comparable)` on an enum: values order by variant DECLARATION index (Low < Medium <
+// High, regardless of names), and same-variant values order by their payload fields — on both
+// backends. This pins the closed gap where enum derives were statically accepted but silently
+// inert at runtime.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "[Priority.Low, Priority.Medium, Priority.High]"
+// expect: exit 0
+@derive(Comparable)
+enum Priority { Low; Medium; High }
+
+@derive(Comparable)
+enum Score { Zero; Points(int) }
+
+echo Priority.Low < Priority.High;
+echo Priority.High <= Priority.Medium;
+echo Priority.Medium >= Priority.Medium;
+
+// Same variant: the payload decides. Different variants: declaration order decides.
+echo Score.Points(3) < Score.Points(7);
+echo Score.Points(0) < Score.Zero;
+
+echo [Priority.High, Priority.Low, Priority.Medium].sorted();

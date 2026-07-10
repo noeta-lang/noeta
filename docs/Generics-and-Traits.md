@@ -84,10 +84,10 @@ There is also a **standalone** `impl Trait for T { }` (marker/empty-body only fo
 | Derivable | Effect |
 |---|---|
 | `Equatable` | Structural equality. |
-| `Comparable` | Field-wise ordering, in declaration order (recurses into nested objects). |
-| `Display` | A structural `to_string`. |
-| `Clone` | A structural clone. |
-| `Serialize<Json>` | Synthesizes `to_json()`. |
+| `Comparable` | Field-wise ordering, in declaration order (recurses into nested objects and enum payloads). On an **enum**: variant declaration order first (`Low < Medium < High`), then payload fields. Also what `.sorted()` uses. |
+| `Display` | A structural `to_string` — a **marker**: the structural default you already get, kept so a competing hand-written `impl Display` is a coherence error. |
+| `Clone` | A structural clone — a marker like `Display` (value semantics already copy). |
+| `Serialize<Json>` | Synthesizes `to_json()` (on an enum: the variant rendering `json.stringify` produces). |
 
 ```noeta ignore
 @derive(Equatable, Comparable, Display, Clone)
@@ -104,6 +104,10 @@ echo User.new("Ada", 7, true).to_json()  // {"name":"Ada","id":7,"active":true}
 ```
 
 Errors: deriving a non-derivable trait (`@derive(Add)`) or wrong generic arity (`@derive(Comparable<int>)`, `@derive(Serialize)` without a format) is E0014. The old `#[derive(...)]` spelling is E0017.
+
+**Field constraints (E0050).** A derive must be supportable by the type's fields (or an enum's variant payloads): `Comparable` needs every field to have an ordering — a `List`/`Map`/`Set`/tuple/`bytes`/function field can never order, so the derive is rejected at the declaration instead of failing at the first runtime comparison. `Serialize` likewise rejects function-typed fields. Value-dependent kinds (`dyn`, unions, extern types like `Uuid`) stay permitted and defer to the runtime. `Equatable` has no constraint — structural `==` is total.
+
+**Generic derives are conditional.** `@derive(Comparable) struct Box<T> { value: T }` defers the parameter-typed field to each use: `Box<int>` satisfies `Comparable`, `Box<List<int>>` does not (the bound fails at the call site, E0025). A hand-written `impl` is the author's contract and stays unconditional.
 
 ## Coherence
 

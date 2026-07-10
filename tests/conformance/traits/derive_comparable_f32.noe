@@ -1,0 +1,20 @@
+// `@derive(Comparable)` over an `f32` field: f32 widens to f64 in the structural field
+// comparison exactly like a bare numeric pairing, on BOTH backends (this fixture pins a former
+// eval/VM divergence — eval's compare_primitive lacked an f32 arm). Also covers `.compare()`
+// on bare f32 values. (Mixed `f32 < float` is a compile-time E0044 by design — same-type
+// comparison — so it is deliberately absent here.)
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "Ordering.Less"
+// expect: exit 0
+@derive(Comparable)
+struct Reading { celsius: f32 }
+
+low = Reading { celsius: 19.5f32 };
+high = Reading { celsius: 21.0f32 };
+
+echo low < high;
+echo high < low;
+echo low <= Reading { celsius: 19.5f32 };
+echo 1.5f32.compare(2.5f32);

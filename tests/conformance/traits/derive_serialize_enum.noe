@@ -1,0 +1,8 @@
+// `@derive(Serialize<Json>)` on an enum: `.to_json()` is available and produces the variant
+// rendering `json.stringify` gives an enum — identical on both backends.
+// expect: stdout "\"Green\""
+// expect: exit 0
+@derive(Serialize<Json>)
+enum Color { Red; Green; Blue }
+
+echo Color.Green.to_json();

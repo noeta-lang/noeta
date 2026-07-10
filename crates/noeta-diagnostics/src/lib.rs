@@ -206,6 +206,11 @@ pub enum DiagnosticCode {
     /// `Sender`, `Receiver`, `Signal`, `Computed`, `Effect`). Shadowing one would make the
     /// name's method tables ambiguous, so it is rejected statically.
     ReservedTypeName,
+    /// A `@derive(...)` names a trait the type's fields cannot support — e.g. `Comparable` over a
+    /// field kind with no defined ordering (`List`, `Map`, `Set`, `Tuple`, `bytes`, a function), or
+    /// `Serialize` over a function-typed field. The derive would type-check and then fail at the
+    /// first runtime comparison/serialization, so it is rejected statically at the declaration.
+    UnderivableTrait,
 }
 
 impl DiagnosticCode {
@@ -261,6 +266,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidReceiver,
         DiagnosticCode::MissingReturn,
         DiagnosticCode::ReservedTypeName,
+        DiagnosticCode::UnderivableTrait,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -316,6 +322,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidReceiver => "E0047",
             DiagnosticCode::MissingReturn => "E0048",
             DiagnosticCode::ReservedTypeName => "E0049",
+            DiagnosticCode::UnderivableTrait => "E0050",
         }
     }
 

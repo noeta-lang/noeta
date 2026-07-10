@@ -426,6 +426,87 @@ fn deriving_an_unknown_trait_is_reported() {
 }
 
 #[test]
+fn deriving_comparable_over_an_unorderable_field_is_e0050() {
+    // A `List` field has no ordering under any values — statically rejected at the derive.
+    let src = "@derive(Comparable)\nstruct B {\n  items: List<int>\n}\n";
+    assert_eq!(codes(src), ["E0050"]);
+    // Maps and tuples likewise.
+    let src = "@derive(Comparable)\nstruct C {\n  m: Map<string, int>\n}\n";
+    assert_eq!(codes(src), ["E0050"]);
+}
+
+#[test]
+fn deriving_comparable_over_orderable_fields_is_clean() {
+    // Every orderable field kind: primitives (incl. bool/f32), a nested struct of primitives,
+    // and `?int` (the prelude Option enum orders by variant then payload).
+    let src = "@derive(Comparable)\nstruct Inner {\n  a: int\n}\n\
+               @derive(Comparable)\nstruct S {\n  n: int\n  f: f32\n  b: bool\n  s: string\n  \
+               inner: Inner\n  opt: ?int\n}\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn deriving_comparable_on_an_enum_with_unorderable_payload_is_e0050() {
+    // The payload struct itself derives nothing (legal); the DERIVED enum's payload recursion
+    // finds the unorderable `List` field inside it.
+    let src = "struct Bag {\n  items: List<int>\n}\n\
+               @derive(Comparable)\nenum E {\n  A(Bag)\n  B\n}\n";
+    assert_eq!(codes(src), ["E0050"]);
+}
+
+#[test]
+fn deriving_serialize_over_a_function_field_is_e0050() {
+    let src = "@derive(Serialize<Json>)\nstruct H {\n  callback: (int) -> int\n}\n";
+    assert_eq!(codes(src), ["E0050"]);
+    // Deeply nested inside a container still rejects.
+    let src = "@derive(Serialize<Json>)\nstruct H {\n  callbacks: List<(int) -> int>\n}\n";
+    assert_eq!(codes(src), ["E0050"]);
+}
+
+#[test]
+fn derive_field_constraint_defers_generic_params_to_instantiation() {
+    // A field typed by the type's own parameter is checked at the use site (conditional derive),
+    // not at the declaration.
+    let src = "@derive(Comparable)\nstruct Box<T> {\n  value: T\n}\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+const MAX_FN: &str =
+    "fn max<T: Comparable>(a: T, b: T): T {\n  if a > b { return a; }\n  return b;\n}\n";
+
+#[test]
+fn generic_derive_is_conditional_on_instantiated_fields() {
+    // `Box<int>` satisfies the bound (the instantiated field is orderable) …
+    let ok = format!(
+        "@derive(Comparable)\nstruct Box<T> {{\n  value: T\n}}\n{MAX_FN}\
+         echo max(Box {{ value: 1 }}, Box {{ value: 2 }}).value\n"
+    );
+    assert!(codes(&ok).is_empty(), "{:?}", codes(&ok));
+    // … while `Box<List<int>>` does not — the bound fails at the call site, not at runtime.
+    let bad = format!(
+        "@derive(Comparable)\nstruct Box<T> {{\n  value: T\n}}\n{MAX_FN}\
+         echo max(Box {{ value: [1] }}, Box {{ value: [2] }}).value\n"
+    );
+    assert_eq!(
+        codes(&bad),
+        ["E0025"],
+        "Box<List<int>> must not satisfy Comparable"
+    );
+}
+
+#[test]
+fn generic_hand_written_impl_stays_unconditional() {
+    // An `impl Comparable` with a hand-written `compare` is the author's contract — no field
+    // constraint applies, whatever the instantiation.
+    let src = format!(
+        "struct Box<T> {{\n  value: T\n  impl Comparable {{\n    fn compare(other: Box<T>): \
+         Ordering {{ return Ordering.Less; }}\n  }}\n}}\n{MAX_FN}\
+         echo max(Box {{ value: [1] }}, Box {{ value: [2] }}).value\n"
+    );
+    assert!(codes(&src).is_empty(), "{:?}", codes(&src));
+}
+
+#[test]
 fn deriving_the_same_trait_twice_is_conflicting() {
     // Coherence: a trait may be implemented at most once per type.
     let src = "@derive(Comparable, Comparable)\nclass P {\n  x: int\n}\n";
