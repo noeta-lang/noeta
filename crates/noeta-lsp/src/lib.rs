@@ -362,12 +362,16 @@ impl LanguageServer for Backend {
                 self.encoding(),
             )
         };
-        Ok(found.map(|(repr, range)| Hover {
+        Ok(found.map(|(repr, note, range)| Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
                 // `TypeRepr` displays as its Noeta surface spelling (`impl Display` in
                 // `noeta_ast::reflect`) — the same rendering the debugger's Variables view uses.
-                value: format!("```noeta\n{repr}\n```"),
+                // A non-default storage fact (`@packed` / flat list) follows as a plain line.
+                value: match note {
+                    Some(note) => format!("```noeta\n{repr}\n```\n{note}"),
+                    None => format!("```noeta\n{repr}\n```"),
+                },
             }),
             range: Some(wire_range(range)),
         }))

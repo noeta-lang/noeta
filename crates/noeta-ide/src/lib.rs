@@ -36,7 +36,7 @@ pub mod symbols;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use noeta_ast::reflect::TypeRepr;
+use noeta_ast::reflect::{PackedLayout, TypeRepr};
 use noeta_db::{DepModule, LangDatabase, SourceProgram, Workspace};
 use noeta_lexer::TokenKind;
 use noeta_span::{SourceId, Span};
@@ -432,7 +432,8 @@ impl DocumentStore {
     }
 
     /// The type at `position` for hover: the **smallest** `expr_types` span in the entry file that
-    /// contains the cursor (the most specific expression under it), rendered plus its LSP range.
+    /// contains the cursor (the most specific expression under it), rendered plus its LSP range,
+    /// plus the type's [`layout_note`] when its storage is non-default (`@packed` / flat list).
     /// Runs over the whole-workspace type index so an expression's type is known even when it depends
     /// on an imported declaration; the `source` filter keeps the lookup to the entry file the cursor
     /// is in. `None` if the document is unknown or no typed expression covers the position.
@@ -441,12 +442,13 @@ impl DocumentStore {
         uri: &str,
         position: Position,
         encoding: Encoding,
-    ) -> Option<(TypeRepr, Range)> {
+    ) -> Option<(TypeRepr, Option<String>, Range)> {
         let cache = self.workspaces.get(uri)?;
         let db = &self.db;
         let index = LineIndex::new(cache.entry().text(db));
         let offset = index.offset(position, encoding);
-        let (span, repr) = noeta_db::linked_checked_ide(db, cache.workspace)
+        let checked = noeta_db::linked_checked_ide(db, cache.workspace);
+        let (span, repr) = checked
             .expr_types
             .iter()
             // Non-empty spans in the entry file that cover the cursor; pick the tightest.
@@ -457,7 +459,8 @@ impl DocumentStore {
                     && offset <= span.end
             })
             .min_by_key(|(span, _)| span.end - span.start)?;
-        Some((repr.clone(), index.range(*span, encoding)))
+        let note = layout_note(repr, &checked.packed_layouts);
+        Some((repr.clone(), note, index.range(*span, encoding)))
     }
 
     /// Resolve the definition of the reference at `position` for go-to-definition, as a `(URI,
@@ -931,6 +934,38 @@ fn nominal_name(repr: &TypeRepr) -> Option<&str> {
         | TypeRepr::Enum(name, _)
         | TypeRepr::Named(name, _) => Some(name),
         _ => None,
+    }
+}
+
+/// The human-readable storage note for a hovered type, when its storage is non-default: a `@packed`
+/// nominal (with its flat byte size) or a `List` of one (stored as a single contiguous buffer, row-
+/// or column-major per the `@packed(layout: …)` declaration). `None` for everything else — types
+/// with ordinary boxed storage say nothing. Shared by LSP hover and the MCP `type_at` tool so both
+/// surfaces describe layout identically. Only a directly-packed list element specializes (matching
+/// the runtime: flatness is derived from "element type is packed"; Set/Map never specialize today).
+pub fn layout_note(repr: &TypeRepr, layouts: &HashMap<String, PackedLayout>) -> Option<String> {
+    match repr {
+        TypeRepr::List(elem) => {
+            let layout = layouts.get(nominal_name(elem)?)?;
+            let order = if layout.column {
+                "column-major (SoA)"
+            } else {
+                "row-major"
+            };
+            Some(format!(
+                "flat packed storage — {} bytes/element, {order}",
+                layout.byte_size()
+            ))
+        }
+        other => {
+            let layout = layouts.get(nominal_name(other)?)?;
+            let column = if layout.column {
+                ", column-major lists (SoA)"
+            } else {
+                ""
+            };
+            Some(format!("@packed — {} bytes{column}", layout.byte_size()))
+        }
     }
 }
 
@@ -1498,10 +1533,57 @@ mod tests {
                     },
                     Encoding::Utf8,
                 )
-                .map(|(repr, _range)| repr.to_string())
+                .map(|(repr, _note, _range)| repr.to_string())
         };
         assert_eq!(at(7).as_deref(), Some("List<int>")); // the `[1, 2, 3]` literal
         assert_eq!(at(8).as_deref(), Some("int")); // the `1` element
+    }
+
+    #[test]
+    fn hover_notes_packed_storage() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///p.noe",
+            "@packed(layout: column) struct Vec3 { x: f32; y: f32; z: f32 }\n\
+             v = Vec3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }\n\
+             vs = [v]\n"
+                .to_string(),
+        );
+        let at = |line, character| {
+            store
+                .hover_type("file:///p.noe", Position { line, character }, Encoding::Utf8)
+                .map(|(repr, note, _range)| (repr.to_string(), note))
+        };
+        // The `Vec3 { … }` literal (line 1) is a packed nominal.
+        let (repr, note) = at(1, 6).expect("literal hovers");
+        assert_eq!(repr, "Vec3");
+        assert_eq!(
+            note.as_deref(),
+            Some("@packed — 12 bytes, column-major lists (SoA)")
+        );
+        // The `[v]` list (line 2, col 6 = inside the brackets… col 5 is `[`) stores flat.
+        let (repr, note) = at(2, 5).expect("list hovers");
+        assert_eq!(repr, "List<Vec3>");
+        assert_eq!(
+            note.as_deref(),
+            Some("flat packed storage — 12 bytes/element, column-major (SoA)")
+        );
+    }
+
+    #[test]
+    fn hover_on_ordinary_types_has_no_layout_note() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///q.noe",
+            "struct P { x: int; y: int }\np = P { x: 1, y: 2 }\nps = [p]\n".to_string(),
+        );
+        let note_at = |line, character| {
+            store
+                .hover_type("file:///q.noe", Position { line, character }, Encoding::Utf8)
+                .and_then(|(_repr, note, _range)| note)
+        };
+        assert_eq!(note_at(1, 4), None); // the `P { … }` literal
+        assert_eq!(note_at(2, 5), None); // the `[p]` list
     }
 
     #[test]

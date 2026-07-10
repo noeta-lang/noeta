@@ -20,6 +20,11 @@ pub struct TypeAtOutput {
     pub resolved_offset: Option<u32>,
     /// When not found, a short note on why (no such symbol / no typed expression there).
     pub note: Option<String>,
+    /// The type's storage note when non-default (`@packed — 12 bytes`, `flat packed storage — 12
+    /// bytes/element, column-major (SoA)`); absent for ordinary boxed storage. The same wording
+    /// LSP hover shows (shared `noeta_ide::layout_note`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
 }
 
 /// Answer `type_at`. The site is a `symbol` name (first whole-word occurrence in the entry file) or
@@ -85,6 +90,7 @@ pub fn type_at(
             location: Some(index.span_loc(*span)),
             resolved_offset: Some(offset),
             note: None,
+            layout: noeta_ide::layout_note(repr, &ide.packed_layouts),
         },
         None => not_found("no typed expression at that site".to_string(), Some(offset)),
     }
@@ -97,6 +103,7 @@ fn not_found(note: String, offset: Option<u32>) -> TypeAtOutput {
         location: None,
         resolved_offset: offset,
         note: Some(note),
+        layout: None,
     }
 }
 
@@ -315,6 +322,36 @@ enum Color { Red; Green }
         let n = type_at(&p, Some("n"), None, None);
         assert!(n.found);
         assert_eq!(n.r#type, "int");
+    }
+
+    #[test]
+    fn type_at_notes_packed_storage() {
+        let p = prepare(
+            &Some(
+                "@packed(layout: column) struct Vec3 { x: f32; y: f32; z: f32 }\n\
+                 v = Vec3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }\n\
+                 vs = [v]\n\
+                 echo vs.len()\n"
+                    .to_string(),
+            ),
+            &None,
+        )
+        .unwrap();
+        let v = type_at(&p, Some("v"), None, None);
+        assert_eq!(v.r#type, "Vec3");
+        assert_eq!(
+            v.layout.as_deref(),
+            Some("@packed — 12 bytes, column-major lists (SoA)")
+        );
+        let vs = type_at(&p, Some("vs"), None, None);
+        assert_eq!(vs.r#type, "List<Vec3>");
+        assert_eq!(
+            vs.layout.as_deref(),
+            Some("flat packed storage — 12 bytes/element, column-major (SoA)")
+        );
+        // Ordinary boxed storage says nothing.
+        let xs = type_at(&prep(), Some("xs"), None, None);
+        assert_eq!(xs.layout, None);
     }
 
     #[test]
