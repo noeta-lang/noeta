@@ -8297,6 +8297,91 @@ mod tests {
         assert_eq!(idx, [0, 1, 2]);
     }
 
+    /// S1 (Tier-B bitwise native): an xorshift-with-masks loop of `^ & << >>` runs fully native
+    /// under forced JIT and matches the interpreter bit-for-bit; the two bail contracts hold —
+    /// a shift amount outside `0..64` aborts identically (native bails before any write, tier 0
+    /// raises), and a `<<` result past the 48-bit immediate range round-trips through the
+    /// interpreter's heap boxing with an identical value.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_bitwise_ops_native_with_identical_semantics() {
+        // In-range workload: every intermediate fits the immediate range (36-bit state).
+        let loop_src = "fn run(n: int): int {\n  mut h = 123456789;\n  mut i = 0;\n  while i < n {\n    h = h ^ (h << 11);\n    h = h & 68719476735;\n    h = h ^ (h >> 7);\n    i = i + 1;\n  }\n  return h;\n}\necho run(200);\n";
+        let module = compile_module(loop_src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, bails) = VmBackend::new().run_module_jit_bails(&module);
+        assert_eq!(interp, jit, "bitwise loop must be tier-identical");
+        assert_eq!(jit.exit_code, 0);
+        // The loop body never bails: the only recorded sites (if any) are outside `run`'s loop
+        // (main's trailing echo) — no site may carry a per-iteration count.
+        assert!(
+            bails.iter().all(|b| b.count < 200),
+            "the bitwise loop body must not bail per iteration: {bails:?}"
+        );
+
+        // Shift out of range: aborts identically (native bails, tier 0 raises E0008-class).
+        let oob = compile_module("fn f(n: int): int {\n  return 1 << n;\n}\necho f(64);\n");
+        let interp = VmBackend::new().run_module(&oob);
+        let jit = VmBackend::new().run_module_jit(&oob);
+        assert_eq!(interp, jit, "over-shift abort must be tier-identical");
+        assert_ne!(jit.exit_code, 0, "1 << 64 aborts");
+
+        // `<<` overflowing the immediate range: the interpreter heap-boxes; native bails before
+        // the write and the values agree end to end.
+        let big = compile_module(
+            "fn f(n: int): int {\n  big = 1 << n;\n  return (big >> n) + 1;\n}\necho f(55);\n",
+        );
+        let interp = VmBackend::new().run_module(&big);
+        let jit = VmBackend::new().run_module_jit(&big);
+        assert_eq!(interp, jit, "boxing `<<` must be tier-identical");
+        assert_eq!(jit.stdout, "2\n");
+    }
+
+    /// S1 (Tier W native): the sign-dependent fixed-width ops run native with the interpreter's
+    /// exact semantics. A u32 div/wrap loop stays native (no per-iteration bails); u64 semantics
+    /// on negative-erased words (unsigned div/compare/shift of `u64::MAX`, which erases to the
+    /// immediate `-1`) agree with tier 0 including where the result must heap-box (the fit guard
+    /// bails, tier 0 boxes); signed i8 `MIN / -1` wraps identically through the width mask.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_wide_int_ops_native_with_identical_semantics() {
+        // u32 loop: WideInt Div (unsigned) + Binary Add + MaskWidth wrap, all in-width — native.
+        let loop_src = "fn churn(n: int): u32 {\n  mut h: u32 = 123456789u32;\n  mut i = 0;\n  while i < n {\n    h = h / 3u32;\n    h = h + 4000000000u32;\n    i = i + 1;\n  }\n  return h;\n}\necho churn(300);\n";
+        let module = compile_module(loop_src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, bails) = VmBackend::new().run_module_jit_bails(&module);
+        assert_eq!(interp, jit, "u32 loop must be tier-identical");
+        assert_eq!(jit.exit_code, 0);
+        assert!(
+            bails.iter().all(|b| b.count < 300),
+            "the u32 loop body must not bail per iteration: {bails:?}"
+        );
+
+        // u64 semantics on a negative-erased word: unsigned div boxes its quotient (bail → tier-0
+        // box), unsigned compare and logical shift read the full bit pattern.
+        let u64_src =
+            "x: u64 = 18446744073709551615u64;\necho x / 3u64;\necho x > 2u64;\necho x >> 1u64;\n";
+        let m = compile_module(u64_src);
+        let interp = VmBackend::new().run_module(&m);
+        let jit = VmBackend::new().run_module_jit(&m);
+        assert_eq!(
+            interp, jit,
+            "u64 negative-erased semantics must be tier-identical"
+        );
+        assert_eq!(
+            jit.stdout,
+            "6148914691236517205\ntrue\n9223372036854775807\n"
+        );
+
+        // Signed wrap: i8 MIN / -1 wraps through the width mask, no trap.
+        let i8_src = "a: i8 = -128i8;\nb: i8 = -1i8;\necho a / b;\n";
+        let m = compile_module(i8_src);
+        let interp = VmBackend::new().run_module(&m);
+        let jit = VmBackend::new().run_module_jit(&m);
+        assert_eq!(interp, jit, "i8 MIN / -1 must be tier-identical");
+        assert_eq!(jit.stdout, "-128\n");
+    }
+
     /// The `--jit-stats` bail histogram (S0): a function whose body holds a non-native op
     /// (`Stringify`, string interpolation) bails there on **every call**, and the seam counts each
     /// one against that exact `(proto, pc)`. Under `force_jit` everything compiles up front, so the
@@ -8328,10 +8413,7 @@ mod tests {
             .iter()
             .find(|b| b.proto == tag_proto as u32 && b.pc == stringify_pc)
             .expect("the Stringify site should be in the histogram");
-        assert_eq!(
-            site.count, 10,
-            "one bail per call, exactly: {bails:?}"
-        );
+        assert_eq!(site.count, 10, "one bail per call, exactly: {bails:?}");
         // Most-frequent-first: no site outranks the per-call one.
         assert_eq!(bails[0].count, site.count, "sorted descending: {bails:?}");
 

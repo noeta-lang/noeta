@@ -1106,6 +1106,19 @@ fn is_fast_op(op: &Op, consts: &[Const]) -> bool {
         Op::LoadConst { k, .. } => const_immediate_bits(&consts[*k as usize]).is_some(),
         Op::Move { .. } | Op::Drop { .. } => true,
         Op::Binary { op, .. } => supported_binary(*op),
+        // S1 (Tier W): the sign-dependent fixed-width ops and the width wrap. Only the ops the
+        // emitter handles; anything else in the field (defensive) stays a bail op.
+        Op::WideInt { op, .. } => matches!(
+            op,
+            BinaryOp::Div
+                | BinaryOp::Rem
+                | BinaryOp::Shr
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+        ),
+        Op::MaskWidth { .. } => true,
         Op::LoadGlobal { .. } | Op::StoreGlobal { .. } | Op::TakeGlobal { .. } => true,
         Op::Call { .. } | Op::CallGlobal { .. } | Op::Return { .. } => true,
         Op::Jump { .. }
@@ -1136,8 +1149,10 @@ fn is_leaf_heap_op(op: &Op) -> bool {
     )
 }
 
-/// The binary operators J1 compiles natively: integer arithmetic and comparison. (Bitwise/shift and
-/// the fixed-width `WideInt` ops are a later slice; `~`/identity/logical are not integer ops.)
+/// The binary operators the JIT compiles natively: integer arithmetic, comparison, and the P-BITS
+/// Tier-B bitwise/shift family (S1 — int-only: a non-int operand pairing bails, the interpreter
+/// raises its E0043). (`~`/identity/logical are not integer ops; the fixed-width `WideInt` op has
+/// its own emit arm.)
 fn supported_binary(op: BinaryOp) -> bool {
     matches!(
         op,
@@ -1152,6 +1167,21 @@ fn supported_binary(op: BinaryOp) -> bool {
             | BinaryOp::Le
             | BinaryOp::Gt
             | BinaryOp::Ge
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr
+    )
+}
+
+/// The Tier-B bitwise/shift subset of [`supported_binary`] — **integer-only** ops: the emitter
+/// skips the float paths entirely (a non-int operand bails; the interpreter raises E0043), and the
+/// kind map may claim their natively-stored destination `Int` unconditionally.
+fn bitwise_binary(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr
     )
 }
 
@@ -1350,6 +1380,11 @@ fn binary_result_is_immediate(op: BinaryOp) -> bool {
             | BinaryOp::Mul
             | BinaryOp::Div
             | BinaryOp::Rem
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr
     )
 }
 
@@ -1392,6 +1427,13 @@ fn reg_effect(op: &Op, consts: &[Const]) -> Option<RegEffect> {
         Op::Binary { op, dst, .. } => RegEffect::Def {
             dst: *dst,
             heap: !binary_result_is_immediate(*op),
+        },
+        // S1 (Tier W): same contract as `Binary` — a natively-stored result is immediate (every
+        // bail — non-int operand, zero divisor, out-of-immediate-range result — precedes the
+        // write); mid-frame re-entry verification covers the tier-0-boxed case, as for `Add`.
+        Op::WideInt { dst, .. } | Op::MaskWidth { dst, .. } => RegEffect::Def {
+            dst: *dst,
+            heap: false,
         },
         Op::Unary { dst, .. } | Op::Stringify { dst, .. } => RegEffect::Def {
             dst: *dst,
@@ -1797,6 +1839,20 @@ pub(crate) fn kind_in_map(chunk: &noeta_bytecode::Chunk) -> Vec<Kind> {
                         | BinaryOp::Le
                         | BinaryOp::Gt
                         | BinaryOp::Ge => Kind::Bool,
+                        // Tier-B bitwise (S1): the emitter's dispatch is int-or-bail, so a
+                        // natively-stored destination is always an int — claim it whenever
+                        // neither operand is statically a non-int (where the op always bails
+                        // and the claim would be inert anyway).
+                        BinaryOp::BitAnd
+                        | BinaryOp::BitOr
+                        | BinaryOp::BitXor
+                        | BinaryOp::Shl
+                        | BinaryOp::Shr => match (ka, kb) {
+                            (Kind::Float | Kind::Bool, _) | (_, Kind::Float | Kind::Bool) => {
+                                Kind::Imm
+                            }
+                            _ => Kind::Int,
+                        },
                         BinaryOp::Add
                         | BinaryOp::Sub
                         | BinaryOp::Mul
@@ -1815,6 +1871,16 @@ pub(crate) fn kind_in_map(chunk: &noeta_bytecode::Chunk) -> Vec<Kind> {
                         _ => Kind::Imm, // `~`, `&&`/`||`, identity — bail ops here; tier 0 decides
                     };
                 }
+                // S1 (Tier W): the emitter's dispatch is int-or-bail, so a natively-stored
+                // destination is an int (comparisons: a bool) — the same claim shape as the
+                // Tier-B bitwise arm above. The emitter def_raws on every storing path.
+                Op::WideInt { op, dst, .. } => {
+                    out[*dst as usize] = match op {
+                        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => Kind::Bool,
+                        _ => Kind::Int,
+                    }
+                }
+                Op::MaskWidth { dst, .. } => out[*dst as usize] = Kind::Int,
                 // P-JCT C3: a `CondBranch`'s continuation (either successor) proved the
                 // scrutinee a bool — a non-bool bails for E0007 before branching. The emitter
                 // defines the raw 0/1 form before the branch, on both claimed and generic paths.
@@ -2596,6 +2662,21 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             next(cg);
         }
         Op::Binary { op, dst, a, b, .. } => emit_binary(cg, *op, *dst, *a, *b, pc, op_blocks),
+        Op::WideInt {
+            op,
+            dst,
+            a,
+            b,
+            signed,
+            bits,
+            ..
+        } => emit_wide_int(cg, *op, *dst, *a, *b, *signed, *bits, pc, op_blocks),
+        Op::MaskWidth {
+            dst,
+            src,
+            signed,
+            bits,
+        } => emit_mask_width(cg, *dst, *src, *signed, *bits, pc, op_blocks),
         Op::Jump { target } => {
             cg.b.ins().jump(op_blocks[*target as usize], &[]);
         }
@@ -3233,7 +3314,7 @@ fn emit_binary(
         emit_int_binary_raw(cg, op, dst, x, y, pc, op_blocks);
         return;
     }
-    if ka == Kind::Float && kb == Kind::Float {
+    if ka == Kind::Float && kb == Kind::Float && !bitwise_binary(op) {
         let va = cg.read_reg(a);
         let vb = cg.read_reg(b);
         emit_float_binary(cg, op, dst, va, vb, pc, op_blocks);
@@ -3271,7 +3352,9 @@ fn emit_binary(
         emit_int_binary_raw(cg, op, dst, x, y, pc, op_blocks);
         return;
     }
-    if (ka == Kind::Float && kb == Kind::Imm) || (ka == Kind::Imm && kb == Kind::Float) {
+    if ((ka == Kind::Float && kb == Kind::Imm) || (ka == Kind::Imm && kb == Kind::Float))
+        && !bitwise_binary(op)
+    {
         let va = cg.read_reg(a);
         let vb = cg.read_reg(b);
         let unknown = if ka == Kind::Float { vb } else { va };
@@ -3288,6 +3371,18 @@ fn emit_binary(
     let a_int = cg.is_small_int(va);
     let b_int = cg.is_small_int(vb);
     let both_int = cg.b.ins().band(a_int, b_int);
+
+    // Tier-B bitwise (S1) is integer-only — no float body exists, so the dispatch is
+    // int-or-bail: a non-int pairing (boxed big int, float, `dyn` misuse) is the
+    // interpreter's to handle (it raises E0043 on a genuine type error).
+    if bitwise_binary(op) {
+        let int_block = cg.b.create_block();
+        guard(cg, both_int, int_block, pc);
+        let x = cg.unbox_int(va);
+        let y = cg.unbox_int(vb);
+        emit_int_binary_raw(cg, op, dst, x, y, pc, op_blocks);
+        return;
+    }
 
     let int_block = cg.b.create_block();
     let float_check = cg.b.create_block();
@@ -3348,6 +3443,35 @@ fn emit_int_binary_raw(
             };
             box_int_and_store(cg, dst, r, pc, op_blocks);
         }
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+            // `& | ^` of two sign-extended 48-bit immediates is itself sign-extended 48-bit
+            // (bitwise ops commute with sign extension), so the fit check is provably true —
+            // store without it.
+            let r = match op {
+                BinaryOp::BitAnd => cg.b.ins().band(x, y),
+                BinaryOp::BitOr => cg.b.ins().bor(x, y),
+                _ => cg.b.ins().bxor(x, y),
+            };
+            store_int_unchecked(cg, dst, r, pc, op_blocks);
+        }
+        BinaryOp::Shl | BinaryOp::Shr => {
+            // The interpreter raises on a shift amount outside `0..64` — bail before any write
+            // (`(y as u64) < 64` covers both the negative and the ≥64 case in one unsigned test).
+            let in_range = cg.b.ins().icmp_imm(IntCC::UnsignedLessThan, y, 64);
+            let ok = cg.b.create_block();
+            guard(cg, in_range, ok, pc);
+            if op == BinaryOp::Shl {
+                // i64 `<<` with the interpreter's wrapping semantics; a result past the 48-bit
+                // immediate range bails (the interpreter heap-boxes it), like `Add`'s overflow.
+                let r = cg.b.ins().ishl(x, y);
+                box_int_and_store(cg, dst, r, pc, op_blocks);
+            } else {
+                // Arithmetic (sign-filling) shift: a 48-bit sign-extended value stays 48-bit
+                // sign-extended under `>>`, so no fit check.
+                let r = cg.b.ins().sshr(x, y);
+                store_int_unchecked(cg, dst, r, pc, op_blocks);
+            }
+        }
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
             let cc = match op {
                 BinaryOp::Eq => IntCC::Equal,
@@ -3379,7 +3503,6 @@ fn emit_int_binary_raw(
 /// the raw i64 (it just passed the fit check), so an `Int`-claimed downstream read skips the
 /// unboxing entirely.
 fn box_int_and_store(cg: &mut Codegen, dst: Reg, r: ClValue, pc: usize, op_blocks: &[Block]) {
-    let lo = cg.b.ins().band(r, cg.pool.ptr_mask);
     let shl = cg.b.ins().ishl_imm(r, 16);
     let ext = cg.b.ins().sshr_imm(shl, 16);
     let fits = cg.b.ins().icmp(IntCC::Equal, ext, r);
@@ -3387,13 +3510,164 @@ fn box_int_and_store(cg: &mut Codegen, dst: Reg, r: ClValue, pc: usize, op_block
     // Guard: result fits the 48-bit immediate range, else bail (a big int must heap-box).
     let store = cg.b.create_block();
     guard(cg, fits, store, pc);
+    store_int_unchecked(cg, dst, r, pc, op_blocks);
+}
+
+/// Store an i64 result that is **provably** in the 48-bit immediate range (a bitwise `& | ^`/`>>`
+/// of immediates, or a value that already passed [`box_int_and_store`]'s fit guard): box the low
+/// 48 bits with the int tag, keep the raw form current (T1), and continue.
+fn store_int_unchecked(cg: &mut Codegen, dst: Reg, r: ClValue, pc: usize, op_blocks: &[Block]) {
+    let lo = cg.b.ins().band(r, cg.pool.ptr_mask);
     cg.def_raw(dst, r);
     let boxed = cg.b.ins().bor(lo, cg.pool.int_tag);
     cg.store_reg(dst, boxed);
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
 }
 
-/// The float body of a `Binary`, entered with both operands proven f64 floats (J2). Computes in f64
+/// `Op::WideInt` (Tier W3, S1): the sign-dependent fixed-width ops `/ % >> < <= > >=` on
+/// erased-i64 operands read as `signed`/unsigned `bits`-wide. Operand dispatch is int-or-bail
+/// (kind claims skip the guard); `/ %` guard the zero divisor (tier 0 raises E0008), mask their
+/// result into the width (matching `apply_binary_wide`), and store through the fit guard (an
+/// unsigned 64-bit quotient can exceed the immediate range — tier 0 heap-boxes it); `>>` guards
+/// the `0..64` amount; comparisons compare the raw words with the right signedness. Every bail
+/// precedes any write.
+#[allow(clippy::too_many_arguments)]
+fn emit_wide_int(
+    cg: &mut Codegen,
+    op: BinaryOp,
+    dst: Reg,
+    a: Reg,
+    b: Reg,
+    signed: bool,
+    bits: u8,
+    pc: usize,
+    op_blocks: &[Block],
+) {
+    // Operands: raw ints, guarded like `emit_binary`'s generic int path unless claimed.
+    let ka = cg.kind_claim(pc, a);
+    let kb = cg.kind_claim(pc, b);
+    let (x, y) = if ka == Kind::Int && kb == Kind::Int {
+        (cg.read_raw_int(a), cg.read_raw_int(b))
+    } else {
+        let va = cg.read_reg(a);
+        let vb = cg.read_reg(b);
+        let a_int = cg.is_small_int(va);
+        let b_int = cg.is_small_int(vb);
+        let both_int = cg.b.ins().band(a_int, b_int);
+        let ok = cg.b.create_block();
+        guard(cg, both_int, ok, pc);
+        (cg.unbox_int(va), cg.unbox_int(vb))
+    };
+    match op {
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            // The erased word *is* the u64 bit pattern, so an unsigned comparison of the raw
+            // i64s is exactly `a as u64 < b as u64` — no masking (values are kept in-width by
+            // construction).
+            let cc = match (op, signed) {
+                (BinaryOp::Lt, true) => IntCC::SignedLessThan,
+                (BinaryOp::Le, true) => IntCC::SignedLessThanOrEqual,
+                (BinaryOp::Gt, true) => IntCC::SignedGreaterThan,
+                (BinaryOp::Ge, true) => IntCC::SignedGreaterThanOrEqual,
+                (BinaryOp::Lt, false) => IntCC::UnsignedLessThan,
+                (BinaryOp::Le, false) => IntCC::UnsignedLessThanOrEqual,
+                (BinaryOp::Gt, false) => IntCC::UnsignedGreaterThan,
+                _ => IntCC::UnsignedGreaterThanOrEqual,
+            };
+            let cmp = cg.b.ins().icmp(cc, x, y);
+            let raw = cg.b.ins().uextend(types::I64, cmp);
+            cg.def_raw(dst, raw);
+            let boxed =
+                cg.b.ins()
+                    .select(cmp, cg.pool.true_bits, cg.pool.false_bits);
+            cg.store_reg(dst, boxed);
+            cg.b.ins().jump(op_blocks[pc + 1], &[]);
+        }
+        BinaryOp::Div | BinaryOp::Rem => {
+            // Bail on a zero divisor (tier 0 raises E0008). Signed overflow (MIN / -1) cannot
+            // arise: an unboxed immediate is never i64::MIN.
+            let nonzero = cg.b.ins().icmp(IntCC::NotEqual, y, cg.pool.zero);
+            let ok = cg.b.create_block();
+            guard(cg, nonzero, ok, pc);
+            let r = match (op, signed) {
+                (BinaryOp::Div, true) => cg.b.ins().sdiv(x, y),
+                (BinaryOp::Div, false) => cg.b.ins().udiv(x, y),
+                (BinaryOp::Rem, true) => cg.b.ins().srem(x, y),
+                _ => cg.b.ins().urem(x, y),
+            };
+            let m = emit_mask_to_width(cg, r, signed, bits);
+            // The fit guard is live: an unsigned 64-bit quotient of a negative-erased word (a
+            // huge u64) can exceed the immediate range — tier 0 boxes it.
+            box_int_and_store(cg, dst, m, pc, op_blocks);
+        }
+        BinaryOp::Shr => {
+            // Amount in `0..64` or tier 0 raises; one unsigned test covers negative and ≥64.
+            let in_range = cg.b.ins().icmp_imm(IntCC::UnsignedLessThan, y, 64);
+            let ok = cg.b.create_block();
+            guard(cg, in_range, ok, pc);
+            if signed {
+                // Arithmetic shift keeps a sign-extended immediate sign-extended — no fit check.
+                let r = cg.b.ins().sshr(x, y);
+                store_int_unchecked(cg, dst, r, pc, op_blocks);
+            } else {
+                // Logical shift of a negative-erased word (u64 with high bits) can land above
+                // the immediate range (`u64::MAX >> 1`) — the fit guard bails, tier 0 boxes.
+                let r = cg.b.ins().ushr(x, y);
+                box_int_and_store(cg, dst, r, pc, op_blocks);
+            }
+        }
+        _ => unreachable!("is_fast_op gate: unexpected WideInt op {op:?}"),
+    }
+}
+
+/// Mask an i64 result into a `signed`/unsigned `bits`-wide integer — `mask_to_width` in native
+/// code, with `bits` a compile-time constant: ≥64 is the identity, signed sign-extends via a
+/// shift pair, unsigned keeps the low bits.
+fn emit_mask_to_width(cg: &mut Codegen, r: ClValue, signed: bool, bits: u8) -> ClValue {
+    if bits >= 64 {
+        return r;
+    }
+    if signed {
+        let shl = cg.b.ins().ishl_imm(r, i64::from(64 - bits));
+        cg.b.ins().sshr_imm(shl, i64::from(64 - bits))
+    } else {
+        cg.b.ins().band_imm(r, ((1u64 << bits) - 1) as i64)
+    }
+}
+
+/// `Op::MaskWidth` (Tier W, S1): wrap an erased result into its fixed width. Total in tier 0; the
+/// native form guards only the operand (an immediate int — a boxed word bails). The masked result
+/// of an immediate is itself immediate for every emitted width (`{8,16,32}` shrink it, 64 is the
+/// identity) — except an unsigned width in `48..64`, which could exceed the range and takes the
+/// fit-guarded store defensively.
+fn emit_mask_width(
+    cg: &mut Codegen,
+    dst: Reg,
+    src: Reg,
+    signed: bool,
+    bits: u8,
+    pc: usize,
+    op_blocks: &[Block],
+) {
+    let x = if cg.kind_claim(pc, src) == Kind::Int {
+        cg.read_raw_int(src)
+    } else {
+        let v = cg.read_reg(src);
+        let is_int = cg.is_small_int(v);
+        let ok = cg.b.create_block();
+        guard(cg, is_int, ok, pc);
+        let x = cg.unbox_int(v);
+        cg.def_raw(src, x);
+        x
+    };
+    let m = emit_mask_to_width(cg, x, signed, bits);
+    if !signed && (48..64).contains(&bits) {
+        box_int_and_store(cg, dst, m, pc, op_blocks);
+    } else {
+        store_int_unchecked(cg, dst, m, pc, op_blocks);
+    }
+}
+
+/// The float body of a `Binary`, entered with both operands proven f64 floats (J2)./// The float body of a `Binary`, entered with both operands proven f64 floats (J2). Computes in f64
 /// and stores the boxed result. Matches the interpreter's `arithmetic`/`compare`: ordered
 /// comparisons (false on NaN, except `!=` which is true on NaN), and a NaN arithmetic result
 /// canonicalized to the standard quiet NaN — exactly `Value::float`. `%` has no Cranelift instruction
