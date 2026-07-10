@@ -1,0 +1,29 @@
+// std.metrics (native OTEL Phase M): the metrics surface — `counter`/`up_down_counter`/`histogram`/
+// `gauge` construct host-owned instruments (get-or-create by name), whose `.add`/`.record` (+ the
+// `*_with` attributed forms) marshal a measurement to the `Metrics` Host capability. A metric is a
+// write-only side effect (aggregated host-side, never program output), so this program's OWN output
+// is what the differential pins; the collected series are asserted in noeta-conformance's `metrics`
+// sink-parity oracle against the sandbox aggregation.
+// expect: stdout "start"
+// expect: stdout "done"
+// expect: exit 0
+use std.metrics
+
+echo "start"
+
+reqs = metrics.counter("http.requests")
+reqs.add(1)
+reqs.add_with(2, {"route": "/users", "status": 200, "cached": true})
+
+active = metrics.up_down_counter("http.active")
+active.add(1)
+active.add(-1)
+
+lat = metrics.histogram("http.latency")
+lat.record(7.5)
+lat.record_with(120, {"route": "/users"})
+
+temp = metrics.gauge("cpu.temp")
+temp.record(45.2)
+
+echo "done"

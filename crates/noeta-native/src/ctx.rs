@@ -354,7 +354,7 @@ pub trait NativeCtx {
     // **current** context belongs to whichever strand is executing (the main strand's root cell,
     // or a task's own — the scheduler swaps a task's context in around each poll of its step, and
     // a `spawn`ed task inherits a snapshot of its spawner's). Extensions that need scope to follow
-    // *execution* rather than the run — `std.telemetry`'s active-span stack is the first client —
+    // *execution* rather than the run — `std.tracing`'s active-span stack is the first client —
     // read/write the current context through these ops instead of keeping one global stack in
     // `ExtState`, which would interleave wrongly across `await`s. The values are opaque to the
     // core (telemetry stores `SpanId`s); an empty context is the natural zero.

@@ -161,10 +161,10 @@ fn handler_spans_nest_under_the_server_span() {
     let spans = emitted_spans(
         "use std.http.server\n\
          use std.http.{Request, Response}\n\
-         use std.{telemetry}\n\
+         use std.{tracing}\n\
          fn fetch(req: Request): Response {\n\
          \x20   body = fn(): int { return 1 }\n\
-         \x20   telemetry.with_span(\"db\", body)\n\
+         \x20   tracing.with_span(\"db\", body)\n\
          \x20   return server.response(200, \"ok\")\n\
          }\n\
          server.serve(8080, fetch)\n",
@@ -198,12 +198,12 @@ fn interleaved_handlers_keep_their_own_context() {
     let spans = emitted_spans(
         "use std.http.server\n\
          use std.http.{Request, Response}\n\
-         use std.{telemetry}\n\
+         use std.{tracing}\n\
          use std.task.{sleep}\n\
          async fn fetch(req: Request): Response {\n\
          \x20   sleep(5).await\n\
          \x20   body = fn(): int { return 1 }\n\
-         \x20   telemetry.with_span(\"work\", body)\n\
+         \x20   tracing.with_span(\"work\", body)\n\
          \x20   return server.response(200, \"ok\")\n\
          }\n\
          server.serve(8080, fetch)\n",
@@ -243,9 +243,9 @@ fn handler_spawned_task_inherits_the_server_span() {
     let spans = emitted_spans(
         "use std.http.server\n\
          use std.http.{Request, Response}\n\
-         use std.{telemetry}\n\
+         use std.{tracing}\n\
          async fn bg(): int {\n\
-         \x20   s = telemetry.span(\"bg\")\n\
+         \x20   s = tracing.span(\"bg\")\n\
          \x20   s.end()\n\
          \x20   return 1\n\
          }\n\
@@ -282,17 +282,17 @@ fn handler_spawned_task_inherits_the_server_span() {
 #[test]
 fn with_span_async_covers_the_bodys_duration() {
     let spans = emitted_spans(
-        "use std.{telemetry}\n\
+        "use std.{tracing}\n\
          use std.task.{sleep}\n\
          async fn work(): int {\n\
-         \x20   early = telemetry.span(\"early\")\n\
+         \x20   early = tracing.span(\"early\")\n\
          \x20   early.end()\n\
          \x20   sleep(5).await\n\
-         \x20   late = telemetry.span(\"late\")\n\
+         \x20   late = tracing.span(\"late\")\n\
          \x20   late.end()\n\
          \x20   return 1\n\
          }\n\
-         echo telemetry.with_span(\"job\", work).await\n",
+         echo tracing.with_span(\"job\", work).await\n",
     );
     let job = spans
         .iter()
@@ -323,13 +323,13 @@ fn with_span_async_covers_the_bodys_duration() {
 #[test]
 fn with_span_async_abort_ends_the_span_with_error() {
     let (spans, ok) = emitted_spans_any(
-        "use std.{telemetry}\n\
+        "use std.{tracing}\n\
          use std.task.{sleep}\n\
          async fn boom(): int {\n\
          \x20   sleep(2).await\n\
          \x20   panic(\"nope\")\n\
          }\n\
-         echo telemetry.with_span(\"job\", boom).await\n",
+         echo tracing.with_span(\"job\", boom).await\n",
     );
     assert!(!ok, "the abort propagates to the program");
     let job = spans
@@ -347,7 +347,7 @@ fn with_span_async_abort_ends_the_span_with_error() {
 #[test]
 fn channel_seeded_consumer_spans_parent_under_the_producer() {
     let spans = emitted_spans(
-        "use std.{telemetry}\n\
+        "use std.{tracing}\n\
          (tx, rx) = channel::<int>(1)\n\
          async fn produce(): int {\n\
          \x20   tx.send(7).await\n\
@@ -356,7 +356,7 @@ fn channel_seeded_consumer_spans_parent_under_the_producer() {
          }\n\
          async fn consume(): int {\n\
          \x20   r = rx.recv().await\n\
-         \x20   work = telemetry.span(\"work\")\n\
+         \x20   work = tracing.span(\"work\")\n\
          \x20   work.end()\n\
          \x20   return match r { some(x) => x, none => 0 }\n\
          }\n\
@@ -364,7 +364,7 @@ fn channel_seeded_consumer_spans_parent_under_the_producer() {
          \x20   mut got = 0\n\
          \x20   concurrent {\n\
          \x20       h = spawn consume()\n\
-         \x20       telemetry.with_span(\"produce\", produce).await\n\
+         \x20       tracing.with_span(\"produce\", produce).await\n\
          \x20       got = h.await\n\
          \x20   }\n\
          \x20   return got\n\

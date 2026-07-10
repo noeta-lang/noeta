@@ -1,0 +1,8 @@
+// A `std.log` attribute value must be a scalar — the `*_with` map's value type is
+// `string | int | float | bool`. A non-scalar value (here a `List<int>`) is a compile-time type
+// error, caught as the map literal absorbs the expected union value type at the call site (not a
+// runtime failure). Mirrors `std.tracing`'s `set_attribute` scalar-only rule.
+// expect: error E0007 at 8:34
+// expect: exit 1
+use std.log
+log.info_with("tagged", {"tags": [1, 2, 3]})

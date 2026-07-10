@@ -8,10 +8,10 @@
 // backends agree.
 // expect: stdout "true"
 // expect: exit 0
-use std.{telemetry}
+use std.{tracing}
 
 async fn producer(tx: Sender<string>): void {
-    s = telemetry.span("remote-work")
+    s = tracing.span("remote-work")
     tx.send(s.context()).await
     s.end()
 }
@@ -19,7 +19,7 @@ async fn producer(tx: Sender<string>): void {
 async fn consumer(rx: Receiver<string>): bool {
     inbound = rx.recv().await
     parent = match inbound { some(x) => x, none => "" }
-    child = telemetry.span_from("continue", parent)
+    child = tracing.span_from("continue", parent)
     child_ctx = child.context()
     child.end()
     in_parts = parent.split("-")

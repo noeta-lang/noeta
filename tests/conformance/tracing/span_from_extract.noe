@@ -1,4 +1,4 @@
-// Native OTEL T3 — the extract side of W3C propagation. `telemetry.span_from(name, traceparent)`
+// Native OTEL T3 — the extract side of W3C propagation. `tracing.span_from(name, traceparent)`
 // starts a span whose parent is a *remote* context parsed from an inbound `traceparent` string, so
 // the new span continues the inbound trace (same trace id) under a fresh span id. The traceparent is
 // the W3C spec's own example value. `Span.context()` reads the child's own traceparent back, and we
@@ -9,10 +9,10 @@
 // expect: stdout "false"
 // expect: stdout "done"
 // expect: exit 0
-use std.{telemetry}
+use std.{tracing}
 
 inbound = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
-child = telemetry.span_from("continue", inbound)
+child = tracing.span_from("continue", inbound)
 child_ctx = child.context()
 child.end()
 

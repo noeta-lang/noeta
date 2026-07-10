@@ -1,0 +1,34 @@
+// std.log (native OTEL Phase L): the logs surface — `log.info`/`debug`/`warn`/`error` and the
+// generic `log.log(severity, message)`. A log record is a write-only side effect (never program
+// output, like a span), so this program's OWN output is what the differential pins; that both
+// backends type-check, dispatch the ctx functions, and run identically is the end-to-end proof.
+// The emitted records (and their active-span correlation) are asserted in noeta-conformance's
+// `logs` sink-parity oracle against the sandbox recorder.
+// expect: stdout "start"
+// expect: stdout "in-span"
+// expect: stdout "done"
+// expect: exit 0
+use std.log
+use std.tracing
+
+echo "start"
+
+// Top-level logs: no active span, so no trace correlation.
+log.info("booting")
+log.warn("low disk")
+log.log("fatal", "not really")
+
+// A log emitted inside a span auto-correlates to it (asserted by the oracle).
+body = fn(): int {
+    log.error("inside the span")
+    echo "in-span"
+    return 1
+}
+tracing.with_span("job", body)
+
+// Structured attributes (`*_with`): a heterogeneous map literal absorbs the union value type.
+log.info_with("served", {"route": "/users", "status": 200, "cached": true, "ms": 1.5})
+
+log.debug("shutting down")
+
+echo "done"

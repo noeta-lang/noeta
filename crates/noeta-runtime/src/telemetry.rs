@@ -9,20 +9,30 @@
 //! T0 is a skeleton: spans buffer and flush as one OTLP/JSON POST at a size threshold or on host
 //! teardown. A real batch span processor (time-triggered, off the request path) is a later slice.
 
-use noeta_stdlib::{AttrValue, SpanData, SpanKind, SpanStatus};
+use noeta_stdlib::{
+    AttrValue, HistogramPoint, LogRecord, MetricData, MetricPoints, MetricValue, NumberPoint,
+    Severity, SpanData, SpanKind, SpanStatus, Temporality,
+};
 use serde_json::{Value, json};
 
 /// Flush the span buffer once it reaches this many spans (a minimal batch; the proper time-based
 /// batch processor is a later slice).
 pub(crate) const FLUSH_THRESHOLD: usize = 512;
 
-/// A configured OTLP/HTTP-JSON traces exporter. Present only when an endpoint is configured.
+/// A configured OTLP/HTTP-JSON exporter, shared by all three telemetry signals. Present when **any**
+/// signal has a resolved endpoint; each signal's endpoint is `Some` only when that signal is enabled
+/// (a base endpoint is set and the signal isn't turned off via `OTEL_{SIGNAL}_EXPORTER=none`, or a
+/// signal-specific endpoint is set). Headers and `service.name` are shared across signals.
 pub(crate) struct OtlpExporter {
-    /// The full traces endpoint URL (`.../v1/traces`).
-    pub(crate) traces_endpoint: String,
-    /// Extra headers (e.g. an auth token), from `OTEL_EXPORTER_OTLP_HEADERS`.
+    /// The full traces endpoint URL (`.../v1/traces`), or `None` when traces are disabled.
+    pub(crate) traces_endpoint: Option<String>,
+    /// The full logs endpoint URL (`.../v1/logs`), or `None` when logs are disabled.
+    pub(crate) logs_endpoint: Option<String>,
+    /// The full metrics endpoint URL (`.../v1/metrics`), or `None` when metrics are disabled.
+    pub(crate) metrics_endpoint: Option<String>,
+    /// Extra headers (e.g. an auth token), from `OTEL_EXPORTER_OTLP_HEADERS`. Shared across signals.
     pub(crate) headers: Vec<(String, String)>,
-    /// `service.name` resource attribute.
+    /// `service.name` resource attribute. Shared across signals.
     service_name: String,
 }
 
@@ -31,6 +41,8 @@ impl std::fmt::Debug for OtlpExporter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OtlpExporter")
             .field("traces_endpoint", &self.traces_endpoint)
+            .field("logs_endpoint", &self.logs_endpoint)
+            .field("metrics_endpoint", &self.metrics_endpoint)
             .field(
                 "headers",
                 &format_args!("<{} redacted>", self.headers.len()),
@@ -41,24 +53,27 @@ impl std::fmt::Debug for OtlpExporter {
 }
 
 impl OtlpExporter {
-    /// Build from the environment, or `None` if no OTLP endpoint is configured (the null sink).
-    /// `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` wins; else `OTEL_EXPORTER_OTLP_ENDPOINT` with the
-    /// conventional `/v1/traces` path appended.
+    /// Build from the environment, or `None` if no OTLP endpoint is configured for any signal (the
+    /// null sink). The master switch is `OTEL_EXPORTER_OTLP_ENDPOINT` (base, with `/v1/{signal}`
+    /// appended per signal); a signal-specific `OTEL_EXPORTER_OTLP_{SIGNAL}_ENDPOINT` wins for that
+    /// signal (used verbatim) and can enable one signal on its own. Any signal can be turned off with
+    /// `OTEL_{SIGNAL}_EXPORTER=none` even when a base is set.
     pub(crate) fn from_env() -> Option<OtlpExporter> {
         // The standard global kill switch (OTel spec): `OTEL_SDK_DISABLED=true` forces the null sink
         // even when an endpoint is configured — the opt-out for auto-instrumentation.
         if std::env::var("OTEL_SDK_DISABLED").is_ok_and(|v| v.eq_ignore_ascii_case("true")) {
             return None;
         }
-        let traces_endpoint = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        let base = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
             .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-                    .map(|base| format!("{}/v1/traces", base.trim_end_matches('/')))
-            })?;
+            .filter(|s| !s.is_empty());
+        let traces_endpoint = signal_endpoint(base.as_deref(), "traces");
+        let logs_endpoint = signal_endpoint(base.as_deref(), "logs");
+        let metrics_endpoint = signal_endpoint(base.as_deref(), "metrics");
+        // No signal resolved to an endpoint ⇒ the null sink, exactly as an unset base was before.
+        if traces_endpoint.is_none() && logs_endpoint.is_none() && metrics_endpoint.is_none() {
+            return None;
+        }
         let headers = std::env::var("OTEL_EXPORTER_OTLP_HEADERS")
             .ok()
             .map(|s| parse_headers(&s))
@@ -67,6 +82,8 @@ impl OtlpExporter {
             std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "noeta".to_string());
         Some(OtlpExporter {
             traces_endpoint,
+            logs_endpoint,
+            metrics_endpoint,
             headers,
             service_name,
         })
@@ -76,6 +93,41 @@ impl OtlpExporter {
     pub(crate) fn request_body(&self, spans: &[SpanData]) -> Value {
         spans_to_json(spans, &self.service_name)
     }
+
+    /// The OTLP/JSON `ExportLogsServiceRequest` body for `records`.
+    pub(crate) fn logs_request_body(&self, records: &[LogRecord]) -> Value {
+        logs_to_json(records, &self.service_name)
+    }
+
+    /// The `service.name` — the periodic metrics reader clones it into its own thread (it builds
+    /// request bodies off the interpreter thread).
+    pub(crate) fn service_name(&self) -> &str {
+        &self.service_name
+    }
+}
+
+/// Resolve one signal's endpoint from the environment. A signal-specific
+/// `OTEL_EXPORTER_OTLP_{SIGNAL}_ENDPOINT` is used verbatim; otherwise `base` gets `/v1/{signal}`
+/// appended. `OTEL_{SIGNAL}_EXPORTER=none` disables the signal outright. `signal` is the lowercase
+/// path segment (`traces`/`logs`/`metrics`); the env var infix is its uppercase form.
+fn signal_endpoint(base: Option<&str>, signal: &str) -> Option<String> {
+    let upper = signal.to_ascii_uppercase();
+    if std::env::var(format!("OTEL_{upper}_EXPORTER")).is_ok_and(|v| v.eq_ignore_ascii_case("none"))
+    {
+        return None;
+    }
+    if let Some(ep) = std::env::var(format!("OTEL_EXPORTER_OTLP_{upper}_ENDPOINT"))
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        return Some(ep);
+    }
+    base.map(|b| format!("{}/v1/{signal}", b.trim_end_matches('/')))
+}
+
+/// The OTLP `resource` object carrying `service.name` — shared by all three signals' request bodies.
+pub(crate) fn resource(service_name: &str) -> Value {
+    json!({ "attributes": [attr_kv("service.name", &AttrValue::Str(service_name.into()))] })
 }
 
 /// Parse `OTEL_EXPORTER_OTLP_HEADERS` (`k1=v1,k2=v2`) into pairs, skipping malformed entries.
@@ -100,9 +152,7 @@ pub(crate) fn spans_to_json(spans: &[SpanData], service_name: &str) -> Value {
     let spans_json: Vec<Value> = spans.iter().map(span_to_json).collect();
     json!({
         "resourceSpans": [{
-            "resource": {
-                "attributes": [attr_kv("service.name", &AttrValue::Str(service_name.into()))]
-            },
+            "resource": resource(service_name),
             "scopeSpans": [{
                 "scope": { "name": "noeta", "version": env!("CARGO_PKG_VERSION") },
                 "spans": spans_json
@@ -127,6 +177,140 @@ fn span_to_json(s: &SpanData) -> Value {
         obj["parentSpanId"] = Value::String(hex(&parent.span_id));
     }
     obj
+}
+
+/// Build the OTLP/JSON `ExportLogsServiceRequest` for a batch of log records (one resource, one
+/// scope). Same encoding rules as spans: `timeUnixNano` is a stringified uint64, `traceId`/`spanId`
+/// are hex, `severityNumber` is the OTel numeric level, `body` is an `AnyValue` (`stringValue`).
+pub(crate) fn logs_to_json(records: &[LogRecord], service_name: &str) -> Value {
+    let records_json: Vec<Value> = records.iter().map(log_to_json).collect();
+    json!({
+        "resourceLogs": [{
+            "resource": resource(service_name),
+            "scopeLogs": [{
+                "scope": { "name": "noeta", "version": env!("CARGO_PKG_VERSION") },
+                "logRecords": records_json
+            }]
+        }]
+    })
+}
+
+fn log_to_json(r: &LogRecord) -> Value {
+    let mut obj = json!({
+        "timeUnixNano": nanos(r.unix_ms),
+        "observedTimeUnixNano": nanos(r.unix_ms),
+        "severityNumber": severity_number(r.severity),
+        "severityText": severity_text(r.severity),
+        "body": { "stringValue": r.body.as_str() },
+        "attributes": r.attributes.iter().map(|(k, v)| attr_kv(k, v)).collect::<Vec<_>>(),
+    });
+    // Auto-correlation: a record emitted inside a span carries that span's trace/span ids.
+    if let Some(ctx) = &r.trace_context {
+        obj["traceId"] = Value::String(hex(&ctx.trace_id));
+        obj["spanId"] = Value::String(hex(&ctx.span_id));
+    }
+    obj
+}
+
+/// Build the OTLP/JSON `ExportMetricsServiceRequest` for a batch of collected metrics (one resource,
+/// one scope). Number data points carry `asInt` (stringified int64) or `asDouble`; histogram points
+/// carry stringified `count`/`bucketCounts` and double `sum`/`explicitBounds`. `aggregationTemporality`
+/// is the OTel enum int (Cumulative=2, Delta=1).
+pub(crate) fn metrics_to_json(metrics: &[MetricData], service_name: &str) -> Value {
+    let metrics_json: Vec<Value> = metrics.iter().map(metric_to_json).collect();
+    json!({
+        "resourceMetrics": [{
+            "resource": resource(service_name),
+            "scopeMetrics": [{
+                "scope": { "name": "noeta", "version": env!("CARGO_PKG_VERSION") },
+                "metrics": metrics_json
+            }]
+        }]
+    })
+}
+
+fn metric_to_json(m: &MetricData) -> Value {
+    let temporality = temporality_code(m.temporality);
+    let mut obj = json!({ "name": m.name.as_str(), "unit": m.unit.as_str() });
+    match &m.points {
+        MetricPoints::Sum { points, monotonic } => {
+            obj["sum"] = json!({
+                "dataPoints": points.iter().map(number_point_to_json).collect::<Vec<_>>(),
+                "aggregationTemporality": temporality,
+                "isMonotonic": monotonic,
+            });
+        }
+        MetricPoints::Gauge(points) => {
+            obj["gauge"] = json!({
+                "dataPoints": points.iter().map(number_point_to_json).collect::<Vec<_>>(),
+            });
+        }
+        MetricPoints::Histogram(points) => {
+            obj["histogram"] = json!({
+                "dataPoints": points.iter().map(histogram_point_to_json).collect::<Vec<_>>(),
+                "aggregationTemporality": temporality,
+            });
+        }
+    }
+    obj
+}
+
+fn number_point_to_json(p: &NumberPoint) -> Value {
+    let mut obj = json!({
+        "attributes": p.attributes.iter().map(|(k, v)| attr_kv(k, v)).collect::<Vec<_>>(),
+        "startTimeUnixNano": nanos(p.start_unix_ms),
+        "timeUnixNano": nanos(p.unix_ms),
+    });
+    match p.value {
+        // int64 as a string, double as a JSON number — the OTLP/JSON number-point encoding.
+        MetricValue::Int(i) => obj["asInt"] = Value::String(i.to_string()),
+        MetricValue::Float(f) => obj["asDouble"] = json!(f),
+    }
+    obj
+}
+
+fn histogram_point_to_json(p: &HistogramPoint) -> Value {
+    json!({
+        "attributes": p.attributes.iter().map(|(k, v)| attr_kv(k, v)).collect::<Vec<_>>(),
+        "startTimeUnixNano": nanos(p.start_unix_ms),
+        "timeUnixNano": nanos(p.unix_ms),
+        "count": p.count.to_string(),
+        "sum": p.sum,
+        "explicitBounds": p.bounds,
+        "bucketCounts": p.buckets.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+    })
+}
+
+fn temporality_code(t: Temporality) -> u8 {
+    match t {
+        Temporality::Delta => 1,
+        Temporality::Cumulative => 2,
+    }
+}
+
+/// The OTel severity **number** for a level (one representative per severity group: TRACE=1,
+/// DEBUG=5, INFO=9, WARN=13, ERROR=17, FATAL=21 — the group base values).
+fn severity_number(s: Severity) -> u8 {
+    match s {
+        Severity::Trace => 1,
+        Severity::Debug => 5,
+        Severity::Info => 9,
+        Severity::Warn => 13,
+        Severity::Error => 17,
+        Severity::Fatal => 21,
+    }
+}
+
+/// The OTel severity **text** for a level (the conventional uppercase name).
+fn severity_text(s: Severity) -> &'static str {
+    match s {
+        Severity::Trace => "TRACE",
+        Severity::Debug => "DEBUG",
+        Severity::Info => "INFO",
+        Severity::Warn => "WARN",
+        Severity::Error => "ERROR",
+        Severity::Fatal => "FATAL",
+    }
 }
 
 fn event_to_json(e: &noeta_stdlib::SpanEvent) -> Value {
@@ -252,6 +436,90 @@ mod tests {
         let s = &body["resourceSpans"][0]["scopeSpans"][0]["spans"][0];
         assert!(s.get("parentSpanId").is_none());
         assert_eq!(s["status"]["code"], 1);
+    }
+
+    #[test]
+    fn otlp_logs_json_shape_is_valid() {
+        let records = vec![
+            LogRecord {
+                unix_ms: 2_000,
+                severity: Severity::Info,
+                body: "started".into(),
+                attributes: vec![("worker".into(), AttrValue::Int(3))],
+                trace_context: Some(ctx(0xab, 0xcd)),
+            },
+            LogRecord {
+                unix_ms: 2_500,
+                severity: Severity::Error,
+                body: "boom".into(),
+                attributes: vec![],
+                trace_context: None,
+            },
+        ];
+        let body = logs_to_json(&records, "svc");
+        let rl = &body["resourceLogs"][0];
+        assert_eq!(
+            rl["resource"]["attributes"][0]["value"]["stringValue"],
+            "svc"
+        );
+        let recs = &rl["scopeLogs"][0]["logRecords"];
+        // Correlated INFO record.
+        assert_eq!(recs[0]["severityNumber"], 9);
+        assert_eq!(recs[0]["severityText"], "INFO");
+        assert_eq!(recs[0]["body"]["stringValue"], "started");
+        assert_eq!(recs[0]["timeUnixNano"], "2000000000");
+        assert_eq!(recs[0]["attributes"][0]["value"]["intValue"], "3");
+        assert_eq!(recs[0]["traceId"], "abababababababababababababababab");
+        assert_eq!(recs[0]["spanId"], "cdcdcdcdcdcdcdcd");
+        // Top-level ERROR record — no trace correlation.
+        assert_eq!(recs[1]["severityNumber"], 17);
+        assert_eq!(recs[1]["severityText"], "ERROR");
+        assert!(recs[1].get("traceId").is_none());
+        assert!(recs[1].get("spanId").is_none());
+    }
+
+    #[test]
+    fn otlp_metrics_json_shape_is_valid() {
+        use noeta_stdlib::{InstrumentKind, MetricStore};
+        let mut store = MetricStore::default();
+        let c = store.get_or_create("http.requests", "{request}", InstrumentKind::Counter);
+        let h = store.get_or_create("latency", "ms", InstrumentKind::Histogram);
+        store.observe(
+            c,
+            MetricValue::Int(2),
+            vec![("method".into(), AttrValue::Str("GET".into()))],
+            10,
+        );
+        store.observe(h, MetricValue::Float(7.0), vec![], 10);
+        let data = store.collect(100);
+
+        let body = metrics_to_json(&data, "svc");
+        let rm = &body["resourceMetrics"][0];
+        assert_eq!(
+            rm["resource"]["attributes"][0]["value"]["stringValue"],
+            "svc"
+        );
+        let metrics = &rm["scopeMetrics"][0]["metrics"];
+
+        // Counter → sum, monotonic, cumulative (temporality 2), asInt string.
+        let sum = &metrics[0]["sum"];
+        assert_eq!(metrics[0]["name"], "http.requests");
+        assert_eq!(sum["isMonotonic"], true);
+        assert_eq!(sum["aggregationTemporality"], 2);
+        let dp = &sum["dataPoints"][0];
+        assert_eq!(dp["asInt"], "2");
+        assert_eq!(dp["startTimeUnixNano"], "10000000");
+        assert_eq!(dp["timeUnixNano"], "100000000");
+        assert_eq!(dp["attributes"][0]["value"]["stringValue"], "GET");
+
+        // Histogram → count/bucketCounts strings, sum + explicitBounds doubles.
+        let hist = &metrics[1]["histogram"];
+        assert_eq!(hist["aggregationTemporality"], 2);
+        let hdp = &hist["dataPoints"][0];
+        assert_eq!(hdp["count"], "1"); // one observation, uint64 as a string
+        assert_eq!(hdp["sum"], 7.0);
+        assert_eq!(hdp["bucketCounts"][2], "1"); // 7.0 → <=10 (bounds index 2)
+        assert_eq!(hdp["explicitBounds"][1], 5.0);
     }
 
     #[test]

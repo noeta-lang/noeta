@@ -48,7 +48,7 @@ ring-http-client = ["dep:reqwest"]
 # Native OTEL span export. Reuses the `ring-http-client` reqwest client (`RealHost::http`) to POST
 # spans, so it pulls that ring, plus json + serde_json. On by default for the dev toolchain;
 # `--no-default-features` drops it, and AOT footprint selection links it only when a program imports
-# `std.telemetry`.
+# `std.tracing`.
 telemetry = ["dep:serde_json", "ring-http-client", "reqwest/json"]
 # The real-p2p ring (p2p P3): pulls a p2panda-net node into `RealHost`. On by default, mirroring
 # `ring-http-client` — the plain toolchain/build is fully capable, and `noeta build --native`'s

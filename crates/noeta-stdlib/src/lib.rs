@@ -43,8 +43,10 @@ pub mod host;
 pub mod id;
 pub mod iter;
 pub mod json;
+pub mod log;
 pub mod map_key;
 pub mod math;
+pub mod metrics;
 pub mod net;
 pub mod p2p;
 pub mod quat;
@@ -54,7 +56,7 @@ pub mod registry;
 pub mod serve;
 pub mod synced;
 pub mod task;
-pub mod telemetry;
+pub mod tracing;
 pub mod vec3;
 
 // The stdlib-only surface (the ABI items above arrive via the `noeta_native::*` glob).

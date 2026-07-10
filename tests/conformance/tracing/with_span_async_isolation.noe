@@ -9,25 +9,25 @@
 // expect: stdout "active=true"
 // expect: stdout "distinct=true"
 // expect: exit 0
-use std.{telemetry}
+use std.{tracing}
 use std.task.{sleep}
 
 async fn body_a(): string {
     sleep(3).await
-    return telemetry.current_context()
+    return tracing.current_context()
 }
 
 async fn body_b(): string {
     sleep(3).await
-    return telemetry.current_context()
+    return tracing.current_context()
 }
 
 async fn worker_a(): string {
-    return telemetry.with_span("a", body_a).await
+    return tracing.with_span("a", body_a).await
 }
 
 async fn worker_b(): string {
-    return telemetry.with_span("b", body_b).await
+    return tracing.with_span("b", body_b).await
 }
 
 async fn run(): (string, string) {
