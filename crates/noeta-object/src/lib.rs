@@ -54,9 +54,17 @@ pub struct Shape {
     /// derived property of the named type — deliberately **excluded from equality/hashing** below
     /// (it is not part of a shape's structural identity, which is name + fields + variant).
     pub structural_eq: bool,
+    /// Whether values of this type may **key a `Map` / member a `Set`** (P-PKEY): a `@packed`
+    /// struct every one of whose fields is an integer/`bool` (or a nested key-capable packed
+    /// struct) — content identity over a canonical fixed-width encoding, no floats. Computed by
+    /// `noeta_ast::key_capable_packed` and baked in by the compiler. Type metadata like
+    /// `structural_eq`: excluded from equality/hashing below. `#[serde(default)]` so bundles
+    /// serialized before the field read back as not-capable.
+    #[serde(default)]
+    pub key_capable: bool,
 }
 
-// `structural_eq` is type metadata, not part of a shape's structural identity (two shapes are "the
+// `structural_eq` and `key_capable` are type metadata, not part of a shape's structural identity (two shapes are "the
 // same shape" iff same kind/name/fields/variant/result-option). Hand-implemented to exclude it so a
 // shape built without derive context (e.g. reflection materialization) still matches the compiler's
 // interned shape for the same type.
@@ -105,7 +113,16 @@ impl Shape {
             variant: None,
             builtin_result_option: false,
             structural_eq,
+            key_capable: false,
         }
+    }
+
+    /// Mark the shape key-capable (P-PKEY) — chained by the compiler, which computed the
+    /// program's key-capable packed set; every other construction site (reflection, isolates)
+    /// leaves the default `false` and resolves against the compiler's canonical interned shape.
+    pub fn with_key_capable(mut self, key_capable: bool) -> Shape {
+        self.key_capable = key_capable;
+        self
     }
 
     /// An enum-variant shape: `name` is the enum, `variant` the case, `fields` the positional
@@ -124,6 +141,7 @@ impl Shape {
             builtin_result_option,
             // Enums are a value kind: `==` is structural.
             structural_eq: true,
+            key_capable: false,
         }
     }
 

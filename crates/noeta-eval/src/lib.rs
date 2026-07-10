@@ -1086,6 +1086,16 @@ struct Channel {
 struct Interpreter {
     stdout: String,
     diagnostics: Vec<Diagnostic>,
+    /// Every declared `@packed` struct's field-type names (P-PKEY,
+    /// `noeta_ast::packed_named_fields`) — the input to the key-capability fixpoint below.
+    /// Accumulated across declarations (a session declares incrementally).
+    packed_fields: std::collections::HashMap<String, Vec<Option<String>>>,
+    /// The **key-capable** packed structs (P-PKEY, `noeta_ast::key_capable_packed`): types whose
+    /// values may key a `Map` / member a `Set`. Recomputed whenever a packed struct declares, and
+    /// consulted at key-*use* time — which necessarily follows every involved declaration, so a
+    /// forward-referenced nested chain is settled before it can be observed. Mirrors the VM's
+    /// `Shape::key_capable`, computed from the same inputs by the same shared fixpoint.
+    key_capable_packed: std::collections::HashSet<String>,
     scope: Rc<Scope>,
     /// The root (global) scope, held so a field-default thunk can be run in the type's **definition
     /// scope** (object-model slice 5) — types are top-level, so their defaults resolve globals only,
@@ -1205,6 +1215,8 @@ impl Interpreter {
         Interpreter {
             stdout: String::new(),
             diagnostics: Vec::new(),
+            packed_fields: std::collections::HashMap::new(),
+            key_capable_packed: std::collections::HashSet::new(),
             globals: Rc::clone(&global),
             scope: global,
             host,

@@ -490,6 +490,13 @@ impl Interpreter {
             .iter()
             .map(|(name, func)| (name.clone(), Rc::new(self.make_ir_closure(func))))
             .collect();
+        // P-PKEY: a `@packed` struct feeds the key-capability fixpoint. Recomputed here (not at
+        // use sites) so the set is settled the moment the last declaration of a nested chain
+        // lands — always before any value of these types can exist, let alone key a map.
+        if let Some(named) = noeta_ast::packed_named_fields(decl) {
+            self.packed_fields.insert(decl.name.clone(), named);
+            self.key_capable_packed = noeta_ast::key_capable_packed(&self.packed_fields);
+        }
         let def = TypeDef {
             name: decl.name.clone(),
             fields,

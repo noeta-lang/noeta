@@ -8256,6 +8256,35 @@ mod tests {
         assert!(trace.is_empty(), "clean run must not trace: {trace:?}");
     }
 
+    /// P-PKEY S0: the compiler bakes key-capability into `Module.shapes` — a `@packed` struct of
+    /// int/bool fields (or a nested chain of them, forward references included) is `key_capable`;
+    /// a float-field packed struct and a plain struct are not. Plumbing only — no behavior reads
+    /// the flag yet.
+    #[test]
+    fn shapes_carry_packed_key_capability() {
+        let src = "@packed struct Outer { m: Mid }\n@packed struct Mid { c: Cell; n: i64 }\n@packed struct Cell { x: int; y: bool }\n@packed struct Vec2f { x: f32; y: f32 }\nstruct Plain { x: int }\no = Outer { m: Mid { c: Cell { x: 1, y: true }, n: 2i64 } }\nv = Vec2f { x: 1.0, y: 2.0 }\np = Plain { x: 1 }\necho o.m.n\n";
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).expect("compiles");
+        let flag = |name: &str| {
+            module
+                .shapes
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("shape {name} missing"))
+                .key_capable
+        };
+        assert!(flag("Cell"), "all-int/bool packed struct is key-capable");
+        assert!(flag("Mid"), "nested capable chain");
+        assert!(
+            flag("Outer"),
+            "forward reference resolves through the fixpoint"
+        );
+        assert!(!flag("Vec2f"), "float fields disqualify");
+        assert!(!flag("Plain"), "a non-packed struct is not key-capable");
+    }
+
     /// Compile a source program to a [`Module`] (or panic if it's outside the VM subset), for the
     /// tests that need to drive `run_module`/`run_module_jit` directly.
     #[cfg(feature = "jit")]
