@@ -3848,8 +3848,13 @@ impl<'m> FnCompiler<'m> {
             _ => unreachable!("make_enum is only reached for enum types"),
         };
         let shape = self.module.intern_shape(
-            Shape::enum_variant(type_name.to_string(), variant.to_string(), slots.fields, false)
-                .with_variant_index(slots.index),
+            Shape::enum_variant(
+                type_name.to_string(),
+                variant.to_string(),
+                slots.fields,
+                false,
+            )
+            .with_variant_index(slots.index),
         );
         let mut consumed = Vec::new();
         let mut arg_regs = Vec::with_capacity(args.len());

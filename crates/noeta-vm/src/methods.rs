@@ -173,7 +173,9 @@ impl<'m> Vm<'m> {
                     return Err(self.error(stdlib_error_code(error.kind), span, error.message));
                 }
                 let mut sorted = items;
-                sorted.sort_by(|&a, &b| noeta_value::compare_values(a, b).unwrap_or(std::cmp::Ordering::Equal));
+                sorted.sort_by(|&a, &b| {
+                    noeta_value::compare_values(a, b).unwrap_or(std::cmp::Ordering::Equal)
+                });
                 for &element in &sorted {
                     retain(element);
                 }
@@ -467,7 +469,13 @@ impl<'m> Vm<'m> {
         let deep = ext.is_some_and(|t| t.deep_marshal);
         let nargs: Vec<noeta_stdlib::NativeValue> = args
             .iter()
-            .map(|a| if deep { a.to_native_deep() } else { marshal_native_arg(*a) })
+            .map(|a| {
+                if deep {
+                    a.to_native_deep()
+                } else {
+                    marshal_native_arg(*a)
+                }
+            })
             .collect();
         let host = &mut *self.host;
         let result = recv

@@ -471,7 +471,8 @@ fn derive_field_constraint_defers_generic_params_to_instantiation() {
     assert!(codes(src).is_empty(), "{:?}", codes(src));
 }
 
-const MAX_FN: &str = "fn max<T: Comparable>(a: T, b: T): T {\n  if a > b { return a; }\n  return b;\n}\n";
+const MAX_FN: &str =
+    "fn max<T: Comparable>(a: T, b: T): T {\n  if a > b { return a; }\n  return b;\n}\n";
 
 #[test]
 fn generic_derive_is_conditional_on_instantiated_fields() {
@@ -486,7 +487,11 @@ fn generic_derive_is_conditional_on_instantiated_fields() {
         "@derive(Comparable)\nstruct Box<T> {{\n  value: T\n}}\n{MAX_FN}\
          echo max(Box {{ value: [1] }}, Box {{ value: [2] }}).value\n"
     );
-    assert_eq!(codes(&bad), ["E0025"], "Box<List<int>> must not satisfy Comparable");
+    assert_eq!(
+        codes(&bad),
+        ["E0025"],
+        "Box<List<int>> must not satisfy Comparable"
+    );
 }
 
 #[test]

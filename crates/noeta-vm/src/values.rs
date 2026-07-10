@@ -246,8 +246,7 @@ pub(crate) fn make_ordering(variant: &str) -> Value {
     };
     let shape = cell.get_or_init(|| {
         noeta_object::intern_shape(
-            Shape::enum_variant("Ordering", variant, Vec::new(), false)
-                .with_variant_index(index),
+            Shape::enum_variant("Ordering", variant, Vec::new(), false).with_variant_index(index),
         )
     });
     Value::enum_value(shape, Vec::new())

@@ -3486,7 +3486,9 @@ impl Checker {
             // `?T` / `Result<T, E>` are the prelude enums — ordered by variant then payload (the
             // same structural rule as a named enum), so orderability follows the payloads.
             Type::Option(e) => self.type_orderable(e, visited),
-            Type::Result(a, b) => self.type_orderable(a, visited) && self.type_orderable(b, visited),
+            Type::Result(a, b) => {
+                self.type_orderable(a, visited) && self.type_orderable(b, visited)
+            }
             Type::Named(name, args) => match self.type_kinds.get(name) {
                 Some(noeta_types::TypeKind::Struct) | Some(noeta_types::TypeKind::Class) => {
                     if visited.iter().any(|v| v == name) {
@@ -4495,7 +4497,9 @@ impl Checker {
                         self.error(
                             DiagnosticCode::InvalidRole,
                             *span,
-                            format!("`roles_of` requires a `@semantic` enum, but `{target}` is not one"),
+                            format!(
+                                "`roles_of` requires a `@semantic` enum, but `{target}` is not one"
+                            ),
                         )
                         .help("mark the enum `@semantic` to query its roles");
                     }
@@ -6578,9 +6582,7 @@ fn mentions_param(ty: &Type, params: &[String]) -> bool {
         Type::Map(k, v) | Type::Result(k, v) => {
             mentions_param(k, params) || mentions_param(v, params)
         }
-        Type::Tuple(elems) | Type::Union(elems) => {
-            elems.iter().any(|e| mentions_param(e, params))
-        }
+        Type::Tuple(elems) | Type::Union(elems) => elems.iter().any(|e| mentions_param(e, params)),
         Type::Fn { params: ps, ret } => {
             ps.iter().any(|p| mentions_param(p, params)) || mentions_param(ret, params)
         }
