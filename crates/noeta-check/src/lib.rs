@@ -820,6 +820,10 @@ struct Checker {
     /// or `impl`s. The basis (with the built-in-type table in [`Self::satisfies`]) for enforcing a
     /// generic call's trait bounds (S4.2).
     trait_impls: HashMap<String, HashSet<BuiltinTrait>>,
+    /// The subset of [`Self::trait_impls`] that came from `@derive(...)` (not a hand-written
+    /// `impl`). A **generic** type's derive is conditional on its instantiated fields
+    /// (derive-soundness S4); a hand-written impl is unconditional. Keyed like `trait_impls`.
+    derived_traits: HashMap<String, HashSet<BuiltinTrait>>,
     /// Each generic user type's type-parameter **names**, in order — so a field/method access can
     /// map an instance's type arguments (`Box<int>`) back onto the declaration's parameters (`T`)
     /// and read a field/return as `int` rather than the bare parameter or `dyn` (S4.5).
@@ -1468,7 +1472,17 @@ impl Checker {
                     self.type_kinds
                         .insert(r.name.clone(), noeta_types::TypeKind::Struct);
                     self.record_optional_fields(&r.name, &r.fields);
-                    self.record_trait_impls(&r.name, r.derives.iter().map(|d| d.name.as_str()));
+                    // A struct satisfies a trait it `@derive`s or in-body `impl`s — the same
+                    // chain a class/enum records. (The impls half was missing here: a struct's
+                    // `impl Comparable` never registered, so bounds falsely rejected it.)
+                    self.record_trait_impls(
+                        &r.name,
+                        r.derives
+                            .iter()
+                            .map(|d| d.name.as_str())
+                            .chain(r.impls.iter().map(|b| b.trait_name.as_str())),
+                    );
+                    self.record_derived(&r.name, &r.derives);
                     self.record_attribute(&r.name, r.attribute.as_deref());
                     self.generic_types.insert(
                         r.name.clone(),
@@ -1572,6 +1586,7 @@ impl Checker {
                             .map(|d| d.name.as_str())
                             .chain(c.impls.iter().map(|b| b.trait_name.as_str())),
                     );
+                    self.record_derived(&c.name, &c.derives);
                     // Attributes are structs only: `@attribute` on a class is an error (E0029).
                     if c.attribute.is_some() {
                         self.error(
@@ -1687,6 +1702,7 @@ impl Checker {
                             .map(|d| d.name.as_str())
                             .chain(e.impls.iter().map(|b| b.trait_name.as_str())),
                     );
+                    self.record_derived(&e.name, &e.derives);
                     self.generic_types.insert(
                         e.name.clone(),
                         e.type_params.iter().map(|p| p.name.clone()).collect(),
@@ -5499,6 +5515,19 @@ impl Checker {
     /// Record that user type `name` satisfies each of `traits` (its `@derive`/`impl` names). Only
     /// real built-in trait names matter for bound enforcement; unknown ones are reported elsewhere
     /// and harmlessly recorded here.
+    /// Record which built-in traits `name` acquired **via `@derive`** — the conditional subset
+    /// (see [`Self::derived_traits`]). Called beside [`Self::record_trait_impls`] at the three
+    /// declaration sites.
+    fn record_derived(&mut self, name: &str, derives: &[DeriveSpec]) {
+        let entry = self.derived_traits.entry(name.to_string()).or_default();
+        for t in derives
+            .iter()
+            .filter_map(|d| BuiltinTrait::from_name(&d.name))
+        {
+            entry.insert(t);
+        }
+    }
+
     fn record_trait_impls<'a>(&mut self, name: &str, traits: impl Iterator<Item = &'a str>) {
         let entry = self.trait_impls.entry(name.to_string()).or_default();
         // Map each name to its trait at the boundary; a non-built-in name (a typo, or an
@@ -5859,8 +5888,25 @@ impl Checker {
         if ty.defers_to_runtime() {
             return true;
         }
-        if let Type::Named(n, _) = ty {
-            return self.trait_impls.get(n).is_some_and(|s| s.contains(&t));
+        if let Type::Named(n, args) = ty {
+            if !self.trait_impls.get(n).is_some_and(|s| s.contains(&t)) {
+                return false;
+            }
+            // A **generic** derive is conditional (derive-soundness S4): `Box<T>` deriving
+            // `Comparable` is satisfied only when the *instantiated* field types are orderable
+            // (`Box<int>` yes, `Box<List<int>>` no) — the instantiation-site twin of the E0050
+            // declaration check, which deferred parameter-typed fields to here. The predicates
+            // substitute the arguments into the field types, so a non-generic type (already
+            // validated at its declaration) passes trivially. A hand-written `impl` is
+            // unconditional — the author wrote the body, no field constraint applies.
+            if !args.is_empty() && self.derived_traits.get(n).is_some_and(|s| s.contains(&t)) {
+                return match t {
+                    BuiltinTrait::Comparable => self.type_orderable(ty, &mut Vec::new()),
+                    BuiltinTrait::Serialize => self.type_serializable(ty, &mut Vec::new()),
+                    _ => true,
+                };
+            }
+            return true;
         }
         builtin_satisfies(ty, t)
     }
