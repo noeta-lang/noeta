@@ -661,14 +661,27 @@ fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
         tag: tag.clone(),
         sha: sha.clone(),
     };
+    // Sign the attestation (Phase 4, #2) if a signing key is available, so consumers can verify
+    // "version → commit" against the scope's public key. The private key is read from
+    // NOETA_SIGNING_KEY (a path) or `noeta-signing.key` in the current directory; absent → publish
+    // *unsigned* (a warning — the release resolves but can't be provenance-verified).
+    let signature = match provenance_sign(&name, &version, &sha, index.as_ref()) {
+        Ok(sig) => sig,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(1);
+        }
+    };
     let release = registry::Release {
         version: version.clone(),
         coords,
         deps,
+        signature,
     };
     match index.publish(&name, &release) {
         Ok(()) => {
-            println!("published `{name}` {version} → {git}#{tag} ({sha})");
+            let signed = if release.signature.is_some() { "signed" } else { "UNSIGNED" };
+            println!("published `{name}` {version} → {git}#{tag} ({sha}) [{signed}]");
             ExitCode::SUCCESS
         }
         Err(err) => {
@@ -775,6 +788,43 @@ fn render_trust_list(set: &std::collections::BTreeSet<String>) -> String {
     } else {
         set.iter().cloned().collect::<Vec<_>>().join(", ")
     }
+}
+
+/// Sign a release attestation for `noeta publish` (Phase 4, #2), returning the hex signature — or
+/// `None` (with a warning) when no signing key is configured, so publishing stays possible while
+/// provenance is adopted gradually. Reads the private key from `NOETA_SIGNING_KEY` (a path) or
+/// `noeta-signing.key`. When it signs, it also registers the scope's public key with the index (a
+/// no-op for the hosted registry, which registers keys via its admin endpoint).
+fn provenance_sign(
+    name: &str,
+    version: &semver::Version,
+    sha: &str,
+    index: &dyn registry::Index,
+) -> Result<Option<String>, String> {
+    let key_path = std::env::var_os("NOETA_SIGNING_KEY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("noeta-signing.key"));
+    if !key_path.is_file() {
+        eprintln!(
+            "lang: no signing key at `{}` — publishing UNSIGNED (consumers can't verify provenance). \
+             Run `noeta key new` and set NOETA_SIGNING_KEY to sign.",
+            key_path.display()
+        );
+        return Ok(None);
+    }
+    let private_hex = std::fs::read_to_string(&key_path)
+        .map_err(|err| format!("cannot read signing key `{}`: {err}", key_path.display()))?
+        .trim()
+        .to_string();
+
+    let attestation = noeta_pm::provenance::Attestation { name, version, sha };
+    let signature = noeta_pm::provenance::sign(&attestation, &private_hex)?;
+    // Register this scope's public key so a consumer can verify (local index writes it; the hosted
+    // registry no-ops — it registers keys via admin, enforcing scope ownership).
+    let scope = name.split('/').next().unwrap_or(name);
+    let public_hex = noeta_pm::provenance::public_key_hex(&private_hex)?;
+    index.set_scope_key(scope, &public_hex)?;
+    Ok(Some(signature))
 }
 
 /// `noeta key new` — generate an Ed25519 signing keypair (package-manager Phase 4, #2). The private

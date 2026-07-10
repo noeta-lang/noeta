@@ -48,19 +48,23 @@ pub struct Dep {
     pub req: VersionReq,
 }
 
-/// A published release (package-manager Phase 4, S5): a version, its git [`GitCoords`], and the
-/// registry dependencies that version declares. The `deps` are what let the resolver backtrack over
-/// ranges — it can read a candidate's requirements from the index instead of fetching its source.
+/// A published release (package-manager Phase 4, S5): a version, its git [`GitCoords`], the registry
+/// dependencies that version declares, and — when signed (Phase 4, #2) — the maintainer's Ed25519
+/// **signature** (hex) over the release's [`crate::provenance::Attestation`]. The `deps` let the
+/// resolver backtrack over ranges; the `signature` lets a consumer verify "version → commit" against
+/// the scope's public key rather than trusting the registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
     pub version: Version,
     pub coords: GitCoords,
     pub deps: Vec<Dep>,
+    /// Hex Ed25519 signature over the attestation, or `None` for an unsigned (unverifiable) release.
+    pub signature: Option<String>,
 }
 
 /// The registry index contract: look up a package's published releases (each with its git coordinates
-/// **and dependencies**), and record a new release. Implemented by [`LocalIndex`] here; the hosted
-/// service implements the same shape over HTTP.
+/// **and dependencies**), record a new release, and serve a **scope's public key** (provenance,
+/// Phase 4 #2). Implemented by [`LocalIndex`] here; the hosted service implements the same shape.
 pub trait Index {
     /// Every published [`Release`] of `name` (`company/package`). An unknown package yields an empty
     /// list; an `Err` is a real lookup failure (a corrupt/unreadable index).
@@ -70,6 +74,20 @@ pub trait Index {
     /// identical coordinates + deps is idempotent; a *different* coordinate for an existing version is
     /// rejected (a published release is immutable).
     fn publish(&self, name: &str, release: &Release) -> Result<(), String>;
+
+    /// The registered Ed25519 **public key** (hex) of `scope` (a `company`), for verifying that
+    /// scope's release signatures. `None` if the scope registered no key. Default: `None` (an index
+    /// that doesn't serve keys yet — a consumer then treats releases as unverified).
+    fn scope_key(&self, _scope: &str) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    /// Register a scope's public key. Default: a **no-op** — the hosted registry registers keys via
+    /// its admin endpoint (scope ownership), so `noeta publish` doesn't self-register there. The
+    /// local index overrides this to record the key, so an offline publish/verify round-trips.
+    fn set_scope_key(&self, _scope: &str, _public_hex: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Resolve a registry requirement to a concrete release's coordinates: the **highest published
@@ -137,6 +155,11 @@ impl LocalIndex {
     fn file_for(&self, name: &str) -> PathBuf {
         self.dir.join(format!("{}.toml", name.replace('/', "__")))
     }
+
+    /// The file holding a scope's registered public key (provenance, Phase 4 #2).
+    fn scope_key_file(&self, scope: &str) -> PathBuf {
+        self.dir.join(format!("scope__{scope}.pub"))
+    }
 }
 
 impl Index for LocalIndex {
@@ -185,10 +208,24 @@ impl Index for LocalIndex {
                         sha: sha.to_string(),
                     },
                     deps,
+                    signature: get("sig").map(str::to_string),
                 });
             }
         }
         Ok(out)
+    }
+
+    fn scope_key(&self, scope: &str) -> Result<Option<String>, String> {
+        match std::fs::read_to_string(self.scope_key_file(scope)) {
+            Ok(text) => Ok(Some(text.trim().to_string())),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(format!("cannot read scope key for `{scope}`: {err}")),
+        }
+    }
+
+    fn set_scope_key(&self, scope: &str, public_hex: &str) -> Result<(), String> {
+        std::fs::write(self.scope_key_file(scope), format!("{public_hex}\n"))
+            .map_err(|err| format!("cannot write scope key for `{scope}`: {err}"))
     }
 
     fn publish(&self, name: &str, release: &Release) -> Result<(), String> {
@@ -212,6 +249,9 @@ impl Index for LocalIndex {
             text.push_str(&format!("url = {}\n", quote(&r.coords.url)));
             text.push_str(&format!("tag = {}\n", quote(&r.coords.tag)));
             text.push_str(&format!("sha = {}\n", quote(&r.coords.sha)));
+            if let Some(sig) = &r.signature {
+                text.push_str(&format!("sig = {}\n", quote(sig)));
+            }
             for dep in &r.deps {
                 text.push_str("\n[[version.deps]]\n");
                 text.push_str(&format!("package = {}\n", quote(&dep.package)));
@@ -280,6 +320,8 @@ struct WireVersion {
     yanked: bool,
     #[serde(default)]
     deps: Vec<WireDep>,
+    #[serde(default)]
+    signature: Option<String>,
 }
 
 #[cfg(feature = "registry-http")]
@@ -287,6 +329,13 @@ struct WireVersion {
 struct WireDep {
     package: String,
     req: String,
+}
+
+#[cfg(feature = "registry-http")]
+#[derive(serde::Deserialize)]
+struct ScopeResponse {
+    #[serde(default)]
+    public_key: Option<String>,
 }
 
 #[cfg(feature = "registry-http")]
@@ -358,9 +407,28 @@ impl Index for HttpIndex {
                     sha: v.sha,
                 },
                 deps,
+                signature: v.signature,
             });
         }
         Ok(out)
+    }
+
+    fn scope_key(&self, scope: &str) -> Result<Option<String>, String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/scopes/{scope}", self.base))
+            .send()
+            .map_err(|err| format!("registry scope-key request for `{scope}` failed: {err}"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(format!("registry returned {} for scope `{scope}`", resp.status()));
+        }
+        let body: ScopeResponse = resp
+            .json()
+            .map_err(|err| format!("registry sent an unreadable scope response for `{scope}`: {err}"))?;
+        Ok(body.public_key)
     }
 
     fn publish(&self, name: &str, release: &Release) -> Result<(), String> {
@@ -379,6 +447,7 @@ impl Index for HttpIndex {
             "tag": release.coords.tag,
             "sha": release.coords.sha,
             "deps": deps,
+            "signature": release.signature,
         });
         let resp = self
             .client
@@ -428,6 +497,7 @@ mod tests {
             version: Version::new(major, minor, patch),
             coords: coords(tag),
             deps: Vec::new(),
+            signature: None,
         }
     }
 
@@ -442,6 +512,20 @@ mod tests {
             resolve_coords(&index, "guzzle/http", &VersionReq::parse("^1.0").unwrap()).unwrap();
         assert_eq!(version, Version::new(1, 4, 0)); // highest in ^1
         assert_eq!(c.tag, "v1.4.0");
+    }
+
+    #[test]
+    fn signature_and_scope_key_round_trip_through_the_local_index() {
+        let index = mem("signature_round_trip");
+        let mut rel = release(1, 0, 0, "v1.0.0");
+        rel.signature = Some("a".repeat(128));
+        index.publish("acme/foo", &rel).unwrap();
+        assert_eq!(index.releases("acme/foo").unwrap()[0].signature, Some("a".repeat(128)));
+
+        // Scope keys register + serve; an unregistered scope is `None`.
+        assert_eq!(index.scope_key("acme").unwrap(), None);
+        index.set_scope_key("acme", "deadbeef").unwrap();
+        assert_eq!(index.scope_key("acme").unwrap(), Some("deadbeef".to_string()));
     }
 
     #[test]
@@ -597,6 +681,7 @@ mod http_tests {
                         package: "acme/bar".to_string(),
                         req: VersionReq::parse("^1.0").unwrap(),
                     }],
+                    signature: Some("deadbeef".to_string()),
                 },
             )
             .unwrap();
@@ -607,6 +692,8 @@ mod http_tests {
         assert!(body.contains("\"version\":\"1.0.0\""), "body: {body}");
         // The dependency metadata is sent so the index can serve it to the resolver (S5).
         assert!(body.contains("\"package\":\"acme/bar\""), "deps in body: {body}");
+        // The provenance signature rides along (Phase 4 #2).
+        assert!(body.contains("\"signature\":\"deadbeef\""), "signature in body: {body}");
     }
 
     #[test]
@@ -627,6 +714,7 @@ mod http_tests {
                         sha: "s".to_string(),
                     },
                     deps: Vec::new(),
+                    signature: None,
                 },
             )
             .unwrap_err();

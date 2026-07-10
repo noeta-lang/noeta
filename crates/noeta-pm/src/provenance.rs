@@ -63,6 +63,12 @@ pub fn generate_keypair() -> Result<Keypair, String> {
     })
 }
 
+/// The hex public key corresponding to a hex private key (the seed) — for registering a scope's key.
+pub fn public_key_hex(private_hex: &str) -> Result<String, String> {
+    let seed = from_hex::<32>(private_hex, "private key")?;
+    Ok(to_hex(SigningKey::from_bytes(&seed).verifying_key().as_bytes()))
+}
+
 /// Sign `attestation` with the hex-encoded private key, returning the hex signature (128 chars).
 pub fn sign(attestation: &Attestation, private_hex: &str) -> Result<String, String> {
     let seed = from_hex::<32>(private_hex, "private key")?;
