@@ -1,29 +1,25 @@
 //! R3, the headline: `trace` — unfold the full static path a request would take from an
 //! architectural role. `trace(from: "EntryPoint")` starts at every declaration bearing that
-//! `@role` binding and walks the [`noeta_ide::callgraph`] forward: each node is a function with
-//! its own roles, location, and how it was reached (a syntactic call or a passed reference — a
-//! handler registration or callback is part of the flow too). External module calls
-//! (`http.response`, `fs.read`) and dynamic callees appear as labeled leaves, never guesses.
+//! `@role` binding and walks the call graph forward: each node is a function with its own roles,
+//! location, and how it was reached (a syntactic call or a passed reference — a handler
+//! registration or callback is part of the flow too). External module calls (`http.response`,
+//! `fs.read`) and dynamic callees appear as labeled leaves, never guesses.
 //!
 //! The `boundaries` summary is the architectural answer on its own: every `(function, role)`
 //! binding the trace reached — "this entry point crosses into these persistence/trust
 //! boundaries".
-
-use std::collections::{HashMap, HashSet};
+//!
+//! Since ide-ui U2 the walk itself lives in [`noeta_ide::trace`] — the LSP's trace document runs
+//! the same engine, so agent and editor can never disagree. This module owns only the MCP wire
+//! shapes (span → file/line resolution, JSON schema) and the tool's notes.
 
 use noeta_ast::Program;
-use noeta_ide::callgraph::{self, CallGraph, Callee};
+use noeta_ide::callgraph;
+use noeta_ide::trace as engine;
 use rmcp::schemars;
 use serde::Serialize;
 
 use crate::analyze::{self, Loc, Prepared};
-
-/// Traces deeper than this are cut (per-node `truncated`), whatever `max_depth` asks for.
-const MAX_DEPTH_CAP: usize = 16;
-const DEFAULT_MAX_DEPTH: usize = 6;
-/// The whole answer is capped at this many nodes — a pathological fan-out reports what fits and
-/// says so, instead of flooding the agent.
-const NODE_BUDGET: usize = 500;
 
 /// The `trace` result.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -74,16 +70,6 @@ pub struct BoundaryHit {
     pub line: Option<u32>,
 }
 
-struct Tracer<'a> {
-    p: &'a Prepared,
-    graph: &'a CallGraph,
-    roles_by_target: &'a HashMap<String, Vec<String>>,
-    boundaries: Vec<BoundaryHit>,
-    seen_boundaries: HashSet<(String, String)>,
-    nodes_left: usize,
-    max_depth: usize,
-}
-
 /// Answer `trace`: walk the call graph forward from `from` — a role (`EntryPoint` or
 /// `Semantic.EntryPoint`, starting at every function bearing it) or a function name. With no
 /// `from`, every role-bearing function is a root (the program's architectural surface).
@@ -97,207 +83,96 @@ pub fn trace(p: &Prepared, from: Option<&str>, max_depth: Option<usize>) -> Trac
     let checked = noeta_db::linked_checked_ide(&p.db, p.ws);
     let texts: Vec<&str> = p.sources.iter().map(|s| s.text()).collect();
     let graph = callgraph::build(program, &checked.expr_types, &texts);
-
     let info = noeta_ast::reflect::build(program);
-    let mut roles_by_target: HashMap<String, Vec<String>> = HashMap::new();
-    for r in &info.roles {
-        roles_by_target
-            .entry(r.target.clone())
-            .or_default()
-            .push(format!("{}.{}", r.enum_name, r.variant));
-    }
 
-    // Resolve the roots: a role name → every function bearing it; else a function name; with no
-    // `from`, every role-bearing function.
-    let (roots, note): (Vec<usize>, Option<String>) = match from {
-        Some(spec) => {
-            let want = spec.trim().to_ascii_lowercase();
-            let role_targets: Vec<usize> = info
-                .roles
-                .iter()
-                .filter(|r| {
-                    r.variant.to_ascii_lowercase() == want
-                        || format!("{}.{}", r.enum_name, r.variant).to_ascii_lowercase() == want
-                })
-                .filter_map(|r| graph.function_named(&r.target))
-                .collect();
-            if !role_targets.is_empty() {
-                (dedup(role_targets), None)
-            } else if let Some(idx) = graph.function_named(spec.trim()) {
-                (vec![idx], None)
-            } else {
-                return TraceOutput {
-                    found: false,
-                    traces: Vec::new(),
-                    boundaries: Vec::new(),
-                    truncated: false,
-                    note: Some(format!(
-                        "`{spec}` matches no role binding and no function — try `reflect` for \
-                         the role index or `symbols` for the declarations"
-                    )),
-                };
+    let (roots, note): (Vec<usize>, Option<String>) =
+        match engine::resolve_roots(&graph, &info, from) {
+            engine::Roots::Functions(roots) => (roots, None),
+            engine::Roots::NotFound => {
+                let spec = from.unwrap_or_default();
+                return not_found(format!(
+                    "`{spec}` matches no role binding and no function — try `reflect` for the \
+                     role index or `symbols` for the declarations"
+                ));
             }
-        }
-        None => {
-            let all: Vec<usize> = info
-                .roles
-                .iter()
-                .filter_map(|r| graph.function_named(&r.target))
-                .collect();
-            if all.is_empty() {
-                return TraceOutput {
-                    found: false,
-                    traces: Vec::new(),
-                    boundaries: Vec::new(),
-                    truncated: false,
-                    note: Some(
+            engine::Roots::AllRoleBearers(all) => {
+                if all.is_empty() {
+                    return not_found(
                         "no `@role` bindings on any function — pass `from` (a function name) to \
                          trace from a specific start"
                             .to_string(),
-                    ),
-                };
+                    );
+                }
+                (
+                    all,
+                    Some("no `from` given — tracing from every role-bearing function".to_string()),
+                )
             }
-            (
-                dedup(all),
-                Some("no `from` given — tracing from every role-bearing function".to_string()),
-            )
-        }
-    };
+        };
 
-    let mut tracer = Tracer {
-        p,
-        graph: &graph,
-        roles_by_target: &roles_by_target,
-        boundaries: Vec::new(),
-        seen_boundaries: HashSet::new(),
-        nodes_left: NODE_BUDGET,
-        max_depth: max_depth
-            .unwrap_or(DEFAULT_MAX_DEPTH)
-            .clamp(1, MAX_DEPTH_CAP),
-    };
-    let mut path: Vec<usize> = Vec::new();
-    let traces: Vec<TraceNode> = roots
-        .iter()
-        .map(|&root| tracer.function_node(root, "root", None, 0, &mut path))
-        .collect();
-    let truncated = tracer.nodes_left == 0;
+    let walked = engine::walk(
+        &graph,
+        &engine::roles_by_target(&info),
+        &roots,
+        max_depth.unwrap_or(engine::DEFAULT_MAX_DEPTH),
+        engine::NODE_BUDGET,
+    );
     TraceOutput {
         found: true,
-        traces,
-        boundaries: tracer.boundaries,
-        truncated,
+        traces: walked.roots.iter().map(|n| to_wire(p, n)).collect(),
+        boundaries: walked
+            .boundaries
+            .iter()
+            .map(|b| {
+                let at = b.decl_span.and_then(|span| analyze::locate_span(p, span));
+                BoundaryHit {
+                    target: b.target.clone(),
+                    role: b.role.clone(),
+                    file: at.as_ref().map(|(file, _)| file.clone()),
+                    line: at.map(|(_, loc)| loc.start.line),
+                }
+            })
+            .collect(),
+        truncated: walked.truncated,
         note,
     }
 }
 
-fn dedup(mut v: Vec<usize>) -> Vec<usize> {
-    let mut seen = HashSet::new();
-    v.retain(|i| seen.insert(*i));
-    v
-}
-
-impl Tracer<'_> {
-    fn function_node(
-        &mut self,
-        idx: usize,
-        kind: &str,
-        site: Option<Loc>,
-        depth: usize,
-        path: &mut Vec<usize>,
-    ) -> TraceNode {
-        self.nodes_left = self.nodes_left.saturating_sub(1);
-        let f = &self.graph.functions[idx];
-        let roles = self
-            .roles_by_target
-            .get(&f.name)
-            .cloned()
-            .unwrap_or_default();
-        let at = analyze::locate_span(self.p, f.name_span);
-        for role in &roles {
-            if self.seen_boundaries.insert((f.name.clone(), role.clone())) {
-                self.boundaries.push(BoundaryHit {
-                    target: f.name.clone(),
-                    role: role.clone(),
-                    file: at.as_ref().map(|(file, _)| file.clone()),
-                    line: at.as_ref().map(|(_, loc)| loc.start.line),
-                });
-            }
-        }
-
-        let cycle = path.contains(&idx);
-        let at_depth_limit = depth >= self.max_depth;
-        let mut truncated = false;
-        let children = if cycle || at_depth_limit || self.nodes_left == 0 {
-            truncated = !cycle && self.graph.edges_from(Some(idx)).next().is_some();
-            Vec::new()
-        } else {
-            path.push(idx);
-            let edges: Vec<_> = self.graph.edges_from(Some(idx)).cloned().collect();
-            let mut children = Vec::new();
-            for edge in edges {
-                if self.nodes_left == 0 {
-                    truncated = true;
-                    break;
-                }
-                children.push(self.edge_node(&edge, depth + 1, path));
-            }
-            path.pop();
-            children
-        };
-
-        TraceNode {
-            name: f.name.clone(),
-            kind: kind.to_string(),
-            roles,
-            file: at.as_ref().map(|(file, _)| file.clone()),
-            line: at.map(|(_, loc)| loc.start.line),
-            site,
-            external: false,
-            dynamic: false,
-            cycle,
-            truncated: truncated || (at_depth_limit && !cycle),
-            children,
-        }
-    }
-
-    fn edge_node(
-        &mut self,
-        edge: &callgraph::CallEdge,
-        depth: usize,
-        path: &mut Vec<usize>,
-    ) -> TraceNode {
-        let kind = if edge.call { "call" } else { "reference" };
-        let site = analyze::locate_span(self.p, edge.site).map(|(_, loc)| loc.start);
-        match &edge.callee {
-            Callee::Function(idx) => self.function_node(*idx, kind, site, depth, path),
-            Callee::External(name) => {
-                self.nodes_left = self.nodes_left.saturating_sub(1);
-                leaf(name, kind, site, true, false)
-            }
-            Callee::Dynamic(name) => {
-                self.nodes_left = self.nodes_left.saturating_sub(1);
-                leaf(name, kind, site, false, true)
-            }
-        }
-    }
-}
-
-fn leaf(name: &str, kind: &str, site: Option<Loc>, external: bool, dynamic: bool) -> TraceNode {
-    TraceNode {
-        name: name.to_string(),
-        kind: kind.to_string(),
-        roles: Vec::new(),
-        file: None,
-        line: None,
-        site,
-        external,
-        dynamic,
-        cycle: false,
+fn not_found(note: String) -> TraceOutput {
+    TraceOutput {
+        found: false,
+        traces: Vec::new(),
+        boundaries: Vec::new(),
         truncated: false,
-        children: Vec::new(),
+        note: Some(note),
     }
 }
 
+/// Resolve an engine node's spans to the tool's file/line wire shape, recursing into children.
+fn to_wire(p: &Prepared, n: &engine::TraceNode) -> TraceNode {
+    let at = n.decl_span.and_then(|span| analyze::locate_span(p, span));
+    TraceNode {
+        name: n.name.clone(),
+        kind: match n.kind {
+            engine::TraceKind::Root => "root",
+            engine::TraceKind::Call => "call",
+            engine::TraceKind::Reference => "reference",
+        }
+        .to_string(),
+        roles: n.roles.clone(),
+        file: at.as_ref().map(|(file, _)| file.clone()),
+        line: at.map(|(_, loc)| loc.start.line),
+        site: n
+            .site_span
+            .and_then(|span| analyze::locate_span(p, span))
+            .map(|(_, loc)| loc.start),
+        external: n.external,
+        dynamic: n.dynamic,
+        cycle: n.cycle,
+        truncated: n.truncated,
+        children: n.children.iter().map(|c| to_wire(p, c)).collect(),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

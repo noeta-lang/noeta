@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.7.0
+
+Adds **architecture navigation** over the compiler's static call graph (the same engine the
+`noeta mcp` agent tools read):
+
+- **Call hierarchy**: `Shift+Alt+H` on any function peeks its callers/callees in VS Code's native
+  tree — cross-module, with each item's `@role` bindings in the detail and passed-as-value uses
+  marked `reference`. External/dynamic callees are omitted here (no source location) and appear in
+  the trace view instead.
+- **Role CodeLenses**: declarations bearing a `@role` show `⚑ Enum.Variant · trace request path`;
+  clicking opens the **trace view** — a read-only `noeta-trace:` document unfolding the full
+  static path from that entry point, with a `boundaries reached` summary and clickable
+  `path:line` links on every node. External/dynamic calls and cycles are labeled, never guessed.
+- **Noeta: Trace Request Path** (palette) traces the active file's whole architectural surface
+  (every role-bearing function).
+- **Architecture sidebar** (new Noeta activity-bar view): the project's role surface as a tree —
+  roles as groups, bearers beneath, each function's calls unfolding lazily with external/dynamic
+  calls as labeled leaves. Click jumps to source; the context menu opens the full trace, the call
+  hierarchy, or a **focused profile run**. Follows the active `.noe` editor; refreshes on save.
+
+Adds **test integration** over VS Code's native Testing API:
+
+- `@test` fns appear in the Test Explorer *and* get run arrows in the editor gutter — discovery is
+  the compiler's own tier walk (`noeta/tests`), so the explorer and `noeta test` always agree.
+  `#[Name]`, `#[Group]`, and `#[Skip]` metadata are honored.
+- Runs shell out to the new `noeta test --json` (with `--name <fn>` for single tests) and map the
+  machine-readable outcomes back: failures carry the assertion message and the test's captured
+  output.
+
+Adds **profile slices**: "Profile Focused on This Function" (Architecture view context menu)
+profiles the run, then the flame view **re-roots every sample stack at that function** — you see
+only the part of the run you asked about, with a bar reporting the slice's share of samples and a
+one-click way back to the whole run.
+
+Internal: one shared `noetaCommand()` toolchain resolver (`src/toolchain.js`); all commands use
+the `Noeta` palette category.
+
 ## 0.6.0
 
 Adds **run/build tasks**: a `noeta` task type (`run` / `build [--native|--exe]`, authorable in

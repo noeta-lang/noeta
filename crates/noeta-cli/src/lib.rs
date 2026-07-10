@@ -100,6 +100,15 @@ enum Command {
         /// Run only tests tagged `#[Group("<name>")]` with this group.
         #[arg(long)]
         group: Option<String>,
+        /// Run only the test fn(s) with these names (repeatable; exact fn-name match). Composes
+        /// with `--group`. Used by editor test explorers to run a single test.
+        #[arg(long = "name")]
+        names: Vec<String>,
+        /// Report outcomes as one JSON object on stdout instead of the human report — the
+        /// machine-readable seam editor integrations parse. The tests' own stdout is captured into
+        /// the JSON (failures carry it), never interleaved.
+        #[arg(long)]
+        json: bool,
         /// Only run when the `test` tier is live in this `noeta.toml` build profile; otherwise the
         /// runner does nothing.
         #[arg(long)]
@@ -366,8 +375,7 @@ pub fn run_cli(
     // package (`[trust].commands`, whose namespace roots the composer baked in here). std's own
     // commands (root `"std"`) are always available. The stock binary passes an empty list — it has
     // only std units, so nothing is filtered.
-    let command_trusted =
-        |root: &str| root == "std" || trusted_command_roots.contains(&root);
+    let command_trusted = |root: &str| root == "std" || trusted_command_roots.contains(&root);
     let trusted_commands: Vec<_> = noeta_stdlib::registry::extensions()
         .iter()
         .filter(|ext| command_trusted(ext.root()))
@@ -431,8 +439,10 @@ pub fn run_cli(
             fail_fast,
             jobs,
             group,
+            names,
+            json,
             profile,
-        } => cmd_test(&file, fail_fast, jobs, &group, &profile),
+        } => cmd_test(&file, fail_fast, jobs, &group, &names, json, &profile),
         Command::Bench {
             file,
             iterations,
@@ -693,7 +703,11 @@ fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
     };
     match index.publish(&name, &release) {
         Ok(()) => {
-            let signed = if release.signature.is_some() { "signed" } else { "UNSIGNED" };
+            let signed = if release.signature.is_some() {
+                "signed"
+            } else {
+                "UNSIGNED"
+            };
             println!("published `{name}` {version} → {git}#{tag} ({sha}) [{signed}]");
             ExitCode::SUCCESS
         }
@@ -712,7 +726,9 @@ fn cmd_audit(path: &std::path::Path) -> ExitCode {
     let start = if path.is_dir() {
         path.to_path_buf()
     } else {
-        path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf()
+        path.parent()
+            .unwrap_or(std::path::Path::new("."))
+            .to_path_buf()
     };
     let Some(manifest_path) = manifest::find(&start) else {
         eprintln!(
@@ -779,14 +795,8 @@ fn cmd_audit(path: &std::path::Path) -> ExitCode {
     }
 
     println!("\n  Elevated authority (granted in [trust]):");
-    println!(
-        "    native   : {}",
-        render_trust_list(&trust.native)
-    );
-    println!(
-        "    commands : {}",
-        render_trust_list(&trust.commands)
-    );
+    println!("    native   : {}", render_trust_list(&trust.native));
+    println!("    commands : {}", render_trust_list(&trust.commands));
     println!(
         "\n  {native_count} package(s) run native code, {command_count} may add CLI commands — all \
          authorized (an unauthorized native dependency would have failed resolution)."
@@ -872,7 +882,10 @@ fn cmd_key(action: &KeyAction) -> ExitCode {
         eprintln!("lang: cannot write `{}`: {err}", out.display());
         return ExitCode::from(1);
     }
-    println!("wrote private signing key to {} (keep it secret)", out.display());
+    println!(
+        "wrote private signing key to {} (keep it secret)",
+        out.display()
+    );
     println!("public key — register this with your registry scope:");
     println!("  {}", keypair.public_hex);
     println!(
@@ -2783,6 +2796,8 @@ fn cmd_test(
     fail_fast: bool,
     jobs: Option<usize>,
     group: &Option<String>,
+    names: &[String],
+    json: bool,
     profile: &Option<String>,
 ) -> ExitCode {
     if let Some(code) = compose::maybe_delegate(file) {
@@ -2823,6 +2838,9 @@ fn cmd_test(
     }
 
     if activated.tests.is_empty() {
+        if json {
+            return report_json(&[], &[], 0);
+        }
         println!("no tests found");
         return ExitCode::SUCCESS;
     }
@@ -2840,6 +2858,7 @@ fn cmd_test(
         .collect();
 
     // The `--group` filter (object-model slice 6h): keep only tests tagged `#[Group("<g>")]`.
+    // `--name` (ide-ui U3) then narrows to the named fn(s) — the editor's run-one-test seam.
     let selected: Vec<&TierFn> = match group {
         Some(g) => activated
             .tests
@@ -2848,10 +2867,22 @@ fn cmd_test(
             .collect(),
         None => activated.tests.iter().collect(),
     };
+    let selected: Vec<&TierFn> = if names.is_empty() {
+        selected
+    } else {
+        selected
+            .into_iter()
+            .filter(|t| names.iter().any(|n| *n == t.name))
+            .collect()
+    };
     if selected.is_empty() {
-        match group {
-            Some(g) => println!("no tests in group `{g}`"),
-            None => println!("no tests found"),
+        if json {
+            return report_json(&[], &[], 0);
+        }
+        match (group, names.is_empty()) {
+            (_, false) => println!("no tests matching --name"),
+            (Some(g), _) => println!("no tests in group `{g}`"),
+            (None, _) => println!("no tests found"),
         }
         return ExitCode::SUCCESS;
     }
@@ -2876,14 +2907,20 @@ fn cmd_test(
     } else {
         format!(", {} skipped", skipped.len())
     };
-    println!(
-        "running {run_count} test{} on {jobs} thread{}{skipped_note}",
-        plural(run_count),
-        plural(jobs),
-    );
+    if !json {
+        println!(
+            "running {run_count} test{} on {jobs} thread{}{skipped_note}",
+            plural(run_count),
+            plural(jobs),
+        );
+    }
 
     let outcomes = run_tests(&setup, &cases, activated.program.span, jobs, fail_fast);
-    report(&outcomes, &skipped, total)
+    if json {
+        report_json(&outcomes, &skipped, total)
+    } else {
+        report(&outcomes, &skipped, total)
+    }
 }
 
 /// One runnable test invocation: which fn to call, the report label, and an optional argument (a
@@ -3185,6 +3222,36 @@ fn run_one_test(setup: &[Stmt], case: &TestCase, span: Span) -> TestOutcome {
 /// every selected test ran and passed — a `#[Skip]`ped test does not fail the suite). Failing tests
 /// show their message and any captured stdout; skipped tests are listed after. `total` counts every
 /// selected test (run + skipped); `outcomes` are the runnable ones (fewer than run on `--fail-fast`).
+/// `noeta test --json`: the machine-readable report — one JSON object on stdout with per-test
+/// outcomes (name = the report label: fn name / `#[Name]`, `[row]`-suffixed for data cases), the
+/// skipped labels, and the totals. The seam the editor's test explorer parses; same exit-code
+/// semantics as the human report.
+fn report_json(outcomes: &[TestOutcome], skipped: &[String], total: usize) -> ExitCode {
+    let passed = outcomes.iter().filter(|o| o.passed).count();
+    let failed = outcomes.len() - passed;
+    let not_run = total.saturating_sub(skipped.len() + outcomes.len());
+    let json = serde_json::json!({
+        "tests": outcomes.iter().map(|o| serde_json::json!({
+            "name": o.name,
+            "passed": o.passed,
+            "message": o.message,
+            "stdout": o.stdout,
+        })).collect::<Vec<_>>(),
+        "skipped": skipped,
+        "passed": passed,
+        "failed": failed,
+        "notRun": not_run,
+        "total": total,
+    });
+    println!("{json}");
+    let _ = io::stdout().flush();
+    if failed == 0 && not_run == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
 fn report(outcomes: &[TestOutcome], skipped: &[String], total: usize) -> ExitCode {
     let mut passed = 0usize;
     for outcome in outcomes {

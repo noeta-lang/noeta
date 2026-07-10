@@ -16,8 +16,11 @@
 //! program (see [`resolve`]); **find-references** and **rename** over the same occurrence index;
 //! **document symbols** (see [`symbols`]); **signature help** (see [`signature`]); **semantic
 //! tokens** (see [`semtokens`]); **completion** — member, bare-dot, type-position, and identifier
-//! forms (see [`completion`]); **inlay type hints** (see [`inlay`]); and **formatting** over the
-//! shared `noeta fmt` engine. Positions convert encoding-aware (see [`offsets`]).
+//! forms (see [`completion`]); **inlay type hints** (see [`inlay`]); **formatting** over the
+//! shared `noeta fmt` engine; and the **call hierarchy** (see [`callgraph`]; ide-ui U0) — cursor →
+//! function, incoming/outgoing call groups with `@role` bindings on every item, the same
+//! graph+reflection join the MCP `trace` tool serves. Positions convert encoding-aware (see
+//! [`offsets`]).
 //!
 //! The engine speaks its own positional types ([`Position`], [`Range`], [`TextEdit`], …) —
 //! field-compatible with their LSP counterparts but owned here, so `noeta lsp` (JSON-RPC) and
@@ -32,6 +35,7 @@ pub mod resolve;
 pub mod semtokens;
 pub mod signature;
 pub mod symbols;
+pub mod trace;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -52,6 +56,91 @@ pub use symbols::{DocumentSymbol, SymbolKind};
 pub struct TextEdit {
     pub range: Range,
     pub new_text: String,
+}
+
+/// The name of the synthetic caller representing the program's **top-level statements** — Noeta's
+/// entry point (there is no `main`). Adapters treat an item with this name as an anchor to jump
+/// to, never a node to expand (its selection range sits on a call site, not a declaration).
+pub const TOP_LEVEL: &str = "(top level)";
+
+/// A function in the call hierarchy (ide-ui U0): its name (`Type.method` for methods), the `@role`
+/// bindings it bears (`Enum.Variant`, from the merged program's reflection index — the item
+/// detail), and where it lives. Field-compatible with the LSP `CallHierarchyItem` essentials.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HierarchyItem {
+    pub name: String,
+    /// [`SymbolKind::Method`] for a method, else [`SymbolKind::Function`] (including the synthetic
+    /// `(top level)` caller — Noeta's entry is the top-level statement sequence).
+    pub kind: SymbolKind,
+    pub roles: Vec<String>,
+    pub uri: String,
+    /// The whole declaration.
+    pub range: Range,
+    /// The declared name (where the editor puts the cursor on jump).
+    pub selection_range: Range,
+}
+
+/// One call-hierarchy answer: the function at the other end, plus every use site — each flagged
+/// syntactic call (`true`) vs reference (`false`: the function passed as a value — a callback or
+/// handler registration, still part of the flow). Site ranges are in the **caller's** document,
+/// whichever direction was asked (LSP `fromRanges` semantics).
+#[derive(Debug, Clone)]
+pub struct HierarchyCall {
+    pub item: HierarchyItem,
+    pub sites: Vec<(Range, bool)>,
+}
+
+/// One `@role` binding located in a document (ide-ui U2) — the data behind a role CodeLens.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoleLens {
+    /// The annotated declaration's *name* range (where the lens hangs).
+    pub range: Range,
+    /// The role, `Enum.Variant`.
+    pub role: String,
+    /// The bearer's declaration name (`handle`, `Counter.bump`, a type name).
+    pub target: String,
+    /// True when the bearer is a function in the call graph — a trace can start there. A role on
+    /// a non-function declaration (a role-annotated struct/class) is informational only.
+    pub traceable: bool,
+}
+
+/// One node of the Architecture view (ide-ui U3): a role bearer, or a callee reached from one —
+/// located when it lives in source, honestly labeled when it doesn't.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArchNode {
+    pub name: String,
+    /// The `Enum.Variant` roles this declaration bears.
+    pub roles: Vec<String>,
+    /// The declaration's location; absent for external/dynamic leaves.
+    pub uri: Option<String>,
+    pub range: Option<Range>,
+    /// Reached as a passed value rather than a syntactic call.
+    pub reference: bool,
+    pub external: bool,
+    pub dynamic: bool,
+    pub cycle: bool,
+    /// Has further outgoing calls — the tree can expand it (lazily, one level per request).
+    pub expandable: bool,
+}
+
+/// One Architecture-view group: a role and every declaration bearing it, in declaration order.
+#[derive(Debug, Clone)]
+pub struct ArchRole {
+    pub role: String,
+    pub bearers: Vec<ArchNode>,
+}
+
+/// One `@test` fn discovered in a document (ide-ui U3): what the editor's test explorer lists and
+/// the gutter run-arrows anchor to. `name` is the fn to pass to `noeta test --name`; `display` is
+/// the `#[Name("…")]` label when present.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TestItem {
+    pub name: String,
+    pub display: Option<String>,
+    pub group: Option<String>,
+    pub skipped: bool,
+    /// The test fn's declaration range in the document.
+    pub range: Range,
 }
 
 /// One open document's workspace: the salsa [`Workspace`] input (its entry plus the sibling `.noe`
@@ -836,6 +925,516 @@ impl DocumentStore {
         )
     }
 
+    /// The workspace serving `uri` and the [`SourceId`] `uri` carries within it: an open document
+    /// is its own workspace's entry; otherwise any open workspace that discovered `uri` as a
+    /// sibling or dependency module answers for it (same merged program either way). This is what
+    /// lets call-hierarchy expansion continue from an item in a file the user never opened — the
+    /// hierarchy requests address items by `(uri, selection range)`, not by the entry document.
+    fn workspace_of(&self, uri: &str) -> Option<(&WorkspaceCache, SourceId)> {
+        if let Some(cache) = self.workspaces.get(uri) {
+            return Some((cache, SourceId::FIRST));
+        }
+        self.workspaces.values().find_map(|cache| {
+            let idx = cache
+                .source_uris
+                .iter()
+                .position(|u| u == uri)
+                .or_else(|| {
+                    cache
+                        .dep_uris
+                        .iter()
+                        .position(|u| u == uri)
+                        .map(|i| i + cache.programs.len())
+                })?;
+            Some((cache, SourceId(idx as u32)))
+        })
+    }
+
+    /// The source text of `source` within `cache` (entry + siblings, then dependency modules —
+    /// the same id layout [`Self::locate`] maps).
+    fn source_text(&self, cache: &WorkspaceCache, source: SourceId) -> Option<&String> {
+        let idx = source.0 as usize;
+        let program = if idx < cache.programs.len() {
+            cache.programs.get(idx)?
+        } else {
+            cache.dep_programs.get(idx - cache.programs.len())?
+        };
+        Some(program.text(&self.db))
+    }
+
+    /// The function the cursor addresses, as a call-hierarchy item (ide-ui U0): its declared name,
+    /// the `@role` bindings it bears, and its location. The cursor may be on the function's name,
+    /// on a call/reference site (resolving to the callee), or anywhere inside the declaration.
+    /// `uri` may be any file of an open workspace, not just an open document (see
+    /// [`Self::workspace_of`]). `None` if no workspace covers the file or the cursor addresses no
+    /// function.
+    pub fn function_at(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<HierarchyItem> {
+        let (cache, source) = self.workspace_of(uri)?;
+        let offset = LineIndex::new(self.source_text(cache, source)?).offset(position, encoding);
+        let (graph, info) = self.call_graph(cache);
+        let roles = trace::roles_by_target(&info);
+        let idx = graph.function_at(offset, source)?;
+        self.hierarchy_item(cache, &graph, &roles, idx, encoding)
+    }
+
+    /// The calls **out of** the function at `position`, grouped by callee, each group carrying its
+    /// sites in the caller's document. Callees the static graph cannot place in source — external
+    /// module calls, dynamic closure calls — are omitted here (a hierarchy item needs a real
+    /// location); the trace document renders them as labeled leaves instead (ide-ui U2).
+    pub fn outgoing_calls(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<Vec<HierarchyCall>> {
+        let (cache, source) = self.workspace_of(uri)?;
+        let offset = LineIndex::new(self.source_text(cache, source)?).offset(position, encoding);
+        let (graph, info) = self.call_graph(cache);
+        let roles = trace::roles_by_target(&info);
+        let caller = graph.function_at(offset, source)?;
+
+        // Group the caller's edges by callee, first-site order (edges are already source-ordered).
+        let mut groups: Vec<(usize, Vec<(Range, bool)>)> = Vec::new();
+        for edge in graph.edges_from(Some(caller)) {
+            let callgraph::Callee::Function(target) = edge.callee else {
+                continue;
+            };
+            let Some((_, site)) = self.locate(cache, edge.site, encoding) else {
+                continue;
+            };
+            match groups.iter_mut().find(|(t, _)| *t == target) {
+                Some((_, sites)) => sites.push((site, edge.call)),
+                None => groups.push((target, vec![(site, edge.call)])),
+            }
+        }
+        Some(
+            groups
+                .into_iter()
+                .filter_map(|(target, sites)| {
+                    let item = self.hierarchy_item(cache, &graph, &roles, target, encoding)?;
+                    Some(HierarchyCall { item, sites })
+                })
+                .collect(),
+        )
+    }
+
+    /// The calls **into** the function at `position`, grouped by caller, each group's sites in that
+    /// caller's document. A use from the program's top-level statements (Noeta's entry — there is
+    /// no `main`) is a real caller: it appears as a synthetic `(top level)` item located at its
+    /// first site, so the editor can still jump to it.
+    pub fn incoming_calls(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<Vec<HierarchyCall>> {
+        let (cache, source) = self.workspace_of(uri)?;
+        let offset = LineIndex::new(self.source_text(cache, source)?).offset(position, encoding);
+        let (graph, info) = self.call_graph(cache);
+        let roles = trace::roles_by_target(&info);
+        let target = graph.function_at(offset, source)?;
+
+        // One group per caller: `(caller, flagged sites, the sites' URI — the caller's document)`.
+        type CallerGroup = (Option<usize>, Vec<(Range, bool)>, String);
+        let mut groups: Vec<CallerGroup> = Vec::new();
+        for edge in &graph.edges {
+            if edge.callee != callgraph::Callee::Function(target) {
+                continue;
+            }
+            let Some((site_uri, site)) = self.locate(cache, edge.site, encoding) else {
+                continue;
+            };
+            match groups.iter_mut().find(|(c, _, _)| *c == edge.caller) {
+                Some((_, sites, _)) => sites.push((site, edge.call)),
+                None => groups.push((edge.caller, vec![(site, edge.call)], site_uri)),
+            }
+        }
+        Some(
+            groups
+                .into_iter()
+                .filter_map(|(caller, sites, site_uri)| {
+                    let item = match caller {
+                        Some(idx) => self.hierarchy_item(cache, &graph, &roles, idx, encoding)?,
+                        None => HierarchyItem {
+                            name: TOP_LEVEL.to_string(),
+                            kind: SymbolKind::Function,
+                            roles: Vec::new(),
+                            uri: site_uri,
+                            range: sites[0].0,
+                            selection_range: sites[0].0,
+                        },
+                    };
+                    Some(HierarchyCall { item, sites })
+                })
+                .collect(),
+        )
+    }
+
+    /// The `@role` bindings declared in `uri` (ide-ui U2), in source order — each locating the
+    /// annotated declaration's name. The data behind the editor's role CodeLenses. Roles are
+    /// indexed over the **merged** program (the `@attribute` struct conferring a role may live in
+    /// a sibling), then filtered to bindings whose target is declared in this file.
+    pub fn role_lenses(&self, uri: &str, encoding: Encoding) -> Option<Vec<RoleLens>> {
+        let (cache, source) = self.workspace_of(uri)?;
+        let (graph, info) = self.call_graph(cache);
+        let index = LineIndex::new(self.source_text(cache, source)?);
+        let mut lenses: Vec<RoleLens> = info
+            .roles
+            .iter()
+            .filter(|r| r.target_span.source == source)
+            .map(|r| RoleLens {
+                range: index.range(r.target_span, encoding),
+                role: format!("{}.{}", r.enum_name, r.variant),
+                target: r.target.clone(),
+                traceable: graph.function_named(&r.target).is_some(),
+            })
+            .collect();
+        lenses.sort_by(|a, b| {
+            (a.range.start.line, a.range.start.character, &a.role).cmp(&(
+                b.range.start.line,
+                b.range.start.character,
+                &b.role,
+            ))
+        });
+        Some(lenses)
+    }
+
+    /// Render the role-aware static trace from `from` (a function name or a role spec — every
+    /// bearer; `None` = every role-bearing function) as a plain-text document: the answer to the
+    /// editor's `noeta/trace` custom request, opened read-only as a `noeta-trace:` document. The
+    /// walk is [`trace`] — the same engine the MCP `trace` tool serves. Locations render as
+    /// `path:line` (1-based), relative to the workspace entry's directory when inside it. `None`
+    /// only when no open workspace covers `uri`; an unmatched `from` renders an explanatory
+    /// document (the user clicked something — answer in the document, not with silence).
+    pub fn trace_document(&self, uri: &str, from: Option<&str>) -> Option<String> {
+        let (cache, _) = self.workspace_of(uri)?;
+        let (graph, info) = self.call_graph(cache);
+        let roots = match trace::resolve_roots(&graph, &info, from) {
+            trace::Roots::Functions(roots) => roots,
+            trace::Roots::AllRoleBearers(all) if !all.is_empty() => all,
+            trace::Roots::AllRoleBearers(_) => {
+                return Some(
+                    "noeta trace\n\nno `@role` bindings on any function — nothing to trace\n"
+                        .to_string(),
+                );
+            }
+            trace::Roots::NotFound => {
+                return Some(format!(
+                    "noeta trace\n\n`{}` matches no role binding and no function\n",
+                    from.unwrap_or_default()
+                ));
+            }
+        };
+        let walked = trace::walk(
+            &graph,
+            &trace::roles_by_target(&info),
+            &roots,
+            trace::DEFAULT_MAX_DEPTH,
+            trace::NODE_BUDGET,
+        );
+        Some(self.render_trace(cache, from, &walked))
+    }
+
+    /// Render a finished walk as the trace document: a header, the `boundaries reached` summary,
+    /// then one indented tree per root with `path:line` locations on every locatable node.
+    fn render_trace(
+        &self,
+        cache: &WorkspaceCache,
+        from: Option<&str>,
+        walked: &trace::Trace,
+    ) -> String {
+        let mut out = String::new();
+        match from {
+            Some(spec) => out.push_str(&format!("noeta trace — from {spec}\n")),
+            None => out.push_str("noeta trace — from every role-bearing function\n"),
+        }
+
+        if !walked.boundaries.is_empty() {
+            out.push_str("\nboundaries reached\n");
+            for b in &walked.boundaries {
+                let loc = b
+                    .decl_span
+                    .and_then(|span| self.trace_loc(cache, span))
+                    .map(|loc| format!(" ({loc})"))
+                    .unwrap_or_default();
+                out.push_str(&format!("  ⚑ {} — {}{}\n", b.role, b.target, loc));
+            }
+        }
+
+        for root in &walked.roots {
+            out.push('\n');
+            out.push_str(&self.trace_node_line(cache, root));
+            out.push('\n');
+            self.render_children(cache, root, "", &mut out);
+        }
+        if walked.truncated {
+            out.push_str("\n(truncated — node budget reached)\n");
+        }
+        out
+    }
+
+    fn render_children(
+        &self,
+        cache: &WorkspaceCache,
+        node: &trace::TraceNode,
+        prefix: &str,
+        out: &mut String,
+    ) {
+        let last = node.children.len().saturating_sub(1);
+        for (i, child) in node.children.iter().enumerate() {
+            let (branch, cont) = if i == last {
+                ("└── ", "    ")
+            } else {
+                ("├── ", "│   ")
+            };
+            out.push_str(prefix);
+            out.push_str(branch);
+            out.push_str(&self.trace_node_line(cache, child));
+            out.push('\n');
+            self.render_children(cache, child, &format!("{prefix}{cont}"), out);
+        }
+    }
+
+    /// One node's line: name, role flags, location, and the honesty markers (reference /
+    /// external / dynamic / cycle / truncation).
+    fn trace_node_line(&self, cache: &WorkspaceCache, node: &trace::TraceNode) -> String {
+        let mut line = node.name.clone();
+        if !node.roles.is_empty() {
+            line.push_str(&format!("  ⚑ {}", node.roles.join(", ")));
+        }
+        if let Some(loc) = node.decl_span.and_then(|span| self.trace_loc(cache, span)) {
+            line.push_str(&format!("  {loc}"));
+        }
+        if node.kind == trace::TraceKind::Reference {
+            line.push_str("  (reference — passed as value)");
+        }
+        if node.external {
+            line.push_str("  [external]");
+        }
+        if node.dynamic {
+            line.push_str("  [dynamic]");
+        }
+        if node.cycle {
+            line.push_str("  (cycle)");
+        }
+        if node.truncated {
+            line.push_str("  …");
+        }
+        line
+    }
+
+    /// A span as `path:line` (1-based), path relative to the workspace entry's directory when it
+    /// lives inside it — the shape the extension's link provider turns into a clickable location.
+    fn trace_loc(&self, cache: &WorkspaceCache, span: Span) -> Option<String> {
+        let (uri, range) = self.locate(cache, span, Encoding::Utf8)?;
+        let line = range.start.line + 1;
+        let entry_dir = cache
+            .source_uris
+            .first()
+            .and_then(|entry| uri_to_path(entry))
+            .and_then(|p| p.parent().map(Path::to_path_buf));
+        let path = match uri_to_path(&uri) {
+            Some(p) => match entry_dir
+                .as_deref()
+                .and_then(|dir| p.strip_prefix(dir).ok())
+            {
+                Some(rel) => rel.display().to_string(),
+                None => p.display().to_string(),
+            },
+            None => uri,
+        };
+        Some(format!("{path}:{line}"))
+    }
+
+    /// The workspace's architectural surface (ide-ui U3): every `@role`, with its bearers, in
+    /// declaration order — the Architecture view's top level. A bearer that is a graph function
+    /// is expandable (its outgoing calls unfold lazily via
+    /// [`architecture_children`](Self::architecture_children)); a role on a non-function
+    /// declaration is a located, non-expandable entry.
+    pub fn architecture(&self, uri: &str, encoding: Encoding) -> Option<Vec<ArchRole>> {
+        let (cache, _) = self.workspace_of(uri)?;
+        let (graph, info) = self.call_graph(cache);
+        let roles_map = trace::roles_by_target(&info);
+        let mut groups: Vec<ArchRole> = Vec::new();
+        for r in &info.roles {
+            let role = format!("{}.{}", r.enum_name, r.variant);
+            let (uri, range) = match self.locate(cache, r.target_span, encoding) {
+                Some((uri, range)) => (Some(uri), Some(range)),
+                None => (None, None),
+            };
+            let expandable = graph
+                .function_named(&r.target)
+                .is_some_and(|idx| graph.edges_from(Some(idx)).next().is_some());
+            let node = ArchNode {
+                name: r.target.clone(),
+                roles: roles_map.get(&r.target).cloned().unwrap_or_default(),
+                uri,
+                range,
+                reference: false,
+                external: false,
+                dynamic: false,
+                cycle: false,
+                expandable,
+            };
+            match groups.iter_mut().find(|g| g.role == role) {
+                Some(group) => {
+                    if !group.bearers.contains(&node) {
+                        group.bearers.push(node);
+                    }
+                }
+                None => groups.push(ArchRole {
+                    role,
+                    bearers: vec![node],
+                }),
+            }
+        }
+        Some(groups)
+    }
+
+    /// One lazily-unfolded level of the Architecture view: what `function` (a graph name —
+    /// `handle`, `Counter.bump`) calls or references, external/dynamic callees as labeled leaves.
+    /// An unknown function yields no children (the view shows a leaf), not an error.
+    pub fn architecture_children(
+        &self,
+        uri: &str,
+        function: &str,
+        encoding: Encoding,
+    ) -> Option<Vec<ArchNode>> {
+        let (cache, _) = self.workspace_of(uri)?;
+        let (graph, info) = self.call_graph(cache);
+        let Some(idx) = graph.function_named(function) else {
+            return Some(Vec::new());
+        };
+        let walked = trace::walk(
+            &graph,
+            &trace::roles_by_target(&info),
+            &[idx],
+            1,
+            trace::NODE_BUDGET,
+        );
+        let Some(root) = walked.roots.first() else {
+            return Some(Vec::new());
+        };
+        Some(
+            root.children
+                .iter()
+                .map(|child| {
+                    let (uri, range) = match child
+                        .decl_span
+                        .and_then(|s| self.locate(cache, s, encoding))
+                    {
+                        Some((uri, range)) => (Some(uri), Some(range)),
+                        None => (None, None),
+                    };
+                    ArchNode {
+                        name: child.name.clone(),
+                        roles: child.roles.clone(),
+                        uri,
+                        range,
+                        reference: child.kind == trace::TraceKind::Reference,
+                        external: child.external,
+                        dynamic: child.dynamic,
+                        cycle: child.cycle,
+                        // At depth 1 a function child with further calls is exactly the one the
+                        // walk marked `truncated` (children cut by the depth limit).
+                        expandable: child.truncated && !child.cycle,
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// The `@test` fns declared in `uri` (ide-ui U3), in source order — what the editor's test
+    /// explorer lists and its gutter run-arrows anchor to. Discovery is the runner's own
+    /// [`activate_tiers`](noeta_check::activate_tiers) walk over the merged program, filtered to
+    /// this file, so the explorer and `noeta test` can never disagree about what a test is.
+    pub fn tests(&self, uri: &str, encoding: Encoding) -> Option<Vec<TestItem>> {
+        let (cache, source) = self.workspace_of(uri)?;
+        let db = &self.db;
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, cache.entry());
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        let activated = noeta_check::activate_tiers(program, &["test"]);
+        let index = LineIndex::new(self.source_text(cache, source)?);
+        Some(
+            activated
+                .tests
+                .iter()
+                .filter(|t| t.span.source == source)
+                .map(|t| TestItem {
+                    name: t.name.clone(),
+                    display: attr_str(&t.attrs, "Name"),
+                    group: attr_str(&t.attrs, "Group"),
+                    skipped: t.attrs.iter().any(|a| a.name == "Skip"),
+                    range: index.range(t.span, encoding),
+                })
+                .collect(),
+        )
+    }
+
+    /// The call-graph context of `uri`'s workspace: the static graph over the merged program plus
+    /// the reflection index (`@role`/attribute bindings with their target spans) — the same
+    /// [`callgraph`]+[`reflect`](noeta_ast::reflect) join the MCP `trace` tool serves, so editor
+    /// and agent read one engine. An unlinkable workspace degrades to the entry's own AST (the
+    /// within-file graph keeps working while a sibling is broken).
+    fn call_graph(
+        &self,
+        cache: &WorkspaceCache,
+    ) -> (callgraph::CallGraph, noeta_ast::reflect::ReflectionInfo) {
+        let db = &self.db;
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, cache.entry());
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        let ide = noeta_db::linked_checked_ide(db, cache.workspace);
+        // Texts by SourceId index: entry + siblings, then dependency modules (ids continue past).
+        let texts: Vec<&str> = cache
+            .programs
+            .iter()
+            .chain(&cache.dep_programs)
+            .map(|p| p.text(db).as_str())
+            .collect();
+        let graph = callgraph::build(program, &ide.expr_types, &texts);
+        (graph, noeta_ast::reflect::build(program))
+    }
+
+    /// Resolve graph function `idx` to a located [`HierarchyItem`] (roles joined by declaration
+    /// name). `None` if its spans map to no known file.
+    fn hierarchy_item(
+        &self,
+        cache: &WorkspaceCache,
+        graph: &callgraph::CallGraph,
+        roles: &HashMap<String, Vec<String>>,
+        idx: usize,
+        encoding: Encoding,
+    ) -> Option<HierarchyItem> {
+        let f = &graph.functions[idx];
+        let (uri, selection_range) = self.locate(cache, f.name_span, encoding)?;
+        let (_, range) = self.locate(cache, f.decl_span, encoding)?;
+        Some(HierarchyItem {
+            name: f.name.clone(),
+            kind: if f.method {
+                SymbolKind::Method
+            } else {
+                SymbolKind::Function
+            },
+            roles: roles.get(&f.name).cloned().unwrap_or_default(),
+            uri,
+            range,
+            selection_range,
+        })
+    }
+
     /// Map a definition `span` (whose [`SourceId`] names the file it belongs to) to the `(URI,
     /// range)` the editor jumps to, resolving the range against that file's own text.
     fn locate(
@@ -884,6 +1483,20 @@ fn to_document_symbol(
             .map(|child| to_document_symbol(index, child, encoding))
             .collect(),
     }
+}
+
+/// The first string argument of the attribute named `name` (`#[Name("…")]`, `#[Group("…")]`), if
+/// the declaration carries it.
+fn attr_str(attrs: &[noeta_ast::Attribute], name: &str) -> Option<String> {
+    attrs
+        .iter()
+        .find(|a| a.name == name)?
+        .args
+        .iter()
+        .find_map(|arg| match &arg.value {
+            noeta_ast::AttrValue::Str(s) => Some(s.clone()),
+            _ => None,
+        })
 }
 
 /// Convert a `file:` document URI to a filesystem path. Returns `None` for any other scheme (e.g.
@@ -2534,5 +3147,322 @@ mod tests {
         // Fix it — salsa re-runs the check on the mutated input and the error is gone.
         store.change("file:///f.noe", "count: int = 7".to_string());
         assert!(store.diagnostics("file:///f.noe").unwrap().0.is_empty());
+    }
+
+    /// An entry point calling through a helper into a persistence boundary, plus an external
+    /// module call — the same shape the MCP `trace` fixtures use (ide-ui U0).
+    const HIER_SRC: &str = "\
+@attribute
+@role(Semantic.EntryPoint)
+struct Route { path: string }
+
+@attribute
+@role(Semantic.Persistence)
+struct Store { table: string }
+
+use std.{math}
+
+#[Route(\"/orders\")]
+fn handle(n: int): int {
+  v = validate(n)
+  return save(v)
+}
+
+fn validate(n: int): int {
+  s = math.sqrt(4.0)
+  echo s
+  return n + 1
+}
+
+#[Store(\"orders\")]
+fn save(n: int): int {
+  echo n
+  return n
+}
+
+echo handle(1)
+";
+
+    fn hier_store() -> DocumentStore {
+        let mut store = DocumentStore::default();
+        store.open("file:///hier.noe", HIER_SRC.to_string());
+        store
+    }
+
+    #[test]
+    fn function_at_resolves_name_body_and_call_site() {
+        let store = hier_store();
+        let uri = "file:///hier.noe";
+        // On the declared name `handle` (line 11: `fn handle(n: int): int {`).
+        let on_name = store
+            .function_at(uri, Position::new(11, 5), Encoding::Utf16)
+            .expect("cursor on a fn name");
+        assert_eq!(on_name.name, "handle");
+        assert_eq!(on_name.roles, vec!["Semantic.EntryPoint"]);
+        assert_eq!(on_name.selection_range.start.line, 11);
+        assert!(on_name.range.end.line >= 14, "range covers the whole decl");
+        // Inside a body (line 18: `echo s` in validate) → the enclosing function.
+        let in_body = store
+            .function_at(uri, Position::new(18, 3), Encoding::Utf16)
+            .expect("cursor inside a body");
+        assert_eq!(in_body.name, "validate");
+        assert!(in_body.roles.is_empty());
+        // On a call site (line 12: `v = validate(n)`) → the callee.
+        let on_site = store
+            .function_at(uri, Position::new(12, 8), Encoding::Utf16)
+            .expect("cursor on a call site");
+        assert_eq!(on_site.name, "validate");
+    }
+
+    #[test]
+    fn outgoing_calls_group_by_callee_and_omit_externals() {
+        let store = hier_store();
+        let calls = store
+            .outgoing_calls("file:///hier.noe", Position::new(11, 5), Encoding::Utf16)
+            .expect("handle resolves");
+        let names: Vec<&str> = calls.iter().map(|c| c.item.name.as_str()).collect();
+        assert_eq!(names, vec!["validate", "save"], "source order, grouped");
+        // Both are syntactic calls, sites in handle's body.
+        let save = &calls[1];
+        assert_eq!(save.item.roles, vec!["Semantic.Persistence"]);
+        assert_eq!(save.sites.len(), 1);
+        assert!(save.sites[0].1, "syntactic call");
+        assert_eq!(save.sites[0].0.start.line, 13);
+        // validate's own outgoing has only the external math call → no located callee at all.
+        let from_validate = store
+            .outgoing_calls("file:///hier.noe", Position::new(16, 5), Encoding::Utf16)
+            .expect("validate resolves");
+        assert!(
+            from_validate.is_empty(),
+            "external module calls are omitted from the hierarchy: {from_validate:?}"
+        );
+    }
+
+    #[test]
+    fn incoming_calls_include_the_top_level_entry() {
+        let store = hier_store();
+        // validate is called by handle.
+        let into_validate = store
+            .incoming_calls("file:///hier.noe", Position::new(16, 5), Encoding::Utf16)
+            .expect("validate resolves");
+        assert_eq!(into_validate.len(), 1);
+        assert_eq!(into_validate[0].item.name, "handle");
+        assert_eq!(into_validate[0].item.roles, vec!["Semantic.EntryPoint"]);
+        assert_eq!(into_validate[0].sites[0].0.start.line, 12);
+        // handle is called from the program's top-level statements (Noeta's entry, no `main`).
+        let into_handle = store
+            .incoming_calls("file:///hier.noe", Position::new(11, 5), Encoding::Utf16)
+            .expect("handle resolves");
+        assert_eq!(into_handle.len(), 1);
+        assert_eq!(into_handle[0].item.name, "(top level)");
+        assert_eq!(into_handle[0].sites[0].0.start.line, 28); // `echo handle(1)`
+    }
+
+    #[test]
+    fn passing_a_function_shows_as_a_reference_site() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///cb.noe",
+            "fn cb(n: int): int { return n }\nfn run(f: (int) -> int): int { return f(1) }\necho run(cb)\n"
+                .to_string(),
+        );
+        let into_cb = store
+            .incoming_calls("file:///cb.noe", Position::new(0, 4), Encoding::Utf16)
+            .expect("cb resolves");
+        assert_eq!(into_cb.len(), 1);
+        assert_eq!(into_cb[0].item.name, "(top level)");
+        assert!(!into_cb[0].sites[0].1, "passed as a value, not called");
+    }
+
+    #[test]
+    fn call_hierarchy_crosses_module_boundaries() {
+        let dir = temp_workspace(
+            "hierarchy_cross",
+            &[(
+                "util.noe",
+                "namespace App.Util;\npub fn helper(): int { return 1 }\n",
+            )],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let mut store = DocumentStore::default();
+        store.open(
+            &entry_uri,
+            "use App.Util.helper;\nfn work(): int { return helper() }\necho work()\n".to_string(),
+        );
+        let calls = store
+            .outgoing_calls(&entry_uri, Position::new(1, 4), Encoding::Utf16)
+            .expect("work resolves");
+        assert_eq!(calls.len(), 1, "calls: {calls:?}");
+        assert_eq!(calls[0].item.name, "App.Util.helper");
+        // The callee item locates in the sibling file; the site stays in the entry.
+        assert!(
+            calls[0].item.uri.ends_with("util.noe"),
+            "{}",
+            calls[0].item.uri
+        );
+        assert_eq!(calls[0].sites[0].0.start.line, 1);
+    }
+
+    #[test]
+    fn hierarchy_answers_for_an_unopened_sibling_file() {
+        // Expanding a cross-file node hands back the *sibling's* URI — which the user never
+        // opened. The query must resolve through the open workspace that discovered it.
+        let dir = temp_workspace(
+            "hierarchy_unopened",
+            &[(
+                "util.noe",
+                "namespace App.Util;\npub fn helper(): int { return 1 }\n",
+            )],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let util_uri = path_to_uri(&dir.join("util.noe"));
+        let mut store = DocumentStore::default();
+        store.open(
+            &entry_uri,
+            "use App.Util.helper;\nfn work(): int { return helper() }\necho work()\n".to_string(),
+        );
+        let into_helper = store
+            .incoming_calls(&util_uri, Position::new(1, 8), Encoding::Utf16)
+            .expect("a sibling file answers through the open workspace");
+        assert_eq!(into_helper.len(), 1, "calls: {into_helper:?}");
+        assert_eq!(into_helper[0].item.name, "work");
+        assert!(into_helper[0].item.uri.ends_with("main.noe"));
+        assert_eq!(into_helper[0].sites[0].0.start.line, 1);
+    }
+
+    #[test]
+    fn role_lenses_locate_bindings_and_flag_traceability() {
+        let store = hier_store();
+        let lenses = store
+            .role_lenses("file:///hier.noe", Encoding::Utf16)
+            .expect("open document");
+        // Roles ride on the *annotated* declarations (the attribute structs Route/Store confer
+        // them, they don't bear them): handle and save, in source order, both trace roots.
+        assert_eq!(lenses.len(), 2, "{lenses:?}");
+        assert_eq!(lenses[0].target, "handle");
+        assert_eq!(lenses[0].role, "Semantic.EntryPoint");
+        assert!(lenses[0].traceable);
+        assert_eq!(lenses[0].range.start.line, 11, "lens hangs on the fn name");
+        assert_eq!(lenses[1].target, "save");
+        assert_eq!(lenses[1].role, "Semantic.Persistence");
+    }
+
+    #[test]
+    fn trace_document_renders_the_flow_with_boundaries_and_markers() {
+        let store = hier_store();
+        let doc = store
+            .trace_document("file:///hier.noe", Some("EntryPoint"))
+            .expect("open document");
+        assert!(doc.contains("noeta trace — from EntryPoint"), "{doc}");
+        assert!(doc.contains("boundaries reached"), "{doc}");
+        assert!(doc.contains("⚑ Semantic.Persistence — save"), "{doc}");
+        // The tree: handle's children with locations, the external leaf labeled.
+        assert!(doc.contains("├── validate"), "{doc}");
+        assert!(doc.contains("└── save"), "{doc}");
+        assert!(doc.contains("math.sqrt"), "{doc}");
+        assert!(doc.contains("[external]"), "{doc}");
+        // 1-based path:line for handle (declared on 0-based line 11).
+        assert!(doc.contains(":12"), "{doc}");
+    }
+
+    #[test]
+    fn trace_document_answers_an_unmatched_spec_in_the_document() {
+        let store = hier_store();
+        let doc = store
+            .trace_document("file:///hier.noe", Some("nope"))
+            .expect("open document still answers");
+        assert!(
+            doc.contains("matches no role binding and no function"),
+            "{doc}"
+        );
+    }
+
+    #[test]
+    fn architecture_groups_roles_and_marks_expandability() {
+        let store = hier_store();
+        let arch = store
+            .architecture("file:///hier.noe", Encoding::Utf16)
+            .expect("open document");
+        let roles: Vec<&str> = arch.iter().map(|g| g.role.as_str()).collect();
+        assert_eq!(roles, vec!["Semantic.EntryPoint", "Semantic.Persistence"]);
+        let handle = &arch[0].bearers[0];
+        assert_eq!(handle.name, "handle");
+        assert!(handle.expandable, "handle has outgoing calls");
+        assert_eq!(handle.range.as_ref().map(|r| r.start.line), Some(11));
+        let save = &arch[1].bearers[0];
+        assert_eq!(save.name, "save");
+        assert!(!save.expandable, "save calls nothing");
+    }
+
+    #[test]
+    fn architecture_children_unfold_one_level_with_honest_leaves() {
+        let store = hier_store();
+        let children = store
+            .architecture_children("file:///hier.noe", "handle", Encoding::Utf16)
+            .expect("open document");
+        let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["validate", "save"]);
+        assert!(
+            children[0].expandable,
+            "validate has an external call to unfold"
+        );
+        assert!(!children[1].expandable);
+        // The next level shows the external leaf, located nowhere, not expandable.
+        let leaves = store
+            .architecture_children("file:///hier.noe", "validate", Encoding::Utf16)
+            .expect("open document");
+        let math = leaves
+            .iter()
+            .find(|c| c.name == "math.sqrt")
+            .expect("external leaf");
+        assert!(math.external && math.uri.is_none() && !math.expandable);
+        // Unknown function → empty, not an error.
+        assert!(
+            store
+                .architecture_children("file:///hier.noe", "nope", Encoding::Utf16)
+                .expect("open document")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn tests_discovers_test_fns_with_their_metadata() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///t.noe",
+            "fn add(a: int, b: int): int { return a + b }\n\n@test {\n  fn adds(): void {\n    assert(add(1, 2) == 3)\n  }\n  #[Skip]\n  #[Name(\"slow one\")]\n  fn slow(): void {\n    assert(true)\n  }\n}\n"
+                .to_string(),
+        );
+        let tests = store
+            .tests("file:///t.noe", Encoding::Utf16)
+            .expect("open document");
+        assert_eq!(tests.len(), 2, "{tests:?}");
+        assert_eq!(tests[0].name, "adds");
+        assert!(!tests[0].skipped);
+        assert_eq!(tests[0].range.start.line, 3);
+        assert_eq!(tests[1].name, "slow");
+        assert!(tests[1].skipped);
+        assert_eq!(tests[1].display.as_deref(), Some("slow one"));
+    }
+
+    #[test]
+    fn call_hierarchy_for_unknown_document_is_none() {
+        let store = DocumentStore::default();
+        let pos = Position::new(0, 0);
+        assert!(
+            store
+                .function_at("file:///nope.noe", pos, Encoding::Utf8)
+                .is_none()
+        );
+        assert!(
+            store
+                .outgoing_calls("file:///nope.noe", pos, Encoding::Utf8)
+                .is_none()
+        );
+        assert!(
+            store
+                .incoming_calls("file:///nope.noe", pos, Encoding::Utf8)
+                .is_none()
+        );
     }
 }

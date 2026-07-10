@@ -13,7 +13,7 @@
 
 use std::sync::Mutex;
 
-use noeta_ide::{DocumentStore, Encoding, LineIndex, completion, inlay, semtokens};
+use noeta_ide::{DocumentStore, Encoding, LineIndex, TOP_LEVEL, completion, inlay, semtokens};
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server};
@@ -156,6 +156,187 @@ fn to_document_symbol(symbol: noeta_ide::DocumentSymbol) -> DocumentSymbol {
     }
 }
 
+/// The call-hierarchy item detail line: the function's `@role` bindings, plus a marker when the
+/// group reaches it only as a **passed value** (never a syntactic call — a callback or handler
+/// registration). This is where the engine's static-analysis honesty surfaces in the native UI.
+fn hierarchy_detail(roles: &[String], reference_only: bool) -> Option<String> {
+    let mut parts: Vec<&str> = roles.iter().map(String::as_str).collect();
+    if reference_only {
+        parts.push("reference (passed as value)");
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// Map an engine [`HierarchyItem`](noeta_ide::HierarchyItem) (spans already resolved) to the LSP
+/// wire item. `None` if its URI does not parse (the item would not be navigable).
+fn to_call_hierarchy_item(
+    item: noeta_ide::HierarchyItem,
+    detail: Option<String>,
+) -> Option<CallHierarchyItem> {
+    let kind = match item.kind {
+        noeta_ide::SymbolKind::Method => SymbolKind::METHOD,
+        _ => SymbolKind::FUNCTION,
+    };
+    Some(CallHierarchyItem {
+        name: item.name,
+        kind,
+        tags: None,
+        detail,
+        uri: item.uri.parse().ok()?,
+        range: wire_range(item.range),
+        selection_range: wire_range(item.selection_range),
+        data: None,
+    })
+}
+
+/// Map one engine [`HierarchyCall`](noeta_ide::HierarchyCall) group to `(wire item, fromRanges)` —
+/// the shared shape of incoming and outgoing answers (both directions' `fromRanges` live in the
+/// caller's document, which is how the engine returns them).
+fn to_hierarchy_call(call: noeta_ide::HierarchyCall) -> Option<(CallHierarchyItem, Vec<Range>)> {
+    let reference_only = call.sites.iter().all(|(_, is_call)| !is_call);
+    let detail = hierarchy_detail(&call.item.roles, reference_only);
+    let item = to_call_hierarchy_item(call.item, detail)?;
+    let ranges = call.sites.into_iter().map(|(r, _)| wire_range(r)).collect();
+    Some((item, ranges))
+}
+
+/// Map an engine [`RoleLens`](noeta_ide::RoleLens) to the wire CodeLens: `⚑ Enum.Variant`, with
+/// the client-side `noeta.showTrace (uri, function)` command attached when the bearer is a trace
+/// root. A non-traceable lens (a role on a type) gets an empty command — the standard trick for a
+/// label-only lens.
+fn to_code_lens(uri: &str, lens: noeta_ide::RoleLens) -> CodeLens {
+    let command = if lens.traceable {
+        Command {
+            title: format!("⚑ {} · trace request path", lens.role),
+            command: "noeta.showTrace".to_string(),
+            arguments: Some(vec![
+                serde_json::Value::String(uri.to_string()),
+                serde_json::Value::String(lens.target),
+            ]),
+        }
+    } else {
+        Command {
+            title: format!("⚑ {}", lens.role),
+            command: String::new(),
+            arguments: None,
+        }
+    };
+    CodeLens {
+        range: wire_range(lens.range),
+        command: Some(command),
+        data: None,
+    }
+}
+
+/// `noeta/trace` custom-request params: the document anchoring the workspace and the trace spec
+/// (a function name or role; absent = every role-bearing function).
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceParams {
+    uri: String,
+    from: Option<String>,
+}
+
+/// `noeta/trace` answer: the rendered trace document text (the client opens it read-only).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceResult {
+    content: Option<String>,
+}
+
+/// A located node of the Architecture view (`noeta/architecture[Children]`, ide-ui U3). Positions
+/// are **UTF-16** line/character regardless of the negotiated encoding — custom requests bypass
+/// the client library's position conversion, and the consumer is the VS Code extension (JS string
+/// semantics).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchNodeWire {
+    name: String,
+    roles: Vec<String>,
+    uri: Option<String>,
+    line: Option<u32>,
+    character: Option<u32>,
+    reference: bool,
+    external: bool,
+    dynamic: bool,
+    cycle: bool,
+    expandable: bool,
+}
+
+impl From<noeta_ide::ArchNode> for ArchNodeWire {
+    fn from(node: noeta_ide::ArchNode) -> ArchNodeWire {
+        ArchNodeWire {
+            name: node.name,
+            roles: node.roles,
+            uri: node.uri,
+            line: node.range.map(|r| r.start.line),
+            character: node.range.map(|r| r.start.character),
+            reference: node.reference,
+            external: node.external,
+            dynamic: node.dynamic,
+            cycle: node.cycle,
+            expandable: node.expandable,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchitectureParams {
+    uri: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchitectureResult {
+    roles: Option<Vec<ArchRoleWire>>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchRoleWire {
+    role: String,
+    bearers: Vec<ArchNodeWire>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchChildrenParams {
+    uri: String,
+    function: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchChildrenResult {
+    children: Option<Vec<ArchNodeWire>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TestsParams {
+    uri: String,
+}
+
+/// `noeta/tests` answer: the file's `@test` fns (UTF-16 positions, like the architecture wire).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestsResult {
+    tests: Option<Vec<TestItemWire>>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TestItemWire {
+    name: String,
+    display: Option<String>,
+    group: Option<String>,
+    skipped: bool,
+    line: u32,
+    character: u32,
+    end_line: u32,
+}
+
 /// Pick the position encoding: prefer UTF-8 when the client advertises support for it (LSP 3.17),
 /// so the server can use the compiler's native byte offsets directly; otherwise fall back to the
 /// protocol default, UTF-16.
@@ -194,6 +375,77 @@ impl Backend {
 
     fn encoding(&self) -> Encoding {
         *self.encoding.lock().expect("encoding lock poisoned")
+    }
+
+    /// The `noeta/trace` custom request (ide-ui U2): render the role-aware static trace as a
+    /// plain-text document for the editor's `noeta-trace:` virtual-document view. The same
+    /// [`noeta_ide::trace`] walk the MCP `trace` tool serves. `content: null` when no open
+    /// workspace covers the URI.
+    async fn noeta_trace(&self, params: TraceParams) -> Result<TraceResult> {
+        let content = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.trace_document(&params.uri, params.from.as_deref())
+        };
+        Ok(TraceResult { content })
+    }
+
+    /// `noeta/architecture` (ide-ui U3): the workspace's role surface — role groups with their
+    /// located bearers — for the Architecture tree view's top level.
+    async fn noeta_architecture(&self, params: ArchitectureParams) -> Result<ArchitectureResult> {
+        let roles = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.architecture(&params.uri, Encoding::Utf16)
+        };
+        Ok(ArchitectureResult {
+            roles: roles.map(|groups| {
+                groups
+                    .into_iter()
+                    .map(|g| ArchRoleWire {
+                        role: g.role,
+                        bearers: g.bearers.into_iter().map(ArchNodeWire::from).collect(),
+                    })
+                    .collect()
+            }),
+        })
+    }
+
+    /// `noeta/architectureChildren` (ide-ui U3): one lazily-unfolded call level for a tree node.
+    async fn noeta_architecture_children(
+        &self,
+        params: ArchChildrenParams,
+    ) -> Result<ArchChildrenResult> {
+        let children = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.architecture_children(&params.uri, &params.function, Encoding::Utf16)
+        };
+        Ok(ArchChildrenResult {
+            children: children.map(|nodes| nodes.into_iter().map(ArchNodeWire::from).collect()),
+        })
+    }
+
+    /// `noeta/tests` (ide-ui U3): the file's `@test` fns — the runner's own discovery walk, so
+    /// the editor's test explorer and `noeta test` can never disagree.
+    async fn noeta_tests(&self, params: TestsParams) -> Result<TestsResult> {
+        let tests = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.tests(&params.uri, Encoding::Utf16)
+        };
+        Ok(TestsResult {
+            tests: tests.map(|items| {
+                items
+                    .into_iter()
+                    .map(|t| TestItemWire {
+                        name: t.name,
+                        display: t.display,
+                        group: t.group,
+                        skipped: t.skipped,
+                        line: t.range.start.line,
+                        character: t.range.start.character,
+                        end_line: t.range.end.line,
+                    })
+                    .collect()
+            }),
+        })
     }
 
     /// Type-check `uri`'s current text and push its diagnostics to the client. A no-op for a URI
@@ -304,6 +556,15 @@ impl LanguageServer for Backend {
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![".".to_string()]),
                     ..Default::default()
+                }),
+                // Call hierarchy (ide-ui U1) over the shared static call graph — the same
+                // engine the MCP `trace` tool reads; items carry `@role` bindings in the detail.
+                call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+                // Role CodeLenses (ide-ui U2): one lens per `@role` binding in the file; a
+                // traceable one carries the client's `noeta.showTrace` command. Lenses are
+                // complete at production — no resolve round-trip.
+                code_lens_provider: Some(CodeLensOptions {
+                    resolve_provider: Some(false),
                 }),
                 ..Default::default()
             },
@@ -633,6 +894,95 @@ impl LanguageServer for Backend {
         self.client.publish_diagnostics(uri, Vec::new(), None).await;
         self.publish_all().await;
     }
+
+    async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        let uri = params.text_document.uri;
+        let lenses = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.role_lenses(uri.as_str(), self.encoding())
+        };
+        Ok(lenses.map(|lenses| {
+            lenses
+                .into_iter()
+                .map(|lens| to_code_lens(uri.as_str(), lens))
+                .collect()
+        }))
+    }
+
+    async fn prepare_call_hierarchy(
+        &self,
+        params: CallHierarchyPrepareParams,
+    ) -> Result<Option<Vec<CallHierarchyItem>>> {
+        let position_params = params.text_document_position_params;
+        let uri = position_params.text_document.uri;
+        let item = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.function_at(
+                uri.as_str(),
+                ide_position(position_params.position),
+                self.encoding(),
+            )
+        };
+        Ok(item.and_then(|item| {
+            let detail = hierarchy_detail(&item.roles, false);
+            to_call_hierarchy_item(item, detail).map(|item| vec![item])
+        }))
+    }
+
+    /// Expansion requests address the function by the **item** the client holds (its URI +
+    /// selection range) — which may be a workspace file the user never opened; the store resolves
+    /// it through the open workspace that discovered it.
+    async fn incoming_calls(
+        &self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        let item = params.item;
+        // The synthetic `(top level)` caller is an anchor, not a traversable function — its
+        // selection range sits on a call site, which would re-resolve to the callee.
+        if item.name == TOP_LEVEL {
+            return Ok(Some(Vec::new()));
+        }
+        let calls = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.incoming_calls(
+                item.uri.as_str(),
+                ide_position(item.selection_range.start),
+                self.encoding(),
+            )
+        };
+        Ok(calls.map(|calls| {
+            calls
+                .into_iter()
+                .filter_map(to_hierarchy_call)
+                .map(|(from, from_ranges)| CallHierarchyIncomingCall { from, from_ranges })
+                .collect()
+        }))
+    }
+
+    async fn outgoing_calls(
+        &self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        let item = params.item;
+        if item.name == TOP_LEVEL {
+            return Ok(Some(Vec::new()));
+        }
+        let calls = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.outgoing_calls(
+                item.uri.as_str(),
+                ide_position(item.selection_range.start),
+                self.encoding(),
+            )
+        };
+        Ok(calls.map(|calls| {
+            calls
+                .into_iter()
+                .filter_map(to_hierarchy_call)
+                .map(|(to, from_ranges)| CallHierarchyOutgoingCall { to, from_ranges })
+                .collect()
+        }))
+    }
 }
 
 /// Run the language server over stdio, blocking until the client disconnects. Called by the
@@ -649,7 +999,19 @@ pub fn run_stdio() {
 async fn serve() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    let (service, socket) = LspService::new(Backend::new);
+    let (service, socket) = LspService::build(Backend::new)
+        // The trace document (ide-ui U2) — a custom request, since LSP has no "render me a
+        // read-only report" method; the VS Code extension opens the answer as `noeta-trace:`.
+        .custom_method("noeta/trace", Backend::noeta_trace)
+        // The Architecture view + test explorer (ide-ui U3): the role surface, lazy call levels,
+        // and `@test` discovery — all custom requests read by the VS Code extension.
+        .custom_method("noeta/architecture", Backend::noeta_architecture)
+        .custom_method(
+            "noeta/architectureChildren",
+            Backend::noeta_architecture_children,
+        )
+        .custom_method("noeta/tests", Backend::noeta_tests)
+        .finish();
     Server::new(stdin, stdout, socket).serve(service).await;
 }
 
@@ -683,6 +1045,85 @@ mod tests {
         assert_eq!(wire_position(ide_position(p)), p);
         let r = Range::new(Position::new(0, 1), Position::new(2, 4));
         assert_eq!(wire_range(ide_range(r)), r);
+    }
+
+    #[test]
+    fn call_hierarchy_maps_to_wire_items_with_roles_in_detail() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///h.noe",
+            "@attribute\n@role(Semantic.EntryPoint)\nstruct Route { path: string }\n\n#[Route(\"/x\")]\nfn handle(): int { return work() }\nfn work(): int { return 1 }\necho handle()\n"
+                .to_string(),
+        );
+        // Prepare on `handle`'s name (line 5) → a wire item with the role in the detail.
+        let item = store
+            .function_at(
+                "file:///h.noe",
+                noeta_ide::Position::new(5, 4),
+                Encoding::Utf8,
+            )
+            .expect("cursor on a fn name");
+        let detail = hierarchy_detail(&item.roles, false);
+        let wire = to_call_hierarchy_item(item, detail).expect("uri parses");
+        assert_eq!(wire.name, "handle");
+        assert_eq!(wire.kind, SymbolKind::FUNCTION);
+        assert_eq!(wire.detail.as_deref(), Some("Semantic.EntryPoint"));
+        assert_eq!(wire.selection_range.start.line, 5);
+
+        // Outgoing from handle → work, sites in handle's document (fromRanges).
+        let outgoing = store
+            .outgoing_calls(
+                "file:///h.noe",
+                noeta_ide::Position::new(5, 4),
+                Encoding::Utf8,
+            )
+            .expect("handle resolves");
+        let (to, from_ranges) = to_hierarchy_call(outgoing.into_iter().next().unwrap()).unwrap();
+        assert_eq!(to.name, "work");
+        assert_eq!(to.detail, None, "no roles, syntactic call — no detail line");
+        assert_eq!(from_ranges.len(), 1);
+        assert_eq!(from_ranges[0].start.line, 5);
+    }
+
+    #[test]
+    fn reference_only_groups_are_marked_in_the_detail() {
+        assert_eq!(
+            hierarchy_detail(&["Semantic.EntryPoint".to_string()], true).as_deref(),
+            Some("Semantic.EntryPoint · reference (passed as value)")
+        );
+        assert_eq!(
+            hierarchy_detail(&[], true).as_deref(),
+            Some("reference (passed as value)")
+        );
+        assert_eq!(hierarchy_detail(&[], false), None);
+    }
+
+    #[test]
+    fn role_lenses_map_to_wire_code_lenses() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///l.noe",
+            "@attribute\n@role(Semantic.EntryPoint)\nstruct Route { path: string }\n\n#[Route(\"/x\")]\nfn handle(): int { return 1 }\n"
+                .to_string(),
+        );
+        let lenses = store
+            .role_lenses("file:///l.noe", Encoding::Utf8)
+            .expect("open document");
+        assert_eq!(lenses.len(), 1);
+        let wire = to_code_lens("file:///l.noe", lenses[0].clone());
+        let command = wire.command.expect("traceable lens carries the command");
+        assert_eq!(command.title, "⚑ Semantic.EntryPoint · trace request path");
+        assert_eq!(command.command, "noeta.showTrace");
+        assert_eq!(
+            command.arguments.as_deref(),
+            Some(
+                &[
+                    serde_json::Value::String("file:///l.noe".into()),
+                    serde_json::Value::String("handle".into()),
+                ][..]
+            )
+        );
+        assert_eq!(wire.range.start.line, 5, "lens hangs on the fn name");
     }
 
     #[test]

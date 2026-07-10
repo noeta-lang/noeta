@@ -824,6 +824,68 @@ const MIXED_TESTS: &str = "fn add(a: int, b: int): int { return a + b; }\n\
      }\n";
 
 #[test]
+fn test_name_filter_runs_only_the_named_test() {
+    // `--name` (ide-ui U3): the editor's run-one-test seam — only the named fn runs, so a suite
+    // with failures exits 0 when the selected test passes.
+    let file = temp_program("test_name_filter", MIXED_TESTS);
+    lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--name", "adds"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("ok    adds")
+                .and(predicate::str::contains("fails").not())
+                .and(predicate::str::contains("1 passed, 0 failed, 1 total")),
+        );
+    // An unmatched name runs nothing and succeeds (like an empty group).
+    lang()
+        .arg("test")
+        .arg(&file)
+        .args(["--name", "nope"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no tests matching --name"));
+}
+
+#[test]
+fn test_json_reports_machine_readable_outcomes() {
+    // `--json` (ide-ui U3): one JSON object on stdout — per-test outcomes + totals, no human
+    // report lines — with the same exit-code semantics.
+    let file = temp_program("test_json", MIXED_TESTS);
+    let assert = lang()
+        .arg("test")
+        .arg(&file)
+        .arg("--json")
+        .assert()
+        .failure()
+        .code(1);
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let json: serde_json::Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["passed"], 1);
+    assert_eq!(json["failed"], 2);
+    assert_eq!(json["total"], 3);
+    let tests = json["tests"].as_array().expect("tests array");
+    let fails = tests
+        .iter()
+        .find(|t| t["name"] == "fails")
+        .expect("fails outcome");
+    assert_eq!(fails["passed"], false);
+    assert!(
+        fails["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("math is hard"),
+        "{fails}"
+    );
+    assert!(
+        !stdout.contains("running"),
+        "no human header in --json mode"
+    );
+}
+
+#[test]
 fn test_runs_all_tests_and_reports_failures() {
     // Default: every test runs even after a failure; exit 1 because some failed. The passing
     // tests are reported `ok`, the failing ones `FAIL` with their message, and the program's own
@@ -2320,7 +2382,13 @@ fn publishing_a_package_with_a_path_dependency_is_rejected() {
     lang()
         .current_dir(&base)
         .env("NOETA_REGISTRY_DIR", base.join("registry"))
-        .args(["publish", "--git", "https://example.com/acme/lib", "--tag", "v1.0.0"])
+        .args([
+            "publish",
+            "--git",
+            "https://example.com/acme/lib",
+            "--tag",
+            "v1.0.0",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("depend only via the registry"))
@@ -2393,8 +2461,11 @@ fn provenance_signs_verifies_and_pins_the_scope_key() {
         "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
     )
     .unwrap();
-    std::fs::write(repo.join("m.noe"), "namespace greet.core;\npub fn v(): int { return 1; }\n")
-        .unwrap();
+    std::fs::write(
+        repo.join("m.noe"),
+        "namespace greet.core;\npub fn v(): int { return 1; }\n",
+    )
+    .unwrap();
     git_in(&["add", "."], &repo);
     git_in(&["commit", "-q", "-m", "r"], &repo);
     git_in(&["tag", "v1.0.0"], &repo);
@@ -2411,7 +2482,13 @@ fn provenance_signs_verifies_and_pins_the_scope_key() {
         .current_dir(&repo)
         .env("NOETA_REGISTRY_DIR", &reg)
         .env("NOETA_SIGNING_KEY", &key)
-        .args(["publish", "--git", repo.to_str().unwrap(), "--tag", "v1.0.0"])
+        .args([
+            "publish",
+            "--git",
+            repo.to_str().unwrap(),
+            "--tag",
+            "v1.0.0",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("[signed]"));
@@ -2478,23 +2555,40 @@ fn a_registry_diamond_backtracks_to_a_compatible_set() {
     commit_version(
         &foo,
         "v1.0.0",
-        &format!("[package]\nname = \"acme/foo\"\nversion = \"1.0.0\"\n{}", dep("acme/bar", "^1.0")),
+        &format!(
+            "[package]\nname = \"acme/foo\"\nversion = \"1.0.0\"\n{}",
+            dep("acme/bar", "^1.0")
+        ),
     );
     commit_version(
         &foo,
         "v1.1.0",
-        &format!("[package]\nname = \"acme/foo\"\nversion = \"1.1.0\"\n{}", dep("acme/bar", "^2.0")),
+        &format!(
+            "[package]\nname = \"acme/foo\"\nversion = \"1.1.0\"\n{}",
+            dep("acme/bar", "^2.0")
+        ),
     );
     // bar: 1.0.0 then 2.0.0 (no deps).
     let bar = make_repo("bar");
-    commit_version(&bar, "v1.0.0", "[package]\nname = \"acme/bar\"\nversion = \"1.0.0\"\n");
-    commit_version(&bar, "v2.0.0", "[package]\nname = \"acme/bar\"\nversion = \"2.0.0\"\n");
+    commit_version(
+        &bar,
+        "v1.0.0",
+        "[package]\nname = \"acme/bar\"\nversion = \"1.0.0\"\n",
+    );
+    commit_version(
+        &bar,
+        "v2.0.0",
+        "[package]\nname = \"acme/bar\"\nversion = \"2.0.0\"\n",
+    );
     // baz: 1.0.0 (bar ^1.0).
     let baz = make_repo("baz");
     commit_version(
         &baz,
         "v1.0.0",
-        &format!("[package]\nname = \"acme/baz\"\nversion = \"1.0.0\"\n{}", dep("acme/bar", "^1.0")),
+        &format!(
+            "[package]\nname = \"acme/baz\"\nversion = \"1.0.0\"\n{}",
+            dep("acme/bar", "^1.0")
+        ),
     );
 
     // Write the registry index entries (each version → git coords + deps), matching LocalIndex format.
@@ -2510,8 +2604,18 @@ fn a_registry_diamond_backtracks_to_a_compatible_set() {
         "acme__foo.toml",
         format!(
             "{}{}",
-            version("1.0.0", &foo, "v1.0.0", "[[version.deps]]\npackage = \"acme/bar\"\nreq = \"^1.0\"\n"),
-            version("1.1.0", &foo, "v1.1.0", "[[version.deps]]\npackage = \"acme/bar\"\nreq = \"^2.0\"\n"),
+            version(
+                "1.0.0",
+                &foo,
+                "v1.0.0",
+                "[[version.deps]]\npackage = \"acme/bar\"\nreq = \"^1.0\"\n"
+            ),
+            version(
+                "1.1.0",
+                &foo,
+                "v1.1.0",
+                "[[version.deps]]\npackage = \"acme/bar\"\nreq = \"^2.0\"\n"
+            ),
         ),
     );
     entry(
@@ -2524,7 +2628,12 @@ fn a_registry_diamond_backtracks_to_a_compatible_set() {
     );
     entry(
         "acme__baz.toml",
-        version("1.0.0", &baz, "v1.0.0", "[[version.deps]]\npackage = \"acme/bar\"\nreq = \"^1.0\"\n"),
+        version(
+            "1.0.0",
+            &baz,
+            "v1.0.0",
+            "[[version.deps]]\npackage = \"acme/bar\"\nreq = \"^1.0\"\n",
+        ),
     );
 
     // The app depends on foo ^1.0 and baz ^1.0 by version (the deps are resolved, not used).
@@ -2552,8 +2661,14 @@ fn a_registry_diamond_backtracks_to_a_compatible_set() {
     let lock = std::fs::read_to_string(app.join("noeta.lock")).expect("lock written");
     assert!(lock.contains("acme/foo"), "{lock}");
     assert!(lock.contains("acme/bar"), "{lock}");
-    assert!(!lock.contains("1.1.0"), "foo must resolve to 1.0.0, not 1.1.0:\n{lock}");
-    assert!(!lock.contains("2.0.0"), "bar must resolve to 1.0.0, not 2.0.0:\n{lock}");
+    assert!(
+        !lock.contains("1.1.0"),
+        "foo must resolve to 1.0.0, not 1.1.0:\n{lock}"
+    );
+    assert!(
+        !lock.contains("2.0.0"),
+        "bar must resolve to 1.0.0, not 2.0.0:\n{lock}"
+    );
 }
 
 #[test]

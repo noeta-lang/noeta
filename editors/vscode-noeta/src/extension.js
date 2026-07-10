@@ -36,11 +36,10 @@ const {
 } = require("vscode");
 const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
 const { registerProfiling } = require("./profile");
-
-/** The configured path to the `noeta` executable (on `PATH` by default). Shared by the LSP and DAP. */
-function noetaCommand() {
-  return workspace.getConfiguration("noeta").get("server.path", "noeta");
-}
+const { registerTrace } = require("./trace");
+const { registerArchitecture } = require("./architecture");
+const { registerTests } = require("./tests");
+const { noetaCommand } = require("./toolchain");
 
 /** @type {import("vscode-languageclient/node").LanguageClient | undefined} */
 let client;
@@ -307,9 +306,25 @@ function activate(context) {
   // The profiler UI: `Noeta: Profile File` commands + the flame-graph view for `*.noeprof.json`.
   registerProfiling(context);
 
+  // The role-trace view (ide-ui U2): the CodeLens-invoked `noeta.showTrace` command + the
+  // read-only `noeta-trace:` document it opens (served by the language server's `noeta/trace`).
+  registerTrace(context, () => client);
+
+  // The Architecture sidebar + the native test explorer (ide-ui U3), both fed by the server's
+  // custom requests (`noeta/architecture[Children]`, `noeta/tests`).
+  const architecture = registerArchitecture(context, () => client);
+  const testExplorer = registerTests(context, () => client);
+
   // Starting the client spawns the server; a failure to launch (e.g. `noeta` not on `PATH`) surfaces
-  // in the "Noeta Language Server" output channel.
-  client.start();
+  // in the "Noeta Language Server" output channel. The U3 surfaces populate once it is running
+  // (their first queries before that would have returned nothing).
+  client.start().then(
+    () => {
+      architecture.refresh();
+      testExplorer.discoverAll();
+    },
+    () => {},
+  );
 }
 
 function deactivate() {

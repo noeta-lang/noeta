@@ -29,6 +29,7 @@ const { spawn } = require("child_process");
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
+const { noetaCommand } = require("./toolchain");
 
 /**
  * Per-artifact metadata the run commands remember for the viewer: the profiler's own one-line
@@ -39,11 +40,6 @@ const fs = require("fs");
  * @type {Map<string, {summary: string, sourceDir: string, program: string}>}
  */
 const artifactMeta = new Map();
-
-/** The configured path to the `noeta` executable — the same setting the LSP/DAP/MCP use. */
-function noetaCommand() {
-  return workspace.getConfiguration("noeta").get("server.path", "noeta");
-}
 
 /** One shared output channel for the profiled program's own stdout/stderr. */
 let channel;
@@ -59,7 +55,7 @@ function profileChannel() {
  * view. `mode` is `"sampling"` (wall-clock flamegraph with line attribution) or `"instrument"`
  * (exact per-function counts).
  */
-async function runProfile(mode) {
+async function runProfile(mode, focus) {
   const editor = window.activeTextEditor;
   if (!editor || editor.document.languageId !== "noeta") {
     window.showErrorMessage("Noeta: open a .noe file to profile.");
@@ -142,6 +138,9 @@ async function runProfile(mode) {
     summary,
     sourceDir: path.dirname(program),
     program,
+    // A profile *slice* (ide-ui U3): the view re-roots every sample stack at this function, so
+    // the flame graph shows only the part of the run the user asked about.
+    focus: focus || null,
   });
 
   // Annotate the hot lines in the source itself (best-effort — the view is the real report).
@@ -370,6 +369,7 @@ class ProfileViewProvider {
           meta: {
             summary: meta?.summary ?? "",
             program: meta?.program ? path.basename(meta.program) : path.basename(document.uri.fsPath),
+            focus: meta?.focus ?? null,
           },
         });
       } else if (msg.type === "openSource") {
@@ -408,4 +408,4 @@ function registerProfiling(context) {
   );
 }
 
-module.exports = { registerProfiling };
+module.exports = { registerProfiling, runProfile };

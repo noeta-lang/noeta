@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <!-- The Noeta architecture glyph: an entry node fanning out into the graph. -->
+  <circle cx="5" cy="5" r="2.4"/>
+  <circle cx="19" cy="10" r="2.1"/>
+  <circle cx="9" cy="19" r="2.1"/>
+  <circle cx="19" cy="19" r="2.1"/>
+  <path d="M7 6.4 L16.9 9.3"/>
+  <path d="M5.9 7.3 L8.4 16.9"/>
+  <path d="M11.1 19 L16.9 19"/>
+  <path d="M19 12.1 L19 16.9"/>
+</svg>

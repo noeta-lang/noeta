@@ -283,3 +283,35 @@ td .pct-bar {
 td .pct-num {
   position: relative;
 }
+
+/* The profile-slice focus bar (ide-ui U3): what the view is focused on + the way back. */
+.focus-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  margin: 4px 0;
+  border: 1px solid var(--vscode-editorWidget-border, transparent);
+  border-radius: 3px;
+  background: var(--vscode-editorWidget-background);
+}
+
+.focus-text {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+}
+
+.focus-clear {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 2px;
+  background: var(--vscode-button-secondaryBackground, var(--vscode-button-background));
+  color: var(--vscode-button-secondaryForeground, var(--vscode-button-foreground));
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.focus-clear:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-hoverBackground));
+}
