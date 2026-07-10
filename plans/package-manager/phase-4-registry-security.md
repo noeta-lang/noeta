@@ -174,8 +174,27 @@ a version's recorded deps match its source manifest (a real registry would verif
 Each slice commits green (workspace tests, differential/conformance, clippy). Deferred + surfaced:
 per-dependency capability *enforcement* (research phase), signed provenance (v-next).
 
+## Follow-ups #2 + #3 — ✅ DONE (post-milestone)
+
+- **#3 — publish lints non-registry deps.** `noeta publish` rejects a package with a path/git
+  dependency (a consumer resolving the release from the index would silently miss it).
+- **#2 — provenance (Ed25519-signed attestations).** A scope registers an Ed25519 public key;
+  `noeta publish` signs an attestation binding `version → commit` (`noeta key new` generates the
+  keypair); the registry (LocalIndex, HttpIndex, and the Worker via Web-Crypto) stores + serves the
+  signature and the scope key, and the Worker verifies at publish. On resolve, the consumer verifies
+  the signature and **pins the scope key trust-on-first-use in `noeta.lock`** — a later registry
+  serving a *different* key is rejected (the defense against a registry compromised after first use).
+  Unsigned releases are allowed (unverified) for gradual adoption; `noeta audit` shows the pinned
+  keys. Trust root = a registered key + TOFU pin; **the evolution is Sigstore-style keyless signing
+  (OIDC → short-lived cert → public transparency log)**, which removes the long-lived secret and adds
+  public detectability — same attestation shape, different trust root.
+
+**Still deferred (v-next):** per-dependency capability *enforcement* (research; a static effect
+analysis in the checker is the tractable first step, vs an object-capability language redesign).
+
 ## Phase 4 gate
 
 A native/command dependency does nothing without a root `[trust]` grant (transitive included); the
 Worker serves an immutable, SHA-pinned, scope-owned index; a range dep resolves through PubGrub
-against it; `noeta audit` reports the tree's trust + capability footprint. Full suite green.
+against it; a signed release is provenance-verified and its scope key TOFU-pinned; `noeta audit`
+reports the tree's trust + provenance footprint. Full suite green.
