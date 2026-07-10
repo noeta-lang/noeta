@@ -1096,6 +1096,13 @@ impl Chunk {
         (idx > 0).then(|| self.line_table[idx - 1].span)
     }
 
+    /// One instruction's disassembly text (the [`Chunk::disassemble`] line for `pc`, without the pc
+    /// prefix) — for tooling that names a single site, like the JIT bail report (`--jit-stats`).
+    /// `names`/`global_names` are the owning module's interned tables, as for `disassemble`.
+    pub fn op_repr_at(&self, pc: usize, names: &[String], global_names: &[String]) -> String {
+        op_repr(&self.code[pc], &self.diagnostics, names, global_names)
+    }
+
     /// Render the chunk as stable, human-readable disassembly for snapshot tests. `names` is the
     /// owning module's interned name table (P-VMT-OPSZ), used to resolve each op's [`NameId`]s back
     /// to their strings so the output is unchanged from the pre-interning inline-`String` form.

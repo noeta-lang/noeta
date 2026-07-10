@@ -1244,6 +1244,31 @@ pub fn worth_osr(chunk: &noeta_bytecode::Chunk) -> bool {
     })
 }
 
+/// The coverage-gap sites behind a [`worth_osr`] decline: every pc inside a loop body whose op is
+/// not native ([`is_fast_op`]), for each loop (over-approximated as `[header, back_edge]`, exactly as
+/// `worth_osr` scans). These are the ops that keep a hot loop off tier 1 — the JIT bail report
+/// (`noeta run --jit-stats`) names them so "what should become JITable next" is a measurement, not a
+/// guess. Deduplicated and sorted; empty when every loop is native-sustainable (or there is no loop).
+pub fn loop_bail_pcs(chunk: &noeta_bytecode::Chunk) -> Vec<usize> {
+    let code = &chunk.code;
+    let mut pcs: Vec<usize> = code
+        .iter()
+        .enumerate()
+        .filter_map(|(pc, op)| backward_target(op, pc).map(|header| (header, pc)))
+        .flat_map(|(header, back_edge)| {
+            code[header..=back_edge]
+                .iter()
+                .enumerate()
+                .filter(|(_, o)| !is_fast_op(o, &chunk.consts))
+                .map(move |(i, _)| header + i)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    pcs.sort_unstable();
+    pcs.dedup();
+    pcs
+}
+
 /// Whether compiling this prototype is worthwhile at all (the entry path *and* OSR). A loopless
 /// prototype — a recursive function like `fib`, straight-line code — is worth compiling: it runs its
 /// body once per activation with no per-iteration bail bounce. A prototype *with* a loop is worth it

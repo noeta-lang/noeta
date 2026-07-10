@@ -74,6 +74,12 @@ enum Command {
         /// write one. Equivalent to setting `NOETA_NO_CACHE`. Recompiles from source regardless.
         #[arg(long)]
         no_cache: bool,
+        /// Report tier-1 JIT activity to stderr after the run: compile coverage, the **bail
+        /// histogram** (which ops sent native code back to the interpreter, how often, where), and
+        /// any loops declined native compilation with the ops responsible — the measurement behind
+        /// "what should become JITable next". Recording costs one branch per bail event.
+        #[arg(long)]
+        jit_stats: bool,
         /// Arguments passed through to the program, after a `--` separator:
         /// `noeta run app.noe -- --verbose input.txt`. The program reads them with `args.all()`,
         /// which — matching a shipped `noeta build --exe` binary run directly — reports the program
@@ -417,8 +423,9 @@ pub fn run_cli(
             tier,
             profile,
             no_cache,
+            jit_stats,
             args,
-        } => cmd_run(&file, &tier, &profile, no_cache, &args),
+        } => cmd_run(&file, &tier, &profile, no_cache, jit_stats, &args),
         Command::Test {
             file,
             fail_fast,
@@ -1288,10 +1295,12 @@ fn execute_real_host(
     checked: &noeta_check::Checked,
     args: Vec<String>,
 ) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), String> {
-    Ok(run_module_real_host(
+    let (result, trace, _) = run_module_real_host(
         std::sync::Arc::new(compile_real(program, checked)?),
         args,
-    ))
+        false,
+    );
+    Ok((result, trace))
 }
 
 /// Run an already-compiled [`Module`] against the real host — the shared execution core of
@@ -1319,7 +1328,12 @@ fn p2p_app_namespace(args: &[String]) -> Option<String> {
 fn run_module_real_host(
     module: std::sync::Arc<noeta_bytecode::Module>,
     args: Vec<String>,
-) -> (noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>) {
+    jit_report: bool,
+) -> (
+    noeta_backend::RunResult,
+    Vec<noeta_vm::TraceFrame>,
+    Option<noeta_vm::JitReport>,
+) {
     // A factory that mints a fresh real host + wall-clock executor per isolate (isolates I.4b): the
     // main program gets one, and each real-thread `isolate f(args)` gets its own so a worker's disk /
     // clock / async state is independent. Injected here (not in `noeta-vm`) so the VM crate needs no
@@ -1346,7 +1360,9 @@ fn run_module_real_host(
     let (host, executor) = factory();
     // Real isolates run on OS threads (out-of-oracle); channel-shipping isolates fall back to
     // cooperative tasks (cross-thread channels are I.4c). The differential keeps the sandbox pair.
-    VmBackend::new().run_module_with_host_and_executor_parallel(module, host, executor, factory)
+    VmBackend::new().run_module_with_host_and_executor_parallel(
+        module, host, executor, factory, jit_report,
+    )
 }
 
 /// P-AOT L2: detect and run a bundle stapled onto this executable (a `noeta build --exe` artifact),
@@ -1375,7 +1391,8 @@ fn try_run_stapled() -> Option<ExitCode> {
     file.read_exact(&mut blob).ok()?;
     // A shipped `--exe` artifact is invoked directly, so its real process argv (`[<binary>, <args…>]`)
     // is exactly the program's argument vector — pass it straight through to `args.all()`.
-    Some(cmd_run_bundle(&exe_path, &blob, std::env::args().collect()))
+    // A stapled executable has no CLI of its own (its argv belongs to the program) — no report.
+    Some(cmd_run_bundle(&exe_path, &blob, std::env::args().collect(), false))
 }
 
 fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a Diagnostic>) {
@@ -1410,6 +1427,7 @@ fn cmd_run(
     tiers: &[String],
     profile: &Option<String>,
     no_cache: bool,
+    jit_stats: bool,
     args: &[String],
 ) -> ExitCode {
     if let Some(code) = compose::maybe_delegate(file) {
@@ -1428,16 +1446,19 @@ fn cmd_run(
             );
             return ExitCode::from(2);
         }
-        return cmd_run_bundle(file, &bytes, program_args(file, args));
+        return cmd_run_bundle(file, &bytes, program_args(file, args), jit_stats);
     }
 
     // Everything else — resolve tiers, consult the startup cache, and (on a miss) load → check →
     // compile — is the shared whole-file pipeline. On success run the module with the program's
     // pass-through args; on failure report it.
     match compile_whole_file(file, tiers, profile, no_cache) {
-        Ok(compiled) => {
-            run_compiled_module(compiled.module, &compiled.sources, program_args(file, args))
-        }
+        Ok(compiled) => run_compiled_module(
+            compiled.module,
+            &compiled.sources,
+            program_args(file, args),
+            jit_stats,
+        ),
         Err(failure) => failure.report(),
     }
 }
@@ -1861,7 +1882,12 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
 /// or type-check (both happened at build time). A runtime abort's diagnostics/trace carry spans but
 /// the bundle ships no source text, so they render against a synthetic empty source (message + code
 /// + location show; no code snippet) — the honest cost of a source-free artifact.
-fn cmd_run_bundle(file: &std::path::Path, bytes: &[u8], args: Vec<String>) -> ExitCode {
+fn cmd_run_bundle(
+    file: &std::path::Path,
+    bytes: &[u8],
+    args: Vec<String>,
+    jit_stats: bool,
+) -> ExitCode {
     let module = match noeta_bundle::read(bytes) {
         Ok(module) => module,
         Err(err) => {
@@ -1874,7 +1900,7 @@ fn cmd_run_bundle(file: &std::path::Path, bytes: &[u8], args: Vec<String>) -> Ex
         file.display().to_string(),
         "",
     )]);
-    run_compiled_module(std::sync::Arc::new(module), &sources, args)
+    run_compiled_module(std::sync::Arc::new(module), &sources, args, jit_stats)
 }
 
 /// A resolved startup-cache slot: an open cache, the content key for this program, and the workspace
@@ -2053,15 +2079,115 @@ fn run_compiled_module(
     module: std::sync::Arc<noeta_bytecode::Module>,
     sources: &SourceMap,
     args: Vec<String>,
+    jit_stats: bool,
 ) -> ExitCode {
-    let (result, trace) = run_module_real_host(module, args);
+    let (result, trace, report) = run_module_real_host(std::sync::Arc::clone(&module), args, jit_stats);
     print!("{}", result.stdout);
     let _ = io::stdout().flush();
     emit_diagnostics_mapped(sources, result.diagnostics.iter());
     if trace.len() >= 2 {
         eprint!("{}", noeta_vm::render_trace(&trace, sources));
     }
+    // `--jit-stats`: the report renders after the program's own output, to stderr (it is
+    // diagnostics, not program output). A JIT-less binary produces no report — say so rather
+    // than print nothing.
+    match report {
+        Some(report) => eprint!("{}", render_jit_report(&report, &module, sources)),
+        None if jit_stats => {
+            eprintln!("lang: --jit-stats: this binary was built without the JIT (no report)");
+        }
+        None => {}
+    }
     exit_code(result.exit_code)
+}
+
+/// Render the `--jit-stats` report (`noeta run --jit-stats`, stderr): tier-1 compile coverage, the
+/// bail histogram, and OSR-declined loops — each site resolved to its function, source line, and
+/// disassembled op. The histogram counts **native entries** that fell back (a frame stays tier-0
+/// after a bail until its next entry), so read it as "how often the fallback happened", not a
+/// per-iteration figure; a declined loop never enters native at all, which is why it is its own
+/// section.
+fn render_jit_report(
+    report: &noeta_vm::JitReport,
+    module: &noeta_bytecode::Module,
+    sources: &SourceMap,
+) -> String {
+    use std::fmt::Write as _;
+    // "app.noe:12" for an op site, resolved through the line table (always emitted, even in
+    // production compiles); "?" for a site before the first line entry (a prototype's prologue).
+    let site = |proto: u32, pc: u32| -> String {
+        module.protos[proto as usize]
+            .line_span(pc as usize)
+            .map(|span| {
+                let lc = sources.line_col(span);
+                format!("{}:{}", sources.source(span.source).name(), lc.line)
+            })
+            .unwrap_or_else(|| "?".to_string())
+    };
+    let fn_name = |proto: u32| -> String {
+        module.protos[proto as usize]
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("proto {proto}"))
+    };
+    let op_text = |proto: u32, pc: u32| -> String {
+        module.protos[proto as usize].op_repr_at(pc as usize, &module.names, &module.global_names)
+    };
+
+    let mut out = String::new();
+    let stubs = report.compiled.saturating_sub(report.native);
+    let _ = writeln!(
+        out,
+        "── JIT report ──\ntier 1: {} of {} compiled prototypes native ({} bail stubs), compile time {:.1} ms",
+        report.native,
+        report.compiled,
+        stubs,
+        report.compile_ns_total as f64 / 1e6,
+    );
+
+    if report.bails.is_empty() {
+        let _ = writeln!(out, "\nno bail events — native code never fell back mid-frame");
+    } else {
+        let _ = writeln!(
+            out,
+            "\nbail sites (native code fell back to the interpreter; counts are native entries, not iterations):"
+        );
+        for b in &report.bails {
+            let _ = writeln!(
+                out,
+                "  {:>8}\u{00d7}  {}  {}  {}",
+                b.count,
+                site(b.proto, b.pc),
+                fn_name(b.proto),
+                op_text(b.proto, b.pc),
+            );
+        }
+        if report.bails.iter().any(|b| b.pc == 0) {
+            let _ = writeln!(
+                out,
+                "  (a pc-0 site can also be the entry parameter guard: a heap argument bails before the first op)"
+            );
+        }
+    }
+
+    if !report.declined.is_empty() {
+        let _ = writeln!(
+            out,
+            "\nloops declined tier 1 (every loop contains a non-native op; the prototype ran interpreted):"
+        );
+        for d in &report.declined {
+            let _ = writeln!(out, "  {} — blocked by:", fn_name(d.proto));
+            for &pc in &d.bail_pcs {
+                let _ = writeln!(
+                    out,
+                    "    {}  {}",
+                    site(d.proto, pc),
+                    op_text(d.proto, pc),
+                );
+            }
+        }
+    }
+    out
 }
 
 /// Build the startup-cache slot for a source run: open the cache and compute the content key from

@@ -3297,3 +3297,54 @@ fn an_unknown_subcommand_falls_back_to_a_noeta_prefixed_binary_on_path() {
         .code(2)
         .stderr(predicate::str::contains("hello"));
 }
+
+// --- `run --jit-stats` ------------------------------------------------------------
+
+/// `--jit-stats` (P-JIT S0): the report renders to stderr after the program's own output. The
+/// declined-loop section is deterministic — a map-dominated loop is declined OSR synchronously at
+/// its 50th back-edge (`worth_osr` says no), so a 200-iteration loop reliably lists the blocking
+/// ops with their source lines, regardless of off-thread compile timing. Program output is
+/// untouched (the report is stderr-only diagnostics).
+#[test]
+#[cfg(feature = "jit")]
+fn run_jit_stats_reports_declined_loops_with_blocking_ops() {
+    let file = temp_program(
+        "jit_stats_declined",
+        "mut m: Map<string, int> = {}\nmut i = 0\nwhile i < 200 {\n  key = \"w${i % 5}\"\n  m[key] = m.get_or(key, 0) + 1\n  i = i + 1\n}\necho m[\"w0\"]\n",
+    );
+    let out = lang()
+        .arg("run")
+        .arg("--jit-stats")
+        .arg(&file)
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert_eq!(stdout, "40\n", "program output untouched by the report");
+    assert!(
+        stderr.contains("── JIT report ──"),
+        "report header on stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("loops declined tier 1"),
+        "the map loop is declined:\n{stderr}"
+    );
+    // The blocking ops are named with their source line (main.noe:5 is the get_or/set line).
+    assert!(
+        stderr.contains("CallMethod") && stderr.contains("main.noe:5"),
+        "blocking ops resolved to op + line:\n{stderr}"
+    );
+}
+
+/// Without `--jit-stats`, a run prints no report — the recording seam stays `None` and stderr
+/// carries only the program's own diagnostics (none here).
+#[test]
+fn run_without_jit_stats_prints_no_report() {
+    let file = temp_program("jit_stats_off", "echo 1 + 1\n");
+    let out = lang().arg("run").arg(&file).assert().success();
+    let stderr = String::from_utf8(out.get_output().stderr.clone()).unwrap();
+    assert!(
+        !stderr.contains("JIT report"),
+        "no report unless asked:\n{stderr}"
+    );
+}

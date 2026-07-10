@@ -478,7 +478,8 @@ impl VmBackend {
         host: Box<dyn noeta_stdlib::Host>,
         executor: Box<dyn noeta_stdlib::Executor>,
         factory: IsolateFactory,
-    ) -> (RunResult, Vec<TraceFrame>) {
+        jit_report: bool,
+    ) -> (RunResult, Vec<TraceFrame>, Option<JitReport>) {
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
         let mut vm = Vm::load(&module, host, executor);
         vm.parallel_isolates = true;
@@ -489,12 +490,24 @@ impl VmBackend {
         // tier-0 (the engine lives on the compile-service thread).
         #[cfg(feature = "jit")]
         vm.init_jit_service(Arc::clone(&module));
+        // `--jit-stats`: arm the bail histogram before the run. Recording costs one branch per
+        // bail *event* (a tier transition), so it observes without perturbing what it measures.
+        #[cfg(feature = "jit")]
+        if jit_report {
+            vm.jit_bail_counts = Some(std::collections::HashMap::new());
+        }
+        #[cfg(not(feature = "jit"))]
+        let _ = jit_report;
         let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
         // The abort traceback (empty for a clean run) rides beside the result — `RunResult` itself
         // stays the differential's compared unit, which the trace is deliberately not part of (yet):
         // the oracle grows its own traceback first.
         let trace = std::mem::take(&mut vm.abort_trace);
-        (result, trace)
+        #[cfg(feature = "jit")]
+        let report = jit_report.then(|| vm.take_jit_report());
+        #[cfg(not(feature = "jit"))]
+        let report = None;
+        (result, trace, report)
     }
 
     /// Run a module whose native prototype entries were **compiled ahead of time and linked in**
@@ -615,6 +628,69 @@ impl VmBackend {
     }
 }
 
+impl<'m> Vm<'m> {
+    /// Assemble the `--jit-stats` [`JitReport`] after a run: the service's final compile accounting
+    /// (parked at teardown), the bail histogram (sorted most-frequent first, ties by site for a
+    /// deterministic report), and the OSR-declined prototypes. Consumes both parked pieces.
+    #[cfg(feature = "jit")]
+    fn take_jit_report(&mut self) -> JitReport {
+        let stats = self.jit_final_stats.take().unwrap_or_default();
+        let mut bails: Vec<JitBailSite> = self
+            .jit_bail_counts
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|((proto, pc), count)| JitBailSite { proto, pc, count })
+            .collect();
+        bails.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| (a.proto, a.pc).cmp(&(b.proto, b.pc)))
+        });
+        let declined = self
+            .jit_declined
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| **d)
+            .map(|(i, _)| JitDeclinedLoop {
+                proto: i as u32,
+                bail_pcs: noeta_jit::loop_bail_pcs(&self.module.protos[i])
+                    .into_iter()
+                    .map(|pc| pc as u32)
+                    .collect(),
+            })
+            .collect();
+        JitReport {
+            native: stats.native,
+            compiled: stats.compiled,
+            compile_ns_total: stats.compile_ns_total,
+            bails,
+            declined,
+        }
+    }
+}
+
+impl VmBackend {
+    /// Like [`VmBackend::run_module_jit`] (forced tier-1, sandbox host) but returning the **bail
+    /// histogram** — the `--jit-stats` recording seam under the oracle's deterministic conditions,
+    /// so tests can pin exactly which (proto, pc) sites bail and how often.
+    #[cfg(feature = "jit")]
+    pub fn run_module_jit_bails(&self, module: &Module) -> (RunResult, Vec<JitBailSite>) {
+        noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+        let mut vm = Vm::load(
+            module,
+            Box::new(noeta_stdlib::SandboxHost::new()),
+            Box::new(noeta_stdlib::SandboxExecutor::new()),
+        );
+        vm.force_jit = true;
+        vm.init_jit();
+        vm.jit_bail_counts = Some(std::collections::HashMap::new());
+        let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
+        let report = vm.take_jit_report();
+        (result, report.bails)
+    }
+}
+
 /// JIT-coverage counts for one forced-JIT run: how many prototypes were compiled to real native code
 /// (`native`) out of the total that were compiled at all (`compiled`, native + bail stubs), plus the
 /// compile-pause accounting (P-PAR S0c) — compilation runs synchronously on the mutator thread, so
@@ -628,6 +704,48 @@ pub struct JitStats {
     pub compile_ns_max: u64,
     /// Where `compile_ns_total` goes + compiled volume (P-JCT C0).
     pub breakdown: noeta_jit::CompileBreakdown,
+}
+
+/// One site in the `--jit-stats` bail histogram: native code for prototype `proto` bailed back to
+/// the interpreter at instruction `pc`, `count` times. The pc is the bailing op's own pc
+/// (bail-before-mutate), so the consumer resolves it to an exact op and source line. Counts are per
+/// **native entry**, not per loop iteration (see `Vm::jit_bail_counts`). Un-gated plain data so a
+/// JIT-less build still names the type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JitBailSite {
+    pub proto: u32,
+    pub pc: u32,
+    pub count: u64,
+}
+
+/// The `--jit-stats` report for one production run: tier-1 compile coverage, the bail histogram
+/// (sorted most-frequent first), and the prototypes whose loops were **declined** OSR because every
+/// loop contains a non-native op (`noeta_jit::worth_osr` said no — those run tier-0 and produce no
+/// bail events, which is why they are reported separately; `noeta_jit::loop_bail_pcs` names the ops
+/// responsible). Un-gated plain data; a JIT-less build simply never produces one.
+#[derive(Debug, Clone, Default)]
+pub struct JitReport {
+    /// Prototypes compiled to real native code.
+    pub native: usize,
+    /// Prototypes compiled at all (native + bail stubs).
+    pub compiled: usize,
+    /// Total off-thread compile time, ns.
+    pub compile_ns_total: u64,
+    /// Bail histogram, most-frequent first.
+    pub bails: Vec<JitBailSite>,
+    /// Prototypes declined OSR (heap-op-dominated loops): they ran tier-0 and produced no bail
+    /// events, so they are reported separately, each with the pcs of the loop ops that blocked it.
+    pub declined: Vec<JitDeclinedLoop>,
+}
+
+/// One OSR-declined prototype in the [`JitReport`]: every loop in `proto` contains a non-native op
+/// (`bail_pcs` — resolved by `noeta_jit::loop_bail_pcs` at report assembly, so the renderer needs no
+/// JIT dependency), which would make native code bounce tiers every iteration; the whole prototype
+/// ran interpreted instead.
+#[derive(Debug, Clone, Default)]
+pub struct JitDeclinedLoop {
+    pub proto: u32,
+    pub bail_pcs: Vec<u32>,
 }
 
 impl Backend for VmBackend {
@@ -996,6 +1114,15 @@ struct Vm<'m> {
     /// deterministic promotion counts.
     #[cfg(feature = "jit")]
     jit_drain_at_exit: bool,
+    /// The **bail histogram** (`--jit-stats`): how many times native code bailed back to the
+    /// interpreter, per `(proto, resume pc)`. `None` (the default) records nothing — the seam pays
+    /// one `Option` check *per bail event* (already a tier transition), never per op. Keyed by the
+    /// resume pc, which is the bailing op's own pc (bail-before-mutate), so the report resolves it
+    /// to an exact op + source line. Counts are per **native entry** (frame entries + one OSR), not
+    /// per loop iteration: once a compiled prototype bails, its frame stays tier-0 until the next
+    /// `'reload` (a declined loop produces no bails at all — the report lists those separately).
+    #[cfg(feature = "jit-rt")]
+    jit_bail_counts: Option<std::collections::HashMap<(u32, u32), u64>>,
     /// The attached debugger (`noeta dap`), consulted before every instruction. `None` on every
     /// non-debug run (production, differential, salsa), where it costs one predicted branch per op.
     debugger: Option<Box<dyn Debugger>>,
@@ -2055,6 +2182,8 @@ impl<'m> Vm<'m> {
             jit_final_stats: None,
             #[cfg(feature = "jit")]
             jit_drain_at_exit: false,
+            #[cfg(feature = "jit-rt")]
+            jit_bail_counts: None,
             debugger: None,
             profiler: None,
             abort_trace: Vec::new(),
@@ -3211,7 +3340,14 @@ impl<'m> Vm<'m> {
                     None => {}
                     // Native code ran the frame to a bail point and left the register window in the
                     // state the interpreter expects at `resume`; continue interpreting there.
-                    Some(JitOutcome::Bail(resume)) => pc = resume,
+                    Some(JitOutcome::Bail(resume)) => {
+                        // Bail histogram (`--jit-stats`): count the site. Off (`None`) on every
+                        // ordinary run — one predicted branch per bail event.
+                        if let Some(counts) = self.jit_bail_counts.as_mut() {
+                            *counts.entry((proto as u32, resume as u32)).or_insert(0) += 1;
+                        }
+                        pc = resume;
+                    }
                     // A native `Call` pushed the callee frame — run it.
                     Some(JitOutcome::Called) => continue 'reload,
                     // A native `Return` transferred to the caller and popped this frame — re-derive
@@ -8159,6 +8295,49 @@ mod tests {
         let mut idx = [l.vec_ptr_word, l.vec_len_word, l.vec_cap_word];
         idx.sort_unstable();
         assert_eq!(idx, [0, 1, 2]);
+    }
+
+    /// The `--jit-stats` bail histogram (S0): a function whose body holds a non-native op
+    /// (`Stringify`, string interpolation) bails there on **every call**, and the seam counts each
+    /// one against that exact `(proto, pc)`. Under `force_jit` everything compiles up front, so the
+    /// counts are deterministic: 10 calls → count 10 at `tag`'s `Stringify`, sorted first (the
+    /// histogram is most-frequent-first). Also locks that the recording seam is `None`-gated — the
+    /// plain stats entry point records nothing.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_bail_histogram_counts_per_call_bails_at_the_exact_site() {
+        let src = "fn tag(n: int): string {\n  return \"v${n}\";\n}\nmut acc = 0;\nmut i = 0;\nwhile i < 10 {\n  s = tag(i);\n  acc = acc + 1;\n  i = i + 1;\n}\necho acc;\n";
+        let module = compile_module(src);
+        let (result, bails) = VmBackend::new().run_module_jit_bails(&module);
+        assert_eq!(result.stdout, "10\n");
+
+        // Locate `tag`'s prototype and its Stringify pc straight from the bytecode.
+        let (tag_proto, tag_chunk) = module
+            .protos
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c.name.as_deref() == Some("tag"))
+            .expect("tag should have a prototype");
+        let stringify_pc = tag_chunk
+            .code
+            .iter()
+            .position(|op| matches!(op, Op::Stringify { .. }))
+            .expect("tag should contain a Stringify") as u32;
+
+        let site = bails
+            .iter()
+            .find(|b| b.proto == tag_proto as u32 && b.pc == stringify_pc)
+            .expect("the Stringify site should be in the histogram");
+        assert_eq!(
+            site.count, 10,
+            "one bail per call, exactly: {bails:?}"
+        );
+        // Most-frequent-first: no site outranks the per-call one.
+        assert_eq!(bails[0].count, site.count, "sorted descending: {bails:?}");
+
+        // The plain stats entry point never records (the seam is `None`-gated).
+        let (_, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert!(stats.native >= 1, "sanity: {stats:?}");
     }
 
     /// P-JIT foundation: a prototype with no compilable op runs its bail stub — reaching the
