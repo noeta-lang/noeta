@@ -317,7 +317,11 @@ mod tests {
         .expect("a solution exists — the resolver must backtrack to find it");
         // Greedy would pick foo 1.1 → bar 2.0 → clash with baz's bar ^1 and report "no solution".
         // Backtracking selects foo 1.0 + bar 1.0, satisfying everyone.
-        assert_eq!(sln["acme/foo"], v("1.0.0"), "backtracked to the compatible foo");
+        assert_eq!(
+            sln["acme/foo"],
+            v("1.0.0"),
+            "backtracked to the compatible foo"
+        );
         assert_eq!(sln["acme/bar"], v("1.0.0"));
         assert_eq!(sln["acme/baz"], v("1.0.0"));
     }

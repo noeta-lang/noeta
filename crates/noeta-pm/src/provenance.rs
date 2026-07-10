@@ -66,7 +66,9 @@ pub fn generate_keypair() -> Result<Keypair, String> {
 /// The hex public key corresponding to a hex private key (the seed) — for registering a scope's key.
 pub fn public_key_hex(private_hex: &str) -> Result<String, String> {
     let seed = from_hex::<32>(private_hex, "private key")?;
-    Ok(to_hex(SigningKey::from_bytes(&seed).verifying_key().as_bytes()))
+    Ok(to_hex(
+        SigningKey::from_bytes(&seed).verifying_key().as_bytes(),
+    ))
 }
 
 /// Sign `attestation` with the hex-encoded private key, returning the hex signature (128 chars).
@@ -102,7 +104,11 @@ fn to_hex(bytes: &[u8]) -> String {
 /// Decode exactly `N` bytes of hex, tagging errors with `what`.
 fn from_hex<const N: usize>(s: &str, what: &str) -> Result<[u8; N], String> {
     if s.len() != N * 2 {
-        return Err(format!("{what} must be {} hex chars, got {}", N * 2, s.len()));
+        return Err(format!(
+            "{what} must be {} hex chars, got {}",
+            N * 2,
+            s.len()
+        ));
     }
     let mut out = [0u8; N];
     for (i, byte) in out.iter_mut().enumerate() {

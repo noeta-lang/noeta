@@ -1373,9 +1373,8 @@ fn run_module_real_host(
     let (host, executor) = factory();
     // Real isolates run on OS threads (out-of-oracle); channel-shipping isolates fall back to
     // cooperative tasks (cross-thread channels are I.4c). The differential keeps the sandbox pair.
-    VmBackend::new().run_module_with_host_and_executor_parallel(
-        module, host, executor, factory, jit_report,
-    )
+    VmBackend::new()
+        .run_module_with_host_and_executor_parallel(module, host, executor, factory, jit_report)
 }
 
 /// P-AOT L2: detect and run a bundle stapled onto this executable (a `noeta build --exe` artifact),
@@ -1405,7 +1404,12 @@ fn try_run_stapled() -> Option<ExitCode> {
     // A shipped `--exe` artifact is invoked directly, so its real process argv (`[<binary>, <args…>]`)
     // is exactly the program's argument vector — pass it straight through to `args.all()`.
     // A stapled executable has no CLI of its own (its argv belongs to the program) — no report.
-    Some(cmd_run_bundle(&exe_path, &blob, std::env::args().collect(), false))
+    Some(cmd_run_bundle(
+        &exe_path,
+        &blob,
+        std::env::args().collect(),
+        false,
+    ))
 }
 
 fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a Diagnostic>) {
@@ -2094,7 +2098,8 @@ fn run_compiled_module(
     args: Vec<String>,
     jit_stats: bool,
 ) -> ExitCode {
-    let (result, trace, report) = run_module_real_host(std::sync::Arc::clone(&module), args, jit_stats);
+    let (result, trace, report) =
+        run_module_real_host(std::sync::Arc::clone(&module), args, jit_stats);
     print!("{}", result.stdout);
     let _ = io::stdout().flush();
     emit_diagnostics_mapped(sources, result.diagnostics.iter());
@@ -2159,7 +2164,10 @@ fn render_jit_report(
     );
 
     if report.bails.is_empty() {
-        let _ = writeln!(out, "\nno bail events — native code never fell back mid-frame");
+        let _ = writeln!(
+            out,
+            "\nno bail events — native code never fell back mid-frame"
+        );
     } else {
         let _ = writeln!(
             out,
@@ -2191,12 +2199,7 @@ fn render_jit_report(
         for d in &report.declined {
             let _ = writeln!(out, "  {} — blocked by:", fn_name(d.proto));
             for &pc in &d.bail_pcs {
-                let _ = writeln!(
-                    out,
-                    "    {}  {}",
-                    site(d.proto, pc),
-                    op_text(d.proto, pc),
-                );
+                let _ = writeln!(out, "    {}  {}", site(d.proto, pc), op_text(d.proto, pc),);
             }
         }
     }

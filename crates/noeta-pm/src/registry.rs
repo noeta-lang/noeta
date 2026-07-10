@@ -298,7 +298,9 @@ pub struct HttpIndex {
 #[cfg(feature = "registry-http")]
 impl std::fmt::Debug for HttpIndex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HttpIndex").field("base", &self.base).finish_non_exhaustive()
+        f.debug_struct("HttpIndex")
+            .field("base", &self.base)
+            .finish_non_exhaustive()
     }
 }
 
@@ -371,10 +373,7 @@ impl Index for HttpIndex {
             .send()
             .map_err(|err| format!("registry request for `{name}` failed: {err}"))?;
         if !resp.status().is_success() {
-            return Err(format!(
-                "registry returned {} for `{name}`",
-                resp.status()
-            ));
+            return Err(format!("registry returned {} for `{name}`", resp.status()));
         }
         let body: VersionsResponse = resp
             .json()
@@ -423,11 +422,14 @@ impl Index for HttpIndex {
             return Ok(None);
         }
         if !resp.status().is_success() {
-            return Err(format!("registry returned {} for scope `{scope}`", resp.status()));
+            return Err(format!(
+                "registry returned {} for scope `{scope}`",
+                resp.status()
+            ));
         }
-        let body: ScopeResponse = resp
-            .json()
-            .map_err(|err| format!("registry sent an unreadable scope response for `{scope}`: {err}"))?;
+        let body: ScopeResponse = resp.json().map_err(|err| {
+            format!("registry sent an unreadable scope response for `{scope}`: {err}")
+        })?;
         Ok(body.public_key)
     }
 
@@ -504,9 +506,15 @@ mod tests {
     #[test]
     fn publish_then_resolve_picks_highest_match() {
         let index = mem("pick_highest");
-        index.publish("guzzle/http", &release(1, 0, 0, "v1.0.0")).unwrap();
-        index.publish("guzzle/http", &release(1, 4, 0, "v1.4.0")).unwrap();
-        index.publish("guzzle/http", &release(2, 0, 0, "v2.0.0")).unwrap();
+        index
+            .publish("guzzle/http", &release(1, 0, 0, "v1.0.0"))
+            .unwrap();
+        index
+            .publish("guzzle/http", &release(1, 4, 0, "v1.4.0"))
+            .unwrap();
+        index
+            .publish("guzzle/http", &release(2, 0, 0, "v2.0.0"))
+            .unwrap();
 
         let (version, c) =
             resolve_coords(&index, "guzzle/http", &VersionReq::parse("^1.0").unwrap()).unwrap();
@@ -520,12 +528,18 @@ mod tests {
         let mut rel = release(1, 0, 0, "v1.0.0");
         rel.signature = Some("a".repeat(128));
         index.publish("acme/foo", &rel).unwrap();
-        assert_eq!(index.releases("acme/foo").unwrap()[0].signature, Some("a".repeat(128)));
+        assert_eq!(
+            index.releases("acme/foo").unwrap()[0].signature,
+            Some("a".repeat(128))
+        );
 
         // Scope keys register + serve; an unregistered scope is `None`.
         assert_eq!(index.scope_key("acme").unwrap(), None);
         index.set_scope_key("acme", "deadbeef").unwrap();
-        assert_eq!(index.scope_key("acme").unwrap(), Some("deadbeef".to_string()));
+        assert_eq!(
+            index.scope_key("acme").unwrap(),
+            Some("deadbeef".to_string())
+        );
     }
 
     #[test]
@@ -551,7 +565,9 @@ mod tests {
     #[test]
     fn resolve_reports_no_match_and_unknown() {
         let index = mem("no_match");
-        index.publish("guzzle/http", &release(1, 0, 0, "v1.0.0")).unwrap();
+        index
+            .publish("guzzle/http", &release(1, 0, 0, "v1.0.0"))
+            .unwrap();
         let err =
             resolve_coords(&index, "guzzle/http", &VersionReq::parse("^2").unwrap()).unwrap_err();
         assert!(err.contains("no version"), "{err}");
@@ -566,7 +582,9 @@ mod tests {
         // Same coords: idempotent.
         index.publish("a/b", &release(1, 0, 0, "v1.0.0")).unwrap();
         // Different coords for a published version: rejected (immutable).
-        let err = index.publish("a/b", &release(1, 0, 0, "v9.9.9")).unwrap_err();
+        let err = index
+            .publish("a/b", &release(1, 0, 0, "v9.9.9"))
+            .unwrap_err();
         assert!(err.contains("immutable"), "{err}");
     }
 }
@@ -580,9 +598,7 @@ mod http_tests {
 
     /// A one-shot in-process HTTP/1.1 server: it handles connections on a background thread, calling
     /// `handler(method, path, body) -> (status, json)`. Returns the base URL. Hermetic — no network.
-    fn mock_server(
-        handler: impl Fn(&str, &str, &str) -> (u16, String) + Send + 'static,
-    ) -> String {
+    fn mock_server(handler: impl Fn(&str, &str, &str) -> (u16, String) + Send + 'static) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (ready_tx, ready_rx) = mpsc::channel();
@@ -650,7 +666,8 @@ mod http_tests {
         assert_eq!(releases[0].coords.sha, "abc");
 
         // resolve_coords picks it through the same trait the local index uses.
-        let (v, c) = resolve_coords(&index, "acme/imgfx", &VersionReq::parse("^1.0").unwrap()).unwrap();
+        let (v, c) =
+            resolve_coords(&index, "acme/imgfx", &VersionReq::parse("^1.0").unwrap()).unwrap();
         assert_eq!(v, Version::new(1, 2, 0));
         assert_eq!(c.tag, "v1.2.0");
     }
@@ -659,7 +676,8 @@ mod http_tests {
     fn http_index_publishes_with_a_bearer_token() {
         let (tx, rx) = mpsc::channel();
         let base = mock_server(move |method, path, body| {
-            tx.send((method.to_string(), path.to_string(), body.to_string())).unwrap();
+            tx.send((method.to_string(), path.to_string(), body.to_string()))
+                .unwrap();
             (201, r#"{"status":"published"}"#.to_string())
         });
         // Construct with an explicit token (avoids racing on a process-global env var).
@@ -691,9 +709,15 @@ mod http_tests {
         assert!(body.contains("\"sha\":\"abc\""), "body: {body}");
         assert!(body.contains("\"version\":\"1.0.0\""), "body: {body}");
         // The dependency metadata is sent so the index can serve it to the resolver (S5).
-        assert!(body.contains("\"package\":\"acme/bar\""), "deps in body: {body}");
+        assert!(
+            body.contains("\"package\":\"acme/bar\""),
+            "deps in body: {body}"
+        );
         // The provenance signature rides along (Phase 4 #2).
-        assert!(body.contains("\"signature\":\"deadbeef\""), "signature in body: {body}");
+        assert!(
+            body.contains("\"signature\":\"deadbeef\""),
+            "signature in body: {body}"
+        );
     }
 
     #[test]
