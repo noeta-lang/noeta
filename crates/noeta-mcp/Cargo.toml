@@ -40,6 +40,11 @@ noeta-fmt = { workspace = true }
 # M5: definition/references/completions/signature ride the shared IDE engine — the same resolver
 # the LSP serves, so agent and editor can never disagree.
 noeta-ide = { workspace = true }
+# M6: debug_* sessions compile with debug info through the live session compiler (the DAP launch
+# pipeline, host-agnostic) and drive the VM's Debugger seam directly.
+noeta-lexer = { workspace = true }
+noeta-compiler = { workspace = true }
+noeta-bytecode = { workspace = true }
 tokio = { workspace = true, features = ["io-std", "rt-multi-thread", "macros"] }
 rmcp = { workspace = true }
 serde = { workspace = true }

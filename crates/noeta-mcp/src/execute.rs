@@ -161,7 +161,7 @@ pub fn run(
         }
     };
 
-    let (host, executor) = make_host(real, args)?;
+    let (host, executor) = make_host(real, args).map_err(|e| ErrorData::internal_error(e, None))?;
     let tripped = Arc::new(AtomicU8::new(TRIP_NONE));
     let step_count = Arc::new(AtomicU64::new(0));
     let debugger = LimitDebugger {
@@ -589,20 +589,18 @@ fn is_tier_setup(stmt: &Stmt) -> bool {
 }
 
 /// A host + async-executor pair — what an execution runs against.
-type HostPair = (Box<dyn noeta_stdlib::Host>, Box<dyn noeta_stdlib::Executor>);
+pub(crate) type HostPair = (Box<dyn noeta_stdlib::Host>, Box<dyn noeta_stdlib::Executor>);
 
-/// The [`HostPair`] for a `run`: the deterministic sandbox, or the real host (with the program's
-/// argument vector) when `real`.
-fn make_host(real: bool, args: Vec<String>) -> Result<HostPair, ErrorData> {
+/// The [`HostPair`] for an execution: the deterministic sandbox, or the real host (with the
+/// program's argument vector) when `real`. String errors so the debug-session run thread (which
+/// has no `ErrorData` to answer with) can share it.
+pub(crate) fn make_host(real: bool, args: Vec<String>) -> Result<HostPair, String> {
     if real {
         let host = noeta_runtime::RealHost::new()
-            .map_err(|e| {
-                ErrorData::internal_error(format!("cannot start the real host: {e}"), None)
-            })?
+            .map_err(|e| format!("cannot start the real host: {e}"))?
             .with_args(args);
-        let executor = noeta_runtime::RealExecutor::new().map_err(|e| {
-            ErrorData::internal_error(format!("cannot start the async executor: {e}"), None)
-        })?;
+        let executor = noeta_runtime::RealExecutor::new()
+            .map_err(|e| format!("cannot start the async executor: {e}"))?;
         Ok((Box::new(host), Box::new(executor)))
     } else {
         Ok((

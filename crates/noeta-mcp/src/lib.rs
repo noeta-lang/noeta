@@ -15,6 +15,7 @@
 
 mod analyze;
 mod corpus;
+mod debug;
 mod execute;
 mod format;
 mod introspect;
@@ -64,6 +65,10 @@ the syntax tree, the VM disassembly, a per-stage health summary, the `use` impor
 - `run` / `eval` / `test` — actually execute code: run a program (stdout/exit/traceback), evaluate \
 an expression (value + type), or run its `@test` blocks. Sandboxed and deterministic by default \
 (pass `real: true` for the real host); every run is bounded by liveness limits.
+- `debug_start` / `debug_inspect` / `debug_step` / `debug_eval` / `debug_stop` — interactively \
+debug a program: pause at entry or breakpoints, read the call stack and live locals, step by \
+line, evaluate expressions in a paused frame, resume. A runaway resume pauses with reason \
+`limit` instead of hanging. The ground-truth way to inspect live state at a line.
 - `format` — format Noeta source into its canonical style.
 
 Do not invent syntax or standard-library calls; search the docs/examples, then `check` a snippet. \
@@ -241,6 +246,58 @@ pub struct PositionArgs {
     pub column: u32,
 }
 
+/// Arguments to `debug_start`: a source, optional breakpoints, and the host choice.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DebugStartArgs {
+    /// Inline Noeta source to debug. Provide this or `file`.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Path to a `.noe` file to debug (sibling modules resolve). Provide this or `source`.
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Breakpoints to arm before the run starts (1-based lines; entry file unless `file` is set
+    /// on the breakpoint).
+    #[serde(default)]
+    pub breakpoints: Option<Vec<debug::BreakpointArg>>,
+    /// Pause before the first instruction. Defaults to true when no breakpoints are given.
+    #[serde(default)]
+    pub stop_on_entry: Option<bool>,
+    /// Run on the real host (real disk/env/network) instead of the deterministic sandbox.
+    #[serde(default)]
+    pub real: Option<bool>,
+}
+
+/// Arguments addressing an existing debug session.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DebugSessionArgs {
+    /// The session id `debug_start` returned.
+    pub session: u64,
+}
+
+/// Arguments to `debug_step`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DebugStepArgs {
+    /// The session id `debug_start` returned.
+    pub session: u64,
+    /// `continue` (to the next breakpoint/limit/exit), or a line-granular `over` / `into` / `out`
+    /// step. Defaults to `over`.
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+/// Arguments to `debug_eval`.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DebugEvalArgs {
+    /// The session id `debug_start` returned.
+    pub session: u64,
+    /// The expression (or statements — a trailing bare expression is the value) to evaluate in
+    /// the paused frame's scope.
+    pub expr: String,
+    /// Which stack frame's scope to evaluate in (index from the reported frames, innermost = 0).
+    #[serde(default)]
+    pub frame: Option<usize>,
+}
+
 /// Arguments to `reflect`: a source, plus an optional architectural-role filter.
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct ReflectArgs {
@@ -335,15 +392,17 @@ pub struct ExplainOut {
     pub docs: Vec<[String; 2]>,
 }
 
-/// The MCP server. Stateless in M0 — each `check` runs on a fresh salsa database (a later slice
-/// will hold one `LangDatabase` across calls for incrementality). The `#[tool_router]` macro
-/// generates the tool table as an associated function, so no per-instance state is needed.
+/// The MCP server. Analysis tools are stateless — each runs on a fresh salsa database (a later
+/// slice may hold one `LangDatabase` across calls for incrementality). The `debug_*` sessions are
+/// the stateful exception: live program runs keyed by session id, shared across handler clones.
 #[derive(Clone, Debug, Default)]
-pub struct NoetaMcp;
+pub struct NoetaMcp {
+    debug: debug::Registry,
+}
 
 impl NoetaMcp {
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
@@ -672,6 +731,98 @@ uses the real host."
             args.filter.as_deref(),
             args.real.unwrap_or(false),
         )))
+    }
+
+    /// Start an interactive debug session.
+    #[tool(
+        description = "Start debugging a Noeta program: compile it with debug info and run it \
+paused under the VM's debugger. Arm `breakpoints` (1-based lines) or stop at entry (the default \
+with no breakpoints). Returns a session id plus the first stop — the paused stack with live \
+locals — or the exit if it ran through. Sandboxed by default (`real: true` for the real host); \
+every resume is budget-bounded, so a runaway program pauses (reason `limit`) instead of hanging."
+    )]
+    async fn debug_start(
+        &self,
+        Parameters(args): Parameters<DebugStartArgs>,
+    ) -> Result<Json<debug::DebugStateOutput>, ErrorData> {
+        Ok(Json(
+            debug::start(
+                &self.debug,
+                args.source,
+                args.file,
+                args.breakpoints.unwrap_or_default(),
+                args.stop_on_entry,
+                args.real.unwrap_or(false),
+            )
+            .await?,
+        ))
+    }
+
+    /// The current state of a debug session.
+    #[tool(
+        description = "Report a debug session's current state without resuming it: paused (with \
+the stack and live locals), running, or exited (with stdout and exit code)."
+    )]
+    async fn debug_inspect(
+        &self,
+        Parameters(args): Parameters<DebugSessionArgs>,
+    ) -> Result<Json<debug::DebugStateOutput>, ErrorData> {
+        Ok(Json(debug::inspect(&self.debug, args.session)?))
+    }
+
+    /// Resume a paused session and report the next stop.
+    #[tool(
+        description = "Resume a paused debug session and wait for the next stop: `mode` is \
+`continue` (to the next breakpoint, budget limit, or exit) or a line-granular step — `over` \
+(default), `into` (descend into calls), `out` (run to the caller). Returns the new paused state \
+(stack + locals) or the exit (stdout + exit code)."
+    )]
+    async fn debug_step(
+        &self,
+        Parameters(args): Parameters<DebugStepArgs>,
+    ) -> Result<Json<debug::DebugStateOutput>, ErrorData> {
+        Ok(Json(
+            debug::step(
+                &self.debug,
+                args.session,
+                args.mode.as_deref().unwrap_or("over"),
+            )
+            .await?,
+        ))
+    }
+
+    /// Evaluate an expression in a paused frame.
+    #[tool(
+        description = "Evaluate a Noeta expression in a paused debug session's frame — the frame's \
+locals, the program's functions, types, and globals are all in scope; statements work and a \
+trailing bare expression is the value. Type-checked against the program before running; execution \
+is budget-bounded, and the program stays paused either way. The debugger's REPL."
+    )]
+    async fn debug_eval(
+        &self,
+        Parameters(args): Parameters<DebugEvalArgs>,
+    ) -> Result<Json<debug::DebugEvalOutput>, ErrorData> {
+        Ok(Json(
+            debug::eval(
+                &self.debug,
+                args.session,
+                &args.expr,
+                args.frame.unwrap_or(0),
+            )
+            .await?,
+        ))
+    }
+
+    /// Terminate a debug session.
+    #[tool(
+        description = "Terminate a debug session (running or paused), wait for it to unwind, and \
+report the final state — the program's stdout so far and its exit code. Frees the session slot."
+    )]
+    async fn debug_stop(
+        &self,
+        Parameters(args): Parameters<DebugSessionArgs>,
+    ) -> Result<Json<debug::DebugStateOutput>, ErrorData> {
+        Ok(Json(debug::stop(&self.debug, args.session).await?))
     }
 
     /// Format Noeta source into its canonical style.
@@ -1235,6 +1386,79 @@ mod tests {
                 .expect("snippet string")
                 .contains("fn greet")
         );
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+
+    /// M6 slice gate: the debug tools are advertised and a start → eval → stop session round-trips
+    /// over a real client⇄server duplex.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn round_trip_debug_session_over_a_duplex() {
+        use rmcp::model::CallToolRequestParams;
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+
+        let client = ().serve(client_io).await.expect("client initializes");
+
+        let tools = client
+            .list_tools(Default::default())
+            .await
+            .expect("tools/list");
+        for expected in [
+            "debug_start",
+            "debug_inspect",
+            "debug_step",
+            "debug_eval",
+            "debug_stop",
+        ] {
+            assert!(
+                tools.tools.iter().any(|t| t.name == expected),
+                "{expected} tool advertised"
+            );
+        }
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "source".to_string(),
+            serde_json::Value::String("total = 7\necho total\n".to_string()),
+        );
+        let mut params = CallToolRequestParams::default();
+        params.name = "debug_start".into();
+        params.arguments = Some(arguments);
+        let started = client.call_tool(params).await.expect("debug_start");
+        let started = started.structured_content.expect("structured content");
+        assert_eq!(started["state"], serde_json::json!("paused"));
+        assert_eq!(started["reason"], serde_json::json!("entry"));
+        let session = started["session"].as_u64().expect("session id");
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert("session".to_string(), serde_json::json!(session));
+        arguments.insert(
+            "expr".to_string(),
+            serde_json::Value::String("1 + 2".to_string()),
+        );
+        let mut params = CallToolRequestParams::default();
+        params.name = "debug_eval".into();
+        params.arguments = Some(arguments);
+        let evaled = client.call_tool(params).await.expect("debug_eval");
+        let evaled = evaled.structured_content.expect("structured content");
+        assert_eq!(evaled["ok"], serde_json::json!(true));
+        assert_eq!(evaled["value"], serde_json::json!("3"));
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert("session".to_string(), serde_json::json!(session));
+        let mut params = CallToolRequestParams::default();
+        params.name = "debug_stop".into();
+        params.arguments = Some(arguments);
+        let stopped = client.call_tool(params).await.expect("debug_stop");
+        let stopped = stopped.structured_content.expect("structured content");
+        assert_eq!(stopped["state"], serde_json::json!("exited"));
 
         client.cancel().await.expect("client shuts down");
         server.abort();
