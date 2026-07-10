@@ -36,11 +36,7 @@ const {
 } = require("vscode");
 const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
 const { registerProfiling } = require("./profile");
-
-/** The configured path to the `noeta` executable (on `PATH` by default). Shared by the LSP and DAP. */
-function noetaCommand() {
-  return workspace.getConfiguration("noeta").get("server.path", "noeta");
-}
+const { noetaCommand } = require("./toolchain");
 
 /** @type {import("vscode-languageclient/node").LanguageClient | undefined} */
 let client;

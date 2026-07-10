@@ -1,6 +1,7 @@
 # IDE architecture navigation — call hierarchy, role lenses, trace UI
 
-**Status: planned — U0 not started.** Branch `ide-ui`, worktree `.claude/worktrees/ide-ui`.
+**Status: U0 done (`722e3a09`); U1 next.** Branch `ide-ui`, worktree `.claude/worktrees/ide-ui`
+(rebased onto main `362b4873`, which merged the profiler VS Code UI).
 
 The role-graph work (merged, `fef79e06`) gave agents a role-enriched architectural graph: the
 `@role` index with source locations, roles on the `symbols` outline and `module_graph` nodes, the
@@ -34,7 +35,34 @@ A parallel session has a **`profiler-vscode-ui`** worktree touching the same ext
 (`editors/vscode-noeta`) — and main just gained editor run/build tasks (`82eefbc4`). Before
 merging any slice that edits `package.json`/`extension.js`, **rebase onto current main** and
 expect both-added contribution-point conflicts (commands, menus). Keep extension diffs small and
-additive.
+additive. *(Resolved for now: the branch is rebased onto the merged profiler UI, `362b4873`.)*
+
+## One extension, one package (profiler-UI unification)
+
+The profiler merge already left the structure right: **one extension**, one `activate()` that
+calls `registerDebugging`/`registerTasks`/`registerMcp`/`registerProfiling`, features as sibling
+modules (`src/profile.js`), and one `noeta.server.path` setting resolving the binary for LSP, DAP,
+tasks, MCP, and profiler alike. The remaining seams were mechanical and are fixed on this branch:
+
+- **`src/toolchain.js`** is now the single `noetaCommand()` resolver (was duplicated in
+  `extension.js` and `profile.js` — identical, but one drift away from two settings).
+- **Command palette normalization**: every command uses `"category": "Noeta"` (three run/build
+  commands had `Noeta:` baked into the title instead — same palette rendering, inconsistent
+  everywhere else, e.g. keybinding UI and menus).
+
+Conventions this arc's UI slices follow (and future arcs should too):
+
+1. New client features live in their own module exporting `register<Feature>(context)` (U2 →
+   `src/trace.js`), wired from `activate()` — the `registerProfiling` pattern.
+2. New commands: `noeta.*` id, `category: "Noeta"`, editor-title placements join the existing
+   `noeta@N` / `profile@N` groups rather than inventing new menus.
+3. Anything that shells out resolves the binary through `src/toolchain.js`; anything analytical
+   goes through the language client (one server, one engine) — never a second `noeta lsp`/`mcp`
+   spawn.
+4. One version bump + one CHANGELOG entry per merged arc (this arc: 0.6.0 → 0.7.0 at U2, when the
+   extension actually changes behavior).
+5. If U3's sidebar happens, it becomes the shared "Noeta" view container — the natural future home
+   for architecture navigation *and* profiler entry points, but only if the go/no-go says build it.
 
 ## Decisions
 

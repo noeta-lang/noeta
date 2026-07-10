@@ -29,6 +29,7 @@ const { spawn } = require("child_process");
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
+const { noetaCommand } = require("./toolchain");
 
 /**
  * Per-artifact metadata the run commands remember for the viewer: the profiler's own one-line
@@ -39,11 +40,6 @@ const fs = require("fs");
  * @type {Map<string, {summary: string, sourceDir: string, program: string}>}
  */
 const artifactMeta = new Map();
-
-/** The configured path to the `noeta` executable — the same setting the LSP/DAP/MCP use. */
-function noetaCommand() {
-  return workspace.getConfiguration("noeta").get("server.path", "noeta");
-}
 
 /** One shared output channel for the profiled program's own stdout/stderr. */
 let channel;

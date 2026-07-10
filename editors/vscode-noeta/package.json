@@ -168,17 +168,20 @@
     "commands": [
       {
         "command": "noeta.restartServer",
-        "title": "Noeta: Restart Language Server"
+        "title": "Restart Language Server",
+        "category": "Noeta"
       },
       {
         "command": "noeta.run",
-        "title": "Noeta: Run File",
-        "icon": "$(play)"
+        "title": "Run File",
+        "icon": "$(play)",
+        "category": "Noeta"
       },
       {
         "command": "noeta.buildNative",
-        "title": "Noeta: Build Native Executable",
-        "icon": "$(package)"
+        "title": "Build Native Executable",
+        "icon": "$(package)",
+        "category": "Noeta"
       },
       {
         "command": "noeta.profileFile",
