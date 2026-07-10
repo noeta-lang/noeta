@@ -1,0 +1,285 @@
+/* The Noeta profile view. Styled exclusively with the editor's own theme variables so the view
+ * reads as part of VS Code in every theme (light, dark, high contrast). */
+
+:root {
+  --row-height: 22px;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size, 13px);
+  color: var(--vscode-foreground);
+  background: var(--vscode-editor-background);
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* ---- header ---------------------------------------------------------------------------------- */
+
+.header {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 16px 0 16px;
+}
+
+.header .title {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.header .meta {
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Panel-style tabs (like the bottom panel's OUTPUT / TERMINAL row). */
+.tabs {
+  flex: none;
+  display: flex;
+  gap: 16px;
+  padding: 6px 16px 0 16px;
+  border-bottom: 1px solid var(--vscode-panel-border, transparent);
+}
+
+.tab {
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: 1px solid transparent;
+  color: var(--vscode-panelTitle-inactiveForeground, var(--vscode-descriptionForeground));
+  font-family: inherit;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 4px 0 6px 0;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--vscode-panelTitle-activeForeground, var(--vscode-foreground));
+}
+
+.tab.active {
+  color: var(--vscode-panelTitle-activeForeground, var(--vscode-foreground));
+  border-bottom-color: var(--vscode-panelTitle-activeBorder, var(--vscode-focusBorder));
+}
+
+.tab:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+/* ---- views ----------------------------------------------------------------------------------- */
+
+.view {
+  flex: 1;
+  min-height: 0;
+  display: none;
+  flex-direction: column;
+}
+
+.view.active {
+  display: flex;
+}
+
+.message {
+  padding: 16px;
+  color: var(--vscode-descriptionForeground);
+}
+
+/* ---- flame graph ----------------------------------------------------------------------------- */
+
+.breadcrumbs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 4px 16px;
+  font-size: 12px;
+  min-height: 18px;
+}
+
+.breadcrumbs .crumb {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 1px 2px;
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 24em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.breadcrumbs .crumb:hover {
+  text-decoration: underline;
+}
+
+.breadcrumbs .crumb:last-child {
+  color: var(--vscode-foreground);
+  cursor: default;
+  text-decoration: none;
+}
+
+.breadcrumbs .sep {
+  color: var(--vscode-descriptionForeground);
+}
+
+.flame-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow-y: auto;
+  overflow-x: hidden;
+  margin: 0 16px 12px 16px;
+}
+
+#flame-canvas {
+  display: block;
+  width: 100%;
+  cursor: pointer;
+}
+
+/* The hover tooltip: rendered like the editor's own hover widget. */
+#tooltip {
+  position: fixed;
+  z-index: 10;
+  max-width: 44em;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  pointer-events: none;
+  background: var(--vscode-editorHoverWidget-background);
+  color: var(--vscode-editorHoverWidget-foreground);
+  border: 1px solid var(--vscode-editorHoverWidget-border);
+  border-radius: 3px;
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
+  display: none;
+}
+
+#tooltip .tip-title {
+  font-family: var(--vscode-editor-font-family);
+  font-weight: 600;
+  word-break: break-all;
+}
+
+#tooltip .tip-loc {
+  color: var(--vscode-textLink-foreground);
+  word-break: break-all;
+}
+
+#tooltip .tip-hint {
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+}
+
+/* ---- tables ---------------------------------------------------------------------------------- */
+
+.table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 16px 12px 16px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--vscode-editor-background);
+  color: var(--vscode-descriptionForeground);
+  font-weight: 600;
+  text-align: left;
+  padding: 4px 12px 4px 0;
+  border-bottom: 1px solid var(--vscode-panel-border, var(--vscode-editorWidget-border));
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+thead th:hover {
+  color: var(--vscode-foreground);
+}
+
+thead th.num,
+tbody td.num {
+  text-align: right;
+  font-family: var(--vscode-editor-font-family);
+}
+
+tbody td {
+  padding: 3px 12px 3px 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 32em;
+}
+
+tbody tr {
+  cursor: pointer;
+}
+
+tbody tr:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+tbody td.fn {
+  font-family: var(--vscode-editor-font-family);
+}
+
+tbody td.loc {
+  color: var(--vscode-descriptionForeground);
+}
+
+tbody tr:hover td.loc {
+  color: var(--vscode-textLink-foreground);
+}
+
+/* A slim self-% meter behind the number, like the built-in profile table's heat hint. */
+td .pct-cell {
+  position: relative;
+  display: inline-block;
+  min-width: 5.5em;
+}
+
+td .pct-bar {
+  position: absolute;
+  right: 0;
+  top: 15%;
+  bottom: 15%;
+  background: var(--vscode-progressBar-background);
+  opacity: 0.25;
+  border-radius: 1px;
+}
+
+td .pct-num {
+  position: relative;
+}

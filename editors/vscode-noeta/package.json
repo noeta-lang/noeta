@@ -115,12 +115,59 @@
         "label": "Noeta compiler tools"
       }
     ],
+    "customEditors": [
+      {
+        "viewType": "noeta.profileView",
+        "displayName": "Noeta Profile",
+        "selector": [
+          {
+            "filenamePattern": "*.noeprof.json"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
     "commands": [
       {
         "command": "noeta.restartServer",
         "title": "Noeta: Restart Language Server"
+      },
+      {
+        "command": "noeta.profileFile",
+        "title": "Profile File (Sampling)",
+        "category": "Noeta",
+        "icon": "$(flame)"
+      },
+      {
+        "command": "noeta.profileFileInstrumented",
+        "title": "Profile File (Instrumenting, exact counts)",
+        "category": "Noeta"
       }
     ],
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "noeta.profileFile",
+          "when": "resourceLangId == noeta",
+          "group": "profile@1"
+        },
+        {
+          "command": "noeta.profileFileInstrumented",
+          "when": "resourceLangId == noeta",
+          "group": "profile@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "noeta.profileFile",
+          "when": "resourceLangId == noeta"
+        },
+        {
+          "command": "noeta.profileFileInstrumented",
+          "when": "resourceLangId == noeta"
+        }
+      ]
+    },
     "configuration": {
       "title": "Noeta",
       "properties": {
@@ -128,6 +175,11 @@
           "type": "string",
           "default": "noeta",
           "markdownDescription": "Path to the `noeta` executable. The extension launches it as `noeta lsp` (language server) and `noeta dap` (debugger). Defaults to `noeta` on your `PATH`; set an absolute path to use a local build (e.g. `target/release/noeta`)."
+        },
+        "noeta.profile.hz": {
+          "type": "number",
+          "default": 1000,
+          "description": "Sampling rate (Hz) for Noeta: Profile File (Sampling)."
         },
         "noeta.trace.server": {
           "type": "string",

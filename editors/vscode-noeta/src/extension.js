@@ -26,6 +26,7 @@ const {
   McpStdioServerDefinition,
 } = require("vscode");
 const { LanguageClient, TransportKind } = require("vscode-languageclient/node");
+const { registerProfiling } = require("./profile");
 
 /** The configured path to the `noeta` executable (on `PATH` by default). Shared by the LSP and DAP. */
 function noetaCommand() {
@@ -160,6 +161,9 @@ function activate(context) {
 
   // Offer `noeta mcp` to the editor's AI agents (no-op on hosts without the MCP API).
   registerMcp(context);
+
+  // The profiler UI: `Noeta: Profile File` commands + the flame-graph view for `*.noeprof.json`.
+  registerProfiling(context);
 
   // Starting the client spawns the server; a failure to launch (e.g. `noeta` not on `PATH`) surfaces
   // in the "Noeta Language Server" output channel.
