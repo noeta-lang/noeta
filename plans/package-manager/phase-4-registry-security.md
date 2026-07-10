@@ -144,12 +144,20 @@ contract is the seam; the Rust `Index` client (in `noeta-pm`) owns the wire type
   HTTP server (no node/wrangler in the language workspace).
 - **Not deployed by the agent** — deploy is the maintainer's Cloudflare creds + an outward action.
 
-## Range resolution (the dormant piece this unlocks)
+## Range resolution — ✅ DONE (S5, "build A properly")
 
-With a real index serving multiple versions, wire the **already-built but undriven PubGrub range
-co-resolution** (`resolve.rs`): registry deps with real ranges (`^1.2`) across the tree resolve to a
-single compatible set via backtracking, instead of the greedy per-dep pick that only ever sees exact
-git pins today.
+The registry now serves **per-version dependency metadata** (the crates.io-index model), and version
+selection runs a real PubGrub **backtracking** solve before materialization. `Walker::solve` gathers
+the candidate graph — the path/git spine (materialized to learn identity/version/deps) plus every
+reachable registry candidate (from the index, no cloning) — and resolves via a `Candidates` provider
+where a **local/git source overrides the registry** for that identity (Cargo-style). This finds a
+compatible set where the old greedy per-dep pick reported a false conflict (proof: the foo/bar/baz
+diamond resolves to `foo 1.0.0 + bar 1.0.0`, in both a resolver unit test and an end-to-end CLI test
+over real git repos + a local index).
+
+**Deferred + surfaced (v-next):** git-deps-*of-published-packages* aren't expressible in the index
+`Dep{package, req}` shape (published packages should depend via the registry); the index trusts that
+a version's recorded deps match its source manifest (a real registry would verify at publish).
 
 ## Slice plan
 
