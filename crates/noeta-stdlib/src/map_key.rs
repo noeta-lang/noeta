@@ -4,7 +4,7 @@
 //! `extern_key_capable` (which reads the registered [`crate::registry::ExtType::key_capable`] flag)
 //! and the canonical `map_key_error`.
 
-pub use noeta_native::map_key::{ExternKeyRef, MapKey};
+pub use noeta_native::map_key::{ExternKeyRef, MapKey, PackedKeyField, packed_names};
 
 /// Whether an extern value may key a map / member a set — its registered
 /// [`crate::registry::ExtType::key_capable`] flag (extern-types X4). The runtime gate both

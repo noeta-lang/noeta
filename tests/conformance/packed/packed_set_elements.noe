@@ -1,0 +1,39 @@
+// P-PKEY S2: key-capable `@packed` structs member sets by CONTENT — literals, add/remove/
+// contains, union/intersection, dedup, and display order (type name, then field-wise — the same
+// total order packed map keys iterate in) all agree across both backends. `sorted()` on a list
+// of key-capable packed structs orders the same way (one comparator).
+// expect: stdout "2"
+// expect: stdout "{Cell {x: -5, y: 0}, Cell {x: 1, y: 2}}"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "3"
+// expect: stdout "{Cell {x: -5, y: 0}}"
+// expect: stdout "{Cell {x: -5, y: 0}, Cell {x: 1, y: 2}, Cell {x: 9, y: 9}}"
+// expect: stdout "[Cell {x: -5, y: 0}, Cell {x: 1, y: 2}, Cell {x: 7, y: 7}]"
+// expect: stdout "{Pair {a: Cell {x: 1, y: 1}, flag: false}, Pair {a: Cell {x: 1, y: 1}, flag: true}}"
+// expect: exit 0
+
+@packed struct Cell { x: int; y: int }
+@packed struct Pair { a: Cell; flag: bool }
+
+// Literal + content dedup (the duplicate collapses).
+mut s = #{Cell { x: 1, y: 2 }, Cell { x: -5, y: 0 }, Cell { x: 1, y: 2 }}
+echo s.len()
+echo s
+
+echo s.contains(Cell { x: 1, y: 2 })
+echo s.contains(Cell { x: 0, y: 0 })
+
+s = s.add(Cell { x: 9, y: 9 })
+s = s.add(Cell { x: 9, y: 9 })
+echo s.len()
+
+t = #{Cell { x: -5, y: 0 }, Cell { x: 42, y: 0 }}
+echo s.intersection(t)
+echo s.union(#{Cell { x: -5, y: 0 }})
+
+// One comparator everywhere: sorted() over packed values uses the same content order.
+echo [Cell { x: 7, y: 7 }, Cell { x: -5, y: 0 }, Cell { x: 1, y: 2 }].sorted()
+
+// Nested + bool fields take part in identity and order (false < true).
+echo #{Pair { a: Cell { x: 1, y: 1 }, flag: true }, Pair { a: Cell { x: 1, y: 1 }, flag: false }}

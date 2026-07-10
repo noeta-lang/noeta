@@ -3031,35 +3031,92 @@ impl Checker {
                     "Set" => args.first(),
                     _ => None,
                 };
-                if let Some(key_ref) = key_position {
-                    let key_ty = Type::from_ref(key_ref);
-                    let (ok, role, help) = if name == "Map" {
-                        (
-                            self.map_keyable(&key_ty),
-                            "key a map",
-                            "map keys are strings or key-capable types (e.g. `Uuid`)",
-                        )
+                if let Some(TypeRef::Named {
+                    name: key_name,
+                    span: key_span,
+                    ..
+                }) = key_position
+                    && self.named_key_capable(key_name, name == "Set") == Some(false)
+                {
+                    let role = if name == "Map" {
+                        "key a map"
                     } else {
-                        (
-                            self.set_memberable(&key_ty),
-                            "member a set",
-                            "set members are orderable values: primitives, key-capable types,                              and value kinds (structs/enums) ordering structurally",
-                        )
+                        "member a set"
                     };
-                    if !ok {
-                        self.error(
-                            DiagnosticCode::TypeMismatch,
-                            key_ref.span(),
-                            format!("`{key_ty}` cannot {role}: it is not a key-capable type"),
-                        )
-                        .help(help);
-                    }
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        *key_span,
+                        format!("`{key_name}` cannot {role}: it is not a key-capable type"),
+                    )
+                    .help(
+                        "key-capable types are strings, key-capable extern types (e.g. `Uuid`), \
+                         and `@packed` structs of int/bool fields; a set additionally admits any \
+                         value kind (struct/enum) ordering structurally",
+                    );
                 }
                 for arg in args {
                     self.check_type_ref(arg);
                 }
             }
         }
+    }
+
+    /// Check-time key-capability of a **named** type in `Map<K, _>` key / `Set<T>` element
+    /// position (P-PKEY S3/S4): `Some(true)` for `string`, the integer family (S4 — `int` and
+    /// every fixed-width `{i,u}N`, erased to the same word), a key-capable extern, or a
+    /// key-capable `@packed` struct (all fields int/`{i,u}N`/bool or nested such structs — no
+    /// floats); `Some(false)` for `float`/`f32` (the NaN footgun), `bool` in MAP position
+    /// (`for_set` splits the role: an orderable `Set<bool>` is fine), a known user record/enum, or a
+    /// non-capable extern (statically certain to abort at runtime); `None` when the name is not
+    /// a resolvable concrete type here (a generic parameter, an unknown — other diagnostics own
+    /// those).
+    fn named_key_capable(&self, key_name: &str, for_set: bool) -> Option<bool> {
+        fn layout_key_capable(layout: &noeta_ast::reflect::PackedLayout) -> bool {
+            use noeta_ast::reflect::PackedKind;
+            layout.fields.iter().all(|f| match &f.kind {
+                PackedKind::Int | PackedKind::Bool => true,
+                PackedKind::Float | PackedKind::F32 => false,
+                PackedKind::Struct(inner) => layout_key_capable(inner),
+            })
+        }
+        if matches!(
+            key_name,
+            "string" | "int" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
+        ) {
+            return Some(true);
+        }
+        if matches!(key_name, "float" | "f32") {
+            return Some(false);
+        }
+        // `bool` splits by role (post derive-soundness: bool is orderable, `false < true`):
+        // a `Set<bool>` is fine — the runtime canonicalizes it like any orderable element — but
+        // a map key needs a `MapKey` kind, which bool deliberately lacks (two possible keys is a
+        // smell; use fields). The gates pass their role via `for_set`.
+        if key_name == "bool" {
+            return Some(for_set);
+        }
+        if let Some(ext) = self.imported_extern(key_name) {
+            return Some(ext.key_capable);
+        }
+        if let Some(layout) = self.packed_layout(&Type::Named(key_name.to_string(), Vec::new())) {
+            return Some(layout_key_capable(&layout));
+        }
+        if self.records.contains_key(key_name) || self.enums.contains_key(key_name) {
+            // A set additionally admits any **value kind** (derive-soundness follow-up F2): a
+            // non-packed struct or an enum orders structurally (`set_order` — the same total
+            // ordering `@derive(Comparable)` and `.sorted()` use), so `Set<P>`/`Set<Dir>` are
+            // fine. A `class` stays out of both roles: a set stores a sorted snapshot, and a
+            // reference could be mutated after insertion. Maps still need a `MapKey` form, which
+            // only the packed/int/string/extern kinds above have.
+            if for_set {
+                return Some(!matches!(
+                    self.type_kinds.get(key_name),
+                    Some(noeta_types::TypeKind::Class)
+                ));
+            }
+            return Some(false);
+        }
+        None
     }
 
     // ----- traits: impl coherence and derive validation (M1.8) -----
@@ -3464,50 +3521,6 @@ impl Checker {
                 )
                 .help(format!("{fix}, or change {place} to a supported type"));
             }
-        }
-    }
-
-    /// Whether `ty` can **key a map**: a `string`, a key-capable extern type, or something
-    /// gradual (`dyn`, a hole, an unresolved name that may be a type parameter). Everything else
-    /// — user structs/classes/enums, non-string primitives, containers — has no runtime key form
-    /// yet (structural object keys are a future arc), so a `Map<K, _>` formation or a map literal
-    /// keyed by one is rejected statically instead of failing at the first insertion.
-    fn map_keyable(&self, ty: &Type) -> bool {
-        match ty {
-            Type::String | Type::Dyn | Type::Unknown => true,
-            Type::Named(name, _) => match self.imported_extern(name) {
-                Some(ext) => ext.key_capable,
-                // A user-declared type has no key form; an unknown name (a type parameter in a
-                // generic declaration) stays permissive — the runtime is the backstop.
-                None => !self.type_kinds.contains_key(name),
-            },
-            _ => false,
-        }
-    }
-
-    /// Whether `ty` can **member a set**: an orderable primitive, a key-capable extern, a
-    /// **value-kind** nominal (struct/enum — a set stores a sorted snapshot, and a `class`
-    /// reference could be mutated after insertion), or something gradual. Containers, functions,
-    /// and `bytes` have no ordering (mirrors the runtime `set_order`).
-    fn set_memberable(&self, ty: &Type) -> bool {
-        match ty {
-            Type::Int
-            | Type::Float
-            | Type::F32
-            | Type::F64
-            | Type::IntN { .. }
-            | Type::Bool
-            | Type::String
-            | Type::Dyn
-            | Type::Unknown => true,
-            Type::Named(name, _) => match self.imported_extern(name) {
-                Some(ext) => ext.key_capable,
-                None => !matches!(
-                    self.type_kinds.get(name),
-                    Some(noeta_types::TypeKind::Class)
-                ),
-            },
-            _ => false,
         }
     }
 
@@ -4227,16 +4240,20 @@ impl Checker {
                         );
                     val_ty = Type::Dyn; // recover as a mixed map
                 }
-                // A literal keyed by anything without a runtime key form — a non-key-capable
-                // extern (extern-types X4), a user type, a non-string primitive — is rejected
-                // statically, matching the `Map<K, _>` formation gate.
-                if !self.map_keyable(&key_ty) {
+                // A literal keyed by a type without a runtime key form is rejected statically
+                // (extern-types X4 / P-PKEY S3), matching the `Map<K, _>` formation gate.
+                if let Type::Named(key_name, _) = &key_ty
+                    && self.named_key_capable(key_name, false) == Some(false)
+                {
                     self.error(
                         DiagnosticCode::TypeMismatch,
                         *span,
                         format!("`{key_ty}` cannot key a map: it is not a key-capable type"),
                     )
-                    .help("map keys are strings or key-capable types (e.g. `Uuid`)");
+                    .help(
+                        "key-capable types are strings, key-capable extern types (e.g. `Uuid`), \
+                         and `@packed` structs of int/bool fields",
+                    );
                 }
                 let ty = Type::Map(Box::new(key_ty), Box::new(val_ty));
                 self.note_construction(&ty, *span);

@@ -89,13 +89,26 @@ echo { host, scheme } // shorthand: { "host": host, "scheme": scheme }
 
 Iterating a map (`for v in m`) yields values in key order; equality is structural (order-independent).
 
-A map's key type `K` is `string`, or a **key-capable** native type — immutable, totally ordered, stably hashed. `Uuid` is one: `Map<Uuid, Order>` works end to end (index, `set`/`remove`, `keys()` returns the `Uuid`s), and `Set<Uuid>` orders by the id's bytes, so v7 ids sort by creation time. Anything else — a mutable native type (`FileHandle`), a user struct/class/enum, a non-`string` primitive — is rejected **statically**, at the `Map<K, _>` annotation or the map literal (`int` and structural object keys are not supported yet).
+A map's key type `K` is `string`, `int` (or any fixed-width integer — `Map<u8, V>` works), a **key-capable** native type, or a **key-capable `@packed` struct** — immutable, totally ordered, stably hashed. Int keys are the leanest kind (an immediate: zero-allocation, one-word hash) and iterate in numeric order: `{1: "one", -7: "neg"}` displays negatives first, and `keys()` returns real ints. `Uuid` is a key-capable native type: `Map<Uuid, Order>` works end to end. A mutable native type (`FileHandle`), `float`/`f32` (NaN makes float keys a footgun), and `bool` are rejected statically.
+
+A `@packed` struct whose fields are all integers/`bool` (or nested such structs) keys a map **by content** — the spatial-hash idiom:
+
+```noeta
+@packed struct Cell { x: int; y: int }
+
+mut grid: Map<Cell, int> = {}
+grid[Cell { x: 3, y: 4 }] = 42          // keyed by value, not identity
+echo grid[Cell { x: 3, y: 4 }]          // 42 — a fresh equal value finds it
+echo grid.keys()                        // [Cell {x: 3, y: 4}] — full struct values again
+```
+
+Iteration/display order over packed keys is **field-wise** (declaration order, negatives before positives), the same total order sets and `sorted()` use. Float/`f32` fields disqualify a struct as a key (`NaN != NaN` makes float keys a footgun); a non-key-capable type in key position is rejected statically.
 
 ## Set
 
 Sorted and de-duplicated; not indexable. Display form `{1, 2, 3}`; empty `#{}`.
 
-Elements must be **orderable**: primitives, key-capable native types, or **value kinds** — structs and enums, which order structurally (the same ordering `@derive(Comparable)` and `.sorted()` use), so `[P {x: 2}, P {x: 1}].to_set()` canonicalizes like any primitive set. A `class` element is rejected (statically at a `Set<T>` annotation): a set stores a sorted snapshot, and a reference could be mutated after insertion.
+Elements are a single **orderable** type: a primitive, a key-capable native type, a key-capable `@packed` struct (ordered by content — type name, then field-wise), or any other **value kind** — structs and enums order structurally (the same ordering `@derive(Comparable)` and `.sorted()` use), so `[P {x: 2}, P {x: 1}].to_set()` canonicalizes like any primitive set. A `class` element is rejected (statically at a `Set<T>` annotation): a set stores a sorted snapshot, and a reference could be mutated after insertion.
 
 ```noeta
 s = #{3, 1, 2, 1}     // set literal (sugar for [...].to_set())

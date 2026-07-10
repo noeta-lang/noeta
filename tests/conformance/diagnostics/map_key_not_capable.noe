@@ -1,0 +1,20 @@
+// P-PKEY S3: a named type that is statically certain to fail as a map key / set element is
+// rejected at CHECK time (closing the pass-then-abort divergence): a plain (non-packed) struct
+// and a float-fielded packed struct as MAP keys, floats and bool as map keys, and a `class` as a
+// set element (a set stores a sorted snapshot; a reference could be mutated after insertion).
+// A key-capable `@packed` struct (all int/bool fields) stays accepted — and a set additionally
+// admits any VALUE kind (plain structs, enums order structurally; see set_of_derived_values).
+// expect: error E0007 at 16:12
+// expect: error E0007 at 17:12
+// expect: error E0007 at 18:12
+// expect: error E0007 at 19:12
+// expect: error E0007 at 20:12
+// expect: exit 1
+struct Plain { x: int }
+@packed struct V2 { x: f32; y: f32 }
+class Ref { pub x: int }
+mut a: Map<Plain, int> = {}
+mut b: Map<V2, int> = {}
+mut c: Set<Ref> = #{}
+mut d: Map<float, int> = {}
+mut e: Map<bool, int> = {}

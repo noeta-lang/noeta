@@ -516,6 +516,12 @@ pub struct TypeDef {
     /// the VM `Shape::structural_eq`, computed from the same inputs so both backends agree — even on
     /// a *nested* class field, where the method-dispatch path is unavailable.
     structural_eq: bool,
+    /// Whether values of this type may **key a `Map` / member a `Set`** (P-PKEY): a key-capable
+    /// `@packed` struct. A `Cell` because capability settles by fixpoint — a later declaration
+    /// can complete a forward-referenced nested chain, and the interpreter re-stamps every
+    /// settled type's (`Rc`-shared) def then. Mirrors the VM's `Shape::key_capable`, computed
+    /// from the same shared `noeta_ast::key_capable_packed`.
+    key_capable: std::cell::Cell<bool>,
     /// Whether the type `@derive(Comparable)`s without a hand-written `compare`: its instances
     /// get structural field-wise ordering for `< <= > >=`.
     derives_comparable: bool,
@@ -1105,6 +1111,16 @@ struct Channel {
 struct Interpreter {
     stdout: String,
     diagnostics: Vec<Diagnostic>,
+    /// Every declared `@packed` struct's field-type names (P-PKEY,
+    /// `noeta_ast::packed_named_fields`) — the input to the key-capability fixpoint below.
+    /// Accumulated across declarations (a session declares incrementally).
+    packed_fields: std::collections::HashMap<String, Vec<Option<String>>>,
+    /// The **key-capable** packed structs (P-PKEY, `noeta_ast::key_capable_packed`): types whose
+    /// values may key a `Map` / member a `Set`. Recomputed whenever a packed struct declares, and
+    /// consulted at key-*use* time — which necessarily follows every involved declaration, so a
+    /// forward-referenced nested chain is settled before it can be observed. Mirrors the VM's
+    /// `Shape::key_capable`, computed from the same inputs by the same shared fixpoint.
+    key_capable_packed: std::collections::HashSet<String>,
     scope: Rc<Scope>,
     /// The root (global) scope, held so a field-default thunk can be run in the type's **definition
     /// scope** (object-model slice 5) — types are top-level, so their defaults resolve globals only,
@@ -1226,6 +1242,8 @@ impl Interpreter {
         Interpreter {
             stdout: String::new(),
             diagnostics: Vec::new(),
+            packed_fields: std::collections::HashMap::new(),
+            key_capable_packed: std::collections::HashSet::new(),
             globals: Rc::clone(&global),
             scope: global,
             host,
@@ -1600,6 +1618,7 @@ impl Interpreter {
                     // An opaque import has no known fields; treat `==` structurally (matches the
                     // VM's `ShapeKind::Opaque` default), not as class identity.
                     structural_eq: true,
+                    key_capable: std::cell::Cell::new(false),
                     derives_comparable: false,
                     derives_tojson: false,
                     opaque: true,
@@ -2903,9 +2922,14 @@ impl Interpreter {
                     .keys()
                     .map(|k| match k {
                         noeta_stdlib::MapKey::Str(s) => Value::Str(s.as_str().to_owned()),
+                        noeta_stdlib::MapKey::Int(i) => Value::Int(*i),
                         noeta_stdlib::MapKey::Extern(e) => {
                             Value::Extern(Rc::new(RefCell::new(e.clone())))
                         }
+                        // P-PKEY: rebuild the packed struct value from the content snapshot.
+                        noeta_stdlib::MapKey::Packed {
+                            type_name, fields, ..
+                        } => self.packed_key_value(type_name, fields),
                     })
                     .collect();
                 Ok(Value::list(keys))
@@ -2945,6 +2969,27 @@ impl Interpreter {
     }
 
     /// Read a map-key argument (string or key-capable extern), raising the shared map-key error
+    /// Rebuild a packed key's struct value (P-PKEY) — the `keys()` direction, mirroring the
+    /// VM's `packed_key_value`. The key's content snapshot carries the field values; the
+    /// `TypeDef` comes from the global scope by name (types are top-level, and a key of type
+    /// `T` implies `T` is declared).
+    fn packed_key_value(&self, type_name: &str, fields: &[noeta_stdlib::PackedKeyField]) -> Value {
+        let Some(Value::Type(def)) = self.globals.lookup(type_name) else {
+            panic!("packed key type `{type_name}` must be declared");
+        };
+        let slots = fields
+            .iter()
+            .map(|f| match f {
+                noeta_stdlib::PackedKeyField::Int(i) => Value::Int(*i),
+                noeta_stdlib::PackedKeyField::Bool(b) => Value::Bool(*b),
+                noeta_stdlib::PackedKeyField::Struct(name, inner) => {
+                    self.packed_key_value(name, inner)
+                }
+            })
+            .collect();
+        Value::Object(Rc::new(ObjectValue::new(def, slots)))
+    }
+
     /// otherwise. Mirrors the VM's `map_update_key`/`map_probe` gate.
     fn expect_map_key(
         &mut self,
@@ -4360,6 +4405,8 @@ fn fresh_type_def(name: &str, fields: &[String], is_struct: bool) -> TypeDef {
         is_struct,
         // No derive context here; a struct compares structurally, a class by identity.
         structural_eq: is_struct,
+        // Reflection-materialized: no packed context (mirrors the VM's fresh `Shape` default).
+        key_capable: std::cell::Cell::new(false),
         derives_comparable: false,
         derives_tojson: false,
         opaque: false,
@@ -4517,17 +4564,49 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
     }
 }
 
-/// Extract the owned [`noeta_stdlib::MapKey`] a map operation keys by: a string, or a
-/// key-capable extern value (a boxed snapshot — extern-types X4). `None` for anything else;
-/// the caller raises the shared map-key error. Mirrors the VM's key extraction.
+/// Extract the owned [`noeta_stdlib::MapKey`] a map operation keys by: a string, a key-capable
+/// extern value (a boxed snapshot — extern-types X4), or a key-capable `@packed` struct (a
+/// content snapshot — P-PKEY, gated by the interpreter's `key_capable_packed` fixpoint, the same
+/// shared computation the VM bakes into `Shape::key_capable`). `None` for anything else; the
+/// caller raises the shared map-key error. Mirrors the VM's key extraction.
 pub(crate) fn value_map_key(value: &Value) -> Option<noeta_stdlib::MapKey> {
     match value {
         Value::Str(s) => Some(noeta_stdlib::MapKey::from(s.as_str())),
+        // P-PKEY S4: ints key maps (`float` stays excluded — NaN).
+        Value::Int(i) => Some(noeta_stdlib::MapKey::Int(*i)),
         Value::Extern(e) if noeta_stdlib::map_key::extern_key_capable(&**e.borrow()) => {
             Some(noeta_stdlib::MapKey::Extern(e.borrow().clone()))
         }
+        Value::Object(o) if o.def.key_capable.get() => Some(noeta_stdlib::MapKey::packed(
+            o.def.name(),
+            packed_key_fields(o)?,
+        )),
         _ => None,
     }
+}
+
+/// The [`value_map_key`] field walk (P-PKEY): the object's slots in declaration order as plain
+/// [`noeta_stdlib::PackedKeyField`] data. `None` on a slot the capability contract excludes —
+/// defensive (a key-capable type's slots are ints/bools/nested-capable by construction), so the
+/// caller falls back to the ordinary key error rather than corrupting a map. Mirrors
+/// `Value::packed_key_fields` on the VM side.
+fn packed_key_fields(object: &ObjectValue) -> Option<Vec<noeta_stdlib::PackedKeyField>> {
+    object
+        .slots
+        .borrow()
+        .iter()
+        .map(|v| match v {
+            Value::Int(i) => Some(noeta_stdlib::PackedKeyField::Int(*i)),
+            Value::Bool(b) => Some(noeta_stdlib::PackedKeyField::Bool(*b)),
+            Value::Object(o) if o.def.key_capable.get() => {
+                Some(noeta_stdlib::PackedKeyField::Struct(
+                    o.def.name().into(),
+                    packed_key_fields(o)?.into_boxed_slice(),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Project a tree-walker `Value` onto the native-extension registry's argument view. One of the
@@ -4863,6 +4942,29 @@ pub(crate) fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp:
         // Extern-type values order through their contract (extern-types X1) — a total order per
         // key-capable kind; `None` for unordered kinds. Mirrors the VM's `compare_primitive`.
         (Value::Extern(a), Value::Extern(b)) => a.borrow().cmp_value(&**b.borrow()),
+        // P-PKEY: two key-capable `@packed` structs order by content — (type name, then
+        // field-wise slot order), exactly `MapKey::Packed`'s order. Mirrors the VM's
+        // `packed_primitive_cmp`.
+        (Value::Object(a), Value::Object(b))
+            if a.def.key_capable.get() && b.def.key_capable.get() =>
+        {
+            let by_name = a.def.name().cmp(b.def.name());
+            if by_name != std::cmp::Ordering::Equal {
+                return Some(by_name);
+            }
+            let (xs, ys) = (a.slots.borrow(), b.slots.borrow());
+            for (x, y) in xs.iter().zip(ys.iter()) {
+                let ord = match (x, y) {
+                    (Value::Bool(p), Value::Bool(q)) => p.cmp(q),
+                    (Value::Int(p), Value::Int(q)) => p.cmp(q),
+                    _ => compare_primitive(x, y)?,
+                };
+                if ord != std::cmp::Ordering::Equal {
+                    return Some(ord);
+                }
+            }
+            Some(std::cmp::Ordering::Equal)
+        }
         _ => {
             // `f32` widens to f64 like any other numeric pairing — mirrors the VM's
             // `compare_primitive` (`noeta_value::ops`), which orders f32 the same way.
@@ -4887,7 +4989,11 @@ fn set_order(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     if is_class(a) || is_class(b) {
         return None;
     }
-    compare_field(a, b)
+    // Primitives, externs, and key-capable `@packed` structs order through `compare_primitive`
+    // first — preserving P-PKEY's content order exactly (including its cross-type by-name order
+    // over capable packed structs); any other value kind (a plain struct, an enum) falls back to
+    // the total structural ordering. Mirrors the VM's `set_order`.
+    compare_primitive(a, b).or_else(|| compare_field(a, b))
 }
 
 /// Build a set's canonical form from `items`: every element must be mutually orderable (an

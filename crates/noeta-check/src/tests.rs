@@ -508,24 +508,26 @@ fn generic_hand_written_impl_stays_unconditional() {
 
 #[test]
 fn map_keys_without_a_runtime_key_form_are_rejected_statically() {
-    // A user struct cannot key a map (no structural keys yet) — literal and annotation forms.
+    // A plain (non-packed) user struct cannot key a map — literal and annotation forms.
     let src = "struct P { x: int }\nm = { P { x: 1 }: \"one\" }\necho m.len()\n";
     assert_eq!(codes(src), ["E0007"]);
     let src = "struct P { x: int }\nfn f(m: Map<P, int>): int { return m.len() }\necho 1\n";
     assert_eq!(codes(src), ["E0007"]);
-    // Non-string primitives have no key form either.
-    let src = "m = { 1: \"one\" }\necho m.len()\n";
-    assert_eq!(codes(src), ["E0007"]);
-    // String keys and generic parameters stay fine.
+    // String and int-family keys are key-capable (P-PKEY S4).
     let src = "m = { \"a\": 1 }\necho m.len()\n";
     assert!(codes(src).is_empty());
+    let src = "fn f(m: Map<int, string>): int { return m.len() }\necho 1\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
 }
 
 #[test]
 fn set_members_follow_the_set_order_rule_statically() {
-    // A `Set<T>` annotation admits value kinds (structs/enums) and rejects classes — matching
-    // the runtime `set_order` (a class reference could be mutated after insertion).
+    // A `Set<T>` annotation admits value kinds (structs/enums, ordering structurally) and
+    // rejects classes — matching the runtime `set_order` (a class reference could be mutated
+    // after insertion, breaking the canonical-order snapshot).
     let ok = "struct P { x: int }\nfn f(s: Set<P>): int { return s.len() }\necho 1\n";
+    assert!(codes(ok).is_empty(), "{:?}", codes(ok));
+    let ok = "enum Dir { north; south }\nfn f(s: Set<Dir>): int { return s.len() }\necho 1\n";
     assert!(codes(ok).is_empty(), "{:?}", codes(ok));
     let bad = "class C { pub x: int }\nfn f(s: Set<C>): int { return s.len() }\necho 1\n";
     assert_eq!(codes(bad), ["E0007"]);

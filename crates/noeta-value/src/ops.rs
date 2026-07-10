@@ -277,12 +277,49 @@ pub fn compare_primitive(left: Value, right: Value) -> Option<Ordering> {
     if left.is_extern() && right.is_extern() {
         return left.with_extern(|a| right.with_extern(|b| a.cmp_value(b)));
     }
+    // P-PKEY: two key-capable `@packed` structs order by content — (type name, then field-wise
+    // slot order), the same total order `MapKey::Packed` uses, so set order, `sorted()`, and map
+    // iteration all agree. Engages only when BOTH sides are key-capable objects; anything else
+    // falls through to the numeric lane below.
+    if let Some(ordering) = packed_primitive_cmp(left, right) {
+        return Some(ordering);
+    }
     let num = |v: Value| {
         v.as_float()
             .or_else(|| v.as_f32().map(|f| f as f64))
             .or_else(|| v.as_int().map(|i| i as f64))
     };
     num(left)?.partial_cmp(&num(right)?)
+}
+
+/// The content order of two **key-capable `@packed` struct** values (P-PKEY): type name first,
+/// then the slots in declaration order — bools `false < true`, ints numerically, nested capable
+/// structs recursively. Exactly [`noeta_stdlib::MapKey`]'s packed order, so every order-observing
+/// surface agrees. `None` unless both sides are key-capable objects (the caller falls through).
+fn packed_primitive_cmp(a: Value, b: Value) -> Option<Ordering> {
+    let sa = a.shape()?;
+    let sb = b.shape()?;
+    if !sa.key_capable || !sb.key_capable {
+        return None;
+    }
+    let by_name = sa.name.cmp(&sb.name);
+    if by_name != Ordering::Equal {
+        return Some(by_name);
+    }
+    // Same type ⇒ same field kinds per slot (the capability contract fixes them).
+    for (x, y) in a.slots()?.into_iter().zip(b.slots()?) {
+        let ord = if let (Some(p), Some(q)) = (x.as_bool(), y.as_bool()) {
+            p.cmp(&q)
+        } else if let (Some(p), Some(q)) = (x.as_int(), y.as_int()) {
+            p.cmp(&q)
+        } else {
+            packed_primitive_cmp(x, y)?
+        };
+        if ord != Ordering::Equal {
+            return Some(ord);
+        }
+    }
+    Some(Ordering::Equal)
 }
 
 /// Field-wise (declared slot order) ordering of two same-type objects — or two same-enum values,
@@ -353,7 +390,11 @@ pub fn set_order(left: Value, right: Value) -> Option<Ordering> {
     if is_class(left) || is_class(right) {
         return None;
     }
-    compare_values(left, right)
+    // Primitives, externs, and key-capable `@packed` structs order through `compare_primitive`
+    // first — preserving P-PKEY's content order exactly (including its cross-type by-name order
+    // over capable packed structs); any other value kind (a plain struct, an enum) falls back to
+    // the total structural ordering.
+    compare_primitive(left, right).or_else(|| compare_values(left, right))
 }
 
 /// The **total structural ordering** of two values, where one exists: an object pair recurses

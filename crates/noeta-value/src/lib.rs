@@ -1754,6 +1754,36 @@ impl Value {
         }
     }
 
+    /// The value for an owned [`MapKey`] probe — the packed-key lane (P-PKEY), where the key was
+    /// just built from a value's content. Same sharing contract as [`Value::map_get`].
+    ///
+    /// [`MapKey`]: noeta_stdlib::MapKey
+    pub fn map_get_key(self, key: &noeta_stdlib::MapKey) -> Option<Value> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Map(entries) => entries.get(key).copied(),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Remove an owned [`MapKey`] (the packed-key lane, P-PKEY), returning the displaced value
+    /// (ownership transfers to the caller). Mirrors [`Value::map_remove`].
+    ///
+    /// [`MapKey`]: noeta_stdlib::MapKey
+    pub fn map_remove_key(self, key: &noeta_stdlib::MapKey) -> Option<Value> {
+        if self.is_pointer() {
+            heap::with_payload_mut(self, |p| match p {
+                Payload::Map(entries) => entries.remove(key),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     /// The value for an extern-type `key`, if this is a map containing it (extern-types X4).
     /// Probes through the extern contract with no key allocation. Same sharing contract as
     /// [`Value::map_get`].
@@ -2106,6 +2136,59 @@ impl Value {
         } else {
             None
         }
+    }
+
+    /// The [`MapKey`] for a **key-capable `@packed` struct** value (P-PKEY), or `None` when this
+    /// value is not one. Walks the fields in declaration order into plain
+    /// [`noeta_stdlib::PackedKeyField`] data — the erased integer word (immediate or boxed),
+    /// bools, nested key-capable structs — plus the display form (render/JSON only, not
+    /// identity). Both backends build keys from the same declarations, so identity, hash, and
+    /// order agree by construction. The key is a snapshot holding no heap reference (`@packed`
+    /// is value semantics, so it can never drift from an aliased original).
+    pub fn packed_map_key(self) -> Option<noeta_stdlib::MapKey> {
+        let shape = self.shape()?;
+        if !shape.key_capable {
+            return None;
+        }
+        Some(noeta_stdlib::MapKey::packed(
+            &shape.name,
+            self.packed_key_fields()?,
+        ))
+    }
+
+    /// The [`packed_map_key`](Value::packed_map_key) field walk. `None` on a slot the capability
+    /// contract excludes — defensive: a `key_capable` shape's slots are ints/bools/nested-capable
+    /// by construction, so `None` here means a compiler bug, and the caller falls back to the
+    /// ordinary key error rather than corrupting a map.
+    fn packed_key_fields(self) -> Option<Vec<noeta_stdlib::PackedKeyField>> {
+        if !self.is_pointer() {
+            return None;
+        }
+        // Borrow the slots in place — a key build is the hot map/set path, so no Vec clone.
+        heap::with_payload(self, |p| {
+            let Payload::Object { slots, .. } = p else {
+                return None;
+            };
+            slots
+                .iter()
+                .map(|v| {
+                    if let Some(b) = v.as_bool() {
+                        Some(noeta_stdlib::PackedKeyField::Bool(b))
+                    } else if let Some(i) = v.as_int() {
+                        Some(noeta_stdlib::PackedKeyField::Int(i))
+                    } else {
+                        let shape = v.shape()?;
+                        if !shape.key_capable {
+                            return None;
+                        }
+                        Some(noeta_stdlib::PackedKeyField::Struct(
+                            shape.name.as_str().into(),
+                            v.packed_key_fields()?.into_boxed_slice(),
+                        ))
+                    }
+                })
+                .collect()
+        })
     }
 
     /// The object's slot values in shape order, if this is an object. Shares references.

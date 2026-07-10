@@ -490,6 +490,12 @@ impl Interpreter {
             .iter()
             .map(|(name, func)| (name.clone(), Rc::new(self.make_ir_closure(func))))
             .collect();
+        // P-PKEY: a `@packed` struct feeds the key-capability fixpoint (stamped onto the defs
+        // right after this declaration lands, below).
+        let packed = noeta_ast::packed_named_fields(decl);
+        if let Some(named) = packed.clone() {
+            self.packed_fields.insert(decl.name.clone(), named);
+        }
         let def = TypeDef {
             name: decl.name.clone(),
             fields,
@@ -498,6 +504,8 @@ impl Interpreter {
             is_struct: true,
             // A value kind: `==` is always structural.
             structural_eq: true,
+            // Stamped below (and re-stamped by later declarations) from the fixpoint.
+            key_capable: std::cell::Cell::new(false),
             // A hand-written `compare`/`to_json` takes precedence over derivation.
             derives_comparable: noeta_ast::derives_trait(&decl.derives, "Comparable")
                 && !decl.methods.iter().any(|m| m.name == "compare"),
@@ -508,6 +516,24 @@ impl Interpreter {
         };
         self.scope
             .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
+        // P-PKEY: settle the fixpoint with this declaration included and stamp every settled
+        // type's (`Rc`-shared) def — a later declaration completing a forward-referenced nested
+        // chain retro-marks the earlier defs, and every live instance sees it through the shared
+        // `Rc`. Capability is read only at key-USE time, which follows all involved declarations.
+        if packed.is_some() {
+            self.key_capable_packed = noeta_ast::key_capable_packed(&self.packed_fields);
+            for name in &self.key_capable_packed {
+                if let Some(Value::Type(def)) = self.globals.lookup(name) {
+                    def.key_capable.set(true);
+                    // P-PKEY: register the field names so a packed key renders its display on
+                    // demand (idempotent; same registry the VM fills at load).
+                    noeta_stdlib::map_key::packed_names::register(
+                        name,
+                        def.fields.iter().map(|f| f.name.as_str()),
+                    );
+                }
+            }
+        }
     }
 
     /// Register an enum whose methods are IR-bodied closures (object-model slice 3). Mirrors
@@ -569,6 +595,8 @@ impl Interpreter {
             // no longer routes through the retired AST walker.
             destructor: class.destructor.clone(),
             is_struct: false,
+            // A class is never a packed key.
+            key_capable: std::cell::Cell::new(false),
             // A reference `class`: `==` is identity unless the class is `Equatable` (derives it or
             // hand-`impl`s `eq`) — the same rule `declare_class` applies.
             structural_eq: noeta_ast::derives_trait(&decl.derives, "Equatable")

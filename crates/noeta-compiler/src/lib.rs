@@ -320,6 +320,8 @@ fn compile_to_mc(
         comparable_derives: Vec::new(),
         tojson_derives: Vec::new(),
         structural_eq_types: HashSet::new(),
+        packed_fields: HashMap::new(),
+        key_capable_types: HashSet::new(),
         types: HashMap::new(),
         module_globals: HashMap::new(),
         module_fns: HashSet::new(),
@@ -417,6 +419,8 @@ impl SessionCompiler {
             comparable_derives: Vec::new(),
             tojson_derives: Vec::new(),
             structural_eq_types: HashSet::new(),
+            packed_fields: HashMap::new(),
+            key_capable_types: HashSet::new(),
             types: HashMap::new(),
             module_globals: HashMap::new(),
             module_fns: HashSet::new(),
@@ -679,6 +683,15 @@ struct ModuleCompiler {
     /// `class` absent here compares by reference identity. Mirrors the tree-walker's
     /// `TypeDef::structural_eq` so both backends agree (object-model slice 2).
     structural_eq_types: HashSet<String>,
+    /// Every `@packed` struct's field-type names (P-PKEY, `noeta_ast::packed_named_fields`),
+    /// accumulated across `register_types` passes (a session declares incrementally) — the input
+    /// to the key-capability fixpoint below.
+    packed_fields: HashMap<String, Vec<Option<String>>>,
+    /// The **key-capable** packed structs (P-PKEY, `noeta_ast::key_capable_packed` over
+    /// `packed_fields`): types whose values may key a `Map` / member a `Set`. Baked into each
+    /// instance's `Shape::key_capable`, like `structural_eq`; recomputed after every
+    /// `register_types` pass. Mirrored by the eval backend from the same inputs.
+    key_capable_types: HashSet<String>,
     types: HashMap<String, TypeInfo>,
     /// Every top-level value global's name and whether it is mutable. Computed before any body
     /// is compiled so a nested function can resolve a global (and check its mutability on
@@ -819,6 +832,10 @@ impl ModuleCompiler {
                     let fields = decl.fields.iter().map(|f| f.name.clone()).collect();
                     // A value `struct` always compares structurally.
                     self.structural_eq_types.insert(decl.name.clone());
+                    // A `@packed` struct feeds the key-capability fixpoint (P-PKEY, below).
+                    if let Some(named) = noeta_ast::packed_named_fields(decl) {
+                        self.packed_fields.insert(decl.name.clone(), named);
+                    }
                     // A hand-written `compare`/`to_json` (via an `impl` block) takes precedence over
                     // the derived version — same rule as a class.
                     if noeta_ast::derives_trait(&decl.derives, "Comparable")
@@ -951,6 +968,10 @@ impl ModuleCompiler {
                 _ => {}
             }
         }
+        // P-PKEY: with every declaration of this pass recorded, settle which packed structs are
+        // key-capable (the fixpoint spans passes — a session's later entry can complete a nested
+        // chain declared earlier).
+        self.key_capable_types = noeta_ast::key_capable_packed(&self.packed_fields);
     }
 
     /// Pass 2: compile each class/struct method (and a class's `destruct` block) into its reserved
@@ -1246,6 +1267,12 @@ impl ModuleCompiler {
     /// object model guarantees).
     fn intern_shape(&mut self, shape: Shape) -> u32 {
         if let Some(i) = self.shapes.iter().position(|s| *s == shape) {
+            // Same structural identity (`Shape::eq` excludes metadata): merge the metadata so
+            // insertion order can't drop it — e.g. the packed-schema path builds a type's shape
+            // before `make_record` arrives with the key-capable flag (P-PKEY), or vice versa.
+            if shape.key_capable {
+                self.shapes[i].key_capable = true;
+            }
             return i as u32;
         }
         let idx = self.shapes.len() as u32;
@@ -1262,11 +1289,17 @@ impl ModuleCompiler {
     fn intern_packed_schema(&mut self, layout: &noeta_ast::reflect::PackedLayout) -> u32 {
         use noeta_ast::reflect::PackedKind;
 
-        let shape = self.intern_shape(Shape::object(
-            noeta_object::ShapeKind::Struct,
-            layout.type_name.clone(),
-            layout.fields.iter().map(|f| f.name.clone()).collect(),
-        ));
+        let shape = self.intern_shape(
+            Shape::object(
+                noeta_object::ShapeKind::Struct,
+                layout.type_name.clone(),
+                layout.fields.iter().map(|f| f.name.clone()).collect(),
+            )
+            // The schema's element shape is the same entry `MakeStruct` uses — carry the
+            // key-capability so a materialized element keys maps/sets exactly like a
+            // constructed one (P-PKEY).
+            .with_key_capable(self.key_capable_types.contains(&layout.type_name)),
+        );
         let fields = layout
             .fields
             .iter()
@@ -3712,12 +3745,16 @@ impl<'m> FnCompiler<'m> {
         span: Span,
     ) -> Result<(), Unsupported> {
         let structural_eq = self.module.structural_eq_types.contains(type_name);
-        let shape = self.module.intern_shape(Shape::object_equatable(
-            kind,
-            type_name.to_string(),
-            decl_fields.to_vec(),
-            structural_eq,
-        ));
+        let key_capable = self.module.key_capable_types.contains(type_name);
+        let shape = self.module.intern_shape(
+            Shape::object_equatable(
+                kind,
+                type_name.to_string(),
+                decl_fields.to_vec(),
+                structural_eq,
+            )
+            .with_key_capable(key_capable),
+        );
         // In-place reuse (Phase 5): a self-update `acc = Type { ...acc, f: v }` whose spread base is a
         // directly-held **local** (Phase 5.1a) or a top-level **global** (Phase 5.1b) reuses that
         // allocation. For a local the register *is* the binding's sole storage, read in place; for a

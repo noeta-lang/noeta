@@ -31,7 +31,7 @@ pub use host::{
     Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, P2p, ReadSource, Rng,
     SyncStatus,
 };
-pub use map_key::{ExternKeyRef, MapKey};
+pub use map_key::{ExternKeyRef, MapKey, PackedKeyField};
 pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
 pub use p2p::{P2pBroker, ReceiveIo};
 pub use registry::{
@@ -245,8 +245,8 @@ pub fn unorderable_error(method: &str) -> StdError {
     StdError {
         kind: ErrorKind::ArgType,
         message: format!(
-            "method `{method}` requires values of a single orderable type (a primitive, or a value \
-             type — struct/enum — ordering structurally)"
+            "method `{method}` requires values of a single orderable type (a primitive, or a \
+             value kind — struct/enum — ordering structurally)"
         ),
     }
 }
