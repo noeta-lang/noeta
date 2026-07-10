@@ -4846,6 +4846,29 @@ pub(crate) fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp:
         // Extern-type values order through their contract (extern-types X1) — a total order per
         // key-capable kind; `None` for unordered kinds. Mirrors the VM's `compare_primitive`.
         (Value::Extern(a), Value::Extern(b)) => a.borrow().cmp_value(&**b.borrow()),
+        // P-PKEY: two key-capable `@packed` structs order by content — (type name, then
+        // field-wise slot order), exactly `MapKey::Packed`'s order. Mirrors the VM's
+        // `packed_primitive_cmp`.
+        (Value::Object(a), Value::Object(b))
+            if a.def.key_capable.get() && b.def.key_capable.get() =>
+        {
+            let by_name = a.def.name().cmp(b.def.name());
+            if by_name != std::cmp::Ordering::Equal {
+                return Some(by_name);
+            }
+            let (xs, ys) = (a.slots.borrow(), b.slots.borrow());
+            for (x, y) in xs.iter().zip(ys.iter()) {
+                let ord = match (x, y) {
+                    (Value::Bool(p), Value::Bool(q)) => p.cmp(q),
+                    (Value::Int(p), Value::Int(q)) => p.cmp(q),
+                    _ => compare_primitive(x, y)?,
+                };
+                if ord != std::cmp::Ordering::Equal {
+                    return Some(ord);
+                }
+            }
+            Some(std::cmp::Ordering::Equal)
+        }
         _ => {
             let num = |v: &Value| match v {
                 Value::Int(i) => Some(*i as f64),

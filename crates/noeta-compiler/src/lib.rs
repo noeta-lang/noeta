@@ -1232,6 +1232,12 @@ impl ModuleCompiler {
     /// object model guarantees).
     fn intern_shape(&mut self, shape: Shape) -> u32 {
         if let Some(i) = self.shapes.iter().position(|s| *s == shape) {
+            // Same structural identity (`Shape::eq` excludes metadata): merge the metadata so
+            // insertion order can't drop it — e.g. the packed-schema path builds a type's shape
+            // before `make_record` arrives with the key-capable flag (P-PKEY), or vice versa.
+            if shape.key_capable {
+                self.shapes[i].key_capable = true;
+            }
             return i as u32;
         }
         let idx = self.shapes.len() as u32;
@@ -1248,11 +1254,17 @@ impl ModuleCompiler {
     fn intern_packed_schema(&mut self, layout: &noeta_ast::reflect::PackedLayout) -> u32 {
         use noeta_ast::reflect::PackedKind;
 
-        let shape = self.intern_shape(Shape::object(
-            noeta_object::ShapeKind::Struct,
-            layout.type_name.clone(),
-            layout.fields.iter().map(|f| f.name.clone()).collect(),
-        ));
+        let shape = self.intern_shape(
+            Shape::object(
+                noeta_object::ShapeKind::Struct,
+                layout.type_name.clone(),
+                layout.fields.iter().map(|f| f.name.clone()).collect(),
+            )
+            // The schema's element shape is the same entry `MakeStruct` uses — carry the
+            // key-capability so a materialized element keys maps/sets exactly like a
+            // constructed one (P-PKEY).
+            .with_key_capable(self.key_capable_types.contains(&layout.type_name)),
+        );
         let fields = layout
             .fields
             .iter()
