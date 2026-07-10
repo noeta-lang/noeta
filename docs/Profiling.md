@@ -41,7 +41,7 @@ get the full flamegraph, pick a format and (recommended) an output file:
 ```console
 $ noeta profile app.noe --format svg -o app.svg          # open app.svg in a browser
 $ noeta profile app.noe --format speedscope -o app.json  # open at speedscope.app
-$ noeta profile app.noe --format folded | inferno-flamegraph > app.svg   # via -o /dev/stdout
+$ noeta profile app.noe --format folded -o - | inferno-flamegraph > app.svg
 ```
 
 | Flag | Effect |
@@ -49,8 +49,8 @@ $ noeta profile app.noe --format folded | inferno-flamegraph > app.svg   # via -
 | `--hz <N>` | Wall-clock sampling rate (default **1000** Hz). |
 | `--every <N>` | **Deterministic** sampling: one sample every `N` executed ops instead of on a wall clock. Reproducible run to run — an op-weighted (not time-weighted) flamegraph. Use it for stable diffs or scripted checks. |
 | `--lines` | Attribute each flamegraph leaf to its **source line** (`fn:line`), not just the function — so the hot *line* within a function is visible. |
-| `--format <fmt>` | `folded` (Brendan-Gregg collapsed stacks), `svg` (self-contained flamegraph), `speedscope` (JSON for [speedscope.app](https://www.speedscope.app)). |
-| `-o <file>` | Write the artifact to a file instead of stderr (recommended for `svg`/`speedscope`). |
+| `--format <fmt>` | `folded` (Brendan-Gregg collapsed stacks), `svg` (self-contained flamegraph), `speedscope` (JSON for [speedscope.app](https://www.speedscope.app); each frame carries structured `file`/`line`/`col`, so tools can jump to source). |
+| `-o <file>` | Write the artifact to a file instead of stderr (recommended for `svg`/`speedscope`). `-o -` writes it to **stdout** for piping — it follows the program's own forwarded output, so it suits programs that print little or nothing. |
 
 ### Determinism
 

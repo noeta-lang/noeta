@@ -596,6 +596,14 @@ pub fn run(path: &Path, mode: Mode, format: Option<Format>, out: Option<PathBuf>
         match render::render(&report, format) {
             Ok(bytes) if bytes.is_empty() => {}
             Ok(bytes) => match &out {
+                // `-o -`: the artifact goes to stdout — for piping into another tool (or an editor
+                // integration capturing the artifact directly). It follows the program's own
+                // forwarded stdout, so this suits programs that print little or nothing.
+                Some(path) if path.as_os_str() == "-" => {
+                    let mut stdout = std::io::stdout();
+                    let _ = stdout.write_all(&bytes);
+                    let _ = stdout.flush();
+                }
                 Some(path) => {
                     if let Err(e) = std::fs::write(path, &bytes) {
                         let _ =
