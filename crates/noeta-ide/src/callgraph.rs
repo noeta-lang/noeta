@@ -19,7 +19,7 @@ use std::collections::HashMap;
 
 use noeta_ast::reflect::TypeRepr;
 use noeta_ast::{Program, Stmt};
-use noeta_span::Span;
+use noeta_span::{SourceId, Span};
 
 use crate::resolve::{DefUse, MemberTable};
 
@@ -75,6 +75,34 @@ impl CallGraph {
     /// The edges out of `caller` (`None` = the top-level statements), in source order.
     pub fn edges_from(&self, caller: Option<usize>) -> impl Iterator<Item = &CallEdge> {
         self.edges.iter().filter(move |e| e.caller == caller)
+    }
+
+    /// The function a cursor at `offset` (in `source`) addresses, the way an editor means it:
+    /// the declared **name** it sits on, else the call/reference **site** it sits on (resolving to
+    /// the callee — hierarchy-from-a-call-site), else the tightest **declaration** containing it
+    /// (hierarchy-from-inside-the-body; methods nest inside their type's decl, so tightest wins).
+    pub fn function_at(&self, offset: u32, source: SourceId) -> Option<usize> {
+        let on = |span: Span| span.source == source && span.start <= offset && offset <= span.end;
+        if let Some(i) = self.functions.iter().position(|f| on(f.name_span)) {
+            return Some(i);
+        }
+        if let Some(i) = self
+            .edges
+            .iter()
+            .filter(|e| on(e.site))
+            .find_map(|e| match e.callee {
+                Callee::Function(i) => Some(i),
+                _ => None, // an external/dynamic site addresses no graph node — fall to enclosing
+            })
+        {
+            return Some(i);
+        }
+        self.functions
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| on(f.decl_span))
+            .min_by_key(|(_, f)| f.decl_span.end - f.decl_span.start)
+            .map(|(i, _)| i)
     }
 }
 

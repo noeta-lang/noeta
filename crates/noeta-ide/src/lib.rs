@@ -16,8 +16,11 @@
 //! program (see [`resolve`]); **find-references** and **rename** over the same occurrence index;
 //! **document symbols** (see [`symbols`]); **signature help** (see [`signature`]); **semantic
 //! tokens** (see [`semtokens`]); **completion** — member, bare-dot, type-position, and identifier
-//! forms (see [`completion`]); **inlay type hints** (see [`inlay`]); and **formatting** over the
-//! shared `noeta fmt` engine. Positions convert encoding-aware (see [`offsets`]).
+//! forms (see [`completion`]); **inlay type hints** (see [`inlay`]); **formatting** over the
+//! shared `noeta fmt` engine; and the **call hierarchy** (see [`callgraph`]; ide-ui U0) — cursor →
+//! function, incoming/outgoing call groups with `@role` bindings on every item, the same
+//! graph+reflection join the MCP `trace` tool serves. Positions convert encoding-aware (see
+//! [`offsets`]).
 //!
 //! The engine speaks its own positional types ([`Position`], [`Range`], [`TextEdit`], …) —
 //! field-compatible with their LSP counterparts but owned here, so `noeta lsp` (JSON-RPC) and
@@ -52,6 +55,30 @@ pub use symbols::{DocumentSymbol, SymbolKind};
 pub struct TextEdit {
     pub range: Range,
     pub new_text: String,
+}
+
+/// A function in the call hierarchy (ide-ui U0): its name (`Type.method` for methods), the `@role`
+/// bindings it bears (`Enum.Variant`, from the merged program's reflection index — the item
+/// detail), and where it lives. Field-compatible with the LSP `CallHierarchyItem` essentials.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HierarchyItem {
+    pub name: String,
+    pub roles: Vec<String>,
+    pub uri: String,
+    /// The whole declaration.
+    pub range: Range,
+    /// The declared name (where the editor puts the cursor on jump).
+    pub selection_range: Range,
+}
+
+/// One call-hierarchy answer: the function at the other end, plus every use site — each flagged
+/// syntactic call (`true`) vs reference (`false`: the function passed as a value — a callback or
+/// handler registration, still part of the flow). Site ranges are in the **caller's** document,
+/// whichever direction was asked (LSP `fromRanges` semantics).
+#[derive(Debug, Clone)]
+pub struct HierarchyCall {
+    pub item: HierarchyItem,
+    pub sites: Vec<(Range, bool)>,
 }
 
 /// One open document's workspace: the salsa [`Workspace`] input (its entry plus the sibling `.noe`
@@ -834,6 +861,170 @@ impl DocumentStore {
                 .map(|node| to_document_symbol(&index, node, encoding))
                 .collect(),
         )
+    }
+
+    /// The function the cursor addresses, as a call-hierarchy item (ide-ui U0): its declared name,
+    /// the `@role` bindings it bears, and its location. The cursor may be on the function's name,
+    /// on a call/reference site (resolving to the callee), or anywhere inside the declaration.
+    /// `None` if the document is unknown or the cursor addresses no function.
+    pub fn function_at(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<HierarchyItem> {
+        let cache = self.workspaces.get(uri)?;
+        let offset = LineIndex::new(cache.entry().text(&self.db)).offset(position, encoding);
+        let (graph, roles) = self.call_graph(cache);
+        let idx = graph.function_at(offset, SourceId::FIRST)?;
+        self.hierarchy_item(cache, &graph, &roles, idx, encoding)
+    }
+
+    /// The calls **out of** the function at `position`, grouped by callee, each group carrying its
+    /// sites in the caller's document. Callees the static graph cannot place in source — external
+    /// module calls, dynamic closure calls — are omitted here (a hierarchy item needs a real
+    /// location); the trace document renders them as labeled leaves instead (ide-ui U2).
+    pub fn outgoing_calls(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<Vec<HierarchyCall>> {
+        let cache = self.workspaces.get(uri)?;
+        let offset = LineIndex::new(cache.entry().text(&self.db)).offset(position, encoding);
+        let (graph, roles) = self.call_graph(cache);
+        let caller = graph.function_at(offset, SourceId::FIRST)?;
+
+        // Group the caller's edges by callee, first-site order (edges are already source-ordered).
+        let mut groups: Vec<(usize, Vec<(Range, bool)>)> = Vec::new();
+        for edge in graph.edges_from(Some(caller)) {
+            let callgraph::Callee::Function(target) = edge.callee else {
+                continue;
+            };
+            let Some((_, site)) = self.locate(cache, edge.site, encoding) else {
+                continue;
+            };
+            match groups.iter_mut().find(|(t, _)| *t == target) {
+                Some((_, sites)) => sites.push((site, edge.call)),
+                None => groups.push((target, vec![(site, edge.call)])),
+            }
+        }
+        Some(
+            groups
+                .into_iter()
+                .filter_map(|(target, sites)| {
+                    let item = self.hierarchy_item(cache, &graph, &roles, target, encoding)?;
+                    Some(HierarchyCall { item, sites })
+                })
+                .collect(),
+        )
+    }
+
+    /// The calls **into** the function at `position`, grouped by caller, each group's sites in that
+    /// caller's document. A use from the program's top-level statements (Noeta's entry — there is
+    /// no `main`) is a real caller: it appears as a synthetic `(top level)` item located at its
+    /// first site, so the editor can still jump to it.
+    pub fn incoming_calls(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<Vec<HierarchyCall>> {
+        let cache = self.workspaces.get(uri)?;
+        let offset = LineIndex::new(cache.entry().text(&self.db)).offset(position, encoding);
+        let (graph, roles) = self.call_graph(cache);
+        let target = graph.function_at(offset, SourceId::FIRST)?;
+
+        // One group per caller: `(caller, flagged sites, the sites' URI — the caller's document)`.
+        type CallerGroup = (Option<usize>, Vec<(Range, bool)>, String);
+        let mut groups: Vec<CallerGroup> = Vec::new();
+        for edge in &graph.edges {
+            if edge.callee != callgraph::Callee::Function(target) {
+                continue;
+            }
+            let Some((site_uri, site)) = self.locate(cache, edge.site, encoding) else {
+                continue;
+            };
+            match groups.iter_mut().find(|(c, _, _)| *c == edge.caller) {
+                Some((_, sites, _)) => sites.push((site, edge.call)),
+                None => groups.push((edge.caller, vec![(site, edge.call)], site_uri)),
+            }
+        }
+        Some(
+            groups
+                .into_iter()
+                .filter_map(|(caller, sites, site_uri)| {
+                    let item = match caller {
+                        Some(idx) => self.hierarchy_item(cache, &graph, &roles, idx, encoding)?,
+                        None => HierarchyItem {
+                            name: "(top level)".to_string(),
+                            roles: Vec::new(),
+                            uri: site_uri,
+                            range: sites[0].0,
+                            selection_range: sites[0].0,
+                        },
+                    };
+                    Some(HierarchyCall { item, sites })
+                })
+                .collect(),
+        )
+    }
+
+    /// The call-graph context of `uri`'s workspace: the static graph over the merged program plus
+    /// the role index (declaration name → its `Enum.Variant` bindings) — the same
+    /// [`callgraph`]+[`reflect`](noeta_ast::reflect) join the MCP `trace` tool serves, so editor
+    /// and agent read one engine. An unlinkable workspace degrades to the entry's own AST (the
+    /// within-file graph keeps working while a sibling is broken).
+    fn call_graph(
+        &self,
+        cache: &WorkspaceCache,
+    ) -> (callgraph::CallGraph, HashMap<String, Vec<String>>) {
+        let db = &self.db;
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, cache.entry());
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        let ide = noeta_db::linked_checked_ide(db, cache.workspace);
+        // Texts by SourceId index: entry + siblings, then dependency modules (ids continue past).
+        let texts: Vec<&str> = cache
+            .programs
+            .iter()
+            .chain(&cache.dep_programs)
+            .map(|p| p.text(db).as_str())
+            .collect();
+        let graph = callgraph::build(program, &ide.expr_types, &texts);
+        let mut roles: HashMap<String, Vec<String>> = HashMap::new();
+        for r in &noeta_ast::reflect::build(program).roles {
+            roles
+                .entry(r.target.clone())
+                .or_default()
+                .push(format!("{}.{}", r.enum_name, r.variant));
+        }
+        (graph, roles)
+    }
+
+    /// Resolve graph function `idx` to a located [`HierarchyItem`] (roles joined by declaration
+    /// name). `None` if its spans map to no known file.
+    fn hierarchy_item(
+        &self,
+        cache: &WorkspaceCache,
+        graph: &callgraph::CallGraph,
+        roles: &HashMap<String, Vec<String>>,
+        idx: usize,
+        encoding: Encoding,
+    ) -> Option<HierarchyItem> {
+        let f = &graph.functions[idx];
+        let (uri, selection_range) = self.locate(cache, f.name_span, encoding)?;
+        let (_, range) = self.locate(cache, f.decl_span, encoding)?;
+        Some(HierarchyItem {
+            name: f.name.clone(),
+            roles: roles.get(&f.name).cloned().unwrap_or_default(),
+            uri,
+            range,
+            selection_range,
+        })
     }
 
     /// Map a definition `span` (whose [`SourceId`] names the file it belongs to) to the `(URI,
@@ -2534,5 +2725,180 @@ mod tests {
         // Fix it — salsa re-runs the check on the mutated input and the error is gone.
         store.change("file:///f.noe", "count: int = 7".to_string());
         assert!(store.diagnostics("file:///f.noe").unwrap().0.is_empty());
+    }
+
+    /// An entry point calling through a helper into a persistence boundary, plus an external
+    /// module call — the same shape the MCP `trace` fixtures use (ide-ui U0).
+    const HIER_SRC: &str = "\
+@attribute
+@role(Semantic.EntryPoint)
+struct Route { path: string }
+
+@attribute
+@role(Semantic.Persistence)
+struct Store { table: string }
+
+use std.{math}
+
+#[Route(\"/orders\")]
+fn handle(n: int): int {
+  v = validate(n)
+  return save(v)
+}
+
+fn validate(n: int): int {
+  s = math.sqrt(4.0)
+  echo s
+  return n + 1
+}
+
+#[Store(\"orders\")]
+fn save(n: int): int {
+  echo n
+  return n
+}
+
+echo handle(1)
+";
+
+    fn hier_store() -> DocumentStore {
+        let mut store = DocumentStore::default();
+        store.open("file:///hier.noe", HIER_SRC.to_string());
+        store
+    }
+
+    #[test]
+    fn function_at_resolves_name_body_and_call_site() {
+        let store = hier_store();
+        let uri = "file:///hier.noe";
+        // On the declared name `handle` (line 11: `fn handle(n: int): int {`).
+        let on_name = store
+            .function_at(uri, Position::new(11, 5), Encoding::Utf16)
+            .expect("cursor on a fn name");
+        assert_eq!(on_name.name, "handle");
+        assert_eq!(on_name.roles, vec!["Semantic.EntryPoint"]);
+        assert_eq!(on_name.selection_range.start.line, 11);
+        assert!(on_name.range.end.line >= 14, "range covers the whole decl");
+        // Inside a body (line 18: `echo s` in validate) → the enclosing function.
+        let in_body = store
+            .function_at(uri, Position::new(18, 3), Encoding::Utf16)
+            .expect("cursor inside a body");
+        assert_eq!(in_body.name, "validate");
+        assert!(in_body.roles.is_empty());
+        // On a call site (line 12: `v = validate(n)`) → the callee.
+        let on_site = store
+            .function_at(uri, Position::new(12, 8), Encoding::Utf16)
+            .expect("cursor on a call site");
+        assert_eq!(on_site.name, "validate");
+    }
+
+    #[test]
+    fn outgoing_calls_group_by_callee_and_omit_externals() {
+        let store = hier_store();
+        let calls = store
+            .outgoing_calls("file:///hier.noe", Position::new(11, 5), Encoding::Utf16)
+            .expect("handle resolves");
+        let names: Vec<&str> = calls.iter().map(|c| c.item.name.as_str()).collect();
+        assert_eq!(names, vec!["validate", "save"], "source order, grouped");
+        // Both are syntactic calls, sites in handle's body.
+        let save = &calls[1];
+        assert_eq!(save.item.roles, vec!["Semantic.Persistence"]);
+        assert_eq!(save.sites.len(), 1);
+        assert!(save.sites[0].1, "syntactic call");
+        assert_eq!(save.sites[0].0.start.line, 13);
+        // validate's own outgoing has only the external math call → no located callee at all.
+        let from_validate = store
+            .outgoing_calls("file:///hier.noe", Position::new(16, 5), Encoding::Utf16)
+            .expect("validate resolves");
+        assert!(
+            from_validate.is_empty(),
+            "external module calls are omitted from the hierarchy: {from_validate:?}"
+        );
+    }
+
+    #[test]
+    fn incoming_calls_include_the_top_level_entry() {
+        let store = hier_store();
+        // validate is called by handle.
+        let into_validate = store
+            .incoming_calls("file:///hier.noe", Position::new(16, 5), Encoding::Utf16)
+            .expect("validate resolves");
+        assert_eq!(into_validate.len(), 1);
+        assert_eq!(into_validate[0].item.name, "handle");
+        assert_eq!(into_validate[0].item.roles, vec!["Semantic.EntryPoint"]);
+        assert_eq!(into_validate[0].sites[0].0.start.line, 12);
+        // handle is called from the program's top-level statements (Noeta's entry, no `main`).
+        let into_handle = store
+            .incoming_calls("file:///hier.noe", Position::new(11, 5), Encoding::Utf16)
+            .expect("handle resolves");
+        assert_eq!(into_handle.len(), 1);
+        assert_eq!(into_handle[0].item.name, "(top level)");
+        assert_eq!(into_handle[0].sites[0].0.start.line, 28); // `echo handle(1)`
+    }
+
+    #[test]
+    fn passing_a_function_shows_as_a_reference_site() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///cb.noe",
+            "fn cb(n: int): int { return n }\nfn run(f: (int) -> int): int { return f(1) }\necho run(cb)\n"
+                .to_string(),
+        );
+        let into_cb = store
+            .incoming_calls("file:///cb.noe", Position::new(0, 4), Encoding::Utf16)
+            .expect("cb resolves");
+        assert_eq!(into_cb.len(), 1);
+        assert_eq!(into_cb[0].item.name, "(top level)");
+        assert!(!into_cb[0].sites[0].1, "passed as a value, not called");
+    }
+
+    #[test]
+    fn call_hierarchy_crosses_module_boundaries() {
+        let dir = temp_workspace(
+            "hierarchy_cross",
+            &[(
+                "util.noe",
+                "namespace App.Util;\npub fn helper(): int { return 1 }\n",
+            )],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let mut store = DocumentStore::default();
+        store.open(
+            &entry_uri,
+            "use App.Util.helper;\nfn work(): int { return helper() }\necho work()\n".to_string(),
+        );
+        let calls = store
+            .outgoing_calls(&entry_uri, Position::new(1, 4), Encoding::Utf16)
+            .expect("work resolves");
+        assert_eq!(calls.len(), 1, "calls: {calls:?}");
+        assert_eq!(calls[0].item.name, "App.Util.helper");
+        // The callee item locates in the sibling file; the site stays in the entry.
+        assert!(
+            calls[0].item.uri.ends_with("util.noe"),
+            "{}",
+            calls[0].item.uri
+        );
+        assert_eq!(calls[0].sites[0].0.start.line, 1);
+    }
+
+    #[test]
+    fn call_hierarchy_for_unknown_document_is_none() {
+        let store = DocumentStore::default();
+        let pos = Position::new(0, 0);
+        assert!(
+            store
+                .function_at("file:///nope.noe", pos, Encoding::Utf8)
+                .is_none()
+        );
+        assert!(
+            store
+                .outgoing_calls("file:///nope.noe", pos, Encoding::Utf8)
+                .is_none()
+        );
+        assert!(
+            store
+                .incoming_calls("file:///nope.noe", pos, Encoding::Utf8)
+                .is_none()
+        );
     }
 }
