@@ -93,9 +93,18 @@ and `mcp` alike.
 
 **Introspect** — the compiler's artifacts:
 - `ast` / `bytecode` / `pipeline` / `module_graph` — the syntax tree, the VM disassembly, a
-  per-stage health summary, and the `use` import graph.
+  per-stage health summary, and the `use` import graph (each module labeled with the `@role`
+  bindings it declares).
 - `reflect` — the [attributes & `@role` reflection manifest](Attributes-and-Reflection): which
-  declarations are entry points, trust boundaries, persistence boundaries, sinks, or layers.
+  declarations are entry points, trust boundaries, persistence boundaries, sinks, or layers —
+  each with its source location, joinable with every other tool. The `symbols` outline carries
+  the same roles per node, so the architecture shows on the map itself.
+- `trace` — unfold the **static call path from a role**: `trace(from: "EntryPoint")` starts at
+  every function bearing the role and walks the call graph — each node a function with its own
+  roles, declaration and call sites; external module calls and dynamic callees are labeled
+  leaves, and passed-function references (handler registrations, callbacks) are followed as
+  `reference` edges. The `boundaries` summary answers the architectural question directly: which
+  persistence/trust boundaries does this entry point reach.
 
 **Execute** — run and observe, not just read:
 - `run` / `eval` / `test` — run a program (stdout/exit/traceback), evaluate an expression

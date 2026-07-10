@@ -5,7 +5,7 @@
 //! `reflect::build` and `Module::disassemble` the runtime and `noeta dump` use, so an agent sees
 //! ground truth, not a re-derivation.
 
-use crate::analyze::{self, Prepared};
+use crate::analyze::{self, Prepared, SpanLoc};
 use noeta_ast::{Pretty, Program, Stmt};
 use rmcp::schemars;
 use serde::Serialize;
@@ -117,7 +117,8 @@ pub struct ModuleGraphOutput {
     pub modules: Vec<ModuleNode>,
 }
 
-/// One file's node: its declared namespace (its module identity) and its imports.
+/// One file's node: its declared namespace (its module identity), its imports, and the
+/// architectural roles its declarations bear.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ModuleNode {
     /// The file's source name (path or `<inline>`).
@@ -126,6 +127,16 @@ pub struct ModuleNode {
     pub namespace: String,
     /// The modules this file imports, one per `use`.
     pub imports: Vec<ImportEdge>,
+    /// The `@role` bindings declared in this file (`target` + `Enum.Variant`) — the architectural
+    /// labels on the import graph itself, attributed by each role target's source span.
+    pub roles: Vec<ModuleRole>,
+}
+
+/// One role binding summarized on a module node.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ModuleRole {
+    pub target: String,
+    pub role: String,
 }
 
 /// One `use A.B.{x, y};` edge: the imported module path and the names it brings in.
@@ -138,10 +149,27 @@ pub struct ImportEdge {
 }
 
 pub fn module_graph(p: &Prepared) -> ModuleGraphOutput {
+    // The role index over the merged program (a role conferred by an attribute declared in another
+    // file still lands), attributed to files via each target's source span.
+    let linked = noeta_db::linked(&p.db, p.ws);
+    let mut roles_by_source: std::collections::HashMap<u32, Vec<ModuleRole>> =
+        std::collections::HashMap::new();
+    if let Ok(program) = &linked.0 {
+        for r in &noeta_ast::reflect::build(program).roles {
+            roles_by_source
+                .entry(r.target_span.source.0)
+                .or_default()
+                .push(ModuleRole {
+                    target: r.target.clone(),
+                    role: format!("{}.{}", r.enum_name, r.variant),
+                });
+        }
+    }
     let modules = p
         .sources
         .iter()
-        .map(|src| {
+        .enumerate()
+        .map(|(source_idx, src)| {
             let sp = noeta_db::source_program(&p.db, src);
             let parsed = noeta_db::ast(&p.db, sp);
             let mut namespace = String::new();
@@ -160,6 +188,10 @@ pub fn module_graph(p: &Prepared) -> ModuleGraphOutput {
                 file: src.name().to_string(),
                 namespace,
                 imports,
+                roles: roles_by_source
+                    .get(&(source_idx as u32))
+                    .cloned()
+                    .unwrap_or_default(),
             }
         })
         .collect();
@@ -188,6 +220,10 @@ pub struct RoleEntry {
     pub target: String,
     /// The role as `Enum.Variant`, e.g. `Semantic.EntryPoint`.
     pub role: String,
+    /// The file the annotated declaration lives in.
+    pub file: Option<String>,
+    /// The declaration name's source location — joinable with `symbols`/`definition` output.
+    pub location: Option<SpanLoc>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -198,6 +234,10 @@ pub struct AttributeEntry {
     pub name: String,
     /// The number of literal arguments the attribute carries.
     pub arg_count: usize,
+    /// The file the annotated declaration lives in.
+    pub file: Option<String>,
+    /// The declaration name's source location.
+    pub location: Option<SpanLoc>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -234,19 +274,29 @@ pub fn reflect(p: &Prepared, role: Option<&str>) -> ReflectOutput {
                     || format!("{}.{}", r.enum_name, r.variant).to_ascii_lowercase() == *w
             }
         })
-        .map(|r| RoleEntry {
-            target: r.target.clone(),
-            role: format!("{}.{}", r.enum_name, r.variant),
+        .map(|r| {
+            let at = analyze::locate_span(p, r.target_span);
+            RoleEntry {
+                target: r.target.clone(),
+                role: format!("{}.{}", r.enum_name, r.variant),
+                file: at.as_ref().map(|(file, _)| file.clone()),
+                location: at.map(|(_, loc)| loc),
+            }
         })
         .collect();
 
     let attributes = info
         .manifest
         .iter()
-        .map(|a| AttributeEntry {
-            target: a.target.clone(),
-            name: a.name.clone(),
-            arg_count: a.args.len(),
+        .map(|a| {
+            let at = analyze::locate_span(p, a.target_span);
+            AttributeEntry {
+                target: a.target.clone(),
+                name: a.name.clone(),
+                arg_count: a.args.len(),
+                file: at.as_ref().map(|(file, _)| file.clone()),
+                location: at.map(|(_, loc)| loc),
+            }
         })
         .collect();
 
@@ -360,6 +410,21 @@ enum Color { Red; Green }
             .find(|e| e.module == "App.Models")
             .unwrap();
         assert_eq!(models.names, vec!["User", "Order"]);
+        assert!(node.roles.is_empty(), "no @role bindings in this module");
+    }
+
+    #[test]
+    fn module_graph_carries_role_summaries() {
+        let p = prep(); // the shared fixture: `handle` bears `#[Route]` → `Semantic.EntryPoint`
+        let out = module_graph(&p);
+        let node = &out.modules[0];
+        assert!(
+            node.roles
+                .iter()
+                .any(|r| r.target == "handle" && r.role == "Semantic.EntryPoint"),
+            "roles: {:?}",
+            node.roles
+        );
     }
 
     #[test]
@@ -369,6 +434,10 @@ enum Color { Red; Green }
         assert_eq!(out.roles.len(), 1);
         assert_eq!(out.roles[0].target, "handle");
         assert_eq!(out.roles[0].role, "Semantic.EntryPoint");
+        // The role is locatable: the target's name span resolves to a file + line, so an agent can
+        // join the role index with `symbols`/`definition` output.
+        assert_eq!(out.roles[0].file.as_deref(), Some("<inline>"));
+        assert!(out.roles[0].location.expect("role located").start.line >= 1);
         // The `#[Route(...)]` data attribute is in the manifest.
         assert!(
             out.attributes

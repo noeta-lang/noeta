@@ -24,6 +24,7 @@
 //! `noeta mcp` (MCP tools) are both thin adapters over this one implementation and can never
 //! drift.
 
+pub mod callgraph;
 pub mod completion;
 pub mod inlay;
 pub mod offsets;

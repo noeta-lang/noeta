@@ -773,9 +773,7 @@ impl Pretty for Expr {
                 out.push(')');
             }
             Expr::RolesOf { ty, span: s } => match ty {
-                Some(ty) => {
-                    out.push_str(&format!("(roles_of {} {})", type_ref_str(ty), span(*s)))
-                }
+                Some(ty) => out.push_str(&format!("(roles_of {} {})", type_ref_str(ty), span(*s))),
                 None => out.push_str(&format!("(roles_of {})", span(*s))),
             },
             Expr::TypedModuleCall {

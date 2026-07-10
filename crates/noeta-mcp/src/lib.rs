@@ -21,6 +21,7 @@ mod format;
 mod introspect;
 mod navigate;
 mod stdlib;
+mod trace;
 mod understand;
 
 use noeta_diagnostics::{DiagnosticCode, JsonDiagnostic, to_json};
@@ -60,8 +61,10 @@ real programs that trigger and fix it.
 the editor uses: where a symbol is declared (cross-file), every place it is used, what completes \
 at a position, and the signature of the call under a position.
 - `ast` / `bytecode` / `pipeline` / `module_graph` / `reflect` — inspect the compiler's artifacts: \
-the syntax tree, the VM disassembly, a per-stage health summary, the `use` import graph, and the \
-`@role` architectural graph.
+the syntax tree, the VM disassembly, a per-stage health summary, the `use` import graph (with \
+per-module role summaries), and the `@role` architectural graph (with source locations).
+- `trace` — unfold the static call path from a `@role` or function: `trace(from: \"EntryPoint\")` \
+shows the full flow a request takes and every role boundary it crosses.
 - `run` / `eval` / `test` — actually execute code: run a program (stdout/exit/traceback), evaluate \
 an expression (value + type), or run its `@test` blocks. Sandboxed and deterministic by default \
 (pass `real: true` for the real host); every run is bounded by liveness limits.
@@ -296,6 +299,23 @@ pub struct DebugEvalArgs {
     /// Which stack frame's scope to evaluate in (index from the reported frames, innermost = 0).
     #[serde(default)]
     pub frame: Option<usize>,
+}
+
+/// Arguments to `trace`: a source, a starting role or function, and a depth.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TraceArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Where to start: a role (`EntryPoint` or `Semantic.EntryPoint` — traces from every function
+    /// bearing it) or a function name (`handle`, `Counter.bump`). Omitted: every role-bearing
+    /// function.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// How many call levels to unfold (default 6, max 16).
+    #[serde(default)]
+    pub max_depth: Option<usize>,
 }
 
 /// Arguments to `reflect`: a source, plus an optional architectural-role filter.
@@ -660,6 +680,28 @@ Noeta program."
     ) -> Result<Json<introspect::ModuleGraphOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
         Ok(Json(introspect::module_graph(&prepared)))
+    }
+
+    /// Unfold the static call path from a role or function.
+    #[tool(
+        description = "Trace the full static path a request takes through Noeta code: start from \
+a `@role` (e.g. `EntryPoint` — traces every function bearing it) or a function name, and unfold \
+the call graph — each node a function with its own roles, declaration site, and call site; \
+external module calls (`http.response`, `fs.read`) and dynamic callees are labeled leaves. The \
+`boundaries` summary lists every (function, role) the flow reaches — which persistence/trust \
+boundaries an entry point crosses. Follows passed-function references (handler registrations, \
+callbacks) as `reference` edges."
+    )]
+    async fn trace(
+        &self,
+        Parameters(args): Parameters<TraceArgs>,
+    ) -> Result<Json<trace::TraceOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(trace::trace(
+            &prepared,
+            args.from.as_deref(),
+            args.max_depth,
+        )))
     }
 
     /// The `@role`/`@semantic` architectural graph plus the attribute manifest and declared types.
@@ -1459,6 +1501,62 @@ mod tests {
         let stopped = client.call_tool(params).await.expect("debug_stop");
         let stopped = stopped.structured_content.expect("structured content");
         assert_eq!(stopped["state"], serde_json::json!("exited"));
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+
+    /// R3 slice gate: `trace` is advertised and a role-driven trace round-trips over a duplex.
+    #[tokio::test]
+    async fn round_trip_trace_over_a_duplex() {
+        use rmcp::model::CallToolRequestParams;
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+
+        let client = ().serve(client_io).await.expect("client initializes");
+        let tools = client
+            .list_tools(Default::default())
+            .await
+            .expect("tools/list");
+        assert!(tools.tools.iter().any(|t| t.name == "trace"));
+
+        let source = "\
+@attribute
+@role(Semantic.EntryPoint)
+struct Route { path: string }
+
+#[Route(\"/x\")]
+fn handle(n: int): int { return helper(n) }
+
+fn helper(n: int): int { return n + 1 }
+
+echo handle(1)
+";
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "source".to_string(),
+            serde_json::Value::String(source.to_string()),
+        );
+        arguments.insert(
+            "from".to_string(),
+            serde_json::Value::String("EntryPoint".to_string()),
+        );
+        let mut params = CallToolRequestParams::default();
+        params.name = "trace".into();
+        params.arguments = Some(arguments);
+        let result = client.call_tool(params).await.expect("tools/call trace");
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["found"], serde_json::json!(true));
+        assert_eq!(structured["traces"][0]["name"], serde_json::json!("handle"));
+        assert_eq!(
+            structured["traces"][0]["children"][0]["name"],
+            serde_json::json!("helper")
+        );
 
         client.cancel().await.expect("client shuts down");
         server.abort();

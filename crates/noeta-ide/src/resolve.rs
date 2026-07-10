@@ -288,6 +288,12 @@ impl DefUse {
             .find(|def| def.source == source && def.start <= offset && offset <= def.end)
     }
 
+    /// Every `(use span, definition span)` pair in the index — the raw material a caller-side
+    /// join reads (the call graph resolves function-name uses through it).
+    pub fn refs(&self) -> impl Iterator<Item = (Span, Span)> + '_ {
+        self.refs.iter().copied()
+    }
+
     /// Every *use* span that resolves to definition `def` — the references to the symbol. The
     /// declaration itself is not included (the caller adds it when `includeDeclaration` is set).
     /// Spans may span multiple files (a cross-module symbol).
