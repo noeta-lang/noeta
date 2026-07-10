@@ -4766,6 +4766,9 @@ pub(crate) fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp:
     match (left, right) {
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
         (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
+        // `false < true` — bool is checker-declared `Comparable`, so derived structural compare
+        // and `.compare()` order it. Mirrors the VM's `compare_primitive`.
+        (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
         // Extern-type values order through their contract (extern-types X1) — a total order per
         // key-capable kind; `None` for unordered kinds. Mirrors the VM's `compare_primitive`.
         (Value::Extern(a), Value::Extern(b)) => a.borrow().cmp_value(&**b.borrow()),

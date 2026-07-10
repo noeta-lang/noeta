@@ -218,6 +218,9 @@ fn arithmetic(op: BinaryOp, left: &Value, right: &Value) -> Result<Value, OpErro
 fn compare(op: BinaryOp, left: &Value, right: &Value) -> Result<Value, OpError> {
     let ordering = match (left, right) {
         (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
+        // `false < true` — the checker declares bool `Comparable` (`builtin_satisfies`), so the
+        // runtime orders it (conventionally, like Rust/Python). Mirrors the VM's `compare`.
+        (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
         _ => match (as_f64(left), as_f64(right)) {
             (Some(a), Some(b)) => a.partial_cmp(&b),
             _ => return Err(type_mismatch(op, left, right)),

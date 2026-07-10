@@ -267,6 +267,11 @@ pub fn compare_primitive(left: Value, right: Value) -> Option<Ordering> {
     if let (Some(a), Some(b)) = (left.as_string(), right.as_string()) {
         return Some(a.cmp(&b));
     }
+    // `false < true` — bool is checker-declared `Comparable` (`builtin_satisfies`), so derived
+    // structural compare and `.compare()` order it (conventionally, like Rust/Python).
+    if let (Some(a), Some(b)) = (left.as_bool(), right.as_bool()) {
+        return Some(a.cmp(&b));
+    }
     // Extern-type values order through their contract (extern-types X1): a total order per
     // key-capable kind (set canonicalization, `x.compare(y)`); `None` for unordered kinds.
     if left.is_extern() && right.is_extern() {
@@ -320,9 +325,13 @@ fn compare_field(a: Value, b: Value) -> Option<Ordering> {
 fn compare(op: BinaryOp, left: Value, right: Value) -> Result<Value, OpError> {
     let ordering = match (left.as_string(), right.as_string()) {
         (Some(a), Some(b)) => Some(a.cmp(&b)),
-        _ => match (as_f64(left), as_f64(right)) {
-            (Some(a), Some(b)) => a.partial_cmp(&b),
-            _ => return Err(type_mismatch(op, left, right)),
+        // `false < true` — bool is checker-declared `Comparable`; mirrors `compare_primitive`.
+        _ => match (left.as_bool(), right.as_bool()) {
+            (Some(a), Some(b)) => Some(a.cmp(&b)),
+            _ => match (as_f64(left), as_f64(right)) {
+                (Some(a), Some(b)) => a.partial_cmp(&b),
+                _ => return Err(type_mismatch(op, left, right)),
+            },
         },
     };
     // A `None` ordering only happens for NaN, where every comparison is false.

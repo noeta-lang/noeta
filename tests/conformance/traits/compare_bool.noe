@@ -1,0 +1,20 @@
+// `bool` orders as `false < true` (conventional): the checker has always declared bool
+// `Comparable` (`builtin_satisfies`), but the runtime lacked an ordering arm — direct `<`,
+// `.compare()`, `.sorted()`, derived structural compare, and set canonicalization all hit
+// "cannot compare". This pins the closed gap on both backends.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "Ordering.Less"
+// expect: stdout "[false, false, true]"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+@derive(Comparable)
+struct Flag { on: bool }
+
+echo false < true;
+echo true <= false;
+echo false.compare(true);
+echo [true, false, false].sorted();
+echo Flag { on: false } < Flag { on: true };
+echo Flag { on: true } < Flag { on: true };
