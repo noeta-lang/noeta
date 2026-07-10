@@ -2091,6 +2091,13 @@ impl<'m> Vm<'m> {
             .cloned()
             .map(noeta_object::intern_shape)
             .collect();
+        // P-PKEY: register each key-capable type's field names once, so a packed map key —
+        // which carries only (type name, field values) — can derive its display on demand.
+        for shape in &shapes {
+            if shape.key_capable {
+                noeta_stdlib::map_key::packed_names::register(&shape.name, shape.fields.iter());
+            }
+        }
         let mut packed_schemas: Vec<&'static noeta_object::PackedSchema> =
             Vec::with_capacity(module.packed_schemas.len());
         for def in &module.packed_schemas {

@@ -13,9 +13,10 @@ set (`Set<Cell>`). Neither has a path today:
   aborts.)
 - `#{Cell{…}}` / `xs.to_set()` reject anything but int/float/string ("single orderable type").
 
-The only workaround is string-encoding keys (`"${x},${y}"`) — which lands users on the language's
-*weakest* map path (interpolation + string hashing), when the natural design is its potentially
-*fastest*: a fixed-width packed key hashes as a few words with zero allocation.
+The only workaround is string-encoding keys (`"${x},${y}"`) — lossy, untyped, and reconstructing
+the coordinates from `keys()` means parsing strings back apart. (The plan originally also claimed
+a performance win over string keys; the S3 bench refuted that for short keys — see the bench
+outcome at the bottom.)
 
 `@packed` is the right capability marker: it already means *value type, fixed width, content
 identity, no interior aliasing* — exactly what a key must be.
@@ -104,8 +105,32 @@ Standing gates per slice: eval↔VM differential (0 divergence), leak oracle res
 `--jit-differential` (keys are heap ops — the JIT bails on them; must stay byte-identical),
 clippy + fmt, commit per green slice.
 
-## Bench target (S3)
+## Bench outcome (S3) — measured, honest: the perf claim did NOT hold
 
-The honest claim to earn: a `Map<Cell, int>` spatial-hash loop beats the `"${x},${y}"`
-string-keyed equivalent by a wide margin (no interpolation, no string hash, no allocation per
-probe), and map iteration order over packed keys is deterministic field-wise order.
+Counting-grid workload (200k iterations of `grid[c] = grid.get_or(c, 0) + 1`, release, pinned,
+per-sample-alternating min-of-13):
+
+| keys | time |
+|---|---|
+| `"${x},${y}"` string | **37.1 ms** |
+| `Map<Cell, int>` packed | 58.5 ms (~1.6× slower) |
+
+**Why the plan's premise was stale:** it assumed string keys pay "interpolation + string hash +
+allocation per probe" — but P-SSO already made short string keys **allocation-free** (≤24-byte
+inline `CompactString`, and P-VMT's single-pass interpolation), so the tiny-coordinate idiom costs
+the string path ~zero heap traffic. The packed path pays ~3 allocations per iteration: the fresh
+`Cell` object (`MakeStruct`) plus one `Vec<PackedKeyField>`+`Box` per key build (probe and set).
+Two S3 reworks already landed to get from 3.1× to 1.6×: display is **no longer carried in keys**
+(a `packed_names` registry — type name → field names, registered once per type at load/declare —
+derives display on demand; key builds format nothing), and the field walk borrows slots in place.
+
+**What packed keys deliver today:** the capability (typed spatial idiom, content identity,
+`keys()` returning real values, deterministic field-wise order) — not a speed win on short keys.
+They should win where string keys exceed SSO (nested/long keys) or where key *construction*
+dominates less.
+
+**Follow-up path if the perf matters** (not started): a zero-alloc probe adapter
+(`Equivalent<MapKey>` + a canonical hash walked directly off the object's slots — kills the
+key-build on `get_or`/`has`/index), and reuse-analysis recycling of the per-iteration key temp
+(`MakeStruct` consumed immediately). Estimated to close most of the gap; parity with SSO strings
+on 2-int keys is not guaranteed.

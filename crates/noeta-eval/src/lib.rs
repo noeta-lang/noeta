@@ -4515,7 +4515,6 @@ pub(crate) fn value_map_key(value: &Value) -> Option<noeta_stdlib::MapKey> {
         Value::Object(o) if o.def.key_capable.get() => Some(noeta_stdlib::MapKey::packed(
             o.def.name(),
             packed_key_fields(o)?,
-            value.display(),
         )),
         _ => None,
     }

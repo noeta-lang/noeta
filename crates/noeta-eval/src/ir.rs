@@ -525,6 +525,12 @@ impl Interpreter {
             for name in &self.key_capable_packed {
                 if let Some(Value::Type(def)) = self.globals.lookup(name) {
                     def.key_capable.set(true);
+                    // P-PKEY: register the field names so a packed key renders its display on
+                    // demand (idempotent; same registry the VM fills at load).
+                    noeta_stdlib::map_key::packed_names::register(
+                        name,
+                        def.fields.iter().map(|f| f.name.as_str()),
+                    );
                 }
             }
         }

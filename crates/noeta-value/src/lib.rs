@@ -2152,7 +2152,6 @@ impl Value {
         Some(noeta_stdlib::MapKey::packed(
             &shape.name,
             self.packed_key_fields()?,
-            self.display(),
         ))
     }
 
@@ -2161,26 +2160,34 @@ impl Value {
     /// by construction, so `None` here means a compiler bug, and the caller falls back to the
     /// ordinary key error rather than corrupting a map.
     fn packed_key_fields(self) -> Option<Vec<noeta_stdlib::PackedKeyField>> {
-        let slots = self.slots()?;
-        slots
-            .iter()
-            .map(|v| {
-                if let Some(b) = v.as_bool() {
-                    Some(noeta_stdlib::PackedKeyField::Bool(b))
-                } else if let Some(i) = v.as_int() {
-                    Some(noeta_stdlib::PackedKeyField::Int(i))
-                } else {
-                    let shape = v.shape()?;
-                    if !shape.key_capable {
-                        return None;
+        if !self.is_pointer() {
+            return None;
+        }
+        // Borrow the slots in place — a key build is the hot map/set path, so no Vec clone.
+        heap::with_payload(self, |p| {
+            let Payload::Object { slots, .. } = p else {
+                return None;
+            };
+            slots
+                .iter()
+                .map(|v| {
+                    if let Some(b) = v.as_bool() {
+                        Some(noeta_stdlib::PackedKeyField::Bool(b))
+                    } else if let Some(i) = v.as_int() {
+                        Some(noeta_stdlib::PackedKeyField::Int(i))
+                    } else {
+                        let shape = v.shape()?;
+                        if !shape.key_capable {
+                            return None;
+                        }
+                        Some(noeta_stdlib::PackedKeyField::Struct(
+                            shape.name.as_str().into(),
+                            v.packed_key_fields()?.into_boxed_slice(),
+                        ))
                     }
-                    Some(noeta_stdlib::PackedKeyField::Struct(
-                        shape.name.as_str().into(),
-                        v.packed_key_fields()?.into_boxed_slice(),
-                    ))
-                }
-            })
-            .collect()
+                })
+                .collect()
+        })
     }
 
     /// The object's slot values in shape order, if this is an object. Shares references.

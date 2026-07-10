@@ -3020,8 +3020,7 @@ impl Checker {
                     span: key_span,
                     ..
                 }) = key_position
-                    && let Some(ext) = self.imported_extern(key_name)
-                    && !ext.key_capable
+                    && self.named_key_capable(key_name) == Some(false)
                 {
                     let role = if name == "Map" {
                         "key a map"
@@ -3033,13 +3032,48 @@ impl Checker {
                         *key_span,
                         format!("`{key_name}` cannot {role}: it is not a key-capable type"),
                     )
-                    .help("key-capable types are immutable with a total order (e.g. `Uuid`)");
+                    .help(
+                        "key-capable types are strings, key-capable extern types (e.g. `Uuid`), \
+                         and `@packed` structs of int/bool fields",
+                    );
                 }
                 for arg in args {
                     self.check_type_ref(arg);
                 }
             }
         }
+    }
+
+    /// Check-time key-capability of a **named** type in `Map<K, _>` key / `Set<T>` element
+    /// position (P-PKEY S3): `Some(true)` for a key-capable extern or a key-capable `@packed`
+    /// struct (all fields int/`{i,u}N`/bool or nested such structs — no floats), `Some(false)`
+    /// for a known user record/enum or non-capable extern (statically certain to abort at
+    /// runtime — the divergence this closes), and `None` when the name is not a resolvable
+    /// concrete type here (a generic parameter, an unknown — other diagnostics own those) or a
+    /// primitive (`Map<int, _>` stays a runtime concern; tightening primitives is a separate
+    /// language decision).
+    fn named_key_capable(&self, key_name: &str) -> Option<bool> {
+        fn layout_key_capable(layout: &noeta_ast::reflect::PackedLayout) -> bool {
+            use noeta_ast::reflect::PackedKind;
+            layout.fields.iter().all(|f| match &f.kind {
+                PackedKind::Int | PackedKind::Bool => true,
+                PackedKind::Float | PackedKind::F32 => false,
+                PackedKind::Struct(inner) => layout_key_capable(inner),
+            })
+        }
+        if key_name == "string" {
+            return Some(true);
+        }
+        if let Some(ext) = self.imported_extern(key_name) {
+            return Some(ext.key_capable);
+        }
+        if let Some(layout) = self.packed_layout(&Type::Named(key_name.to_string(), Vec::new())) {
+            return Some(layout_key_capable(&layout));
+        }
+        if self.records.contains_key(key_name) || self.enums.contains_key(key_name) {
+            return Some(false);
+        }
+        None
     }
 
     // ----- traits: impl coherence and derive validation (M1.8) -----
@@ -4004,15 +4038,17 @@ impl Checker {
                 // A literal keyed by a non-key-capable extern type is rejected statically
                 // (extern-types X4), matching the `Map<K, _>` formation gate.
                 if let Type::Named(key_name, _) = &key_ty
-                    && let Some(ext) = self.imported_extern(key_name)
-                    && !ext.key_capable
+                    && self.named_key_capable(key_name) == Some(false)
                 {
                     self.error(
                         DiagnosticCode::TypeMismatch,
                         *span,
                         format!("`{key_name}` cannot key a map: it is not a key-capable type"),
                     )
-                    .help("key-capable types are immutable with a total order (e.g. `Uuid`)");
+                    .help(
+                        "key-capable types are strings, key-capable extern types (e.g. `Uuid`), \
+                         and `@packed` structs of int/bool fields",
+                    );
                 }
                 let ty = Type::Map(Box::new(key_ty), Box::new(val_ty));
                 self.note_construction(&ty, *span);
@@ -4319,7 +4355,9 @@ impl Checker {
                         self.error(
                             DiagnosticCode::InvalidRole,
                             *span,
-                            format!("`roles_of` requires a `@semantic` enum, but `{target}` is not one"),
+                            format!(
+                                "`roles_of` requires a `@semantic` enum, but `{target}` is not one"
+                            ),
                         )
                         .help("mark the enum `@semantic` to query its roles");
                     }

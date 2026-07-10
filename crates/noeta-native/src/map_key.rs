@@ -27,16 +27,96 @@ use crate::ExternBox;
 pub enum MapKey {
     Str(compact_str::CompactString),
     Extern(ExternBox),
-    /// A key-capable `@packed` struct's snapshot: the qualified type name, the field values in
-    /// declaration order ([`PackedKeyField`] — plain data, so the key holds no backend heap
-    /// reference and reconstructs a value for `keys()`), and the value's display form (carried
-    /// for [`MapKey::render`]/JSON — deliberately **excluded** from identity, which is
-    /// `(type_name, fields)` alone).
+    /// A key-capable `@packed` struct's snapshot: the qualified type name and the field values
+    /// in declaration order ([`PackedKeyField`] — plain data, so the key holds no backend heap
+    /// reference and reconstructs a value for `keys()`). Identity is `(type_name, fields)`;
+    /// display derives on demand through [`packed_names`] (field names register once per type at
+    /// load/declare), so building a key — the hot map/set path — formats nothing.
     Packed {
         type_name: compact_str::CompactString,
         fields: Box<[PackedKeyField]>,
-        display: compact_str::CompactString,
     },
+}
+
+/// The **field-name registry** for packed keys (P-PKEY): `type name → field names`, registered
+/// once per key-capable type by each backend as it loads/declares the type, and read only when a
+/// packed key must *render* (display, JSON) — key construction, hashing, and comparison never
+/// touch it. Process-global like the shape interner; both backends register from the same
+/// declarations, so renders agree. An unregistered type (defensive) renders positionally.
+pub mod packed_names {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    use super::PackedKeyField;
+
+    type Names = std::sync::Arc<[compact_str::CompactString]>;
+
+    fn registry() -> &'static Mutex<HashMap<compact_str::CompactString, Names>> {
+        static REGISTRY: OnceLock<Mutex<HashMap<compact_str::CompactString, Names>>> =
+            OnceLock::new();
+        REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Register `type_name`'s field names (declaration order). Idempotent; called once per
+    /// key-capable type at load (VM) / declare (eval).
+    pub fn register(type_name: &str, fields: impl Iterator<Item = impl AsRef<str>>) {
+        let mut map = registry().lock().expect("packed-name registry poisoned");
+        map.entry(compact_str::CompactString::from(type_name))
+            .or_insert_with(|| {
+                fields
+                    .map(|f| compact_str::CompactString::from(f.as_ref()))
+                    .collect()
+            });
+    }
+
+    /// The display form of a packed key — the struct's own display (`Cell {x: 3, y: 4}`), derived
+    /// from the registered names; positional (`Cell {3, 4}`) only for an unregistered type.
+    pub fn display(type_name: &str, fields: &[PackedKeyField]) -> String {
+        let names = registry()
+            .lock()
+            .expect("packed-name registry poisoned")
+            .get(type_name)
+            .cloned();
+        let mut out = String::with_capacity(16 + 12 * fields.len());
+        write_struct(&mut out, type_name, fields, names.as_deref());
+        out
+    }
+
+    fn write_struct(
+        out: &mut String,
+        type_name: &str,
+        fields: &[PackedKeyField],
+        names: Option<&[compact_str::CompactString]>,
+    ) {
+        use std::fmt::Write as _;
+        out.push_str(type_name);
+        out.push_str(" {");
+        for (i, f) in fields.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            if let Some(name) = names.and_then(|n| n.get(i)) {
+                let _ = write!(out, "{name}: ");
+            }
+            match f {
+                PackedKeyField::Int(v) => {
+                    let _ = write!(out, "{v}");
+                }
+                PackedKeyField::Bool(b) => {
+                    let _ = write!(out, "{b}");
+                }
+                PackedKeyField::Struct(nested_name, nested) => {
+                    let nested_names = registry()
+                        .lock()
+                        .expect("packed-name registry poisoned")
+                        .get(nested_name.as_str())
+                        .cloned();
+                    write_struct(out, nested_name, nested, nested_names.as_deref());
+                }
+            }
+        }
+        out.push('}');
+    }
 }
 
 /// One field of a packed key (P-PKEY), in declaration order: the erased integer word (`int` and
@@ -52,13 +132,11 @@ pub enum PackedKeyField {
 }
 
 impl MapKey {
-    /// A packed-struct key (P-PKEY) from its canonical parts: field values in declaration order
-    /// plus the value's display form (render/JSON only, not identity).
-    pub fn packed(type_name: &str, fields: Vec<PackedKeyField>, display: String) -> MapKey {
+    /// A packed-struct key (P-PKEY) from its canonical parts: field values in declaration order.
+    pub fn packed(type_name: &str, fields: Vec<PackedKeyField>) -> MapKey {
         MapKey::Packed {
             type_name: compact_str::CompactString::from(type_name),
             fields: fields.into_boxed_slice(),
-            display: compact_str::CompactString::from(display),
         }
     }
 
@@ -68,7 +146,7 @@ impl MapKey {
         match self {
             MapKey::Str(s) => format!("{s:?}"),
             MapKey::Extern(e) => e.display_string(),
-            MapKey::Packed { display, .. } => display.as_str().to_owned(),
+            MapKey::Packed { type_name, fields } => packed_names::display(type_name, fields),
         }
     }
 
@@ -78,7 +156,7 @@ impl MapKey {
         match self {
             MapKey::Str(s) => s.as_str().to_owned(),
             MapKey::Extern(e) => e.display_string(),
-            MapKey::Packed { display, .. } => display.as_str().to_owned(),
+            MapKey::Packed { type_name, fields } => packed_names::display(type_name, fields),
         }
     }
 
@@ -100,9 +178,7 @@ impl Hash for MapKey {
         match self {
             MapKey::Str(s) => s.as_str().hash(h),
             MapKey::Extern(e) => h.write_u64(e.hash_value()),
-            MapKey::Packed {
-                type_name, fields, ..
-            } => {
+            MapKey::Packed { type_name, fields } => {
                 type_name.as_str().hash(h);
                 fields.hash(h);
             }
@@ -119,12 +195,10 @@ impl PartialEq for MapKey {
                 MapKey::Packed {
                     type_name: an,
                     fields: af,
-                    ..
                 },
                 MapKey::Packed {
                     type_name: bn,
                     fields: bf,
-                    ..
                 },
             ) => an == bn && af == bf,
             _ => false,
@@ -159,12 +233,10 @@ impl Ord for MapKey {
                 MapKey::Packed {
                     type_name: an,
                     fields: af,
-                    ..
                 },
                 MapKey::Packed {
                     type_name: bn,
                     fields: bf,
-                    ..
                 },
             ) => an.cmp(bn).then_with(|| af.cmp(bf)),
             (a, b) => rank(a).cmp(&rank(b)),
@@ -221,12 +293,8 @@ impl equivalent::Equivalent<MapKey> for ExternKeyRef<'_> {
 mod tests {
     use super::*;
 
-    fn mk(ty: &str, ints: &[i64], display: &str) -> MapKey {
-        MapKey::packed(
-            ty,
-            ints.iter().map(|&v| PackedKeyField::Int(v)).collect(),
-            display.to_string(),
-        )
+    fn mk(ty: &str, ints: &[i64], _display: &str) -> MapKey {
+        MapKey::packed(ty, ints.iter().map(|&v| PackedKeyField::Int(v)).collect())
     }
 
     /// Packed-key identity is `(type_name, fields)` — display is carried but excluded; distinct
@@ -246,6 +314,9 @@ mod tests {
             "sign order"
         );
         assert!(MapKey::from("zzz") < a, "Str < Packed, fixed");
+        // Display derives through the name registry; unregistered types render positionally.
+        assert_eq!(a.render(), "Cell {3, 4}");
+        packed_names::register("Cell", ["x", "y"].iter());
         assert_eq!(a.render(), "Cell {x: 3, y: 4}");
         // Nested structs and bools take part in identity and order.
         let nested_a = MapKey::packed(
@@ -257,7 +328,6 @@ mod tests {
                 ),
                 PackedKeyField::Bool(false),
             ],
-            "Outer {…}".to_string(),
         );
         let nested_b = MapKey::packed(
             "Outer",
@@ -268,7 +338,6 @@ mod tests {
                 ),
                 PackedKeyField::Bool(true),
             ],
-            "Outer {…}".to_string(),
         );
         assert_ne!(nested_a, nested_b);
         assert!(nested_a < nested_b, "false < true");
