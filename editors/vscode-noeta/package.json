@@ -142,6 +142,11 @@
         "command": "noeta.profileFileInstrumented",
         "title": "Profile File (Instrumenting, exact counts)",
         "category": "Noeta"
+      },
+      {
+        "command": "noeta.clearProfileHeat",
+        "title": "Clear Profile Line Annotations",
+        "category": "Noeta"
       }
     ],
     "menus": {
@@ -180,6 +185,11 @@
           "type": "number",
           "default": 1000,
           "description": "Sampling rate (Hz) for Noeta: Profile File (Sampling)."
+        },
+        "noeta.profile.lineAnnotations": {
+          "type": "boolean",
+          "default": true,
+          "description": "After a sampling profile run, annotate the hot source lines with their share of samples (cleared on edit, or with Noeta: Clear Profile Line Annotations)."
         },
         "noeta.trace.server": {
           "type": "string",

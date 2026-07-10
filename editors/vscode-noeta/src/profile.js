@@ -21,6 +21,9 @@ const {
   ViewColumn,
   ProgressLocation,
   TextEditorRevealType,
+  MarkdownString,
+  ThemeColor,
+  DecorationRangeBehavior,
 } = require("vscode");
 const { spawn } = require("child_process");
 const path = require("path");
@@ -140,6 +143,17 @@ async function runProfile(mode) {
     sourceDir: path.dirname(program),
     program,
   });
+
+  // Annotate the hot lines in the source itself (best-effort — the view is the real report).
+  if (mode === "sampling" && workspace.getConfiguration("noeta").get("profile.lineAnnotations", true)) {
+    try {
+      collectHeat(JSON.parse(fs.readFileSync(artifact, "utf8")), path.dirname(program));
+      decorateVisibleEditors();
+    } catch {
+      // A malformed artifact still opens in the view, which reports the parse failure.
+    }
+  }
+
   await commands.executeCommand(
     "vscode.openWith",
     Uri.file(artifact),
@@ -183,6 +197,108 @@ async function openSource(file, line, col, meta) {
   const position = doc.lineAt(Math.min(Math.max((line ?? 1) - 1, 0), doc.lineCount - 1)).range.start.translate(0, Math.max((col ?? 1) - 1, 0));
   editor.selection = new Selection(position, position);
   editor.revealRange(new Range(position, position), TextEditorRevealType.InCenter);
+}
+
+// ---- line-heat annotations ----------------------------------------------------------------
+//
+// After a sampling run (always taken with `--lines`), the hot lines of the profiled sources get a
+// subtle after-line annotation (`▕ 12.4%`) — the profile carried into the code itself. The data
+// is per-line *self* samples, aggregated from the artifact's leaf frames. Annotations are cleared
+// per file on edit (line numbers shift, the profile is stale) and wholesale by the
+// `noeta.clearProfileHeat` command; a new run replaces them.
+
+/** Per-line self-sample heat from the last sampling run: absolute fsPath → [{line, self, pct}]. */
+const heatByFile = new Map();
+
+/** One decoration type for all heat lines; color and text vary per range. */
+const heatDecoration = window.createTextEditorDecorationType({
+  isWholeLine: true,
+  rangeBehavior: DecorationRangeBehavior.ClosedClosed,
+});
+
+/** Aggregate a speedscope artifact's leaf frames into per-file, per-line self-sample heat. */
+function collectHeat(profile, sourceDir) {
+  const frames = profile.shared?.frames ?? [];
+  const run = (profile.profiles ?? [])[0];
+  const samples = run?.samples ?? [];
+  const weights = run?.weights ?? [];
+  const total = weights.reduce((acc, w) => acc + w, 0);
+  if (total === 0) {
+    return;
+  }
+  /** @type {Map<string, Map<number, number>>} file → line → self samples */
+  const files = new Map();
+  for (let i = 0; i < samples.length; i++) {
+    const chain = samples[i];
+    const frame = chain.length > 0 ? frames[chain[chain.length - 1]] : undefined;
+    if (!frame || !frame.file || frame.line == null) {
+      continue;
+    }
+    const file = path.resolve(sourceDir, frame.file);
+    let lines = files.get(file);
+    if (!lines) {
+      lines = new Map();
+      files.set(file, lines);
+    }
+    lines.set(frame.line, (lines.get(frame.line) ?? 0) + weights[i]);
+  }
+  heatByFile.clear();
+  for (const [file, lines] of files) {
+    const rows = [...lines.entries()]
+      .map(([line, self]) => ({ line, self, pct: self / total }))
+      // Below a tenth of a percent it's sampling noise, not signal — leave the line clean.
+      .filter((row) => row.pct >= 0.001);
+    if (rows.length > 0) {
+      heatByFile.set(file, rows);
+    }
+  }
+}
+
+/** The annotation color for a line's share of all samples — hotter lines borrow warmer theme colors. */
+function heatColor(pct) {
+  if (pct >= 0.1) return new ThemeColor("editorError.foreground");
+  if (pct >= 0.02) return new ThemeColor("editorWarning.foreground");
+  return new ThemeColor("editorCodeLens.foreground");
+}
+
+/** Apply (or clear) the heat annotations on one editor from the current `heatByFile` data. */
+function decorateEditor(editor) {
+  if (editor.document.languageId !== "noeta") {
+    return;
+  }
+  const rows = heatByFile.get(editor.document.uri.fsPath);
+  if (!rows) {
+    editor.setDecorations(heatDecoration, []);
+    return;
+  }
+  const decorations = [];
+  for (const { line, self, pct } of rows) {
+    if (line - 1 >= editor.document.lineCount) {
+      continue;
+    }
+    const range = editor.document.lineAt(line - 1).range;
+    const hover = new MarkdownString(
+      `**${(pct * 100).toFixed(1)}%** of samples (${self.toLocaleString()}) on this line — \`noeta profile\``,
+    );
+    decorations.push({
+      range,
+      hoverMessage: hover,
+      renderOptions: {
+        after: {
+          contentText: `▕ ${(pct * 100).toFixed(1)}%`,
+          color: heatColor(pct),
+          margin: "0 0 0 3em",
+        },
+      },
+    });
+  }
+  editor.setDecorations(heatDecoration, decorations);
+}
+
+function decorateVisibleEditors() {
+  for (const editor of window.visibleTextEditors) {
+    decorateEditor(editor);
+  }
 }
 
 /** A little HTML-attribute-safe nonce for the webview's CSP. */
@@ -263,14 +379,31 @@ class ProfileViewProvider {
   }
 }
 
-/** Wire the profiler UI: the two run commands and the profile custom editor. */
+/** Wire the profiler UI: the run commands, the profile custom editor, and the line annotations. */
 function registerProfiling(context) {
   context.subscriptions.push(
     commands.registerCommand("noeta.profileFile", () => runProfile("sampling")),
     commands.registerCommand("noeta.profileFileInstrumented", () => runProfile("instrument")),
+    commands.registerCommand("noeta.clearProfileHeat", () => {
+      heatByFile.clear();
+      decorateVisibleEditors();
+    }),
     window.registerCustomEditorProvider("noeta.profileView", new ProfileViewProvider(context), {
       webviewOptions: { retainContextWhenHidden: true },
       supportsMultipleEditorsPerDocument: false,
+    }),
+    heatDecoration,
+    // Newly-revealed editors pick up the current heat data.
+    window.onDidChangeVisibleTextEditors(() => decorateVisibleEditors()),
+    // An edit shifts line numbers, so that file's annotations are stale: drop them.
+    workspace.onDidChangeTextDocument((event) => {
+      if (heatByFile.delete(event.document.uri.fsPath)) {
+        for (const editor of window.visibleTextEditors) {
+          if (editor.document === event.document) {
+            decorateEditor(editor);
+          }
+        }
+      }
     }),
   );
 }
