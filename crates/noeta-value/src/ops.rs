@@ -285,11 +285,15 @@ pub fn compare_primitive(left: Value, right: Value) -> Option<Ordering> {
     num(left)?.partial_cmp(&num(right)?)
 }
 
-/// Field-wise (declared slot order) ordering of two same-type objects, the behavior synthesized
-/// by `@derive(Comparable)`. Slots compare lexicographically via [`compare_primitive`]. Returns
-/// `None` if the operands are not two same-type objects, or any field is non-primitive (and so
-/// has no defined order) — the caller turns that into a runtime type error.
+/// Field-wise (declared slot order) ordering of two same-type objects — or two same-enum values,
+/// ordered by **variant declaration index** then payload fields — the behavior synthesized by
+/// `@derive(Comparable)`. Slots compare lexicographically via [`compare_primitive`]. Returns
+/// `None` if the operands are not two same-type objects/enums, or any field is non-primitive
+/// (and so has no defined order) — the caller turns that into a runtime type error.
 pub fn structural_compare(left: Value, right: Value) -> Option<Ordering> {
+    if left.is_enum() && right.is_enum() {
+        return enum_structural_compare(left, right);
+    }
     if !left.is_object() || !right.is_object() {
         return None;
     }
@@ -302,7 +306,7 @@ pub fn structural_compare(left: Value, right: Value) -> Option<Ordering> {
         return None;
     }
     for (a, b) in la.iter().zip(lb.iter()) {
-        match compare_field(*a, *b)? {
+        match compare_values(*a, *b)? {
             Ordering::Equal => continue,
             other => return Some(other),
         }
@@ -310,12 +314,41 @@ pub fn structural_compare(left: Value, right: Value) -> Option<Ordering> {
     Some(Ordering::Equal)
 }
 
-/// Compare one field of two structurally-compared objects: a nested object recurses (so derived
-/// `Comparable` orders objects-of-objects lexicographically all the way down), anything else
-/// goes through [`compare_primitive`]. Returns `None` for an incomparable pairing (the caller
-/// turns that into a runtime type error).
-fn compare_field(a: Value, b: Value) -> Option<Ordering> {
-    if a.is_object() && b.is_object() {
+/// Two same-enum values order by variant **declaration index** (`Low < High` as declared), then
+/// payload slots lexicographically — the enum half of derived `Comparable`. A shape without a
+/// recorded index (built outside the compiler, e.g. reflection materialization) is unordered
+/// (`None` → runtime error), never wrongly ordered.
+fn enum_structural_compare(left: Value, right: Value) -> Option<Ordering> {
+    let (sa, sb) = (left.shape()?, right.shape()?);
+    if sa.name != sb.name {
+        return None;
+    }
+    match sa.variant_index?.cmp(&sb.variant_index?) {
+        Ordering::Equal => {}
+        other => return Some(other),
+    }
+    let (la, lb) = (left.enum_data()?, right.enum_data()?);
+    if la.len() != lb.len() {
+        return None;
+    }
+    for (a, b) in la.iter().zip(lb.iter()) {
+        match compare_values(*a, *b)? {
+            Ordering::Equal => continue,
+            other => return Some(other),
+        }
+    }
+    Some(Ordering::Equal)
+}
+
+/// The **total structural ordering** of two values, where one exists: an object pair recurses
+/// field-wise (so derived `Comparable` orders objects-of-objects lexicographically all the way
+/// down), an enum pair orders by variant index then payload (how an `?int`/enum field inside a
+/// derived struct orders), anything else goes through [`compare_primitive`]. Returns `None` for
+/// an incomparable pairing (the caller turns that into a runtime type error). Also the comparator
+/// `.sorted()` uses — the checker gates `.sorted()` on `Comparable` elements, and derived
+/// `Comparable` structs/enums order exactly like this.
+pub fn compare_values(a: Value, b: Value) -> Option<Ordering> {
+    if (a.is_object() && b.is_object()) || (a.is_enum() && b.is_enum()) {
         structural_compare(a, b)
     } else {
         compare_primitive(a, b)

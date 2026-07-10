@@ -239,8 +239,16 @@ pub(crate) fn make_ordering(variant: &str) -> Value {
         "Equal" => &EQUAL,
         _ => &GREATER,
     };
+    let index = match variant {
+        "Less" => 0,
+        "Equal" => 1,
+        _ => 2,
+    };
     let shape = cell.get_or_init(|| {
-        noeta_object::intern_shape(Shape::enum_variant("Ordering", variant, Vec::new(), false))
+        noeta_object::intern_shape(
+            Shape::enum_variant("Ordering", variant, Vec::new(), false)
+                .with_variant_index(index),
+        )
     });
     Value::enum_value(shape, Vec::new())
 }
@@ -449,7 +457,12 @@ pub(crate) fn arity_message(kind: &str, required: usize, total: usize, supplied:
 pub(crate) fn make_some(value: Value) -> Value {
     static SOME: OnceLock<&'static Shape> = OnceLock::new();
     let shape = SOME.get_or_init(|| {
-        noeta_object::intern_shape(Shape::enum_variant("Option", "some", Vec::new(), true))
+        // `none < some` — the built-in Option variant order (matches the compiler's
+        // `builtin_enum_shape`; the interner dedups on identity EXCLUDING the index, so every
+        // intern site of a well-known variant must agree on it).
+        noeta_object::intern_shape(
+            Shape::enum_variant("Option", "some", Vec::new(), true).with_variant_index(1),
+        )
     });
     Value::enum_value(shape, vec![value])
 }
@@ -458,7 +471,9 @@ pub(crate) fn make_some(value: Value) -> Value {
 pub(crate) fn make_none() -> Value {
     static NONE: OnceLock<&'static Shape> = OnceLock::new();
     let shape = NONE.get_or_init(|| {
-        noeta_object::intern_shape(Shape::enum_variant("Option", "none", Vec::new(), true))
+        noeta_object::intern_shape(
+            Shape::enum_variant("Option", "none", Vec::new(), true).with_variant_index(0),
+        )
     });
     Value::enum_value(shape, Vec::new())
 }

@@ -531,6 +531,12 @@ impl Interpreter {
         let def = EnumDef {
             name: decl.name.clone(),
             variants,
+            // A hand-written `compare`/`to_json` takes precedence over derivation — the same
+            // rule `declare_ir_struct` applies.
+            derives_comparable: noeta_ast::derives_trait(&decl.derives, "Comparable")
+                && !decl.methods.iter().any(|m| m.name == "compare"),
+            derives_tojson: noeta_ast::derives_trait(&decl.derives, "Serialize")
+                && !decl.methods.iter().any(|m| m.name == "to_json"),
             methods,
         };
         self.scope

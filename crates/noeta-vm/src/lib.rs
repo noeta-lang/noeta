@@ -4470,6 +4470,18 @@ impl<'m> Vm<'m> {
                         // falls through to the built-in paths below.
                         if hk == Some(HeapKind::Enum) {
                             let type_name = v.shape().unwrap().name.clone();
+                            // `e.to_json()` on an enum that `@derive(Serialize<Json>)`s (and has no
+                            // hand-written `to_json`): the variant rendering, exactly what
+                            // `json.stringify` produces — the enum twin of the object arm above.
+                            if method == "to_json"
+                                && args.is_empty()
+                                && self.tojson_derives.contains(&type_name)
+                            {
+                                let json = Value::string(&v.to_json());
+                                set_reg(regs, fbase, *dst, json);
+                                pc += 1;
+                                continue;
+                            }
                             if let Some(&proto) = self.methods.get(&(type_name, method.to_string()))
                             {
                                 let callee_chunk = &module.protos[proto as usize];
@@ -5813,10 +5825,11 @@ impl<'m> Vm<'m> {
                             });
                             continue 'reload;
                         }
-                        // Derived structural comparison: `< <= > >=` on an object whose type
-                        // `@derive(Comparable)`s (and has no hand-written `compare`) — field-wise
-                        // ordering, computed synchronously (no method to call).
-                        if left.is_object()
+                        // Derived structural comparison: `< <= > >=` on an object or enum whose
+                        // type `@derive(Comparable)`s (and has no hand-written `compare`) —
+                        // field-wise ordering for objects, variant-declaration-index then payload
+                        // for enums, computed synchronously (no method to call).
+                        if (left.is_object() || left.is_enum())
                             && op.comparable_method().is_some()
                             && self
                                 .comparable_derives

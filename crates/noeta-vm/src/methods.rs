@@ -163,17 +163,17 @@ impl<'m> Vm<'m> {
             noeta_stdlib::ListMethod::Sorted => {
                 self.stdlib_arity(name, args, 0, span)?;
                 // Mutual orderability check against the first element (homogeneous numbers or
-                // strings); a stable sort then matches the tree-walker element-for-element.
+                // strings — or derived-`Comparable` structs/enums, which order structurally via
+                // `compare_values`); a stable sort then matches the tree-walker element-for-element.
                 if items
                     .iter()
-                    .any(|&item| compare_primitive(items[0], item).is_none())
+                    .any(|&item| noeta_value::compare_values(items[0], item).is_none())
                 {
                     let error = noeta_stdlib::unorderable_error(name);
                     return Err(self.error(stdlib_error_code(error.kind), span, error.message));
                 }
                 let mut sorted = items;
-                sorted
-                    .sort_by(|&a, &b| compare_primitive(a, b).unwrap_or(std::cmp::Ordering::Equal));
+                sorted.sort_by(|&a, &b| noeta_value::compare_values(a, b).unwrap_or(std::cmp::Ordering::Equal));
                 for &element in &sorted {
                     retain(element);
                 }

@@ -47,6 +47,13 @@ pub struct Shape {
     pub variant: Option<String>,
     /// Whether this is a built-in `Result`/`Option` enum, affecting only display.
     pub builtin_result_option: bool,
+    /// The variant's **declaration index** (enum shapes only, when known) — the primary key of
+    /// derived `Comparable` ordering on enums (variant order, then payload fields). Type metadata
+    /// like [`Shape::structural_eq`]: **excluded from equality/hashing** below, so a shape built
+    /// without declaration context (reflection materialization, tests) still matches the
+    /// compiler's interned shape. A compare reaching a `None` index is unordered (runtime error),
+    /// never wrongly ordered.
+    pub variant_index: Option<u32>,
     /// Whether `==` on this type is **structural** (field-wise) rather than **reference identity**
     /// (object-model slice 2). True for every value kind (`struct`/`enum`/opaque) and for a
     /// reference `class` that is `Equatable` (derives it or hand-`impl`s `eq`); false only for a
@@ -105,6 +112,7 @@ impl Shape {
             variant: None,
             builtin_result_option: false,
             structural_eq,
+            variant_index: None,
         }
     }
 
@@ -124,7 +132,16 @@ impl Shape {
             builtin_result_option,
             // Enums are a value kind: `==` is structural.
             structural_eq: true,
+            variant_index: None,
         }
+    }
+
+    /// [`Shape::enum_variant`] plus the variant's declaration index — what derived `Comparable`
+    /// orders by. Used where the declaration is at hand (the compiler; the built-in enums whose
+    /// order is defined: `none < some`, `Ok < Err`, `Less < Equal < Greater`).
+    pub fn with_variant_index(mut self, index: u32) -> Shape {
+        self.variant_index = Some(index);
+        self
     }
 
     /// The slot index of `field`, or `None` if this shape has no such field.
