@@ -284,8 +284,10 @@ gives an exact, timer-free base before the sampling seam builds on the same crat
 - **Differential flamegraph / A-B compare** — diff two folded profiles (before/after a change),
   the profiler-side analogue of the H-BENCH interleaved compare.
 - **Column-precise / sub-statement attribution** — start line-granular.
-- **In-editor flamegraph view** — a VS Code panel; the folded/speedscope artifacts already open in
-  external tools, so this is pure polish.
+- ~~**In-editor flamegraph view**~~ — ✅ DONE (profiler-vscode-ui): a `noeta.profileView` custom
+  editor in the VS Code extension renders `*.noeprof.json` artifacts as a theme-native flame graph +
+  function table with click-to-source (speedscope frames now carry structured `file`/`line`/`col`),
+  plus hot-line annotations in the source after a sampling run.
 
 ## Non-goals
 

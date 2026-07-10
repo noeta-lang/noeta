@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.0
+
+Adds **run/build tasks**: a `noeta` task type (`run` / `build [--native|--exe]`, authorable in
+`tasks.json`) with a TaskProvider for the active file — the native build is the default build task
+(Ctrl+Shift+B) — plus **Noeta: Run File** and **Noeta: Build Native Executable** commands in the
+editor title bar's run menu.
+
+Adds the **profiler UI** (`noeta profile`):
+
+- **Noeta: Profile File (Sampling)** and **(Instrumenting)** commands (run-button dropdown +
+  palette) profile the active `.noe` file and open the result in a new **Noeta Profile** view —
+  an interactive flame graph (zoom, breadcrumbs, hover details, double/ctrl+click to jump to
+  source) with a sortable per-function table, rendered in the editor's own theme colors
+  (light/dark/high-contrast).
+- **Hot-line annotations**: after a sampling run, profiled sources show each hot line's share of
+  samples inline; cleared on edit or with **Noeta: Clear Profile Line Annotations**
+  (`noeta.profile.lineAnnotations` to disable, `noeta.profile.hz` for the sampling rate).
+- The view is a custom editor for `*.noeprof.json` and reads the standard artifacts (speedscope
+  JSON with structured `file`/`line`/`col` frames, or the instrumenting JSON), so CLI-made
+  profiles open in it too. The profiled program's own output streams to the **Noeta Profile**
+  output channel.
+
 ## 0.5.0
 
 Registers the **`noeta mcp` server** with the editor's language-model API (VS Code 1.101+), so AI

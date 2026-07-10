@@ -236,7 +236,8 @@ enum Command {
         #[arg(long, value_name = "FMT")]
         format: Option<String>,
         /// Write the profile artifact to this file instead of stderr (recommended for `svg` /
-        /// `speedscope`). The program's own stdout is never touched.
+        /// `speedscope`), or to stdout with `-o -` (for piping; the artifact follows the
+        /// program's own forwarded output). Without `-o` the program's stdout is never touched.
         #[arg(long, short)]
         out: Option<PathBuf>,
         /// Attribute each flamegraph leaf to its **source line** (`fn:line`), not just the function —

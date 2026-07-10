@@ -90,34 +90,35 @@ fn svg(report: &Report) -> Result<String, String> {
     String::from_utf8(out).map_err(|e| format!("flamegraph SVG was not valid UTF-8: {e}"))
 }
 
-/// Build a speedscope "sampled" profile (opens at speedscope.app). Each folded stack becomes one
-/// weighted sample over a shared frame table; weights are sample counts.
+/// Build a speedscope "sampled" profile (opens at speedscope.app). The flamegraph's shared frame
+/// table maps directly onto speedscope's: each frame carries its display label as `name` plus the
+/// structured `file`/`line`/`col` (speedscope-schema fields) so a consumer — the VS Code profile
+/// view — can jump to source without parsing labels. Each folded stack becomes one weighted sample.
 fn speedscope_json(report: &Report) -> String {
     let Some(flame) = &report.flamegraph else {
         return "{}".to_string();
     };
 
-    // Intern frame labels → indices for the shared frame table.
-    let mut frame_index: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    let mut frames: Vec<serde_json::Value> = Vec::new();
-    let mut intern = |label: &str| -> usize {
-        if let Some(&i) = frame_index.get(label) {
-            return i;
-        }
-        let i = frames.len();
-        frames.push(serde_json::json!({ "name": label }));
-        frame_index.insert(label.to_string(), i);
-        i
-    };
+    let frames: Vec<serde_json::Value> = flame
+        .frames
+        .iter()
+        .map(|f| {
+            let mut frame = serde_json::json!({ "name": f.label });
+            if let Some(file) = &f.file {
+                frame["file"] = serde_json::json!(file);
+            }
+            if let Some(line) = f.line {
+                frame["line"] = serde_json::json!(line);
+            }
+            if let Some(col) = f.col {
+                frame["col"] = serde_json::json!(col);
+            }
+            frame
+        })
+        .collect();
 
-    let mut samples: Vec<Vec<usize>> = Vec::new();
-    let mut weights: Vec<u64> = Vec::new();
-    for stack in &flame.stacks {
-        let indices: Vec<usize> = stack.frames.iter().map(|f| intern(f)).collect();
-        samples.push(indices);
-        weights.push(stack.count);
-    }
+    let samples: Vec<&Vec<u32>> = flame.stacks.iter().map(|s| &s.frames).collect();
+    let weights: Vec<u64> = flame.stacks.iter().map(|s| s.count).collect();
 
     let profile = serde_json::json!({
         "$schema": "https://www.speedscope.app/file-format-schema.json",
