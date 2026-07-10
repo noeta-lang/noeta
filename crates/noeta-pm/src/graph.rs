@@ -48,6 +48,11 @@ pub struct ResolvedGraph {
     /// composed-toolchain build (N3.2) compiles in. Empty for a pure-Noeta graph, which is the
     /// signal that no composition is needed. Sorted by identity (deterministic compose key).
     pub native_crates: Vec<NativeCrate>,
+    /// The **namespace root segments** of the native packages the root app authorized to contribute
+    /// CLI commands (`[trust].commands`, package-manager Phase 4). The composer bakes these into the
+    /// shim so `run_cli` registers a dependency's `noeta <cmd>` only when its package is
+    /// command-trusted; std's own commands (root `"std"`) are always allowed. Sorted + deduped.
+    pub trusted_command_roots: Vec<String>,
 }
 
 /// A resolved package's native entry crate (Phase 3, N3.1): where the composed build finds its
@@ -114,6 +119,7 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
             packages: Vec::new(),
             locked: Vec::new(),
             native_crates: Vec::new(),
+            trusted_command_roots: Vec::new(),
         });
     };
     let manifest = read_manifest(&manifest_path)?;
@@ -140,7 +146,7 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
     walker.walk(manifest.dependencies(), &manifest_dir, &mut root_edges)?;
 
     validate_with_resolver(&walker.instances, &root_edges)?;
-    let graph = assemble(walker.instances, &root_edges);
+    let graph = assemble(walker.instances, &root_edges, &manifest.trust().commands);
 
     // Refresh the lockfile (best-effort: a read-only project must not fail a build). Skipped for a
     // manifest with no resolved dependencies, so a bare-`[profiles]` project grows no lock.
@@ -401,6 +407,7 @@ impl crate::resolve::Registry for GraphRegistry<'_> {
 fn assemble(
     instances: BTreeMap<String, Instance>,
     root_edges: &BTreeMap<String, String>,
+    trusted_commands: &std::collections::BTreeSet<String>,
 ) -> ResolvedGraph {
     // Global segment per identity. Direct dependencies keep the consumer's key (so the entry's
     // `use <key>.…` needs no rewrite); transitive-only packages get a unique synthesized segment.
@@ -424,6 +431,9 @@ fn assemble(
     let mut packages = Vec::with_capacity(instances.len());
     let mut locked = Vec::with_capacity(instances.len());
     let mut native_crates = Vec::new();
+    // A native package's commands register only if the root app command-trusts its identity; record
+    // the namespace root segment the composer/`run_cli` filters on (Phase 4).
+    let mut trusted_command_roots: Vec<String> = Vec::new();
     for (identity, inst) in &instances {
         let key = global[identity].clone();
         let dep_renames: BTreeMap<String, String> = inst
@@ -450,15 +460,22 @@ fn assemble(
                 identity: identity.clone(),
                 crate_dir: inst.dir.join(native),
             });
+            // Commands only exist inside a native package; grant its commands only if command-trusted.
+            if trusted_commands.contains(identity) {
+                trusted_command_roots.push(inst.root_segment.clone());
+            }
         }
     }
     // Sort by global segment so the loader's SourceId assignment and the startup-cache key are
     // deterministic regardless of walk order.
     packages.sort_by(|a, b| a.key.cmp(&b.key));
+    trusted_command_roots.sort();
+    trusted_command_roots.dedup();
     ResolvedGraph {
         packages,
         locked,
         native_crates,
+        trusted_command_roots,
     }
 }
 
@@ -576,6 +593,54 @@ mod tests {
         let err = resolve_graph(&entry).expect_err("must fail");
         assert!(err.contains("acme/imgfx"), "{err}");
         assert!(err.contains("Cargo.toml"), "{err}");
+    }
+
+    #[test]
+    fn command_trust_gates_which_native_roots_may_add_commands() {
+        // A native dep trusted for native but NOT for commands contributes no trusted command root;
+        // adding it to `[trust].commands` surfaces its namespace root for the composer's filter.
+        let base = std::env::temp_dir().join("noeta_graph_test_cmd_trust");
+        let make = |commands_trust: bool| -> Vec<String> {
+            let _ = std::fs::remove_dir_all(&base);
+            let app = base.join("app");
+            let dep = base.join("imgfx");
+            std::fs::create_dir_all(&app).unwrap();
+            std::fs::create_dir_all(dep.join("native")).unwrap();
+            let commands = if commands_trust {
+                "commands = [\"acme/imgfx\"]\n"
+            } else {
+                ""
+            };
+            std::fs::write(
+                app.join("noeta.toml"),
+                format!(
+                    "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+                     [dependencies]\nfx = {{ path = \"../imgfx\" }}\n\
+                     [trust]\nnative = [\"acme/imgfx\"]\n{commands}"
+                ),
+            )
+            .unwrap();
+            std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+            std::fs::write(
+                dep.join("noeta.toml"),
+                "[package]\nname = \"acme/imgfx\"\nversion = \"1.0.0\"\nnative = \"native\"\n",
+            )
+            .unwrap();
+            std::fs::write(dep.join("fx.noe"), "namespace imgfx.fx;\npub fn one(): int { return 1; }\n")
+                .unwrap();
+            std::fs::write(
+                dep.join("native").join("Cargo.toml"),
+                "[package]\nname = \"imgfx-native\"\nversion = \"1.0.0\"\n",
+            )
+            .unwrap();
+            resolve_graph(&app.join("main.noe"))
+                .expect("resolves")
+                .trusted_command_roots
+        };
+        // Native-trusted but not command-trusted → the package composes, but no command root.
+        assert!(make(false).is_empty());
+        // Command-trusted → its namespace root (`imgfx`) is surfaced for the command filter.
+        assert_eq!(make(true), vec!["imgfx".to_string()]);
     }
 
     #[test]

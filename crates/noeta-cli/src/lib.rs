@@ -320,8 +320,22 @@ enum CacheAction {
 /// anything can look them up. Everything else — every verb, the LSP, the DAP, extension
 /// commands — runs identically in both, which is the point: the composed artifact IS the
 /// toolchain, not a runner.
-pub fn run_cli(extra: &'static [&'static (dyn noeta_stdlib::Extension + Sync)]) -> ExitCode {
+pub fn run_cli(
+    extra: &'static [&'static (dyn noeta_stdlib::Extension + Sync)],
+    trusted_command_roots: &[&str],
+) -> ExitCode {
     noeta_stdlib::registry::install_with_extras(extra);
+    // Phase 4: a dependency's `ExtCommand`s reach the CLI only if the root app command-trusts its
+    // package (`[trust].commands`, whose namespace roots the composer baked in here). std's own
+    // commands (root `"std"`) are always available. The stock binary passes an empty list — it has
+    // only std units, so nothing is filtered.
+    let command_trusted =
+        |root: &str| root == "std" || trusted_command_roots.contains(&root);
+    let trusted_commands: Vec<_> = noeta_stdlib::registry::extensions()
+        .iter()
+        .filter(|ext| command_trusted(ext.root()))
+        .flat_map(|ext| ext.commands().iter())
+        .collect();
     // P-AOT L2: if this executable is a `noeta build --exe` artifact (a bundle stapled onto a copy
     // of the runtime), run the embedded program directly — the shipped app is not the toolchain, so
     // its CLI verbs are irrelevant. A plain `noeta` binary has no trailer and falls through to the
@@ -333,7 +347,7 @@ pub fn run_cli(extra: &'static [&'static (dyn noeta_stdlib::Extension + Sync)]) 
     // each registered command (so `noeta --help` lists them and each gets real clap parsing),
     // then dispatch a matched name to its extension `run` — the in-process `cargo clippy` model.
     let mut cli = <Cli as clap::CommandFactory>::command();
-    for ext in noeta_stdlib::registry::commands() {
+    for ext in &trusted_commands {
         cli = cli.subcommand(ext_command_clap(ext));
     }
     // An unknown subcommand may be a command contributed by a *native dependency* — visible only
@@ -360,7 +374,7 @@ pub fn run_cli(extra: &'static [&'static (dyn noeta_stdlib::Extension + Sync)]) 
         }
     };
     if let Some((name, sub)) = matches.subcommand()
-        && let Some(ext) = noeta_stdlib::registry::commands().find(|c| c.name == name)
+        && let Some(ext) = trusted_commands.iter().find(|c| c.name == name)
     {
         return ext_command_dispatch(ext, sub);
     }

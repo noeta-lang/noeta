@@ -5,5 +5,5 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    noeta_cli::run_cli(&[])
+    noeta_cli::run_cli(&[], &[])
 }
