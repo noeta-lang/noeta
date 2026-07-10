@@ -121,6 +121,17 @@ mod tests {
     }
 
     #[test]
+    fn canonical_bytes_are_the_fixed_cross_language_format() {
+        // This exact byte layout is what the Cloudflare Worker (`sig_message`) reproduces to verify
+        // signatures — any drift here breaks cross-language provenance. Pin it.
+        let v = Version::new(1, 0, 0);
+        assert_eq!(
+            att("signed/pkg", &v, "abc").canonical_bytes(),
+            b"noeta-attestation-v1\nsigned/pkg\n1.0.0\nabc\n"
+        );
+    }
+
+    #[test]
     fn sign_then_verify_round_trips() {
         let kp = generate_keypair().unwrap();
         let v = Version::new(1, 2, 0);
