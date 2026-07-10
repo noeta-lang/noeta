@@ -18,6 +18,7 @@ mod corpus;
 mod execute;
 mod format;
 mod introspect;
+mod navigate;
 mod stdlib;
 mod understand;
 
@@ -54,6 +55,9 @@ resolved so imports type-check). Run this before claiming any Noeta code compile
 - `explain_diagnostic` — when `check` returns an `E0xxx` code, look up what it means and see the \
 real programs that trigger and fix it.
 - `type_at` / `symbols` — the inferred type at a symbol/position, and a file's declaration outline.
+- `definition` / `references` / `completions` / `signature` — navigate code with the same engine \
+the editor uses: where a symbol is declared (cross-file), every place it is used, what completes \
+at a position, and the signature of the call under a position.
 - `ast` / `bytecode` / `pipeline` / `module_graph` / `reflect` — inspect the compiler's artifacts: \
 the syntax tree, the VM disassembly, a per-stage health summary, the `use` import graph, and the \
 `@role` architectural graph.
@@ -198,6 +202,43 @@ pub struct TypeAtArgs {
     /// 1-based, UTF-8-byte column of the site.
     #[serde(default)]
     pub column: Option<u32>,
+}
+
+/// Arguments to `definition`/`references`: a source, plus a site addressed by `symbol` name or
+/// `line`/`column` (same addressing as `type_at`).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct NavigateArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// A symbol name to locate (its first whole-word occurrence in the entry file). Preferred over a
+    /// position for an agent that has a name, not a cursor.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// 1-based line of the site (use with `column` when no `symbol` is given).
+    #[serde(default)]
+    pub line: Option<u32>,
+    /// 1-based, UTF-8-byte column of the site.
+    #[serde(default)]
+    pub column: Option<u32>,
+    /// `references` only: include the declaration among the results (default true).
+    #[serde(default)]
+    pub include_declaration: Option<bool>,
+}
+
+/// Arguments to `completions`/`signature`: a source plus a required 1-based position.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct PositionArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// 1-based line of the position.
+    pub line: u32,
+    /// 1-based, UTF-8-byte column of the position (for completions after a `.`, the column just
+    /// past the dot).
+    pub column: u32,
 }
 
 /// Arguments to `reflect`: a source, plus an optional architectural-role filter.
@@ -419,6 +460,77 @@ the tightest typed expression's type in surface syntax. Ground truth from the ty
             args.line,
             args.column,
         )))
+    }
+
+    /// Where the symbol at a site is declared — possibly in another file.
+    #[tool(
+        description = "Find where a symbol in Noeta code is declared. Address the site by `symbol` \
+(a name) or 1-based `line`+`column`. Resolves through the same engine the editor uses — \
+shadowing-correct locals, members via the receiver's type, imports into sibling modules and \
+dependency packages (pass `file` for cross-file resolution). Returns the location and its source \
+line."
+    )]
+    async fn definition(
+        &self,
+        Parameters(args): Parameters<NavigateArgs>,
+    ) -> Result<Json<navigate::DefinitionOutput>, ErrorData> {
+        let opened = navigate::open(&args.source, &args.file)?;
+        Ok(Json(navigate::definition(
+            &opened,
+            args.symbol.as_deref(),
+            args.line,
+            args.column,
+        )))
+    }
+
+    /// Every use of the symbol at a site.
+    #[tool(
+        description = "List every reference to a symbol in Noeta code — each use plus the \
+declaration (set `include_declaration: false` to drop it). Address the site by `symbol` or \
+1-based `line`+`column`. Value symbols resolve scope-aware; member symbols match by the \
+receiver's type, so a same-named member on another type is not swept in. Cross-file with `file`."
+    )]
+    async fn references(
+        &self,
+        Parameters(args): Parameters<NavigateArgs>,
+    ) -> Result<Json<navigate::ReferencesOutput>, ErrorData> {
+        let opened = navigate::open(&args.source, &args.file)?;
+        Ok(Json(navigate::references(
+            &opened,
+            args.symbol.as_deref(),
+            args.line,
+            args.column,
+            args.include_declaration.unwrap_or(true),
+        )))
+    }
+
+    /// What completes at a position.
+    #[tool(
+        description = "List completion candidates at a 1-based `line`+`column` in Noeta code — \
+the same engine the editor uses. After a `.` it offers the receiver type's fields, variants, and \
+methods (only); in a type-annotation position, type names; otherwise keywords, declarations, and \
+the bindings in scope. Useful for discovering what an object offers."
+    )]
+    async fn completions(
+        &self,
+        Parameters(args): Parameters<PositionArgs>,
+    ) -> Result<Json<navigate::CompletionsOutput>, ErrorData> {
+        let opened = navigate::open(&args.source, &args.file)?;
+        Ok(Json(navigate::completions(&opened, args.line, args.column)))
+    }
+
+    /// The signature of the call a position is inside.
+    #[tool(
+        description = "Report the signature of the function or method call surrounding a 1-based \
+`line`+`column` in Noeta code, with the active parameter. Token-based, so it works mid-edit with \
+an unclosed call; method calls resolve the receiver's type."
+    )]
+    async fn signature(
+        &self,
+        Parameters(args): Parameters<PositionArgs>,
+    ) -> Result<Json<navigate::SignatureOutput>, ErrorData> {
+        let opened = navigate::open(&args.source, &args.file)?;
+        Ok(Json(navigate::signature(&opened, args.line, args.column)))
     }
 
     /// The declaration outline of a file — functions, types, and their members.
@@ -1062,6 +1174,66 @@ mod tests {
                 .as_str()
                 .expect("stdout string")
                 .contains("from mcp")
+        );
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+
+    /// M5 slice gate: the navigation tools are advertised and `definition` resolves over a real
+    /// client⇄server duplex.
+    #[tokio::test]
+    async fn round_trip_definition_over_a_duplex() {
+        use rmcp::model::CallToolRequestParams;
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+
+        let client = ().serve(client_io).await.expect("client initializes");
+
+        let tools = client
+            .list_tools(Default::default())
+            .await
+            .expect("tools/list");
+        for expected in ["definition", "references", "completions", "signature"] {
+            assert!(
+                tools.tools.iter().any(|t| t.name == expected),
+                "{expected} tool advertised"
+            );
+        }
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "source".to_string(),
+            serde_json::Value::String("fn greet(): int { return 1 }\ntotal = greet()".to_string()),
+        );
+        arguments.insert(
+            "symbol".to_string(),
+            serde_json::Value::String("greet".to_string()),
+        );
+        let mut params = CallToolRequestParams::default();
+        params.name = "definition".into();
+        params.arguments = Some(arguments);
+        let result = client
+            .call_tool(params)
+            .await
+            .expect("tools/call definition");
+
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["found"], serde_json::json!(true));
+        assert_eq!(
+            structured["location"]["range"]["start"]["line"],
+            serde_json::json!(1)
+        );
+        assert!(
+            structured["snippet"]
+                .as_str()
+                .expect("snippet string")
+                .contains("fn greet")
         );
 
         client.cancel().await.expect("client shuts down");

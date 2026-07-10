@@ -120,11 +120,19 @@ impl<'a> LineIndex<'a> {
 /// `name` (identifier boundaries on both sides), so an agent can ask "what's the type of `total`"
 /// without computing a position. `None` if the name never appears as a standalone identifier.
 pub fn symbol_offset(text: &str, name: &str) -> Option<u32> {
+    symbol_offsets(text, name).first().copied()
+}
+
+/// Every whole-word occurrence of `name` in the entry text, in order. The navigation tools probe
+/// occurrences until one resolves (the first may be the declaration itself, which is not a "use"
+/// the resolver indexes).
+pub fn symbol_offsets(text: &str, name: &str) -> Vec<u32> {
     if name.is_empty() {
-        return None;
+        return Vec::new();
     }
     let is_ident = |c: char| c.is_alphanumeric() || c == '_';
     let bytes = text.as_bytes();
+    let mut offsets = Vec::new();
     let mut from = 0usize;
     while let Some(rel) = text[from..].find(name) {
         let at = from + rel;
@@ -132,11 +140,11 @@ pub fn symbol_offset(text: &str, name: &str) -> Option<u32> {
         let after = at + name.len();
         let after_ok = after >= bytes.len() || !is_ident(bytes[after] as char);
         if before_ok && after_ok {
-            return Some(at as u32);
+            offsets.push(at as u32);
         }
         from = at + name.len();
     }
-    None
+    offsets
 }
 
 /// The entry file's [`SourceProgram`] — the salsa input the per-file `ast`/`tokens` queries take.

@@ -3878,6 +3878,7 @@ dependencies = [
  "noeta-db",
  "noeta-diagnostics",
  "noeta-fmt",
+ "noeta-ide",
  "noeta-loader",
  "noeta-parser",
  "noeta-runtime",
