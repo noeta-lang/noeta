@@ -15,6 +15,8 @@
 
 mod analyze;
 mod corpus;
+mod execute;
+mod format;
 mod introspect;
 mod stdlib;
 mod understand;
@@ -55,8 +57,13 @@ real programs that trigger and fix it.
 - `ast` / `bytecode` / `pipeline` / `module_graph` / `reflect` — inspect the compiler's artifacts: \
 the syntax tree, the VM disassembly, a per-stage health summary, the `use` import graph, and the \
 `@role` architectural graph.
+- `run` / `eval` / `test` — actually execute code: run a program (stdout/exit/traceback), evaluate \
+an expression (value + type), or run its `@test` blocks. Sandboxed and deterministic by default \
+(pass `real: true` for the real host); every run is bounded by liveness limits.
+- `format` — format Noeta source into its canonical style.
 
-Do not invent syntax or standard-library calls; search the docs/examples, then `check` a snippet.";
+Do not invent syntax or standard-library calls; search the docs/examples, then `check` a snippet. \
+When you claim code works, `run` or `test` it — do not assert behavior you have not executed.";
 
 /// The `check` tool's result. The per-diagnostic shape is `noeta_diagnostics::JsonDiagnostic` — the
 /// *same* canonical form `noeta check --format json` emits — so an agent parses one schema whether it
@@ -214,6 +221,55 @@ pub struct StdlibApiArgs {
     /// Omit to list the entire standard-library surface.
     #[serde(default)]
     pub module: Option<String>,
+}
+
+/// Arguments to `run`: a source, plus how to run it — real host, program args, and liveness limits.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct RunArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Program arguments (`args.all()`), for a `file` run against the real host. Ignored under the
+    /// deterministic sandbox.
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    /// Run against the **real host** (real disk/env/network) instead of the deterministic sandbox
+    /// (in-memory fs, logical clock, seeded random, pure network). Default false. Real effects are
+    /// gated by your own tool approval.
+    #[serde(default)]
+    pub real: Option<bool>,
+    /// Liveness limits (timeout / step budget / output cap). All optional and defaulted; always on.
+    #[serde(default)]
+    pub limits: Option<execute::RunLimits>,
+}
+
+/// Arguments to `eval`: an expression, optional prior `context`, and the real-host opt-in.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct EvalArgs {
+    /// The Noeta expression to evaluate (e.g. `1 + 2`, `[1, 2, 3].map(fn(x) { return x * 2; })`).
+    pub expr: String,
+    /// Prior statements/bindings/definitions run before `expr` (e.g. `xs = [1, 2, 3];`), REPL-style.
+    #[serde(default)]
+    pub context: Option<String>,
+    /// Evaluate against the real host instead of the sandbox. Default false.
+    #[serde(default)]
+    pub real: Option<bool>,
+}
+
+/// Arguments to `test`: a source with `@test` blocks, an optional filter, and the real-host opt-in.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct TestArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Keep only tests whose name or `#[Group(...)]` contains this substring (case-insensitive).
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// Run the tests against the real host instead of the sandbox. Default false.
+    #[serde(default)]
+    pub real: Option<bool>,
 }
 
 /// Arguments to `explain_diagnostic`.
@@ -448,6 +504,76 @@ the declared types — exactly what the program's own `roles_of()`/`attributes_o
     ) -> Result<Json<introspect::ReflectOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
         Ok(Json(introspect::reflect(&prepared, args.role.as_deref())))
+    }
+
+    /// Run a program and report what it did — stdout, exit, traceback — under liveness limits.
+    #[tool(
+        description = "Run Noeta code and report what happened: stdout, exit code, any runtime panic \
+(with a traceback), and whether a liveness limit stopped it. Runs against the deterministic sandbox \
+by default (in-memory fs, logical clock, seeded random) — pass `real: true` for the real host \
+(disk/env/network) to test end-to-end behavior. Every run is bounded by a timeout, an instruction \
+budget, and an output cap (tune via `limits`). A program that does not type-check is not run."
+    )]
+    async fn run(
+        &self,
+        Parameters(args): Parameters<RunArgs>,
+    ) -> Result<Json<execute::RunOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        let out = execute::run(
+            &prepared,
+            args.args.unwrap_or_default(),
+            args.real.unwrap_or(false),
+            &args.limits.unwrap_or_default(),
+        )?;
+        Ok(Json(out))
+    }
+
+    /// Evaluate an expression against an optional context — a one-shot REPL.
+    #[tool(
+        description = "Evaluate a Noeta expression and get its value and type — a one-shot REPL. \
+Provide `context` (prior bindings/definitions, e.g. `xs = [1, 2, 3];`) that run before `expr`. \
+Sandbox by default; `real: true` uses the real host. Use this to check what an expression produces \
+without writing a whole program."
+    )]
+    async fn eval(&self, Parameters(args): Parameters<EvalArgs>) -> Json<execute::EvalOutput> {
+        Json(execute::eval(
+            &args.expr,
+            args.context.as_deref(),
+            args.real.unwrap_or(false),
+        ))
+    }
+
+    /// Run a program's `@test` blocks and report each case.
+    #[tool(
+        description = "Run the `@test` blocks in Noeta code and report each case (pass/fail/skip, \
+with the failing assertion and any stdout). Honors `#[Data([...])]` rows, `#[Skip]`, `#[Name]`, and \
+`#[Group]`; `filter` keeps only tests whose name or group matches. Sandbox by default; `real: true` \
+uses the real host."
+    )]
+    async fn test(
+        &self,
+        Parameters(args): Parameters<TestArgs>,
+    ) -> Result<Json<execute::TestOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(execute::test(
+            &prepared,
+            args.filter.as_deref(),
+            args.real.unwrap_or(false),
+        )))
+    }
+
+    /// Format Noeta source into its canonical style.
+    #[tool(
+        description = "Format Noeta code into its canonical style (the same formatter `noeta fmt` \
+runs) and return the result. Reports whether the source was already canonical, and declines (leaving \
+the source untouched) if it does not parse — format never guesses at broken source."
+    )]
+    async fn format(
+        &self,
+        Parameters(args): Parameters<AnalyzeArgs>,
+    ) -> Result<Json<format::FormatOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(format::format(&prepared)))
     }
 
     /// Explain a diagnostic code with real programs that trigger it.
@@ -886,6 +1012,57 @@ mod tests {
         let structured = result.structured_content.expect("structured content");
         assert_eq!(structured["found"], serde_json::json!(true));
         assert_eq!(structured["type"], serde_json::json!("List<int>"));
+
+        client.cancel().await.expect("client shuts down");
+        server.abort();
+    }
+
+    /// M4 gate fixture: drive a real MCP session and call `run` — an Execute-pillar tool is
+    /// advertised and runs a program against the sandbox, returning its stdout and clean exit.
+    #[tokio::test]
+    async fn round_trip_run_over_a_duplex() {
+        use rmcp::model::CallToolRequestParams;
+
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let server = tokio::spawn(async move {
+            if let Ok(svc) = NoetaMcp::new().serve(server_io).await {
+                let _ = svc.waiting().await;
+            }
+        });
+
+        let client = ().serve(client_io).await.expect("client initializes");
+
+        let tools = client
+            .list_tools(Default::default())
+            .await
+            .expect("tools/list");
+        for expected in ["run", "eval", "test", "format"] {
+            assert!(
+                tools.tools.iter().any(|t| t.name == expected),
+                "{expected} tool advertised"
+            );
+        }
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert(
+            "source".to_string(),
+            serde_json::Value::String("echo \"from mcp\";\n".to_string()),
+        );
+        let mut params = CallToolRequestParams::default();
+        params.name = "run".into();
+        params.arguments = Some(arguments);
+        let result = client.call_tool(params).await.expect("tools/call run");
+
+        let structured = result.structured_content.expect("structured content");
+        assert_eq!(structured["ran"], serde_json::json!(true));
+        assert_eq!(structured["ok"], serde_json::json!(true));
+        assert_eq!(structured["host"], serde_json::json!("sandbox"));
+        assert!(
+            structured["stdout"]
+                .as_str()
+                .expect("stdout string")
+                .contains("from mcp")
+        );
 
         client.cancel().await.expect("client shuts down");
         server.abort();

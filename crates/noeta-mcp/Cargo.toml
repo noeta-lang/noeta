@@ -24,6 +24,19 @@ noeta-loader = { workspace = true }
 # ABI vocabulary (SigType/RetTy/ExtFn/ExtModule/ExtType), so the tool reads the same single source of
 # truth the checker maps onto `Type`.
 noeta-stdlib = { workspace = true }
+# M4 Execute pillar (`run`/`eval`/`test`): drive the bytecode VM directly. `run` compiles via the
+# salsa `linked_bytecode` query and runs the module against the sandbox (or real) host through the
+# `Debugger` seam — a per-op hook enforces the always-on liveness limits (decision #5). `eval` rides
+# `VmSession` (the REPL engine); `test` runs each `@test` case as a `VmSession` entry. `activate_tiers`
+# + `check_all` come from `noeta-check`; `RealHost`/`RealExecutor` (the real-host opt-in) from
+# `noeta-runtime`; the interactive-fragment parser (`eval`) from `noeta-parser`.
+noeta-vm = { workspace = true }
+noeta-check = { workspace = true }
+noeta-parser = { workspace = true }
+noeta-runtime = { workspace = true }
+# M4 transform leg: `format` wraps the parallel `noeta fmt` arc's reusable `format_source` entry
+# (decision #6) — the MCP does not reimplement the formatter.
+noeta-fmt = { workspace = true }
 tokio = { workspace = true, features = ["io-std", "rt-multi-thread", "macros"] }
 rmcp = { workspace = true }
 serde = { workspace = true }
