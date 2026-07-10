@@ -913,7 +913,9 @@ mod tests {
         // Under parallel test load the bounded wait can answer `running` before the budget
         // trips — poll like a real agent would until the session settles.
         let mut limited = step(&reg, session, "continue").await.expect("continue");
-        for _ in 0..20 {
+        // Generous polling: under whole-workspace parallel test load the spinning run thread can
+        // be starved well past the nominal 5 s budget before it samples the clock.
+        for _ in 0..60 {
             if limited.state != "running" {
                 break;
             }
