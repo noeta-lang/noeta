@@ -7,7 +7,7 @@ Noeta is a new, general-purpose programming language built from scratch in Rust.
 This wiki is the complete documentation for the language, its tooling, its design, and how to contribute.
 
 > [!NOTE]
-> **Project status: pre-alpha.** The **language core** and its **tooling** are complete and stable to use: the full syntax, the type system, traits/generics/derives, multi-file modules, a layered standard library, real host IO, structured concurrency (isolates + channels + async), and the `run`/`repl`/`test`/`bench`/`doc` toolchain all ship today. The larger vision — server-side reactivity (`signal`/`computed`/`effect`), a bundled HTTP/WS server, desktop packaging, an embedded LSP, and an agentic MCP surface — is the roadmap, not yet shipped. Where a feature is a plan rather than a reality, this wiki says so plainly.
+> **Project status: pre-alpha.** The **language core** and its **tooling** are complete and stable to use: the full syntax, the type system, traits/generics/derives, multi-file modules, a layered standard library, real host IO, structured concurrency (isolates + channels + async), and the `run`/`repl`/`test`/`bench`/`doc` toolchain all ship today. Server-side reactivity (`signal`/`computed`/`effect`), a bundled HTTP server, the `noeta lsp`/`noeta dap` editor tooling, and the `noeta mcp` agent surface ship today too; the larger vision still on the roadmap — WebSockets/LiveView and desktop packaging — is not yet shipped. Where a feature is a plan rather than a reality, this wiki says so plainly.
 
 ---
 

@@ -39,6 +39,7 @@ pub enum HintKind {
 }
 
 /// One computed hint: attach `label` at byte `offset` in the requested file.
+#[derive(Debug)]
 pub struct TypeHint {
     pub offset: u32,
     pub label: String,

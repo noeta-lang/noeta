@@ -10,6 +10,13 @@ rust-version.workspace = true
 noeta-span = { workspace = true }
 ariadne = { workspace = true }
 serde = { workspace = true }
+# Optional: derive `JsonSchema` on the machine-readable `JsonDiagnostic` family so consumers that
+# need a schema (the MCP server's `check` tool output) get one from the single source of truth.
+# Off by default — only `noeta-mcp` enables it, so the core crate stays schemars-free otherwise.
+schemars = { workspace = true, optional = true }
+
+[features]
+schema = ["dep:schemars"]
 
 [lints]
 workspace = true

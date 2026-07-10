@@ -6,17 +6,46 @@
 //! type-checking: a pure structural read of the parsed program.
 //!
 //! [`outline`] returns a backend-neutral [`SymbolNode`] tree (name, kind, the full declaration span
-//! and the name span, children); the server maps each node to an LSP `DocumentSymbol`, resolving the
+//! and the name span, children); the store maps each node to a [`DocumentSymbol`], resolving the
 //! two spans to ranges. Keeping the walk free of position mapping is what makes it unit-testable
-//! against source without an LSP client.
+//! against source without an editor client.
 
 use noeta_ast::{
     EnumDecl, FieldDecl, FnDecl, ImplDecl, Param, Program, Stmt, TypeRef, VariantDecl,
 };
 use noeta_span::Span;
-use tower_lsp_server::ls_types::SymbolKind;
 
-/// One node of the document outline: the display name and (optional) detail, the LSP symbol kind,
+use crate::offsets::Range;
+
+/// The kind of a declared symbol, for the outline icon. Mirrors the LSP `SymbolKind` values this
+/// engine emits, owned here so the engine stays wire-protocol-free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SymbolKind {
+    Function,
+    Struct,
+    Class,
+    Enum,
+    EnumMember,
+    Field,
+    Method,
+    Interface,
+}
+
+/// One resolved node of the document outline — [`SymbolNode`] with its two spans mapped to
+/// positional ranges, ready for an adapter to reshape onto its wire.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocumentSymbol {
+    pub name: String,
+    pub detail: Option<String>,
+    pub kind: SymbolKind,
+    /// The range of the whole declaration — the outline range that "contains the cursor".
+    pub range: Range,
+    /// The range of just the declared name — what is revealed when the symbol is picked.
+    pub selection_range: Range,
+    pub children: Vec<DocumentSymbol>,
+}
+
+/// One node of the document outline: the display name and (optional) detail, the symbol kind,
 /// the span of the whole declaration (the outline "range") and of just its name (the "selection
 /// range", what is revealed when the symbol is picked), and any nested members.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,11 +68,11 @@ pub fn outline(program: &Program) -> Vec<SymbolNode> {
     let mut symbols = Vec::new();
     for stmt in &program.stmts {
         match stmt {
-            Stmt::Fn(decl) => symbols.push(fn_symbol(decl, SymbolKind::FUNCTION)),
+            Stmt::Fn(decl) => symbols.push(fn_symbol(decl, SymbolKind::Function)),
             Stmt::Struct(decl) => symbols.push(SymbolNode {
                 name: decl.name.clone(),
                 detail: None,
-                kind: SymbolKind::STRUCT,
+                kind: SymbolKind::Struct,
                 full_span: decl.span,
                 name_span: decl.name_span,
                 children: type_members(&decl.fields, &decl.methods),
@@ -51,7 +80,7 @@ pub fn outline(program: &Program) -> Vec<SymbolNode> {
             Stmt::Class(decl) => symbols.push(SymbolNode {
                 name: decl.name.clone(),
                 detail: None,
-                kind: SymbolKind::CLASS,
+                kind: SymbolKind::Class,
                 full_span: decl.span,
                 name_span: decl.name_span,
                 children: type_members(&decl.fields, &decl.methods),
@@ -84,14 +113,14 @@ fn type_members(fields: &[FieldDecl], methods: &[FnDecl]) -> Vec<SymbolNode> {
         members.push(SymbolNode {
             name: field.name.clone(),
             detail: field.ty.as_ref().map(render_type_ref),
-            kind: SymbolKind::FIELD,
+            kind: SymbolKind::Field,
             full_span: field.span,
             name_span: field.name_span,
             children: Vec::new(),
         });
     }
     for method in methods {
-        members.push(fn_symbol(method, SymbolKind::METHOD));
+        members.push(fn_symbol(method, SymbolKind::Method));
     }
     members
 }
@@ -104,19 +133,19 @@ fn enum_symbol(decl: &EnumDecl) -> SymbolNode {
         children.push(SymbolNode {
             name: variant.name.clone(),
             detail: variant_detail(variant),
-            kind: SymbolKind::ENUM_MEMBER,
+            kind: SymbolKind::EnumMember,
             full_span: variant.span,
             name_span: variant.name_span,
             children: Vec::new(),
         });
     }
     for method in &decl.methods {
-        children.push(fn_symbol(method, SymbolKind::METHOD));
+        children.push(fn_symbol(method, SymbolKind::Method));
     }
     SymbolNode {
         name: decl.name.clone(),
         detail: None,
-        kind: SymbolKind::ENUM,
+        kind: SymbolKind::Enum,
         full_span: decl.span,
         name_span: decl.name_span,
         children,
@@ -129,13 +158,13 @@ fn impl_symbol(decl: &ImplDecl) -> SymbolNode {
     SymbolNode {
         name: format!("{} for {}", decl.trait_name, decl.target),
         detail: None,
-        kind: SymbolKind::INTERFACE,
+        kind: SymbolKind::Interface,
         full_span: decl.span,
         name_span: decl.trait_span,
         children: decl
             .methods
             .iter()
-            .map(|method| fn_symbol(method, SymbolKind::METHOD))
+            .map(|method| fn_symbol(method, SymbolKind::Method))
             .collect(),
     }
 }
@@ -230,7 +259,7 @@ mod tests {
         let syms = outline_of("fn add(a: int, b: int): int { return a + b }");
         assert_eq!(syms.len(), 1);
         assert_eq!(syms[0].name, "add");
-        assert_eq!(syms[0].kind, SymbolKind::FUNCTION);
+        assert_eq!(syms[0].kind, SymbolKind::Function);
         assert_eq!(syms[0].detail.as_deref(), Some("(a: int, b: int) -> int"));
         // The selection range is the name, contained by the whole-declaration range.
         assert!(syms[0].name_span.start >= syms[0].full_span.start);
@@ -242,32 +271,32 @@ mod tests {
         let syms =
             outline_of("struct Point {\n  x: int\n  y: int\n  fn norm(): int { return self.x }\n}");
         assert_eq!(syms.len(), 1);
-        assert_eq!(syms[0].kind, SymbolKind::STRUCT);
+        assert_eq!(syms[0].kind, SymbolKind::Struct);
         let kids = &syms[0].children;
         assert_eq!(kids.len(), 3);
         assert_eq!(
             (kids[0].name.as_str(), kids[0].kind),
-            ("x", SymbolKind::FIELD)
+            ("x", SymbolKind::Field)
         );
         assert_eq!(kids[0].detail.as_deref(), Some("int"));
         assert_eq!(
             (kids[1].name.as_str(), kids[1].kind),
-            ("y", SymbolKind::FIELD)
+            ("y", SymbolKind::Field)
         );
         assert_eq!(
             (kids[2].name.as_str(), kids[2].kind),
-            ("norm", SymbolKind::METHOD)
+            ("norm", SymbolKind::Method)
         );
     }
 
     #[test]
     fn enum_nests_variants_with_payload_detail() {
         let syms = outline_of("enum Shape {\n  Dot\n  Circle(radius: int)\n}");
-        assert_eq!(syms[0].kind, SymbolKind::ENUM);
+        assert_eq!(syms[0].kind, SymbolKind::Enum);
         let kids = &syms[0].children;
         assert_eq!(kids.len(), 2);
         assert_eq!(kids[0].name, "Dot");
-        assert_eq!(kids[0].kind, SymbolKind::ENUM_MEMBER);
+        assert_eq!(kids[0].kind, SymbolKind::EnumMember);
         assert_eq!(kids[0].detail, None); // fieldless
         assert_eq!(kids[1].name, "Circle");
         assert_eq!(kids[1].detail.as_deref(), Some("(radius: int)"));
@@ -276,7 +305,7 @@ mod tests {
     #[test]
     fn class_is_a_class_symbol() {
         let syms = outline_of("class Counter {\n  n: int\n}");
-        assert_eq!(syms[0].kind, SymbolKind::CLASS);
+        assert_eq!(syms[0].kind, SymbolKind::Class);
         assert_eq!(syms[0].children.len(), 1);
     }
 
@@ -285,12 +314,12 @@ mod tests {
         let syms = outline_of("struct R {}\nimpl Show for R {\n  fn show(): int { return 1 }\n}");
         let imp = syms
             .iter()
-            .find(|s| s.kind == SymbolKind::INTERFACE)
+            .find(|s| s.kind == SymbolKind::Interface)
             .unwrap();
         assert_eq!(imp.name, "Show for R");
         assert_eq!(imp.children.len(), 1);
         assert_eq!(imp.children[0].name, "show");
-        assert_eq!(imp.children[0].kind, SymbolKind::METHOD);
+        assert_eq!(imp.children[0].kind, SymbolKind::Method);
     }
 
     #[test]
