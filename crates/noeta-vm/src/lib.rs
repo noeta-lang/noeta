@@ -1219,6 +1219,19 @@ extern "C" fn jit_retain(v: u64) {
     retain(Value::from_bits(v));
 }
 
+/// Runtime helper: float `%` (S2). Rust's `%` on f64 **is** fmod, so tier parity holds by
+/// construction; a NaN result is canonicalized by the caller's `box_float_and_store`, exactly as
+/// the other float ops.
+#[cfg(feature = "jit-rt")]
+#[cfg_attr(
+    feature = "aot",
+    allow(unsafe_code),
+    unsafe(export_name = "noeta_jit_fmod")
+)]
+extern "C" fn jit_fmod(a: f64, b: f64) -> f64 {
+    a % b
+}
+
 /// Runtime helper: drop one reference to a value — the plain, non-destructor release the
 /// interpreter's `set_reg` uses on an overwritten register (J3). No-op on an immediate.
 #[cfg(feature = "jit-rt")]
@@ -2202,6 +2215,7 @@ impl<'m> Vm<'m> {
                 noeta_jit_abi::NOTE_GLOBAL_BOUND_HELPER,
                 jit_note_global_bound as *const u8,
             ),
+            (noeta_jit_abi::FMOD_HELPER, jit_fmod as *const u8),
             (noeta_jit_abi::RETAIN_HELPER, jit_retain as *const u8),
             (noeta_jit_abi::RELEASE_HELPER, jit_release as *const u8),
             (
@@ -2255,6 +2269,7 @@ impl<'m> Vm<'m> {
                 noeta_jit_abi::NOTE_GLOBAL_BOUND_HELPER,
                 jit_note_global_bound as *const u8 as usize,
             ),
+            (noeta_jit_abi::FMOD_HELPER, jit_fmod as *const u8 as usize),
             (
                 noeta_jit_abi::RETAIN_HELPER,
                 jit_retain as *const u8 as usize,
@@ -8380,6 +8395,39 @@ mod tests {
         let jit = VmBackend::new().run_module_jit(&m);
         assert_eq!(interp, jit, "i8 MIN / -1 must be tier-identical");
         assert_eq!(jit.stdout, "-128\n");
+    }
+
+    /// S2 (mixed int/float + float `%` native): the canonical float-accumulator loop
+    /// (`total = total + i` — f64 × int every iteration) stays native with no per-iteration
+    /// bails and matches tier 0 bit-for-bit; float `%` runs through the fmod helper (including
+    /// a NaN result canonicalized like every float op); mixed comparisons and equality follow
+    /// the interpreter's widen-to-f64 semantics.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_mixed_numeric_and_float_rem_native_with_identical_semantics() {
+        // The mixed-accumulator loop: previously bailed at `total + i` every iteration.
+        let loop_src = "fn accum(n: int): float {\n  mut total = 0.0;\n  mut i = 0;\n  while i < n {\n    total = total + i;\n    total = total % 1000000.0;\n    i = i + 1;\n  }\n  return total;\n}\necho accum(300);\n";
+        let module = compile_module(loop_src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, bails) = VmBackend::new().run_module_jit_bails(&module);
+        assert_eq!(interp, jit, "mixed loop must be tier-identical");
+        assert_eq!(jit.exit_code, 0);
+        assert!(
+            bails.iter().all(|b| b.count < 300),
+            "the mixed loop body must not bail per iteration: {bails:?}"
+        );
+
+        // Float `%` semantics, NaN included; mixed compare/equality widen to f64.
+        let src =
+            "echo 7.5 % 2.25;\necho 5.5 % 0.0;\necho 1 == 1.0;\necho 2 < 2.5;\necho 3.5 % 2;\n";
+        let m = compile_module(src);
+        let interp = VmBackend::new().run_module(&m);
+        let jit = VmBackend::new().run_module_jit(&m);
+        assert_eq!(
+            interp, jit,
+            "float % / mixed semantics must be tier-identical"
+        );
+        assert_eq!(jit.stdout.lines().nth(2), Some("true"), "1 == 1.0 widens");
     }
 
     /// The `--jit-stats` bail histogram (S0): a function whose body holds a non-native op

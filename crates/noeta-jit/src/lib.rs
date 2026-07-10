@@ -68,11 +68,11 @@ use noeta_value::Value;
 // `noeta-jit-abi` so an AOT binary can link the runtime support without pulling Cranelift. Re-exported
 // here so every `noeta_jit::*` path — and this crate's own bare references — resolve unchanged.
 pub use noeta_jit_abi::{
-    AFTER_CALL_HELPER, AOT_DISPATCH_SYMBOL, CALL_HELPER, CallSiteCache, CompiledFn, FrameLayout,
-    LEAF_OP_HELPER, NOTE_GLOBAL_BOUND_HELPER, OBSERVE_HELPER, OUTCOME_ABORTED, OUTCOME_CALLED,
-    OUTCOME_CONTINUE, OUTCOME_HALTED, OUTCOME_RETURNED, PREPARE_CALL_HELPER, RELEASE_HELPER,
-    RELEASE_VALUE_HELPER, RETAIN_HELPER, RETURN_HELPER, SITE_EMPTY, SITE_POISON, fast_symbol,
-    proto_symbol, stub_symbol,
+    AFTER_CALL_HELPER, AOT_DISPATCH_SYMBOL, CALL_HELPER, CallSiteCache, CompiledFn, FMOD_HELPER,
+    FrameLayout, LEAF_OP_HELPER, NOTE_GLOBAL_BOUND_HELPER, OBSERVE_HELPER, OUTCOME_ABORTED,
+    OUTCOME_CALLED, OUTCOME_CONTINUE, OUTCOME_HALTED, OUTCOME_RETURNED, PREPARE_CALL_HELPER,
+    RELEASE_HELPER, RELEASE_VALUE_HELPER, RETAIN_HELPER, RETURN_HELPER, SITE_EMPTY, SITE_POISON,
+    fast_symbol, proto_symbol, stub_symbol,
 };
 
 /// Per-phase compile accounting (P-JCT C0): where the engine's total compile time goes, plus the
@@ -152,6 +152,7 @@ pub struct Jit<M: ClifModule = JITModule> {
     prepare_call_id: FuncId,
     after_call_id: FuncId,
     leaf_op_id: FuncId,
+    fmod_id: FuncId,
     ctx: cranelift_codegen::Context,
     fb_ctx: FunctionBuilderContext,
 }
@@ -310,6 +311,14 @@ impl<M: ClifModule> Jit<M> {
         let leaf_op_id = module
             .declare_function(LEAF_OP_HELPER, Linkage::Import, &leaf_sig)
             .map_err(|e| e.to_string())?;
+        // `fmod(a: f64, b: f64) -> f64` — float `%` (S2).
+        let mut fmod_sig = module.make_signature();
+        fmod_sig.params.push(AbiParam::new(types::F64));
+        fmod_sig.params.push(AbiParam::new(types::F64));
+        fmod_sig.returns.push(AbiParam::new(types::F64));
+        let fmod_id = module
+            .declare_function(FMOD_HELPER, Linkage::Import, &fmod_sig)
+            .map_err(|e| e.to_string())?;
         let ctx = module.make_context();
         Ok(Jit {
             module,
@@ -335,6 +344,7 @@ impl<M: ClifModule> Jit<M> {
             prepare_call_id,
             after_call_id,
             leaf_op_id,
+            fmod_id,
             ctx,
             fb_ctx: FunctionBuilderContext::new(),
         })
@@ -567,6 +577,7 @@ impl<M: ClifModule> Jit<M> {
                 .declare_func_in_func(self.prepare_call_id, b.func);
             let after_call_ref = self.module.declare_func_in_func(self.after_call_id, b.func);
             let leaf_op_ref = self.module.declare_func_in_func(self.leaf_op_id, b.func);
+            let fmod_ref = self.module.declare_func_in_func(self.fmod_id, b.func);
             // The signature of a compiled prototype, imported so a direct call can `call_indirect`
             // another compiled prototype's entry point — plus one fast-convention signature per
             // distinct call arity in this chunk (S4.1).
@@ -663,6 +674,7 @@ impl<M: ClifModule> Jit<M> {
                 prepare_call_ref,
                 after_call_ref,
                 leaf_op_ref,
+                fmod_ref,
                 callee_sig,
                 fast_sigs,
             };
@@ -1866,6 +1878,9 @@ pub(crate) fn kind_in_map(chunk: &noeta_bytecode::Chunk) -> Vec<Kind> {
                             // compiled the full generic two-sided dispatch.
                             (Kind::Int, Kind::Imm) | (Kind::Imm, Kind::Int) => Kind::Int,
                             (Kind::Float, Kind::Imm) | (Kind::Imm, Kind::Float) => Kind::Float,
+                            // S2 mixed lane: a statically int×float pairing computes at f64 and
+                            // stores a float on every native continuation.
+                            (Kind::Int, Kind::Float) | (Kind::Float, Kind::Int) => Kind::Float,
                             _ => Kind::Imm,
                         },
                         _ => Kind::Imm, // `~`, `&&`/`||`, identity — bail ops here; tier 0 decides
@@ -2150,6 +2165,7 @@ struct Codegen<'a, 'b> {
     prepare_call_ref: FuncRef,
     after_call_ref: FuncRef,
     leaf_op_ref: FuncRef,
+    fmod_ref: FuncRef,
     callee_sig: cranelift_codegen::ir::SigRef,
     /// Imported fast-convention signatures, one per distinct call arity in this chunk (P-JSSA
     /// S4.1) — a compiled caller `call_indirect`s a fast body through the signature its own
@@ -3394,14 +3410,39 @@ fn emit_binary(
     let y = cg.unbox_int(vb);
     emit_int_binary_raw(cg, op, dst, x, y, pc, op_blocks);
 
-    // Float fast path (or bail): both operands must be f64 floats.
+    // Float fast path: both operands f64 floats.
     cg.b.switch_to_block(float_check);
     let a_flt = cg.is_float(va);
     let b_flt = cg.is_float(vb);
     let both_flt = cg.b.ins().band(a_flt, b_flt);
     let float_block = cg.b.create_block();
-    guard(cg, both_flt, float_block, pc);
+    let mixed_check = cg.b.create_block();
+    cg.b.ins()
+        .brif(both_flt, float_block, &[], mixed_check, &[]);
+
+    cg.b.switch_to_block(float_block);
     emit_float_binary(cg, op, dst, va, vb, pc, op_blocks);
+
+    // Mixed int/f64 lane (S2, or bail): exactly one side a small int — widen it to f64 (an
+    // immediate is ≤48 bits, exactly representable, matching the interpreter's `as f64`) and run
+    // the float body. Any other pairing (f32, boxed, non-numeric) bails. Branchless conversion:
+    // compute both readings per side and select on the int flag — the discarded reading is
+    // garbage bits, never a trap.
+    cg.b.switch_to_block(mixed_check);
+    let a_mixed = cg.b.ins().band(a_int, b_flt);
+    let b_mixed = cg.b.ins().band(a_flt, b_int);
+    let mixed = cg.b.ins().bor(a_mixed, b_mixed);
+    let mixed_block = cg.b.create_block();
+    guard(cg, mixed, mixed_block, pc);
+    let a_raw = cg.unbox_int(va);
+    let a_widened = cg.b.ins().fcvt_from_sint(types::F64, a_raw);
+    let a_as_f64 = cg.bits_to_f64(va);
+    let x = cg.b.ins().select(a_int, a_widened, a_as_f64);
+    let b_raw = cg.unbox_int(vb);
+    let b_widened = cg.b.ins().fcvt_from_sint(types::F64, b_raw);
+    let b_as_f64 = cg.bits_to_f64(vb);
+    let y = cg.b.ins().select(b_int, b_widened, b_as_f64);
+    emit_float_binary_vals(cg, op, dst, x, y, pc, op_blocks);
 }
 
 /// The integer body of a `Binary`, entered with both operands as **raw** (unboxed, sign-extended)
@@ -3670,8 +3711,8 @@ fn emit_mask_width(
 /// The float body of a `Binary`, entered with both operands proven f64 floats (J2)./// The float body of a `Binary`, entered with both operands proven f64 floats (J2). Computes in f64
 /// and stores the boxed result. Matches the interpreter's `arithmetic`/`compare`: ordered
 /// comparisons (false on NaN, except `!=` which is true on NaN), and a NaN arithmetic result
-/// canonicalized to the standard quiet NaN — exactly `Value::float`. `%` has no Cranelift instruction
-/// (`fmod` is a libcall), so it bails.
+/// canonicalized to the standard quiet NaN — exactly `Value::float`. `%` calls the `fmod` helper
+/// (S2 — no Cranelift instruction exists, and `a - trunc(a/b)*b` is not bit-exact to fmod).
 fn emit_float_binary(
     cg: &mut Codegen,
     op: BinaryOp,
@@ -3681,14 +3722,30 @@ fn emit_float_binary(
     pc: usize,
     op_blocks: &[Block],
 ) {
-    // Float `%` (fmod) is a libcall, not an instruction — leave it to the interpreter.
-    if op == BinaryOp::Rem {
-        let here = cg.pc_const(pc);
-        cg.b.ins().return_(&[here]);
-        return;
-    }
     let x = cg.bits_to_f64(va);
     let y = cg.bits_to_f64(vb);
+    emit_float_binary_vals(cg, op, dst, x, y, pc, op_blocks);
+}
+
+/// [`emit_float_binary`] on operands already converted to f64 — shared with the mixed int/float
+/// lane (S2), which widens its int side before entering.
+fn emit_float_binary_vals(
+    cg: &mut Codegen,
+    op: BinaryOp,
+    dst: Reg,
+    x: ClValue,
+    y: ClValue,
+    pc: usize,
+    op_blocks: &[Block],
+) {
+    // Float `%` (S2): one call to the `fmod` runtime helper — Rust `%` on f64, the interpreter's
+    // exact semantics; the NaN-canonicalizing store below matches the other float ops.
+    if op == BinaryOp::Rem {
+        let call = cg.b.ins().call(cg.fmod_ref, &[x, y]);
+        let r = cg.b.inst_results(call)[0];
+        box_float_and_store(cg, dst, r, pc, op_blocks);
+        return;
+    }
     match op {
         BinaryOp::Add => {
             let r = cg.b.ins().fadd(x, y);

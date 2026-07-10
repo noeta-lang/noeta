@@ -138,6 +138,11 @@ pub const AFTER_CALL_HELPER: &str = "noeta_jit_after_call";
 /// resume pc (it can't handle this instance — a dispatch or an error — so the interpreter runs it).
 pub const LEAF_OP_HELPER: &str = "noeta_jit_run_leaf_op";
 
+/// `noeta_jit_fmod(a: f64, b: f64) -> f64` — float `%` (S2). fmod is a libcall, not a Cranelift
+/// instruction, and `a - trunc(a/b)*b` is not bit-exact to it (the divide rounds), so native code
+/// calls this helper, whose body is Rust's `%` on f64 — the interpreter's exact semantics.
+pub const FMOD_HELPER: &str = "noeta_jit_fmod";
+
 /// A per-call-site **inline cache** slot (P-JSSA S4.2), allocated by the JIT (one per
 /// `Call`/`CallGlobal` pc, stable address baked into the code) and filled by the VM's
 /// `jit_prepare_call` when it resolves a fast-convention callee. Layout:

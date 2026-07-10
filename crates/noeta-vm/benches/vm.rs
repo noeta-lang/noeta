@@ -357,6 +357,15 @@ fn jit_bitwise_loop_src(n: usize) -> String {
     )
 }
 
+/// S2 (P-JIT mixed lane): the canonical float-accumulator loop — `total + i` pairs an f64 with the
+/// int counter every iteration, the shape that previously bailed per iteration. Interp-vs-JIT pair.
+#[cfg(feature = "jit")]
+fn jit_mixed_loop_src(n: usize) -> String {
+    format!(
+        "fn run(n: int): float {{\n    mut total = 0.0;\n    mut i = 0;\n    while i < n {{\n        total = total + i;\n        i = i + 1;\n    }}\n    return total;\n}}\necho run({n});\n"
+    )
+}
+
 /// J2 (P-JIT float fast path): the same loop shape with an f64 accumulator — a float `Binary` (`*`,
 /// `+`) each iteration alongside the integer counter, so the JIT's runtime int-vs-float dispatch and
 /// the native f64 arithmetic both get exercised.
@@ -1009,6 +1018,17 @@ fn vm_hot_paths(c: &mut Criterion) {
                 },
             );
             jit.bench_with_input(BenchmarkId::new("bitwise_jit", n), &bmodule, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+            });
+            let mmodule = compile(&jit_mixed_loop_src(n));
+            jit.bench_with_input(
+                BenchmarkId::new("mixed_interp", n),
+                &mmodule,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+                },
+            );
+            jit.bench_with_input(BenchmarkId::new("mixed_jit", n), &mmodule, |b, module| {
                 b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
             });
             let fmodule = compile(&jit_float_loop_src(n));
