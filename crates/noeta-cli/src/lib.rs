@@ -302,6 +302,15 @@ enum Command {
         #[arg(long)]
         tag: Option<String>,
     },
+    /// Report the dependency tree's **trust footprint** (package-manager Phase 4): every resolved
+    /// dependency, its source, and which ones run **native code** or contribute **CLI commands** —
+    /// the elevated authority your `[trust]` grants make active. Informed-consent transparency:
+    /// answer "what am I actually running?" before you build.
+    Audit {
+        /// A file or directory in the project to audit (default: the current directory).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -453,6 +462,7 @@ pub fn run_cli(
         ),
         Command::Update => cmd_update(),
         Command::Publish { git, tag } => cmd_publish(&git, tag.as_deref()),
+        Command::Audit { path } => cmd_audit(&path),
     }
 }
 
@@ -598,6 +608,105 @@ fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
             eprintln!("lang: {err}");
             ExitCode::from(1)
         }
+    }
+}
+
+/// `noeta audit [path]` — report the dependency tree's trust footprint (package-manager Phase 4, S6):
+/// every resolved dependency, its source, and the elevated authority (`native` / `commands`) the root
+/// `[trust]` grants make active. Transparency/informed-consent: since an *unauthorized* native
+/// dependency fails resolution, a successful audit lists exactly the elevated authority that is live.
+fn cmd_audit(path: &std::path::Path) -> ExitCode {
+    let start = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent().unwrap_or(std::path::Path::new(".")).to_path_buf()
+    };
+    let Some(manifest_path) = manifest::find(&start) else {
+        eprintln!(
+            "lang: no `{}` found at or above `{}`",
+            manifest::MANIFEST_NAME,
+            start.display()
+        );
+        return ExitCode::from(1);
+    };
+    let manifest_dir = manifest_path
+        .parent()
+        .unwrap_or(std::path::Path::new("."))
+        .to_path_buf();
+    // A synthetic entry so `resolve_graph` discovers the manifest from its directory.
+    let graph = match graph::resolve_graph(&manifest_dir.join("_.noe")) {
+        Ok(graph) => graph,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let manifest = match manifest::load(&manifest_path) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let trust = manifest.trust();
+
+    println!("Trust audit — {}\n", manifest_path.display());
+    if graph.locked.is_empty() {
+        println!("  No dependencies.");
+        return ExitCode::SUCCESS;
+    }
+
+    let mut deps = graph.locked.clone();
+    deps.sort_by(|a, b| a.identity.cmp(&b.identity));
+    let mut native_count = 0usize;
+    let mut command_count = 0usize;
+    println!("  Dependencies ({}):", deps.len());
+    for pkg in &deps {
+        let source = match &pkg.source {
+            noeta_pm::graph::ResolvedSource::Path { path } => format!("path {}", path.display()),
+            noeta_pm::graph::ResolvedSource::Git { url, tag, sha } => {
+                format!("git {url}#{tag} ({})", &sha[..sha.len().min(9)])
+            }
+        };
+        let mut flags = Vec::new();
+        if pkg.native.is_some() {
+            native_count += 1;
+            flags.push("native");
+        }
+        if trust.commands.contains(&pkg.identity) {
+            command_count += 1;
+            flags.push("commands");
+        }
+        let tail = if flags.is_empty() {
+            String::new()
+        } else {
+            format!("  ⚠ {}", flags.join(" + "))
+        };
+        println!("    {} {}  [{}]{}", pkg.identity, pkg.version, source, tail);
+    }
+
+    println!("\n  Elevated authority (granted in [trust]):");
+    println!(
+        "    native   : {}",
+        render_trust_list(&trust.native)
+    );
+    println!(
+        "    commands : {}",
+        render_trust_list(&trust.commands)
+    );
+    println!(
+        "\n  {native_count} package(s) run native code, {command_count} may add CLI commands — all \
+         authorized (an unauthorized native dependency would have failed resolution)."
+    );
+    ExitCode::SUCCESS
+}
+
+/// Render a `[trust]` identity set for the audit report (`(none)` when empty).
+fn render_trust_list(set: &std::collections::BTreeSet<String>) -> String {
+    if set.is_empty() {
+        "(none)".to_string()
+    } else {
+        set.iter().cloned().collect::<Vec<_>>().join(", ")
     }
 }
 

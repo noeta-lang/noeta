@@ -2061,6 +2061,21 @@ fn a_path_dependency_resolves_and_runs() {
 }
 
 #[test]
+fn noeta_audit_reports_the_trust_footprint() {
+    // A pure path-dependency project: audit lists the dependency and reports no elevated authority.
+    let entry = path_dep_project("pm_audit");
+    let app_dir = entry.parent().unwrap();
+    lang()
+        .arg("audit")
+        .arg(app_dir)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("acme/greet"))
+        .stdout(predicate::str::contains("0 package(s) run native code"))
+        .stdout(predicate::str::contains("native   : (none)"));
+}
+
+#[test]
 fn noeta_check_resolves_cross_package_use() {
     // `noeta check` must see dependency packages too (package-manager P2.1c), so a cross-package
     // `use` that references a real exported symbol checks clean rather than erroring.

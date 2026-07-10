@@ -159,6 +159,14 @@ pub fn find(start_dir: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Read + parse the manifest at `manifest_path` (package-manager Phase 4, backing `noeta audit`).
+/// Errors (tagged with the path) on an unreadable or invalid manifest.
+pub fn load(manifest_path: &Path) -> Result<Manifest, String> {
+    let text = std::fs::read_to_string(manifest_path)
+        .map_err(|err| format!("cannot read `{}`: {err}", manifest_path.display()))?;
+    Manifest::parse(&text).map_err(|err| format!("invalid `{}`: {err}", manifest_path.display()))
+}
+
 /// The `[package]` identity (`company/package`) and version of the manifest at `manifest_path`
 /// (package-manager P2.5, backing `noeta publish`). Errors when the manifest can't be read/parsed or
 /// declares no `[package]` (a bare script can't be published).
