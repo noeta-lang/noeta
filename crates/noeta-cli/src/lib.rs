@@ -2875,7 +2875,7 @@ fn cmd_test(
     } else {
         selected
             .into_iter()
-            .filter(|t| names.iter().any(|n| *n == t.name))
+            .filter(|t| names.contains(&t.name))
             .collect()
     };
     if selected.is_empty() {
