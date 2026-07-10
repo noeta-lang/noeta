@@ -5,7 +5,7 @@
 //! `reflect::build` and `Module::disassemble` the runtime and `noeta dump` use, so an agent sees
 //! ground truth, not a re-derivation.
 
-use crate::analyze::{self, Prepared};
+use crate::analyze::{self, Prepared, SpanLoc};
 use noeta_ast::{Pretty, Program, Stmt};
 use rmcp::schemars;
 use serde::Serialize;
@@ -188,6 +188,10 @@ pub struct RoleEntry {
     pub target: String,
     /// The role as `Enum.Variant`, e.g. `Semantic.EntryPoint`.
     pub role: String,
+    /// The file the annotated declaration lives in.
+    pub file: Option<String>,
+    /// The declaration name's source location — joinable with `symbols`/`definition` output.
+    pub location: Option<SpanLoc>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -198,6 +202,10 @@ pub struct AttributeEntry {
     pub name: String,
     /// The number of literal arguments the attribute carries.
     pub arg_count: usize,
+    /// The file the annotated declaration lives in.
+    pub file: Option<String>,
+    /// The declaration name's source location.
+    pub location: Option<SpanLoc>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -234,19 +242,29 @@ pub fn reflect(p: &Prepared, role: Option<&str>) -> ReflectOutput {
                     || format!("{}.{}", r.enum_name, r.variant).to_ascii_lowercase() == *w
             }
         })
-        .map(|r| RoleEntry {
-            target: r.target.clone(),
-            role: format!("{}.{}", r.enum_name, r.variant),
+        .map(|r| {
+            let at = analyze::locate_span(p, r.target_span);
+            RoleEntry {
+                target: r.target.clone(),
+                role: format!("{}.{}", r.enum_name, r.variant),
+                file: at.as_ref().map(|(file, _)| file.clone()),
+                location: at.map(|(_, loc)| loc),
+            }
         })
         .collect();
 
     let attributes = info
         .manifest
         .iter()
-        .map(|a| AttributeEntry {
-            target: a.target.clone(),
-            name: a.name.clone(),
-            arg_count: a.args.len(),
+        .map(|a| {
+            let at = analyze::locate_span(p, a.target_span);
+            AttributeEntry {
+                target: a.target.clone(),
+                name: a.name.clone(),
+                arg_count: a.args.len(),
+                file: at.as_ref().map(|(file, _)| file.clone()),
+                location: at.map(|(_, loc)| loc),
+            }
         })
         .collect();
 
@@ -369,6 +387,10 @@ enum Color { Red; Green }
         assert_eq!(out.roles.len(), 1);
         assert_eq!(out.roles[0].target, "handle");
         assert_eq!(out.roles[0].role, "Semantic.EntryPoint");
+        // The role is locatable: the target's name span resolves to a file + line, so an agent can
+        // join the role index with `symbols`/`definition` output.
+        assert_eq!(out.roles[0].file.as_deref(), Some("<inline>"));
+        assert!(out.roles[0].location.expect("role located").start.line >= 1);
         // The `#[Route(...)]` data attribute is in the manifest.
         assert!(
             out.attributes

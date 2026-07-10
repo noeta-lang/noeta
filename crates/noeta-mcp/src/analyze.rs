@@ -147,6 +147,15 @@ pub fn symbol_offsets(text: &str, name: &str) -> Vec<u32> {
     offsets
 }
 
+/// Resolve a span to its owning file's name and line/column location — spans in the merged
+/// workspace program keep their per-file [`SourceId`]s, so a role or attribute target in a sibling
+/// module locates correctly. `None` for a span outside the prepared sources.
+pub fn locate_span(p: &Prepared, span: noeta_span::Span) -> Option<(String, SpanLoc)> {
+    let source = p.sources.get(span.source.0 as usize)?;
+    let index = LineIndex::new(source.text());
+    Some((source.name().to_string(), index.span_loc(span)))
+}
+
 /// The entry file's [`SourceProgram`] — the salsa input the per-file `ast`/`tokens` queries take.
 pub fn entry_program(p: &Prepared) -> noeta_db::SourceProgram {
     noeta_db::source_program(&p.db, &p.sources[0])

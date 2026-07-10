@@ -5,6 +5,7 @@
 //! It carries no codegen or runtime meaning of its own; it is a read-only view of the program.
 
 use crate::{AttrArg, AttrValue, Attribute, Expr, FieldDecl, Program, Stmt, TypeRef, UnaryOp};
+use noeta_span::Span;
 use serde::{Deserialize, Serialize};
 
 /// Everything reflection needs about a program, derived purely from its AST.
@@ -99,6 +100,9 @@ impl ReflectionInfo {
 pub struct AttributeRecord {
     /// The annotated declaration's name (a type name today; pass 2 extends attributes to methods).
     pub target: String,
+    /// The span of the annotated declaration's *name*, so tooling can locate the target in source
+    /// (the runtime materialization ignores it).
+    pub target_span: Span,
     /// The attribute's name (e.g. `Route`).
     pub name: String,
     /// The attribute's literal arguments (positional + named), straight from the AST.
@@ -113,6 +117,9 @@ pub struct AttributeRecord {
 pub struct RoleRecord {
     /// The annotated declaration's name (the same target keying as the attribute manifest).
     pub target: String,
+    /// The span of the annotated declaration's *name*, so tooling can locate the role bearer in
+    /// source (the runtime `roles_of()` materialization ignores it).
+    pub target_span: Span,
     /// The role's `@semantic` enum name (e.g. `Semantic`, `WebRole`).
     pub enum_name: String,
     /// The role's variant name (e.g. `EntryPoint`, `Controller`).
@@ -165,7 +172,7 @@ pub fn build(program: &Program) -> ReflectionInfo {
     for stmt in &program.stmts {
         match stmt {
             Stmt::Struct(decl) => {
-                push_attrs(&mut manifest, &decl.name, &decl.attrs);
+                push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
                 push_field_attrs(&mut manifest, &decl.name, &decl.fields);
                 // A role tag rides on the attribute struct; record each (validated) `Enum.Variant`
                 // so every declaration the attribute annotates inherits it. A malformed `@role`
@@ -187,13 +194,13 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 });
             }
             Stmt::Class(decl) => {
-                push_attrs(&mut manifest, &decl.name, &decl.attrs);
+                push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
                 push_field_attrs(&mut manifest, &decl.name, &decl.fields);
                 // A method's attributes are keyed by its qualified `Class.method` name, so a
                 // `#[...]` on a method surfaces distinctly from the same name on another class.
                 for method in &decl.methods {
                     let target = format!("{}.{}", decl.name, method.name);
-                    push_attrs(&mut manifest, &target, &method.attrs);
+                    push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
@@ -205,20 +212,20 @@ pub fn build(program: &Program) -> ReflectionInfo {
             }
             // A top-level function carries attributes too (keyed by its bare name); it is not a
             // declared *type*, so it contributes to the manifest only, not the type registry.
-            Stmt::Fn(decl) => push_attrs(&mut manifest, &decl.name, &decl.attrs),
+            Stmt::Fn(decl) => push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs),
             Stmt::Enum(decl) => {
-                push_attrs(&mut manifest, &decl.name, &decl.attrs);
+                push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
                 // A variant's attributes are keyed by its qualified `Enum.Variant` name, mirroring
                 // the `Type.field`/`Type.method` convention.
                 for variant in &decl.variants {
                     let target = format!("{}.{}", decl.name, variant.name);
-                    push_attrs(&mut manifest, &target, &variant.attrs);
+                    push_attrs(&mut manifest, &target, variant.name_span, &variant.attrs);
                 }
                 // An enum method's attributes are keyed by its qualified `Enum.method` name, the same
                 // convention class/struct methods use (object-model slice 3).
                 for method in &decl.methods {
                     let target = format!("{}.{}", decl.name, method.name);
-                    push_attrs(&mut manifest, &target, &method.attrs);
+                    push_attrs(&mut manifest, &target, method.name_span, &method.attrs);
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
@@ -246,6 +253,7 @@ pub fn build(program: &Program) -> ReflectionInfo {
         for (_, (enum_name, variant)) in role_of.iter().filter(|(name, _)| name == &entry.name) {
             let record = RoleRecord {
                 target: entry.target.clone(),
+                target_span: entry.target_span,
                 enum_name: enum_name.clone(),
                 variant: variant.clone(),
             };
@@ -685,14 +693,20 @@ pub const SEMANTIC_VARIANTS: &[&str] = &[
 fn push_field_attrs(manifest: &mut Vec<AttributeRecord>, type_name: &str, fields: &[FieldDecl]) {
     for field in fields {
         let target = format!("{}.{}", type_name, field.name);
-        push_attrs(manifest, &target, &field.attrs);
+        push_attrs(manifest, &target, field.name_span, &field.attrs);
     }
 }
 
-fn push_attrs(manifest: &mut Vec<AttributeRecord>, target: &str, attrs: &[Attribute]) {
+fn push_attrs(
+    manifest: &mut Vec<AttributeRecord>,
+    target: &str,
+    target_span: Span,
+    attrs: &[Attribute],
+) {
     for attr in attrs {
         manifest.push(AttributeRecord {
             target: target.to_string(),
+            target_span,
             name: attr.name.clone(),
             args: attr.args.clone(),
         });
