@@ -599,7 +599,37 @@ fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
         tag: tag.clone(),
         sha: sha.clone(),
     };
-    match index.publish(&name, &version, &coords) {
+    // Record this package's **registry** dependencies (Phase 4, S5c) so the index can serve them to
+    // the resolver — the crates.io-index model that lets version ranges resolve without cloning every
+    // candidate. Path deps can't travel and git deps don't fit the (identity, req) shape, so only
+    // registry deps are recorded; a published package should depend via the registry.
+    let manifest = match manifest::load(&manifest_path) {
+        Ok(manifest) => manifest,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let deps: Vec<registry::Dep> = manifest
+        .dependencies()
+        .values()
+        .filter_map(|dep| match dep {
+            manifest::Dependency::Registry {
+                package: Some(pkg),
+                req,
+            } => Some(registry::Dep {
+                package: format!("{}/{}", pkg.company, pkg.package),
+                req: req.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+    let release = registry::Release {
+        version: version.clone(),
+        coords,
+        deps,
+    };
+    match index.publish(&name, &release) {
         Ok(()) => {
             println!("published `{name}` {version} → {git}#{tag} ({sha})");
             ExitCode::SUCCESS

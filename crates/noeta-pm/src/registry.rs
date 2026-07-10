@@ -38,40 +38,61 @@ pub struct GitCoords {
     pub sha: String,
 }
 
-/// The registry index contract: look up a package's published versions (each with its git
-/// coordinates), and record a new release. Implemented by [`LocalIndex`] here; the hosted service
-/// implements the same shape over HTTP.
-pub trait Index {
-    /// Every published `(version, git coordinates)` of `name` (`company/package`). An unknown package
-    /// yields an empty list; an `Err` is a real lookup failure (a corrupt/unreadable index).
-    fn versions(&self, name: &str) -> Result<Vec<(Version, GitCoords)>, String>;
-
-    /// Record `name`@`version` → `coords` (the `noeta publish` write path). Re-publishing the same
-    /// version with identical coordinates is idempotent; a *different* coordinate for an existing
-    /// version is rejected (a published release is immutable).
-    fn publish(&self, name: &str, version: &Version, coords: &GitCoords) -> Result<(), String>;
+/// One registry dependency edge of a published release (package-manager Phase 4, S5): the depended-on
+/// **package identity** and the SemVer requirement. Carried in the index so the PubGrub resolver sees
+/// a package's dependencies without cloning it — the crates.io-index model that makes range
+/// backtracking practical.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dep {
+    pub package: String,
+    pub req: VersionReq,
 }
 
-/// Resolve a registry requirement to a concrete release: the **highest published version** of `name`
-/// satisfying `req`. Errors when the package is unknown or no published version matches (with the
-/// available versions listed, matching the project's diagnostic bar).
+/// A published release (package-manager Phase 4, S5): a version, its git [`GitCoords`], and the
+/// registry dependencies that version declares. The `deps` are what let the resolver backtrack over
+/// ranges — it can read a candidate's requirements from the index instead of fetching its source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Release {
+    pub version: Version,
+    pub coords: GitCoords,
+    pub deps: Vec<Dep>,
+}
+
+/// The registry index contract: look up a package's published releases (each with its git coordinates
+/// **and dependencies**), and record a new release. Implemented by [`LocalIndex`] here; the hosted
+/// service implements the same shape over HTTP.
+pub trait Index {
+    /// Every published [`Release`] of `name` (`company/package`). An unknown package yields an empty
+    /// list; an `Err` is a real lookup failure (a corrupt/unreadable index).
+    fn releases(&self, name: &str) -> Result<Vec<Release>, String>;
+
+    /// Record a `name` release (the `noeta publish` write path). Re-publishing the same version with
+    /// identical coordinates + deps is idempotent; a *different* coordinate for an existing version is
+    /// rejected (a published release is immutable).
+    fn publish(&self, name: &str, release: &Release) -> Result<(), String>;
+}
+
+/// Resolve a registry requirement to a concrete release's coordinates: the **highest published
+/// version** of `name` satisfying `req`. Errors when the package is unknown or no published version
+/// matches. Used where a single dependency is materialized directly; the graph's PubGrub pass
+/// (Phase 4, S5b) instead reads whole candidate sets through [`Index::releases`].
 pub fn resolve_coords(
     index: &dyn Index,
     name: &str,
     req: &VersionReq,
 ) -> Result<(Version, GitCoords), String> {
-    let mut versions = index.versions(name)?;
-    if versions.is_empty() {
+    let mut releases = index.releases(name)?;
+    if releases.is_empty() {
         return Err(format!("registry has no package `{name}`"));
     }
     // Highest first, so the first match is the selection.
-    versions.sort_by(|a, b| b.0.cmp(&a.0));
-    versions
+    releases.sort_by(|a, b| b.version.cmp(&a.version));
+    releases
         .iter()
-        .find(|(v, _)| req.matches(v))
-        .cloned()
+        .find(|r| req.matches(&r.version))
+        .map(|r| (r.version.clone(), r.coords.clone()))
         .ok_or_else(|| {
-            let available: Vec<String> = versions.iter().map(|(v, _)| v.to_string()).collect();
+            let available: Vec<String> = releases.iter().map(|r| r.version.to_string()).collect();
             format!(
                 "no version of `{name}` matches `{req}` (published: {})",
                 available.join(", ")
@@ -119,7 +140,7 @@ impl LocalIndex {
 }
 
 impl Index for LocalIndex {
-    fn versions(&self, name: &str) -> Result<Vec<(Version, GitCoords)>, String> {
+    fn releases(&self, name: &str) -> Result<Vec<Release>, String> {
         let path = self.file_for(name);
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Ok(Vec::new()); // unknown package
@@ -132,45 +153,70 @@ impl Index for LocalIndex {
             for entry in entries {
                 let Some(t) = entry.as_table() else { continue };
                 let get = |k: &str| t.get(k).and_then(|v| v.as_str());
-                if let (Some(ver), Some(url), Some(tag), Some(sha)) =
+                let (Some(ver), Some(url), Some(tag), Some(sha)) =
                     (get("version"), get("url"), get("tag"), get("sha"))
-                    && let Ok(version) = Version::parse(ver)
-                {
-                    out.push((
-                        version,
-                        GitCoords {
-                            url: url.to_string(),
-                            tag: tag.to_string(),
-                            sha: sha.to_string(),
-                        },
-                    ));
+                else {
+                    continue;
+                };
+                let Ok(version) = Version::parse(ver) else {
+                    continue;
+                };
+                let mut deps = Vec::new();
+                if let Some(dep_arr) = t.get("deps").and_then(|v| v.as_array()) {
+                    for d in dep_arr {
+                        let Some(dt) = d.as_table() else { continue };
+                        if let (Some(package), Some(req)) = (
+                            dt.get("package").and_then(|v| v.as_str()),
+                            dt.get("req").and_then(|v| v.as_str()),
+                        ) && let Ok(req) = VersionReq::parse(req)
+                        {
+                            deps.push(Dep {
+                                package: package.to_string(),
+                                req,
+                            });
+                        }
+                    }
                 }
+                out.push(Release {
+                    version,
+                    coords: GitCoords {
+                        url: url.to_string(),
+                        tag: tag.to_string(),
+                        sha: sha.to_string(),
+                    },
+                    deps,
+                });
             }
         }
         Ok(out)
     }
 
-    fn publish(&self, name: &str, version: &Version, coords: &GitCoords) -> Result<(), String> {
-        let mut versions = self.versions(name)?;
-        if let Some((_, existing)) = versions.iter().find(|(v, _)| v == version) {
-            if existing == coords {
+    fn publish(&self, name: &str, release: &Release) -> Result<(), String> {
+        let mut releases = self.releases(name)?;
+        if let Some(existing) = releases.iter().find(|r| r.version == release.version) {
+            if existing == release {
                 return Ok(()); // idempotent re-publish
             }
             return Err(format!(
-                "`{name}`@{version} is already published at {}#{} — a release is immutable",
-                existing.url, existing.tag
+                "`{name}`@{} is already published at {}#{} — a release is immutable",
+                release.version, existing.coords.url, existing.coords.tag
             ));
         }
-        versions.push((version.clone(), coords.clone()));
-        versions.sort_by(|a, b| a.0.cmp(&b.0));
+        releases.push(release.clone());
+        releases.sort_by(|a, b| a.version.cmp(&b.version));
 
         let mut text = String::from("# noeta registry index entry (generated).\n");
-        for (v, c) in &versions {
+        for r in &releases {
             text.push_str("\n[[version]]\n");
-            text.push_str(&format!("version = {}\n", quote(&v.to_string())));
-            text.push_str(&format!("url = {}\n", quote(&c.url)));
-            text.push_str(&format!("tag = {}\n", quote(&c.tag)));
-            text.push_str(&format!("sha = {}\n", quote(&c.sha)));
+            text.push_str(&format!("version = {}\n", quote(&r.version.to_string())));
+            text.push_str(&format!("url = {}\n", quote(&r.coords.url)));
+            text.push_str(&format!("tag = {}\n", quote(&r.coords.tag)));
+            text.push_str(&format!("sha = {}\n", quote(&r.coords.sha)));
+            for dep in &r.deps {
+                text.push_str("\n[[version.deps]]\n");
+                text.push_str(&format!("package = {}\n", quote(&dep.package)));
+                text.push_str(&format!("req = {}\n", quote(&dep.req.to_string())));
+            }
         }
         std::fs::write(self.file_for(name), text)
             .map_err(|err| format!("cannot write registry entry for `{name}`: {err}"))
@@ -232,6 +278,15 @@ struct WireVersion {
     sha: String,
     #[serde(default)]
     yanked: bool,
+    #[serde(default)]
+    deps: Vec<WireDep>,
+}
+
+#[cfg(feature = "registry-http")]
+#[derive(serde::Deserialize)]
+struct WireDep {
+    package: String,
+    req: String,
 }
 
 #[cfg(feature = "registry-http")]
@@ -260,7 +315,7 @@ impl HttpIndex {
 
 #[cfg(feature = "registry-http")]
 impl Index for HttpIndex {
-    fn versions(&self, name: &str) -> Result<Vec<(Version, GitCoords)>, String> {
+    fn releases(&self, name: &str) -> Result<Vec<Release>, String> {
         let resp = self
             .client
             .get(self.url_for(name))
@@ -285,28 +340,45 @@ impl Index for HttpIndex {
             let Ok(version) = Version::parse(&v.version) else {
                 continue; // ignore an unparseable version rather than failing the whole resolve
             };
-            out.push((
+            let deps = v
+                .deps
+                .into_iter()
+                .filter_map(|d| {
+                    VersionReq::parse(&d.req).ok().map(|req| Dep {
+                        package: d.package,
+                        req,
+                    })
+                })
+                .collect();
+            out.push(Release {
                 version,
-                GitCoords {
+                coords: GitCoords {
                     url: v.url,
                     tag: v.tag,
                     sha: v.sha,
                 },
-            ));
+                deps,
+            });
         }
         Ok(out)
     }
 
-    fn publish(&self, name: &str, version: &Version, coords: &GitCoords) -> Result<(), String> {
+    fn publish(&self, name: &str, release: &Release) -> Result<(), String> {
         let token = self.token.as_ref().ok_or_else(|| {
             "publishing needs a token — set NOETA_REGISTRY_TOKEN to your registry publish token"
                 .to_string()
         })?;
+        let deps: Vec<_> = release
+            .deps
+            .iter()
+            .map(|d| serde_json::json!({ "package": d.package, "req": d.req.to_string() }))
+            .collect();
         let body = serde_json::json!({
-            "version": version.to_string(),
-            "url": coords.url,
-            "tag": coords.tag,
-            "sha": coords.sha,
+            "version": release.version.to_string(),
+            "url": release.coords.url,
+            "tag": release.coords.tag,
+            "sha": release.coords.sha,
+            "deps": deps,
         });
         let resp = self
             .client
@@ -314,7 +386,7 @@ impl Index for HttpIndex {
             .bearer_auth(token)
             .json(&body)
             .send()
-            .map_err(|err| format!("publishing `{name}`@{version} failed: {err}"))?;
+            .map_err(|err| format!("publishing `{name}`@{} failed: {err}", release.version))?;
         let status = resp.status();
         if status.is_success() {
             return Ok(());
@@ -325,7 +397,10 @@ impl Index for HttpIndex {
             .ok()
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| status.to_string());
-        Err(format!("registry rejected `{name}`@{version}: {detail}"))
+        Err(format!(
+            "registry rejected `{name}`@{}: {detail}",
+            release.version
+        ))
     }
 }
 
@@ -347,18 +422,21 @@ mod tests {
         }
     }
 
+    /// A release with the given version + tag and no dependencies.
+    fn release(major: u64, minor: u64, patch: u64, tag: &str) -> Release {
+        Release {
+            version: Version::new(major, minor, patch),
+            coords: coords(tag),
+            deps: Vec::new(),
+        }
+    }
+
     #[test]
     fn publish_then_resolve_picks_highest_match() {
         let index = mem("pick_highest");
-        index
-            .publish("guzzle/http", &Version::new(1, 0, 0), &coords("v1.0.0"))
-            .unwrap();
-        index
-            .publish("guzzle/http", &Version::new(1, 4, 0), &coords("v1.4.0"))
-            .unwrap();
-        index
-            .publish("guzzle/http", &Version::new(2, 0, 0), &coords("v2.0.0"))
-            .unwrap();
+        index.publish("guzzle/http", &release(1, 0, 0, "v1.0.0")).unwrap();
+        index.publish("guzzle/http", &release(1, 4, 0, "v1.4.0")).unwrap();
+        index.publish("guzzle/http", &release(2, 0, 0, "v2.0.0")).unwrap();
 
         let (version, c) =
             resolve_coords(&index, "guzzle/http", &VersionReq::parse("^1.0").unwrap()).unwrap();
@@ -367,11 +445,29 @@ mod tests {
     }
 
     #[test]
+    fn deps_round_trip_through_the_local_index() {
+        let index = mem("deps_round_trip");
+        let mut rel = release(1, 0, 0, "v1.0.0");
+        rel.deps = vec![
+            Dep {
+                package: "acme/bar".to_string(),
+                req: VersionReq::parse("^1.2").unwrap(),
+            },
+            Dep {
+                package: "acme/baz".to_string(),
+                req: VersionReq::parse(">=2, <3").unwrap(),
+            },
+        ];
+        index.publish("acme/foo", &rel).unwrap();
+        let got = index.releases("acme/foo").unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].deps, rel.deps);
+    }
+
+    #[test]
     fn resolve_reports_no_match_and_unknown() {
         let index = mem("no_match");
-        index
-            .publish("guzzle/http", &Version::new(1, 0, 0), &coords("v1.0.0"))
-            .unwrap();
+        index.publish("guzzle/http", &release(1, 0, 0, "v1.0.0")).unwrap();
         let err =
             resolve_coords(&index, "guzzle/http", &VersionReq::parse("^2").unwrap()).unwrap_err();
         assert!(err.contains("no version"), "{err}");
@@ -382,17 +478,11 @@ mod tests {
     #[test]
     fn republishing_a_version_with_new_coords_is_rejected() {
         let index = mem("republish");
-        index
-            .publish("a/b", &Version::new(1, 0, 0), &coords("v1.0.0"))
-            .unwrap();
+        index.publish("a/b", &release(1, 0, 0, "v1.0.0")).unwrap();
         // Same coords: idempotent.
-        index
-            .publish("a/b", &Version::new(1, 0, 0), &coords("v1.0.0"))
-            .unwrap();
+        index.publish("a/b", &release(1, 0, 0, "v1.0.0")).unwrap();
         // Different coords for a published version: rejected (immutable).
-        let err = index
-            .publish("a/b", &Version::new(1, 0, 0), &coords("v9.9.9"))
-            .unwrap_err();
+        let err = index.publish("a/b", &release(1, 0, 0, "v9.9.9")).unwrap_err();
         assert!(err.contains("immutable"), "{err}");
     }
 }
@@ -469,11 +559,11 @@ mod http_tests {
             )
         });
         let index = HttpIndex::new(base).unwrap();
-        let versions = index.versions("acme/imgfx").unwrap();
+        let releases = index.releases("acme/imgfx").unwrap();
         // 2.0.0 is yanked → not offered as a candidate; 1.2.0 carries its pinned SHA.
-        assert_eq!(versions.len(), 1);
-        assert_eq!(versions[0].0, Version::new(1, 2, 0));
-        assert_eq!(versions[0].1.sha, "abc");
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].version, Version::new(1, 2, 0));
+        assert_eq!(releases[0].coords.sha, "abc");
 
         // resolve_coords picks it through the same trait the local index uses.
         let (v, c) = resolve_coords(&index, "acme/imgfx", &VersionReq::parse("^1.0").unwrap()).unwrap();
@@ -496,11 +586,17 @@ mod http_tests {
         index
             .publish(
                 "acme/imgfx",
-                &Version::new(1, 0, 0),
-                &GitCoords {
-                    url: "https://x/acme/imgfx".to_string(),
-                    tag: "v1.0.0".to_string(),
-                    sha: "abc".to_string(),
+                &Release {
+                    version: Version::new(1, 0, 0),
+                    coords: GitCoords {
+                        url: "https://x/acme/imgfx".to_string(),
+                        tag: "v1.0.0".to_string(),
+                        sha: "abc".to_string(),
+                    },
+                    deps: vec![Dep {
+                        package: "acme/bar".to_string(),
+                        req: VersionReq::parse("^1.0").unwrap(),
+                    }],
                 },
             )
             .unwrap();
@@ -509,6 +605,8 @@ mod http_tests {
         assert_eq!(path, "/v1/packages/acme/imgfx");
         assert!(body.contains("\"sha\":\"abc\""), "body: {body}");
         assert!(body.contains("\"version\":\"1.0.0\""), "body: {body}");
+        // The dependency metadata is sent so the index can serve it to the resolver (S5).
+        assert!(body.contains("\"package\":\"acme/bar\""), "deps in body: {body}");
     }
 
     #[test]
@@ -521,11 +619,14 @@ mod http_tests {
         let err = index
             .publish(
                 "acme/imgfx",
-                &Version::new(1, 0, 0),
-                &GitCoords {
-                    url: "u".to_string(),
-                    tag: "t".to_string(),
-                    sha: "s".to_string(),
+                &Release {
+                    version: Version::new(1, 0, 0),
+                    coords: GitCoords {
+                        url: "u".to_string(),
+                        tag: "t".to_string(),
+                        sha: "s".to_string(),
+                    },
+                    deps: Vec::new(),
                 },
             )
             .unwrap_err();
