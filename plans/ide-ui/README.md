@@ -1,7 +1,17 @@
 # IDE architecture navigation — call hierarchy, role lenses, trace UI
 
-**Status: U0 done (`722e3a09`); U1 next.** Branch `ide-ui`, worktree `.claude/worktrees/ide-ui`
-(rebased onto main `362b4873`, which merged the profiler VS Code UI).
+**Status: U0–U2 done; U3 awaits its go/no-go (use U1+U2 first).** Branch `ide-ui`, worktree
+`.claude/worktrees/ide-ui` (rebased onto main `362b4873`, which merged the profiler VS Code UI).
+
+- **U0** `722e3a09` — hierarchy queries on the `DocumentStore` (+ `4a60eb2f` extension unification).
+- **U1** `bfe6065e` — LSP call hierarchy; engine generalized so expansion works from files the user
+  never opened (`workspace_of`); `FnNode.method` flag; shared `TOP_LEVEL` anchor.
+- **U2** `87ba5da9`+`8db949bf`+`27921e75` — trace walker extracted to `noeta_ide::trace`
+  (span-carrying, MCP converts + its tests gate parity), `role_lenses`/`trace_document` on the
+  store, LSP `code_lens` + `noeta/trace` custom request, extension 0.7.0 (`src/trace.js`:
+  `noeta.showTrace`, `noeta-trace:` content provider, `path:line` DocumentLinkProvider).
+- End-to-end smoke: a scripted stdio session against the real `noeta lsp` binary exercises
+  initialize/codeLens/prepare+incoming+outgoing/noeta trace and asserts each answer.
 
 The role-graph work (merged, `fef79e06`) gave agents a role-enriched architectural graph: the
 `@role` index with source locations, roles on the `symbols` outline and `module_graph` nodes, the
