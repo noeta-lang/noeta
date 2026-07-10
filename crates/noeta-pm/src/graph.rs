@@ -162,7 +162,7 @@ struct Walker<'a> {
     instances: BTreeMap<String, Instance>,
     store: Option<Store>,
     lock: &'a crate::lock::Lock,
-    index: Option<crate::registry::LocalIndex>,
+    index: Option<Box<dyn crate::registry::Index>>,
     /// The root manifest's `[trust].native` — package identities allowed to run native code (Phase 4).
     native_trust: &'a std::collections::BTreeSet<String>,
 }
@@ -350,12 +350,13 @@ impl Walker<'_> {
         Ok(self.store.as_ref().expect("just opened"))
     }
 
-    /// The registry index, opened on first use (only a registry dependency needs it).
-    fn index(&mut self) -> Result<&crate::registry::LocalIndex, String> {
+    /// The registry index, opened on first use (only a registry dependency needs it): the networked
+    /// index when configured (`NOETA_REGISTRY_URL` + the `registry-http` feature), else the local one.
+    fn index(&mut self) -> Result<&dyn crate::registry::Index, String> {
         if self.index.is_none() {
-            self.index = Some(crate::registry::LocalIndex::open()?);
+            self.index = Some(crate::registry::open_default()?);
         }
-        Ok(self.index.as_ref().expect("just opened"))
+        Ok(self.index.as_deref().expect("just opened"))
     }
 }
 

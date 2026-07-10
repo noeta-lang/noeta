@@ -567,7 +567,7 @@ fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
     let tag = tag
         .map(str::to_string)
         .unwrap_or_else(|| format!("v{version}"));
-    let index = match registry::LocalIndex::open() {
+    let index = match registry::open_default() {
         Ok(index) => index,
         Err(err) => {
             eprintln!("lang: {err}");
@@ -589,7 +589,7 @@ fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
         tag: tag.clone(),
         sha: sha.clone(),
     };
-    match registry::Index::publish(&index, &name, &version, &coords) {
+    match index.publish(&name, &version, &coords) {
         Ok(()) => {
             println!("published `{name}` {version} → {git}#{tag} ({sha})");
             ExitCode::SUCCESS

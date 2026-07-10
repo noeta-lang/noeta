@@ -182,6 +182,153 @@ fn quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// Open the registry index a resolve/publish should use (package-manager Phase 4, S4). With the
+/// `registry-http` feature and `NOETA_REGISTRY_URL` set, this is the **networked** [`HttpIndex`]
+/// (the hosted index); otherwise the file-backed [`LocalIndex`] (offline / tests). A future default
+/// production URL flips the else-branch once the hosted registry is live.
+pub fn open_default() -> Result<Box<dyn Index>, String> {
+    #[cfg(feature = "registry-http")]
+    if let Some(url) = std::env::var_os("NOETA_REGISTRY_URL") {
+        let base = url
+            .into_string()
+            .map_err(|_| "NOETA_REGISTRY_URL is not valid UTF-8".to_string())?;
+        return Ok(Box::new(HttpIndex::new(base)?));
+    }
+    Ok(Box::new(LocalIndex::open()?))
+}
+
+/// The networked registry index (package-manager Phase 4, S4): an HTTP client of the hosted index
+/// (see the `noeta-registry` Worker + its `PROTOCOL.md`). Reads over `GET`, publishes over `POST`
+/// with a bearer token (`NOETA_REGISTRY_TOKEN`). The registry serves only git *coordinates*, never
+/// source, so a compromised index can at worst point at a different repo/tag — which the SHA pin and
+/// the consumer's lockfile catch.
+#[cfg(feature = "registry-http")]
+pub struct HttpIndex {
+    base: String,
+    token: Option<String>,
+    client: reqwest::blocking::Client,
+}
+
+#[cfg(feature = "registry-http")]
+impl std::fmt::Debug for HttpIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpIndex").field("base", &self.base).finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "registry-http")]
+#[derive(serde::Deserialize)]
+struct VersionsResponse {
+    #[serde(default)]
+    versions: Vec<WireVersion>,
+}
+
+#[cfg(feature = "registry-http")]
+#[derive(serde::Deserialize)]
+struct WireVersion {
+    version: String,
+    url: String,
+    tag: String,
+    sha: String,
+    #[serde(default)]
+    yanked: bool,
+}
+
+#[cfg(feature = "registry-http")]
+impl HttpIndex {
+    /// A client for the registry at `base` (e.g. `https://registry.noeta.dev`). The publish token,
+    /// if any, comes from `NOETA_REGISTRY_TOKEN`.
+    pub fn new(base: impl Into<String>) -> Result<HttpIndex, String> {
+        let base = base.into().trim_end_matches('/').to_string();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .user_agent(concat!("noeta/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .map_err(|err| format!("cannot build the registry HTTP client: {err}"))?;
+        Ok(HttpIndex {
+            base,
+            token: std::env::var("NOETA_REGISTRY_TOKEN").ok(),
+            client,
+        })
+    }
+
+    fn url_for(&self, name: &str) -> String {
+        // `name` is `company/package`, which becomes the two path segments verbatim.
+        format!("{}/v1/packages/{name}", self.base)
+    }
+}
+
+#[cfg(feature = "registry-http")]
+impl Index for HttpIndex {
+    fn versions(&self, name: &str) -> Result<Vec<(Version, GitCoords)>, String> {
+        let resp = self
+            .client
+            .get(self.url_for(name))
+            .send()
+            .map_err(|err| format!("registry request for `{name}` failed: {err}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for `{name}`",
+                resp.status()
+            ));
+        }
+        let body: VersionsResponse = resp
+            .json()
+            .map_err(|err| format!("registry sent an unreadable response for `{name}`: {err}"))?;
+        let mut out = Vec::new();
+        for v in body.versions {
+            // A yanked release is never *newly* selected (an existing lockfile pin bypasses the index
+            // entirely, so it still resolves) — skip it from the candidate set.
+            if v.yanked {
+                continue;
+            }
+            let Ok(version) = Version::parse(&v.version) else {
+                continue; // ignore an unparseable version rather than failing the whole resolve
+            };
+            out.push((
+                version,
+                GitCoords {
+                    url: v.url,
+                    tag: v.tag,
+                    sha: v.sha,
+                },
+            ));
+        }
+        Ok(out)
+    }
+
+    fn publish(&self, name: &str, version: &Version, coords: &GitCoords) -> Result<(), String> {
+        let token = self.token.as_ref().ok_or_else(|| {
+            "publishing needs a token — set NOETA_REGISTRY_TOKEN to your registry publish token"
+                .to_string()
+        })?;
+        let body = serde_json::json!({
+            "version": version.to_string(),
+            "url": coords.url,
+            "tag": coords.tag,
+            "sha": coords.sha,
+        });
+        let resp = self
+            .client
+            .post(self.url_for(name))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .map_err(|err| format!("publishing `{name}`@{version} failed: {err}"))?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        // Surface the server's error message when it sends one.
+        let detail = resp
+            .text()
+            .ok()
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| status.to_string());
+        Err(format!("registry rejected `{name}`@{version}: {detail}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,5 +394,141 @@ mod tests {
             .publish("a/b", &Version::new(1, 0, 0), &coords("v9.9.9"))
             .unwrap_err();
         assert!(err.contains("immutable"), "{err}");
+    }
+}
+
+#[cfg(all(test, feature = "registry-http"))]
+mod http_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    /// A one-shot in-process HTTP/1.1 server: it handles connections on a background thread, calling
+    /// `handler(method, path, body) -> (status, json)`. Returns the base URL. Hermetic — no network.
+    fn mock_server(
+        handler: impl Fn(&str, &str, &str) -> (u16, String) + Send + 'static,
+    ) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                let mut parts = line.split_whitespace();
+                let method = parts.next().unwrap_or("").to_string();
+                let path = parts.next().unwrap_or("").to_string();
+                let mut content_length = 0usize;
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if header == "\r\n" || header == "\n" {
+                        break;
+                    }
+                    let lower = header.to_ascii_lowercase();
+                    if let Some(v) = lower.strip_prefix("content-length:") {
+                        content_length = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; content_length];
+                if content_length > 0 {
+                    reader.read_exact(&mut body).unwrap();
+                }
+                let (status, json) = handler(&method, &path, &String::from_utf8_lossy(&body));
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                    json.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        ready_rx.recv().unwrap();
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn http_index_lists_versions_and_skips_yanked() {
+        let base = mock_server(|method, path, _body| {
+            assert_eq!(method, "GET");
+            assert_eq!(path, "/v1/packages/acme/imgfx");
+            (
+                200,
+                r#"{"name":"acme/imgfx","versions":[
+                    {"version":"1.2.0","url":"https://x/acme/imgfx","tag":"v1.2.0","sha":"abc","yanked":false},
+                    {"version":"2.0.0","url":"https://x/acme/imgfx","tag":"v2.0.0","sha":"def","yanked":true}
+                ]}"#
+                    .to_string(),
+            )
+        });
+        let index = HttpIndex::new(base).unwrap();
+        let versions = index.versions("acme/imgfx").unwrap();
+        // 2.0.0 is yanked → not offered as a candidate; 1.2.0 carries its pinned SHA.
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0].0, Version::new(1, 2, 0));
+        assert_eq!(versions[0].1.sha, "abc");
+
+        // resolve_coords picks it through the same trait the local index uses.
+        let (v, c) = resolve_coords(&index, "acme/imgfx", &VersionReq::parse("^1.0").unwrap()).unwrap();
+        assert_eq!(v, Version::new(1, 2, 0));
+        assert_eq!(c.tag, "v1.2.0");
+    }
+
+    #[test]
+    fn http_index_publishes_with_a_bearer_token() {
+        let (tx, rx) = mpsc::channel();
+        let base = mock_server(move |method, path, body| {
+            tx.send((method.to_string(), path.to_string(), body.to_string())).unwrap();
+            (201, r#"{"status":"published"}"#.to_string())
+        });
+        // Construct with an explicit token (avoids racing on a process-global env var).
+        let index = HttpIndex {
+            token: Some("secret-token".to_string()),
+            ..HttpIndex::new(base).unwrap()
+        };
+        index
+            .publish(
+                "acme/imgfx",
+                &Version::new(1, 0, 0),
+                &GitCoords {
+                    url: "https://x/acme/imgfx".to_string(),
+                    tag: "v1.0.0".to_string(),
+                    sha: "abc".to_string(),
+                },
+            )
+            .unwrap();
+        let (method, path, body) = rx.recv().unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/v1/packages/acme/imgfx");
+        assert!(body.contains("\"sha\":\"abc\""), "body: {body}");
+        assert!(body.contains("\"version\":\"1.0.0\""), "body: {body}");
+    }
+
+    #[test]
+    fn http_index_publish_without_token_errors() {
+        let base = mock_server(|_, _, _| (201, "{}".to_string()));
+        let index = HttpIndex {
+            token: None,
+            ..HttpIndex::new(base).unwrap()
+        };
+        let err = index
+            .publish(
+                "acme/imgfx",
+                &Version::new(1, 0, 0),
+                &GitCoords {
+                    url: "u".to_string(),
+                    tag: "t".to_string(),
+                    sha: "s".to_string(),
+                },
+            )
+            .unwrap_err();
+        assert!(err.contains("NOETA_REGISTRY_TOKEN"), "{err}");
     }
 }
