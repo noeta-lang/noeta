@@ -200,6 +200,50 @@ fn to_hierarchy_call(call: noeta_ide::HierarchyCall) -> Option<(CallHierarchyIte
     Some((item, ranges))
 }
 
+/// Map an engine [`RoleLens`](noeta_ide::RoleLens) to the wire CodeLens: `⚑ Enum.Variant`, with
+/// the client-side `noeta.showTrace (uri, function)` command attached when the bearer is a trace
+/// root. A non-traceable lens (a role on a type) gets an empty command — the standard trick for a
+/// label-only lens.
+fn to_code_lens(uri: &str, lens: noeta_ide::RoleLens) -> CodeLens {
+    let command = if lens.traceable {
+        Command {
+            title: format!("⚑ {} · trace request path", lens.role),
+            command: "noeta.showTrace".to_string(),
+            arguments: Some(vec![
+                serde_json::Value::String(uri.to_string()),
+                serde_json::Value::String(lens.target),
+            ]),
+        }
+    } else {
+        Command {
+            title: format!("⚑ {}", lens.role),
+            command: String::new(),
+            arguments: None,
+        }
+    };
+    CodeLens {
+        range: wire_range(lens.range),
+        command: Some(command),
+        data: None,
+    }
+}
+
+/// `noeta/trace` custom-request params: the document anchoring the workspace and the trace spec
+/// (a function name or role; absent = every role-bearing function).
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceParams {
+    uri: String,
+    from: Option<String>,
+}
+
+/// `noeta/trace` answer: the rendered trace document text (the client opens it read-only).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceResult {
+    content: Option<String>,
+}
+
 /// Pick the position encoding: prefer UTF-8 when the client advertises support for it (LSP 3.17),
 /// so the server can use the compiler's native byte offsets directly; otherwise fall back to the
 /// protocol default, UTF-16.
@@ -238,6 +282,18 @@ impl Backend {
 
     fn encoding(&self) -> Encoding {
         *self.encoding.lock().expect("encoding lock poisoned")
+    }
+
+    /// The `noeta/trace` custom request (ide-ui U2): render the role-aware static trace as a
+    /// plain-text document for the editor's `noeta-trace:` virtual-document view. The same
+    /// [`noeta_ide::trace`] walk the MCP `trace` tool serves. `content: null` when no open
+    /// workspace covers the URI.
+    async fn noeta_trace(&self, params: TraceParams) -> Result<TraceResult> {
+        let content = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.trace_document(&params.uri, params.from.as_deref())
+        };
+        Ok(TraceResult { content })
     }
 
     /// Type-check `uri`'s current text and push its diagnostics to the client. A no-op for a URI
@@ -352,6 +408,12 @@ impl LanguageServer for Backend {
                 // Call hierarchy (ide-ui U1) over the shared static call graph — the same
                 // engine the MCP `trace` tool reads; items carry `@role` bindings in the detail.
                 call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+                // Role CodeLenses (ide-ui U2): one lens per `@role` binding in the file; a
+                // traceable one carries the client's `noeta.showTrace` command. Lenses are
+                // complete at production — no resolve round-trip.
+                code_lens_provider: Some(CodeLensOptions {
+                    resolve_provider: Some(false),
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -681,6 +743,20 @@ impl LanguageServer for Backend {
         self.publish_all().await;
     }
 
+    async fn code_lens(&self, params: CodeLensParams) -> Result<Option<Vec<CodeLens>>> {
+        let uri = params.text_document.uri;
+        let lenses = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.role_lenses(uri.as_str(), self.encoding())
+        };
+        Ok(lenses.map(|lenses| {
+            lenses
+                .into_iter()
+                .map(|lens| to_code_lens(uri.as_str(), lens))
+                .collect()
+        }))
+    }
+
     async fn prepare_call_hierarchy(
         &self,
         params: CallHierarchyPrepareParams,
@@ -771,7 +847,11 @@ pub fn run_stdio() {
 async fn serve() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
-    let (service, socket) = LspService::new(Backend::new);
+    let (service, socket) = LspService::build(Backend::new)
+        // The trace document (ide-ui U2) — a custom request, since LSP has no "render me a
+        // read-only report" method; the VS Code extension opens the answer as `noeta-trace:`.
+        .custom_method("noeta/trace", Backend::noeta_trace)
+        .finish();
     Server::new(stdin, stdout, socket).serve(service).await;
 }
 
@@ -856,6 +936,34 @@ mod tests {
             Some("reference (passed as value)")
         );
         assert_eq!(hierarchy_detail(&[], false), None);
+    }
+
+    #[test]
+    fn role_lenses_map_to_wire_code_lenses() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///l.noe",
+            "@attribute\n@role(Semantic.EntryPoint)\nstruct Route { path: string }\n\n#[Route(\"/x\")]\nfn handle(): int { return 1 }\n"
+                .to_string(),
+        );
+        let lenses = store
+            .role_lenses("file:///l.noe", Encoding::Utf8)
+            .expect("open document");
+        assert_eq!(lenses.len(), 1);
+        let wire = to_code_lens("file:///l.noe", lenses[0].clone());
+        let command = wire.command.expect("traceable lens carries the command");
+        assert_eq!(command.title, "⚑ Semantic.EntryPoint · trace request path");
+        assert_eq!(command.command, "noeta.showTrace");
+        assert_eq!(
+            command.arguments.as_deref(),
+            Some(
+                &[
+                    serde_json::Value::String("file:///l.noe".into()),
+                    serde_json::Value::String("handle".into()),
+                ][..]
+            )
+        );
+        assert_eq!(wire.range.start.line, 5, "lens hangs on the fn name");
     }
 
     #[test]

@@ -18,6 +18,10 @@ noeta-diagnostics = { workspace = true }
 # (`macros`). Feature-unified with the rest of the workspace's tokio usage.
 tokio = { workspace = true, features = ["io-std", "rt-multi-thread", "macros"] }
 tower-lsp-server = { workspace = true }
+# The `noeta/trace` custom request (ide-ui U2): its params/result are plain serde shapes, and the
+# role CodeLens carries JSON command arguments.
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
