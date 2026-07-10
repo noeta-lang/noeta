@@ -54,6 +54,9 @@ use noeta_value::{
     compare_primitive, structural_compare,
 };
 
+/// Protocol-neutral debug-session support shared by `noeta dap` and `noeta mcp` (breakpoint
+/// resolution, line-granular stepping, owned stack capture).
+pub mod debug;
 mod isolate;
 #[cfg(feature = "jit")]
 mod jit_service;

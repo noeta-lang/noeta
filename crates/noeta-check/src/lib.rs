@@ -320,6 +320,46 @@ impl SessionChecker {
         diagnostics
     }
 
+    /// Type-check a debug-console **fragment** against the session: the fragment is wrapped as a
+    /// bare closure expression whose parameters are `params` — the paused frame's in-scope local
+    /// names, the same shape the VM compiles it as — and checked as one entry (session-checker C3,
+    /// shared by `noeta dap` and `noeta mcp`). Closure parameters are inference-typed, so frame
+    /// locals check as unconstrained (never a false positive); everything the fragment touches in
+    /// the PROGRAM — functions, methods, types, globals — checks precisely. The bare-closure
+    /// wrapper commits nothing to the session: its bindings are closure-locals to the checker, so
+    /// cross-fragment console bindings stay runtime-deferred — under-constrained, never wrong.
+    pub fn check_closure_fragment(
+        &mut self,
+        body: &noeta_ast::Program,
+        params: &[String],
+    ) -> Vec<Diagnostic> {
+        use noeta_ast::{ClosureBody, Expr, Param, Program, Stmt};
+        let span = body.span;
+        let params = params
+            .iter()
+            .map(|name| Param {
+                name: name.clone(),
+                name_span: span,
+                ty: None,
+                default: None,
+                span,
+            })
+            .collect();
+        let wrapper = Program {
+            stmts: vec![Stmt::Expr {
+                expr: Expr::Closure {
+                    params,
+                    ret: None,
+                    body: ClosureBody::Block(body.stmts.clone()),
+                    span,
+                },
+                span,
+            }],
+            span,
+        };
+        self.check_entry(&wrapper)
+    }
+
     /// A snapshot of the accumulated compile-input bundle — every entry's site maps so far
     /// (span-keyed by per-entry `SourceId`s, so a consumer's lookups only ever hit the right
     /// entry). What a checked session compile (C5) threads into `compile_with_sites`.
