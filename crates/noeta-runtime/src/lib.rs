@@ -1018,37 +1018,114 @@ fn real_exec(
     })
 }
 
-/// A spawned, still-running child (process-handle arc). The stdout/stderr pipes are drained by two
-/// dedicated threads into buffers as the child writes, so the child never blocks on a full pipe
-/// while the program supervises it (the classic capture-without-draining deadlock). `result` caches
-/// the outcome once the child is reaped, so `wait`/`try_wait` are idempotent.
+/// A growing capture buffer for one of a child's output pipes, shared between the draining thread
+/// (which appends and marks EOF) and the interpreter thread (which reads it, whole at `wait` or
+/// line-by-line at `read_line`). The condvar lets a blocking `read_line` sleep until more bytes
+/// arrive or the stream ends, instead of busy-polling.
+#[derive(Debug, Default)]
+struct StreamBuf {
+    data: Vec<u8>,
+    eof: bool,
+}
+
+#[derive(Debug, Default)]
+struct SharedStream {
+    buf: Mutex<StreamBuf>,
+    more: std::sync::Condvar,
+}
+
+impl SharedStream {
+    /// The next line (without its trailing newline), from `cursor`, blocking until a full line is
+    /// buffered or the stream ends. `None` at end of output; a final unterminated line is returned
+    /// once (like `str::lines`). `cursor` advances past the line (and its newline).
+    fn read_line(&self, cursor: &mut usize) -> Option<String> {
+        let mut buf = self.buf.lock().unwrap();
+        loop {
+            if let Some(rel) = buf.data[*cursor..].iter().position(|&b| b == b'\n') {
+                let end = *cursor + rel;
+                let line = String::from_utf8_lossy(&buf.data[*cursor..end]).into_owned();
+                *cursor = end + 1;
+                return Some(line);
+            }
+            if buf.eof {
+                if *cursor < buf.data.len() {
+                    let line = String::from_utf8_lossy(&buf.data[*cursor..]).into_owned();
+                    *cursor = buf.data.len();
+                    return Some(line);
+                }
+                return None;
+            }
+            buf = self.more.wait(buf).unwrap();
+        }
+    }
+
+    /// The whole captured content decoded lossily — read at `wait` once the draining thread has
+    /// finished (so `data` is complete).
+    fn snapshot(&self) -> String {
+        String::from_utf8_lossy(&self.buf.lock().unwrap().data).into_owned()
+    }
+}
+
+/// Read `pipe` to EOF, appending into `shared` and waking any blocked `read_line`. Runs on its own
+/// thread per pipe so a chatty child never blocks on a full pipe buffer while the program
+/// supervises it (the classic capture-without-draining deadlock).
+fn drain_pipe(mut pipe: impl std::io::Read, shared: Arc<SharedStream>) {
+    let mut chunk = [0u8; 8192];
+    loop {
+        match pipe.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                shared
+                    .buf
+                    .lock()
+                    .unwrap()
+                    .data
+                    .extend_from_slice(&chunk[..n]);
+                shared.more.notify_all();
+            }
+        }
+    }
+    shared.buf.lock().unwrap().eof = true;
+    shared.more.notify_all();
+}
+
+/// A spawned, still-running child (process-handle + streaming arcs). Both output pipes drain on
+/// background threads into shared buffers (see [`SharedStream`]): `read_line` streams stdout
+/// incrementally while the child runs, `wait` returns the whole captured output at exit, and
+/// `write`/`close_stdin` feed the child's stdin. `result` caches the outcome so `wait`/`try_wait`
+/// are idempotent.
 #[derive(Debug)]
 struct ChildProc {
     child: std::process::Child,
     /// The child's OS pid, captured at spawn (stays valid after reap for `pid()`).
     pid: i64,
-    /// The stdout/stderr drain threads; each reads its pipe to EOF and returns the bytes. `take`n
-    /// and joined when the child is reaped.
-    stdout: Option<std::thread::JoinHandle<Vec<u8>>>,
-    stderr: Option<std::thread::JoinHandle<Vec<u8>>>,
-    /// The reaped outcome, cached so a second `wait`/`try_wait` returns it without touching the
-    /// (already-consumed) child.
+    stdout: Arc<SharedStream>,
+    stderr: Arc<SharedStream>,
+    /// The stdout/stderr drain threads, joined when the child is reaped.
+    stdout_join: Option<std::thread::JoinHandle<()>>,
+    stderr_join: Option<std::thread::JoinHandle<()>>,
+    /// `read_line`'s cursor into the stdout buffer — independent of the whole-output `wait`.
+    stdout_cursor: usize,
+    /// The child's stdin pipe; `None` once closed. Dropping it signals EOF to the child.
+    stdin: Option<std::process::ChildStdin>,
+    /// The reaped outcome, cached so a second `wait`/`try_wait` returns it without re-waiting.
     result: Option<ExecResult>,
 }
 
 impl ChildProc {
-    /// Build the [`ExecResult`] for an exited child: join the drain threads to collect the full
-    /// captured output and pair it with `status`. Caches the result on `self` and returns it.
+    /// Build the [`ExecResult`] for an exited child: join the drain threads (so the buffers are
+    /// complete), snapshot the full captured output, and pair it with `status`. Caches and returns.
     fn reap(&mut self, status: std::process::ExitStatus) -> ExecResult {
-        let collect = |h: Option<std::thread::JoinHandle<Vec<u8>>>| {
-            h.map(|h| h.join().unwrap_or_default()).unwrap_or_default()
-        };
-        let stdout = collect(self.stdout.take());
-        let stderr = collect(self.stderr.take());
+        if let Some(h) = self.stdout_join.take() {
+            let _ = h.join();
+        }
+        if let Some(h) = self.stderr_join.take() {
+            let _ = h.join();
+        }
         let result = ExecResult {
             status: i64::from(status.code().unwrap_or(-1)),
-            stdout: String::from_utf8_lossy(&stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            stdout: self.stdout.snapshot(),
+            stderr: self.stderr.snapshot(),
         };
         self.result = Some(result.clone());
         result
@@ -1123,38 +1200,29 @@ impl Os for RealHost {
     }
 
     fn os_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, StdError> {
-        use std::io::Read;
         use std::process::Stdio;
         let mut child = std::process::Command::new(command)
             .args(args)
             .envs(&self.env_overlay)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| io_error(format!("spawn: cannot start `{command}`: {e}")))?;
         let pid = i64::from(child.id());
-        // Drain each pipe on its own thread so a chatty child never blocks on a full pipe buffer
-        // while the program supervises it. The threads end at the child's EOF (exit or kill).
-        let drain = |pipe: Option<std::process::ChildStdout>| {
-            pipe.map(|mut p| {
-                std::thread::spawn(move || {
-                    let mut buf = Vec::new();
-                    let _ = p.read_to_end(&mut buf);
-                    buf
-                })
-            })
-        };
-        let drain_err = |pipe: Option<std::process::ChildStderr>| {
-            pipe.map(|mut p| {
-                std::thread::spawn(move || {
-                    let mut buf = Vec::new();
-                    let _ = p.read_to_end(&mut buf);
-                    buf
-                })
-            })
-        };
-        let stdout = drain(child.stdout.take());
-        let stderr = drain_err(child.stderr.take());
+        // Drain both pipes on background threads into shared buffers, so a chatty child never
+        // blocks on a full pipe while the program supervises it, and `read_line` can stream stdout.
+        let stdout = Arc::new(SharedStream::default());
+        let stderr = Arc::new(SharedStream::default());
+        let stdout_join = child.stdout.take().map(|pipe| {
+            let shared = Arc::clone(&stdout);
+            std::thread::spawn(move || drain_pipe(pipe, shared))
+        });
+        let stderr_join = child.stderr.take().map(|pipe| {
+            let shared = Arc::clone(&stderr);
+            std::thread::spawn(move || drain_pipe(pipe, shared))
+        });
+        let stdin = child.stdin.take();
         let id = self.next_proc;
         self.next_proc += 1;
         self.procs.insert(
@@ -1164,6 +1232,10 @@ impl Os for RealHost {
                 pid,
                 stdout,
                 stderr,
+                stdout_join,
+                stderr_join,
+                stdout_cursor: 0,
+                stdin,
                 result: None,
             },
         );
@@ -1214,6 +1286,50 @@ impl Os for RealHost {
             .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
         // Killing an already-exited child returns `InvalidInput`; that is a harmless no-op here.
         let _ = proc.child.kill();
+        Ok(())
+    }
+
+    fn os_proc_read_line(&mut self, handle: u64) -> Result<Option<String>, StdError> {
+        // Clone the `Arc` and cursor out under a short borrow, then read without holding the
+        // `procs` borrow — `read_line` may block on the condvar, and the drain thread must stay
+        // free to append. The cursor is written back after.
+        let (stream, mut cursor) = {
+            let proc = self
+                .procs
+                .get(&handle)
+                .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
+            (Arc::clone(&proc.stdout), proc.stdout_cursor)
+        };
+        let line = stream.read_line(&mut cursor);
+        if let Some(proc) = self.procs.get_mut(&handle) {
+            proc.stdout_cursor = cursor;
+        }
+        Ok(line)
+    }
+
+    fn os_proc_write_stdin(&mut self, handle: u64, data: &str) -> Result<(), StdError> {
+        use std::io::Write;
+        let proc = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
+        let stdin = proc
+            .stdin
+            .as_mut()
+            .ok_or_else(|| io_error("write: the child's stdin is closed".to_string()))?;
+        stdin
+            .write_all(data.as_bytes())
+            .and_then(|()| stdin.flush())
+            .map_err(|e| io_error(format!("write: {e}")))
+    }
+
+    fn os_proc_close_stdin(&mut self, handle: u64) -> Result<(), StdError> {
+        let proc = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
+        // Dropping the `ChildStdin` closes the pipe (EOF to the child). Idempotent.
+        proc.stdin = None;
         Ok(())
     }
 }

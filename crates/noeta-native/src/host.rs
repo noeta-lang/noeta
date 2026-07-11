@@ -245,6 +245,25 @@ pub trait Os {
     /// Terminate the child (a forceful kill — SIGKILL / `TerminateProcess`). Idempotent: killing an
     /// already-exited child is `Ok`. A later `wait` observes the killed status.
     fn os_proc_kill(&mut self, handle: u64) -> Result<(), StdError>;
+
+    // --- Streaming (process-streaming arc): read a child's stdout line-by-line *while it runs*,
+    // and feed its stdin — unlike `wait`, which only hands back the fully-captured output at exit.
+    // The real host keeps draining both pipes on background threads (so a chatty child never
+    // deadlocks), and `read_line` consumes the stdout buffer through a per-handle cursor; the
+    // sandbox streams its scripted output line by line. `wait` still returns the *whole* captured
+    // output regardless of what was streamed. ---
+
+    /// The next line of the child's stdout (without its trailing newline), advancing a per-handle
+    /// read cursor. Blocks until a full line is available or the stream ends; `None` at end of
+    /// output. A final unterminated line is returned once, then `None` (like `fs` `read_line`).
+    fn os_proc_read_line(&mut self, handle: u64) -> Result<Option<String>, StdError>;
+
+    /// Write `data` to the child's stdin. An error if the child has no stdin or it is closed.
+    fn os_proc_write_stdin(&mut self, handle: u64, data: &str) -> Result<(), StdError>;
+
+    /// Close the child's stdin, signalling end-of-input to it (a program reading until EOF then
+    /// unblocks). Idempotent.
+    fn os_proc_close_stdin(&mut self, handle: u64) -> Result<(), StdError>;
 }
 
 /// **Peer-to-peer sync** capability (p2p P1) — the local-first stack's transport seam (§9.15). A

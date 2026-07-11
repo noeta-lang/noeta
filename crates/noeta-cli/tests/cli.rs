@@ -600,6 +600,33 @@ fn run_os_spawn_controls_a_real_child_process() {
 }
 
 #[test]
+fn run_os_spawn_streams_stdout_and_feeds_stdin() {
+    // Streaming over a REAL child: read a slow producer's lines with `read_line` as they arrive
+    // (each blocks until the child emits it), confirm `wait()` still returns the whole capture,
+    // and feed a `cat` child through stdin, closing it to signal EOF. Proves the drain-thread +
+    // shared-buffer streaming path, not the sandbox script.
+    let src = "use std.{os}\n\
+               p = os.spawn(\"sh\", [\"-c\", \"for i in 1 2 3; do echo line-$i; sleep 0.05; done\"])\n\
+               echo p.read_line()\n\
+               echo p.read_line()\n\
+               echo p.read_line()\n\
+               echo p.read_line()\n\
+               echo p.wait().stdout().trim().replace(\"\\n\", \"|\")\n\
+               c = os.spawn(\"cat\", [])\n\
+               c.write(\"in-a\\nin-b\\n\")\n\
+               c.close_stdin()\n\
+               echo c.read_line()\n\
+               echo c.read_line()\n\
+               echo c.read_line()\n\
+               echo c.wait().ok()\n";
+    let file = temp_program("run_os_stream", src);
+    lang().arg("run").arg(&file).assert().success().stdout(
+        "some(line-1)\nsome(line-2)\nsome(line-3)\nnone\nline-1|line-2|line-3\n\
+         some(in-a)\nsome(in-b)\nnone\ntrue\n",
+    );
+}
+
+#[test]
 fn run_does_real_disk_io() {
     // `fs.write`/`fs.read` hit the REAL disk (RealHost), relative to the working directory.
     let dir = std::env::temp_dir().join("noeta_cli_realfs_dir");

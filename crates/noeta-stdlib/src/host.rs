@@ -47,10 +47,11 @@ pub struct SandboxHost {
     env: BTreeMap<String, String>,
     args: Vec<String>,
     /// Scripted spawned processes (process-handle arc): id → the pre-computed instant-complete
-    /// outcome. A sandbox "child" runs to completion at spawn (the scripted `os_exec`), so `wait`
-    /// returns its stored outcome and `try_wait` always reports it done — deterministic and
-    /// in-oracle, the process analogue of the Vfs / logical clock.
-    procs: BTreeMap<u64, ExecResult>,
+    /// outcome plus a stdout read cursor (process-streaming arc, for `read_line`). A sandbox
+    /// "child" runs to completion at spawn (the scripted `os_exec`), so `wait` returns its stored
+    /// outcome and `try_wait` always reports it done — deterministic and in-oracle, the process
+    /// analogue of the Vfs / logical clock.
+    procs: BTreeMap<u64, ScriptedProc>,
     /// The next spawned-process handle id (starts at 1, like `ids`).
     next_proc: u64,
     /// The inbound server state (http-server S1), armed by `net_listen`. A sandbox run serves at
@@ -106,6 +107,14 @@ struct InboundState {
     script: Vec<crate::NetRequest>,
     cursor: usize,
     transcript: Vec<(u64, crate::NetResponse)>,
+}
+
+/// A scripted spawned process (process-handle + streaming arcs): its instant-complete outcome and
+/// a stdout read cursor for `read_line`.
+#[derive(Debug, Clone)]
+struct ScriptedProc {
+    result: ExecResult,
+    stdout_cursor: usize,
 }
 
 impl SandboxHost {
@@ -468,7 +477,13 @@ impl Os for SandboxHost {
         let result = self.os_exec(command, args)?;
         let id = self.next_proc;
         self.next_proc += 1;
-        self.procs.insert(id, result);
+        self.procs.insert(
+            id,
+            ScriptedProc {
+                result,
+                stdout_cursor: 0,
+            },
+        );
         Ok(id)
     }
 
@@ -483,7 +498,7 @@ impl Os for SandboxHost {
     fn os_proc_wait(&mut self, handle: u64) -> Result<ExecResult, StdError> {
         self.procs
             .get(&handle)
-            .cloned()
+            .map(|p| p.result.clone())
             .ok_or_else(|| noeta_native::os::unknown_process_error(handle))
     }
 
@@ -496,6 +511,55 @@ impl Os for SandboxHost {
     /// The scripted child is already complete, so a kill is a harmless no-op (the handle stays
     /// valid, matching the real host where a later `wait` still returns the outcome).
     fn os_proc_kill(&mut self, handle: u64) -> Result<(), StdError> {
+        if self.procs.contains_key(&handle) {
+            Ok(())
+        } else {
+            Err(noeta_native::os::unknown_process_error(handle))
+        }
+    }
+
+    /// Stream the scripted stdout a line at a time from the stored output via the per-handle
+    /// cursor — deterministic, and identical in shape to the real host's line streaming. `None`
+    /// once the output is exhausted; a final unterminated line is returned once (like `str::lines`).
+    fn os_proc_read_line(&mut self, handle: u64) -> Result<Option<String>, StdError> {
+        let proc = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| noeta_native::os::unknown_process_error(handle))?;
+        let rest = &proc.result.stdout[proc.stdout_cursor..];
+        if rest.is_empty() {
+            return Ok(None);
+        }
+        match rest.find('\n') {
+            Some(nl) => {
+                let line = rest[..nl].to_string();
+                proc.stdout_cursor += nl + 1;
+                Ok(Some(line))
+            }
+            None => {
+                let line = rest.to_string();
+                proc.stdout_cursor = proc.result.stdout.len();
+                Ok(Some(line))
+            }
+        }
+    }
+
+    /// The scripted commands don't read stdin, so a write is a validated no-op (the handle must
+    /// exist). `close_stdin` likewise no-ops. This keeps a stdin-feeding program deterministic and
+    /// terminating in-oracle.
+    fn os_proc_write_stdin(&mut self, handle: u64, _data: &str) -> Result<(), StdError> {
+        self.require_proc(handle)
+    }
+
+    fn os_proc_close_stdin(&mut self, handle: u64) -> Result<(), StdError> {
+        self.require_proc(handle)
+    }
+}
+
+impl SandboxHost {
+    /// Assert a scripted-process handle is live (else an `Io` error) — shared by the no-op stdin
+    /// operations.
+    fn require_proc(&self, handle: u64) -> Result<(), StdError> {
         if self.procs.contains_key(&handle) {
             Ok(())
         } else {
@@ -750,6 +814,37 @@ mod tests {
         // A spawn of an unstartable command fails at spawn, like a real missing binary.
         assert_eq!(
             host.os_spawn("frobnicate", &[]).unwrap_err().kind,
+            ErrorKind::Io
+        );
+    }
+
+    #[test]
+    fn os_proc_read_line_streams_scripted_stdout() {
+        let mut host = SandboxHost::new();
+        // The scripted `echo` joins args with spaces; an embedded newline makes it multi-line.
+        let p = host
+            .os_spawn("echo", &["first\nsecond\nthird".into()])
+            .unwrap();
+        assert_eq!(host.os_proc_read_line(p).unwrap().as_deref(), Some("first"));
+        assert_eq!(
+            host.os_proc_read_line(p).unwrap().as_deref(),
+            Some("second")
+        );
+        assert_eq!(host.os_proc_read_line(p).unwrap().as_deref(), Some("third"));
+        // Exhausted → None, and it stays None.
+        assert_eq!(host.os_proc_read_line(p).unwrap(), None);
+        assert_eq!(host.os_proc_read_line(p).unwrap(), None);
+        // `wait` still returns the whole captured stdout, independent of the read cursor.
+        assert_eq!(
+            host.os_proc_wait(p).unwrap().stdout,
+            "first\nsecond\nthird\n"
+        );
+        // stdin ops are validated no-ops on the scripted child; unknown handle is an Io error.
+        assert!(host.os_proc_write_stdin(p, "x").is_ok());
+        assert!(host.os_proc_close_stdin(p).is_ok());
+        assert_eq!(host.os_proc_read_line(999).unwrap_err().kind, ErrorKind::Io);
+        assert_eq!(
+            host.os_proc_write_stdin(999, "x").unwrap_err().kind,
             ErrorKind::Io
         );
     }

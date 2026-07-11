@@ -1744,6 +1744,23 @@ const PROCESS_METHODS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(SigType::Unit),
     },
+    // Streaming (process-streaming arc): consume stdout line-by-line while the child runs, and
+    // feed / close its stdin. `wait` still returns the whole captured output.
+    ExtFn {
+        name: "read_line",
+        params: &[],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        name: "write",
+        params: &[Str],
+        ret: Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "close_stdin",
+        params: &[],
+        ret: Concrete(SigType::Unit),
+    },
 ];
 
 fn process_method_dispatch(
@@ -1756,20 +1773,47 @@ fn process_method_dispatch(
         return Err(type_error(method, "Process"));
     };
     let id = process.id;
-    want_arity(method, args, 0)?;
     let exec_out = |r: crate::ExecResult| NativeOut::Extern(crate::ExternBox::new(r));
     match method {
-        "pid" => match host.os_proc_pid(id) {
-            Some(pid) => Ok(NativeOut::Scalar(Scalar::Int(pid))),
-            None => Err(crate::os::unknown_process_error(id)),
-        },
-        "wait" => Ok(exec_out(host.os_proc_wait(id)?)),
-        "try_wait" => Ok(match host.os_proc_try_wait(id)? {
-            Some(result) => NativeOut::Some(Box::new(exec_out(result))),
-            None => NativeOut::None,
-        }),
+        "pid" => {
+            want_arity(method, args, 0)?;
+            match host.os_proc_pid(id) {
+                Some(pid) => Ok(NativeOut::Scalar(Scalar::Int(pid))),
+                None => Err(crate::os::unknown_process_error(id)),
+            }
+        }
+        "wait" => {
+            want_arity(method, args, 0)?;
+            Ok(exec_out(host.os_proc_wait(id)?))
+        }
+        "try_wait" => {
+            want_arity(method, args, 0)?;
+            Ok(match host.os_proc_try_wait(id)? {
+                Some(result) => NativeOut::Some(Box::new(exec_out(result))),
+                None => NativeOut::None,
+            })
+        }
         "kill" => {
+            want_arity(method, args, 0)?;
             host.os_proc_kill(id)?;
+            Ok(NativeOut::Unit)
+        }
+        "read_line" => {
+            want_arity(method, args, 0)?;
+            Ok(match host.os_proc_read_line(id)? {
+                Some(line) => NativeOut::Some(Box::new(NativeOut::Str(line))),
+                None => NativeOut::None,
+            })
+        }
+        "write" => {
+            want_arity(method, args, 1)?;
+            let data = want_str(method, args, 0)?;
+            host.os_proc_write_stdin(id, data)?;
+            Ok(NativeOut::Unit)
+        }
+        "close_stdin" => {
+            want_arity(method, args, 0)?;
+            host.os_proc_close_stdin(id)?;
             Ok(NativeOut::Unit)
         }
         _ => Err(crate::no_method_error(crate::os::PROCESS_TYPE_NAME, method)),
