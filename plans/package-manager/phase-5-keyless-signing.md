@@ -133,12 +133,20 @@ swappable.
   resolves, verifies offline under the **default policy**, TOFU-pins identity in `noeta.lock`,
   audit names it, identity change rejected. pm round-trip test additionally proves the
   production root rejects fixture-minted bundles.
-- **K5 — audit, docs, staging smoke.** `noeta audit` reports per-scope trust root
-  (key / keyless identity / unsigned); embedded `trusted_root.json` snapshot + provenance docs
-  incl. the honest trust statement; a manual (not CI) smoke script against Sigstore **staging**.
-  *Exit: audit output + docs; smoke script exists and is documented as maintainer-run.*
+- **K5 — audit, docs, staging smoke. ✅ DONE.** Audit trust-root reporting landed in K3
+  (key prefix / keyless identity+issuer / none) and is e2e-asserted in K4; the embedded
+  `trusted_root.json` snapshot came free with `sigstore-trust-root` (K0) with the
+  `NOETA_SIGSTORE_TRUST_ROOT` override (K4). New here: **`docs/Package-Provenance.md`**
+  (wiki page, sidebar-linked) — both trust roots, the attestation format, offline
+  verification steps, the honest trust statement (what the log detects, residual trust in
+  the Sigstore root + OIDC issuer), TOFU/downgrade/switch rules, `noeta update` re-pin,
+  env reference; **`scripts/keyless-staging-smoke.sh`** — maintainer-run (real ambient OIDC
+  required, CI-dispatched) against `fulcio.sigstage.dev`/`rekor.sigstage.dev`, catching
+  client↔service wire drift that hermetic fixtures can't.
 
 Each slice commits green (workspace tests + clippy + fmt).
+
+## Arc status: ✅ K0–K5 COMPLETE (2026-07-11, branch `keyless-signing`)
 
 ## Deferred + surfaced (v-next)
 
