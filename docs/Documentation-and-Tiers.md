@@ -55,7 +55,7 @@ The only flag is `--target <NAME>`, which gates extraction on the `doc` tier bei
 
 There are two orthogonal ideas:
 
-- A **tier** is a *kind of co-located content* — a property of the **source**. Built-in tiers: `test`, `bench`, `debug` (all *code*), and `doc` (*text*).
+- A **tier** is a *kind of co-located content* — a property of the **source**. Built-in tiers: `test`, `bench`, `debug` (all *code*), and `doc` (*text*) — declared by std's core extension through the same `ExtTier` surface a third-party extension uses (only the runners are native); the name-space is open (see [Declaring your own tier](#declaring-your-own-tier)).
 - A **target** is a *named build recipe* — a property of the **build invocation** (in `noeta.toml`) — that decides which tiers are live: a `dev` target includes them, a `prod` target strips them all.
 
 ### How activation works

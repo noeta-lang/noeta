@@ -189,7 +189,11 @@ fn compile_inner(
     real_isolates: bool,
     debug: bool,
 ) -> Result<Module, Unsupported> {
-    let reflection = noeta_ast::reflect::build(program);
+    let mut reflection = noeta_ast::reflect::build(program);
+    // Embed the installed extensions' attribute shapes (tier-extensions port): `attributes_of`
+    // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
+    // registry now, not the AST.
+    noeta_check::extend_reflection(&mut reflection);
     let (module, map_packed_sites) =
         compile_to_mc(program, sites, relevance, real_isolates, debug)?;
     Ok(Module {
@@ -233,7 +237,11 @@ pub fn compile_with_sites_session(
         .iter()
         .cloned()
         .collect();
-    let reflection = noeta_ast::reflect::build(program);
+    let mut reflection = noeta_ast::reflect::build(program);
+    // Embed the installed extensions' attribute shapes (tier-extensions port): `attributes_of`
+    // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
+    // registry now, not the AST.
+    noeta_check::extend_reflection(&mut reflection);
     let (mc, map_packed_sites) = compile_to_mc(program, sites, relevance, real_isolates, debug)?;
     let session = SessionCompiler {
         mc,
@@ -563,6 +571,9 @@ impl SessionCompiler {
         // type declared in an earlier entry resolves — the tree-walker `Session` accumulates the same
         // way, keeping the session differential green.
         self.reflection.accumulate(noeta_ast::reflect::build(entry));
+        // Re-embed extension attribute shapes: `accumulate` purges a redeclared name's records, and
+        // the extension shapes must survive every entry (idempotent for names already present).
+        noeta_check::extend_reflection(&mut self.reflection);
 
         // Snapshot the persistent tables into a runnable module (cloned, not moved, so the tables
         // stay alive for the next entry). The full map-packed accumulation rides every snapshot —

@@ -170,6 +170,9 @@ impl Interpreter {
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
     ) -> (RunResult, Vec<noeta_backend::TraceFrame>) {
         self.reflection = noeta_ast::reflect::build(ast);
+        // Extension attribute shapes ride the artifact (tier-extensions port) — same embed the
+        // bytecode path does, so the differential stays green by construction.
+        noeta_check::extend_reflection(&mut self.reflection);
         self.type_of_sites = type_of_sites;
         let mut frame = Frame::new(ir.temp_count);
         // The top-level statements run directly in the global scope (no child).

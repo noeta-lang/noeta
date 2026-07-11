@@ -308,30 +308,11 @@ fn fold_const_expr(expr: &Expr) -> Option<AttrValue> {
     })
 }
 
-/// The built-in test-metadata and tier-knob attributes' field shapes (object-model slice 6h/6i) —
-/// `(field names, their literal defaults)` — for `Skip`/`Name`/`Group`/`Data`/`Bench`. These are
-/// prelude `@attribute` structs the checker registers but that never reach [`build`]'s AST walk
-/// (they are not declared in the program), so their shape is supplied here for materialization. Only
-/// `Skip` has an optional field (`reason`, default `""`); the rest carry one mandatory field.
-fn builtin_attribute_shape(name: &str) -> Option<(Vec<String>, Vec<Option<AttrValue>>)> {
-    let one = |field: &str| (vec![field.to_string()], vec![None]);
-    Some(match name {
-        TEST_ATTR_SKIP => (
-            vec!["reason".to_string()],
-            vec![Some(AttrValue::Str(String::new()))],
-        ),
-        TEST_ATTR_NAME | TEST_ATTR_GROUP => one("value"),
-        TEST_ATTR_DATA => one("rows"),
-        TIER_ATTR_BENCH => one("iterations"),
-        TIER_ATTR_DOC => one("text"),
-        _ => return None,
-    })
-}
-
 /// The materialization shape of an attribute named `type_name`: its field names and their literal
-/// defaults. Resolved from the reflected type registry (user-declared attributes) first, then the
-/// built-in test attributes, else empty. The boolean is whether it is a struct (vs a class) — only a
-/// class materializes with a class shape.
+/// defaults, resolved from the reflection artifact — which carries user-declared attributes from
+/// the AST walk *and* extension-declared ones embedded at compile time
+/// (`noeta_check::extend_reflection`, tier-extensions port). The boolean is whether it is a
+/// struct (vs a class) — only a class materializes with a class shape.
 pub fn attribute_shape(type_name: &str, info: &ReflectionInfo) -> AttributeShape {
     if let Some(t) = info.type_named(type_name) {
         return AttributeShape {
@@ -340,12 +321,10 @@ pub fn attribute_shape(type_name: &str, info: &ReflectionInfo) -> AttributeShape
             is_struct: !matches!(t.kind, TypeKind::Class),
         };
     }
-    let (fields, defaults) = builtin_attribute_shape(type_name).unwrap_or_default();
-    AttributeShape {
-        fields,
-        defaults,
-        is_struct: true,
-    }
+    // Unknown to the artifact — including an extension attribute in an artifact built before the
+    // registry embed (impossible on the normal compile paths, which all call
+    // `noeta_check::extend_reflection`). The honest empty shape.
+    AttributeShape::default()
 }
 
 /// An attribute type's materialization shape — its field names, their literal defaults (parallel),

@@ -2358,12 +2358,9 @@ fn tier_declaration_errors_are_e0051() {
         "tier_decl_collide",
         "@tier(bench)\nfn r(roots: List<TierRoot>): void { return }\n",
     );
-    lang()
-        .arg("check")
-        .arg(&collide)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("E0051").and(predicate::str::contains("built-in")));
+    lang().arg("check").arg(&collide).assert().failure().stderr(
+        predicate::str::contains("E0051").and(predicate::str::contains("extension-declared")),
+    );
     let bad_config = temp_program(
         "tier_decl_badcfg",
         "struct NotAttr { x: int }\n@tier(fuzz, config: NotAttr)\nfn r(roots: List<TierRoot>): void { return }\n",

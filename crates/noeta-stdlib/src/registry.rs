@@ -52,12 +52,30 @@ macro_rules! std_unit {
     };
 }
 
-std_unit!(
-    CoreExtension,
-    "std.core",
-    modules = CORE_MODULES,
-    types = CORE_TYPES
-);
+/// The core unit — the always-on Ring-1/2 surface. Written out (not `std_unit!`) because it also
+/// declares the built-in dev-tiers and their attributes (tier-extensions port, `crate::tiers`).
+#[derive(Debug, Clone, Copy)]
+pub struct CoreExtension;
+impl Extension for CoreExtension {
+    fn name(&self) -> &'static str {
+        "std.core"
+    }
+    fn root(&self) -> &'static str {
+        "std"
+    }
+    fn modules(&self) -> &'static [ExtModule] {
+        CORE_MODULES
+    }
+    fn types(&self) -> &'static [ExtType] {
+        CORE_TYPES
+    }
+    fn tiers(&self) -> &'static [noeta_native::registry::ExtTier] {
+        crate::tiers::TIERS
+    }
+    fn attributes(&self) -> &'static [noeta_native::registry::ExtAttribute] {
+        crate::tiers::ATTRIBUTES
+    }
+}
 std_unit!(
     CryptoExtension,
     "std.crypto",
@@ -448,6 +466,30 @@ pub fn extensions() -> &'static [&'static (dyn Extension + Sync)] {
 pub fn find_module(name: &str) -> Option<&'static ExtModule> {
     ensure();
     noeta_native::registry::find_module(name)
+}
+
+/// See [`noeta_native::registry::ext_tiers`].
+pub fn ext_tiers() -> impl Iterator<Item = &'static noeta_native::registry::ExtTier> {
+    ensure();
+    noeta_native::registry::ext_tiers()
+}
+
+/// See [`noeta_native::registry::find_ext_tier`].
+pub fn find_ext_tier(name: &str) -> Option<&'static noeta_native::registry::ExtTier> {
+    ensure();
+    noeta_native::registry::find_ext_tier(name)
+}
+
+/// See [`noeta_native::registry::ext_attributes`].
+pub fn ext_attributes() -> impl Iterator<Item = &'static noeta_native::registry::ExtAttribute> {
+    ensure();
+    noeta_native::registry::ext_attributes()
+}
+
+/// See [`noeta_native::registry::find_ext_attribute`].
+pub fn find_ext_attribute(name: &str) -> Option<&'static noeta_native::registry::ExtAttribute> {
+    ensure();
+    noeta_native::registry::find_ext_attribute(name)
 }
 
 /// See [`noeta_native::registry::module_name`] (pure string projection — no registry state).

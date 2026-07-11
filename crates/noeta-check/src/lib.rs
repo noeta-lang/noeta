@@ -80,8 +80,8 @@ mod stdlib;
 pub mod tiers;
 
 pub use tiers::{
-    Activated, BUILTIN_TIERS, DocBlock, DocTarget, TierFn, activate_tiers, dedent_doc,
-    resolve_docs, tier_config_attribute,
+    Activated, DocBlock, DocTarget, TierFn, activate_tiers, dedent_doc, extend_reflection,
+    is_extension_tier, resolve_docs, tier_config_attribute,
 };
 
 /// The full output of one checker run: the diagnostics **and** the resolved-type map both
@@ -1134,7 +1134,7 @@ impl Checker {
         self.register_type_enum();
         self.register_semantic_prelude();
         self.register_tier_prelude();
-        self.register_test_attributes();
+        self.register_extension_attributes();
         self.seed_extern_type_traits();
     }
 
@@ -1156,46 +1156,41 @@ impl Checker {
         }
     }
 
-    /// Register the built-in **test-metadata attributes** (object-model slice 6h) and **tier-knob
-    /// attributes** as prelude `@attribute` structs, so `#[Skip]` / `#[Name("…")]` / `#[Group("…")]`
-    /// / `#[Data([…])]` / `#[Bench(iterations: N)]` on a `@test`/`@bench` fn type-check without the
-    /// program defining them. Each is an ordinary struct (fields validated by the construction gate)
-    /// marked `@attribute` (so the capability gate E0029 passes); the runner reads them off the fn's
-    /// `attrs`. Registered like any prelude type, so a user declaration of the same name shadows it.
-    /// `Skip` is field-less (a bare marker); `Name`/`Group` carry one string; `Data` carries a `dyn`
-    /// payload (the row list — heterogeneous, so the element type is left open); `Bench` carries the
-    /// bench tier's one knob (`iterations: int`) — a `@bench(…)` block directive stamps it onto its
-    /// fns, so this construction gate is also what validates tier directive arguments; `Doc` carries
-    /// an attached `@doc { … }` block's text (stamped by activation when the `doc` tier is live).
-    fn register_test_attributes(&mut self) {
-        use noeta_ast::reflect::{
-            TEST_ATTR_DATA, TEST_ATTR_GROUP, TEST_ATTR_NAME, TEST_ATTR_SKIP, TIER_ATTR_BENCH,
-            TIER_ATTR_DOC,
-        };
-        let attrs: [(&str, Vec<(String, Type)>); 6] = [
-            // `Skip`'s `reason` is optional (default `""`), so both `#[Skip]` and `#[Skip("flaky")]`
-            // construct it — see the optional-fields registration below.
-            (TEST_ATTR_SKIP, vec![("reason".to_string(), Type::String)]),
-            (TEST_ATTR_NAME, vec![("value".to_string(), Type::String)]),
-            (TEST_ATTR_GROUP, vec![("value".to_string(), Type::String)]),
-            (TEST_ATTR_DATA, vec![("rows".to_string(), Type::Dyn)]),
-            (TIER_ATTR_BENCH, vec![("iterations".to_string(), Type::Int)]),
-            (TIER_ATTR_DOC, vec![("text".to_string(), Type::String)]),
-        ];
-        for (name, fields) in attrs {
-            self.types.insert(name.to_string());
-            self.records.insert(name.to_string(), fields);
+    /// Register every installed extension's declared **prelude attributes** (tier-extensions
+    /// port) — std's core unit ships the test-metadata quartet (`Skip`/`Name`/`Group`/`Data`),
+    /// `bench`'s knob (`Bench { iterations: int }`), and the doc tier's text carrier
+    /// (`Doc { text: string }`); a third-party extension's attributes register identically. Each
+    /// is an ordinary struct (fields validated by the construction gate) marked `@attribute` (so
+    /// the capability gate E0029 passes); the runners read them off a fn's `attrs`. Registered
+    /// like any prelude type, so a user declaration of the same name shadows it. A field carrying
+    /// a declaration default is optional at construction (`Skip.reason` = `""`, so both `#[Skip]`
+    /// and `#[Skip("flaky")]` construct); the materialization default flows into the reflection
+    /// artifact at compile time.
+    fn register_extension_attributes(&mut self) {
+        use noeta_stdlib::registry as ext;
+        for attr in ext::ext_attributes() {
+            let fields: Vec<(String, Type)> = attr
+                .fields
+                .iter()
+                .map(|f| (f.name.to_string(), attr_field_type(f.ty)))
+                .collect();
+            self.types.insert(attr.name.to_string());
+            self.records.insert(attr.name.to_string(), fields);
             self.type_kinds
-                .insert(name.to_string(), noeta_types::TypeKind::Struct);
+                .insert(attr.name.to_string(), noeta_types::TypeKind::Struct);
             // Mark `@attribute` (bare — attachable anywhere) so the E0029 capability gate passes.
-            self.record_attribute(name, Some(&[]));
+            self.record_attribute(attr.name, Some(&[]));
+            let optional: HashSet<String> = attr
+                .fields
+                .iter()
+                .filter(|f| f.default.is_some())
+                .map(|f| f.name.to_string())
+                .collect();
+            if !optional.is_empty() {
+                self.attribute_optional_fields
+                    .insert(attr.name.to_string(), optional);
+            }
         }
-        // `Skip.reason` defaults to `""`, so a bare `#[Skip]` is valid (the construction gate may omit
-        // it); the materialization default lives in `noeta_ast::reflect::attribute_shape`.
-        self.attribute_optional_fields.insert(
-            TEST_ATTR_SKIP.to_string(),
-            HashSet::from([String::from("reason")]),
-        );
     }
 
     /// Register the prelude `Semantic` enum and `RoleBinding` struct. `Semantic` is the language's
@@ -5708,16 +5703,19 @@ impl Checker {
         for stmt in &program.stmts {
             let Stmt::Fn(f) = stmt else { continue };
             let Some(decl) = &f.tier else { continue };
-            if BUILTIN_TIERS.contains(&decl.name.as_str()) {
+            if tiers::is_extension_tier(&decl.name) {
                 self.error(
                     DiagnosticCode::InvalidTierDeclaration,
                     decl.name_span,
                     format!(
-                        "tier `{}` collides with the built-in tier of that name",
+                        "tier `{}` collides with an extension-declared tier of that name",
                         decl.name
                     ),
                 )
-                .help("built-in tiers cannot be redeclared; pick another name");
+                .help(
+                    "extension tiers (std's `test`/`bench`/`doc`/`debug` among them) cannot be \
+                     redeclared; pick another name",
+                );
             }
             if let Some(first) = seen.get(&decl.name) {
                 let first = *first;
@@ -6613,6 +6611,15 @@ impl Checker {
 /// maps to a bool. It resolves to a [`Type::Named`] but is a legal annotation, so the unknown-type
 /// check (`E0013`) accepts it. (The bare `list`/`map`/`set` spellings are now lattice built-ins —
 /// they desugar to collections of `dyn`.)
+/// Map an extension attribute field's declared literal type onto the checker lattice.
+fn attr_field_type(ty: noeta_stdlib::registry::AttrFieldType) -> Type {
+    match ty {
+        noeta_stdlib::registry::AttrFieldType::Int => Type::Int,
+        noeta_stdlib::registry::AttrFieldType::Str => Type::String,
+        noeta_stdlib::registry::AttrFieldType::Dyn => Type::Dyn,
+    }
+}
+
 const PRELUDE_TYPES: &[&str] = &[
     "Ordering",
     "Type",

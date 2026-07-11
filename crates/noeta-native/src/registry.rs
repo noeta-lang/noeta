@@ -636,6 +636,58 @@ impl ExtBundle {
     }
 }
 
+/// The literal type of an extension-declared attribute field — the subset attribute
+/// construction accepts (tier-extensions port). Mirrors the checker's field typing for a prelude
+/// `@attribute` struct; grow variants as std's declarations demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttrFieldType {
+    Int,
+    Str,
+    /// An open payload (`Data.rows` — heterogeneous, element type left to the runtime).
+    Dyn,
+}
+
+/// A field's literal default. Present ⇒ the field is optional at construction and materialization
+/// fills the default (`Skip.reason` = `""`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AttrFieldDefault {
+    Str(&'static str),
+    Int(i64),
+}
+
+/// One field of an extension-declared attribute.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExtAttrField {
+    pub name: &'static str,
+    pub ty: AttrFieldType,
+    /// `Some` makes the field optional; `None` is mandatory.
+    pub default: Option<AttrFieldDefault>,
+}
+
+/// An extension-declared prelude **attribute** — the extension counterpart of an `@attribute`
+/// struct (tier-extensions port). The checker registers each installed extension's attributes
+/// exactly as it registers a program-declared one (construction gate, reflection, shadowable by a
+/// user declaration); std ships the tier knob/metadata attributes (`Bench`, `Doc`, `Skip`, `Name`,
+/// `Group`, `Data`) this way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExtAttribute {
+    pub name: &'static str,
+    pub fields: &'static [ExtAttrField],
+}
+
+/// An extension-declared **dev-tier** — the extension counterpart of a program's `@tier`
+/// declaration. std ships the built-in four (`test`/`bench`/`doc`/`debug`); the tier name-space
+/// the checker validates against is the installed extensions' tiers ∪ the program's own `@tier`
+/// declarations. The built-ins' runners stay native (`noeta test`/`bench`/`doc` and `--tier
+/// debug`); only the declaration lives here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ExtTier {
+    pub name: &'static str,
+    /// The knob attribute a `@<tier>(args)` block stamps onto its fns — one of the extension's
+    /// [`Extension::attributes`] — or `None` for a knob-less tier (whose directive rejects args).
+    pub config: Option<&'static str>,
+}
+
 /// A bundle of native modules and types registered into the language. Core implements this once
 /// as `StdExtension` (in `noeta-stdlib`); a third-party crate implements it to contribute its own
 /// modules/types.
@@ -657,6 +709,14 @@ pub trait Extension: Sync {
     }
     /// The extension's CLI subcommands (higher-order-abi H6). Default empty.
     fn commands(&self) -> &'static [crate::ExtCommand] {
+        &[]
+    }
+    /// The extension's declared dev-tiers (tier-extensions port). Default empty.
+    fn tiers(&self) -> &'static [ExtTier] {
+        &[]
+    }
+    /// The extension's declared prelude attributes (tier knobs and metadata). Default empty.
+    fn attributes(&self) -> &'static [ExtAttribute] {
         &[]
     }
 }
@@ -905,6 +965,26 @@ pub fn dispatch_bundle_method(
 
 /// Find a registered extern type by its short display name (extern-types X1). Ambiguous once two
 /// namespaces own the same short name — [`find_type_qualified`] is the identity-preserving lookup.
+/// Every installed extension's declared dev-tiers, in install order.
+pub fn ext_tiers() -> impl Iterator<Item = &'static ExtTier> {
+    extensions().iter().flat_map(|e| e.tiers().iter())
+}
+
+/// The installed extension tier named `name`, if any.
+pub fn find_ext_tier(name: &str) -> Option<&'static ExtTier> {
+    ext_tiers().find(|t| t.name == name)
+}
+
+/// Every installed extension's declared prelude attributes, in install order.
+pub fn ext_attributes() -> impl Iterator<Item = &'static ExtAttribute> {
+    extensions().iter().flat_map(|e| e.attributes().iter())
+}
+
+/// The installed extension attribute named `name`, if any.
+pub fn find_ext_attribute(name: &str) -> Option<&'static ExtAttribute> {
+    ext_attributes().find(|a| a.name == name)
+}
+
 pub fn find_type(name: &str) -> Option<&'static ExtType> {
     extensions()
         .iter()

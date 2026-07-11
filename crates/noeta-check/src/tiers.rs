@@ -12,8 +12,9 @@
 //!   ordinary attribute construction gate validates them and the runner reads one place;
 //! - **drops** an inactive block (it never reaches the checker or the IR — the strip is by
 //!   construction, no DCE pass);
-//! - **validates** every block's tier name against [`BUILTIN_TIERS`] (an unknown tier is an
-//!   `E0036`, active or not — a typo must surface, not silently vanish); and
+//! - **validates** every block's tier name against the extension-declared ∪ program-declared
+//!   tier set (an unknown tier is an `E0036`, active or not — a typo must surface, not silently
+//!   vanish); and
 //! - **discovers** the `@test` fns it activated, so the runner finds them without a second walk.
 //!
 //! The *default* program path (`lang run`, the conformance differential) runs with an **empty**
@@ -22,26 +23,25 @@
 //! activates a tier, so the differential is untouched by construction. The two E0036 sources (this
 //! module and the checker's in-place arm) share [`unknown_tier_diagnostic`], so they never drift.
 
-use noeta_ast::reflect::{TIER_ATTR_BENCH, TIER_ATTR_DOC};
+use noeta_ast::reflect::TIER_ATTR_DOC;
 use noeta_ast::{AttrArg, Attribute, Program, Stmt};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
 
-/// The **tier-knob attribute** of a built-in tier — the prelude `@attribute` struct its directive
-/// arguments construct (`@bench(iterations: N)` ⇒ `#[Bench(iterations: N)]` stamped onto each
-/// contained fn; a per-fn attribute wins over the block's). `None` for a tier with no knobs, which
-/// therefore accepts no arguments. One schema source: the attribute's registered fields drive
-/// validation (the ordinary construction gate) and the runner's reads alike. A *declared* tier's
-/// config attribute lives in the [`TierRegistry`] instead (its `@tier(…, config: T)` directive).
+/// The **tier-knob attribute** of an extension-declared tier — the prelude `@attribute` struct
+/// its directive arguments construct (`@bench(iterations: N)` ⇒ `#[Bench(iterations: N)]` stamped
+/// onto each contained fn; a per-fn attribute wins over the block's). `None` for a tier with no
+/// knobs, which therefore accepts no arguments. One schema source: the attribute's registered
+/// fields drive validation (the ordinary construction gate) and the runner's reads alike. A
+/// *program-declared* tier's config attribute lives in the [`TierRegistry`] instead (its
+/// `@tier(…, config: T)` directive).
 pub fn tier_config_attribute(tier: &str) -> Option<&'static str> {
-    match tier {
-        "bench" => Some(TIER_ATTR_BENCH),
-        _ => None,
-    }
+    noeta_stdlib::registry::find_ext_tier(tier).and_then(|t| t.config)
 }
 
 /// A tier brought into existence by a `@tier(name[, config: T]) fn runner(…)` declaration
-/// (tier-providers T2) — the program-declared counterpart of a [`BUILTIN_TIERS`] entry.
+/// (tier-providers T2) — the program-declared counterpart of an extension's [`ExtTier`] entry
+/// (`noeta_native::registry::ExtTier`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeclaredTier {
     /// The tier name consumers write as `@<name> { … }`.
@@ -85,9 +85,9 @@ impl TierRegistry {
         TierRegistry { declared }
     }
 
-    /// Whether `tier` names a known tier — built-in or declared.
+    /// Whether `tier` names a known tier — extension-declared or program-declared.
     pub fn is_known(&self, tier: &str) -> bool {
-        BUILTIN_TIERS.contains(&tier) || self.declared.contains_key(tier)
+        is_extension_tier(tier) || self.declared.contains_key(tier)
     }
 
     /// The declared tier named `tier`, if any (`None` for a built-in).
@@ -95,8 +95,8 @@ impl TierRegistry {
         self.declared.get(tier)
     }
 
-    /// The tier's config attribute — the built-in mapping for the built-in four, the `@tier`
-    /// directive's `config:` for a declared tier.
+    /// The tier's config attribute — the extension declaration's for an extension tier, the
+    /// `@tier` directive's `config:` for a program-declared one.
     pub fn config_attribute<'a>(&'a self, tier: &str) -> Option<&'a str> {
         tier_config_attribute(tier)
             .or_else(|| self.declared.get(tier).and_then(|d| d.config.as_deref()))
@@ -133,6 +133,45 @@ pub fn synthesized_config_attr(attr_name: &str, args: &[AttrArg], tier_span: Spa
         name_span: tier_span,
         args: args.to_vec(),
         span: tier_span,
+    }
+}
+
+/// Every installed extension's declared attributes as reflection [`TypeInfo`]s (tier-extensions
+/// port) — the materialization shapes `attributes_of` needs for an attribute that has no AST
+/// declaration. [`extend_reflection`] embeds these into the reflection artifact at compile time,
+/// so the backends materialize an extension attribute exactly as a program-declared one; the
+/// registry declaration is the single source (the old hardcoded `builtin_attribute_shape`
+/// fallback is gone).
+pub fn extension_attribute_types() -> Vec<noeta_ast::reflect::TypeInfo> {
+    use noeta_stdlib::registry as ext;
+    ext::ext_attributes()
+        .map(|attr| noeta_ast::reflect::TypeInfo {
+            name: attr.name.to_string(),
+            kind: noeta_ast::reflect::TypeKind::Struct,
+            fields: attr.fields.iter().map(|f| f.name.to_string()).collect(),
+            field_defaults: attr
+                .fields
+                .iter()
+                .map(|f| {
+                    f.default.map(|d| match d {
+                        ext::AttrFieldDefault::Str(s) => noeta_ast::AttrValue::Str(s.to_string()),
+                        ext::AttrFieldDefault::Int(n) => noeta_ast::AttrValue::Int(n),
+                    })
+                })
+                .collect(),
+            variants: Vec::new(),
+        })
+        .collect()
+}
+
+/// Embed the installed extensions' attribute shapes into a freshly built reflection artifact —
+/// idempotent (a name the program itself declares, or one already embedded by an earlier REPL
+/// entry, is left alone: the program's own declaration wins, matching prelude shadowing).
+pub fn extend_reflection(info: &mut noeta_ast::reflect::ReflectionInfo) {
+    for ty in extension_attribute_types() {
+        if info.type_named(&ty.name).is_none() {
+            info.types.push(ty);
+        }
     }
 }
 
@@ -174,15 +213,25 @@ pub fn dedent_doc(text: &str) -> String {
         .join("\n")
 }
 
-/// The dev-tiers the language ships built in. The tier name-space is **open** (tier-providers
-/// T2/T3): a program (or its dependencies) adds names with `@tier` declarations, and the
-/// [`TierRegistry`] resolves against built-ins ∪ declared — a name in neither is an `E0036` (a
-/// typo must not silently vanish). These four stay hardcoded until the follow-up arc ports them
-/// to std's own `@tier` declarations (dogfooding the provider mechanism).
-pub const BUILTIN_TIERS: &[&str] = &["test", "bench", "doc", "debug"];
+/// Whether `name` is an **extension-declared** tier (tier-extensions port): the built-in four
+/// live in std's core unit (`noeta_stdlib::tiers`), declared through the same `ExtTier` surface a
+/// third-party extension uses — nothing tier-shaped is hardcoded in the checker anymore. The tier
+/// name-space stays open: extension tiers ∪ the program's `@tier` declarations; a name in neither
+/// is an `E0036` (a typo must not silently vanish).
+pub fn is_extension_tier(name: &str) -> bool {
+    noeta_stdlib::registry::find_ext_tier(name).is_some()
+}
 
-/// The `E0036 UnknownTier` diagnostic for a `@<tier>` whose name is not a built-in tier. Shared by
-/// [`activate_tiers`] and the checker's in-place `TierBlock` arm so the two never diverge.
+/// Every installed extension's tier names, for diagnostics (the E0036 help list).
+pub fn extension_tier_names() -> Vec<&'static str> {
+    noeta_stdlib::registry::ext_tiers()
+        .map(|t| t.name)
+        .collect()
+}
+
+/// The `E0036 UnknownTier` diagnostic for a `@<tier>` whose name no extension declares and the
+/// program does not declare. Shared by [`activate_tiers`] and the checker's in-place `TierBlock`
+/// arm so the two never diverge.
 pub fn unknown_tier_diagnostic(tier: &str, span: Span) -> Diagnostic {
     Diagnostic::error(
         DiagnosticCode::UnknownTier,
@@ -190,8 +239,8 @@ pub fn unknown_tier_diagnostic(tier: &str, span: Span) -> Diagnostic {
         format!("unknown dev-tier `@{tier}`"),
     )
     .with_help(format!(
-        "the built-in tiers are {}",
-        BUILTIN_TIERS
+        "the available tiers are {} — or declare one with `@tier`",
+        extension_tier_names()
             .iter()
             .map(|t| format!("`@{t}`"))
             .collect::<Vec<_>>()
@@ -629,6 +678,49 @@ mod tests {
         assert_eq!(out.program.stmts.len(), 1);
     }
 
+    /// The extension-declared names and the `noeta_ast::reflect` constants are two spellings of
+    /// one contract (the ABI sits beneath the syntax crates, so they cannot share a symbol) — pin
+    /// them together so neither drifts. Also pins the built-in four and `bench`'s knob mapping.
+    #[test]
+    fn extension_declarations_match_the_reflect_constants() {
+        use noeta_ast::reflect::{
+            TEST_ATTR_DATA, TEST_ATTR_GROUP, TEST_ATTR_NAME, TEST_ATTR_SKIP, TIER_ATTR_BENCH,
+            TIER_ATTR_DOC,
+        };
+        let declared: Vec<&str> = noeta_stdlib::registry::ext_attributes()
+            .map(|a| a.name)
+            .collect();
+        for name in [
+            TEST_ATTR_SKIP,
+            TEST_ATTR_NAME,
+            TEST_ATTR_GROUP,
+            TEST_ATTR_DATA,
+            TIER_ATTR_BENCH,
+            TIER_ATTR_DOC,
+        ] {
+            assert!(
+                declared.contains(&name),
+                "`{name}` missing from std's declarations"
+            );
+        }
+        for tier in ["test", "bench", "doc", "debug"] {
+            assert!(is_extension_tier(tier), "`{tier}` missing from std's tiers");
+        }
+        assert_eq!(tier_config_attribute("bench"), Some(TIER_ATTR_BENCH));
+        assert_eq!(tier_config_attribute("test"), None);
+        // The materialization shapes flow from the same declarations.
+        let types = extension_attribute_types();
+        let skip = types
+            .iter()
+            .find(|t| t.name == TEST_ATTR_SKIP)
+            .expect("Skip shape");
+        assert_eq!(skip.fields, ["reason"]);
+        assert_eq!(
+            skip.field_defaults,
+            [Some(noeta_ast::AttrValue::Str(String::new()))]
+        );
+    }
+
     /// A `@tier`-declared tier opens the name space: its blocks activate (no E0036), block knobs
     /// stamp its config attribute, and its fns collect as roots under the tier's name in
     /// `Activated.custom`.
@@ -731,7 +823,7 @@ mod tests {
             let attr = bench
                 .attrs
                 .iter()
-                .find(|a| a.name == TIER_ATTR_BENCH)
+                .find(|a| a.name == noeta_ast::reflect::TIER_ATTR_BENCH)
                 .expect("Bench attr");
             attr.args[0].value.clone()
         };

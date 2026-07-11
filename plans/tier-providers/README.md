@@ -9,14 +9,20 @@ declaration; `TierRoot { name, run }` prelude struct carries fn handles; `noeta 
 dispatches (after compose, before the external-binary probe); the linker pulls `config:` along
 with an imported runner and qualifies the reference; manifests accept any identifier tier name.*
 
-**FOLLOW-UP ARC (user-directed, 2026-07-11): port the hardcoded built-in tiers to their
-respective extensions** — `test`/`bench`/`doc`/`debug` (and their knob/metadata attributes
-`Bench`/`Doc`/`Skip`/`Name`/`Group`/`Data`, plus `TierRoot`) move from checker-hardcoded prelude
-registration (`register_test_attributes`/`register_tier_prelude`/`BUILTIN_TIERS`) to `@tier`/
-`@attribute` declarations owned by std's extension packages, dogfooding the provider mechanism —
-after which `BUILTIN_TIERS` and the intrinsic registration die and the built-ins run through the
-same declaration + dispatch path a third-party tier uses. (The native runners — test's parallel
-executor, bench's two-point measurement — stay native; the *declarations* move.)
+**✅ FOLLOW-UP COMPLETE (same day): built-in tiers ported to the extension ABI.**
+`Extension::tiers()`/`attributes()` (`ExtTier`/`ExtAttribute`/`ExtAttrField` in
+`noeta-native::registry`); std's core unit declares the four tiers + six attributes
+(`noeta-stdlib::tiers`); the checker registers attributes and resolves tier names from the
+registry (`BUILTIN_TIERS`, the hardcoded attribute table, and reflect's
+`builtin_attribute_shape` fallback are all deleted); materialization shapes flow into the
+reflection artifact at compile time (`noeta_check::extend_reflection` at every build site — one
+source, third-party extension attributes materialize too). A checker pin-test ties the registry
+names to the `noeta_ast::reflect` constants (the ABI sits beneath the syntax crates, so they
+cannot share a symbol). `TierRoot` deliberately stays core: it is the `@tier` feature's runner
+*protocol*, not any tier's property — porting it would make third-party tiers depend on std's
+tier unit to name their own signature. Runners stay native as planned. Also folded in: the
+built-in runners (`test`/`bench`/`doc`) now load with dependency resolution (shared
+`load_linked`), fixing tier content that imports from packages.
 
 ## Motivation
 
