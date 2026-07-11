@@ -62,10 +62,27 @@ swappable.
 
 ## Slices
 
-- **K0 — spike + scaffolding.** Add `keyless` feature; evaluate candidates on (a) offline
-  bundle verification incl. inclusion proof + checkpoint, (b) build weight (clean-build delta,
-  C deps), (c) API fit for a synchronous CLI. Record the decision + numbers in this doc.
-  *Exit: a fixture Sigstore bundle verifies in a hermetic unit test against a test trust root.*
+- **K0 — spike + scaffolding. ✅ DONE.** Decision: **prefix-dev `sigstore-rust` 0.11**
+  (`sigstore-verify`/`-trust-root`/`-types`, `default-features = false`). Measured/verified:
+  - Official `sigstore` 0.14 rejected (tokio-bound, attestation verification explicitly
+    incomplete); `jdx/sigstore-verification` rejected (verify-only yet 438-dep tree vs 191,
+    pulls oauth2 + a second reqwest + ring).
+  - Build weight: whole stack ~13s wall / 105s CPU clean debug; **aws-lc-sys builds with `cc`
+    alone (no cmake)** — the sole C build dep this adds.
+  - API fit: verification is **sync and fully offline**, implements the client-spec steps 0–8
+    (chain → SCT → policy → inclusion proof + **signed checkpoint** → integrated-time →
+    signature → CVE-2022-36056 consistency). Identity policy built in
+    (`require_identity`/`require_issuer`). `SIGSTORE_PRODUCTION_TRUSTED_ROOT` ships embedded
+    in `sigstore-trust-root` (no `tuf` feature needed) — K5's snapshot requirement comes free.
+  - **DSSE binding is in-toto-only (fails closed on custom payload types)** → K1 wraps
+    `canonical_bytes` in an in-toto Statement: subject digest = `sha256(canonical_bytes)`,
+    predicate carries `{name, version, sha, url, tag}`, predicateType
+    `https://noeta.dev/attestation/publish/v1`. `canonical_bytes` stays the single
+    cross-format truth; consumers recompute its digest from registry-served facts.
+  - Shipped: `noeta-pm` `keyless` feature + `keyless.rs` seam (`verify_bundle[_with_root]`,
+    `IdentityPolicy`, `VerifiedIdentity`); 7 hermetic tests over a vendored **real**
+    GitHub-Actions DSSE bundle (verify + identity/issuer mismatch + wrong-artifact +
+    tampered-sig + malformed inputs). LSP/core link zero sigstore crates.
 - **K1 — DSSE + bundle through the registry.** `canonical_bytes` as DSSE payload
   (payloadType `application/vnd.noeta.attestation.v1`); `Release.bundle` through LocalIndex,
   HttpIndex, mock-server tests; exactly-one-of-signature/bundle enforced; Worker contract delta

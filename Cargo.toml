@@ -92,6 +92,18 @@ getrandom = "0.3"
 # Ed25519 signing for package provenance (package-manager Phase 4, #2) — CLI-only, behind the
 # `provenance` feature so pure/offline consumers and the LSP don't pull it.
 ed25519-dalek = "2"
+# Sigstore keyless provenance (package-manager Phase 5) — CLI-only, behind noeta-pm's `keyless`
+# feature. prefix-dev's modular stack (the conda ecosystem's choice) over the official `sigstore`
+# crate (tokio-bound, attestation verification incomplete) and `jdx/sigstore-verification`
+# (verify-only yet a ~2× larger dep tree). Verification is fully OFFLINE and sync: cert chain →
+# identity policy → SCT → Rekor inclusion proof + signed checkpoint, from a stored bundle.
+# `default-features = false` sheds the clients' TLS stack (we never contact Rekor to verify);
+# `sigstore-trust-root` without its `tuf` feature = the embedded pinned production root snapshot
+# (TUF rotation is a surfaced deferral). Crypto backend is aws-lc-rs (C via `cc`, no cmake) —
+# the one C build dep this buys, measured at ~13s wall for the whole stack.
+sigstore-verify = { version = "0.11", default-features = false }
+sigstore-trust-root = { version = "0.11", default-features = false }
+sigstore-types = "0.11"
 # RFC 9562 UUID type + builders for the first-class `Uuid` (extern-types X2). Deliberately
 # default-features = false: the self-generating constructors (`new_v4`/`new_v7`, behind the
 # `v4`/`v7` features) stay OUT so the Host seam remains the only entropy/time source —

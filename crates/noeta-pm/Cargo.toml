@@ -22,6 +22,11 @@ serde_json = { workspace = true, optional = true }
 # Ed25519 signing/verification for package provenance (Phase 4, #2). Seed bytes come from getrandom.
 ed25519-dalek = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
+# Sigstore keyless provenance (Phase 5): offline bundle verification against the public
+# sigstore.dev trust root. See the workspace manifest for the crate-choice rationale.
+sigstore-verify = { workspace = true, optional = true }
+sigstore-trust-root = { workspace = true, optional = true }
+sigstore-types = { workspace = true, optional = true }
 
 [features]
 # Enable the networked registry `Index` (an HTTP client of the hosted index). Off by default; the CLI
@@ -29,6 +34,15 @@ getrandom = { workspace = true, optional = true }
 registry-http = ["dep:reqwest", "dep:serde", "dep:serde_json"]
 # Package provenance: sign attestations on publish, verify them on resolve (Ed25519). CLI-only.
 provenance = ["dep:ed25519-dalek", "dep:getrandom"]
+# Keyless provenance (Phase 5): Sigstore bundles verified offline — OIDC identity in place of a
+# registered key, public transparency log in place of local-only detection. CLI-only, like
+# `provenance` (which stays: keyless is a second trust root, not a replacement).
+keyless = [
+    "dep:sigstore-verify",
+    "dep:sigstore-trust-root",
+    "dep:sigstore-types",
+    "dep:serde_json",
+]
 
 [lints]
 workspace = true

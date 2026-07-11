@@ -22,6 +22,11 @@ pub mod registry;
 #[cfg(feature = "provenance")]
 pub mod provenance;
 
+/// Keyless provenance — Sigstore bundles verified offline against the public sigstore.dev trust
+/// root (Phase 5). Behind the `keyless` feature (CLI-only), for the same reason as `provenance`.
+#[cfg(feature = "keyless")]
+pub mod keyless;
+
 // Internal to the crate: the git fetch, the content-addressed store, and the pure resolver are
 // implementation details the public modules above compose (the CLI never names them directly).
 mod git;
