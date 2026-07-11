@@ -495,6 +495,41 @@ impl VmBackend {
             memo: HashMap::new(),
         });
         vm.hot_mailbox = Some(mailbox);
+        // Hot serving runs tier-1 like any production serve (server-hmr H3): the hot-counter
+        // service compiles off-thread, and a swap retires + re-arms it (`install_fragment`).
+        #[cfg(feature = "jit")]
+        vm.init_jit_service(Arc::new(module.clone()));
+        let result = run_and_teardown(&mut vm, mode);
+        let trace = std::mem::take(&mut vm.abort_trace);
+        (result, trace)
+    }
+
+    /// [`VmBackend::run_module_hot`] with the **synchronous force-JIT engine** — the H3 oracle
+    /// entry: every prototype (the in-flight `main` included) executes tier-1 from the first
+    /// dispatch, so a swap deposited in `mailbox` deterministically exercises retire→re-arm
+    /// under live native frames (the off-thread service would race the program's runtime). A
+    /// dropped — rather than graveyard-parked — engine fails this by unwinding into freed pages.
+    #[cfg(feature = "jit")]
+    pub fn run_module_hot_forced_jit(
+        &self,
+        module: &Module,
+        session: noeta_compiler::SessionCompiler,
+        host: Box<dyn noeta_stdlib::Host>,
+        executor: Box<dyn noeta_stdlib::Executor>,
+        mailbox: HotSwapMailbox,
+    ) -> (RunResult, Vec<TraceFrame>) {
+        let mode = noeta_value::CollectorMode::Trace;
+        noeta_value::set_collector_mode(mode);
+        let arena = typed_arena::Arena::new();
+        let mut vm = Vm::load(module, host, executor);
+        vm.debug_session = Some(DebugSession {
+            compiler: session,
+            arena: &arena,
+            memo: HashMap::new(),
+        });
+        vm.hot_mailbox = Some(mailbox);
+        vm.force_jit = true;
+        vm.init_jit();
         let result = run_and_teardown(&mut vm, mode);
         let trace = std::mem::take(&mut vm.abort_trace);
         (result, trace)
@@ -1147,6 +1182,19 @@ struct Vm<'m> {
     /// exclusive with the synchronous `jit` engine (which the `force_jit` oracle keeps).
     #[cfg(feature = "jit")]
     jit_service: Option<jit_service::JitService>,
+    /// Tier-1 engines **retired by a hot swap** (server-hmr H3). Their executable pages must
+    /// outlive any in-flight native frame (a frame beneath the long-running serve dispatch can
+    /// be native code), so a swap never drops an engine — it parks it here, clears the mirror
+    /// tables (no NEW dispatch can enter retired code), and re-arms fresh against the swapped
+    /// module. Dropped with the `Vm`, after the run's machine stack has fully unwound. Bounded
+    /// per-swap growth, like the arena modules — the documented retention model.
+    #[cfg(feature = "jit")]
+    jit_graveyard: Vec<noeta_jit::Jit>,
+    /// The service twin of [`Vm::jit_graveyard`]: a retired service handle keeps its compile
+    /// thread parked (blocked on an empty request channel) and its pages alive; the `Drop` at
+    /// `Vm` teardown stops and joins it.
+    #[cfg(feature = "jit")]
+    jit_service_graveyard: Vec<jit_service::JitService>,
     /// P-AOT L3.2b: native entries were **bound ahead of time** (from a linked dispatch table),
     /// not JIT-compiled — so `self.jit`/`jit_service` are both `None` yet the mirror tables carry
     /// real native entry points. This makes the frame-entry dispatch consult those pre-installed
@@ -2258,6 +2306,10 @@ impl<'m> Vm<'m> {
             jit_frame_template: None,
             #[cfg(feature = "jit")]
             jit_service: None,
+            #[cfg(feature = "jit")]
+            jit_graveyard: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_service_graveyard: Vec::new(),
             #[cfg(feature = "jit-rt")]
             aot: false,
             #[cfg(feature = "jit-rt")]
@@ -6418,11 +6470,12 @@ impl<'m> Vm<'m> {
     }
 
     fn install_fragment(&mut self, fragment: &Program) -> Result<u32, String> {
+        // Tier-1 across a swap (server-hmr H3): retire the armed engine (pages parked in the
+        // graveyard so in-flight native frames stay executable), install the fragment against a
+        // clean tier-0 world, then re-arm fresh against the swapped module and let tiering
+        // re-warm. Unarmed runs (the debug console, hover, the differential) skip both halves.
         #[cfg(feature = "jit")]
-        assert!(
-            self.jit.is_none() && self.jit_service.is_none(),
-            "debug fragments require the JIT unarmed"
-        );
+        let rearm = self.hotswap_retire_tier1();
         let Some(session) = self.debug_session.as_mut() else {
             return Err("this run has no debug session (fragments need a session launch)".into());
         };
@@ -6491,7 +6544,55 @@ impl<'m> Vm<'m> {
 
         // (3) Swap to the arena'd snapshot; the dispatch loop picks it up at the next frame transfer.
         self.module = arena.alloc(extended);
+        #[cfg(feature = "jit")]
+        if rearm {
+            self.hotswap_rearm_tier1();
+        }
         Ok(entry_idx)
+    }
+
+    /// Retire the armed tier-1 engine ahead of a module swap (server-hmr H3). The engine (or the
+    /// off-thread service) moves to the graveyard — its executable pages must outlive any native
+    /// frame still on the machine stack beneath the swap safepoint — and every mirror entry is
+    /// cleared, so no *new* dispatch enters retired code; everything falls back to the
+    /// interpreter (whose dispatch reads the live, post-swap tables) until re-warmed. Counters
+    /// and request state reset with them. Returns whether tier 1 was armed (the caller re-arms
+    /// after the module is swapped).
+    #[cfg(feature = "jit")]
+    fn hotswap_retire_tier1(&mut self) -> bool {
+        let was_armed = self.jit.is_some() || self.jit_service.is_some();
+        if let Some(engine) = self.jit.take() {
+            self.jit_graveyard.push(engine);
+        }
+        if let Some(service) = self.jit_service.take() {
+            // Parked, not shut down: shutdown joins the thread and frees the pages. Stale ready
+            // responses die with the handle at teardown — `jit_pending` resets below, so the
+            // drain never looks for them.
+            self.jit_service_graveyard.push(service);
+        }
+        self.jit_entries.iter_mut().for_each(|e| *e = None);
+        self.jit_fast.iter_mut().for_each(|f| *f = None);
+        self.jit_counters.iter_mut().for_each(|c| *c = 0);
+        self.jit_declined.iter_mut().for_each(|d| *d = false);
+        self.jit_requested.iter_mut().for_each(|r| *r = false);
+        self.jit_osr_pending.iter_mut().for_each(|o| *o = false);
+        self.jit_pending = 0;
+        // `jit_cache_pins` stay: retired code's call-site caches still guard on those closures'
+        // bits, and in-flight old frames may consult them. Released at teardown, as always.
+        was_armed
+    }
+
+    /// Re-arm tier 1 against the freshly swapped module (server-hmr H3): the `force_jit` oracle
+    /// re-creates the synchronous engine (eager-compiling every proto of the NEW module, added
+    /// ones included); production re-spawns the off-thread service around a clone of the new
+    /// module — hot-counter promotion re-warms exactly what the program still runs.
+    #[cfg(feature = "jit")]
+    fn hotswap_rearm_tier1(&mut self) {
+        if self.force_jit {
+            self.init_jit();
+        } else {
+            self.init_jit_service(Arc::new(self.module.clone()));
+        }
     }
 
     /// Evaluate a debug-console **fragment** against a paused frame by *compiling* it — the T5

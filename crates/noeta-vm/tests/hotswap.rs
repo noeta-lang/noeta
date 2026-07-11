@@ -231,6 +231,61 @@ fn a_field_layout_change_blocks() {
     );
 }
 
+/// H3 — the swap lands while a **live force-JIT engine** is armed and `main`'s native frame is on
+/// the machine stack (the await suspension is where the scheduler tick applies the pre-deposited
+/// plan). Exercises retire→re-arm end to end: the retired engine's pages must stay executable
+/// (main returns into them), the mirror tables clear, and the re-armed engine compiles the
+/// swapped module — the post-swap call observes the new body, natively.
+#[cfg(feature = "jit")]
+#[test]
+fn a_swap_lands_under_a_live_force_jit_engine() {
+    use noeta_vm::{HotChannel, HotSwapMailbox, VmBackend};
+
+    // The tick that applies the swap is `NativeCtx::advance_tasks` — reached from ctx-driven
+    // loops (`task.all`, the serve loop), not from a bare top-level await.
+    let v = |ret: i64| {
+        format!(
+            "use std.task.{{sleep, all}}\n\
+             fn f(): int {{ return {ret}; }}\n\
+             async fn probe(): int {{\n\
+             \x20   sleep(1).await\n\
+             \x20   return f()\n\
+             }}\n\
+             echo f()\n\
+             results = all([probe()])\n\
+             echo results[0]\n"
+        )
+    };
+    let (v1, v2) = (v(1), v(2));
+    let program = parse(&v1);
+    let checked = noeta_check::check_all(&program);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let (module, compiler) =
+        noeta_compiler::compile_with_sites_session(&program, checked.sites, false, false)
+            .expect("compiles");
+
+    // Pre-deposit the body swap: the first scheduler tick (inside the await) applies it.
+    let SwapDiff::Swap(plan) = verdict(&v1, &v2) else {
+        panic!("a body edit must be swappable");
+    };
+    let mailbox: HotSwapMailbox = std::sync::Arc::new(HotChannel::default());
+    *mailbox.plan.lock().unwrap() = Some(plan);
+
+    let (result, trace) = VmBackend::new().run_module_hot_forced_jit(
+        &module,
+        compiler,
+        Box::new(noeta_stdlib::SandboxHost::new()),
+        Box::new(noeta_stdlib::SandboxExecutor::new()),
+        mailbox,
+    );
+    assert!(trace.is_empty(), "no abort under the armed swap: {trace:?}");
+    assert_eq!(
+        result.stdout, "1\n2\n",
+        "pre-swap call sees v1, the post-tick call sees the swapped body — under tier 1"
+    );
+    assert_eq!(result.exit_code, 0);
+}
+
 #[test]
 fn a_changed_embedded_packed_struct_blocks_transitively() {
     // H2's transitive claim: `Outer` embeds `Inner` in flat packed storage, so a change to
