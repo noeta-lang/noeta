@@ -343,6 +343,71 @@ pub(crate) fn parse_intn_literal(text: &str) -> Option<(u64, bool, u8)> {
     None
 }
 
+/// Split an **expression-tier block**'s verbatim body into statics and `${…}` holes
+/// (expr-tiers arc), producing an [`Expr::TierExpr`]. The contract is string interpolation's,
+/// adapted to a text body: `${expr}` opens a hole (nested braces tracked by [`find_hole_end`],
+/// the expression sub-parsed by [`parse_hole`] with absolute spans); the text escapes are the
+/// text-tier set `\{ \} \\` (which the lexer's brace balance already honors) **plus `\$`** for a
+/// literal `$` that would otherwise open a hole — a literal `${` is written `\$\{` so the
+/// lexer's balance scan and this split agree. Every other backslash is ordinary text. Statics
+/// always number `holes + 1` (empty where holes touch the braces or each other) — the N+1
+/// invariant the handler-call desugar relies on.
+pub(crate) fn parse_tier_expr_body(
+    ctx: Ctx<'_>,
+    tier: String,
+    tier_span: Span,
+    body_span: Span,
+    span: Span,
+) -> Expr {
+    let inner = ctx.source.slice(body_span);
+    let base = body_span.start;
+    let mut statics: Vec<String> = Vec::new();
+    let mut holes: Vec<Expr> = Vec::new();
+    let mut literal = String::new();
+    let mut chars = inner.char_indices().peekable();
+
+    while let Some((offset, c)) = chars.next() {
+        match c {
+            '\\' => match chars.peek().map(|(_, c)| *c) {
+                Some(escaped @ ('{' | '}' | '\\' | '$')) => {
+                    chars.next();
+                    literal.push(escaped);
+                }
+                // Any other backslash is ordinary text (markdown/regex keep their own escapes).
+                _ => literal.push('\\'),
+            },
+            '$' if chars.peek().map(|(_, c)| *c) == Some('{') => {
+                chars.next(); // consume the `{`
+                statics.push(std::mem::take(&mut literal));
+                let hole_start = offset + 2;
+                let hole_end = find_hole_end(inner, hole_start);
+                let hole_text = &inner[hole_start..hole_end];
+                holes.push(parse_hole(ctx, hole_text, base + hole_start as u32));
+                // Advance past the hole and its closing `}`.
+                while let Some((i, _)) = chars.peek().copied() {
+                    if i >= hole_end {
+                        break;
+                    }
+                    chars.next();
+                }
+                if chars.peek().map(|(i, _)| *i) == Some(hole_end) {
+                    chars.next();
+                }
+            }
+            other => literal.push(other),
+        }
+    }
+    statics.push(literal);
+
+    Expr::TierExpr {
+        tier,
+        tier_span,
+        statics,
+        holes,
+        span,
+    }
+}
+
 /// Parse a single interpolation hole's expression. The hole text is lexed and parsed
 /// with token spans shifted to their absolute position in the source, so diagnostics
 /// and snapshots point at the real location. Hole diagnostics flow through the

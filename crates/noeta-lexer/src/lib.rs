@@ -793,10 +793,11 @@ fn opens_text_block(text: &str, tokens: &[Token], text_tiers: &TextTiers) -> boo
             .is_some_and(|name| text_tiers.contains(name))
 }
 
-/// Scan a lexed token stream for `@tier(<name>, …, text: <string>)` declarations and return the
-/// declared text-tier names — the lexical shape is fixed, so this needs no parse. Powers
-/// [`lex_in`]'s two-pass self-use: a file's own text-tier declarations take effect within the
-/// file, whatever the order of declaration and use.
+/// Scan a lexed token stream for `@tier(<name>, …, text: <string>)` — or `expr: <Type>`, an
+/// expression tier's marker (expr-tiers arc), whose bodies capture the same way — declarations
+/// and return the declared text-tier names; the lexical shape is fixed, so this needs no parse.
+/// Powers [`lex_in`]'s two-pass self-use: a file's own text-tier declarations take effect within
+/// the file, whatever the order of declaration and use.
 fn declared_text_tiers(text: &str, tokens: &[Token]) -> Vec<String> {
     let ident = |t: &Token| -> Option<&str> {
         (t.kind == TokenKind::Ident).then(|| &text[t.span.start as usize..t.span.end as usize])
@@ -816,7 +817,7 @@ fn declared_text_tiers(text: &str, tokens: &[Token]) -> Vec<String> {
             continue;
         };
         // Within the directive's parens (depth-tracked to its close), look for a `text: <string>`
-        // key — the marker that makes the declared tier a text tier.
+        // or `expr: <Type>` key — either marker makes the tier's bodies verbatim-captured.
         let mut depth = 1u32;
         let mut rest = tokens[i + 4..].iter().peekable();
         while let Some(tok) = rest.next() {
@@ -830,7 +831,7 @@ fn declared_text_tiers(text: &str, tokens: &[Token]) -> Vec<String> {
                 }
                 TokenKind::Ident
                     if depth == 1
-                        && ident(tok) == Some("text")
+                        && matches!(ident(tok), Some("text" | "expr"))
                         && rest.peek().is_some_and(|t| t.kind == TokenKind::Colon) =>
                 {
                     names.push(name.to_string());

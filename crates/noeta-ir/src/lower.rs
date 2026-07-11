@@ -1239,6 +1239,13 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
+            // An expression-tier block is desugared to its handler call during tier activation,
+            // before checking — one reaching lowering means the pipeline skipped activation (or
+            // the tier was not an expression tier, which the checker rejects as E0052). Surface
+            // it as `Unsupported`, never a panic.
+            Expr::TierExpr { span, .. } => {
+                Err(Unsupported::at("un-desugared expression-tier block", *span))
+            }
             Expr::Match {
                 scrutinee,
                 arms,

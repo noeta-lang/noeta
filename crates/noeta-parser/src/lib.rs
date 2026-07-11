@@ -44,6 +44,7 @@ mod literals;
 use literals::{
     parse_f32_literal, parse_f64_literal, parse_float_literal, parse_int_literal,
     parse_intn_literal, parse_raw_string, parse_string_literal, parse_template_string,
+    parse_tier_expr_body,
 };
 
 /// A `.`-then-keyword postfix operator, folded into one pratt entry: `receiver.as<T>()` (checked
@@ -379,6 +380,7 @@ fn tier_decl_from_args(args: &[AttrArg], directive_span: Span, ctx: &Ctx) -> Opt
     let mut name: Option<(String, Span)> = None;
     let mut config: Option<(String, Span)> = None;
     let mut text: Option<(String, Span)> = None;
+    let mut expr: Option<(String, Span)> = None;
     let mut bad = false;
     for arg in args {
         match (&arg.name, &arg.value) {
@@ -391,17 +393,23 @@ fn tier_decl_from_args(args: &[AttrArg], directive_span: Span, ctx: &Ctx) -> Opt
             (Some(k), AttrValue::Str(lang)) if k == "text" && text.is_none() => {
                 text = Some((lang.clone(), arg.span));
             }
+            (Some(k), AttrValue::TypeRef(ty)) if k == "expr" && expr.is_none() => {
+                expr = Some((ty.clone(), arg.span));
+            }
             _ => {
                 ctx.diags.borrow_mut().push(
                     Diagnostic::error(
                         DiagnosticCode::InvalidDirectiveArgument,
                         arg.span,
-                        "`@tier` takes a tier name and an optional `config: Type` or `text: \"<lang>\"`",
+                        "`@tier` takes a tier name and an optional `config: Type`, `text: \
+                         \"<lang>\"`, or `expr: Type`",
                     )
                     .with_help(
                         "declare a code tier as `@tier(fuzz, config: FuzzConfig) fn runner(roots: \
-                         List<TierRoot>): void { … }`, or a text tier (verbatim `@<name> { … }` \
-                         bodies) as `@tier(spec, text: \"xml\") fn runner(…)`",
+                         List<TierRoot>): void { … }`, a text tier (verbatim `@<name> { … }` \
+                         bodies) as `@tier(spec, text: \"xml\") fn runner(…)`, or an expression \
+                         tier (`@<name> { … }` blocks as values) as `@tier(sql, text: \"sql\", \
+                         expr: Query) fn handler(…)`",
                     ),
                 );
                 bad = true;
@@ -424,6 +432,7 @@ fn tier_decl_from_args(args: &[AttrArg], directive_span: Span, ctx: &Ctx) -> Opt
         name_span,
         config,
         text,
+        expr,
         span: directive_span,
     })
 }
@@ -1269,6 +1278,22 @@ where
             just(T::RawStr).map_with(move |_, e| parse_raw_string(ctx, ctx.to_span(e.span())));
         let template = just(T::TemplateStr)
             .map_with(move |_, e| parse_template_string(ctx, ctx.to_span(e.span())));
+        // An **expression-tier block** `@sql { select ${id} }` (expr-tiers arc): `@` + a tier
+        // name + a lexer-captured verbatim body, split into statics and `${…}` holes. Only tiers
+        // the lexer knows as text-capturing produce the `DocText` token this matches, so an
+        // unknown `@name` in expression position fails the parse at the `@` (its body lexed as
+        // code); whether the tier is *declared* `expr:` is the checker's question, asked of the
+        // desugar's leftovers during tier activation.
+        let tier_expr = just(T::At)
+            .ignore_then(id.clone())
+            .then(
+                just(T::DocText)
+                    .map_with(move |_, e| ctx.to_span(e.span()))
+                    .delimited_by(just(T::LBrace), just(T::RBrace)),
+            )
+            .map_with(move |((tier, tier_span), body_span), e| {
+                parse_tier_expr_body(ctx, tier, tier_span, body_span, ctx.to_span(e.span()))
+            });
         let bool_ = choice((
             just(T::TrueKw).map_with(move |_, e| Expr::Bool {
                 value: true,
@@ -1642,6 +1667,7 @@ where
             string,
             raw_string,
             template,
+            tier_expr,
             bool_,
             closure,
             if_then_else,
@@ -3308,6 +3334,74 @@ mod tests {
             parsed.diagnostics
         );
         parsed.program.to_pretty_string()
+    }
+
+    /// Destructure the single `x = @sql { … }`-shaped statement of `src` into its tier-expr parts.
+    fn tier_expr_of(src: &str) -> (String, Vec<String>, Vec<Expr>) {
+        let parsed = parse_str(src);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        for stmt in &parsed.program.stmts {
+            if let Stmt::Binding { value, .. } = stmt
+                && let Expr::TierExpr {
+                    tier,
+                    statics,
+                    holes,
+                    ..
+                } = value
+            {
+                return (tier.clone(), statics.clone(), holes.clone());
+            }
+        }
+        panic!("no tier-expr binding parsed from: {src}");
+    }
+
+    const SQL_DECL: &str = "@tier(sql, text: \"sql\", expr: Query)\nfn q(statics: List<string>, holes: List<() -> int>): Query { return Query {} }\nstruct Query {}\n";
+
+    #[test]
+    fn expression_tier_block_parses_to_statics_and_holes() {
+        // The lexer's two-pass scan catches the same-file `expr:` declaration, captures the body,
+        // and the expression grammar splits it: N holes, N+1 statics, holes as real expressions.
+        let src = format!("{SQL_DECL}x = @sql {{ select ${{a}} from t where id = ${{b + 1}} }}\n");
+        let (tier, statics, holes) = tier_expr_of(&src);
+        assert_eq!(tier, "sql");
+        assert_eq!(statics, vec![" select ", " from t where id = ", " "]);
+        assert_eq!(holes.len(), 2);
+        assert!(matches!(&holes[0], Expr::Ident { name, .. } if name == "a"));
+        assert!(matches!(&holes[1], Expr::Binary { .. }));
+        // Hole spans are absolute — they slice the original source to the hole text.
+        let span = holes[0].span();
+        assert_eq!(&src[span.start as usize..span.end as usize], "a");
+    }
+
+    #[test]
+    fn expression_tier_block_with_no_holes_is_one_static() {
+        let src = format!("{SQL_DECL}x = @sql {{ select 1 }}\n");
+        let (_, statics, holes) = tier_expr_of(&src);
+        assert_eq!(statics, vec![" select 1 "]);
+        assert!(holes.is_empty());
+    }
+
+    #[test]
+    fn expression_tier_escapes_and_adjacent_holes() {
+        // `\{`/`\}`/`\\` are the text-tier escapes, `\$` suppresses a hole; adjacent holes get an
+        // empty static between them (the N+1 invariant); other backslashes pass through verbatim.
+        let src = format!("{SQL_DECL}x = @sql {{ \\{{ \\$ \\\\ \\n ${{a}}${{b}} }}\n");
+        let (_, statics, holes) = tier_expr_of(&src);
+        assert_eq!(holes.len(), 2);
+        assert_eq!(statics, vec![" { $ \\ \\n ", "", " "]);
+    }
+
+    #[test]
+    fn expression_tier_declaration_carries_expr_type() {
+        let parsed = parse_str(SQL_DECL);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Fn(f) = &parsed.program.stmts[0] else {
+            panic!("expected the handler fn");
+        };
+        let tier = f.tier.as_ref().expect("@tier declaration");
+        assert_eq!(tier.name, "sql");
+        assert_eq!(tier.text.as_ref().map(|(l, _)| l.as_str()), Some("sql"));
+        assert_eq!(tier.expr.as_ref().map(|(t, _)| t.as_str()), Some("Query"));
     }
 
     #[test]

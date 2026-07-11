@@ -396,6 +396,14 @@ fn q_expr(e: &mut Expr, map: &QMap) {
             q_expr(receiver, map);
             q_expr(value, map);
         }
+        // An expression-tier block's holes are ordinary expressions — type references inside
+        // them (`${User.new()}`) qualify like anywhere else. The tier name is not a type; the
+        // handler is resolved by the activation desugar against the already-qualified registry.
+        Expr::TierExpr { holes, .. } => {
+            for h in holes {
+                q_expr(h, map);
+            }
+        }
         // Leaves with no nested expression or type reference.
         Expr::Str { .. }
         | Expr::Int { .. }

@@ -259,6 +259,12 @@ impl Walker<'_> {
                     }
                 }
             }
+            // An expression-tier block's holes are ordinary expressions (its statics are text).
+            Expr::TierExpr { holes, .. } => {
+                for hole in holes {
+                    self.expr(hole);
+                }
+            }
             Expr::Match {
                 scrutinee, arms, ..
             } => {

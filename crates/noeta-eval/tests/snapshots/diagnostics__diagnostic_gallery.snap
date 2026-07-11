@@ -1,5 +1,6 @@
 ---
 source: crates/noeta-eval/tests/diagnostics.rs
+assertion_line: 66
 expression: out
 ---
 ================ E0001 unexpected character ================
@@ -23,12 +24,12 @@ expression: out
 ───╯
 
 ================ E0003 unexpected token ================
-[E0003] Error: found '`;`' expected '`-`', '`!`', '`spawn`', '`isolate`', 'an integer literal', 'an f32 literal', 'an f64 literal', 'a fixed-width integer literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`channel`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
+[E0003] Error: found '`;`' expected '`-`', '`!`', '`spawn`', '`isolate`', 'an integer literal', 'an f32 literal', 'an f64 literal', 'a fixed-width integer literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`@`', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`channel`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
    ╭─[ snippet.noe:1:6 ]
    │
  1 │ echo ;
    │      ┬  
-   │      ╰── found '`;`' expected '`-`', '`!`', '`spawn`', '`isolate`', 'an integer literal', 'an f32 literal', 'an f64 literal', 'a fixed-width integer literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`channel`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
+   │      ╰── found '`;`' expected '`-`', '`!`', '`spawn`', '`isolate`', 'an integer literal', 'an f32 literal', 'an f64 literal', 'a fixed-width integer literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`@`', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`channel`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
 ───╯
 
 ================ E0004 unexpected end of input ================

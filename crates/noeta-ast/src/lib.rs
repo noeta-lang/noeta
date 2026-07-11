@@ -667,6 +667,13 @@ pub struct TierDecl {
     /// with this language for tooling (editor injection, extraction). `None` for a code tier.
     /// Mutually exclusive with `config` — a text body has no fns to stamp knobs onto (E0051).
     pub text: Option<(String, Span)>,
+    /// The block-value type (`expr: Query`) when the tier is an **expression tier** (expr-tiers
+    /// arc): its `@<name> { … }` bodies are expressions — verbatim text with `${…}` holes —
+    /// desugared to a call of the decorated fn (the tier's *handler*,
+    /// `fn(statics: List<string>, holes: List<() -> U>): T`). The named type must match the
+    /// handler's return type (E0051). Composes with `text:` (the lang id drives tooling) and is
+    /// mutually exclusive with `config:`.
+    pub expr: Option<(String, Span)>,
     /// The whole `@tier(…)` directive span, for diagnostics.
     pub span: Span,
 }
@@ -962,6 +969,21 @@ pub enum Expr {
         value: Box<Expr>,
         span: Span,
     },
+    /// An **expression-tier block** `@sql { select ${id} }` (expr-tiers arc): verbatim
+    /// foreign-language text with `${…}` holes, evaluating to a typed value. `statics` are the
+    /// literal segments (always `holes.len() + 1`, empty where holes touch, `\{ \} \\ \$` escapes
+    /// undone); `holes` are the hole expressions, parsed in the enclosing scope with absolute
+    /// spans. Tier activation desugars this to a call of the tier's declared handler —
+    /// `handler([statics…], [fn() => hole, …])` — so the checker and both backends only ever see
+    /// an ordinary call; the node survives activation only in never-activated parses (fmt, which
+    /// re-emits raw source and never reads the fields).
+    TierExpr {
+        tier: String,
+        tier_span: Span,
+        statics: Vec<String>,
+        holes: Vec<Expr>,
+        span: Span,
+    },
 }
 
 /// An all-fields object literal. `spread` (`..expr`) supplies values for fields not named
@@ -1160,7 +1182,8 @@ impl Expr {
             | Expr::RolesOf { span, .. }
             | Expr::Invoke { span, .. }
             | Expr::TypeTest { span, .. }
-            | Expr::FieldSet { span, .. } => *span,
+            | Expr::FieldSet { span, .. }
+            | Expr::TierExpr { span, .. } => *span,
             Expr::Object(lit) => lit.span,
         }
     }
@@ -1256,6 +1279,7 @@ impl Expr {
             Expr::FieldSet {
                 receiver, value, ..
             } => receiver.mentions(name) || value.mentions(name),
+            Expr::TierExpr { holes, .. } => any(holes),
         }
     }
 
@@ -1280,7 +1304,10 @@ impl Expr {
             | Expr::RolesOf { .. }
             // A closure is a separate callable: its own `.await`s are not this level's (they are
             // E0040 unless the closure is itself async, which builtins' callbacks are not).
-            | Expr::Closure { .. } => false,
+            | Expr::Closure { .. }
+            // An expression-tier block's holes desugar to zero-param closures (separate
+            // callables), so an `.await` inside a hole is never this level's.
+            | Expr::TierExpr { .. } => false,
             Expr::Unary { operand, .. } => operand.has_await(),
             Expr::Binary { lhs, rhs, .. }
             | Expr::Pipeline {

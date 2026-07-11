@@ -825,6 +825,25 @@ impl Pretty for Expr {
                 value.pretty(out, level + 1);
                 out.push(')');
             }
+            Expr::TierExpr {
+                tier,
+                statics,
+                holes,
+                span: s,
+                ..
+            } => {
+                out.push_str(&format!("(tier-expr {tier} {}", span(*s)));
+                for (i, static_) in statics.iter().enumerate() {
+                    out.push('\n');
+                    indent(out, level + 1);
+                    out.push_str(&format!("(static {static_:?})"));
+                    if let Some(hole) = holes.get(i) {
+                        out.push('\n');
+                        hole.pretty(out, level + 1);
+                    }
+                }
+                out.push(')');
+            }
             Expr::Invoke {
                 recv,
                 name,

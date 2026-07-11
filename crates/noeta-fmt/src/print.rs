@@ -1274,6 +1274,16 @@ impl Printer<'_> {
 
     fn expr(&self, expr: &Expr) -> Result<Doc, FmtError> {
         Ok(match expr {
+            // An expression-tier block `@sql { … ${hole} … }` re-emits **verbatim from source**:
+            // the body is foreign-language text (escapes intact — the AST's `statics` are
+            // unescaped and must never be re-emitted), and holes are the author's expressions in
+            // the author's layout. Idempotent by construction.
+            Expr::TierExpr { span, .. } => Doc::raw_text(
+                self.source
+                    .get(span.start as usize..span.end as usize)
+                    .unwrap_or_default()
+                    .to_string(),
+            ),
             Expr::Str { value, .. } => Doc::text(format!("\"{}\"", escape(value))),
             Expr::Int { value, .. } => Doc::text(value.to_string()),
             Expr::Float { value, .. } => Doc::text(format_float(*value)),

@@ -4036,6 +4036,31 @@ impl Checker {
                 }
                 Type::String
             }
+            // A `TierExpr` that reaches the checker survived tier activation's desugar, which
+            // rewrites every block of a declared **expression** tier into its handler call — so
+            // this block's tier is captured (text-bodied) but not `expr:`-declared: `x = @doc
+            // { … }`. Its holes still synth (hover/IDE coverage inside the body), the block
+            // itself is the error.
+            Expr::TierExpr {
+                tier,
+                tier_span,
+                holes,
+                ..
+            } => {
+                for hole in holes {
+                    self.synth(hole, env);
+                }
+                self.error(
+                    DiagnosticCode::InvalidTierExpression,
+                    *tier_span,
+                    format!("`@{tier}` is not an expression tier — its blocks are not values"),
+                )
+                .help(
+                    "only a tier declared `@tier(name, …, expr: Type)` yields a value from \
+                     `@name { … }`; a text tier's blocks are runner input, not expressions",
+                );
+                Type::Unknown
+            }
             Expr::Ident { name, span } => match lookup(env, name)
                 // A bare user-function reference is a first-class value of its **full** signature
                 // type — parameters included, so passing it where a `Fn(A) -> B` is declared
@@ -7454,8 +7479,9 @@ fn conditional_await_span(e: &Expr) -> Option<Span> {
         } => {
             conditional_await_span(scrutinee).or_else(|| arms.iter().find_map(|a| guarded(&a.body)))
         }
-        // A closure is a separate callable — its awaits are not this level's.
-        Expr::Closure { .. } => None,
+        // A closure is a separate callable — its awaits are not this level's. An expression-tier
+        // block's holes desugar to closures, so the same applies.
+        Expr::Closure { .. } | Expr::TierExpr { .. } => None,
         // Unconditional compounds: recurse into every child (evaluation order does not matter here —
         // any conditional await anywhere disqualifies).
         Expr::Await { expr, .. }
