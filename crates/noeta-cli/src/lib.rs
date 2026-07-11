@@ -700,6 +700,8 @@ fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
         coords,
         deps,
         signature,
+        // Keyless publish (Phase 5, K4) fills this from the Sigstore flow; key/unsigned = None.
+        bundle: None,
     };
     match index.publish(&name, &release) {
         Ok(()) => {

@@ -23,10 +23,13 @@ serde_json = { workspace = true, optional = true }
 ed25519-dalek = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
 # Sigstore keyless provenance (Phase 5): offline bundle verification against the public
-# sigstore.dev trust root. See the workspace manifest for the crate-choice rationale.
+# sigstore.dev trust root. See the workspace manifest for the crate-choice rationale. sha2
+# computes the in-toto subject digest — sha256(canonical_bytes), the DSSE payload's binding
+# to the attestation.
 sigstore-verify = { workspace = true, optional = true }
 sigstore-trust-root = { workspace = true, optional = true }
 sigstore-types = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 [features]
 # Enable the networked registry `Index` (an HTTP client of the hosted index). Off by default; the CLI
@@ -35,13 +38,16 @@ registry-http = ["dep:reqwest", "dep:serde", "dep:serde_json"]
 # Package provenance: sign attestations on publish, verify them on resolve (Ed25519). CLI-only.
 provenance = ["dep:ed25519-dalek", "dep:getrandom"]
 # Keyless provenance (Phase 5): Sigstore bundles verified offline — OIDC identity in place of a
-# registered key, public transparency log in place of local-only detection. CLI-only, like
-# `provenance` (which stays: keyless is a second trust root, not a replacement).
+# registered key, public transparency log in place of local-only detection. CLI-only, and
+# includes `provenance`: both trust roots sign the SAME `Attestation` (its canonical bytes are
+# what the in-toto subject digests), so keyless builds on the key path's attestation model.
 keyless = [
+    "provenance",
     "dep:sigstore-verify",
     "dep:sigstore-trust-root",
     "dep:sigstore-types",
     "dep:serde_json",
+    "dep:sha2",
 ]
 
 [lints]

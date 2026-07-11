@@ -23,10 +23,56 @@
 //! live in the lockfile/graph layer, not here — this module only answers "does this bundle prove
 //! that identity X attested these bytes?".
 
+use sha2::{Digest, Sha256};
 use sigstore_trust_root::{SIGSTORE_PRODUCTION_TRUSTED_ROOT, TrustedRoot};
 use sigstore_types::Sha256Hash;
 use sigstore_verify::types::Bundle;
 use sigstore_verify::{VerificationPolicy, verify};
+
+use crate::provenance::Attestation;
+use crate::registry::GitCoords;
+
+/// The in-toto predicate type naming what a Noeta publish attestation *means* — monitors and
+/// tooling key on this to recognize (and index) Noeta releases in the public transparency log.
+pub const PREDICATE_TYPE: &str = "https://noeta.dev/attestation/publish/v1";
+
+/// The sha256 (hex) of the attestation's [`Attestation::canonical_bytes`] — the **artifact digest**
+/// a keyless bundle attests. Both sides compute it from first principles: the publisher when
+/// building the in-toto statement, the consumer from the registry-served release facts it is about
+/// to trust. The canonical bytes stay the single cross-trust-root truth; DSSE/in-toto is envelope.
+pub fn attested_digest(attestation: &Attestation<'_>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(attestation.canonical_bytes());
+    let out = hasher.finalize();
+    out.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The in-toto Statement (v1) a keyless publish signs as its DSSE payload: the subject binds
+/// [`attested_digest`] under the release's name, and the predicate carries the human/monitor-facing
+/// publish facts (identity, version, commit, and where the tag lives). Deterministic output — the
+/// exact bytes are what the ephemeral key signs, so no map-ordering surprises.
+pub fn publish_statement(attestation: &Attestation<'_>, coords: &GitCoords) -> String {
+    debug_assert_eq!(
+        attestation.sha, coords.sha,
+        "attestation and coords disagree"
+    );
+    serde_json::json!({
+        "_type": "https://in-toto.io/Statement/v1",
+        "subject": [{
+            "name": format!("{}@{}", attestation.name, attestation.version),
+            "digest": { "sha256": attested_digest(attestation) },
+        }],
+        "predicateType": PREDICATE_TYPE,
+        "predicate": {
+            "name": attestation.name,
+            "version": attestation.version.to_string(),
+            "sha": attestation.sha,
+            "url": coords.url,
+            "tag": coords.tag,
+        },
+    })
+    .to_string()
+}
 
 /// The consumer-side pin: which OIDC identity is allowed to sign for a scope. Both parts match
 /// exactly — the `issuer` is the OIDC provider (e.g. `https://token.actions.githubusercontent.com`),
@@ -179,6 +225,50 @@ mod tests {
         bundle["dsseEnvelope"]["signatures"][0]["sig"] = flipped.into();
         let err = verify_bundle(&bundle.to_string(), GHA_SUBJECT_SHA256, None).unwrap_err();
         assert!(err.contains("failed"), "{err}");
+    }
+
+    #[test]
+    fn the_publish_statement_binds_the_canonical_attestation_bytes() {
+        let version = semver::Version::new(1, 2, 0);
+        let attestation = Attestation {
+            name: "acme/imgfx",
+            version: &version,
+            sha: "a3f9c2d1",
+        };
+        let coords = GitCoords {
+            url: "https://github.com/acme/imgfx".to_string(),
+            tag: "v1.2.0".to_string(),
+            sha: "a3f9c2d1".to_string(),
+        };
+
+        // The subject digest IS sha256(canonical_bytes) — the pinned cross-format contract. The
+        // fixed hex below (= sha256("noeta-attestation-v1\nacme/imgfx\n1.2.0\na3f9c2d1\n"),
+        // cross-checked out-of-band) guards the whole chain (canonical bytes → sha256 →
+        // statement): a drift in either the attestation format or the digest fails loudly here.
+        let digest = attested_digest(&attestation);
+        assert_eq!(
+            digest,
+            "6407bd48413706f3aee3c266551929b45b6826320cbf524a174d3ad6c883d98a"
+        );
+
+        let statement: serde_json::Value =
+            serde_json::from_str(&publish_statement(&attestation, &coords)).unwrap();
+        assert_eq!(statement["_type"], "https://in-toto.io/Statement/v1");
+        assert_eq!(statement["subject"][0]["name"], "acme/imgfx@1.2.0");
+        assert_eq!(statement["subject"][0]["digest"]["sha256"], digest.as_str());
+        assert_eq!(statement["predicateType"], PREDICATE_TYPE);
+        assert_eq!(statement["predicate"]["sha"], "a3f9c2d1");
+        assert_eq!(
+            statement["predicate"]["url"],
+            "https://github.com/acme/imgfx"
+        );
+        assert_eq!(statement["predicate"]["tag"], "v1.2.0");
+
+        // Deterministic: the same attestation yields byte-identical statements (what gets signed).
+        assert_eq!(
+            publish_statement(&attestation, &coords),
+            publish_statement(&attestation, &coords)
+        );
     }
 
     #[test]

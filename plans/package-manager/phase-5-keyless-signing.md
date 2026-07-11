@@ -83,10 +83,16 @@ swappable.
     `IdentityPolicy`, `VerifiedIdentity`); 7 hermetic tests over a vendored **real**
     GitHub-Actions DSSE bundle (verify + identity/issuer mismatch + wrong-artifact +
     tampered-sig + malformed inputs). LSP/core link zero sigstore crates.
-- **K1 — DSSE + bundle through the registry.** `canonical_bytes` as DSSE payload
-  (payloadType `application/vnd.noeta.attestation.v1`); `Release.bundle` through LocalIndex,
-  HttpIndex, mock-server tests; exactly-one-of-signature/bundle enforced; Worker contract delta
-  documented. *Exit: a bundle round-trips publish → index → releases().*
+- **K1 — DSSE + bundle through the registry. ✅ DONE.** Payload settled by K0's fail-closed
+  finding: an **in-toto Statement v1** (`application/vnd.in-toto+json`), subject digest =
+  `sha256(canonical_bytes)` (pinned by test against an out-of-band-computed hex), subject name
+  `name@version`, predicateType `https://noeta.dev/attestation/publish/v1`, predicate
+  `{name, version, sha, url, tag}` (`keyless::publish_statement`/`attested_digest`; the
+  `keyless` feature now includes `provenance` — both roots sign the same `Attestation`).
+  `Release.bundle: Option<String>` through LocalIndex TOML + HttpIndex wire + publish body;
+  at-most-one-of signature/bundle enforced at both publish impls
+  (`Release::check_provenance_shape`). Worker contract delta: `WireVersion.bundle` +
+  `POST` body `bundle` key (nullable string), stored verbatim, served back verbatim.
 - **K2 — offline verification seam.** `provenance::verify_keyless(att, bundle, trust_root,
   policy) -> VerifiedIdentity` — DSSE sig over canonical bytes, chain to Fulcio root, identity
   extension extraction, SCT, Rekor inclusion + checkpoint signature, time-in-validity. Hermetic
