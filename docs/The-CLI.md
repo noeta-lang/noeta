@@ -277,4 +277,6 @@ The opcode set and prototype/side-table layout are described in [The Virtual Mac
 - **[Benchmarking](Benchmarking)** — `@bench` blocks and the timing method.
 - **[Documentation & Dev Tiers](Documentation-and-Tiers)** — `@doc` extraction, the tier model, and `noeta.toml` build targets.
 
+A program (or a dependency) can also declare its **own** tier with `@tier` — `noeta <tier> <FILE>` dispatches to the declaring package's runner; see [Documentation & Dev Tiers](Documentation-and-Tiers).
+
 All three accept `--target <NAME>`, which acts as a **gate**: if the named `noeta.toml` target does not make that tier live, the command prints a notice and no-ops with exit `0`. With no `--target`, they always proceed.

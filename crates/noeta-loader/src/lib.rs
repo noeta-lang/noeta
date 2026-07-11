@@ -511,6 +511,30 @@ fn link_core(
                         origins.insert(name.local().to_string(), Origin::Import(path.to_vec()));
                         // Merge the declaration under its module's qualified identity.
                         let mut decl = *decl;
+                        // A `@tier(…, config: T)` runner *references* its config type (tier-
+                        // providers T2): importing the runner pulls `T`'s declaration from the
+                        // same module along with it — the consumer's `@<tier>(knobs)` blocks and
+                        // the checker's E0051 need the attribute struct linked, and the tier
+                        // directive is the reference that makes it reachable. Keyed under its
+                        // qualified identity (a dotted name no local can collide with), so a
+                        // consumer's own explicit `use …​.T` still merges it exactly once.
+                        if let Stmt::Fn(f) = &decl
+                            && let Some(tier) = &f.tier
+                            && let Some((config, _)) = &tier.config
+                            && let Resolution::Resolved(cfg) = resolve(&module_views, path, config)
+                        {
+                            let qualified = format!("{}.{}", path.join("."), config);
+                            if let std::collections::hash_map::Entry::Vacant(slot) =
+                                origins.entry(qualified)
+                            {
+                                slot.insert(Origin::Import(path.to_vec()));
+                                let mut cfg = *cfg;
+                                if let Some(map) = module_maps.get(path) {
+                                    qualify::qualify_stmt(&mut cfg, map);
+                                }
+                                imported.push(cfg);
+                            }
+                        }
                         if let Some(map) = module_maps.get(path) {
                             qualify::qualify_stmt(&mut decl, map);
                         }

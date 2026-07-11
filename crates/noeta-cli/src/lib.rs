@@ -429,6 +429,12 @@ pub fn run_cli(
                 if let Some(code) = compose::maybe_delegate_cwd() {
                     return code;
                 }
+                // Then a **declared tier** (tier-providers T4): `noeta <tier> <file>` where the
+                // file's linked program declares `<tier>` with `@tier` dispatches to that tier's
+                // runner in-process.
+                if let Some(code) = try_tier_dispatch(&err) {
+                    return code;
+                }
                 // Then the external-binary form (Phase 3, N3.7 — the `cargo-<name>` model): an
                 // executable `noeta-<cmd>` on PATH serves `noeta <cmd> …`. Registered
                 // (compiled-in) commands never reach here — clap knows them.
@@ -1813,6 +1819,149 @@ fn noe_files(root: &std::path::Path) -> Vec<PathBuf> {
 /// `noeta <cmd>` with an unknown `<cmd>` looks for an executable `noeta-<cmd>` on `PATH` and runs
 /// it with everything after the subcommand as its argv, forwarding the exit code. Returns `None`
 /// (letting clap's error render) when the name can't be extracted or no such binary exists.
+/// `noeta <tier> <file>` for a **declared tier** (tier-providers T4). When the unknown subcommand
+/// names a tier the file's linked program declares with `@tier(name[, config: T])`, this owns the
+/// command: activate exactly that tier, then invoke its runner **in-process** with the activated
+/// roots — a synthesized `runner([TierRoot { name: "…", run: <fn> }, …])` fragment appended to the
+/// activated program and run through the ordinary real-host pipeline (the in-process
+/// reflected-handles protocol). Knob values are not passed here: the block-stamped config
+/// attributes travel on the root fns, and the runner reads them with `attributes_of::<Config>()`.
+/// Returns `None` when this is not a tier invocation — no file argument, an unloadable file, or a
+/// name the program does not declare — so the caller falls through to the external-binary probe.
+fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
+    let name = err
+        .get(clap::error::ContextKind::InvalidSubcommand)
+        .and_then(|v| match v {
+            clap::error::ContextValue::String(s) => Some(s.clone()),
+            _ => None,
+        })?;
+    // The subcommand's first argument is the entry file.
+    let file: PathBuf = std::env::args_os()
+        .skip(1)
+        .skip_while(|a| *a != *name.as_str())
+        .nth(1)
+        .map(PathBuf::from)?;
+    if !file.is_file() {
+        return None;
+    }
+    // A file that fails to load or link cannot tell us whether it declares the tier — fall
+    // through (the external probe, then clap's error). Dependencies resolve first: a declared
+    // tier typically lives in a dependency package (`use fuzzkit.tiers.run_fuzz`).
+    let deps = graph::resolve_graph(&file).ok()?.packages;
+    let linked = noeta_loader::load_with_deps(&file, &deps).ok()?.ok()?;
+    let activated = noeta_check::activate_tiers(&linked.program, &[&name]);
+    activated.registry.declared(&name)?;
+    Some(run_declared_tier(&name, &linked, activated))
+}
+
+/// Run a declared tier's dispatch over an already-activated program: type-check, synthesize the
+/// runner call over the collected roots, and execute on the real host. Owns all reporting; the
+/// tier and its declaration are known to exist by the time this runs.
+fn run_declared_tier(
+    name: &str,
+    linked: &noeta_loader::Linked,
+    activated: noeta_check::Activated,
+) -> ExitCode {
+    if !activated.diagnostics.is_empty() {
+        emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
+        return ExitCode::from(1);
+    }
+    let tier = activated
+        .registry
+        .declared(name)
+        .expect("caller checked")
+        .clone();
+    let roots = activated.custom.get(name).cloned().unwrap_or_default();
+
+    // The runner call — `<runner>([TierRoot { name: "<fn>", run: <fn> }, …])` — is built as AST
+    // directly: the runner (and, in a namespaced entry, a root) carries its **link-qualified**
+    // dotted name, which is an identifier to the resolved program but would parse as member
+    // access from text. The `TierRoot` *declaration* is textual (no names to qualify) and only
+    // synthesized when the program doesn't already declare one: the checker knows `TierRoot` as a
+    // prelude type — that is what lets the runner's package name `List<TierRoot>` standalone —
+    // but the backends build record literals from real declarations, and a declaration of the
+    // same name shadows the prelude registration by design.
+    let mut program = activated.program;
+    let declares_tier_root = program
+        .stmts
+        .iter()
+        .any(|s| matches!(s, Stmt::Struct(d) if d.name == noeta_ast::reflect::TIER_ROOT));
+    if !declares_tier_root {
+        let fragment = parse_fragment(
+            SourceId(u32::MAX),
+            "<tier-dispatch>",
+            "struct TierRoot { name: string  run: () -> void }",
+        );
+        if !fragment.diagnostics.is_empty() {
+            eprintln!("lang: internal error synthesizing the `{name}` dispatch");
+            return ExitCode::from(2);
+        }
+        program.stmts.extend(fragment.program.stmts);
+    }
+    let span = program.span;
+    let root_items: Vec<Expr> = roots
+        .iter()
+        .map(|root| {
+            Expr::Object(noeta_ast::ObjectLit {
+                type_name: noeta_ast::reflect::TIER_ROOT.to_string(),
+                type_name_span: span,
+                fields: vec![
+                    noeta_ast::FieldInit {
+                        name: "name".to_string(),
+                        name_span: span,
+                        value: Expr::Str {
+                            value: root.name.clone(),
+                            span,
+                        },
+                        span,
+                    },
+                    noeta_ast::FieldInit {
+                        name: "run".to_string(),
+                        name_span: span,
+                        value: Expr::Ident {
+                            name: root.name.clone(),
+                            span,
+                        },
+                        span,
+                    },
+                ],
+                spread: None,
+                span,
+            })
+        })
+        .collect();
+    program.stmts.push(call_stmt(
+        &tier.runner,
+        vec![Expr::List {
+            items: root_items,
+            span,
+        }],
+        span,
+    ));
+    // One check over the whole dispatch program: the user's code, the stamped attributes, the
+    // runner's signature, and the synthesized call all validate together.
+    let checked = noeta_check::check_all(&program);
+    if !checked.diagnostics.is_empty() {
+        emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+        return ExitCode::from(1);
+    }
+    match execute_real_host(&program, &checked, std::env::args().collect()) {
+        Ok((result, trace)) => {
+            print!("{}", result.stdout);
+            let _ = io::stdout().flush();
+            emit_diagnostics_mapped(&linked.sources, result.diagnostics.iter());
+            if trace.len() >= 2 {
+                eprint!("{}", noeta_vm::render_trace(&trace, &linked.sources));
+            }
+            ExitCode::from(result.exit_code.clamp(0, 255) as u8)
+        }
+        Err(msg) => {
+            eprintln!("lang: {msg}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn external_command_fallback(err: &clap::Error) -> Option<ExitCode> {
     let name = err
         .get(clap::error::ContextKind::InvalidSubcommand)

@@ -31,7 +31,8 @@ use noeta_span::Span;
 /// arguments construct (`@bench(iterations: N)` ⇒ `#[Bench(iterations: N)]` stamped onto each
 /// contained fn; a per-fn attribute wins over the block's). `None` for a tier with no knobs, which
 /// therefore accepts no arguments. One schema source: the attribute's registered fields drive
-/// validation (the ordinary construction gate) and the runner's reads alike.
+/// validation (the ordinary construction gate) and the runner's reads alike. A *declared* tier's
+/// config attribute lives in the [`TierRegistry`] instead (its `@tier(…, config: T)` directive).
 pub fn tier_config_attribute(tier: &str) -> Option<&'static str> {
     match tier {
         "bench" => Some(TIER_ATTR_BENCH),
@@ -39,24 +40,87 @@ pub fn tier_config_attribute(tier: &str) -> Option<&'static str> {
     }
 }
 
-/// The `E0037` for directive arguments on a tier that has no knob attribute (`@test(x)` — `test`
-/// takes no arguments), or `None` when the args are acceptable at this level. Args on a
-/// knob-carrying tier are *not* validated here — they construct the tier's config attribute, checked
-/// by the ordinary attribute construction gate (in place by the checker's `TierBlock` arm on the
-/// default path; on the stamped fns when activated).
-pub fn knobless_args_diagnostic(tier: &str, args: &[AttrArg]) -> Option<Diagnostic> {
-    if tier_config_attribute(tier).is_some() {
-        return None;
+/// A tier brought into existence by a `@tier(name[, config: T]) fn runner(…)` declaration
+/// (tier-providers T2) — the program-declared counterpart of a [`BUILTIN_TIERS`] entry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclaredTier {
+    /// The tier name consumers write as `@<name> { … }`.
+    pub name: String,
+    /// The knob-attribute type from `config: T`, if the tier has knobs.
+    pub config: Option<String>,
+    /// The runner fn's (possibly link-qualified) name — what dispatch invokes with the roots.
+    pub runner: String,
+    /// The `@tier` directive's span, for diagnostics.
+    pub span: Span,
+}
+
+/// The tier name-space a program sees: the built-in four plus every `@tier` declaration in the
+/// (linked) program — imported packages' declarations included, since linking merges their
+/// modules. The one lookup activation, the checker's in-place `TierBlock` arm, and the CLI's
+/// runner dispatch all resolve against.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TierRegistry {
+    declared: std::collections::HashMap<String, DeclaredTier>,
+}
+
+impl TierRegistry {
+    /// Collect every `@tier` declaration from `program`'s top-level fns. Duplicates keep the first
+    /// (the checker reports the collision as E0051; resolution just stays stable).
+    pub fn collect(program: &Program) -> TierRegistry {
+        let mut declared = std::collections::HashMap::new();
+        for stmt in &program.stmts {
+            if let Stmt::Fn(f) = stmt
+                && let Some(t) = &f.tier
+            {
+                declared
+                    .entry(t.name.clone())
+                    .or_insert_with(|| DeclaredTier {
+                        name: t.name.clone(),
+                        config: t.config.as_ref().map(|(n, _)| n.clone()),
+                        runner: f.name.clone(),
+                        span: t.span,
+                    });
+            }
+        }
+        TierRegistry { declared }
     }
-    let span = args.first().map(|a| a.span)?;
-    Some(
-        Diagnostic::error(
-            DiagnosticCode::InvalidDirectiveArgument,
-            span,
-            format!("tier `@{tier}` takes no arguments"),
+
+    /// Whether `tier` names a known tier — built-in or declared.
+    pub fn is_known(&self, tier: &str) -> bool {
+        BUILTIN_TIERS.contains(&tier) || self.declared.contains_key(tier)
+    }
+
+    /// The declared tier named `tier`, if any (`None` for a built-in).
+    pub fn declared(&self, tier: &str) -> Option<&DeclaredTier> {
+        self.declared.get(tier)
+    }
+
+    /// The tier's config attribute — the built-in mapping for the built-in four, the `@tier`
+    /// directive's `config:` for a declared tier.
+    pub fn config_attribute<'a>(&'a self, tier: &str) -> Option<&'a str> {
+        tier_config_attribute(tier)
+            .or_else(|| self.declared.get(tier).and_then(|d| d.config.as_deref()))
+    }
+
+    /// The `E0037` for directive arguments on a tier that has no knob attribute (`@test(x)` —
+    /// `test` takes no arguments), or `None` when the args are acceptable at this level. Args on a
+    /// knob-carrying tier are *not* validated here — they construct the tier's config attribute,
+    /// checked by the ordinary attribute construction gate (in place by the checker's `TierBlock`
+    /// arm on the default path; on the stamped fns when activated).
+    pub fn knobless_args_diagnostic(&self, tier: &str, args: &[AttrArg]) -> Option<Diagnostic> {
+        if self.config_attribute(tier).is_some() {
+            return None;
+        }
+        let span = args.first().map(|a| a.span)?;
+        Some(
+            Diagnostic::error(
+                DiagnosticCode::InvalidDirectiveArgument,
+                span,
+                format!("tier `@{tier}` takes no arguments"),
+            )
+            .with_help("a tier's knobs come from its config attribute (`@bench`'s is `Bench { iterations: int }`; a declared tier's is its `@tier(…, config: T)`)"),
         )
-        .with_help("only `@bench` carries a knob (`iterations: int`)"),
-    )
+    }
 }
 
 /// The attribute a tier block's directive args construct, stamped at the block's spans — the
@@ -110,10 +174,11 @@ pub fn dedent_doc(text: &str) -> String {
         .join("\n")
 }
 
-/// The dev-tiers the language ships built in. A `@<tier> { … }` block against any other name is an
-/// `E0036` (a typo must not silently vanish). Hardcoded for now; once `@tier` declarations + the
-/// package manifest land, the active set becomes a build target's resolved provider-map and this
-/// constant gives way to that set.
+/// The dev-tiers the language ships built in. The tier name-space is **open** (tier-providers
+/// T2/T3): a program (or its dependencies) adds names with `@tier` declarations, and the
+/// [`TierRegistry`] resolves against built-ins ∪ declared — a name in neither is an `E0036` (a
+/// typo must not silently vanish). These four stay hardcoded until the follow-up arc ports them
+/// to std's own `@tier` declarations (dogfooding the provider mechanism).
 pub const BUILTIN_TIERS: &[&str] = &["test", "bench", "doc", "debug"];
 
 /// The `E0036 UnknownTier` diagnostic for a `@<tier>` whose name is not a built-in tier. Shared by
@@ -243,6 +308,13 @@ pub struct Activated {
     pub tests: Vec<TierFn>,
     /// The `@bench` fns activated by this resolution, in source order (roots for `lang bench`).
     pub benches: Vec<TierFn>,
+    /// The roots of every activated **declared** tier (tier-providers T2), keyed by tier name — a
+    /// `@fuzz { fn f() }` block's fns under `"fuzz"`, for the dispatching runner.
+    pub custom: std::collections::BTreeMap<String, Vec<TierFn>>,
+    /// The tier name-space this resolution ran against — built-ins plus the program's `@tier`
+    /// declarations. Surfaced so the caller (the CLI's dispatch) resolves the runner from the same
+    /// registry activation validated with.
+    pub registry: TierRegistry,
     /// `E0036` for any block naming an unknown tier (active or not).
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -255,6 +327,10 @@ pub struct Activated {
 pub fn activate_tiers(program: &Program, active: &[&str]) -> Activated {
     let mut roots = Roots::default();
     let mut diagnostics = Vec::new();
+    // The tier name-space: built-ins ∪ the program's own `@tier` declarations (imported packages'
+    // included — the linked program carries their decls). Unknown-name validation, config-attr
+    // stamping, and root collection all resolve against it.
+    let registry = TierRegistry::collect(program);
     // With the `doc` tier live, a declaration-attached `@doc` block (adjacency-resolved on the
     // *input* program, before its blocks are gone) stamps `#[Doc("…")]` onto its declaration —
     // the text tier's counterpart of `@bench`'s knob stamping, giving runtime docstrings via
@@ -272,7 +348,14 @@ pub fn activate_tiers(program: &Program, active: &[&str]) -> Activated {
     };
     // The top-level statement list collects roots (a `@test`/`@bench` block's fns are runnable roots
     // only here — a tier block nested in a fn body holds inline code, not roots).
-    let mut stmts = resolve_block(&program.stmts, active, &mut diagnostics, &mut roots, true);
+    let mut stmts = resolve_block(
+        &program.stmts,
+        active,
+        &registry,
+        &mut diagnostics,
+        &mut roots,
+        true,
+    );
     if !doc_stamps.is_empty() {
         for stmt in &mut stmts {
             let (name_span, attrs) = match stmt {
@@ -305,6 +388,8 @@ pub fn activate_tiers(program: &Program, active: &[&str]) -> Activated {
         },
         tests: roots.tests,
         benches: roots.benches,
+        custom: roots.custom,
+        registry,
         diagnostics,
     }
 }
@@ -315,6 +400,8 @@ pub fn activate_tiers(program: &Program, active: &[&str]) -> Activated {
 struct Roots {
     tests: Vec<TierFn>,
     benches: Vec<TierFn>,
+    /// Declared-tier roots, keyed by tier name.
+    custom: std::collections::BTreeMap<String, Vec<TierFn>>,
 }
 
 /// Resolve the tier blocks in one statement list. A `@<tier> { … }` is validated, then inlined (its
@@ -325,6 +412,7 @@ struct Roots {
 fn resolve_block(
     stmts: &[Stmt],
     active: &[&str],
+    registry: &TierRegistry,
     diagnostics: &mut Vec<Diagnostic>,
     roots: &mut Roots,
     collect_roots: bool,
@@ -339,13 +427,13 @@ fn resolve_block(
             ..
         } = stmt
         else {
-            out.push(resolve_children(stmt, active, diagnostics));
+            out.push(resolve_children(stmt, active, registry, diagnostics));
             continue;
         };
 
-        if !BUILTIN_TIERS.contains(&tier.as_str()) {
+        if !registry.is_known(tier) {
             diagnostics.push(unknown_tier_diagnostic(tier, *tier_span));
-        } else if let Some(d) = knobless_args_diagnostic(tier, args) {
+        } else if let Some(d) = registry.knobless_args_diagnostic(tier, args) {
             // Directive args on a knob-less tier (`@test(x)`) — E0037. A knob-carrying tier's args
             // are validated as the stamped attribute's construction, by the checker, below.
             diagnostics.push(d);
@@ -364,12 +452,15 @@ fn resolve_block(
         // a per-fn attribute wins. The checker then validates the stamp through the ordinary
         // attribute construction gate, and the runner reads it off the fn's `attrs`; a top-level
         // `@test`/`@bench` block's fns are also recorded as roots.
-        let config_attr = tier_config_attribute(tier).filter(|_| !args.is_empty());
-        let resolved = resolve_block(items, active, diagnostics, roots, collect_roots);
+        let config_attr = registry
+            .config_attribute(tier)
+            .filter(|_| !args.is_empty())
+            .map(str::to_string);
+        let resolved = resolve_block(items, active, registry, diagnostics, roots, collect_roots);
         for mut item in resolved {
             if let Stmt::Fn(decl) = &mut item {
                 decl.is_dev_tier = true;
-                if let Some(attr_name) = config_attr
+                if let Some(attr_name) = config_attr.as_deref()
                     && !decl.attrs.iter().any(|a| a.name == attr_name)
                 {
                     decl.attrs
@@ -379,6 +470,10 @@ fn resolve_block(
                     let sink = match tier.as_str() {
                         "test" => Some(&mut roots.tests),
                         "bench" => Some(&mut roots.benches),
+                        // A declared tier's fns are roots for its runner's dispatch.
+                        name if registry.declared(name).is_some() => {
+                            Some(roots.custom.entry(name.to_string()).or_default())
+                        }
                         _ => None,
                     };
                     if let Some(sink) = sink {
@@ -401,13 +496,18 @@ fn resolve_block(
 /// collect tests (`collect_tests = false`). Statements with no nested statements are returned
 /// unchanged. Tier blocks live only in statement position, so there is no need to descend into
 /// expressions (closures and `match`/`if` *expressions* are expression-bodied).
-fn resolve_children(stmt: &Stmt, active: &[&str], diagnostics: &mut Vec<Diagnostic>) -> Stmt {
+fn resolve_children(
+    stmt: &Stmt,
+    active: &[&str],
+    registry: &TierRegistry,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Stmt {
     let mut stmt = stmt.clone();
     let block = |stmts: &[Stmt], diags: &mut Vec<Diagnostic>| -> Vec<Stmt> {
         // Nested statement lists never produce runnable roots (`collect_roots = false`); the sink is
         // a throwaway.
         let mut sink = Roots::default();
-        resolve_block(stmts, active, diags, &mut sink, false)
+        resolve_block(stmts, active, registry, diags, &mut sink, false)
     };
     match &mut stmt {
         Stmt::If {
@@ -527,6 +627,36 @@ mod tests {
         assert!(out.diagnostics.is_empty());
         assert!(out.tests.is_empty());
         assert_eq!(out.program.stmts.len(), 1);
+    }
+
+    /// A `@tier`-declared tier opens the name space: its blocks activate (no E0036), block knobs
+    /// stamp its config attribute, and its fns collect as roots under the tier's name in
+    /// `Activated.custom`.
+    #[test]
+    fn a_declared_tier_activates_and_collects_custom_roots() {
+        let program = parse_program(
+            "@attribute(Function)\n\
+             struct Fuzz { cases: int }\n\
+             @tier(fuzz, config: Fuzz)\n\
+             fn run_fuzz(roots: List<TierRoot>): void { return; }\n\
+             @fuzz(cases: 9) { fn probe(): void { return; } }\n",
+        );
+        let out = activate_tiers(&program, &["fuzz"]);
+        assert!(out.diagnostics.is_empty(), "{:?}", out.diagnostics);
+        let tier = out.registry.declared("fuzz").expect("declared");
+        assert_eq!(tier.runner, "run_fuzz");
+        assert_eq!(tier.config.as_deref(), Some("Fuzz"));
+        let roots = &out.custom["fuzz"];
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].name, "probe");
+        // The block knob stamped the declared config attribute.
+        assert!(roots[0].attrs.iter().any(|a| a.name == "Fuzz"));
+        // The activated program (stamp included) type-checks through the ordinary gates.
+        assert!(crate::check_all(&out.program).diagnostics.is_empty());
+        // Inactive: the block strips like any tier.
+        let stripped = activate_tiers(&program, &[]);
+        assert!(stripped.custom.is_empty());
+        assert!(stripped.diagnostics.is_empty());
     }
 
     /// `resolve_docs` adjacency: a file-leading `@doc` is the module doc (Python-docstring rule),

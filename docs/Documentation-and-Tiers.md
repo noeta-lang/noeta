@@ -127,7 +127,34 @@ doc = "std"
 - `--target <NAME>` on `noeta run` activates those tiers (unioned with `--tier`). On `noeta test`/`bench`/`doc`, `--target` acts as a **gate** — the tool no-ops if the target does not make its tier live.
 
 > [!NOTE]
-> **What works today vs. what is stubbed.** The full target grammar works now: parsing, `extends` inheritance, tier-name validation, provider string-vs-table forms, cycle detection, and unknown-target errors. A tier's provider may be the built-in `"std"` or any declared `[dependencies]` key — but naming a third-party provider is not yet *consumed*: the built-in runners always run. Wiring provider dispatch (and `@tier` declarations, so packages can define new tiers) is the remaining step; the table shape also leaves room for a target to carry platform/artifact keys later.
+> The table shape leaves room for a target to carry platform/artifact keys later (the full build recipe).
+
+---
+
+## Declaring your own tier
+
+The tier name-space is **open**: a package (or the program itself) brings a new tier into existence with a `@tier` declaration on its **runner** function:
+
+```noeta
+namespace fuzz.tiers;
+
+@attribute(Function)
+pub struct Fuzz { cases: int }          // the tier's knobs, as an ordinary attribute
+
+@tier(fuzz, config: Fuzz)
+pub fn run_fuzz(roots: List<TierRoot>): void {
+    configs = attributes_of::<Fuzz>()   // knob values, per root, via reflection
+    for root in roots {
+        run = root.run
+        run()                           // invoke the root — an in-process fn handle
+    }
+}
+```
+
+- `@tier(name[, config: Type])` names the tier consumers write as `@<name> { … }`; the optional `config:` names an `@attribute` struct whose fields are the tier's knobs — exactly the `Bench { iterations }` model, so `@fuzz(cases: 500) { … }` stamps `#[Fuzz(cases: 500)]` onto each contained fn and the ordinary construction gate validates it.
+- The decorated fn is the **runner**: it must be `fn(roots: List<TierRoot>): void`, where each `TierRoot { name: string, run: () -> void }` is an activated root fn as a first-class handle. Anything else about the declaration — a name colliding with a built-in, a duplicate, a non-attribute config, a wrong signature — is **E0051** at the declaration.
+- A consumer opts in with one import (`use fuzzkit.tiers.run_fuzz` — the config struct links along with the runner), writes `@fuzz { … }` blocks, and runs **`noeta fuzz <file>`**: the unknown subcommand resolves against the file's declared tiers and dispatches to the runner in-process, after the compose and before the `noeta-<cmd>` external-binary probes. Roots keep white-box access and strip from a normal build, exactly like the built-in tiers.
+- In `noeta.toml`, any identifier is a valid tier name in a target's `tiers` map — whether it resolves is checked where the tier is used.
 
 ---
 

@@ -1,9 +1,22 @@
 # Tier providers — build targets, one directive mechanism, third-party tiers
 
-*Status: IN PROGRESS (started 2026-07-11, branch `tier-providers`). ✅ T0 (`--target`/`[targets.*]`,
-`6457c36f`), ✅ T1 (tier knobs = attribute system, `#[Bench]`, `c6fba9dc`), ✅ T5 (`@doc` adjacency
-attachment — hover/symbol headers/runtime docstrings, `a9986539`). REMAINING: T2 `@tier`
-declarations (surface syntax awaiting user sign-off), T3 open name set, T4 runner dispatch.*
+*Status: ✅ ALL SLICES COMPLETE (2026-07-11, branch `tier-providers`): T0 (`--target`/
+`[targets.*]`, `6457c36f`), T1 (tier knobs = attribute system, `#[Bench]`, `c6fba9dc`), T5 (`@doc`
+adjacency attachment — hover/symbol headers/runtime docstrings, `a9986539`), T2+T3+T4 (`@tier`
+declarations + open name set + in-process runner dispatch). Decorated-runner syntax ratified by
+user: `@tier(name[, config: T]) fn runner(roots: List<TierRoot>): void`; E0051 validates the
+declaration; `TierRoot { name, run }` prelude struct carries fn handles; `noeta <tier> <file>`
+dispatches (after compose, before the external-binary probe); the linker pulls `config:` along
+with an imported runner and qualifies the reference; manifests accept any identifier tier name.*
+
+**FOLLOW-UP ARC (user-directed, 2026-07-11): port the hardcoded built-in tiers to their
+respective extensions** — `test`/`bench`/`doc`/`debug` (and their knob/metadata attributes
+`Bench`/`Doc`/`Skip`/`Name`/`Group`/`Data`, plus `TierRoot`) move from checker-hardcoded prelude
+registration (`register_test_attributes`/`register_tier_prelude`/`BUILTIN_TIERS`) to `@tier`/
+`@attribute` declarations owned by std's extension packages, dogfooding the provider mechanism —
+after which `BUILTIN_TIERS` and the intrinsic registration die and the built-ins run through the
+same declaration + dispatch path a third-party tier uses. (The native runners — test's parallel
+executor, bench's two-point measurement — stay native; the *declarations* move.)
 
 ## Motivation
 

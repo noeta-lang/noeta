@@ -2299,6 +2299,160 @@ fn path_dep_project(name: &str) -> PathBuf {
     app.join("main.noe")
 }
 
+/// A single-file program declaring its own tier (`@tier(fuzz, config: Fuzz)`): the source of the
+/// tier-providers e2e fixtures. The runner reads each root's knobs via `attributes_of::<Fuzz>()`
+/// (block-stamped or per-fn), proving the T1 stamping + T5 reflection + T2 declaration + T4
+/// dispatch composition in one program.
+const DECLARED_TIER_PROGRAM: &str = "\
+@attribute(Function)\n\
+struct Fuzz { cases: int }\n\
+@tier(fuzz, config: Fuzz)\n\
+fn run_fuzz(roots: List<TierRoot>): void {\n\
+    echo \"fuzzing ${roots.len()} roots\"\n\
+    configs = attributes_of::<Fuzz>()\n\
+    for root in roots {\n\
+        mut cases = 10\n\
+        for c in configs { if c.target == root.name { cases = c.value.cases } }\n\
+        echo \"${root.name}: ${cases} cases\"\n\
+        run = root.run\n\
+        run()\n\
+    }\n\
+}\n\
+@fuzz(cases: 500) {\n\
+    fn checks_math(): void { echo \"  ran checks_math\" }\n\
+}\n\
+@fuzz fn bare_root(): void { echo \"  ran bare_root\" }\n";
+
+#[test]
+fn a_declared_tier_dispatches_to_its_runner() {
+    // `noeta fuzz <file>` — an unknown subcommand naming a declared tier — activates that tier and
+    // invokes the runner in-process with the roots; block knobs stamp (500), a bare root gets the
+    // runner's default (10).
+    let file = temp_program("tier_decl_single", DECLARED_TIER_PROGRAM);
+    lang().arg("fuzz").arg(&file).assert().success().stdout(
+        predicate::str::contains("fuzzing 2 roots")
+            .and(predicate::str::contains("checks_math: 500 cases"))
+            .and(predicate::str::contains("  ran checks_math"))
+            .and(predicate::str::contains("bare_root: 10 cases")),
+    );
+}
+
+#[test]
+fn a_declared_tier_strips_on_a_normal_run() {
+    // The declared tier obeys the strip invariant: `noeta run` compiles the same file with the
+    // tier inactive — no roots run, no runner is invoked, nothing prints.
+    let file = temp_program("tier_decl_strip", DECLARED_TIER_PROGRAM);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn tier_declaration_errors_are_e0051() {
+    // A `@tier` name colliding with a built-in, a non-attribute config, and a wrong runner
+    // signature are each an E0051 at the declaration.
+    let collide = temp_program(
+        "tier_decl_collide",
+        "@tier(bench)\nfn r(roots: List<TierRoot>): void { return }\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&collide)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0051").and(predicate::str::contains("built-in")));
+    let bad_config = temp_program(
+        "tier_decl_badcfg",
+        "struct NotAttr { x: int }\n@tier(fuzz, config: NotAttr)\nfn r(roots: List<TierRoot>): void { return }\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&bad_config)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0051").and(predicate::str::contains("@attribute")));
+    let bad_sig = temp_program(
+        "tier_decl_badsig",
+        "@tier(fuzz)\nfn r(n: int): void { return }\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&bad_sig)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0051").and(predicate::str::contains("List<TierRoot>")));
+}
+
+/// A consumer app + a `fuzzkit` path dependency that declares the `fuzz` tier. The consumer only
+/// imports the runner; the config struct links implicitly through the `@tier` reference, and the
+/// consumer's `@fuzz(cases: 7)` knob crosses the package boundary through the stamped attribute.
+fn tier_dep_project(name: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("fuzzkit");
+    std::fs::create_dir_all(&app).expect("mk app");
+    std::fs::create_dir_all(&lib).expect("mk lib");
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nfuzzkit = { path = \"../fuzzkit\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use fuzzkit.tiers.run_fuzz\n\
+         @fuzz(cases: 7) {\n    fn app_case(): void { echo \"  app_case ran\" }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/fuzz\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("tiers.noe"),
+        "namespace fuzz.tiers;\n\
+         @attribute(Function)\npub struct Fuzz { cases: int }\n\
+         @tier(fuzz, config: Fuzz)\n\
+         pub fn run_fuzz(roots: List<TierRoot>): void {\n\
+             echo \"fuzzkit: ${roots.len()} roots\"\n\
+             configs = attributes_of::<Fuzz>()\n\
+             for root in roots {\n\
+                 mut cases = 10\n\
+                 for c in configs { if c.target == root.name { cases = c.value.cases } }\n\
+                 echo \"${root.name}: ${cases} cases\"\n\
+                 run = root.run\n\
+                 run()\n\
+             }\n\
+         }\n",
+    )
+    .unwrap();
+    app.join("main.noe")
+}
+
+#[test]
+fn a_dependency_declared_tier_dispatches_cross_package() {
+    // The third-party proof (tier-providers T4): the tier, its config attribute, and its runner
+    // all live in a path dependency; the consumer opts in with one `use` and writes `@fuzz` blocks.
+    let entry = tier_dep_project("tier_dep_dispatch");
+    lang().arg("fuzz").arg(&entry).assert().success().stdout(
+        predicate::str::contains("fuzzkit: 1 roots")
+            .and(predicate::str::contains("app_case: 7 cases"))
+            .and(predicate::str::contains("  app_case ran")),
+    );
+    // And the same program runs clean with the tier stripped.
+    lang()
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
 #[test]
 fn a_path_dependency_resolves_and_runs() {
     let entry = path_dep_project("pm_pathdep_run");

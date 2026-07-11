@@ -211,6 +211,11 @@ pub enum DiagnosticCode {
     /// `Serialize` over a function-typed field. The derive would type-check and then fail at the
     /// first runtime comparison/serialization, so it is rejected statically at the declaration.
     UnderivableTrait,
+    /// A `@tier(name, config: Type)` declaration is invalid (tier-providers T2): the name collides
+    /// with a built-in tier or another declaration, the `config` does not name an `@attribute`
+    /// struct, or the runner's signature is not `fn(roots: List<TierRoot>): void`. Rejected at the
+    /// declaration so a broken tier never reaches a consumer's `@<name> { … }` block.
+    InvalidTierDeclaration,
 }
 
 impl DiagnosticCode {
@@ -267,6 +272,7 @@ impl DiagnosticCode {
         DiagnosticCode::MissingReturn,
         DiagnosticCode::ReservedTypeName,
         DiagnosticCode::UnderivableTrait,
+        DiagnosticCode::InvalidTierDeclaration,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -323,6 +329,7 @@ impl DiagnosticCode {
             DiagnosticCode::MissingReturn => "E0048",
             DiagnosticCode::ReservedTypeName => "E0049",
             DiagnosticCode::UnderivableTrait => "E0050",
+            DiagnosticCode::InvalidTierDeclaration => "E0051",
         }
     }
 

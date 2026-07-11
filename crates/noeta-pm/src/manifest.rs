@@ -27,7 +27,6 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use noeta_check::BUILTIN_TIERS;
 use noeta_fmt::FmtConfig;
 
 /// The manifest file name, discovered at or above the entry file's directory.
@@ -351,10 +350,14 @@ impl Manifest {
                     .as_table()
                     .ok_or_else(|| format!("target `{name}`: `tiers` must be a table"))?;
                 for (tier, provider_value) in tiers_table {
-                    if !BUILTIN_TIERS.contains(&tier.as_str()) {
+                    // The tier name-space is open (tier-providers T3): a name may be a built-in
+                    // tier or one a dependency declares with `@tier`. The manifest cannot see the
+                    // dependency's source, so it validates only the *shape* here — an identifier —
+                    // and resolution happens where the tier is used (activation validates the name
+                    // against the linked program's registry, E0036).
+                    if !is_identifier(tier) {
                         return Err(format!(
-                            "target `{name}`: unknown tier `{tier}` (built-in tiers are {})",
-                            builtin_tier_list()
+                            "target `{name}`: tier `{tier}` is not a valid tier name (an identifier)"
                         ));
                     }
                     let provider = provider_of(name, tier, provider_value)?;
@@ -676,15 +679,6 @@ fn provider_of(target: &str, tier: &str, value: &toml::Value) -> Result<String, 
     ))
 }
 
-/// The built-in tiers rendered as a comma-separated backticked list, for diagnostics.
-fn builtin_tier_list() -> String {
-    BUILTIN_TIERS
-        .iter()
-        .map(|t| format!("`{t}`"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -909,9 +903,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tier_is_rejected() {
-        let err = Manifest::parse("[targets.dev.tiers]\ntset = \"std\"\n").unwrap_err();
-        assert!(err.contains("unknown tier `tset`"), "{err}");
+    fn tier_names_are_open_but_must_be_identifiers() {
+        // The tier name-space is open (tier-providers T3): a non-builtin name is accepted — it may
+        // be a tier a dependency declares with `@tier`; whether it resolves is activation's check.
+        let m = Manifest::parse("[targets.dev.tiers]\nfuzz = \"std\"\n").expect("open name-space");
+        assert_eq!(m.active_tiers("dev").unwrap(), ["fuzz"]);
+        // Only the *shape* is validated here: a non-identifier key is rejected.
+        let err = Manifest::parse("[targets.dev.tiers]\n\"fu zz\" = \"std\"\n").unwrap_err();
+        assert!(err.contains("not a valid tier name"), "{err}");
     }
 
     #[test]

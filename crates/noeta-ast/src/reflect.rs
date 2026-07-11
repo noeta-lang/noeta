@@ -691,6 +691,11 @@ pub const TIER_ATTR_BENCH: &str = "Bench";
 /// production carries no doc text. One mandatory `text: string` field.
 pub const TIER_ATTR_DOC: &str = "Doc";
 
+/// The prelude struct a declared tier's runner receives its roots as (tier-providers T2):
+/// `TierRoot { name: string, run: () -> void }` — one per activated fn. The checker registers it
+/// as a prelude type; dispatch constructs instances in the synthesized runner-call fragment.
+pub const TIER_ROOT: &str = "TierRoot";
+
 /// The built-in `Semantic.*` variants, in declaration order. The single source of truth for the
 /// language's own role vocabulary, shared by the prelude-enum registration and both backends'
 /// materialization. All are payload-free (a richer parameterized form, e.g. `Layer(name)`, would

@@ -31,10 +31,10 @@ use chumsky::input::ValueInput;
 use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use noeta_ast::{
-    AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr, FieldDecl,
-    FieldInit, FnDecl, ForPattern, ImplBlock, MatchArm, ObjectLit, PackedDirective, PackedLayout,
-    Param, Pattern, Program, RoleTag, Stmt, StructDecl, TypeParam, TypeRef, UnaryOp, UseName,
-    VariantDecl,
+    AttrArg, AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr,
+    FieldDecl, FieldInit, FnDecl, ForPattern, ImplBlock, MatchArm, ObjectLit, PackedDirective,
+    PackedLayout, Param, Pattern, Program, RoleTag, Stmt, StructDecl, TierDecl, TypeParam, TypeRef,
+    UnaryOp, UseName, VariantDecl,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_lexer::{Token, TokenKind as T};
@@ -71,7 +71,8 @@ enum PrefixOp {
 /// this set by name: a tier parser rejects these names up front, so a decorator directive is never
 /// speculatively parsed as a tier (no wasted backtracking, and no need to restrict tier arguments —
 /// the side-effecting literal parser is only ever reached for a genuine tier).
-const DECORATOR_DIRECTIVES: &[&str] = &["derive", "attribute", "role", "semantic", "packed"];
+const DECORATOR_DIRECTIVES: &[&str] =
+    &["derive", "attribute", "role", "semantic", "packed", "tier"];
 
 /// Whether `name` is a built-in decorator directive (vs. a tier directive).
 fn is_decorator_directive(name: &str) -> bool {
@@ -367,6 +368,58 @@ fn parse_packed_layout(args: &[DirectiveArg], _directive_span: Span, ctx: &Ctx) 
             PackedLayout::Row
         }
     }
+}
+
+/// Interpret a `@tier(…)` directive's arguments (tier-providers T2): the first positional
+/// identifier is the tier name; an optional `config:` names the tier's knob-attribute type.
+/// Anything else — a missing name, a repeated or unknown argument, a non-identifier — is an E0037
+/// and the declaration is dropped (the `fn` still parses as an ordinary declaration, so one bad
+/// directive does not cascade).
+fn tier_decl_from_args(args: &[AttrArg], directive_span: Span, ctx: &Ctx) -> Option<TierDecl> {
+    let mut name: Option<(String, Span)> = None;
+    let mut config: Option<(String, Span)> = None;
+    let mut bad = false;
+    for arg in args {
+        match (&arg.name, &arg.value) {
+            (None, AttrValue::TypeRef(n)) if name.is_none() => {
+                name = Some((n.clone(), arg.span));
+            }
+            (Some(k), AttrValue::TypeRef(ty)) if k == "config" && config.is_none() => {
+                config = Some((ty.clone(), arg.span));
+            }
+            _ => {
+                ctx.diags.borrow_mut().push(
+                    Diagnostic::error(
+                        DiagnosticCode::InvalidDirectiveArgument,
+                        arg.span,
+                        "`@tier` takes a tier name and an optional `config: Type`",
+                    )
+                    .with_help(
+                        "declare a tier as `@tier(fuzz, config: FuzzConfig) fn runner(roots: \
+                         List<TierRoot>): void { … }`",
+                    ),
+                );
+                bad = true;
+            }
+        }
+    }
+    if name.is_none() && !bad {
+        ctx.diags.borrow_mut().push(
+            Diagnostic::error(
+                DiagnosticCode::InvalidDirectiveArgument,
+                directive_span,
+                "`@tier` is missing the tier name",
+            )
+            .with_help("write `@tier(<name>) fn …` — the name consumers use as `@<name> { … }`"),
+        );
+    }
+    let (name, name_span) = name?;
+    Some(TierDecl {
+        name,
+        name_span,
+        config,
+        span: directive_span,
+    })
 }
 
 fn directive_heads(args: Vec<DirectiveArg>) -> Vec<(String, Span)> {
@@ -2236,6 +2289,7 @@ where
                         ret,
                         attrs,
                         is_dev_tier: false,
+                        tier: None,
                         is_async: async_kw.is_some(),
                         body,
                         span: ctx.to_span(e.span()),
@@ -2324,6 +2378,7 @@ where
                     // type's privates; the dev-tier white-box relaxation is only for lifted top-level
                     // fns.
                     is_dev_tier: false,
+                    tier: None,
                     is_async: async_kw.is_some(),
                     body,
                     span: ctx.to_span(e.span()),
@@ -3154,6 +3209,31 @@ where
                 }
             });
 
+        // A **tier declaration** `@tier(name[, config: Type]) fn runner(…) { … }` (tier-providers
+        // T2): the directive that brings a dev-tier into existence. The decorated `fn` is the
+        // tier's runner; `name` (a bare identifier — parsed as the attr grammar's `TypeRef`) is
+        // what consumers write as `@<name> { … }`; the optional `config:` names the `@attribute`
+        // struct carrying the tier's knobs (the `Bench { iterations }` model). Argument-shape
+        // errors surface here (E0037); the checker validates the semantics (E0051). `tier` is in
+        // `DECORATOR_DIRECTIVES`, so the tier-block/annotation forms never claim it.
+        let tier_decl_fn = just(T::At)
+            .ignore_then(
+                id.clone()
+                    .filter(|(name, _): &(String, Span)| name == "tier"),
+            )
+            .then(tier_args.clone())
+            // Absorb the synthetic `;` when the directive sits on its own line above the `fn`
+            // (slice 7), exactly as `derive_directive` does.
+            .then_ignore(just(T::Semicolon).repeated())
+            .then(fn_decl.clone())
+            .map(move |(((_, tier_kw_span), args), mut item)| {
+                // The runner stays an ordinary top-level fn statement; the declaration rides on it.
+                if let Stmt::Fn(f) = &mut item {
+                    f.tier = tier_decl_from_args(&args, tier_kw_span, &ctx);
+                }
+                item
+            });
+
         choice((
             echo,
             mut_binding,
@@ -3167,6 +3247,7 @@ where
             continue_,
             fn_decl,
             standalone_impl,
+            tier_decl_fn,
             tier_block,
             tier_annotation,
             attributed_tier_annotation,
@@ -3679,6 +3760,44 @@ mod tests {
         insta::assert_snapshot!(pretty(
             "@bench(iterations: 1000) { fn hot(): void { return; } }\n@bench(iterations: 50) fn warm(): void { return; }"
         ));
+    }
+
+    #[test]
+    fn tier_declaration_parses_onto_the_runner_fn() {
+        // `@tier(name[, config: Type]) fn …` (tier-providers T2) rides on the runner's FnDecl: the
+        // positional identifier is the tier name, the named `config:` its knob-attribute type.
+        let source = Source::new(
+            SourceId::FIRST,
+            "t.noe",
+            "@tier(fuzz, config: Fuzz)\nfn run_fuzz(roots: List<TierRoot>): void { return; }\n"
+                .to_string(),
+        );
+        let lexed = noeta_lexer::lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Fn(f) = &parsed.program.stmts[0] else {
+            panic!("expected a fn, got {:?}", parsed.program.stmts[0]);
+        };
+        let tier = f.tier.as_ref().expect("tier declaration attached");
+        assert_eq!(tier.name, "fuzz");
+        assert_eq!(tier.config.as_ref().map(|(n, _)| n.as_str()), Some("Fuzz"));
+
+        // A malformed directive (unknown named arg) is an E0037 and the fn parses undecorated.
+        let bad = Source::new(
+            SourceId::FIRST,
+            "t.noe",
+            "@tier(fuzz, wat: 3)\nfn r(roots: List<TierRoot>): void { return; }\n".to_string(),
+        );
+        let lexed = noeta_lexer::lex(&bad);
+        let parsed = parse(&bad, &lexed.tokens);
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::InvalidDirectiveArgument),
+            "{:?}",
+            parsed.diagnostics
+        );
     }
 
     #[test]

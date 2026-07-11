@@ -111,6 +111,14 @@ pub fn qualify_stmt(stmt: &mut Stmt, map: &QMap) {
             // methods resolve through their type, so `q_fn` (shared with methods) never touches the
             // name, and the rewrite lives here on the `Stmt::Fn` arm only.
             q_name(&mut decl.name, map);
+            // A `@tier(…, config: T)` declaration's config names a type in this module — qualify
+            // it like any type reference, so a consumer's activation stamps (and E0051's
+            // attribute-existence check) resolve the same qualified attribute the struct became.
+            if let Some(tier) = &mut decl.tier
+                && let Some((config, _)) = &mut tier.config
+            {
+                q_name(config, map);
+            }
             q_fn(decl, map);
         }
         Stmt::Class(decl) => {
