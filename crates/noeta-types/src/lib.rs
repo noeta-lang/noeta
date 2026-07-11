@@ -150,12 +150,9 @@ pub enum Type {
 /// truth for what spellings the Tier-W width types accept — the lexer, parser, `from_ref`, and
 /// `is_builtin_name` all route through it.
 pub fn parse_int_width(name: &str) -> Option<(bool, u8)> {
-    let (signed, rest) = if let Some(r) = name.strip_prefix('i') {
-        (true, r)
-    } else if let Some(r) = name.strip_prefix('u') {
-        (false, r)
-    } else {
-        return None;
+    let (signed, rest) = match name.strip_prefix('i') {
+        Some(r) => (true, r),
+        None => (false, name.strip_prefix('u')?),
     };
     match rest {
         "8" => Some((signed, 8)),
