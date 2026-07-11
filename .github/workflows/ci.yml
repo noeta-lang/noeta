@@ -12,6 +12,9 @@ name: CI
 #   - fmt    : `cargo fmt --check` — the tree is kept stable-rustfmt-clean.
 #   - miri   : the one place `unsafe` lives — the NaN-box value model and the cycle collector —
 #              run under Miri to prove the refcount/heap paths are sound.
+#   - wasm   : the portability invariant behind the WASM target (plans/wasm/): the interpreter
+#              pipeline must keep checking on wasm32-wasip1 — no tokio/threads/Cranelift/getrandom
+#              may creep onto the default path.
 
 on:
   push:
@@ -134,6 +137,25 @@ jobs:
         run: >
           cargo clippy -p noeta-vm -p noeta-jit -p noeta-conformance -p noeta-cli
           --features "noeta-vm/jit noeta-conformance/jit" --all-targets --locked -- -D warnings
+
+  wasm:
+    name: WASM portability (wasm32-wasip1 check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      # The wasm target (plans/wasm/) rides on the interpreter pipeline being OS-free: every effect
+      # behind the `Host` trait, threads/Cranelift feature-gated off the default path. That held by
+      # architecture before it was ever checked; this job makes it an invariant instead of an
+      # accident. Check (not build): linkage is the runner crate's concern, portability is this one's.
+      - name: cargo check pipeline crates (wasm32-wasip1)
+        run: >
+          cargo check -p noeta-vm -p noeta-stdlib -p noeta-compiler -p noeta-lexer
+          -p noeta-parser -p noeta-loader -p noeta-db -p noeta-bundle -p noeta-eval
+          --target wasm32-wasip1 --locked
 
   miri:
     name: Miri (unsafe value & collector paths)
