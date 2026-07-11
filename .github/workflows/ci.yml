@@ -145,7 +145,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-wasip1
+          targets: wasm32-wasip1,wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       # The wasm target (plans/wasm/) rides on the interpreter pipeline being OS-free: every effect
       # behind the `Host` trait, threads/Cranelift feature-gated off the default path. That held by
@@ -165,6 +165,13 @@ jobs:
         run: cargo build -p noeta-wasm-runner --target wasm32-wasip1 --profile wasm-release --locked
       - name: Wasm differential oracle (runner under wasmtime vs native VM)
         run: PATH="$HOME/.wasmtime/bin:$PATH" cargo run -p noeta-conformance --locked -- --wasm-differential
+      # The browser engine (W2): the playground cdylib must build for wasm32-unknown-unknown and
+      # actually execute in a plain JS embedding — the node smoke drives check/run/fmt through the
+      # hand-rolled ABI, the same way the playground's Web Worker does.
+      - name: Build the playground engine (wasm32-unknown-unknown)
+        run: cargo build -p noeta-playground --target wasm32-unknown-unknown --profile wasm-release --locked
+      - name: Browser-engine smoke (node over the raw ABI)
+        run: node crates/noeta-playground/tests/browser_smoke.mjs target/wasm32-unknown-unknown/wasm-release/noeta_playground.wasm
 
   miri:
     name: Miri (unsafe value & collector paths)

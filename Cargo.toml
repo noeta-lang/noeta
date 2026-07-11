@@ -58,6 +58,9 @@ noeta-runtime = { path = "crates/noeta-runtime" }
 noeta-wasi-host = { path = "crates/noeta-wasi-host" }
 # The wasm runner bin (P-WASM W1): VM on a `.noeb` bundle for wasm32-wasip1 — the L2-exe analogue.
 noeta-wasm-runner = { path = "crates/noeta-wasm-runner" }
+# The in-browser toolchain cdylib (P-WASM W2): the noeta.dev playground engine — check/run/fmt
+# over the deterministic sandbox, compiled to wasm32-unknown-unknown behind a hand-rolled ABI.
+noeta-playground = { path = "crates/noeta-playground" }
 # M2 reactivity core (signal/computed/effect graph — value-generic, backend-driven)
 noeta-reactive = { path = "crates/noeta-reactive" }
 # M3 CRDT convergence core (p2p/local-first P0): state-based merge algebra — dep-free, value-less,

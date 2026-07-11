@@ -9,3 +9,11 @@
 # deliberate, sound use so miri runs are quiet by default. (Set `MIRIFLAGS` in the environment to
 # override — an explicit value wins over this one.)
 MIRIFLAGS = "-Zmiri-permissive-provenance"
+
+# The browser wasm target (P-WASM W2): `getrandom` 0.3 refuses wasm32-unknown-unknown without an
+# explicit backend choice. `custom` — the `noeta-playground` cdylib defines the (unreachable)
+# hook: the only getrandom consumer in the tree is `bcrypt`'s dead salt path (salts arrive as
+# arguments from the Host `Entropy` capability), and the playground runs on the deterministic
+# `SandboxHost`. No `wasm_js`/wasm-bindgen creep into the dependency graph.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="custom"']

@@ -3979,6 +3979,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-playground"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "noeta-db",
+ "noeta-diagnostics",
+ "noeta-fmt",
+ "noeta-span",
+ "noeta-vm",
+ "serde_json",
+]
+
+[[package]]
 name = "noeta-pm"
 version = "0.1.0"
 dependencies = [
