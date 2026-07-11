@@ -7,6 +7,7 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta run`](#noeta-run) | Type-check and execute a program. |
 | [`noeta build`](#noeta-build) | Compile to a standalone artifact (`--exe`, `--native` for machine code, `--wasm`/`--serve` for [WebAssembly](WebAssembly-and-the-Edge)). |
 | [`noeta check`](#noeta-check) | Parse and type-check without running or building (exit 0/1/2). |
+| [`noeta serve`](#noeta-serve) | Run a program's HTTP handler as a server (`fn fetch(req: Request): Response`). |
 | [`noeta repl`](#noeta-repl) | Interactive REPL. |
 | [`noeta dump`](#noeta-dump) | Disassemble a program to its VM bytecode (a debugging aid). |
 | [`noeta test`](Testing) | Discover and run `@test` blocks. |
@@ -130,6 +131,26 @@ noeta check [PATH]
 ```
 
 Parses and type-checks without running or building — the CI/pre-commit gate (the `cargo check` / `tsc --noEmit` primitive). `PATH` defaults to the current directory, walked recursively for `.noe` files (resolving and deduping shared modules); a single file checks just that file with its sibling modules linked in. `--format json` emits a single machine-readable report on stdout for CI/editors/the MCP server; the default renders diagnostics for a terminal. Exits non-zero if any error-severity diagnostic is found (warnings print but do not fail).
+
+## `noeta serve`
+
+```
+noeta serve <FILE> [--port <PORT>]
+```
+
+Runs a program as an HTTP server: executes the file's top-level setup, then calls
+`server.serve(<port>, fetch)` for it — the exact call the program could write itself, so `noeta
+serve` is pure ergonomics over [`std.http.server`](Standard-Library-Modules). The program supplies
+two things: `use std.http.server` and a top-level handler
+
+```noeta
+fn fetch(req: Request): Response { … }
+```
+
+(sync or `async` — both are handled identically). Default port `8080`, bound on all interfaces
+(`0.0.0.0`); a single cooperatively-concurrent worker; runs until Ctrl-C. A missing `fetch` or
+import surfaces as an ordinary check error. The same unchanged program also deploys to the edge
+as a `wasi:http` component — see [WebAssembly & the Edge](WebAssembly-and-the-Edge).
 
 ---
 
