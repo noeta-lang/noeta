@@ -11,7 +11,7 @@
 
 pub use noeta_native::net::{
     NetFetchIo, NetRequest, NetResponse, REQUEST_TYPE_NAME, RESPONSE_TYPE_NAME, Request,
-    accept_outcome, query_value, request_header, request_path,
+    WS_ACCEPT_GUID, accept_outcome, query_value, request_header, request_path, ws_recv_outcome,
 };
 
 use serde_json::json;

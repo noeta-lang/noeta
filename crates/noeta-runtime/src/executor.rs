@@ -17,7 +17,6 @@ use noeta_stdlib::{Executor, ExternIo, Host, NativeOut, RealBody, StdError};
 use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
-use tokio::task::JoinHandle;
 
 /// The real executor: a wall-clock reading (`now` = ms elapsed since construction), a set of pending
 /// timer deadlines, and a set of in-flight async IO requests — with `advance` sleeping real time or
@@ -33,11 +32,10 @@ pub struct RealExecutor {
     /// Absolute deadlines (ms since `start`) of timers polled while pending. Ordered, so `advance`
     /// deterministically picks the earliest — though "deterministic" here still races real time.
     timers: BTreeSet<u64>,
-    /// In-flight async work descriptors spawned onto `runtime`, keyed by ticket id. Each runs
-    /// on the tokio blocking pool (or as a native future) concurrently; `advance` harvests one
-    /// (driving the runtime, which also lets the others finish), and `poll_ext` returns a
-    /// finished one.
-    io: HashMap<u64, JoinHandle<Result<NativeOut, StdError>>>,
+    /// Every in-flight IO task, tagged with its ticket id — a `JoinSet` so `advance` can wait
+    /// for WHICHEVER completes first (any-of semantics, server-hmr L0b: a long-lived leaf like a
+    /// websocket recv must not be starved behind a pending accept, nor vice versa).
+    tasks: tokio::task::JoinSet<(u64, Result<NativeOut, StdError>)>,
     /// Work harvested by `advance` (or resolved synchronously at spawn — the `run_sync`
     /// fallback) but not yet returned by `poll_ext`, keyed by ticket id.
     resolved: HashMap<u64, Result<NativeOut, StdError>>,
@@ -59,7 +57,7 @@ impl RealExecutor {
             start: Instant::now(),
             runtime,
             timers: BTreeSet::new(),
-            io: HashMap::new(),
+            tasks: tokio::task::JoinSet::new(),
             resolved: HashMap::new(),
             next_io_id: 0,
         })
@@ -85,19 +83,47 @@ impl Executor for RealExecutor {
     }
 
     fn advance(&mut self) -> Option<u64> {
-        // A pending IO request is the more urgent progress: drive one to completion on the runtime.
-        // Blocking on its handle also pumps the runtime, so the *other* in-flight requests (running on
-        // the blocking pool) get polled too and may finish in the same pass — genuine IO concurrency.
-        if let Some(&id) = self.io.keys().min() {
-            let handle = self.io.remove(&id).expect("id came from the map");
-            let result = self
-                .runtime
-                .block_on(handle)
-                .unwrap_or_else(|join_err| Err(join_error(join_err)));
-            self.resolved.insert(id, result);
+        // Harvest everything that already completed (completion order). ANY-OF semantics
+        // (server-hmr L0b): a stall must end when *any* pending IO finishes — blocking on one
+        // specific handle deadlocked a server whose accept was pending while a websocket recv
+        // completed (the recv's result sat unharvested; the loop never woke).
+        let mut harvested = false;
+        while let Some(joined) = self.tasks.try_join_next() {
+            if let Ok((id, result)) = joined {
+                self.resolved.insert(id, result);
+                harvested = true;
+            }
+        }
+        if harvested {
             return Some(self.elapsed_ms());
         }
-        let next = *self.timers.iter().next()?;
+        let next_timer = self.timers.iter().next().copied();
+        if !self.tasks.is_empty() {
+            let now = self.elapsed_ms();
+            let RealExecutor { runtime, tasks, .. } = self;
+            let joined = match next_timer {
+                // A due timer must not be starved by pending IO: skip the block, clear it below.
+                Some(next) if next <= now => None,
+                // Wait for whichever completes first: any IO task, or the earliest deadline.
+                Some(next) => {
+                    let wait = Duration::from_millis(next - now);
+                    runtime.block_on(async {
+                        tokio::time::timeout(wait, tasks.join_next())
+                            .await
+                            .ok()
+                            .flatten()
+                    })
+                }
+                None => runtime.block_on(tasks.join_next()),
+            };
+            if let Some(Ok((id, result))) = joined {
+                self.resolved.insert(id, result);
+            }
+            let now = self.elapsed_ms();
+            self.timers.retain(|&d| d > now);
+            return Some(now);
+        }
+        let next = next_timer?;
         let now = self.elapsed_ms();
         if next > now {
             // Sleep real time until the earliest deadline (approximately — the OS timer has its own
@@ -120,17 +146,26 @@ impl Executor for RealExecutor {
         match io.run_real() {
             // Real concurrency: the descriptor's own body proceeds on the runtime (blocking
             // pool or native future) concurrently with the isolate's cooperative scheduling.
+            // The inner spawn keeps a panic mapped to ITS id (the outer wrapper only awaits, so
+            // it cannot itself panic and lose the id for the JoinSet's any-of harvest).
             Some(RealBody::Blocking(f)) => {
-                let handle = self.runtime.spawn(async move {
-                    tokio::task::spawn_blocking(f)
-                        .await
-                        .unwrap_or_else(|e| Err(join_error(e)))
-                });
-                self.io.insert(id, handle);
+                self.tasks.spawn_on(
+                    async move {
+                        let inner = tokio::task::spawn_blocking(f);
+                        (id, inner.await.unwrap_or_else(|e| Err(join_error(e))))
+                    },
+                    self.runtime.handle(),
+                );
             }
             Some(RealBody::Async(fut)) => {
-                let handle = self.runtime.spawn(fut);
-                self.io.insert(id, handle);
+                let handle = self.runtime.handle().clone();
+                self.tasks.spawn_on(
+                    async move {
+                        let inner = handle.spawn(fut);
+                        (id, inner.await.unwrap_or_else(|e| Err(join_error(e))))
+                    },
+                    self.runtime.handle(),
+                );
             }
             // No real body: the deterministic sync body runs against the (real) Host at spawn —
             // correct, serial. The degradation an extension gets for free.
@@ -146,19 +181,19 @@ impl Executor for RealExecutor {
         if let Some(result) = self.resolved.remove(&id) {
             return Some(result);
         }
-        // Otherwise ready only if the spawned task has finished (it needs the runtime driven — which
-        // `advance` does — before `is_finished` flips, so pending is the normal answer here).
-        let handle = self.io.get(&id)?;
-        if handle.is_finished() {
-            let handle = self.io.remove(&id).expect("just checked present");
-            Some(
-                self.runtime
-                    .block_on(handle)
-                    .unwrap_or_else(|join_err| Err(join_error(join_err))),
-            )
-        } else {
-            None
+        // Opportunistic harvest: tasks that finished since the last `advance` (the runtime is
+        // pumped whenever `advance` blocks, so completions can be sitting here).
+        let mut found = None;
+        while let Some(joined) = self.tasks.try_join_next() {
+            if let Ok((tid, result)) = joined {
+                if tid == id {
+                    found = Some(result);
+                } else {
+                    self.resolved.insert(tid, result);
+                }
+            }
         }
+        found
     }
 }
 

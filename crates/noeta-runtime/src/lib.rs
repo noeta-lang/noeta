@@ -26,6 +26,7 @@ pub use executor::RealExecutor;
 
 #[cfg(feature = "telemetry")]
 mod telemetry;
+mod ws;
 // Real p2p transport (p2p P3) — only compiled under the `ring-p2p` ring, which pulls the heavy
 // p2panda/iroh dependency tree. Off by default; `RealHost` keeps the loopback broker.
 #[cfg(feature = "ring-p2p")]
@@ -96,6 +97,10 @@ pub struct RealHost {
     /// Monotonic, thread-safe id source for `conns` (accept futures run concurrently on the
     /// executor).
     next_conn: Arc<AtomicU64>,
+    /// Upgraded websocket connections (server-hmr L0b): the split halves behind async locks,
+    /// shared into every ws descriptor. A conn moves here from `conns` at upgrade and leaves on
+    /// close/peer-EOF.
+    ws_conns: ws::WsConns,
     /// The program's argument vector reported through `args.all()` (M2.2). Defaults to the real
     /// process argv (`std::env::args()`), which is exactly what a shipped `noeta build --exe` binary
     /// wants when invoked directly. `noeta run app.noe -- a b c` overrides it via
@@ -219,6 +224,7 @@ impl RealHost {
             next_listener: 0,
             conns: Arc::new(Mutex::new(HashMap::new())),
             next_conn: Arc::new(AtomicU64::new(0)),
+            ws_conns: Arc::new(Mutex::new(HashMap::new())),
             args: std::env::args().collect(),
             env_overlay: HashMap::new(),
             procs: HashMap::new(),
@@ -553,6 +559,56 @@ impl Network for RealHost {
     /// The real host always overrides [`Network::net_reply`] with the async descriptor.
     fn net_reply_now(&mut self, _conn: u64, _response: NetResponse) -> Result<(), StdError> {
         unreachable!("RealHost replies via the async net_reply descriptor, never the sync fallback")
+    }
+
+    // --- Websocket hijack (server-hmr L0b): the async descriptors; the sync fallbacks are never
+    // reached (same contract as accept/reply above).
+
+    fn net_ws_upgrade(&self, conn: u64, key: String) -> Box<dyn ExternIo> {
+        Box::new(ws::RealWsUpgradeIo {
+            conns: self.conns.clone(),
+            ws_conns: self.ws_conns.clone(),
+            conn,
+            key: Some(key),
+        })
+    }
+
+    fn net_ws_recv(&self, conn: u64) -> Box<dyn ExternIo> {
+        Box::new(ws::RealWsRecvIo {
+            ws_conns: self.ws_conns.clone(),
+            conn,
+        })
+    }
+
+    fn net_ws_send(&self, conn: u64, text: String) -> Box<dyn ExternIo> {
+        Box::new(ws::RealWsSendIo {
+            ws_conns: self.ws_conns.clone(),
+            conn,
+            text: Some(text),
+        })
+    }
+
+    fn net_ws_close(&self, conn: u64) -> Box<dyn ExternIo> {
+        Box::new(ws::RealWsCloseIo {
+            ws_conns: self.ws_conns.clone(),
+            conn,
+        })
+    }
+
+    fn net_ws_upgrade_now(&mut self, _conn: u64, _key: &str) -> Result<(), StdError> {
+        unreachable!("RealHost upgrades via the async descriptor, never the sync fallback")
+    }
+
+    fn net_ws_recv_next(&mut self, _conn: u64) -> Result<Option<String>, StdError> {
+        unreachable!("RealHost receives via the async descriptor, never the sync fallback")
+    }
+
+    fn net_ws_send_now(&mut self, _conn: u64, _text: &str) -> Result<(), StdError> {
+        unreachable!("RealHost sends via the async descriptor, never the sync fallback")
+    }
+
+    fn net_ws_close_now(&mut self, _conn: u64) -> Result<(), StdError> {
+        unreachable!("RealHost closes via the async descriptor, never the sync fallback")
     }
 }
 

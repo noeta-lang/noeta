@@ -4334,6 +4334,7 @@ version = "0.1.0"
 name = "noeta-runtime"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "compact_str",
  "criterion",
  "futures-util",
@@ -4350,6 +4351,7 @@ dependencies = [
  "postcard",
  "reqwest 0.12.28",
  "serde_json",
+ "sha1",
  "tokio",
 ]
 
