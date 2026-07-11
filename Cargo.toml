@@ -216,3 +216,14 @@ all = { level = "warn", priority = -1 }
 [profile.release]
 codegen-units = 1
 lto = "thin"
+
+# The wasm runner's artifact profile (P-WASM W1.4): release plus `strip` — the emitted wasm
+# carries a ~220 KiB `name` custom section that only feeds wasmtime's trap backtraces (Noeta
+# tracebacks come from the bundle's own line table), so stripping is free: 2.42 → 2.20 MiB at
+# identical speed. A full size build (opt-level=z + fat LTO + panic=abort) was measured and
+# REJECTED as the default: 1.37 MiB but ~60% slower on the interpreter hot loop (fib(31) warm:
+# 0.51 s → 0.82 s) — edge compute wants the throughput; size-critical deploys can still build
+# that shape themselves and point NOETA_WASM_RUNNER at it.
+[profile.wasm-release]
+inherits = "release"
+strip = true

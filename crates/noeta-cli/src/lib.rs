@@ -2522,7 +2522,8 @@ fn resolve_wasm_runner() -> Result<std::path::PathBuf, String> {
             "noeta-wasm-runner",
             "--target",
             "wasm32-wasip1",
-            "--release",
+            "--profile",
+            "wasm-release",
         ])
         .output()
         .map_err(|e| format!("cannot run cargo to build the wasm runner: {e}"))?;
@@ -2535,7 +2536,7 @@ fn resolve_wasm_runner() -> Result<std::path::PathBuf, String> {
     }
     let artifact = workspace_target_dir()?
         .join("wasm32-wasip1")
-        .join("release")
+        .join("wasm-release")
         .join("noeta-wasm-runner.wasm");
     if !artifact.is_file() {
         return Err(format!(

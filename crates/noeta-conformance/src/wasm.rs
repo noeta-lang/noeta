@@ -97,14 +97,14 @@ fn discover_tools() -> Result<WasmTools, String> {
     let runner = std::env::var_os("NOETA_WASM_RUNNER")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            // The conformance binary runs from the workspace root; the runner's release build is
-            // the deployment artifact, so the oracle exercises exactly what ships.
-            PathBuf::from("target/wasm32-wasip1/release/noeta-wasm-runner.wasm")
+            // The conformance binary runs from the workspace root; the runner's `wasm-release`
+            // build is the deployment artifact, so the oracle exercises exactly what ships.
+            PathBuf::from("target/wasm32-wasip1/wasm-release/noeta-wasm-runner.wasm")
         });
     if !runner.is_file() {
         return Err(format!(
             "wasm runner not found at {} — build it first:\n  \
-             cargo build -p noeta-wasm-runner --target wasm32-wasip1 --release\n\
+             cargo build -p noeta-wasm-runner --target wasm32-wasip1 --profile wasm-release\n\
              (or set NOETA_WASM_RUNNER)",
             runner.display()
         ));

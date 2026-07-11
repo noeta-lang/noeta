@@ -161,8 +161,8 @@ jobs:
       # exit code, and rendered stderr. The wasm analogue of the bundle oracle's L1.3 gate.
       - name: Install wasmtime
         run: curl -sSf https://wasmtime.dev/install.sh | bash
-      - name: Build the wasm runner
-        run: cargo build -p noeta-wasm-runner --target wasm32-wasip1 --release --locked
+      - name: Build the wasm runner (the shipping artifact profile)
+        run: cargo build -p noeta-wasm-runner --target wasm32-wasip1 --profile wasm-release --locked
       - name: Wasm differential oracle (runner under wasmtime vs native VM)
         run: PATH="$HOME/.wasmtime/bin:$PATH" cargo run -p noeta-conformance --locked -- --wasm-differential
 
