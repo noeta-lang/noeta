@@ -123,9 +123,17 @@ a full-screen diagnostics overlay, cleared by the next good frame. Swaps apply i
 when the server is idle (the watcher wakes the blocked executor).
 
 Changes the live process cannot absorb — a type-layout or signature change, an edit to another
-project file, a namespaced entry — fall back to a **full restart**, automatically. After a
-restart, an open browser page reconnects and re-syncs state but keeps its old markup until
-refreshed (the reload push needs a live server to send it).
+project file, a namespaced entry — fall back to a **full restart**, automatically, with the
+reason printed (`[hot] restart needed: the layout of type \`P\` changed`). After a restart, an
+open browser page reconnects and re-syncs state but keeps its old markup until refreshed (the
+reload push needs a live server to send it).
+
+**The retention model.** A hot-swapping process deliberately retains superseded artifacts for
+soundness: old code versions (in-flight requests finish on the code they started on), replaced
+reactive nodes an alias might still read, and — when the JIT is armed — retired native code that
+a live frame may still return into. Growth is **bounded per swap** and reclaimed when the process
+exits; an edit marathon costs memory proportional to the number of swaps, never correctness. The
+dev server hot-swaps at tier 1 (the JIT re-warms after each swap); `--no-jit` is unnecessary.
 
 ---
 

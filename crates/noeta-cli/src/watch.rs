@@ -371,7 +371,7 @@ fn hot_watcher(
             noeta_compiler::hotswap::SwapDiff::NeedsRestart(blockers) => {
                 drop(slot);
                 for b in &blockers {
-                    eprintln!("[hot] restart needed: {b:?}");
+                    eprintln!("[hot] restart needed: {b}");
                 }
                 std::process::exit(HOT_RESTART_CODE);
             }

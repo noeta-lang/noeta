@@ -89,6 +89,29 @@ pub enum SwapBlocker {
     NamespaceChanged { detail: String },
 }
 
+impl std::fmt::Display for SwapBlocker {
+    /// The human-readable reason the dev loop reports next to "restarting" (server-hmr H4).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SwapBlocker::SignatureChanged { name } => {
+                write!(f, "the signature of `{name}` changed")
+            }
+            SwapBlocker::LayoutChanged { type_name } => {
+                write!(f, "the layout of type `{type_name}` changed")
+            }
+            SwapBlocker::TypeRemoved { type_name } => {
+                write!(f, "type `{type_name}` was removed")
+            }
+            SwapBlocker::ImplChanged { trait_name, target } => {
+                write!(f, "`impl {trait_name} for {target}` changed")
+            }
+            SwapBlocker::NamespaceChanged { detail } => {
+                write!(f, "the namespace changed: {detail}")
+            }
+        }
+    }
+}
+
 /// The differ's verdict for one old→new program pair.
 #[derive(Debug, Clone)]
 pub enum SwapDiff {
