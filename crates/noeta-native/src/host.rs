@@ -217,6 +217,34 @@ pub trait Os {
     fn os_exec_spawn(&self, command: String, args: Vec<String>) -> Box<dyn crate::ExternIo> {
         Box::new(crate::os::ExecIo { command, args })
     }
+
+    // --- Process lifecycle (process-handle arc): spawn-and-hold, unlike the run-to-completion
+    // `os_exec`. `os_spawn` starts a child and returns an opaque handle id; the program then
+    // controls it through the [`crate::os::Process`] extern type, whose methods route back here by
+    // id — the listener/reader-registry model, not `FileHandle`'s self-contained state. The
+    // sandbox scripts a deterministic instant-complete child (in-oracle); `RealHost` holds a real
+    // `std::process::Child` with drained pipes (CLI-only). ---
+
+    /// Spawn `command` with `args` (verbatim — no shell) **without waiting**, returning an opaque
+    /// handle id. The child runs concurrently with the program. A command that cannot be started
+    /// at all (not found, not executable) is an `Io` error, exactly like [`Self::os_exec`].
+    fn os_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, StdError>;
+
+    /// The OS process id of a spawned child, or `None` if `handle` is not a live handle.
+    fn os_proc_pid(&self, handle: u64) -> Option<i64>;
+
+    /// Block until the child exits and return its outcome (exit status + captured output).
+    /// Idempotent: after the child is reaped the cached outcome is returned, so `wait` after a
+    /// `try_wait` that already observed exit still works.
+    fn os_proc_wait(&mut self, handle: u64) -> Result<crate::os::ExecResult, StdError>;
+
+    /// Non-blocking poll: `Some(outcome)` if the child has exited (reaping it), `None` if it is
+    /// still running. Lets a program supervise a child without blocking.
+    fn os_proc_try_wait(&mut self, handle: u64) -> Result<Option<crate::os::ExecResult>, StdError>;
+
+    /// Terminate the child (a forceful kill — SIGKILL / `TerminateProcess`). Idempotent: killing an
+    /// already-exited child is `Ok`. A later `wait` observes the killed status.
+    fn os_proc_kill(&mut self, handle: u64) -> Result<(), StdError>;
 }
 
 /// **Peer-to-peer sync** capability (p2p P1) — the local-first stack's transport seam (§9.15). A

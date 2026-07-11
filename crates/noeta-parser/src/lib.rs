@@ -1117,6 +1117,18 @@ where
         };
         let id = ident_parser(ctx);
 
+        // A member name after `.` — an identifier, or a keyword that is unambiguous in member
+        // position. A method/field name lives in a different namespace from an expression keyword
+        // (`os.spawn(...)` is a method, not the `spawn e` task construct), and after a `.` there is
+        // no ambiguity, so the keyword is accepted and its source text is the name. (`as`/`await`
+        // are the exception — they have dedicated `.as<T>()` / `.await` postfixes registered ahead
+        // of the member postfix, so they must NOT be admitted here.) Add a keyword to the choice
+        // when a stdlib/user method needs its spelling.
+        let member_name = choice((just(T::Ident), just(T::SpawnKw))).map_with(move |_, e| {
+            let span = ctx.to_span(e.span());
+            (ctx.source.slice(span).to_string(), span)
+        });
+
         // Literals.
         let int = just(T::IntLit).map_with(move |_, e| {
             let span = ctx.to_span(e.span());
@@ -1681,7 +1693,7 @@ where
             ),
             postfix(
                 14,
-                just(T::Dot).ignore_then(id),
+                just(T::Dot).ignore_then(member_name),
                 move |receiver, (name, name_span), e| Expr::Member {
                     receiver: Box::new(receiver),
                     name,
@@ -3334,6 +3346,19 @@ mod tests {
     #[test]
     fn unary_and_comparison() {
         insta::assert_snapshot!(pretty("echo -1 < 2 && !false;"));
+    }
+
+    #[test]
+    fn spawn_is_a_keyword_and_a_member_name() {
+        // A method/field name lives in a different namespace from the `spawn e` task keyword, so
+        // after a `.` the keyword is a plain member name (`os.spawn(...)`), while a leading `spawn`
+        // is still the prefix task construct. Both must parse cleanly in the same program.
+        let parsed = parse_str("p = os.spawn(\"echo\", []); spawn work();");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        // The member call resolves `.spawn` as a member, then a call.
+        assert!(pretty("os.spawn(\"echo\", [])").contains("spawn"));
+        // The prefix form is unchanged.
+        assert!(pretty("spawn work()").contains("(spawn"));
     }
 
     #[test]

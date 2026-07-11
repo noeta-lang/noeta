@@ -576,6 +576,30 @@ fn run_os_exit_sets_the_process_exit_code() {
 }
 
 #[test]
+fn run_os_spawn_controls_a_real_child_process() {
+    // `os.spawn` starts a REAL child without waiting and hands back a `Process` handle: `pid()` is
+    // the real OS pid, `wait()` captures its output via the drain threads, and `kill()` + `wait()`
+    // reports a non-success status. Proves the real-host lifecycle, not the sandbox script.
+    let src = "use std.{os}\n\
+               p = os.spawn(\"echo\", [\"child says hi\"])\n\
+               echo p.pid() > 0\n\
+               r = p.wait()\n\
+               echo r.status()\n\
+               echo r.stdout().trim()\n\
+               // a killed child does not exit 0\n\
+               s = os.spawn(\"sleep\", [\"5\"])\n\
+               s.kill()\n\
+               echo s.wait().ok()\n";
+    let file = temp_program("run_os_spawn", src);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("true\n0\nchild says hi\nfalse\n");
+}
+
+#[test]
 fn run_does_real_disk_io() {
     // `fs.write`/`fs.read` hit the REAL disk (RealHost), relative to the working directory.
     let dir = std::env::temp_dir().join("noeta_cli_realfs_dir");

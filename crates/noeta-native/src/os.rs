@@ -78,3 +78,55 @@ impl crate::ExternIo for ExecIo {
         Ok(crate::NativeOut::Extern(crate::ExternBox::new(result)))
     }
 }
+
+/// The registered extern-type name of a spawned, still-controllable child process (process-handle
+/// arc): `os.spawn(cmd, args?)` returns one, and `pid`/`wait`/`try_wait`/`kill` on it route back to
+/// the [`crate::host::Os`] seam by id.
+pub const PROCESS_TYPE_NAME: &str = "Process";
+
+/// A handle to a spawned child process — a thin `{ id }` into the host's process registry, the
+/// listener/reader-id model (NOT [`crate::FileHandle`]'s self-contained state, because a real OS
+/// child can only be manipulated through the host). A **reference** value like `FileHandle`: its
+/// lifecycle methods mutate host-side state shared by every alias. Not key-capable; equality is by
+/// handle identity (two handles are equal iff they name the same spawned child).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Process {
+    /// The opaque id the host's `os_spawn` handed back; the key into its process registry.
+    pub id: u64,
+}
+
+impl ExternValue for Process {
+    fn type_name(&self) -> &'static str {
+        PROCESS_TYPE_NAME
+    }
+    fn eq_value(&self, other: &dyn ExternValue) -> bool {
+        other.as_any().downcast_ref::<Process>() == Some(self)
+    }
+    fn cmp_value(&self, _other: &dyn ExternValue) -> Option<Ordering> {
+        None
+    }
+    fn hash_value(&self) -> u64 {
+        0 // not key-capable
+    }
+    fn display(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
+        write!(out, "<process {}>", self.id)
+    }
+    fn clone_box(&self) -> Box<dyn ExternValue> {
+        Box::new(self.clone())
+    }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+/// The canonical "unknown process handle" error (→ `E0021`) — a `pid`/`wait`/`kill` on a handle the
+/// host does not know (only reachable through a bug, since a handle is minted by `os_spawn`).
+pub fn unknown_process_error(handle: u64) -> crate::StdError {
+    crate::StdError {
+        kind: crate::ErrorKind::Io,
+        message: format!("process handle {handle} is not valid"),
+    }
+}

@@ -107,6 +107,12 @@ pub struct RealHost {
     /// environment, and layered into `os.exec` children. `std::env::set_var` is unsafe with live
     /// threads (isolates are OS threads), so the real environment is never mutated.
     env_overlay: HashMap<String, String>,
+    /// Spawned child processes (process-handle arc), keyed by the handle id `os_spawn` hands out.
+    /// Each holds the live `Child` plus the drain threads capturing its piped stdout/stderr, so a
+    /// high-output child never deadlocks on a full pipe while the program polls it.
+    procs: HashMap<u64, ChildProc>,
+    /// Monotonic id source for `procs`.
+    next_proc: u64,
     /// The p2p broker (p2p P1/P2): the in-process pub/sub log — the `RealHost` p2p backing when the
     /// `ring-p2p` ring is OFF (single-node loopback, so `noeta run` of a p2p program works locally
     /// without a network). Under `ring-p2p` the real node below replaces it, so it isn't compiled.
@@ -215,6 +221,8 @@ impl RealHost {
             next_conn: Arc::new(AtomicU64::new(0)),
             args: std::env::args().collect(),
             env_overlay: HashMap::new(),
+            procs: HashMap::new(),
+            next_proc: 1,
             #[cfg(not(feature = "ring-p2p"))]
             p2p: noeta_stdlib::P2pBroker::default(),
             tel: RealTelemetry::new(),
@@ -1010,6 +1018,43 @@ fn real_exec(
     })
 }
 
+/// A spawned, still-running child (process-handle arc). The stdout/stderr pipes are drained by two
+/// dedicated threads into buffers as the child writes, so the child never blocks on a full pipe
+/// while the program supervises it (the classic capture-without-draining deadlock). `result` caches
+/// the outcome once the child is reaped, so `wait`/`try_wait` are idempotent.
+#[derive(Debug)]
+struct ChildProc {
+    child: std::process::Child,
+    /// The child's OS pid, captured at spawn (stays valid after reap for `pid()`).
+    pid: i64,
+    /// The stdout/stderr drain threads; each reads its pipe to EOF and returns the bytes. `take`n
+    /// and joined when the child is reaped.
+    stdout: Option<std::thread::JoinHandle<Vec<u8>>>,
+    stderr: Option<std::thread::JoinHandle<Vec<u8>>>,
+    /// The reaped outcome, cached so a second `wait`/`try_wait` returns it without touching the
+    /// (already-consumed) child.
+    result: Option<ExecResult>,
+}
+
+impl ChildProc {
+    /// Build the [`ExecResult`] for an exited child: join the drain threads to collect the full
+    /// captured output and pair it with `status`. Caches the result on `self` and returns it.
+    fn reap(&mut self, status: std::process::ExitStatus) -> ExecResult {
+        let collect = |h: Option<std::thread::JoinHandle<Vec<u8>>>| {
+            h.map(|h| h.join().unwrap_or_default()).unwrap_or_default()
+        };
+        let stdout = collect(self.stdout.take());
+        let stderr = collect(self.stderr.take());
+        let result = ExecResult {
+            status: i64::from(status.code().unwrap_or(-1)),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        };
+        self.result = Some(result.clone());
+        result
+    }
+}
+
 /// The real host's async exec descriptor: its real body runs the subprocess on the executor's
 /// blocking pool (a `Command::output` is exactly a blocking op), so `os.exec_async` genuinely
 /// overlaps with the program — the exec analogue of `FsIo`'s real bodies.
@@ -1075,6 +1120,101 @@ impl Os for RealHost {
             args,
             overlay: self.env_overlay.clone(),
         })
+    }
+
+    fn os_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, StdError> {
+        use std::io::Read;
+        use std::process::Stdio;
+        let mut child = std::process::Command::new(command)
+            .args(args)
+            .envs(&self.env_overlay)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| io_error(format!("spawn: cannot start `{command}`: {e}")))?;
+        let pid = i64::from(child.id());
+        // Drain each pipe on its own thread so a chatty child never blocks on a full pipe buffer
+        // while the program supervises it. The threads end at the child's EOF (exit or kill).
+        let drain = |pipe: Option<std::process::ChildStdout>| {
+            pipe.map(|mut p| {
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let _ = p.read_to_end(&mut buf);
+                    buf
+                })
+            })
+        };
+        let drain_err = |pipe: Option<std::process::ChildStderr>| {
+            pipe.map(|mut p| {
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let _ = p.read_to_end(&mut buf);
+                    buf
+                })
+            })
+        };
+        let stdout = drain(child.stdout.take());
+        let stderr = drain_err(child.stderr.take());
+        let id = self.next_proc;
+        self.next_proc += 1;
+        self.procs.insert(
+            id,
+            ChildProc {
+                child,
+                pid,
+                stdout,
+                stderr,
+                result: None,
+            },
+        );
+        Ok(id)
+    }
+
+    fn os_proc_pid(&self, handle: u64) -> Option<i64> {
+        self.procs.get(&handle).map(|p| p.pid)
+    }
+
+    fn os_proc_wait(&mut self, handle: u64) -> Result<ExecResult, StdError> {
+        let proc = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
+        if let Some(result) = &proc.result {
+            return Ok(result.clone());
+        }
+        let status = proc
+            .child
+            .wait()
+            .map_err(|e| io_error(format!("wait: {e}")))?;
+        Ok(proc.reap(status))
+    }
+
+    fn os_proc_try_wait(&mut self, handle: u64) -> Result<Option<ExecResult>, StdError> {
+        let proc = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
+        if let Some(result) = &proc.result {
+            return Ok(Some(result.clone()));
+        }
+        match proc
+            .child
+            .try_wait()
+            .map_err(|e| io_error(format!("try_wait: {e}")))?
+        {
+            Some(status) => Ok(Some(proc.reap(status))),
+            None => Ok(None),
+        }
+    }
+
+    fn os_proc_kill(&mut self, handle: u64) -> Result<(), StdError> {
+        let proc = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
+        // Killing an already-exited child returns `InvalidInput`; that is a harmless no-op here.
+        let _ = proc.child.kill();
+        Ok(())
     }
 }
 

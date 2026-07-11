@@ -248,6 +248,16 @@ const CORE_TYPES: &[ExtType] = &[
         key_capable: false,
         ..ExtType::DEFAULTS
     },
+    // `Process` (process-handle arc) — a spawned child's control handle: a mutable, host-coupled
+    // reference value (like `FileHandle`), its methods reaching the `Os` seam by id.
+    ExtType {
+        name: crate::os::PROCESS_TYPE_NAME,
+        namespace: "std.os",
+        methods: PROCESS_METHODS,
+        dispatch: process_method_dispatch,
+        key_capable: false,
+        ..ExtType::DEFAULTS
+    },
     // `Cell<T>` (higher-order-abi H4) — the generic, Class-3 corner of the matrix: all methods
     // higher-order (ctx table), the held value in the retained arena; `get` is a declared
     // always-open arena read (H5), so the backend inlines it.
@@ -1629,6 +1639,17 @@ fn os_dispatch(
                 host.os_exec_spawn(command, argv),
             )))
         }
+        // `spawn(command, args?)` — start a child WITHOUT waiting and hand back a controllable
+        // `Process` handle (process-handle arc), unlike `exec`'s run-to-completion.
+        "spawn" => {
+            want_arity_range(func, args, 1, 2)?;
+            let command = want_str(func, args, 0)?;
+            let argv = want_argv(func, args, 1)?;
+            let id = host.os_spawn(command, &argv)?;
+            Ok(NativeOut::Extern(crate::ExternBox::new(
+                crate::os::Process { id },
+            )))
+        }
         // `exit(code?)` — deliberate termination. Not a host effect and not a diagnostic: the
         // distinguished `ErrorKind::Exit` unwinds the backend, which halts cleanly and surfaces
         // the code as the run's exit code.
@@ -1691,6 +1712,61 @@ fn exec_result_dispatch(
             crate::os::EXEC_RESULT_TYPE_NAME,
             method,
         )),
+    }
+}
+
+/// The `Process` instance methods (process-handle arc): lifecycle control over a spawned child,
+/// each routing to the `Os` seam by the handle's id.
+const PROCESS_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "pid",
+        params: &[],
+        ret: Concrete(Int),
+    },
+    ExtFn {
+        name: "wait",
+        params: &[],
+        ret: Concrete(EXEC_RESULT_SIG),
+    },
+    ExtFn {
+        name: "try_wait",
+        params: &[],
+        ret: Concrete(SigType::Option(&EXEC_RESULT_SIG)),
+    },
+    ExtFn {
+        name: "kill",
+        params: &[],
+        ret: Concrete(SigType::Unit),
+    },
+];
+
+fn process_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(process) = recv.as_any().downcast_ref::<crate::os::Process>() else {
+        return Err(type_error(method, "Process"));
+    };
+    let id = process.id;
+    want_arity(method, args, 0)?;
+    let exec_out = |r: crate::ExecResult| NativeOut::Extern(crate::ExternBox::new(r));
+    match method {
+        "pid" => match host.os_proc_pid(id) {
+            Some(pid) => Ok(NativeOut::Scalar(Scalar::Int(pid))),
+            None => Err(crate::os::unknown_process_error(id)),
+        },
+        "wait" => Ok(exec_out(host.os_proc_wait(id)?)),
+        "try_wait" => Ok(match host.os_proc_try_wait(id)? {
+            Some(result) => NativeOut::Some(Box::new(exec_out(result))),
+            None => NativeOut::None,
+        }),
+        "kill" => {
+            host.os_proc_kill(id)?;
+            Ok(NativeOut::Unit)
+        }
+        _ => Err(crate::no_method_error(crate::os::PROCESS_TYPE_NAME, method)),
     }
 }
 
@@ -2381,6 +2457,9 @@ const ARGS_FNS: &[ExtFn] = &[ExtFn {
 /// The `ExecResult` signature — `os.exec`'s return (stdlib-gaps).
 const EXEC_RESULT_SIG: SigType = SigType::Named(crate::os::EXEC_RESULT_TYPE_NAME);
 
+/// The `Process` signature — `os.spawn`'s return (process-handle arc).
+const PROCESS_SIG: SigType = SigType::Named(crate::os::PROCESS_TYPE_NAME);
+
 /// The `os` module (stdlib-gaps): system introspection leaves + subprocess execution + exit.
 const OS_FNS: &[ExtFn] = &[
     ExtFn {
@@ -2422,6 +2501,12 @@ const OS_FNS: &[ExtFn] = &[
         name: "exec_async",
         params: &[Str, SigType::Optional(&SigType::List(&Str))],
         ret: Concrete(SigType::Future(&EXEC_RESULT_SIG)),
+    },
+    // `spawn(command, args?)` — start a child and return a controllable `Process` handle.
+    ExtFn {
+        name: "spawn",
+        params: &[Str, SigType::Optional(&SigType::List(&Str))],
+        ret: Concrete(PROCESS_SIG),
     },
     // `exit(code?)` types as unit; it never actually returns.
     ExtFn {
@@ -3245,6 +3330,7 @@ mod tests {
             ("Request", "std.http.Request"),
             ("FileHandle", "std.fs.FileHandle"),
             ("ExecResult", "std.os.ExecResult"),
+            ("Process", "std.os.Process"),
             ("Span", "std.tracing.Span"),
             ("Counter", "std.metrics.Counter"),
             ("Histogram", "std.metrics.Histogram"),

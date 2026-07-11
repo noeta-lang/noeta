@@ -90,14 +90,29 @@ Process execution and system introspection. Under the sandbox the introspection 
 | `pid` | `pid() -> int` | Process id. |
 | `exec` | `exec(command: string, args?: List<string>) -> ExecResult` | Runs and waits. A command that cannot start is E0021; one that runs and fails is an `ExecResult` with its non-zero status. |
 | `exec_async` | `exec_async(command: string, args?: List<string>) -> Future<ExecResult>` | The async twin — the subprocess runs on the blocking pool. |
+| `spawn` | `spawn(command: string, args?: List<string>) -> Process` | Starts a child **without waiting** and returns a controllable handle. A command that cannot start is E0021. |
 | `exit` | `exit(code?: int) -> void` | Deliberate, clean termination: output so far is kept, nothing is reported, the run's exit code is `code` (default 0). |
 
 `ExecResult` (namespaced `std.os.ExecResult`) carries the captured outcome: `status() -> int`, `ok() -> bool` (status 0), `stdout() -> string`, `stderr() -> string`.
+
+`Process` (namespaced `std.os.Process`) is a handle to a spawned child you control over its lifetime (unlike `exec`, which runs to completion). Its stdout/stderr are captured while it runs, so `wait` returns them in full.
+
+| Method | Signature | Notes |
+|---|---|---|
+| `pid` | `pid() -> int` | The child's OS process id. |
+| `wait` | `wait() -> ExecResult` | Blocks until the child exits; returns its status + captured output. Idempotent. |
+| `try_wait` | `try_wait() -> ?ExecResult` | Non-blocking poll: `some(result)` if exited, `none` if still running. |
+| `kill` | `kill() -> void` | Forcefully terminates the child (idempotent). A later `wait` sees the killed status. |
 
 ```noeta
 use std.{os}
 r = os.exec("echo", ["hi"])
 echo if r.ok() then r.stdout().trim() else r.stderr()
+
+// A controllable child: start it, do other work, then collect its output.
+p = os.spawn("echo", ["from the child"])
+done = p.wait()
+echo done.stdout().trim()
 ```
 
 ## `fs`
