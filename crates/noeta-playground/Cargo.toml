@@ -19,6 +19,9 @@ noeta-fmt = { workspace = true }
 # adapts over, so the playground answers are the LSP's answers.
 noeta-ide = { workspace = true }
 noeta-span = { workspace = true }
+# The Host trait + SandboxHost/SandboxExecutor + Vfs the browser host embeds (W3.0).
+noeta-stdlib = { workspace = true }
+compact_str = { workspace = true }
 noeta-vm = { workspace = true }
 serde_json = { workspace = true }
 # Only for the custom-backend hook + Error type (see `abi.rs`): the browser build must satisfy

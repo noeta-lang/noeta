@@ -23,8 +23,8 @@ use compact_str::CompactString;
 use noeta_stdlib::{
     AttrValue, Clock, Entropy, Env, ErrorKind, ExecResult, FileReader, FileSystem, Ids,
     InstrumentId, InstrumentKind, LogRecord, Logging, MetricData, MetricStore, MetricValue,
-    Metrics, NetRequest, NetResponse, Network, Os, P2p, ReadSource, Rng, SpanData, SpanEvent,
-    SpanId, SpanKind, SpanStatus, StdError, TraceContext, Tracing,
+    Metrics, NetRequest, NetResponse, Network, Os, P2p, ReadSource, Rng, SpanId, SpanKind,
+    SpanStatus, SpanTracker, StdError, TraceContext, Tracing,
 };
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -61,18 +61,11 @@ pub struct WasiHost {
     tel: WasiTelemetry,
 }
 
-/// `WasiHost`'s telemetry state — `RealHost`'s no-`telemetry`-feature shape: live-span tracking
-/// for context/parenting, a remote-intern table, metric aggregation with nothing reading it.
+/// `WasiHost`'s telemetry state — the shared no-exporter shape ([`SpanTracker`], live-span
+/// tracking for context/parenting) plus metric aggregation with nothing reading it.
 #[derive(Debug, Default)]
 struct WasiTelemetry {
-    /// Opaque span-handle counter. The W3C `span_id` *bytes* are real entropy, per span.
-    next_span: u64,
-    /// In-flight spans by handle, ended entries removed (and dropped — the null sink).
-    live: HashMap<SpanId, SpanData>,
-    /// Remote-interned contexts: pseudo-handles read by `tel_span_context`, no-ops elsewhere.
-    remote: HashMap<SpanId, TraceContext>,
-    /// Host-side metric aggregation — the shared store, aggregating for `metric_collect` even
-    /// though no exporter drains it.
+    spans: SpanTracker,
     metrics: MetricStore,
 }
 
@@ -88,10 +81,7 @@ impl WasiHost {
             args: std::env::args().collect(),
             env_overlay: HashMap::new(),
             p2p: noeta_stdlib::P2pBroker::default(),
-            tel: WasiTelemetry {
-                next_span: 1,
-                ..WasiTelemetry::default()
-            },
+            tel: WasiTelemetry::default(),
         }
     }
 
@@ -410,52 +400,20 @@ impl Tracing for WasiHost {
         kind: SpanKind,
         parent: Option<TraceContext>,
     ) -> SpanId {
-        let handle = self.tel.next_span;
-        self.tel.next_span += 1;
         // Real entropy for the W3C ids, like RealHost: a propagated context must not collide
         // across processes even if the spans themselves are never exported.
         let span_id = self.entropy_u64().to_be_bytes();
-        let trace_id = match parent {
-            Some(p) => p.trace_id,
-            None => {
-                let hi = self.entropy_u64().to_be_bytes();
-                let lo = self.entropy_u64().to_be_bytes();
-                let mut t = [0u8; 16];
-                t[..8].copy_from_slice(&hi);
-                t[8..].copy_from_slice(&lo);
-                t
-            }
-        };
+        let mut trace_id = [0u8; 16];
+        trace_id[..8].copy_from_slice(&self.entropy_u64().to_be_bytes());
+        trace_id[8..].copy_from_slice(&self.entropy_u64().to_be_bytes());
         let now = self.clock_unix_ms();
-        let context = TraceContext {
-            trace_id,
-            span_id,
-            sampled: true,
-        };
-        self.tel.live.insert(
-            handle,
-            SpanData {
-                name: name.into(),
-                kind,
-                context,
-                parent,
-                start_unix_ms: now,
-                end_unix_ms: None,
-                attributes: Vec::new(),
-                events: Vec::new(),
-                status: SpanStatus::Unset,
-            },
-        );
-        handle
+        self.tel
+            .spans
+            .start(name, kind, parent, span_id, trace_id, now)
     }
 
     fn tel_span_set_attr(&mut self, span: SpanId, key: &str, value: AttrValue) {
-        if let Some(s) = self.tel.live.get_mut(&span) {
-            match s.attributes.iter_mut().find(|(k, _)| k == key) {
-                Some(slot) => slot.1 = value,
-                None => s.attributes.push((key.into(), value)),
-            }
-        }
+        self.tel.spans.set_attr(span, key, value);
     }
 
     fn tel_span_add_event(
@@ -465,55 +423,34 @@ impl Tracing for WasiHost {
         attrs: Vec<(CompactString, AttrValue)>,
     ) {
         let now = self.clock_unix_ms();
-        if let Some(s) = self.tel.live.get_mut(&span) {
-            s.events.push(SpanEvent {
-                name: name.into(),
-                unix_ms: now,
-                attributes: attrs,
-            });
-        }
+        self.tel.spans.add_event(span, name, attrs, now);
     }
 
     fn tel_span_set_status(&mut self, span: SpanId, status: SpanStatus) {
-        if let Some(s) = self.tel.live.get_mut(&span) {
-            s.status = status;
-        }
+        self.tel.spans.set_status(span, status);
     }
 
     fn tel_span_end(&mut self, span: SpanId) {
-        // The null sink: the ended span drops. Removal is still load-bearing — it bounds `live`
-        // and makes `tel_span_context` on an ended span yield the fresh zero context.
-        self.tel.live.remove(&span);
+        // The null sink: the completed record drops. Removal is still load-bearing — it bounds
+        // the live table and makes `tel_span_context` on an ended span yield the zero context.
+        let now = self.clock_unix_ms();
+        drop(self.tel.spans.end(span, now));
     }
 
     fn tel_span_context(&mut self, span: SpanId) -> TraceContext {
-        if let Some(remote) = self.tel.remote.get(&span) {
-            return *remote;
-        }
-        self.tel.live.get(&span).map_or(
-            TraceContext {
-                trace_id: [0u8; 16],
-                span_id: [0u8; 8],
-                sampled: false,
-            },
-            |s| s.context,
-        )
+        self.tel.spans.context(span)
     }
 
     fn tel_intern_remote(&mut self, context: TraceContext) -> SpanId {
-        // Ids share the span counter, so a remote handle can never collide with a live span.
-        let id = self.tel.next_span;
-        self.tel.next_span += 1;
-        self.tel.remote.insert(id, context);
-        id
+        self.tel.spans.intern_remote(context)
     }
 
     fn tel_is_remote(&self, span: SpanId) -> bool {
-        self.tel.remote.contains_key(&span)
+        self.tel.spans.is_remote(span)
     }
 
     fn tel_release_remote(&mut self, span: SpanId) {
-        self.tel.remote.remove(&span);
+        self.tel.spans.release_remote(span);
     }
 }
 

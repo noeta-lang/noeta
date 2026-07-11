@@ -15,9 +15,37 @@ import assert from 'node:assert/strict';
 
 const wasmPath = process.argv[2] ?? 'target/wasm32-unknown-unknown/wasm-release/noeta_playground.wasm';
 const bytes = await readFile(wasmPath);
-const { instance } = await WebAssembly.instantiate(bytes, {});
+
+// The `noeta_host` imports (W3.0), supplied exactly like the worker does — entropy and wall
+// clock real, fetch canned (node has no sync XHR; the worker's is the same JSON contract).
+let engine = null; // late-bound: imports are only called during an export call
+const fetched = [];
+function packReply(json) {
+  const replyBytes = new TextEncoder().encode(json);
+  const ptr = engine.noeta_alloc(4 + replyBytes.length);
+  new DataView(engine.memory.buffer).setUint32(ptr, replyBytes.length, true);
+  new Uint8Array(engine.memory.buffer, ptr + 4, replyBytes.length).set(replyBytes);
+  return ptr;
+}
+const imports = {
+  noeta_host: {
+    js_entropy_u64() {
+      const word = new BigUint64Array(1);
+      crypto.getRandomValues(word);
+      return word[0];
+    },
+    js_now_ms: () => Date.now(),
+    js_net_fetch(ptr, len) {
+      const request = JSON.parse(new TextDecoder().decode(new Uint8Array(engine.memory.buffer, ptr, len)));
+      fetched.push(request);
+      return packReply(JSON.stringify({ status: 200, headers: [['x-test', 'yes']], body: 'pong' }));
+    },
+  },
+};
+const { instance } = await WebAssembly.instantiate(bytes, imports);
+engine = instance.exports;
 const {
-  memory, noeta_alloc, noeta_check, noeta_run, noeta_fmt, noeta_free_result,
+  memory, noeta_alloc, noeta_check, noeta_run, noeta_run_browser, noeta_fmt, noeta_free_result,
   noeta_hover, noeta_definition, noeta_complete, noeta_signature,
 } = instance.exports;
 
@@ -77,5 +105,24 @@ assert.equal(sig.found, true);
 assert.equal(sig.active, 1);
 const completions = call(noeta_complete, ideText, 4, 0);
 assert.ok(completions.items.some((item) => item.label === 'add' && item.kind === 'function'));
+
+// The browser host (W3.0): `noeta_run_browser` reaches the real-world leaves through the
+// imports — a full std.http round trip over the JSON contract, plus real entropy for uuids.
+const fetching = 'use std.http.client\nr = client.get("https://svc.test/ping")\necho r.status()\necho r.body()';
+const browserRun = call(noeta_run_browser, fetching);
+assert.equal(browserRun.compiled, true, JSON.stringify(browserRun));
+assert.equal(browserRun.exit_code, 0, JSON.stringify(browserRun));
+assert.equal(browserRun.stdout, '200\npong\n');
+assert.equal(fetched.length, 1);
+assert.equal(fetched[0].method, 'GET');
+assert.equal(fetched[0].url, 'https://svc.test/ping');
+// Real entropy: two uuids from one browser-host run differ (the sandbox's would be fixed).
+const uuids = call(noeta_run_browser, 'use std.id;\necho id.uuid();\necho id.uuid();');
+const [a, b] = uuids.stdout.trim().split('\n');
+assert.notEqual(a, b);
+// The sandbox stays the default and deterministic — the same program, fixed stream.
+const sandboxUuids = call(noeta_run, 'use std.id;\necho id.uuid();\necho id.uuid();');
+const again = call(noeta_run, 'use std.id;\necho id.uuid();\necho id.uuid();');
+assert.equal(sandboxUuids.stdout, again.stdout);
 
 console.log('browser-engine smoke: all assertions passed ✓');

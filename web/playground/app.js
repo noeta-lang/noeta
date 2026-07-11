@@ -43,6 +43,14 @@ echo outer();
 mut count = 1;
 count = "not a number";
 `,
+  'http fetch': `// Tick "real host" above: the request leaves your browser (subject to CORS).
+// In the default sandbox the same code gets the deterministic pure responder.
+use std.http.client
+
+r = client.get("https://api.github.com/zen")
+echo r.status()
+echo r.body()
+`,
 };
 
 // --- Worker lifecycle: one engine worker, terminated and respawned on timeout (the runaway
@@ -132,7 +140,8 @@ async function doCheck() {
 async function doRun() {
   setStatus('running…');
   output.textContent = '';
-  const reply = await request('run', editor.value);
+  const op = document.getElementById('realhost').checked ? 'run-browser' : 'run';
+  const reply = await request(op, editor.value);
   if (!reply.ok) { setStatus(reply.error); return; }
   const r = reply.result;
   renderDiagnostics(r.diagnostics);

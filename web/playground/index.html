@@ -26,6 +26,7 @@
   }
   header h1 { font-size: 1.05rem; margin: 0 0.5rem 0 0; font-weight: 650; }
   header h1 span { color: var(--muted); font-weight: 400; }
+  header label { color: var(--muted); font-size: 0.9rem; display: flex; align-items: center; gap: 0.3rem; }
   button, select {
     font: inherit; padding: 0.3rem 0.9rem; border-radius: 6px;
     border: 1px solid var(--border); background: var(--panel); color: var(--fg); cursor: pointer;
@@ -65,6 +66,9 @@
     <button id="check">Check</button>
     <button id="fmt">Format</button>
     <select id="examples" title="examples"></select>
+    <label title="Run with real wall clock, entropy, and outbound HTTP (sync fetch from the worker) instead of the deterministic sandbox">
+      <input type="checkbox" id="realhost"> real host
+    </label>
     <span id="status"></span>
   </header>
   <main>

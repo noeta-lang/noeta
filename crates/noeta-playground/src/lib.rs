@@ -22,8 +22,10 @@
 //! change rather than a second pipeline.
 
 mod abi;
+mod browser_host;
 mod ide;
 
+pub use browser_host::BrowserHost;
 pub use ide::{complete_source, definition_source, hover_source, signature_source};
 
 use noeta_db::LangDatabase;
@@ -41,10 +43,23 @@ pub fn check_source(text: &str) -> String {
     json!({ "diagnostics": diagnostics }).to_string()
 }
 
-/// Compile and run `text` on the deterministic sandbox. The result object always carries
-/// `compiled` and `diagnostics`; a compiled program adds `stdout`, `exit_code`, and — after an
-/// abort with a call chain — `trace` (the rendered traceback, exactly as the CLI prints it).
+/// Compile and run `text` on the deterministic sandbox — the default world, so playground output
+/// is oracle-grade. The result object always carries `compiled` and `diagnostics`; a compiled
+/// program adds `stdout`, `exit_code`, and — after an abort with a call chain — `trace` (the
+/// rendered traceback, exactly as the CLI prints it).
 pub fn run_source(text: &str) -> String {
+    run_with(text, Box::new(noeta_stdlib::SandboxHost::new()))
+}
+
+/// [`run_source`] on the [`BrowserHost`] (W3.0): real entropy, wall clock, and outbound HTTP
+/// through the embedder's `noeta_host` imports — the playground's "real host" mode.
+pub fn run_source_browser(text: &str) -> String {
+    run_with(text, Box::new(BrowserHost::new()))
+}
+
+/// The shared run tail: compile through the salsa front end and execute on `host` (cooperative,
+/// tier-0, with the abort traceback — `run_module_debug(…, None)` is the documented plain run).
+fn run_with(text: &str, host: Box<dyn noeta_stdlib::Host>) -> String {
     let (db, src, diagnostics) = front_end(text);
     if !diagnostics.is_empty() {
         return json!({ "compiled": false, "diagnostics": diagnostics }).to_string();
@@ -65,7 +80,8 @@ pub fn run_source(text: &str) -> String {
         }
     };
 
-    let (result, trace) = noeta_vm::VmBackend::new().run_module_traced(module);
+    let executor: Box<dyn noeta_stdlib::Executor> = Box::new(noeta_stdlib::SandboxExecutor::new());
+    let (result, trace) = noeta_vm::VmBackend::new().run_module_debug(module, host, executor, None);
     let runtime_diagnostics: Vec<_> = result
         .diagnostics
         .iter()
