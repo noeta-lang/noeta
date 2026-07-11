@@ -315,7 +315,7 @@ fn place(items: List<Item>): Result<Order, OrderError> {
 
 ## Generics and traits
 
-Type parameters are erased at runtime, and can be bounded by a built-in trait:
+Type parameters don't affect dispatch — one compiled shape serves every instantiation — though values carry a reflected type tag, so `type_of` and `x is List<int>` can still recover the type arguments. They can be bounded by a built-in trait:
 
 ```noeta
 class Box<T> {

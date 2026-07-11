@@ -492,7 +492,7 @@ echo vec.cross(a, b)        // V3 { x: -3.0, y: 6.0, z: -3.0 }
 
 `vec`: `add`, `sub`, `scale`, `dot`, `cross`, `length`, `normalize`, `distance`, `lerp`, `reflect`, `clamp`, `min`, `max`, `abs`. `quat`: `mul`, `conjugate`, `normalize`, `slerp`, `dot`, `length`, `rotate_vec3`.
 
-For bulk work, a `List<Vec3>` is stored as a flat packed buffer, and the `vec.soa*` family (`soa`, `soa_dot`, `soa_length`, …) reduces columnar batches fast. The performance story — flat layout unlocking autovectorization — is on [Performance Techniques](Performance-Techniques).
+For bulk work, a `List<Vec3>` is stored as a flat packed buffer, and the `*_all` family (`add_all`, `sub_all`, `scale_all`, `dot_all`, `length_all` — usable as `vec.dot_all(xs, ys)` or the method form `xs.dot_all(ys)`) reduces columnar batches fast. The performance story — flat layout unlocking autovectorization — is on [Performance Techniques](Performance-Techniques).
 
 ## See also
 

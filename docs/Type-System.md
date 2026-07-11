@@ -64,7 +64,7 @@ echo d is string       // false
 
 ## Type tests and narrowing
 
-**`x is T`** is a plain `bool` head-constructor test — well-formed even on a concrete `x`. Generics are erased, so `x is List<int>` really tests "is `x` a list."
+**`x is T`** is a plain `bool` head-constructor test — well-formed even on a concrete `x`. Generics don't affect dispatch (one compiled shape serves every instantiation), but values carry a reified type tag, so `x is List<int>` is element-precise — it really does test the element type, not just "is `x` a list."
 
 ```noeta
 enum Color { Red; Green }

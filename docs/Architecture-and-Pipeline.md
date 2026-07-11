@@ -2,7 +2,7 @@
 
 This section is the "how it works under the hood" tour, for the curious and the systems-minded. It describes the implementation as it actually exists — and, where the design intends more than what has shipped, says so.
 
-The implementation is a workspace of ~25 small Rust crates forming a strict dependency DAG. Two ideas organize everything: a **compilation pipeline** of sharp, single-purpose stages, and a **two-backend differential oracle** that keeps the whole thing honest.
+The implementation is a workspace of ~40 small Rust crates forming a strict dependency DAG (the crate map below covers the pipeline core; the tooling and runtime subsystems — JIT, package manager, LSP/DAP/MCP, formatter, profiler, CRDT, reactivity — add the rest). Two ideas organize everything: a **compilation pipeline** of sharp, single-purpose stages, and a **two-backend differential oracle** that keeps the whole thing honest.
 
 ## The pipeline
 
@@ -44,7 +44,7 @@ Both implement one trait — `trait Backend { fn run(&self, program: &Program) -
 Why build it twice? A second independent implementation is a continuously-running oracle: any divergence between the two is a bug in one of them, caught mechanically instead of by hand-written expected output. Crucially, the comparison is on *observable behavior*, not internal representation — which is exactly what frees the two backends to use completely different value models (an `Rc` enum vs. NaN-boxed words). This oracle is the spine of the whole test strategy, and it constrains the design: any shared semantics that both backends must agree on live *once*, in `noeta-stdlib`, so they cannot drift.
 
 > [!NOTE]
-> **A precise nuance.** The differential's reference used to be the AST tree-walker. Since the memory-management migration, the reference is the **Core-IR interpreter** (the same `noeta-eval` machinery, now interpreting the RC-annotated ANF IR) — because the AST walker fired destructors only at global teardown and so could no longer reproduce last-use destruction. The live differential is now *Core-IR interpreter ↔ VM*: two genuinely different memory machines (Rust `Rc` vs. a manual refcount heap) executing the *same* RC-annotated IR. The AST walk survives as a performance baseline and property-test helper.
+> **A precise nuance.** The differential's reference used to be the AST tree-walker. Since the memory-management migration, the reference is the **Core-IR interpreter** (the same `noeta-eval` machinery, now interpreting the RC-annotated ANF IR) — because the AST walker fired destructors only at global teardown and so could no longer reproduce last-use destruction. The live differential is now *Core-IR interpreter ↔ VM*: two genuinely different memory machines (Rust `Rc` vs. a manual refcount heap) executing the *same* RC-annotated IR. The AST tree-walker itself was retired in the migration; the Core-IR interpreter is the sole reference path (its `Backend::run` shim still lowers to the same Core IR for perf benches and property tests).
 
 ## Incremental compilation (salsa)
 
