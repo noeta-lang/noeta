@@ -167,6 +167,26 @@ corpus), exactly how `http.serve` itself was made deterministic.
   code; `Rejected` keeps the old version serving with diagnostics to the terminal.
 - **W2** — dev UX: clear swap/restart/reject reporting, `--watch` for `noeta serve` documented;
   browser error overlay arrives with L3 (needs the WS channel).
+- **W3** — **impact-filtered tier watch** (user-pinned 2026-07-11: generic machinery, not a
+  test-runner feature). An **impact engine** — one library seam, deliberately runner-agnostic:
+  input = the H0 differ's changed/added/removed definition names; compute the **reverse
+  transitive closure** over the existing call graph (`noeta_ide::callgraph`, the `trace`/
+  call-hierarchy extraction) to the set of impacted declarations. Consumers filter that set to
+  *their* tier's fns and rerun only those:
+  - `noeta test --watch` — impacted `@test` fns via the runner's existing `--name` filter (the
+    first consumer and the proof of the seam);
+  - `noeta bench --watch` — impacted `@bench` fns (same shape, different tier);
+  - **third-party tiers** — the impact query is exposed where extension-contributed commands
+    (`ExtCommand`) can reach it, so any custom tier runner a package ships gets change-driven
+    reruns for free. The seam's contract is "changed defs → impacted decls"; what a tier does
+    with the set is the runner's business.
+  Soundness valves are part of the contract, not the consumer's job: a change the differ cannot
+  attribute (layout/signature/namespace/top-level, manifest or non-entry files) degrades to
+  IMPACT-ALL (full rerun), and the engine reports *why*; a static call graph cannot see
+  reflection/`invoke`/method-handle dispatch, so consumers surface an occasional/on-demand full
+  pass (the engine flags declarations reached only dynamically as best-effort). Oracle: impact
+  results pinned against hand-computed closures on a fixture graph; end-to-end — edit a leaf fn,
+  exactly its caller-tests rerun; edit a layout, everything reruns.
 
 **Phase L — reactive transport + HMR client** (the LiveView half)
 - **L0** — WS upgrade + frame codec on the serve loop (hijack path), sandbox scripted-client
@@ -201,8 +221,12 @@ corpus), exactly how `http.serve` itself was made deterministic.
   **swap broadcast** (a swap must reach every worker isolate — H's swap core takes a "notify
   isolate" seam now so single-worker doesn't bake in a one-VM assumption).
 
-Suggested order: H0→H1→W0 (early value)→W1→H2→H3→L0→L1→L2→L3→H4/W2, with E running in parallel
-after H1 and S last (S1 interacts with everything and wants the swap core settled).
+Suggested order: H0→H1→W0 (early value)→W1→H2→H3→L0→L1→L2→L3→H4/W2→W3, with E running in
+parallel after H1 and S last (S1 interacts with everything and wants the swap core settled).
+W3 sits after the L phase by default (the transport unblocks two consumers; W3 improves one
+loop that already works correctly-if-wastefully) but depends only on H0 + the existing call
+graph — it can be pulled earlier or run as a parallel session's slice if test-feedback latency
+starts to matter more.
 
 ## Oracle posture
 
