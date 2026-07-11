@@ -143,7 +143,7 @@ Runs a program as an HTTP server: executes the file's top-level setup, then call
 serve` is pure ergonomics over [`std.http.server`](Standard-Library-Modules). The program supplies
 two things: `use std.http.server` and a top-level handler
 
-```noeta
+```noeta ignore
 fn fetch(req: Request): Response { … }
 ```
 
