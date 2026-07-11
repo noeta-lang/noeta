@@ -316,6 +316,17 @@ const CORE_TYPES: &[ExtType] = &[
         }),
         ..ExtType::DEFAULTS
     },
+    // `View` (server-hmr L1) — the diff-push flush subscriber: named bindings onto
+    // Signal/Computed/SyncedSignal handles, `snapshot()`/`diff()` render the wire frames.
+    ExtType {
+        name: crate::reactive::VIEW_TYPE_NAME,
+        namespace: "std.reactive",
+        ctx_methods: crate::reactive::VIEW_CTX_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::reactive::view_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        ..ExtType::DEFAULTS
+    },
 ];
 
 /// The `FileHandle` instance methods (extern-types X3) — the signatures the checker's
@@ -3149,6 +3160,9 @@ pub fn static_dispatch_ctx_method<C: crate::NativeCtx + ?Sized>(
         crate::reactive::EFFECT_TYPE_NAME => Some(crate::reactive::effect_ctx_method_dispatch(
             method, ctx, recv, args,
         )),
+        crate::reactive::VIEW_TYPE_NAME => Some(crate::reactive::view_ctx_method_dispatch(
+            method, ctx, recv, args,
+        )),
         crate::synced::SYNCED_SIGNAL_TYPE_NAME => Some(crate::synced::synced_ctx_method_dispatch(
             method, ctx, recv, args,
         )),
@@ -3454,6 +3468,7 @@ mod tests {
             ("Signal", "std.reactive.Signal"),
             ("Computed", "std.reactive.Computed"),
             ("Effect", "std.reactive.Effect"),
+            ("View", "std.reactive.View"),
             ("SyncedSignal", "std.synced.SyncedSignal"),
             ("GCounter", "std.crdt.GCounter"),
             ("PnCounter", "std.crdt.PnCounter"),

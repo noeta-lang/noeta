@@ -428,6 +428,42 @@ fn signal_state_survives_a_swap_and_the_effect_reruns_with_its_new_body() {
 }
 
 #[test]
+fn a_view_rebuilt_by_a_swap_diffs_against_a_fresh_baseline() {
+    // The L1∘H1 seam: a `view` is PLAIN state (rebuilt by the re-run) over PRESERVED reactive
+    // state. After a swap edits an unrelated binding, the re-run re-creates the view and
+    // re-exposes the surviving signal — the fresh baseline means diff() is quiet until a real
+    // change, and the first post-swap change diffs against the preserved (not initial) value.
+    let v1 = "use std.reactive.{signal, view}\n\
+              count = signal(0)\n\
+              v = view()\n\
+              v.expose(\"count\", count)\n\
+              marker = 1\n";
+    let v2 = "use std.reactive.{signal, view}\n\
+              count = signal(0)\n\
+              v = view()\n\
+              v.expose(\"count\", count)\n\
+              marker = 2\n";
+    let mut session = boot(v1);
+    assert_eq!(
+        probe(&mut session, "count.set(7); echo v.diff() ?? \"none\";"),
+        "{\"type\":\"patch\",\"changes\":{\"count\":7}}\n"
+    );
+    let (plan, _) = apply(&mut session, v1, v2);
+    assert_eq!(plan.preserved, vec!["count".to_string()]);
+    assert_eq!(
+        probe(&mut session, "echo v.diff() ?? \"none\";"),
+        "none\n",
+        "the rebuilt view baselines at expose — the preserved value is not re-pushed"
+    );
+    assert_eq!(
+        probe(&mut session, "count.set(8); echo v.diff() ?? \"none\";"),
+        "{\"type\":\"patch\",\"changes\":{\"count\":8}}\n",
+        "post-swap changes flow through the rebuilt view over the preserved signal"
+    );
+    session.teardown();
+}
+
+#[test]
 fn a_changed_signal_binding_resets_its_state() {
     // The developer redefined the signal itself — it is NOT preserved: the re-run creates the
     // replacement (initial 100) and the old node is disposed pre-run.

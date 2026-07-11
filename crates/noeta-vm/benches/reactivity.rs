@@ -58,6 +58,50 @@ fn fanout_src(n: usize) -> String {
     )
 }
 
+/// The fan-out program with the change log switched on (a `view` exposes the signal, which is what
+/// enables observation) — benched against the plain `fanout` to pin the L1 recording overhead on
+/// the flush hot path at ~zero. No `diff()` in the loop: this isolates record+distribute.
+fn fanout_observed_src(n: usize) -> String {
+    format!(
+        "use std.reactive.{{signal, effect, view}}\n\
+         s = signal(0)\n\
+         v = view()\n\
+         v.expose(\"s\", s)\n\
+         mut c = 0\n\
+         while c < {n} {{\n    \
+             effect(fn() {{ s.get() }})\n    \
+             c = c + 1\n\
+         }}\n\
+         for i in 0..{SETS} {{\n    \
+             s.set(i)\n\
+         }}\n\
+         echo \"done\"\n",
+    )
+}
+
+/// The diff-push shape (server-hmr L1): one view exposing `n` cold bindings plus one hot signal;
+/// each iteration sets the hot signal and renders `diff()`. The minimal-diff promise is that the
+/// patch cost tracks the ONE dirty binding (serialize one value), not the `n` cold ones — the
+/// change log narrows the candidate set before any serialization happens.
+fn view_diff_src(n: usize) -> String {
+    format!(
+        "use std.reactive.{{signal, view}}\n\
+         v = view()\n\
+         hot = signal(0)\n\
+         v.expose(\"hot\", hot)\n\
+         mut c = 0\n\
+         while c < {n} {{\n    \
+             v.expose(\"cold${{c}}\", signal(0))\n    \
+             c = c + 1\n\
+         }}\n\
+         for i in 0..{SETS} {{\n    \
+             hot.set(i + 1)\n    \
+             v.diff()\n\
+         }}\n\
+         echo \"done\"\n",
+    )
+}
+
 fn reactivity_flush(c: &mut Criterion) {
     const FANOUT: &[usize] = &[64, 256, 1024];
 
@@ -67,9 +111,34 @@ fn reactivity_flush(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("fanout", n), &module, |b, module| {
             b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
         });
+        let observed = compile(&fanout_observed_src(n));
+        group.bench_with_input(
+            BenchmarkId::new("fanout_observed", n),
+            &observed,
+            |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+            },
+        );
     }
     group.finish();
 }
 
-criterion_group!(benches, reactivity_flush);
+fn reactivity_view_diff(c: &mut Criterion) {
+    const COLD: &[usize] = &[64, 256, 1024];
+
+    let mut group = c.benchmark_group("view_diff_push");
+    for &n in COLD {
+        let module = compile(&view_diff_src(n));
+        group.bench_with_input(
+            BenchmarkId::new("cold_bindings", n),
+            &module,
+            |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(benches, reactivity_flush, reactivity_view_diff);
 criterion_main!(benches);

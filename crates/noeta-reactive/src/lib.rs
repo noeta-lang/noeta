@@ -200,6 +200,16 @@ struct Inner<V> {
     ///
     /// [`is_flushing`]: ReactiveGraph::is_flushing
     flushing: bool,
+    /// Change observation (server-hmr L1, the flush-subscriber hook): while `observed` is true,
+    /// every value-bearing change lands in `changed` — a `set`/`touch` records the origin node and
+    /// the dirty walk records each `Computed` it transitions clean→dirty (the transitive "this
+    /// value can no longer be trusted" set; an *already*-dirty computed re-dirtied records
+    /// nothing new). Effects never record — they have no readable value. Off by default so an
+    /// unobserved hot `set` loop pays nothing; a client with diff subscribers switches it on and
+    /// drains via [`ReactiveGraph::drain_changed_into`]. May hold duplicates (two sets of one
+    /// signal between drains) — the consumer dedupes.
+    observed: bool,
+    changed: Vec<NodeId>,
 }
 
 impl<V> Inner<V> {
@@ -281,6 +291,9 @@ impl<V> Inner<V> {
                         if !n.dirty {
                             n.dirty = true;
                             self.dirty_computeds += 1;
+                            if self.observed {
+                                self.changed.push(sub);
+                            }
                             work.push(sub);
                         }
                     }
@@ -341,6 +354,8 @@ impl<V: Clone> ReactiveGraph<V> {
                 dirty_scratch: Vec::new(),
                 queue: Vec::new(),
                 flushing: false,
+                observed: false,
+                changed: Vec::new(),
             }),
         }
     }
@@ -481,6 +496,9 @@ impl<V: Clone> ReactiveGraph<V> {
             "only a signal can be set"
         );
         inner.nodes[node.index()].content = Some(value);
+        if inner.observed {
+            inner.changed.push(node);
+        }
         inner.mark_dirty_subscribers(node);
     }
 
@@ -491,6 +509,9 @@ impl<V: Clone> ReactiveGraph<V> {
     pub fn touch(&self, node: NodeId) {
         let mut inner = self.inner.borrow_mut();
         debug_assert!(inner.nodes[node.index()].live, "touch of a disposed node");
+        if inner.observed {
+            inner.changed.push(node);
+        }
         inner.mark_dirty_subscribers(node);
     }
 
@@ -648,6 +669,7 @@ impl<V: Clone> ReactiveGraph<V> {
         inner.dirty_computeds = 0;
         inner.round_scratch.clear();
         inner.dirty_scratch.clear();
+        inner.changed.clear();
     }
 
     /// The number of live nodes — for the leak assertion in tests (create N, dispose N, expect 0).
@@ -671,6 +693,31 @@ impl<V: Clone> ReactiveGraph<V> {
     /// while any memo is stale.
     pub fn dirty_computed_count(&self) -> usize {
         self.inner.borrow().dirty_computeds
+    }
+
+    /// Switch change observation on (or off) — see [`Inner::observed`]. Idempotent; switching
+    /// **on** starts recording from *now* (changes before the switch were not recorded), and
+    /// switching **off** also drops anything recorded but not yet drained.
+    pub fn set_observed(&self, on: bool) {
+        let mut inner = self.inner.borrow_mut();
+        inner.observed = on;
+        if !on {
+            inner.changed.clear();
+        }
+    }
+
+    /// Drain every change recorded since the last drain into `out` (appending — the caller owns
+    /// the buffer so a hot drain loop reuses its allocation). May contain duplicates; order is
+    /// the recording order (deterministic — it follows the deterministic set/flush order).
+    pub fn drain_changed_into(&self, out: &mut Vec<NodeId>) {
+        let mut inner = self.inner.borrow_mut();
+        out.append(&mut inner.changed);
+    }
+
+    /// Whether `node` is a live (not disposed) slot — the guard a *held* id needs before reading
+    /// through it (a diff subscriber can outlive a node a hot swap disposed, server-hmr L1).
+    pub fn is_live(&self, node: NodeId) -> bool {
+        self.inner.borrow().nodes[node.index()].live
     }
 }
 
@@ -1155,6 +1202,89 @@ mod tests {
             !h.graph.is_flushing(),
             "flushing flag cleared after the flush"
         );
+    }
+
+    #[test]
+    fn change_log_records_origin_and_transitive_dirty_computeds_when_observed() {
+        // The L1 flush-subscriber hook: with observation ON, a set records the signal itself and
+        // every computed the dirty walk transitions clean→dirty — and nothing else. Effects never
+        // record; an already-dirty computed does not re-record.
+        let b = Builder::new();
+        let s = b.graph.signal(TestVal::Data(1));
+        let ac: Rc<Cell<Option<NodeId>>> = Rc::new(Cell::new(None));
+        ac.set(Some(s));
+        let (a1, a2) = (ac.clone(), ac.clone());
+        let b = b
+            .body("double", move |h| {
+                TestVal::Data(get(h, a1.get().unwrap()) * 2)
+            })
+            .body("watch", move |h| {
+                let _ = get(h, a2.get().unwrap());
+                TestVal::Data(0)
+            });
+        let d = b.graph.computed(TestVal::Body("double"));
+        let _e = b.graph.effect(TestVal::Body("watch"));
+        let h = b.finish();
+        h.flush();
+        let _ = h.read(d); // make the computed clean (and subscribed)
+
+        // Unobserved: a set records nothing.
+        let mut drained = Vec::new();
+        h.set(s, 2);
+        h.flush();
+        h.graph.drain_changed_into(&mut drained);
+        assert!(drained.is_empty(), "unobserved changes are not recorded");
+
+        h.graph.set_observed(true);
+        let _ = h.read(d); // clean again after the unobserved set
+        h.set(s, 3);
+        h.flush();
+        h.graph.drain_changed_into(&mut drained);
+        drained.sort_unstable();
+        drained.dedup();
+        assert_eq!(
+            drained,
+            vec![s, d],
+            "the signal and its clean→dirty computed"
+        );
+
+        // While `d` stays dirty (not re-read), a second set records only the signal.
+        drained.clear();
+        h.set(s, 4);
+        h.flush();
+        h.graph.drain_changed_into(&mut drained);
+        assert_eq!(
+            drained,
+            vec![s],
+            "an already-dirty computed does not re-record"
+        );
+
+        // Draining consumed the log.
+        drained.clear();
+        h.graph.drain_changed_into(&mut drained);
+        assert!(drained.is_empty());
+    }
+
+    #[test]
+    fn touch_records_and_liveness_reflects_dispose() {
+        let b = Builder::new();
+        let s = b.graph.signal(TestVal::Data(0));
+        let h = b.finish();
+        h.graph.set_observed(true);
+        h.graph.touch(s);
+        let mut drained = Vec::new();
+        h.graph.drain_changed_into(&mut drained);
+        assert_eq!(drained, vec![s], "touch records like set");
+        assert!(h.graph.is_live(s));
+        h.graph.dispose(s);
+        assert!(!h.graph.is_live(s), "a disposed node reads as dead");
+        // Switching observation off drops any undrained log.
+        h.graph.set_observed(false);
+        assert!({
+            let mut rest = Vec::new();
+            h.graph.drain_changed_into(&mut rest);
+            rest.is_empty()
+        });
     }
 
     #[test]
