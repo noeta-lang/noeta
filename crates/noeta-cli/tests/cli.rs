@@ -1665,6 +1665,103 @@ fn doc_out_generates_the_registry_artifact() {
 }
 
 #[test]
+fn published_docs_round_trip_through_the_registry() {
+    // The docs-ingestion loop: `noeta publish` generates the package's docs.json and stores it
+    // with the release (advisory — a docs failure never blocks a publish); `noeta doc --package`
+    // fetches it back (highest version, or pinned with `@`), and `--out` renders the Markdown
+    // tree from the stored artifact alone. Runs against the file-backed LocalIndex via
+    // NOETA_REGISTRY_DIR, publishing unsigned (no key, no ambient identity).
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("docs_registry");
+    let _ = std::fs::remove_dir_all(&base);
+    let pkg = base.join("pkg");
+    let reg = base.join("registry");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(
+        pkg.join("noeta.toml"),
+        "[package]\nname = \"acme/greeter\"\nversion = \"0.3.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pkg.join("lib.noe"),
+        "@doc { Friendly greetings. }\nnamespace greeter.lib;\n\
+         @doc { Greets `who` by name. }\n\
+         pub fn greet(who: string): string { return \"hello \" + who }\n",
+    )
+    .unwrap();
+    let git = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&pkg)
+                .output()
+                .expect("git runs")
+                .status
+                .success(),
+            "git {args:?}"
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&[
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-qm",
+        "init",
+    ]);
+    git(&["tag", "v0.3.0"]);
+
+    let url = format!("file://{}", pkg.display());
+    lang()
+        .current_dir(&pkg)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("publish")
+        .arg("--git")
+        .arg(&url)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "docs uploaded (1 module, 1 declaration)",
+        ));
+    // Fetch: the stored artifact comes back as JSON…
+    let out = lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("doc")
+        .arg("--package")
+        .arg("acme/greeter")
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("stored docs are valid JSON");
+    assert_eq!(json["package"]["name"], "acme/greeter");
+    assert_eq!(json["modules"][0]["items"][0]["name"], "greet");
+    // …and renders to Markdown from the artifact alone (version-pinned form).
+    let rendered = base.join("rendered");
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("doc")
+        .arg("--package")
+        .arg("acme/greeter@0.3.0")
+        .arg("--out")
+        .arg(&rendered)
+        .assert()
+        .success();
+    let page = std::fs::read_to_string(rendered.join("lib.md")).unwrap();
+    assert!(page.contains("pub fn greet(who: string): string"), "{page}");
+    // An unknown version has no docs — a clear error.
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("doc")
+        .arg("--package")
+        .arg("acme/greeter@9.9.9")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no docs stored"));
+}
+
+#[test]
 fn doc_no_blocks_is_success_with_note() {
     let file = temp_program("doc_none", "echo \"hi\"\n");
     lang()

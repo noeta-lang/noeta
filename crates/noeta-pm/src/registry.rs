@@ -106,6 +106,21 @@ pub trait Index {
     fn set_scope_key(&self, _scope: &str, _public_hex: &str) -> Result<(), String> {
         Ok(())
     }
+
+    /// Store a release's **documentation artifact** — the `docs.json` the generator produces
+    /// (`noeta doc --out`, docs-ingestion follow-up). Docs are *advisory metadata*, not
+    /// provenance: they are unsigned, last-wins on re-put (a regenerated artifact for the same
+    /// immutable release is fine), and a hosted registry may choose to regenerate them from
+    /// source itself (the docs.rs model) rather than trust the upload. Default: an error — an
+    /// index that does not store docs says so, and `noeta publish` degrades to a warning.
+    fn put_docs(&self, _name: &str, _version: &Version, _docs_json: &str) -> Result<(), String> {
+        Err("this registry does not store documentation".to_string())
+    }
+
+    /// The stored `docs.json` for `name@version`, if any. Default: `None`.
+    fn docs(&self, _name: &str, _version: &Version) -> Result<Option<String>, String> {
+        Ok(None)
+    }
 }
 
 /// Resolve a registry requirement to a concrete release's coordinates: the **highest published
@@ -177,6 +192,12 @@ impl LocalIndex {
     /// The file holding a scope's registered public key (provenance, Phase 4 #2).
     fn scope_key_file(&self, scope: &str) -> PathBuf {
         self.dir.join(format!("scope__{scope}.pub"))
+    }
+
+    /// The file holding a release's documentation artifact (docs-ingestion follow-up).
+    fn docs_file(&self, name: &str, version: &Version) -> PathBuf {
+        self.dir
+            .join(format!("docs__{}__{version}.json", name.replace('/', "__")))
     }
 }
 
@@ -283,6 +304,20 @@ impl Index for LocalIndex {
         }
         std::fs::write(self.file_for(name), text)
             .map_err(|err| format!("cannot write registry entry for `{name}`: {err}"))
+    }
+    fn put_docs(&self, name: &str, version: &Version, docs_json: &str) -> Result<(), String> {
+        let path = self.docs_file(name, version);
+        std::fs::write(&path, docs_json)
+            .map_err(|err| format!("cannot write docs `{}`: {err}", path.display()))
+    }
+
+    fn docs(&self, name: &str, version: &Version) -> Result<Option<String>, String> {
+        let path = self.docs_file(name, version);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Ok(Some(text)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(format!("cannot read docs `{}`: {err}", path.display())),
+        }
     }
 }
 
@@ -501,6 +536,47 @@ impl Index for HttpIndex {
             release.version
         ))
     }
+    fn put_docs(&self, name: &str, version: &Version, docs_json: &str) -> Result<(), String> {
+        let token = self.token.as_ref().ok_or_else(|| {
+            "uploading docs needs a token — set NOETA_REGISTRY_TOKEN to your registry publish token"
+                .to_string()
+        })?;
+        let resp = self
+            .client
+            .put(format!("{}/docs/{version}", self.url_for(name)))
+            .bearer_auth(token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(docs_json.to_string())
+            .send()
+            .map_err(|err| format!("registry docs upload for `{name}` failed: {err}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} uploading docs for `{name}@{version}`",
+                resp.status()
+            ));
+        }
+        Ok(())
+    }
+
+    fn docs(&self, name: &str, version: &Version) -> Result<Option<String>, String> {
+        let resp = self
+            .client
+            .get(format!("{}/docs/{version}", self.url_for(name)))
+            .send()
+            .map_err(|err| format!("registry docs request for `{name}` failed: {err}"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for `{name}@{version}` docs",
+                resp.status()
+            ));
+        }
+        resp.text()
+            .map(Some)
+            .map_err(|err| format!("registry sent unreadable docs for `{name}`: {err}"))
+    }
 }
 
 #[cfg(test)]
@@ -569,6 +645,32 @@ mod tests {
             index.scope_key("acme").unwrap(),
             Some("deadbeef".to_string())
         );
+    }
+
+    /// Docs are per-release artifacts: put/get round-trips, an unknown release has none, and a
+    /// re-put overwrites (advisory metadata, last-wins — unlike the immutable release itself).
+    #[test]
+    fn docs_round_trip_through_the_local_index() {
+        let index = mem("docs_round_trip");
+        let v = Version::parse("1.2.0").unwrap();
+        assert_eq!(index.docs("acme/pkg", &v).unwrap(), None);
+        index
+            .put_docs("acme/pkg", &v, "{\"schema\":1}")
+            .expect("put");
+        assert_eq!(
+            index.docs("acme/pkg", &v).unwrap().as_deref(),
+            Some("{\"schema\":1}")
+        );
+        index
+            .put_docs("acme/pkg", &v, "{\"schema\":1,\"modules\":[]}")
+            .expect("re-put");
+        assert_eq!(
+            index.docs("acme/pkg", &v).unwrap().as_deref(),
+            Some("{\"schema\":1,\"modules\":[]}")
+        );
+        // Another version's docs are independent.
+        let v2 = Version::parse("2.0.0").unwrap();
+        assert_eq!(index.docs("acme/pkg", &v2).unwrap(), None);
     }
 
     #[test]

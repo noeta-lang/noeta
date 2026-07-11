@@ -56,6 +56,17 @@ noeta doc [OPTIONS] <FILE>
 
 A module that declares a `namespace` (a package module) documents its `pub` API only; a bare entry script documents every top-level declaration. Generation works from a bare parse — a sibling that fails to parse is skipped with a note, never fatal.
 
+### Docs on the registry
+
+`noeta publish` generates the package's `docs.json` and stores it **with the release** (skip with `--no-docs`; a docs failure warns, never blocks a publish). Fetch any published package's docs back:
+
+```console
+$ noeta doc --package acme/greeter            # highest version — docs.json to stdout
+$ noeta doc --package acme/greeter@0.3.0 --out docs/   # pinned — render the Markdown tree
+```
+
+Stored docs are *advisory metadata*, not provenance: unsigned, last-wins on re-publish, and a hosted registry may regenerate them from source itself (the docs.rs model) rather than trust the upload.
+
 The only flag is `--target <NAME>`, which gates extraction on the `doc` tier being live in that build target.
 
 ---

@@ -34,7 +34,7 @@ const SCHEMA: u32 = 1;
 pub fn generate(entry: &Path, out: &Path) -> Result<Generated, String> {
     let workspace = noeta_loader::read_workspace(entry)
         .map_err(|e| format!("cannot read {}: {e}", entry.display()))?;
-    let package = package_meta(entry);
+    let package = package_meta(entry.parent().unwrap_or_else(|| Path::new(".")));
 
     // Parse each module independently: docs and signatures are per-file facts (adjacency never
     // crosses a file), and a broken sibling must not take the whole artifact down.
@@ -67,9 +67,113 @@ pub fn generate(entry: &Path, out: &Path) -> Result<Generated, String> {
     })
 }
 
-/// The `[package]` identity of the manifest governing `entry`, if any.
-fn package_meta(entry: &Path) -> Option<(String, String)> {
-    let dir = entry.parent()?;
+/// Build the documentation artifact for the **package** rooted at `dir` — every `.noe` file,
+/// sorted by name (no entry-file concept: a package's modules are peers) — returning the
+/// `docs.json` text. The `noeta publish` producer: nothing is written to disk, and the sorted
+/// order keeps the artifact deterministic.
+pub fn package_docs_json(dir: &Path) -> Result<(String, Generated), String> {
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "noe"))
+        .collect();
+    paths.sort();
+    let mut modules = Vec::new();
+    let mut skipped = Vec::new();
+    for path in &paths {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            skipped.push(path.display().to_string());
+            continue;
+        };
+        let source = Source::new(SourceId::FIRST, path.display().to_string(), text);
+        match module_docs(&source) {
+            Some(m) => modules.push(m),
+            None => skipped.push(basename(source.name()).to_string()),
+        }
+    }
+    let json = docs_json(&package_meta(dir), &modules);
+    Ok((
+        format!("{json:#}\n"),
+        Generated {
+            modules: modules.len(),
+            decls: modules.iter().map(|m| m.decl_count()).sum(),
+            skipped,
+        },
+    ))
+}
+
+/// Render the Markdown tree from a stored `docs.json` (the registry-fetch path: `noeta doc
+/// --package … --out DIR`) into `out`, alongside a copy of the artifact itself. The inverse of
+/// [`generate`]'s emit step, working purely from the schema — no source needed.
+pub fn render_json_to(out: &Path, docs_json_text: &str) -> Result<Generated, String> {
+    let doc: serde_json::Value =
+        serde_json::from_str(docs_json_text).map_err(|e| format!("corrupt docs.json: {e}"))?;
+    let schema = doc["schema"].as_u64().unwrap_or(0);
+    if schema != SCHEMA as u64 {
+        return Err(format!(
+            "docs.json schema {schema} is not the supported {SCHEMA}"
+        ));
+    }
+    let package = doc["package"].as_object().and_then(|p| {
+        Some((
+            p.get("name")?.as_str()?.to_string(),
+            p.get("version")?.as_str()?.to_string(),
+        ))
+    });
+    let mut modules = Vec::new();
+    for m in doc["modules"].as_array().into_iter().flatten() {
+        let file = m["file"].as_str().unwrap_or("module.noe").to_string();
+        let items = m["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                if let Some(text) = item.get("section").and_then(|s| s.as_str()) {
+                    return Some(Item::Section(text.to_string()));
+                }
+                Some(Item::Decl(DeclDocs {
+                    kind: match item.get("kind")?.as_str()? {
+                        "fn" => "fn",
+                        "struct" => "struct",
+                        "class" => "class",
+                        "enum" => "enum",
+                        _ => return None,
+                    },
+                    name: item.get("name")?.as_str()?.to_string(),
+                    signature: item.get("signature")?.as_str()?.to_string(),
+                    doc: item.get("doc").and_then(|d| d.as_str()).map(str::to_string),
+                    public: item.get("public").and_then(|p| p.as_bool()).unwrap_or(true),
+                }))
+            })
+            .collect();
+        modules.push(ModuleDocs {
+            slug: file.trim_end_matches(".noe").to_string(),
+            file,
+            namespace: m["namespace"].as_str().map(str::to_string),
+            doc: m["doc"].as_str().map(str::to_string),
+            items,
+        });
+    }
+    std::fs::create_dir_all(out).map_err(|e| format!("cannot create {}: {e}", out.display()))?;
+    std::fs::write(out.join("docs.json"), docs_json_text).map_err(|e| e.to_string())?;
+    std::fs::write(out.join("index.md"), index_markdown(&package, &modules))
+        .map_err(|e| e.to_string())?;
+    for module in &modules {
+        std::fs::write(
+            out.join(format!("{}.md", module.slug)),
+            module_markdown(module),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(Generated {
+        modules: modules.len(),
+        decls: modules.iter().map(|m| m.decl_count()).sum(),
+        skipped: Vec::new(),
+    })
+}
+
+/// The `[package]` identity of the manifest governing `dir`, if any.
+fn package_meta(dir: &Path) -> Option<(String, String)> {
     let path = noeta_pm::manifest::find(dir)?;
     let text = std::fs::read_to_string(&path).ok()?;
     let manifest = noeta_pm::manifest::Manifest::parse(&text).ok()?;

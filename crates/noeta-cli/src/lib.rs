@@ -158,8 +158,14 @@ enum Command {
     /// Extract a program's `@doc { … }` text blocks to stdout, or — with `--out` — generate the
     /// package's documentation artifact (a registry-ready `docs.json` plus a Markdown tree).
     Doc {
-        /// Path to a `.noe` file.
-        file: PathBuf,
+        /// Path to a `.noe` file. Omit with `--package` to fetch a published package's docs.
+        file: Option<PathBuf>,
+        /// Fetch a **published** package's stored documentation from the registry instead of
+        /// reading local source: `company/package` (highest published version) or
+        /// `company/package@1.2.0`. Prints the `docs.json` to stdout; with `--out`, writes it and
+        /// renders the Markdown tree.
+        #[arg(long, value_name = "NAME[@VERSION]", conflicts_with = "file")]
+        package: Option<String>,
         /// Generate the documentation artifact into this directory instead of extracting to
         /// stdout: `docs.json` (schema-versioned, keyed by the package's `[package]` identity —
         /// the canonical form a registry indexes) plus `index.md` and one Markdown page per
@@ -377,6 +383,11 @@ enum Command {
         /// the code instead (SSH sessions, containers).
         #[arg(long, requires = "interactive")]
         oob: bool,
+        /// Skip generating and uploading the release's documentation artifact (`docs.json`). By
+        /// default docs ride along with the release; a docs failure never blocks the publish
+        /// (it degrades to a warning).
+        #[arg(long)]
+        no_docs: bool,
     },
     /// Report the dependency tree's **trust footprint** (package-manager Phase 4): every resolved
     /// dependency, its source, and which ones run **native code** or contribute **CLI commands** —
@@ -524,7 +535,12 @@ pub fn run_cli(
             max_regress,
             &target,
         ),
-        Command::Doc { file, out, target } => cmd_doc(&file, &out, &target),
+        Command::Doc {
+            file,
+            package,
+            out,
+            target,
+        } => cmd_doc(&file, &package, &out, &target),
         Command::Build {
             file,
             out,
@@ -581,7 +597,8 @@ pub fn run_cli(
             key,
             interactive,
             oob,
-        } => cmd_publish(&git, tag.as_deref(), key, interactive, oob),
+            no_docs,
+        } => cmd_publish(&git, tag.as_deref(), key, interactive, oob, no_docs),
         Command::Audit { path } => cmd_audit(&path),
         Command::Key { action } => cmd_key(&action),
     }
@@ -689,6 +706,7 @@ fn cmd_publish(
     force_key: bool,
     interactive: bool,
     oob: bool,
+    no_docs: bool,
 ) -> ExitCode {
     let manifest_path = match locate_manifest() {
         Ok(p) => p,
@@ -841,6 +859,28 @@ fn cmd_publish(
     match index.publish(&name, &release) {
         Ok(()) => {
             println!("published `{name}` {version} → {git}#{tag} ({sha}) [{provenance_tag}]");
+            // Docs ride along (docs-ingestion follow-up): generate the artifact from the package
+            // dir and store it with the release. Advisory metadata — a docs failure warns, never
+            // blocks a publish that already succeeded.
+            if !no_docs {
+                let pkg_dir = manifest_path
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from("."));
+                match docgen::package_docs_json(&pkg_dir) {
+                    Ok((docs_json, done)) => match index.put_docs(&name, &version, &docs_json) {
+                        Ok(()) => println!(
+                            "docs uploaded ({} module{}, {} declaration{})",
+                            done.modules,
+                            plural(done.modules),
+                            done.decls,
+                            plural(done.decls),
+                        ),
+                        Err(err) => eprintln!("lang: warning: docs not uploaded: {err}"),
+                    },
+                    Err(err) => eprintln!("lang: warning: docs not generated: {err}"),
+                }
+            }
             ExitCode::SUCCESS
         }
         Err(err) => {
@@ -4167,7 +4207,103 @@ fn fmt_per_iter(ns: f64) -> String {
 /// HTML-comment header noting its source location — valid markdown that renders to nothing. The
 /// program is not type-checked or run; doc extraction works on a parse alone, so docs can be pulled
 /// from work-in-progress code.
-fn cmd_doc(file: &std::path::Path, out: &Option<PathBuf>, target: &Option<String>) -> ExitCode {
+/// Fetch a published package's stored documentation artifact from the registry: `name` picks the
+/// highest published version, `name@1.2.0` an exact one. Prints the `docs.json` to stdout, or —
+/// with `--out` — writes it and renders the Markdown tree from it (no source needed).
+fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
+    let (name, version) = match spec.split_once('@') {
+        Some((n, v)) => match semver::Version::parse(v) {
+            Ok(version) => (n.to_string(), Some(version)),
+            Err(err) => {
+                eprintln!("lang: `{v}` is not a version: {err}");
+                return ExitCode::from(2);
+            }
+        },
+        None => (spec.to_string(), None),
+    };
+    let index = match registry::open_default() {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    let version = match version {
+        Some(v) => v,
+        None => {
+            // Highest published version, matching how registry resolution selects.
+            let mut releases = match index.releases(&name) {
+                Ok(r) => r,
+                Err(err) => {
+                    eprintln!("lang: {err}");
+                    return ExitCode::from(1);
+                }
+            };
+            releases.sort_by(|a, b| b.version.cmp(&a.version));
+            match releases.first() {
+                Some(r) => r.version.clone(),
+                None => {
+                    eprintln!("lang: registry has no package `{name}`");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+    };
+    let docs = match index.docs(&name, &version) {
+        Ok(Some(docs)) => docs,
+        Ok(None) => {
+            eprintln!("lang: no docs stored for `{name}@{version}`");
+            return ExitCode::from(1);
+        }
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    match out {
+        Some(dir) => match docgen::render_json_to(dir, &docs) {
+            Ok(done) => {
+                println!(
+                    "rendered `{name}@{version}` docs ({} module{}, {} declaration{}) → {}",
+                    done.modules,
+                    plural(done.modules),
+                    done.decls,
+                    plural(done.decls),
+                    dir.display(),
+                );
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("lang: {err}");
+                ExitCode::from(1)
+            }
+        },
+        None => {
+            print!("{docs}");
+            let _ = io::stdout().flush();
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+fn cmd_doc(
+    file: &Option<PathBuf>,
+    package: &Option<String>,
+    out: &Option<PathBuf>,
+    target: &Option<String>,
+) -> ExitCode {
+    // `--package`: the registry-fetch path — a published release's stored artifact, no local
+    // source involved.
+    if let Some(spec) = package {
+        return cmd_doc_package(spec, out);
+    }
+    let Some(file) = file else {
+        eprintln!(
+            "lang: `noeta doc` needs a `.noe` file (or `--package <NAME>` for published docs)"
+        );
+        return ExitCode::from(2);
+    };
+    let file = file.as_path();
     if let Some(code) = compose::maybe_delegate(file) {
         return code;
     }
