@@ -17,6 +17,9 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta mcp`](Editor-and-AI-Tooling) | The agent-native MCP server, over stdio (for AI tooling; see [Editor & AI Tooling](Editor-and-AI-Tooling)). |
 | [`noeta profile`](Profiling) | Profile a program — a hot-function table or a flamegraph. |
 | [`noeta fmt`](#noeta-fmt) | Format `.noe` source into the canonical style (files/dirs, `--check`, `--stdin`). |
+| [`noeta publish`](#noeta-publish) | Publish a tagged release of your package to the registry, signed ([provenance](Package-Provenance)). |
+| [`noeta audit`](#noeta-audit) | Report the dependency tree's trust footprint — native/command grants and pinned provenance. |
+| [`noeta key`](#noeta-key) | Manage the Ed25519 signing key (the key-based provenance path). |
 
 Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
@@ -278,3 +281,45 @@ The opcode set and prototype/side-table layout are described in [The Virtual Mac
 - **[Documentation & Dev Tiers](Documentation-and-Tiers)** — `@doc` extraction, the tier model, and `noeta.toml` build profiles.
 
 All three accept `--profile <NAME>`, which acts as a **gate**: if the named `noeta.toml` profile does not make that tier live, the command prints a notice and no-ops with exit `0`. With no `--profile`, they always proceed.
+
+---
+
+## Packages: `publish`, `audit`, `key`
+
+Dependencies are declared in `noeta.toml` (`[dependencies]`, with elevated grants in `[trust]`) and resolve automatically on `run`/`build`/`check` — there is no separate install step; the resolved pins live in `noeta.lock` (commit it). These three verbs are the *publisher/consumer trust* surface. The trust model behind them — attestations, the two signing roots, pinning, downgrade protection — is documented on [Package Provenance](Package-Provenance).
+
+### `noeta publish`
+
+```
+noeta publish --git <URL> [--tag <TAG>] [--key | --interactive [--oob]]
+```
+
+Publishes the package in the current directory's `noeta.toml` to the registry: resolves `--tag` (default `v<version>`) to its commit SHA, pins that into the index entry, and **signs an attestation** binding *name + version → commit* so consumers can verify the release independently of trusting the registry.
+
+How it signs — an explicit flag wins, then the environment decides:
+
+| Situation | Result |
+|---|---|
+| `--key` | Force **key-based** Ed25519 signing with the key file — `[signed]`. |
+| `--interactive` | Keyless via a **browser sign-in** (GitHub/Google/Microsoft; your email is the identity). `--oob` prints the URL and prompts for a code instead of opening a browser. |
+| Ambient CI identity (GitHub Actions, GitLab, Buildkite) | **Keyless** (Sigstore), zero-config — `[keyless: <identity>]`. |
+| A key file exists (`NOETA_SIGNING_KEY` or `./noeta-signing.key`) | **Key-based** Ed25519 — `[signed]`. |
+| None of the above | `[UNSIGNED]` (resolves, but consumers can't verify it). |
+
+A published version is **immutable** — re-publishing the same version with different coordinates is rejected. A package with `path`/`git` dependencies is rejected at publish (consumers couldn't resolve them); depend via the registry. Publishing to the hosted registry needs `NOETA_REGISTRY_TOKEN`; `NOETA_REGISTRY_URL` selects it (otherwise the file-backed local index is used — offline development and tests).
+
+### `noeta audit`
+
+```
+noeta audit [PATH]
+```
+
+Answers *"what am I actually running?"* for the resolved dependency tree: every package and its source, which ones run **native code** or add **CLI commands** (the `[trust]` grants that make that authority active), and each scope's **pinned provenance trust root** — a signing key or a keyless identity. Resolution *enforces* verification, so a build that succeeds already means every signed release verified; the audit is the human-readable report of what that trust rests on.
+
+### `noeta key`
+
+```
+noeta key new [--out <PATH>]
+```
+
+Generates an Ed25519 keypair for the key-based signing path: writes the **private** key (default `noeta-signing.key`, mode 0600 — keep it out of git) and prints the **public** key to register with your registry scope. Only needed if you can't sign keyless (no CI identity and no browser); see [Package Provenance](Package-Provenance) for the trade-offs — keyless has nothing to steal and is publicly monitorable, a key file is neither.
