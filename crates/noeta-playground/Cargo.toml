@@ -15,6 +15,9 @@ crate-type = ["cdylib", "rlib"]
 noeta-db = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-fmt = { workspace = true }
+# The IDE engine (W2.3): hover/completion/definition/signature — the same DocumentStore the LSP
+# adapts over, so the playground answers are the LSP's answers.
+noeta-ide = { workspace = true }
 noeta-span = { workspace = true }
 noeta-vm = { workspace = true }
 serde_json = { workspace = true }

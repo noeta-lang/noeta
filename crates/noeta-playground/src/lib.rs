@@ -22,6 +22,9 @@
 //! change rather than a second pipeline.
 
 mod abi;
+mod ide;
+
+pub use ide::{complete_source, definition_source, hover_source, signature_source};
 
 use noeta_db::LangDatabase;
 use noeta_span::{Source, SourceId, SourceMap};
@@ -191,6 +194,50 @@ mod tests {
         assert_ne!(run["exit_code"], 0);
         let trace = run["trace"].as_str().expect("multi-frame abort renders");
         assert!(trace.contains("boom"), "trace: {trace}");
+    }
+
+    #[test]
+    fn ide_smarts_answer_over_the_persistent_store() {
+        // One buffer exercises all four smarts; positions are 0-based (line, UTF-16 character).
+        let text = "fn add(a: int, b: int): int {\n  return a + b;\n}\n\necho add(1, 2);";
+
+        // Hover over `a` in `a + b` (line 1, col 9): its type.
+        let hover = parsed(&hover_source(text, 1, 9));
+        assert_eq!(hover["found"], true);
+        assert_eq!(hover["type"], "int");
+
+        // Definition of `add` at the call site (line 4, col 5) → the declaration on line 0.
+        let def = parsed(&definition_source(text, 4, 5));
+        assert_eq!(def["found"], true);
+        assert_eq!(def["range"]["start"]["line"], 0);
+
+        // Signature help inside `add(1, |2)` (line 4, col 12): second parameter active.
+        let sig = parsed(&signature_source(text, 4, 12));
+        assert_eq!(sig["found"], true);
+        assert!(sig["label"].as_str().unwrap().contains("add("));
+        assert_eq!(sig["active"], 1);
+
+        // Identifier completion at top level offers the declared function.
+        let items = parsed(&complete_source(text, 4, 0));
+        let labels: Vec<_> = items["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["label"].as_str().unwrap().to_string())
+            .collect();
+        assert!(labels.iter().any(|l| l == "add"), "labels: {labels:?}");
+
+        // Member completion after a bare dot: a struct receiver offers its fields. This also
+        // proves the persistent store took the *changed* buffer (a different program than above).
+        let member_text = "class Counter { n: int\n  fn get(): int { return self.n }\n}\nc = Counter { n: 1 }\nv = c.";
+        let items = parsed(&complete_source(member_text, 4, 6));
+        let labels: Vec<_> = items["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["label"].as_str().unwrap().to_string())
+            .collect();
+        assert!(labels.iter().any(|l| l == "n"), "labels: {labels:?}");
     }
 
     #[test]

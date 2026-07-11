@@ -62,6 +62,67 @@ pub unsafe extern "C" fn noeta_fmt(ptr: *mut u8, len: usize) -> *mut u8 {
     pack(crate::fmt_source(&text))
 }
 
+/// [`crate::hover_source`] over the ABI: `line`/`character` are a zero-based UTF-16 position
+/// (the LSP convention — see `ide.rs`).
+///
+/// # Safety
+/// `ptr`/`len` must be a live [`noeta_alloc`] allocation holding UTF-8 (lossily decoded if not).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noeta_hover(
+    ptr: *mut u8,
+    len: usize,
+    line: u32,
+    character: u32,
+) -> *mut u8 {
+    let text = unsafe { take_input(ptr, len) };
+    pack(crate::hover_source(&text, line, character))
+}
+
+/// [`crate::definition_source`] over the ABI. Safety and position convention: as [`noeta_hover`].
+///
+/// # Safety
+/// `ptr`/`len` must be a live [`noeta_alloc`] allocation holding UTF-8 (lossily decoded if not).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noeta_definition(
+    ptr: *mut u8,
+    len: usize,
+    line: u32,
+    character: u32,
+) -> *mut u8 {
+    let text = unsafe { take_input(ptr, len) };
+    pack(crate::definition_source(&text, line, character))
+}
+
+/// [`crate::complete_source`] over the ABI. Safety and position convention: as [`noeta_hover`].
+///
+/// # Safety
+/// `ptr`/`len` must be a live [`noeta_alloc`] allocation holding UTF-8 (lossily decoded if not).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noeta_complete(
+    ptr: *mut u8,
+    len: usize,
+    line: u32,
+    character: u32,
+) -> *mut u8 {
+    let text = unsafe { take_input(ptr, len) };
+    pack(crate::complete_source(&text, line, character))
+}
+
+/// [`crate::signature_source`] over the ABI. Safety and position convention: as [`noeta_hover`].
+///
+/// # Safety
+/// `ptr`/`len` must be a live [`noeta_alloc`] allocation holding UTF-8 (lossily decoded if not).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noeta_signature(
+    ptr: *mut u8,
+    len: usize,
+    line: u32,
+    character: u32,
+) -> *mut u8 {
+    let text = unsafe { take_input(ptr, len) };
+    pack(crate::signature_source(&text, line, character))
+}
+
 /// Release a result buffer handed out by an entry point.
 ///
 /// # Safety

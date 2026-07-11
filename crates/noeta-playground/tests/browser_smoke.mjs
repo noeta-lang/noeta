@@ -16,13 +16,16 @@ import assert from 'node:assert/strict';
 const wasmPath = process.argv[2] ?? 'target/wasm32-unknown-unknown/wasm-release/noeta_playground.wasm';
 const bytes = await readFile(wasmPath);
 const { instance } = await WebAssembly.instantiate(bytes, {});
-const { memory, noeta_alloc, noeta_check, noeta_run, noeta_fmt, noeta_free_result } = instance.exports;
+const {
+  memory, noeta_alloc, noeta_check, noeta_run, noeta_fmt, noeta_free_result,
+  noeta_hover, noeta_definition, noeta_complete, noeta_signature,
+} = instance.exports;
 
-function call(entry, source) {
+function call(entry, source, ...extra) {
   const encoded = new TextEncoder().encode(source);
   const input = noeta_alloc(encoded.length);
   new Uint8Array(memory.buffer, input, encoded.length).set(encoded);
-  const out = entry(input, encoded.length); // consumes the input buffer
+  const out = entry(input, encoded.length, ...extra); // consumes the input buffer
   const len = new DataView(memory.buffer).getUint32(out, true);
   const json = new TextDecoder().decode(new Uint8Array(memory.buffer, out + 4, len));
   noeta_free_result(out);
@@ -58,5 +61,21 @@ assert.match(abortRun.trace, /boom/);
 const fmt = call(noeta_fmt, 'echo   "hello"  ;');
 assert.equal(fmt.ok, true);
 assert.match(fmt.formatted, /echo "hello"/);
+
+// The IDE smarts (W2.3 engine half) answer over the persistent DocumentStore — proving the
+// whole noeta-ide engine (salsa incrementality included) runs in a JS embedding. Positions are
+// zero-based (line, UTF-16 character), the LSP convention.
+const ideText = 'fn add(a: int, b: int): int {\n  return a + b;\n}\n\necho add(1, 2);';
+const hover = call(noeta_hover, ideText, 1, 9);
+assert.equal(hover.found, true);
+assert.equal(hover.type, 'int');
+const def = call(noeta_definition, ideText, 4, 5);
+assert.equal(def.found, true);
+assert.equal(def.range.start.line, 0);
+const sig = call(noeta_signature, ideText, 4, 12);
+assert.equal(sig.found, true);
+assert.equal(sig.active, 1);
+const completions = call(noeta_complete, ideText, 4, 0);
+assert.ok(completions.items.some((item) => item.label === 'add' && item.kind === 'function'));
 
 console.log('browser-engine smoke: all assertions passed ✓');
