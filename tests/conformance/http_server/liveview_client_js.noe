@@ -8,6 +8,8 @@
 // expect: stdout "true"
 // expect: stdout "true"
 // expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
 // expect: exit 0
 use std.http.server
 
@@ -17,3 +19,5 @@ echo js.contains("\"patch\"")
 echo js.contains("data-live")
 echo js.contains("data-live-click")
 echo js.contains("noetaLive")
+echo js.contains("\"reload\"")
+echo js.contains("noeta-live-overlay")

@@ -2080,8 +2080,16 @@ fn run_program_hot(
             return 1;
         }
     };
-    let mailbox: noeta_vm::HotSwapMailbox = std::sync::Arc::new(std::sync::Mutex::new(None));
-    watch::spawn_hot_watcher(entry_path.to_path_buf(), std::sync::Arc::clone(&mailbox));
+    let mailbox: noeta_vm::HotSwapMailbox = std::sync::Arc::new(noeta_vm::HotChannel::default());
+    // The wake lets the watcher rouse a *blocked* executor the moment it deposits (server-hmr
+    // L3) — otherwise an idle server (accept pending, no traffic) would only apply the swap at
+    // its next request (the W1 one-request lag).
+    let wake = std::sync::Arc::new(noeta_runtime::Notify::new());
+    watch::spawn_hot_watcher(
+        entry_path.to_path_buf(),
+        std::sync::Arc::clone(&mailbox),
+        std::sync::Arc::clone(&wake),
+    );
 
     let args: Vec<String> = std::env::args().collect();
     let app_id = p2p_app_namespace(&args);
@@ -2093,7 +2101,10 @@ fn run_program_hot(
         }
     };
     let executor: Box<dyn noeta_stdlib::Executor> = match noeta_runtime::RealExecutor::new() {
-        Ok(executor) => Box::new(executor),
+        Ok(mut executor) => {
+            executor.set_wake(wake);
+            Box::new(executor)
+        }
         Err(e) => {
             eprintln!("lang: cannot start the async executor: {e}");
             return 1;

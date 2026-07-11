@@ -340,6 +340,9 @@ pub fn http_ctx_dispatch(
             let mut in_flight: Vec<InFlight> = Vec::new();
             let mut accept_future: Option<Slot> = None;
             let mut closing = false;
+            // The swap generation as of the last iteration (server-hmr L3); a change means a hot
+            // swap landed inside `advance_tasks` and live ws clients must be told to reload.
+            let mut hot_gen = ctx.hot_swap_count();
             loop {
                 // Keep one accept in flight while the listener is open.
                 if !closing && accept_future.is_none() {
@@ -571,6 +574,8 @@ pub fn http_ctx_dispatch(
                 // (No external-wake term — matching the migrated arms: a serve loop stalled with
                 // no accept, no handler progress, and no timer is a genuine deadlock.)
                 progressed |= ctx.advance_tasks()?;
+                // A hot swap applies inside `advance_tasks`; deliver its events this iteration.
+                progressed |= hot_broadcast(ctx, &in_flight, &mut hot_gen)?;
                 if !progressed && ctx.advance_clock().is_none() {
                     return Err(panic_error(
                         "async deadlock: `http.serve` stalled with no pending work",
@@ -606,6 +611,52 @@ fn ws_close(ctx: &mut dyn NativeCtx, conn: u64) -> CtxResult<()> {
     let unit = ctx.drive(future)?;
     ctx.free(unit);
     Ok(())
+}
+
+/// Send one text frame on a websocket, loop-side (the HMR broadcast path, server-hmr L3) — the
+/// same driven leaf `Socket.send` uses, without a Socket value in hand.
+fn ws_send_text(ctx: &mut dyn NativeCtx, conn: u64, text: &str) -> CtxResult<()> {
+    let io = ctx.host().net_ws_send(conn, text.to_string());
+    let future = ctx.spawn_io(io);
+    let unit = ctx.drive(future)?;
+    ctx.free(unit);
+    Ok(())
+}
+
+/// Push the hot-reload events to every live websocket session (server-hmr L3), once per serve-loop
+/// iteration. A landed swap pushes `{"type":"reload"}` and **closes** each socket: a session is
+/// old code with old bindings — the client reloads the page and its reconnect lands in a fresh
+/// session compiled from the new version, whose snapshot carries the (preserved) signal state.
+/// A rejected edit pushes `{"type":"error",…}` for the browser overlay and keeps the socket open —
+/// the page still works, the developer is mid-edit. Send failures are ignored (the client may be
+/// mid-reload already); the generation/error reads are `0`/`None` outside hot mode, so this is
+/// inert everywhere but `noeta serve --watch`.
+fn hot_broadcast(
+    ctx: &mut dyn NativeCtx,
+    in_flight: &[InFlight],
+    hot_gen: &mut u64,
+) -> CtxResult<bool> {
+    let mut progressed = false;
+    let generation = ctx.hot_swap_count();
+    if generation != *hot_gen {
+        *hot_gen = generation;
+        progressed = true;
+        for f in in_flight.iter().filter(|f| f.ws) {
+            let _ = ws_send_text(ctx, f.conn, "{\"type\":\"reload\"}");
+            let _ = ws_close(ctx, f.conn);
+        }
+    }
+    if let Some(message) = ctx.take_hot_error() {
+        progressed = true;
+        let frame = format!(
+            "{{\"type\":\"error\",\"message\":{}}}",
+            crate::json::json_string(&message)
+        );
+        for f in in_flight.iter().filter(|f| f.ws) {
+            let _ = ws_send_text(ctx, f.conn, &frame);
+        }
+    }
+    Ok(progressed)
 }
 
 /// The request's `Sec-WebSocket-Key` header, if it carries one (server-hmr L0) — captured at

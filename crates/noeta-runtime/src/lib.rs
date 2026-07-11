@@ -23,6 +23,9 @@
 
 pub mod executor;
 pub use executor::RealExecutor;
+/// Re-exported for drivers that arm [`RealExecutor::set_wake`] (the CLI's hot-reload watcher)
+/// without taking their own tokio dependency.
+pub use tokio::sync::Notify;
 
 #[cfg(feature = "telemetry")]
 mod telemetry;

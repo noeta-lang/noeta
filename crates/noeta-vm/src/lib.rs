@@ -142,7 +142,25 @@ impl Debugger for EvalBudget {
 /// version — see the CLI's hot-serve driver).
 ///
 /// [`SwapPlan`]: noeta_compiler::hotswap::SwapPlan
-pub type HotSwapMailbox = Arc<std::sync::Mutex<Option<noeta_compiler::hotswap::SwapPlan>>>;
+pub type HotSwapMailbox = Arc<HotChannel>;
+
+/// The hot-reload channel shared by the watcher thread, the VM, and (through the [`NativeCtx`]
+/// accessors) the serve loop (server-hmr L3).
+///
+/// - `plan` — the swap mailbox (see [`HotSwapMailbox`]).
+/// - `error` — the last **rejected** edit's rendered diagnostics: the watcher deposits on a red
+///   check (replacing an older error; a green deposit clears it), the serve loop takes it and
+///   pushes an `error` frame to live LiveView clients for the browser overlay.
+/// - `swaps` — the swap **generation**: incremented after each successfully applied swap, so the
+///   serve loop can detect "a swap landed since my last iteration" and push `reload` to clients.
+///
+/// [`NativeCtx`]: noeta_stdlib::NativeCtx
+#[derive(Debug, Default)]
+pub struct HotChannel {
+    pub plan: std::sync::Mutex<Option<noeta_compiler::hotswap::SwapPlan>>,
+    pub error: std::sync::Mutex<Option<String>>,
+    pub swaps: std::sync::atomic::AtomicU64,
+}
 
 /// What the VM does after consulting the [`Debugger`] for an instruction.
 #[derive(Debug)]
@@ -6328,7 +6346,7 @@ impl<'m> Vm<'m> {
         let Some(mailbox) = &self.hot_mailbox else {
             return;
         };
-        let plan = match mailbox.try_lock() {
+        let plan = match mailbox.plan.try_lock() {
             Ok(mut slot) => slot.take(),
             Err(_) => None,
         };
@@ -6384,6 +6402,13 @@ impl<'m> Vm<'m> {
                     if what.is_empty() { "" } else { ": " },
                     what
                 );
+                // Bump the generation so the serve loop (via `NativeCtx::hot_swap_count`) pushes
+                // `reload` to live LiveView clients (server-hmr L3).
+                if let Some(mailbox) = &self.hot_mailbox {
+                    mailbox
+                        .swaps
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             }
             Err(Abort) => {
                 let msg = self.last_diag_message();

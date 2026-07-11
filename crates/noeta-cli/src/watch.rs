@@ -222,11 +222,19 @@ fn relevant_path(path: &Path) -> bool {
 /// process cannot absorb — a [`SwapBlocker`], a change to any *other* project file, an entry file
 /// that declares a `namespace` (its definitions get qualified identity the raw parse won't match)
 /// — exits the process with [`HOT_RESTART_CODE`] so the `--watch` wrapper restarts it.
-pub(crate) fn spawn_hot_watcher(entry: std::path::PathBuf, mailbox: noeta_vm::HotSwapMailbox) {
-    std::thread::spawn(move || hot_watcher(entry, mailbox));
+pub(crate) fn spawn_hot_watcher(
+    entry: std::path::PathBuf,
+    mailbox: noeta_vm::HotSwapMailbox,
+    wake: std::sync::Arc<noeta_runtime::Notify>,
+) {
+    std::thread::spawn(move || hot_watcher(entry, mailbox, wake));
 }
 
-fn hot_watcher(entry: std::path::PathBuf, mailbox: noeta_vm::HotSwapMailbox) {
+fn hot_watcher(
+    entry: std::path::PathBuf,
+    mailbox: noeta_vm::HotSwapMailbox,
+    wake: std::sync::Arc<noeta_runtime::Notify>,
+) {
     let entry_canon = entry.canonicalize().unwrap_or_else(|_| entry.clone());
     // The baseline: the source that is currently RUNNING (read back at spawn — the run thread
     // just compiled exactly this file).
@@ -310,19 +318,28 @@ fn hot_watcher(entry: std::path::PathBuf, mailbox: noeta_vm::HotSwapMailbox) {
             eprintln!("[hot] parse error — still serving the old version");
             continue;
         };
-        // The transactional gate: red code never swaps; the old version keeps serving.
+        // The transactional gate: red code never swaps; the old version keeps serving. The
+        // rendered diagnostics also ride the channel's error slot to live LiveView clients
+        // (the browser overlay, server-hmr L3) — waking the run thread to deliver promptly.
         let checked = noeta_check::check_all(&new_program);
         if !checked.diagnostics.is_empty() {
             let source = noeta_span::Source::new(noeta_span::SourceId::FIRST, "<entry>", &new_src);
+            let mut rendered = String::new();
             for d in &checked.diagnostics {
-                eprint!("{}", crate::render(&source, d));
+                let one = crate::render(&source, d);
+                eprint!("{one}");
+                rendered.push_str(&one);
             }
             eprintln!("[hot] check failed — still serving the old version");
+            if let Ok(mut slot) = mailbox.error.lock() {
+                *slot = Some(rendered);
+            }
+            wake.notify_one();
             continue;
         }
         // Diff against the last CONSUMED version; the lock makes "was the previous deposit
         // taken?" exact, so a replaced deposit still diffs from what actually runs.
-        let mut slot = match mailbox.lock() {
+        let mut slot = match mailbox.plan.lock() {
             Ok(slot) => slot,
             Err(_) => return,
         };
@@ -344,6 +361,12 @@ fn hot_watcher(entry: std::path::PathBuf, mailbox: noeta_vm::HotSwapMailbox) {
             noeta_compiler::hotswap::SwapDiff::Swap(plan) => {
                 *slot = Some(plan);
                 deposited = Some(new_src);
+                // A green deposit supersedes any pending red-check overlay, and the wake makes
+                // an idle server apply it now rather than at its next request.
+                if let Ok(mut err) = mailbox.error.lock() {
+                    err.take();
+                }
+                wake.notify_one();
             }
             noeta_compiler::hotswap::SwapDiff::NeedsRestart(blockers) => {
                 drop(slot);

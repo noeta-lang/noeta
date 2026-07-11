@@ -477,6 +477,11 @@ elements marked `data-live="name"` (strings verbatim, other values as JSON), sen
 connect, so recovery is total-state). It is a patch-applier, not a component framework — the
 server renders the page however it likes.
 
+Under `noeta serve --watch`, hot-reload events ride the same socket: a landed swap pushes
+`{"type":"reload"}` (the page reloads into the new code over the **preserved** signal state) and
+a rejected edit pushes `{"type":"error",…}`, rendered as a full-screen diagnostics overlay —
+see [The CLI](The-CLI) for the whole dev loop.
+
 ```noeta ignore
 async fn session(sock: Socket): bool {
     v = view()

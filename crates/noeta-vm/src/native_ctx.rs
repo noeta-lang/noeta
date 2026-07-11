@@ -645,6 +645,21 @@ impl NativeCtx for VmCtx<'_, '_> {
         });
         Ok(true)
     }
+
+    fn hot_swap_count(&mut self) -> u64 {
+        self.vm
+            .hot_mailbox
+            .as_ref()
+            .map(|m| m.swaps.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    fn take_hot_error(&mut self) -> Option<String> {
+        self.vm
+            .hot_mailbox
+            .as_ref()
+            .and_then(|m| m.error.lock().ok().and_then(|mut e| e.take()))
+    }
 }
 
 impl<'m> Vm<'m> {

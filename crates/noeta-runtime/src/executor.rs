@@ -41,6 +41,13 @@ pub struct RealExecutor {
     resolved: HashMap<u64, Result<NativeOut, StdError>>,
     /// Monotonic ticket source for `io`/`resolved`.
     next_io_id: u64,
+    /// An optional **external wake** (server-hmr L3): when set, a blocked `advance` also returns
+    /// on `notify_one()` from another thread — how the hot-reload watcher makes an *idle* server
+    /// (blocked awaiting its accept) apply a deposited swap immediately instead of at the next
+    /// request. A wake with nothing harvested still reports progress, so the caller's scheduler
+    /// loop runs its per-tick hooks; `Notify` stores at most one permit, so a spurious extra
+    /// iteration is bounded, not a spin.
+    wake: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 impl RealExecutor {
@@ -60,7 +67,14 @@ impl RealExecutor {
             tasks: tokio::task::JoinSet::new(),
             resolved: HashMap::new(),
             next_io_id: 0,
+            wake: None,
         })
+    }
+
+    /// Arm the external wake (see the field docs). Called once at construction time by drivers
+    /// that have an out-of-band event source (the hot-reload watcher thread).
+    pub fn set_wake(&mut self, wake: std::sync::Arc<tokio::sync::Notify>) {
+        self.wake = Some(wake);
     }
 
     /// Milliseconds of real time elapsed since construction.
@@ -100,21 +114,28 @@ impl Executor for RealExecutor {
         let next_timer = self.timers.iter().next().copied();
         if !self.tasks.is_empty() {
             let now = self.elapsed_ms();
-            let RealExecutor { runtime, tasks, .. } = self;
+            let RealExecutor {
+                runtime,
+                tasks,
+                wake,
+                ..
+            } = self;
+            let wake = wake.as_deref();
             let joined = match next_timer {
                 // A due timer must not be starved by pending IO: skip the block, clear it below.
                 Some(next) if next <= now => None,
-                // Wait for whichever completes first: any IO task, or the earliest deadline.
+                // Wait for whichever completes first: any IO task, the earliest deadline, or an
+                // external wake (a `None` join with real time passed reads as plain progress).
                 Some(next) => {
                     let wait = Duration::from_millis(next - now);
                     runtime.block_on(async {
-                        tokio::time::timeout(wait, tasks.join_next())
+                        tokio::time::timeout(wait, join_or_wake(tasks, wake))
                             .await
                             .ok()
                             .flatten()
                     })
                 }
-                None => runtime.block_on(tasks.join_next()),
+                None => runtime.block_on(join_or_wake(tasks, wake)),
             };
             if let Some(Ok((id, result))) = joined {
                 self.resolved.insert(id, result);
@@ -130,9 +151,17 @@ impl Executor for RealExecutor {
             // granularity, and `now` is re-read afterwards so a slightly-long sleep is accounted for).
             // The `Sleep` future must be *constructed inside* the runtime (it registers with the time
             // driver on creation), so build it in the async block rather than as a `block_on` argument.
+            // An external wake also ends the sleep early (the woken caller re-polls; not-yet-due
+            // timers stay pending below).
             let wait = Duration::from_millis(next - now);
-            self.runtime
-                .block_on(async move { tokio::time::sleep(wait).await });
+            let wake = self.wake.clone();
+            self.runtime.block_on(async move {
+                let sleep = tokio::time::sleep(wait);
+                match wake {
+                    Some(n) => tokio::select! { _ = sleep => {}, _ = n.notified() => {} },
+                    None => sleep.await,
+                }
+            });
         }
         let now = self.elapsed_ms();
         // Clear every deadline real time has now reached (not just `next`); the rest stay pending.
@@ -194,6 +223,22 @@ impl Executor for RealExecutor {
             }
         }
         found
+    }
+}
+
+/// Wait for the next completed task, or an external wake (server-hmr L3) — a woken wait returns
+/// `None`, indistinguishable from a timeout, which the caller reports as plain progress so its
+/// scheduler loop runs a tick.
+async fn join_or_wake(
+    tasks: &mut tokio::task::JoinSet<(u64, Result<NativeOut, StdError>)>,
+    wake: Option<&tokio::sync::Notify>,
+) -> Option<Result<(u64, Result<NativeOut, StdError>), tokio::task::JoinError>> {
+    match wake {
+        Some(n) => tokio::select! {
+            joined = tasks.join_next() => joined,
+            _ = n.notified() => None,
+        },
+        None => tasks.join_next().await,
     }
 }
 

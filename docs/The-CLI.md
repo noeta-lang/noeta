@@ -94,6 +94,41 @@ hello
 
 ---
 
+## `noeta serve` and `--watch`
+
+`noeta serve app.noe --port 8080` serves the file's top-level `fn fetch(req: Request): Response`
+handler (see the `http.server` section of [Standard Library Modules](Standard-Library-Modules));
+the app defines the handler and must **not** call `server.serve(...)` itself — the command runs
+the file's top-level setup, then drives the handler on the given port.
+
+`--watch` works on **any** command (`noeta run --watch`, `noeta test --watch`, …): a file watcher
+restarts the command on change — with the startup cache, a restart is a few milliseconds.
+
+`noeta serve --watch` upgrades from restarts to **in-process hot reload**. On each save of the
+entry file the watcher parses, type-checks (**transactionally** — red code never swaps; the old
+version keeps serving and the diagnostics go to the terminal *and* to connected LiveView clients
+as an error overlay), diffs against the running version, and swaps the changed definitions into
+the live server. The state rule is the language behavior to know:
+
+- **Reactive state survives edits** — an unchanged `signal(...)`/`cell`/`synced_signal` binding
+  keeps its value across the swap; effects are disposed and re-created by the new version.
+- **Plain state re-initializes** — ordinary top-level bindings are re-run from the new source.
+  State that must survive belongs in a signal.
+
+Connected LiveView clients (the bundled `server.liveview_js()` shim) are told over their own
+websocket: a landed swap pushes `{"type":"reload"}` and closes the socket — the page reloads and
+its fresh session snapshots the *preserved* signal state, so the browser view carries the same
+counter through the edit; a rejected edit pushes `{"type":"error",…}`, which the shim renders as
+a full-screen diagnostics overlay, cleared by the next good frame. Swaps apply immediately even
+when the server is idle (the watcher wakes the blocked executor).
+
+Changes the live process cannot absorb — a type-layout or signature change, an edit to another
+project file, a namespaced entry — fall back to a **full restart**, automatically. After a
+restart, an open browser page reconnects and re-syncs state but keeps its old markup until
+refreshed (the reload push needs a live server to send it).
+
+---
+
 ## The startup cache
 
 `noeta run`, `dump`, and `build` re-lex, parse, type-check, and compile the source on every invocation. For a large program that front-end work dominates startup (≈120 ms on a 6000-line file — around 95 % of wall time). So the toolchain **caches the compiled bytecode**: the first run of a file compiles and stores it; subsequent runs of unchanged sources load the stored bytecode and skip the whole front-end (a ~17× startup win on that same file). It is **on by default** and requires no build step — a plain `noeta run app.noe` populates and reuses it.
