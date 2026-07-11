@@ -38,6 +38,8 @@ Keyless signing wraps them in an [in-toto Statement](https://in-toto.io) — sub
 
 ## Keyless signing (Sigstore)
 
+### From CI (ambient identity)
+
 Publishing from CI, there is nothing to configure:
 
 ```console
@@ -51,6 +53,22 @@ generates an ephemeral P-256 key, gets a ~10-minute certificate for it from **Fu
 signature in **Rekor** (a public, append-only transparency log), assembles the bundle, verifies
 its own bundle end-to-end, and publishes. The ephemeral key never touches disk and is gone when
 the command exits.
+
+### From a laptop (interactive browser login)
+
+No CI identity? Sign in interactively — Sigstore runs a public OAuth frontend, so there is
+still nothing to register:
+
+```console
+$ noeta publish --git … --tag … --interactive
+Opening browser for authentication...
+```
+
+Your browser opens Sigstore's login (GitHub, Google, or Microsoft; PKCE-protected), and the
+certified identity is your **email address** — that's what consumers pin. On a headless machine
+(SSH, container) add `--oob`: the CLI prints the sign-in URL to open anywhere and prompts for
+the verification code the page shows. Same ephemeral key, same transparency log, same
+guarantees as the CI flow.
 
 Consumers verify the bundle **fully offline** — no Rekor round-trip:
 
@@ -124,3 +142,4 @@ release verified.
 | `NOETA_SIGNING_KEY` | Path to the Ed25519 private key (key path) |
 | `NOETA_SIGSTORE_TRUST_ROOT` | Path to a `trusted_root.json` overriding the embedded snapshot |
 | `NOETA_FULCIO_URL` / `NOETA_REKOR_URL` | Override both signing endpoints together (private Sigstore deployment or staging; default: production sigstore.dev) |
+| `NOETA_OIDC_URL` | Override the interactive login's OAuth provider (default: `oauth2.sigstore.dev/auth`) |

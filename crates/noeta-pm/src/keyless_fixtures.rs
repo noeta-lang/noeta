@@ -108,25 +108,94 @@ impl TestSigstore {
         .to_string()
     }
 
-    /// The mock **GitHub Actions token endpoint** response: an (unsigned) OIDC JWT asserting
-    /// this fixture's issuer/identity. Fulcio is what vouches for token authenticity in the real
-    /// flow, and here the mock Fulcio is ours — the signature is never checked by the client.
-    pub fn github_token_response(&self) -> String {
+    /// An (unsigned) OIDC JWT asserting this fixture's issuer/identity. Fulcio is what vouches
+    /// for token authenticity in the real flow, and here the mock Fulcio is ours — the signature
+    /// is never checked by the client. An email identity is asserted as the `email` claim
+    /// (Dex-style interactive login); anything else as the subject (CI-style).
+    pub fn fake_jwt(&self) -> String {
         let b64url = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         let header = b64url(br#"{"alg":"none","typ":"JWT"}"#);
         let now = unix_now();
-        let payload = b64url(
-            serde_json::json!({
-                "iss": self.issuer,
-                "sub": self.identity,
-                "aud": "sigstore",
-                "iat": now - 30,
-                "exp": now + 600,
-            })
-            .to_string()
-            .as_bytes(),
-        );
-        serde_json::json!({ "value": format!("{header}.{payload}.unsigned") }).to_string()
+        let mut claims = serde_json::json!({
+            "iss": self.issuer,
+            "sub": self.identity,
+            "aud": "sigstore",
+            "iat": now - 30,
+            "exp": now + 600,
+        });
+        if self.identity.contains('@') {
+            claims["email"] = self.identity.clone().into();
+            claims["email_verified"] = true.into();
+        }
+        format!(
+            "{header}.{}.unsigned",
+            b64url(claims.to_string().as_bytes())
+        )
+    }
+
+    /// The mock **GitHub Actions token endpoint** response wrapping [`TestSigstore::fake_jwt`].
+    pub fn github_token_response(&self) -> String {
+        serde_json::json!({ "value": self.fake_jwt() }).to_string()
+    }
+
+    /// The mock **OIDC provider** (K6, the interactive login): the authorization-code flow with
+    /// **real PKCE enforcement**, stateless — the issued code encodes the challenge + state, and
+    /// the token exchange recomputes `b64url(sha256(verifier))` against it. `GET /auth` plays
+    /// the login page (returning the code as JSON where a browser would display it);
+    /// `POST /token` exchanges it for an ID token.
+    pub fn handle_oidc(&self, method: &str, path: &str, body: &str) -> (u16, String) {
+        if method == "GET" && path.contains("/auth") {
+            let query: std::collections::BTreeMap<String, String> = path
+                .split_once('?')
+                .map(|(_, q)| q)
+                .unwrap_or_default()
+                .split('&')
+                .filter_map(|pair| pair.split_once('='))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let (Some(challenge), Some(state)) = (query.get("code_challenge"), query.get("state"))
+            else {
+                return (
+                    400,
+                    r#"{"error":"missing code_challenge/state"}"#.to_string(),
+                );
+            };
+            if query.get("code_challenge_method").map(String::as_str) != Some("S256") {
+                return (400, r#"{"error":"only S256 supported"}"#.to_string());
+            }
+            return (
+                200,
+                serde_json::json!({ "code": format!("{challenge}.{state}") }).to_string(),
+            );
+        }
+        if method == "POST" && path.contains("/token") {
+            let form: std::collections::BTreeMap<String, String> = body
+                .split('&')
+                .filter_map(|pair| pair.split_once('='))
+                .map(|(k, v)| (k.to_string(), urldecode(v)))
+                .collect();
+            let (Some(code), Some(verifier)) = (form.get("code"), form.get("code_verifier")) else {
+                return (400, r#"{"error":"missing code/code_verifier"}"#.to_string());
+            };
+            let Some((challenge, _state)) = code.split_once('.') else {
+                return (400, r#"{"error":"malformed code"}"#.to_string());
+            };
+            let recomputed = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(sha256(verifier.as_bytes()));
+            if recomputed != *challenge {
+                return (400, r#"{"error":"PKCE verification failed"}"#.to_string());
+            }
+            return (
+                200,
+                serde_json::json!({
+                    "access_token": "mock-access-token",
+                    "token_type": "Bearer",
+                    "id_token": self.fake_jwt(),
+                })
+                .to_string(),
+            );
+        }
+        (404, r#"{"error":"unknown oidc endpoint"}"#.to_string())
     }
 
     /// The mock **Fulcio**: `POST /api/v2/signingCert` → a leaf certificate (Fulcio profile,
@@ -262,9 +331,16 @@ impl TestSigstore {
         // The Fulcio-profile extensions (sans SCT).
         let ku = KeyUsage(KeyUsages::DigitalSignature.into());
         let eku = ExtendedKeyUsage(vec![const_oid::db::rfc5280::ID_KP_CODE_SIGNING]);
-        let san = SubjectAltName(vec![GeneralName::UniformResourceIdentifier(
-            Ia5String::new(&self.identity).expect("identity is IA5"),
-        )]);
+        // Fulcio's SAN kind follows the identity: an email (interactive Dex login) is an
+        // rfc822Name, a workflow/CI identity a URI.
+        let san_name = if self.identity.contains('@') {
+            GeneralName::Rfc822Name(Ia5String::new(&self.identity).expect("identity is IA5"))
+        } else {
+            GeneralName::UniformResourceIdentifier(
+                Ia5String::new(&self.identity).expect("identity is IA5"),
+            )
+        };
+        let san = SubjectAltName(vec![san_name]);
         let issuer_ext = Extension {
             extn_id: FULCIO_ISSUER_OID,
             critical: false,
@@ -481,6 +557,31 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Minimal `application/x-www-form-urlencoded` value decoding (%XX + '+' → space) — enough for
+/// the token-exchange form fields the mock OIDC provider parses.
+fn urldecode(value: &str) -> String {
+    let mut out = Vec::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < bytes.len() => {
+                let hex_pair = &value[i + 1..i + 3];
+                if let Ok(byte) = u8::from_str_radix(hex_pair, 16) {
+                    out.push(byte);
+                    i += 2;
+                } else {
+                    out.push(b'%');
+                }
+            }
+            byte => out.push(byte),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -638,5 +739,135 @@ mod tests {
         // And the production trust root rejects it (the fixture CA is NOT sigstore.dev).
         let err = keyless::verify_bundle(&bundle, &digest, None).unwrap_err();
         assert!(err.contains("keyless verification failed"), "{err}");
+    }
+
+    /// A programmatic [`AuthCallback`]: "the user" fetches the auth URL itself (hitting the
+    /// mock provider's login page) and pastes back the code it returns — the whole OOB flow
+    /// with no stdin and no browser, PKCE enforced by the mock.
+    struct ScriptedLogin {
+        auth_url: std::sync::Mutex<Option<String>>,
+    }
+
+    impl sigstore_oidc::templates::HtmlTemplates for ScriptedLogin {
+        fn success_html(&self) -> &str {
+            "ok"
+        }
+        fn error_html(&self, error: &str) -> String {
+            error.to_string()
+        }
+    }
+
+    impl sigstore_oidc::oauth::AuthCallback for ScriptedLogin {
+        fn auth_url_ready(&self, url: &str, _mode: sigstore_oidc::oauth::AuthMode) {
+            *self.auth_url.lock().unwrap() = Some(url.to_string());
+        }
+
+        fn prompt_for_code(&self) -> std::io::Result<String> {
+            // Visit the login page like a browser would; the mock returns the code as JSON.
+            let url = self
+                .auth_url
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("auth URL announced");
+            let body = http_get(&url);
+            let page: serde_json::Value = serde_json::from_str(&body).expect("login page JSON");
+            Ok(page["code"].as_str().expect("code on page").to_string())
+        }
+
+        fn waiting_for_redirect(&self) {}
+        fn auth_complete(&self) {}
+    }
+
+    /// Plain-std HTTP GET against a 127.0.0.1 mock — returns the response body.
+    fn http_get(url: &str) -> String {
+        use std::io::{Read, Write};
+        let rest = url.strip_prefix("http://").expect("http mock URL");
+        let (host, path) = rest.split_once('/').expect("URL has a path");
+        let mut stream = std::net::TcpStream::connect(host).expect("connect mock");
+        write!(
+            stream,
+            "GET /{path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+        )
+        .expect("send request");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read response");
+        response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body.to_string())
+            .expect("response has a body")
+    }
+
+    /// The interactive login end-to-end (K6), hermetic: OAuth authorization-code flow with the
+    /// mock provider ENFORCING PKCE, an email identity (rfc822 SAN in the minted cert), then the
+    /// same Fulcio/Rekor publish and default-policy verification as the CI path.
+    #[test]
+    fn interactive_login_publish_then_verify_round_trips() {
+        let issuer_placeholder = "set-below";
+        let email = "maintainer@example.test";
+        // The OIDC mock needs to exist before we know its URL; the issuer inside the fake JWT
+        // is informational for this test (Fulcio stamps the fixture's configured issuer).
+        let sigstore = std::sync::Arc::new(TestSigstore::new(issuer_placeholder, email));
+        let oidc = {
+            let s = sigstore.clone();
+            spawn_mock(move |m, p, b| s.handle_oidc(m, p, b))
+        };
+        // Rebuild the fixture with the real issuer URL so JWT, cert extension and pin agree.
+        let sigstore = std::sync::Arc::new(TestSigstore::new(&oidc, email));
+        let oidc = {
+            let s = sigstore.clone();
+            spawn_mock(move |m, p, b| s.handle_oidc(m, p, b))
+        };
+        let fulcio = {
+            let s = sigstore.clone();
+            spawn_mock(move |m, p, b| s.handle_fulcio(m, p, b))
+        };
+        let rekor = {
+            let s = sigstore.clone();
+            spawn_mock(move |m, p, b| s.handle_rekor(m, p, b))
+        };
+
+        // "Sign in": the scripted user completes the OOB OAuth flow against the mock provider.
+        let login = ScriptedLogin {
+            auth_url: std::sync::Mutex::new(None),
+        };
+        let identity =
+            keyless::interactive_identity_at(Some(&oidc), login, true).expect("login succeeds");
+        assert_eq!(identity.identity(), email);
+
+        // Publish + verify exactly as the CI path does.
+        let version = semver::Version::new(2, 0, 0);
+        let attestation = Attestation {
+            name: "acme/imgfx",
+            version: &version,
+            sha: "b4e8d7c6",
+        };
+        let coords = GitCoords {
+            url: "https://github.com/acme/imgfx".to_string(),
+            tag: "v2.0.0".to_string(),
+            sha: "b4e8d7c6".to_string(),
+        };
+        let statement = keyless::publish_statement(&attestation, &coords);
+        let bundle = keyless::publish_bundle_at(statement.as_bytes(), identity, &fulcio, &rekor)
+            .expect("keyless signing succeeds");
+
+        let root = TrustedRoot::from_json(&sigstore.trusted_root_json()).unwrap();
+        let digest = keyless::attested_digest(&attestation);
+        let pin = keyless::IdentityPolicy {
+            issuer: sigstore.issuer.clone(),
+            identity: email.to_string(),
+        };
+        let verified =
+            keyless::verify_bundle_with_root(&bundle, &digest, Some(&pin), &root).unwrap();
+        assert_eq!(verified.identity, email);
+
+        // A wrong verifier is refused by the provider: PKCE is genuinely enforced.
+        let (status, body) = sigstore.handle_oidc(
+            "POST",
+            "/token",
+            "client_id=sigstore&code=bogus-challenge.state&code_verifier=wrong&grant_type=authorization_code&redirect_uri=x",
+        );
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains("PKCE"), "{body}");
     }
 }

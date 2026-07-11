@@ -175,6 +175,46 @@ pub fn ambient_identity() -> Result<Option<AmbientIdentity>, String> {
     Ok(token.map(AmbientIdentity))
 }
 
+/// Acquire an OIDC identity **interactively** (K6): the OAuth 2.0 authorization-code flow with
+/// PKCE against Sigstore's public OAuth frontend (`oauth2.sigstore.dev` — Dex fronting
+/// GitHub/Google/Microsoft logins; the certified identity is the **email**). Opens the browser
+/// and waits on a local redirect server; a headless environment (or `force_oob`) falls back to
+/// print-the-URL / paste-the-code. `NOETA_OIDC_URL` overrides the provider (tests, private
+/// deployments).
+pub fn interactive_identity(force_oob: bool) -> Result<AmbientIdentity, String> {
+    interactive_identity_with(sigstore_oidc::oauth::DefaultAuthCallback, force_oob)
+}
+
+/// [`interactive_identity`] with a custom UX callback — the seam hermetic tests drive the flow
+/// through programmatically (no stdin, no browser).
+pub fn interactive_identity_with(
+    callback: impl sigstore_oidc::oauth::AuthCallback,
+    force_oob: bool,
+) -> Result<AmbientIdentity, String> {
+    let oidc_url = std::env::var("NOETA_OIDC_URL").ok();
+    interactive_identity_at(oidc_url.as_deref(), callback, force_oob)
+}
+
+/// [`interactive_identity_with`] against an explicit provider (`None` = Sigstore's public
+/// OAuth) — bypasses the process-global env override, like [`publish_bundle_at`].
+pub fn interactive_identity_at(
+    oidc_url: Option<&str>,
+    callback: impl sigstore_oidc::oauth::AuthCallback,
+    force_oob: bool,
+) -> Result<AmbientIdentity, String> {
+    let config = match oidc_url {
+        Some(url) => sigstore_oidc::oauth::OAuthConfig::from_oidc_url(url),
+        None => sigstore_oidc::oauth::OAuthConfig::sigstore(),
+    };
+    let client = sigstore_oidc::oauth::OAuthClient::new(config);
+    let options = sigstore_oidc::oauth::AuthOptions { force_oob };
+    let runtime = publish_runtime()?;
+    let token = runtime
+        .block_on(client.auth_with_options(callback, options))
+        .map_err(|err| format!("interactive sign-in failed: {err}"))?;
+    Ok(AmbientIdentity(token))
+}
+
 /// Where a keyless publish sends its requests. Production sigstore.dev by default;
 /// `NOETA_FULCIO_URL` / `NOETA_REKOR_URL` override both together (tests, or a private Sigstore
 /// deployment — set both or neither).

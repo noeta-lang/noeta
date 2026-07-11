@@ -144,13 +144,28 @@ swappable.
   required, CI-dispatched) against `fulcio.sigstage.dev`/`rekor.sigstage.dev`, catching
   client↔service wire drift that hermetic fixtures can't.
 
+- **K6 — interactive browser OAuth publish (follow-on, user-requested). ✅ DONE.** The deferral
+  reason dissolved on inspection: Sigstore operates a public OAuth frontend
+  (`oauth2.sigstore.dev`, Dex fronting GitHub/Google/Microsoft — certified identity = email),
+  so no OAuth-app registration exists to defer for; `sigstore-oidc` ships the PKCE
+  authorization-code flow with browser + **OOB** (print-URL/paste-code) modes.
+  `noeta publish --interactive [--oob]` (`keyless::interactive_identity[_at/_with]`;
+  `NOETA_OIDC_URL` override; the UNSIGNED warning now points at `--interactive`). Fixtures
+  gained a mock OIDC provider with **real PKCE enforcement** (stateless: code encodes the
+  challenge) and email identities mint **rfc822Name SANs**. Hermetic tests: pm round trip
+  drives the OOB flow through a scripted `AuthCallback` (login → Fulcio → Rekor →
+  default-policy verify as email identity + a wrong-verifier PKCE rejection); CLI e2e plays
+  the human — reads the printed URL from a piped subprocess, visits it, types the code into
+  stdin — then a consumer resolve pins the email identity in `noeta.lock`.
+
 Each slice commits green (workspace tests + clippy + fmt).
 
-## Arc status: ✅ K0–K5 COMPLETE (2026-07-11, branch `keyless-signing`)
+## Arc status: ✅ K0–K6 COMPLETE (2026-07-11, branch `keyless-signing`)
 
 ## Deferred + surfaced (v-next)
 
-- Interactive browser OAuth publish (Sigstore's own OAuth endpoint; same seam).
+- ~~Interactive browser OAuth publish~~ — **landed as K6** (the deferral reason — an OAuth-app
+  registration — turned out not to exist: Sigstore operates the OAuth frontend).
 - TUF-based trust-root rotation (embedded snapshot until then).
 - Worker-side bundle storage/validation (separate repo; contract shipped here).
 - Log monitoring tooling (`noeta watch-scope`?) — the ecosystem-side detectability story.

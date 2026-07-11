@@ -324,8 +324,17 @@ enum Command {
         /// Force **key-based** signing even when an ambient OIDC identity (CI) is present.
         /// Default: keyless (Sigstore) when the environment carries an identity, else the key
         /// file, else unsigned.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "interactive")]
         key: bool,
+        /// Sign keyless via an **interactive browser login** (Sigstore's OAuth: GitHub, Google,
+        /// or Microsoft — the certified identity is your email). For publishing from a laptop,
+        /// where no ambient CI identity exists.
+        #[arg(long)]
+        interactive: bool,
+        /// With `--interactive`: skip opening a browser — print the sign-in URL and prompt for
+        /// the code instead (SSH sessions, containers).
+        #[arg(long, requires = "interactive")]
+        oob: bool,
     },
     /// Report the dependency tree's **trust footprint** (package-manager Phase 4): every resolved
     /// dependency, its source, and which ones run **native code** or contribute **CLI commands** —
@@ -506,7 +515,13 @@ pub fn run_cli(
             version.as_deref(),
         ),
         Command::Update => cmd_update(),
-        Command::Publish { git, tag, key } => cmd_publish(&git, tag.as_deref(), key),
+        Command::Publish {
+            git,
+            tag,
+            key,
+            interactive,
+            oob,
+        } => cmd_publish(&git, tag.as_deref(), key, interactive, oob),
         Command::Audit { path } => cmd_audit(&path),
         Command::Key { action } => cmd_key(&action),
     }
@@ -608,7 +623,13 @@ fn cmd_update() -> ExitCode {
 /// `noeta publish --git <url> [--tag <tag>]` — record this package's identity + version → git
 /// coordinates in the registry index (package-manager P2.5, client stub). The tag defaults to
 /// `v<version>`. Writes to the local/offline index; the hosted registry is operated separately.
-fn cmd_publish(git: &str, tag: Option<&str>, force_key: bool) -> ExitCode {
+fn cmd_publish(
+    git: &str,
+    tag: Option<&str>,
+    force_key: bool,
+    interactive: bool,
+    oob: bool,
+) -> ExitCode {
     let manifest_path = match locate_manifest() {
         Ok(p) => p,
         Err(code) => return code,
@@ -702,6 +723,17 @@ fn cmd_publish(git: &str, tag: Option<&str>, force_key: bool) -> ExitCode {
     };
     let ambient = if force_key {
         None
+    } else if interactive {
+        // Interactive browser login (K6): Sigstore's OAuth signs you in with GitHub/Google/
+        // Microsoft and the certified identity is the account email. `--oob` prints the URL
+        // and prompts for the code instead of opening a browser.
+        match noeta_pm::keyless::interactive_identity(oob) {
+            Ok(identity) => Some(identity),
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(1);
+            }
+        }
     } else {
         match noeta_pm::keyless::ambient_identity() {
             Ok(identity) => identity,
@@ -893,7 +925,8 @@ fn provenance_sign(
     if !key_path.is_file() {
         eprintln!(
             "lang: no signing key at `{}` — publishing UNSIGNED (consumers can't verify provenance). \
-             Run `noeta key new` and set NOETA_SIGNING_KEY to sign.",
+             Sign keyless with `noeta publish --interactive` (browser login), or run \
+             `noeta key new` and set NOETA_SIGNING_KEY.",
             key_path.display()
         );
         return Ok(None);

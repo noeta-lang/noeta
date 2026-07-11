@@ -2633,6 +2633,165 @@ fn keyless_trust_pins_downgrades_and_switches_are_enforced_end_to_end() {
 }
 
 #[test]
+fn interactive_oob_publish_signs_keyless_end_to_end() {
+    // The interactive browser-login path (Phase 5, K6), driven the way a human drives OOB mode:
+    // the CLI prints the sign-in URL and prompts for a code; this test "is" the user — it visits
+    // the URL (the mock OIDC provider, PKCE enforced), reads the code off the page, and types it
+    // into the CLI's stdin. The publish then runs the same Fulcio/Rekor/bundle path as CI, and a
+    // consumer resolve pins the EMAIL identity.
+    if !git_available() {
+        return;
+    }
+    use noeta_pm::keyless_fixtures::{TestSigstore, spawn_mock};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::Arc;
+
+    const EMAIL: &str = "maintainer@example.test";
+    const ISSUER: &str = "https://oauth2.noeta.test";
+
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_keyless_interactive");
+    let _ = std::fs::remove_dir_all(&base);
+    let reg = base.join("registry");
+    let repo = base.join("greet_repo");
+    let app = base.join("app");
+    for d in [&reg, &repo, &app] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+
+    let sigstore = Arc::new(TestSigstore::new(ISSUER, EMAIL));
+    let oidc = {
+        let s = sigstore.clone();
+        spawn_mock(move |m, p, b| s.handle_oidc(m, p, b))
+    };
+    let fulcio = {
+        let s = sigstore.clone();
+        spawn_mock(move |m, p, b| s.handle_fulcio(m, p, b))
+    };
+    let rekor = {
+        let s = sigstore.clone();
+        spawn_mock(move |m, p, b| s.handle_rekor(m, p, b))
+    };
+    let trust_root = base.join("trusted_root.json");
+    std::fs::write(&trust_root, sigstore.trusted_root_json()).unwrap();
+
+    git_in(&["init", "-q"], &repo);
+    std::fs::write(
+        repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("m.noe"),
+        "namespace greet.core;\npub fn v(): int { return 1; }\n",
+    )
+    .unwrap();
+    git_in(&["add", "."], &repo);
+    git_in(&["commit", "-q", "-m", "r"], &repo);
+    git_in(&["tag", "v1.0.0"], &repo);
+
+    // Publish interactively (OOB), piping stdio so the test can play the user.
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("noeta"))
+        .current_dir(&repo)
+        .env(
+            "NOETA_CACHE_DIR",
+            concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+        )
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env_remove("NOETA_SIGNING_KEY")
+        .env_remove("GITHUB_ACTIONS")
+        .env("NOETA_OIDC_URL", &oidc)
+        .env("NOETA_FULCIO_URL", &fulcio)
+        .env("NOETA_REKOR_URL", &rekor)
+        .env("NOETA_SIGSTORE_TRUST_ROOT", &trust_root)
+        .args([
+            "publish",
+            "--git",
+            repo.to_str().unwrap(),
+            "--tag",
+            "v1.0.0",
+            "--interactive",
+            "--oob",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn noeta publish");
+
+    // Read the CLI's output until it announces the sign-in URL.
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let auth_url = loop {
+        let mut line = String::new();
+        assert_ne!(
+            stdout.read_line(&mut line).expect("read publish output"),
+            0,
+            "publish ended before printing the sign-in URL"
+        );
+        let trimmed = line.trim();
+        if trimmed.starts_with("http://") {
+            break trimmed.to_string();
+        }
+    };
+
+    // "Visit" the sign-in page: GET the auth URL against the mock provider, which enforces the
+    // PKCE parameters and shows the verification code.
+    let page = {
+        let rest = auth_url.strip_prefix("http://").unwrap();
+        let (host, path) = rest.split_once('/').unwrap();
+        let mut stream = std::net::TcpStream::connect(host).expect("connect mock oidc");
+        write!(
+            stream,
+            "GET /{path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response.split_once("\r\n\r\n").unwrap().1.to_string()
+    };
+    let code = serde_json::from_str::<serde_json::Value>(&page).expect("login page JSON")["code"]
+        .as_str()
+        .expect("code on page")
+        .to_string();
+
+    // Type the code at the prompt.
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{code}\n").as_bytes())
+        .unwrap();
+
+    let mut rest_out = String::new();
+    stdout.read_to_string(&mut rest_out).unwrap();
+    let status = child.wait().expect("publish exits");
+    assert!(status.success(), "publish failed: {rest_out}");
+    assert!(
+        rest_out.contains(&format!("keyless: {EMAIL}")),
+        "expected keyless email identity in: {rest_out}"
+    );
+
+    // The consumer verifies and pins the email identity.
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 42;\n").unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_SIGSTORE_TRUST_ROOT", &trust_root)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout("42\n");
+    let lock = std::fs::read_to_string(app.join("noeta.lock")).expect("lock written");
+    assert!(lock.contains(&format!("identity = \"{EMAIL}\"")), "{lock}");
+    assert!(lock.contains(&format!("issuer = \"{ISSUER}\"")), "{lock}");
+}
+
+#[test]
 fn keyless_publish_verifies_pins_and_defends_end_to_end() {
     // The POSITIVE keyless loop through the real CLI (Phase 5, K4): an ambient CI identity
     // publishes a release whose Sigstore bundle is minted by a hermetic in-process Fulcio + CT
