@@ -2551,11 +2551,13 @@ fn provenance_signs_verifies_and_pins_the_scope_key() {
         .success()
         .stdout(predicate::str::contains("public key"));
 
-    // Publish, signed (cwd = the package repo so it finds greet's manifest).
+    // Publish, signed (cwd = the package repo so it finds greet's manifest). GITHUB_ACTIONS is
+    // scrubbed so a CI run of this suite doesn't trip ambient keyless detection.
     lang()
         .current_dir(&repo)
         .env("NOETA_REGISTRY_DIR", &reg)
         .env("NOETA_SIGNING_KEY", &key)
+        .env_remove("GITHUB_ACTIONS")
         .args([
             "publish",
             "--git",
@@ -2595,6 +2597,412 @@ fn provenance_signs_verifies_and_pins_the_scope_key() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("changed"));
+}
+
+#[test]
+fn keyless_trust_pins_downgrades_and_switches_are_enforced_end_to_end() {
+    // The keyless trust model (Phase 5, K3) through the whole stack: the `noeta.lock` scope pin
+    // drives resolution. Negative paths only — they need no verifiable bundle (a *positive*
+    // keyless resolve is exercised with minted bundles in the K4 publish tests).
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_keyless_trust");
+    let _ = std::fs::remove_dir_all(&base);
+    let reg = base.join("registry");
+    let repo = base.join("greet_repo");
+    let app = base.join("app");
+    for d in [&reg, &repo, &app] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+
+    // A tagged package repo, published UNSIGNED (no signing key in the environment).
+    git_in(&["init", "-q"], &repo);
+    std::fs::write(
+        repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("m.noe"),
+        "namespace greet.core;\npub fn v(): int { return 1; }\n",
+    )
+    .unwrap();
+    git_in(&["add", "."], &repo);
+    git_in(&["commit", "-q", "-m", "r"], &repo);
+    git_in(&["tag", "v1.0.0"], &repo);
+    lang()
+        .current_dir(&repo)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env_remove("NOETA_SIGNING_KEY")
+        .env_remove("GITHUB_ACTIONS")
+        .args([
+            "publish",
+            "--git",
+            repo.to_str().unwrap(),
+            "--tag",
+            "v1.0.0",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("UNSIGNED"));
+
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 42;\n").unwrap();
+
+    // 1. Downgrade rejection: the scope is keyless-pinned in the lock, but the registry serves an
+    //    unsigned release — exactly what a compromised registry smuggling a forged release looks
+    //    like. The resolve must fail and name the defense.
+    std::fs::write(
+        app.join("noeta.lock"),
+        "version = 1\n\n[[scope]]\nname = \"acme\"\n\
+         issuer = \"https://token.actions.githubusercontent.com\"\n\
+         identity = \"https://github.com/acme/greet/.github/workflows/r.yaml@refs/heads/main\"\n",
+    )
+    .unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("downgrade"));
+
+    // 2. Keyless verification is live in the CLI: an unpinned consumer receiving a garbage bundle
+    //    must fail *in the verifier* (malformed bundle), not silently accept.
+    let _ = std::fs::remove_file(app.join("noeta.lock"));
+    let entry = reg.join("acme__greet.toml");
+    let text = std::fs::read_to_string(&entry).unwrap();
+    std::fs::write(&entry, format!("{text}bundle = \"{{}}\"\n")).unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Sigstore bundle"));
+
+    // 3. Root-switch rejection: a key-pinned scope served a keyless release. Never implicit —
+    //    any OIDC identity could otherwise take over a key-pinned scope.
+    std::fs::write(
+        app.join("noeta.lock"),
+        format!(
+            "version = 1\n\n[[scope]]\nname = \"acme\"\npublic_key = \"{}\"\n",
+            "b".repeat(64)
+        ),
+    )
+    .unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("never implicit"));
+}
+
+#[test]
+fn interactive_oob_publish_signs_keyless_end_to_end() {
+    // The interactive browser-login path (Phase 5, K6), driven the way a human drives OOB mode:
+    // the CLI prints the sign-in URL and prompts for a code; this test "is" the user — it visits
+    // the URL (the mock OIDC provider, PKCE enforced), reads the code off the page, and types it
+    // into the CLI's stdin. The publish then runs the same Fulcio/Rekor/bundle path as CI, and a
+    // consumer resolve pins the EMAIL identity.
+    if !git_available() {
+        return;
+    }
+    use noeta_pm::keyless_fixtures::{TestSigstore, spawn_mock};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::Arc;
+
+    const EMAIL: &str = "maintainer@example.test";
+    const ISSUER: &str = "https://oauth2.noeta.test";
+
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_keyless_interactive");
+    let _ = std::fs::remove_dir_all(&base);
+    let reg = base.join("registry");
+    let repo = base.join("greet_repo");
+    let app = base.join("app");
+    for d in [&reg, &repo, &app] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+
+    let sigstore = Arc::new(TestSigstore::new(ISSUER, EMAIL));
+    let oidc = {
+        let s = sigstore.clone();
+        spawn_mock(move |m, p, b| s.handle_oidc(m, p, b))
+    };
+    let fulcio = {
+        let s = sigstore.clone();
+        spawn_mock(move |m, p, b| s.handle_fulcio(m, p, b))
+    };
+    let rekor = {
+        let s = sigstore.clone();
+        spawn_mock(move |m, p, b| s.handle_rekor(m, p, b))
+    };
+    let trust_root = base.join("trusted_root.json");
+    std::fs::write(&trust_root, sigstore.trusted_root_json()).unwrap();
+
+    git_in(&["init", "-q"], &repo);
+    std::fs::write(
+        repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("m.noe"),
+        "namespace greet.core;\npub fn v(): int { return 1; }\n",
+    )
+    .unwrap();
+    git_in(&["add", "."], &repo);
+    git_in(&["commit", "-q", "-m", "r"], &repo);
+    git_in(&["tag", "v1.0.0"], &repo);
+
+    // Publish interactively (OOB), piping stdio so the test can play the user.
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("noeta"))
+        .current_dir(&repo)
+        .env(
+            "NOETA_CACHE_DIR",
+            concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+        )
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env_remove("NOETA_SIGNING_KEY")
+        .env_remove("GITHUB_ACTIONS")
+        .env("NOETA_OIDC_URL", &oidc)
+        .env("NOETA_FULCIO_URL", &fulcio)
+        .env("NOETA_REKOR_URL", &rekor)
+        .env("NOETA_SIGSTORE_TRUST_ROOT", &trust_root)
+        .args([
+            "publish",
+            "--git",
+            repo.to_str().unwrap(),
+            "--tag",
+            "v1.0.0",
+            "--interactive",
+            "--oob",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn noeta publish");
+
+    // Read the CLI's output until it announces the sign-in URL.
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let auth_url = loop {
+        let mut line = String::new();
+        assert_ne!(
+            stdout.read_line(&mut line).expect("read publish output"),
+            0,
+            "publish ended before printing the sign-in URL"
+        );
+        let trimmed = line.trim();
+        if trimmed.starts_with("http://") {
+            break trimmed.to_string();
+        }
+    };
+
+    // "Visit" the sign-in page: GET the auth URL against the mock provider, which enforces the
+    // PKCE parameters and shows the verification code.
+    let page = {
+        let rest = auth_url.strip_prefix("http://").unwrap();
+        let (host, path) = rest.split_once('/').unwrap();
+        let mut stream = std::net::TcpStream::connect(host).expect("connect mock oidc");
+        write!(
+            stream,
+            "GET /{path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response.split_once("\r\n\r\n").unwrap().1.to_string()
+    };
+    let code = serde_json::from_str::<serde_json::Value>(&page).expect("login page JSON")["code"]
+        .as_str()
+        .expect("code on page")
+        .to_string();
+
+    // Type the code at the prompt.
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{code}\n").as_bytes())
+        .unwrap();
+
+    let mut rest_out = String::new();
+    stdout.read_to_string(&mut rest_out).unwrap();
+    let status = child.wait().expect("publish exits");
+    assert!(status.success(), "publish failed: {rest_out}");
+    assert!(
+        rest_out.contains(&format!("keyless: {EMAIL}")),
+        "expected keyless email identity in: {rest_out}"
+    );
+
+    // The consumer verifies and pins the email identity.
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 42;\n").unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_SIGSTORE_TRUST_ROOT", &trust_root)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout("42\n");
+    let lock = std::fs::read_to_string(app.join("noeta.lock")).expect("lock written");
+    assert!(lock.contains(&format!("identity = \"{EMAIL}\"")), "{lock}");
+    assert!(lock.contains(&format!("issuer = \"{ISSUER}\"")), "{lock}");
+}
+
+#[test]
+fn keyless_publish_verifies_pins_and_defends_end_to_end() {
+    // The POSITIVE keyless loop through the real CLI (Phase 5, K4): an ambient CI identity
+    // publishes a release whose Sigstore bundle is minted by a hermetic in-process Fulcio + CT
+    // log + Rekor; a consumer resolves it, verifies the bundle offline under the DEFAULT policy
+    // against the matching trust root, and TOFU-pins the identity in `noeta.lock`; a later
+    // identity change is rejected.
+    if !git_available() {
+        return;
+    }
+    use noeta_pm::keyless_fixtures::{TestSigstore, spawn_mock};
+    use std::sync::Arc;
+
+    const IDENTITY: &str =
+        "https://github.com/acme/greet/.github/workflows/release.yaml@refs/heads/main";
+    const ISSUER: &str = "https://token.actions.githubusercontent.com";
+
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_keyless_publish");
+    let _ = std::fs::remove_dir_all(&base);
+    let reg = base.join("registry");
+    let repo = base.join("greet_repo");
+    let app = base.join("app");
+    for d in [&reg, &repo, &app] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+
+    // The hermetic Sigstore: mock Fulcio + Rekor + the GitHub Actions token endpoint, plus the
+    // trust root file that binds their public halves.
+    let sigstore = Arc::new(TestSigstore::new(ISSUER, IDENTITY));
+    let fulcio = {
+        let s = sigstore.clone();
+        spawn_mock(move |m, p, b| s.handle_fulcio(m, p, b))
+    };
+    let rekor = {
+        let s = sigstore.clone();
+        spawn_mock(move |m, p, b| s.handle_rekor(m, p, b))
+    };
+    let token_endpoint = {
+        let s = sigstore.clone();
+        spawn_mock(move |method, path, _| {
+            assert_eq!(method, "GET");
+            assert!(path.contains("audience=sigstore"), "path: {path}");
+            (200, s.github_token_response())
+        })
+    };
+    let trust_root = base.join("trusted_root.json");
+    std::fs::write(&trust_root, sigstore.trusted_root_json()).unwrap();
+
+    // A tagged package repo.
+    git_in(&["init", "-q"], &repo);
+    std::fs::write(
+        repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("m.noe"),
+        "namespace greet.core;\npub fn v(): int { return 1; }\n",
+    )
+    .unwrap();
+    git_in(&["add", "."], &repo);
+    git_in(&["commit", "-q", "-m", "r"], &repo);
+    git_in(&["tag", "v1.0.0"], &repo);
+
+    // Publish from "CI": the ambient GitHub Actions identity signs keyless. No signing key.
+    lang()
+        .current_dir(&repo)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env_remove("NOETA_SIGNING_KEY")
+        .env("GITHUB_ACTIONS", "true")
+        .env(
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+            format!("{token_endpoint}/token"),
+        )
+        .env("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "mock-runner-token")
+        .env("NOETA_FULCIO_URL", &fulcio)
+        .env("NOETA_REKOR_URL", &rekor)
+        .env("NOETA_SIGSTORE_TRUST_ROOT", &trust_root)
+        .args([
+            "publish",
+            "--git",
+            repo.to_str().unwrap(),
+            "--tag",
+            "v1.0.0",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("keyless: {IDENTITY}")));
+
+    // A consumer resolves it: the bundle verifies offline (default policy) and the identity is
+    // TOFU-pinned in the lock.
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 42;\n").unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_SIGSTORE_TRUST_ROOT", &trust_root)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout("42\n");
+    let lock = std::fs::read_to_string(app.join("noeta.lock")).expect("lock written");
+    assert!(lock.contains("[[scope]]"), "keyless pin written: {lock}");
+    assert!(
+        lock.contains(&format!("identity = \"{IDENTITY}\"")),
+        "{lock}"
+    );
+    assert!(lock.contains(&format!("issuer = \"{ISSUER}\"")), "{lock}");
+
+    // The audit names the pinned keyless identity.
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_SIGSTORE_TRUST_ROOT", &trust_root)
+        .args(["audit", app.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("keyless").and(predicate::str::contains(IDENTITY)));
+
+    // TOFU holds: a release later signed by a DIFFERENT identity (the registry re-serving a
+    // forged bundle) is rejected against the pin.
+    let pinned_elsewhere = lock.replace(
+        "acme/greet/.github/workflows/release.yaml",
+        "mallory/greet/.github/workflows/release.yaml",
+    );
+    std::fs::write(app.join("noeta.lock"), pinned_elsewhere).unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_SIGSTORE_TRUST_ROOT", &trust_root)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("identity mismatch"));
 }
 
 #[test]

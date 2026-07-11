@@ -49,17 +49,35 @@ pub struct Dep {
 }
 
 /// A published release (package-manager Phase 4, S5): a version, its git [`GitCoords`], the registry
-/// dependencies that version declares, and — when signed (Phase 4, #2) — the maintainer's Ed25519
-/// **signature** (hex) over the release's [`crate::provenance::Attestation`]. The `deps` let the
-/// resolver backtrack over ranges; the `signature` lets a consumer verify "version → commit" against
-/// the scope's public key rather than trusting the registry.
+/// dependencies that version declares, and — when signed — the release's provenance. The `deps` let
+/// the resolver backtrack over ranges; the provenance lets a consumer verify "version → commit"
+/// independently of trusting the registry, under one of two trust roots (Phase 4 #2 / Phase 5):
+/// a key-based `signature` **or** a keyless `bundle` — at most one (enforced at publish).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Release {
     pub version: Version,
     pub coords: GitCoords,
     pub deps: Vec<Dep>,
-    /// Hex Ed25519 signature over the attestation, or `None` for an unsigned (unverifiable) release.
+    /// Hex Ed25519 signature over the attestation (key trust root), or `None`.
     pub signature: Option<String>,
+    /// JSON Sigstore bundle over the same attestation (keyless trust root, Phase 5): a DSSE
+    /// envelope + Fulcio certificate + Rekor inclusion proof, verified offline. Or `None`.
+    pub bundle: Option<String>,
+}
+
+impl Release {
+    /// A release carries **at most one** trust root: `signature` (key) or `bundle` (keyless), never
+    /// both — two roots would make "which one did the consumer verify?" ambiguous and give a
+    /// downgrade attack a second surface. Both `None` = unsigned (allowed, unverified).
+    pub fn check_provenance_shape(&self) -> Result<(), String> {
+        if self.signature.is_some() && self.bundle.is_some() {
+            return Err(
+                "a release carries either a key signature or a keyless bundle, not both"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
 }
 
 /// The registry index contract: look up a package's published releases (each with its git coordinates
@@ -209,6 +227,7 @@ impl Index for LocalIndex {
                     },
                     deps,
                     signature: get("sig").map(str::to_string),
+                    bundle: get("bundle").map(str::to_string),
                 });
             }
         }
@@ -229,6 +248,7 @@ impl Index for LocalIndex {
     }
 
     fn publish(&self, name: &str, release: &Release) -> Result<(), String> {
+        release.check_provenance_shape()?;
         let mut releases = self.releases(name)?;
         if let Some(existing) = releases.iter().find(|r| r.version == release.version) {
             if existing == release {
@@ -251,6 +271,9 @@ impl Index for LocalIndex {
             text.push_str(&format!("sha = {}\n", quote(&r.coords.sha)));
             if let Some(sig) = &r.signature {
                 text.push_str(&format!("sig = {}\n", quote(sig)));
+            }
+            if let Some(bundle) = &r.bundle {
+                text.push_str(&format!("bundle = {}\n", quote(bundle)));
             }
             for dep in &r.deps {
                 text.push_str("\n[[version.deps]]\n");
@@ -324,6 +347,8 @@ struct WireVersion {
     deps: Vec<WireDep>,
     #[serde(default)]
     signature: Option<String>,
+    #[serde(default)]
+    bundle: Option<String>,
 }
 
 #[cfg(feature = "registry-http")]
@@ -407,6 +432,7 @@ impl Index for HttpIndex {
                 },
                 deps,
                 signature: v.signature,
+                bundle: v.bundle,
             });
         }
         Ok(out)
@@ -434,6 +460,7 @@ impl Index for HttpIndex {
     }
 
     fn publish(&self, name: &str, release: &Release) -> Result<(), String> {
+        release.check_provenance_shape()?;
         let token = self.token.as_ref().ok_or_else(|| {
             "publishing needs a token — set NOETA_REGISTRY_TOKEN to your registry publish token"
                 .to_string()
@@ -450,6 +477,7 @@ impl Index for HttpIndex {
             "sha": release.coords.sha,
             "deps": deps,
             "signature": release.signature,
+            "bundle": release.bundle,
         });
         let resp = self
             .client
@@ -500,6 +528,7 @@ mod tests {
             coords: coords(tag),
             deps: Vec::new(),
             signature: None,
+            bundle: None,
         }
     }
 
@@ -540,6 +569,27 @@ mod tests {
             index.scope_key("acme").unwrap(),
             Some("deadbeef".to_string())
         );
+    }
+
+    #[test]
+    fn bundle_round_trips_through_the_local_index() {
+        let index = mem("bundle_round_trip");
+        let mut rel = release(1, 0, 0, "v1.0.0");
+        // A realistic bundle is a large JSON document with quotes and escapes — the TOML
+        // string round-trip must preserve it byte-for-byte.
+        rel.bundle = Some(r#"{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json","dsseEnvelope":{"payload":"e30=","payloadType":"application/vnd.in-toto+json"}}"#.to_string());
+        index.publish("acme/foo", &rel).unwrap();
+        assert_eq!(index.releases("acme/foo").unwrap()[0].bundle, rel.bundle);
+    }
+
+    #[test]
+    fn a_release_with_both_trust_roots_is_rejected_at_publish() {
+        let index = mem("both_roots");
+        let mut rel = release(1, 0, 0, "v1.0.0");
+        rel.signature = Some("a".repeat(128));
+        rel.bundle = Some("{}".to_string());
+        let err = index.publish("acme/foo", &rel).unwrap_err();
+        assert!(err.contains("not both"), "{err}");
     }
 
     #[test]
@@ -700,6 +750,7 @@ mod http_tests {
                         req: VersionReq::parse("^1.0").unwrap(),
                     }],
                     signature: Some("deadbeef".to_string()),
+                    bundle: None,
                 },
             )
             .unwrap();
@@ -721,6 +772,57 @@ mod http_tests {
     }
 
     #[test]
+    fn http_index_round_trips_a_bundle() {
+        // Serving: a version row carries its Sigstore bundle verbatim.
+        let base = mock_server(|_, _, _| {
+            (
+                200,
+                r#"{"versions":[{"version":"1.0.0","url":"https://x/a/b","tag":"v1.0.0","sha":"abc","bundle":"{\"mediaType\":\"application/vnd.dev.sigstore.bundle.v0.3+json\"}"}]}"#
+                    .to_string(),
+            )
+        });
+        let index = HttpIndex::new(base).unwrap();
+        let releases = index.releases("a/b").unwrap();
+        assert_eq!(
+            releases[0].bundle.as_deref(),
+            Some(r#"{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}"#)
+        );
+
+        // Publishing: the bundle rides the POST body (the Worker stores it next to the release).
+        let (tx, rx) = mpsc::channel();
+        let base = mock_server(move |_, _, body| {
+            tx.send(body.to_string()).unwrap();
+            (201, "{}".to_string())
+        });
+        let index = HttpIndex {
+            token: Some("secret-token".to_string()),
+            ..HttpIndex::new(base).unwrap()
+        };
+        let mut rel = Release {
+            version: Version::new(1, 0, 0),
+            coords: GitCoords {
+                url: "https://x/a/b".to_string(),
+                tag: "v1.0.0".to_string(),
+                sha: "abc".to_string(),
+            },
+            deps: Vec::new(),
+            signature: None,
+            bundle: Some(r#"{"mediaType":"m"}"#.to_string()),
+        };
+        index.publish("a/b", &rel).unwrap();
+        let body = rx.recv().unwrap();
+        assert!(
+            body.contains(r#""bundle":"{\"mediaType\":\"m\"}""#),
+            "{body}"
+        );
+
+        // Both trust roots on one release never reach the wire.
+        rel.signature = Some("deadbeef".to_string());
+        let err = index.publish("a/b", &rel).unwrap_err();
+        assert!(err.contains("not both"), "{err}");
+    }
+
+    #[test]
     fn http_index_publish_without_token_errors() {
         let base = mock_server(|_, _, _| (201, "{}".to_string()));
         let index = HttpIndex {
@@ -739,6 +841,7 @@ mod http_tests {
                     },
                     deps: Vec::new(),
                     signature: None,
+                    bundle: None,
                 },
             )
             .unwrap_err();

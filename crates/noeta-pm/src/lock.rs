@@ -35,6 +35,22 @@ pub const LOCK_NAME: &str = "noeta.lock";
 /// older toolchain re-resolves rather than misreading it.
 const LOCK_VERSION: i64 = 1;
 
+/// The **pinned trust root** of a scope (`company`), recorded trust-on-first-use in `noeta.lock`.
+/// Two roots exist (Phase 4 #2 / Phase 5) and the pin remembers *which* — that memory is the
+/// downgrade defense: a scope pinned [`ScopeTrust::Keyless`] refuses a later key-signed or
+/// unsigned release, so a registry compromise can't quietly step a scope down to a weaker root.
+/// This type is deliberately crypto-free (plain strings): the lock layer — like the LSP — reasons
+/// about trust *shapes* without linking any verification stack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopeTrust {
+    /// The key root: the scope's registered Ed25519 public key (hex). Signatures verify against
+    /// exactly this pinned key; a registry later serving a different key is rejected.
+    Key(String),
+    /// The keyless root: the OIDC identity (issuer + certificate SAN) that signs this scope's
+    /// releases via Sigstore. Bundles must prove exactly this identity.
+    Keyless { issuer: String, identity: String },
+}
+
 /// A read lockfile: the pins a build consults to reproduce (package-manager P2.4c). Missing or
 /// unreadable → [`Lock::empty`] (the walk then resolves from scratch).
 #[derive(Debug, Default)]
@@ -43,10 +59,11 @@ pub struct Lock {
     git_pins: BTreeMap<(String, String), String>,
     /// package identity → content hash (integrity check for immutable git sources).
     hashes: BTreeMap<String, String>,
-    /// scope (`company`) → **pinned** Ed25519 public key (hex), for provenance (Phase 4 #2). Pinned
-    /// trust-on-first-use: once a scope's key is recorded here, a later registry that serves a
-    /// different key is rejected — so a registry compromised *after* first use can't forge releases.
-    scope_keys: BTreeMap<String, String>,
+    /// scope (`company`) → **pinned** trust root, trust-on-first-use (Phase 4 #2 / Phase 5): once
+    /// a scope's root is recorded here, a later registry serving a different key, a different
+    /// keyless identity, or a *weaker root* (keyless → key/unsigned) is rejected — so a registry
+    /// compromised *after* first use can't forge releases or downgrade a scope's trust.
+    scope_trust: BTreeMap<String, ScopeTrust>,
 }
 
 impl Lock {
@@ -87,12 +104,19 @@ impl Lock {
         if let Some(scopes) = table.get("scope").and_then(|v| v.as_array()) {
             for entry in scopes {
                 let Some(s) = entry.as_table() else { continue };
-                if let (Some(scope), Some(key)) = (
-                    s.get("name").and_then(|v| v.as_str()),
-                    s.get("public_key").and_then(|v| v.as_str()),
-                ) {
-                    lock.scope_keys.insert(scope.to_string(), key.to_string());
-                }
+                let get = |k: &str| s.get(k).and_then(|v| v.as_str());
+                let Some(scope) = get("name") else { continue };
+                // The entry's shape says which trust root is pinned: `public_key` = the key root,
+                // `issuer` + `identity` = the keyless root. An entry with neither is ignored.
+                let trust = match (get("public_key"), get("issuer"), get("identity")) {
+                    (Some(key), _, _) => ScopeTrust::Key(key.to_string()),
+                    (None, Some(issuer), Some(identity)) => ScopeTrust::Keyless {
+                        issuer: issuer.to_string(),
+                        identity: identity.to_string(),
+                    },
+                    _ => continue,
+                };
+                lock.scope_trust.insert(scope.to_string(), trust);
             }
         }
         lock
@@ -110,14 +134,15 @@ impl Lock {
         self.hashes.get(identity).map(String::as_str)
     }
 
-    /// The pinned public key for `scope`, if the lock records one (provenance TOFU, Phase 4 #2).
-    pub fn scope_key(&self, scope: &str) -> Option<&str> {
-        self.scope_keys.get(scope).map(String::as_str)
+    /// The pinned trust root for `scope`, if the lock records one (provenance TOFU, Phase 4 #2 /
+    /// Phase 5).
+    pub fn scope_trust(&self, scope: &str) -> Option<&ScopeTrust> {
+        self.scope_trust.get(scope)
     }
 }
 
-/// Serialize the resolved packages + pinned scope keys to `noeta.lock` text (deterministic, sorted).
-fn render(locked: &[LockedPackage], scope_keys: &BTreeMap<String, String>) -> String {
+/// Serialize the resolved packages + pinned scope trust to `noeta.lock` text (deterministic, sorted).
+fn render(locked: &[LockedPackage], scope_trust: &BTreeMap<String, ScopeTrust>) -> String {
     let mut sorted: Vec<&LockedPackage> = locked.iter().collect();
     sorted.sort_by(|a, b| a.identity.cmp(&b.identity));
     let mut out = String::new();
@@ -144,11 +169,20 @@ fn render(locked: &[LockedPackage], scope_keys: &BTreeMap<String, String>) -> St
         }
         out.push_str(&format!("hash = {}\n", quote(&pkg.content_hash)));
     }
-    // Pinned scope public keys (provenance TOFU): once written, a later differing key is rejected.
-    for (scope, key) in scope_keys {
+    // Pinned scope trust roots (provenance TOFU): once written, a later differing key, differing
+    // identity, or weaker root is rejected.
+    for (scope, trust) in scope_trust {
         out.push_str("\n[[scope]]\n");
         out.push_str(&format!("name = {}\n", quote(scope)));
-        out.push_str(&format!("public_key = {}\n", quote(key)));
+        match trust {
+            ScopeTrust::Key(key) => {
+                out.push_str(&format!("public_key = {}\n", quote(key)));
+            }
+            ScopeTrust::Keyless { issuer, identity } => {
+                out.push_str(&format!("issuer = {}\n", quote(issuer)));
+                out.push_str(&format!("identity = {}\n", quote(identity)));
+            }
+        }
     }
     out
 }
@@ -160,10 +194,10 @@ fn render(locked: &[LockedPackage], scope_keys: &BTreeMap<String, String>) -> St
 pub fn write(
     dir: &Path,
     locked: &[LockedPackage],
-    scope_keys: &BTreeMap<String, String>,
+    scope_trust: &BTreeMap<String, ScopeTrust>,
 ) -> io::Result<()> {
     let path = dir.join(LOCK_NAME);
-    let text = render(locked, scope_keys);
+    let text = render(locked, scope_trust);
     if std::fs::read_to_string(&path).is_ok_and(|existing| existing == text) {
         return Ok(()); // unchanged
     }
@@ -215,9 +249,9 @@ mod tests {
         let dir = std::env::temp_dir().join("noeta_lock_test_roundtrip");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let mut scope_keys = BTreeMap::new();
-        scope_keys.insert("acme".to_string(), "b".repeat(64));
-        write(&dir, &[git_pkg(), path_pkg()], &scope_keys).unwrap();
+        let mut scope_trust = BTreeMap::new();
+        scope_trust.insert("acme".to_string(), ScopeTrust::Key("b".repeat(64)));
+        write(&dir, &[git_pkg(), path_pkg()], &scope_trust).unwrap();
 
         let lock = Lock::read(&dir);
         assert_eq!(
@@ -229,8 +263,36 @@ mod tests {
         // A path package records no git pin.
         assert_eq!(lock.git_pin("../local", ""), None);
         // The pinned scope key round-trips (provenance TOFU, Phase 4 #2).
-        assert_eq!(lock.scope_key("acme"), Some("b".repeat(64).as_str()));
-        assert_eq!(lock.scope_key("nobody"), None);
+        assert_eq!(
+            lock.scope_trust("acme"),
+            Some(&ScopeTrust::Key("b".repeat(64)))
+        );
+        assert_eq!(lock.scope_trust("nobody"), None);
+    }
+
+    #[test]
+    fn a_keyless_identity_pin_round_trips() {
+        let dir = std::env::temp_dir().join("noeta_lock_test_keyless_pin");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let pin = ScopeTrust::Keyless {
+            issuer: "https://token.actions.githubusercontent.com".to_string(),
+            identity:
+                "https://github.com/acme/imgfx/.github/workflows/release.yaml@refs/heads/main"
+                    .to_string(),
+        };
+        let mut scope_trust = BTreeMap::new();
+        scope_trust.insert("acme".to_string(), pin.clone());
+        // A second scope stays on the key root — the two coexist in one lock.
+        scope_trust.insert("legacy".to_string(), ScopeTrust::Key("c".repeat(64)));
+        write(&dir, &[git_pkg()], &scope_trust).unwrap();
+
+        let lock = Lock::read(&dir);
+        assert_eq!(lock.scope_trust("acme"), Some(&pin));
+        assert_eq!(
+            lock.scope_trust("legacy"),
+            Some(&ScopeTrust::Key("c".repeat(64)))
+        );
     }
 
     #[test]

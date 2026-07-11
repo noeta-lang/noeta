@@ -37,7 +37,7 @@ noeta-lsp = { workspace = true }
 noeta-dap = { workspace = true }
 noeta-prof = { workspace = true }
 noeta-fmt = { workspace = true }
-noeta-pm = { workspace = true, features = ["registry-http", "provenance"] }
+noeta-pm = { workspace = true, features = ["registry-http", "provenance", "keyless"] }
 noeta-mcp = { workspace = true }
 sha2 = { workspace = true }
 clap = { workspace = true }
@@ -56,6 +56,8 @@ jit = ["noeta-vm/jit"]
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
+# The hermetic Sigstore (test CA/CT/Rekor) the keyless publish e2e mints against (Phase 5, K4).
+noeta-pm = { workspace = true, features = ["keyless-test-fixtures"] }
 
 [lints]
 workspace = true
