@@ -192,9 +192,13 @@ fn string_method_inner(recv: &str, method: &str, args: &[Arg]) -> Result<Output,
             want_arity(method, args, 1)?;
             Ok(Output::Bool(recv.ends_with(want_str(method, args, 0)?)))
         }
+        // `split(sep, limit?)` — an optional `limit` caps the number of pieces (the last holds
+        // the unsplit remainder, Rust's `splitn`); absent or ≤ 0 means unlimited.
         "split" => {
-            want_arity(method, args, 1)?;
-            Ok(Output::StrList(split(recv, want_str(method, args, 0)?)))
+            want_arity_range(method, args, 1, 2)?;
+            let sep = want_str(method, args, 0)?;
+            let limit = opt_int(method, args, 1)?;
+            Ok(Output::StrList(split(recv, sep, limit)))
         }
         "replace" => {
             want_arity(method, args, 2)?;
@@ -222,7 +226,7 @@ fn string_method_inner(recv: &str, method: &str, args: &[Arg]) -> Result<Output,
         // `chars()` — the Unicode scalar characters, each as a string (identical to `split("")`).
         "chars" => {
             want_arity(method, args, 0)?;
-            Ok(Output::StrList(split(recv, "")))
+            Ok(Output::StrList(split(recv, "", None)))
         }
         // `lines()` — split on `\n`, dropping a trailing `\r` (so `\r\n` input works) and the
         // final empty segment after a trailing newline (Rust's `str::lines`).
@@ -230,14 +234,14 @@ fn string_method_inner(recv: &str, method: &str, args: &[Arg]) -> Result<Output,
             want_arity(method, args, 0)?;
             Ok(Output::StrList(recv.lines().map(str::to_string).collect()))
         }
-        // `slice(start, end)` — the half-open character range `[start, end)`, with the same
+        // `slice(start, end?)` — the half-open character range `[start, end)`, with the same
         // bounds rule as list `slice` (out of bounds is an error, not a clamp). Character-based,
-        // so multi-byte text slices at scalar boundaries.
+        // so multi-byte text slices at scalar boundaries. `end` is optional — to the string's end.
         "slice" => {
-            want_arity(method, args, 2)?;
+            want_arity_range(method, args, 1, 2)?;
             let start = want_int(method, args, 0)?;
-            let end = want_int(method, args, 1)?;
             let len = recv.chars().count();
+            let end = opt_int(method, args, 1)?.unwrap_or(len as i64);
             if start < 0 || end < start || end as usize > len {
                 return Err(str_slice_bounds_error(start, end, len));
             }
@@ -259,25 +263,35 @@ fn string_method_inner(recv: &str, method: &str, args: &[Arg]) -> Result<Output,
                 .map(|c| c.to_string());
             Ok(Output::OptStr(found))
         }
-        // `index_of(sub)` — the character index of the first occurrence, or `none`.
+        // `index_of(sub, from?)` — the character index of the first occurrence at or after the
+        // optional `from` character offset (default 0), or `none`.
         "index_of" => {
-            want_arity(method, args, 1)?;
+            want_arity_range(method, args, 1, 2)?;
             let sub = want_str(method, args, 0)?;
-            let found = recv
+            let from = opt_int(method, args, 1)?.unwrap_or(0).max(0) as usize;
+            // Advance to the byte offset of the `from`-th character, then search the remainder;
+            // report the match's character index counted from the whole string's start.
+            let byte_from = recv
+                .char_indices()
+                .nth(from)
+                .map(|(b, _)| b)
+                .unwrap_or(recv.len());
+            let found = recv[byte_from..]
                 .find(sub)
-                .map(|byte| recv[..byte].chars().count() as i64);
+                .map(|byte| recv[..byte_from + byte].chars().count() as i64);
             Ok(Output::OptInt(found))
         }
+        // `pad_start(width, fill?)` / `pad_end(width, fill?)` — `fill` optional (default a space).
         "pad_start" => {
-            want_arity(method, args, 2)?;
+            want_arity_range(method, args, 1, 2)?;
             let width = want_int(method, args, 0)?;
-            let fill = want_str(method, args, 1)?;
+            let fill = opt_str(method, args, 1)?.unwrap_or(" ");
             Ok(Output::Str(pad(recv, width, fill, method, Pad::Start)?))
         }
         "pad_end" => {
-            want_arity(method, args, 2)?;
+            want_arity_range(method, args, 1, 2)?;
             let width = want_int(method, args, 0)?;
-            let fill = want_str(method, args, 1)?;
+            let fill = opt_str(method, args, 1)?.unwrap_or(" ");
             Ok(Output::Str(pad(recv, width, fill, method, Pad::End)?))
         }
         // `to_int()`/`to_float()` — strict numeric parsing (no implicit trim; compose with
@@ -339,12 +353,16 @@ fn str_slice_bounds_error(start: i64, end: i64, len: usize) -> StdError {
 }
 
 /// Split `recv` on `sep`. An empty separator yields the Unicode scalar characters (the
-/// useful, surprise-free reading), avoiding Rust's leading/trailing empty fields.
-fn split(recv: &str, sep: &str) -> Vec<String> {
+/// useful, surprise-free reading), avoiding Rust's leading/trailing empty fields. A `limit > 0`
+/// caps the number of pieces (the last holds the unsplit remainder, `splitn`); an absent or
+/// non-positive limit is unlimited. An empty separator ignores the limit (it always yields chars).
+fn split(recv: &str, sep: &str, limit: Option<i64>) -> Vec<String> {
     if sep.is_empty() {
-        recv.chars().map(|c| c.to_string()).collect()
-    } else {
-        recv.split(sep).map(|part| part.to_string()).collect()
+        return recv.chars().map(|c| c.to_string()).collect();
+    }
+    match limit {
+        Some(n) if n > 0 => recv.splitn(n as usize, sep).map(str::to_string).collect(),
+        _ => recv.split(sep).map(str::to_string).collect(),
     }
 }
 
@@ -353,6 +371,17 @@ fn want_arity(method: &str, args: &[Arg], expected: usize) -> Result<(), StdErro
         Ok(())
     } else {
         Err(arity_error(method, expected, args.len()))
+    }
+}
+
+/// Accept `min..=max` arguments — a built-in method with a trailing-optional parameter (the core
+/// analogue of a Ring 2 function's `SigType::Optional`). The checker already gates the range, so
+/// this is the defensive twin of [`want_arity`]; on violation it reports `max` as the expected.
+fn want_arity_range(method: &str, args: &[Arg], min: usize, max: usize) -> Result<(), StdError> {
+    if (min..=max).contains(&args.len()) {
+        Ok(())
+    } else {
+        Err(arity_error(method, max, args.len()))
     }
 }
 
@@ -367,6 +396,25 @@ fn want_int(method: &str, args: &[Arg], index: usize) -> Result<i64, StdError> {
     match args[index] {
         Arg::Int(value) => Ok(value),
         _ => Err(type_error(method, "int")),
+    }
+}
+
+/// An **optional** int argument at `index`: `None` when absent, the value when present, a type
+/// error when present-but-not-an-int. The reader for a trailing-optional parameter.
+fn opt_int(method: &str, args: &[Arg], index: usize) -> Result<Option<i64>, StdError> {
+    match args.get(index) {
+        None => Ok(None),
+        Some(Arg::Int(value)) => Ok(Some(*value)),
+        Some(_) => Err(type_error(method, "int")),
+    }
+}
+
+/// An **optional** string argument at `index` — the string twin of [`opt_int`].
+fn opt_str<'a>(method: &str, args: &[Arg<'a>], index: usize) -> Result<Option<&'a str>, StdError> {
+    match args.get(index) {
+        None => Ok(None),
+        Some(Arg::Str(value)) => Ok(Some(value)),
+        Some(_) => Err(type_error(method, "string")),
     }
 }
 
@@ -1073,6 +1121,61 @@ mod tests {
         );
         match string_method("x", "pad_start", &[Arg::Int(3), Arg::Str("")]) {
             Dispatch::Err(error) => assert_eq!(error.kind, ErrorKind::ArgType),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn optional_params_default_when_absent() {
+        // `split(sep, limit?)` — absent limit is unlimited; a positive limit caps the pieces
+        // (last holds the remainder); an empty separator yields chars and ignores the limit.
+        assert_eq!(
+            done("a,b,c,d", "split", &[Arg::Str(",")]),
+            Output::StrList(vec!["a".into(), "b".into(), "c".into(), "d".into()])
+        );
+        assert_eq!(
+            done("a,b,c,d", "split", &[Arg::Str(","), Arg::Int(2)]),
+            Output::StrList(vec!["a".into(), "b,c,d".into()])
+        );
+        assert_eq!(
+            done("a,b,c", "split", &[Arg::Str(","), Arg::Int(0)]),
+            Output::StrList(vec!["a".into(), "b".into(), "c".into()])
+        );
+        // `slice(start, end?)` — absent end runs to the string's end.
+        assert_eq!(
+            done("héllo", "slice", &[Arg::Int(1)]),
+            Output::Str("éllo".into())
+        );
+        // `index_of(sub, from?)` — search starts at the optional char offset.
+        assert_eq!(
+            done("abcabc", "index_of", &[Arg::Str("b")]),
+            Output::OptInt(Some(1))
+        );
+        assert_eq!(
+            done("abcabc", "index_of", &[Arg::Str("b"), Arg::Int(2)]),
+            Output::OptInt(Some(4))
+        );
+        assert_eq!(
+            done("abcabc", "index_of", &[Arg::Str("b"), Arg::Int(5)]),
+            Output::OptInt(None)
+        );
+        // `pad_start/pad_end(width, fill?)` — absent fill defaults to a space.
+        assert_eq!(
+            done("7", "pad_start", &[Arg::Int(3)]),
+            Output::Str("  7".into())
+        );
+        assert_eq!(
+            done("7", "pad_end", &[Arg::Int(3)]),
+            Output::Str("7  ".into())
+        );
+        // The optional arg still type-checks defensively when present.
+        match string_method("x", "split", &[Arg::Str(","), Arg::Str("nope")]) {
+            Dispatch::Err(error) => assert_eq!(error.kind, ErrorKind::ArgType),
+            other => panic!("expected Err, got {other:?}"),
+        }
+        // Too many args is still an arity error (max is 2).
+        match string_method("x", "slice", &[Arg::Int(0), Arg::Int(1), Arg::Int(2)]) {
+            Dispatch::Err(error) => assert_eq!(error.kind, ErrorKind::Arity),
             other => panic!("expected Err, got {other:?}"),
         }
     }

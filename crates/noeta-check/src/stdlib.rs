@@ -516,8 +516,11 @@ pub(super) fn module_required(module: &str, name: &str) -> Option<usize> {
     registry::find_function_sig(module, name).map(|f| registry::SigType::required_count(f.params))
 }
 
-/// The required-argument count of a registered extern type's method (http arc H4); `None` for a
-/// built-in receiver method (all required), so the caller falls back to `params.len()`.
+/// The required-argument count of a receiver method — the count below its trailing-optional
+/// params. `None` means "all of [`method_params`] are required" (the caller falls back to
+/// `params.len()`). A registered extern type reads it from its `ExtFn` signature (http arc H4);
+/// a **built-in** method reads it from [`builtin_method_required`] (the core analogue — a method
+/// like `split(sep, limit?)` accepts a range).
 pub(super) fn method_required(receiver: &Type, name: &str) -> Option<usize> {
     if let Type::Named(n, _) = receiver
         && registry::resolve_type(n).is_some()
@@ -525,7 +528,25 @@ pub(super) fn method_required(receiver: &Type, name: &str) -> Option<usize> {
         return registry::find_type_method_sig(n, name)
             .map(|sig| registry::SigType::required_count(sig.params));
     }
-    None
+    builtin_method_required(receiver, name)
+}
+
+/// The required-argument count of a **built-in** receiver method that has trailing-optional
+/// params — the core-method analogue of a Ring 2 function's `SigType::Optional`. `None` means
+/// every parameter is required (the common case). The max count still comes from
+/// [`method_params`], so the checker admits `required..=params.len()` arguments and both backends
+/// supply the default for an omitted trailing argument.
+fn builtin_method_required(receiver: &Type, name: &str) -> Option<usize> {
+    let required = match (receiver, name) {
+        // `split(sep, limit?)`, `slice(start, end?)`, `index_of(sub, from?)`,
+        // `pad_start/pad_end(width, fill?)` — one required arg, one optional.
+        (Type::String, "split" | "slice" | "index_of" | "pad_start" | "pad_end") => 1,
+        // `list.slice(start, end?)` — end optional; `list.join(sep?)` — separator optional.
+        (Type::List(_), "slice") => 1,
+        (Type::List(_), "join") => 0,
+        _ => return None,
+    };
+    Some(required)
 }
 
 fn iterator_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
@@ -563,11 +584,13 @@ fn string_params(name: &str) -> Option<Vec<Type>> {
     Some(match name {
         "upper" | "lower" | "trim" | "trim_start" | "trim_end" | "len" | "is_empty" | "chars"
         | "lines" | "to_int" | "to_float" | "to_bytes" => vec![],
-        "contains" | "starts_with" | "ends_with" | "split" | "index_of" => vec![Type::String],
+        "contains" | "starts_with" | "ends_with" => vec![Type::String],
         "replace" => vec![Type::String, Type::String],
         "repeat" | "char_at" => vec![Type::Int],
+        // The trailing param is **optional** (see `builtin_method_required`): `split(sep, limit?)`,
+        // `slice(start, end?)`, `index_of(sub, from?)`, `pad_start/pad_end(width, fill?)`.
+        "split" | "index_of" => vec![Type::String, Type::Int],
         "slice" => vec![Type::Int, Type::Int],
-        // `pad_start(width, fill)` / `pad_end(width, fill)` — JS semantics, explicit fill.
         "pad_start" | "pad_end" => vec![Type::Int, Type::String],
         _ => return None,
     })
@@ -580,6 +603,8 @@ fn list_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
             vec![]
         }
         "contains" => vec![elem.clone()],
+        // `join(sep?)` — separator optional (default empty); `slice(start, end?)` — end optional
+        // (default the list length). See `builtin_method_required`.
         "join" => vec![Type::String],
         "slice" => vec![Type::Int, Type::Int],
         "set" => vec![Type::Int, elem.clone()], // `set(index, value)`

@@ -1,0 +1,5 @@
+// An optional parameter widens the accepted arity to a range, but too many arguments is still a
+// static arity error (E0007) — `slice` accepts 1 or 2, not 3.
+// expect: error E0007 at 5:6
+// expect: exit 1
+echo "hello".slice(0, 1, 2)

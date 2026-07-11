@@ -2518,8 +2518,11 @@ impl Interpreter {
                 Ok(Value::Bool(items.iter().any(|item| *item == args[0])))
             }
             noeta_stdlib::ListMethod::Join => {
-                self.expect_std_arity(name, args, 1, span)?;
-                let separator = self.expect_std_string(name, &args[0], span)?.to_string();
+                self.expect_std_arity_range(name, args, 0, 1, span)?;
+                let separator = match args.first() {
+                    Some(arg) => self.expect_std_string(name, arg, span)?.to_string(),
+                    None => String::new(),
+                };
                 let joined = items
                     .iter()
                     .map(Value::display)
@@ -2549,10 +2552,10 @@ impl Interpreter {
                 Ok(Value::list(sorted))
             }
             noeta_stdlib::ListMethod::Slice => {
-                self.expect_std_arity(name, args, 2, span)?;
+                self.expect_std_arity_range(name, args, 1, 2, span)?;
                 let start = self.expect_std_int(name, &args[0], span)?;
-                let end = self.expect_std_int(name, &args[1], span)?;
                 let len = items.len();
+                let end = self.expect_std_opt_int(name, args, 1, len as i64, span)?;
                 if start < 0 || end < start || end as usize > len {
                     let error = noeta_stdlib::slice_bounds_error(start, end, len);
                     return Err(self.runtime_error(
@@ -3026,6 +3029,40 @@ impl Interpreter {
         } else {
             let error = noeta_stdlib::arity_error(name, expected, args.len());
             Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+        }
+    }
+
+    /// Accept `min..=max` arguments — a collection method with a trailing-optional parameter
+    /// (`slice(start, end?)`, `join(sep?)`). Mirrors the VM's `stdlib_arity_range`.
+    fn expect_std_arity_range(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        min: usize,
+        max: usize,
+        span: Span,
+    ) -> Eval<()> {
+        if (min..=max).contains(&args.len()) {
+            Ok(())
+        } else {
+            let error = noeta_stdlib::arity_error(name, max, args.len());
+            Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+        }
+    }
+
+    /// Read an **optional** int argument at `index`, falling back to `default` when absent — the
+    /// trailing-optional-parameter reader (`slice`'s `end?`). Mirrors the VM's `stdlib_opt_int`.
+    fn expect_std_opt_int(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        index: usize,
+        default: i64,
+        span: Span,
+    ) -> Eval<i64> {
+        match args.get(index) {
+            None => Ok(default),
+            Some(value) => self.expect_std_int(name, value, span),
         }
     }
 
