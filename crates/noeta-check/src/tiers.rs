@@ -2,11 +2,14 @@
 //! against an *active-tier set* before the checker and the backends see it.
 //!
 //! A tier block is co-located developer-tooling content (`test`/`bench`/`doc`/`debug`). Whether a
-//! block is compiled in is the *profile*'s call (the package manifest, later); this module is the
-//! front-end mechanism a profile drives. Given the resolved active set, [`activate_tiers`]:
+//! block is compiled in is the *build target*'s call (the `noeta.toml` manifest); this module is
+//! the front-end mechanism a target drives. Given the resolved active set, [`activate_tiers`]:
 //!
 //! - **inlines** an active code-tier block's items into the top-level statement stream, so they are
-//!   checked and lowered as ordinary declarations (the block is pure grouping sugar);
+//!   checked and lowered as ordinary declarations (the block is pure grouping sugar), **stamping**
+//!   the block's directive args onto each lifted fn as the tier's config attribute
+//!   (`@bench(iterations: N)` ⇒ `#[Bench(iterations: N)]`; a per-fn attribute wins) — so the
+//!   ordinary attribute construction gate validates them and the runner reads one place;
 //! - **drops** an inactive block (it never reaches the checker or the IR — the strip is by
 //!   construction, no DCE pass);
 //! - **validates** every block's tier name against [`BUILTIN_TIERS`] (an unknown tier is an
@@ -19,140 +22,59 @@
 //! activates a tier, so the differential is untouched by construction. The two E0036 sources (this
 //! module and the checker's in-place arm) share [`unknown_tier_diagnostic`], so they never drift.
 
-use std::collections::HashMap;
-
-use noeta_ast::{AttrArg, AttrValue, Attribute, Program, Stmt};
+use noeta_ast::reflect::TIER_ATTR_BENCH;
+use noeta_ast::{AttrArg, Attribute, Program, Stmt};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
 
-/// The literal type a tier-directive argument must have.
-#[derive(Clone, Copy, PartialEq)]
-enum ArgType {
-    Int,
-}
-
-impl ArgType {
-    fn name(self) -> &'static str {
-        match self {
-            ArgType::Int => "int",
-        }
-    }
-    /// Whether `value` has this type.
-    fn matches(self, value: &AttrValue) -> bool {
-        matches!((self, value), (ArgType::Int, AttrValue::Int(_)))
-    }
-}
-
-/// The parameter schema for a built-in tier's directive arguments — `(name, type)` in positional
-/// order. Every parameter is optional (a tier knob has a runner default). A tier absent here, or
-/// with no parameters, accepts no arguments. The single source of truth the validator and the
-/// runner's argument binding share.
-fn tier_params(tier: &str) -> &'static [(&'static str, ArgType)] {
+/// The **tier-knob attribute** of a built-in tier — the prelude `@attribute` struct its directive
+/// arguments construct (`@bench(iterations: N)` ⇒ `#[Bench(iterations: N)]` stamped onto each
+/// contained fn; a per-fn attribute wins over the block's). `None` for a tier with no knobs, which
+/// therefore accepts no arguments. One schema source: the attribute's registered fields drive
+/// validation (the ordinary construction gate) and the runner's reads alike.
+pub fn tier_config_attribute(tier: &str) -> Option<&'static str> {
     match tier {
-        "bench" => &[("iterations", ArgType::Int)],
-        _ => &[],
+        "bench" => Some(TIER_ATTR_BENCH),
+        _ => None,
     }
 }
 
-/// The result of binding a tier directive's arguments to its parameter schema: the resolved
-/// `name → value` map (positional arguments bound by order, named by name) and any validation
-/// diagnostics (`E0037` — unknown parameter, wrong type, too many, set twice). The checker consumes
-/// the diagnostics; the runner reads the values.
-#[derive(Debug, Default)]
-pub struct TierArgBinding {
-    pub values: HashMap<String, AttrValue>,
-    pub diagnostics: Vec<Diagnostic>,
-}
-
-/// Bind `args` against `tier`'s parameter schema, validating each (object-model directive-typing).
-/// Positional arguments fill parameters left to right; named arguments bind by name. An argument
-/// that names an unknown parameter, overflows the positional list, repeats a parameter, or carries
-/// the wrong literal type is an `E0037`; every parameter is optional, so omission is fine. A tier
-/// that takes no arguments rejects any (`@test(x)` → E0037).
-pub fn bind_tier_args(tier: &str, args: &[AttrArg]) -> TierArgBinding {
-    let params = tier_params(tier);
-    let mut binding = TierArgBinding::default();
-    let mut next_positional = 0usize;
-    for arg in args {
-        let idx = match &arg.name {
-            Some(name) => match params.iter().position(|(p, _)| p == name) {
-                Some(i) => i,
-                None => {
-                    binding.diagnostics.push(invalid_arg(
-                        arg.span,
-                        format!("tier `@{tier}` has no argument `{name}`"),
-                        params,
-                    ));
-                    continue;
-                }
-            },
-            None => {
-                let i = next_positional;
-                next_positional += 1;
-                if i >= params.len() {
-                    binding.diagnostics.push(invalid_arg(
-                        arg.span,
-                        format!("tier `@{tier}` takes {} argument(s)", params.len()),
-                        params,
-                    ));
-                    continue;
-                }
-                i
-            }
-        };
-        let (pname, ptype) = params[idx];
-        if binding.values.contains_key(pname) {
-            binding.diagnostics.push(invalid_arg(
-                arg.span,
-                format!("argument `{pname}` of tier `@{tier}` is set twice"),
-                params,
-            ));
-            continue;
-        }
-        if !ptype.matches(&arg.value) {
-            binding.diagnostics.push(invalid_arg(
-                arg.span,
-                format!(
-                    "argument `{pname}` of tier `@{tier}` expects {}",
-                    ptype.name()
-                ),
-                params,
-            ));
-            continue;
-        }
-        binding.values.insert(pname.to_string(), arg.value.clone());
+/// The `E0037` for directive arguments on a tier that has no knob attribute (`@test(x)` — `test`
+/// takes no arguments), or `None` when the args are acceptable at this level. Args on a
+/// knob-carrying tier are *not* validated here — they construct the tier's config attribute, checked
+/// by the ordinary attribute construction gate (in place by the checker's `TierBlock` arm on the
+/// default path; on the stamped fns when activated).
+pub fn knobless_args_diagnostic(tier: &str, args: &[AttrArg]) -> Option<Diagnostic> {
+    if tier_config_attribute(tier).is_some() {
+        return None;
     }
-    binding
-}
-
-/// Validate a tier directive's arguments, returning only the diagnostics (the binding's values are
-/// the runner's concern). Shared by the checker's in-place `TierBlock` arm (the default run path)
-/// and [`activate_tiers`] (the runner path), so both paths validate identically.
-pub fn validate_tier_args(tier: &str, args: &[AttrArg]) -> Vec<Diagnostic> {
-    bind_tier_args(tier, args).diagnostics
-}
-
-/// An `E0037` for an invalid tier-directive argument, with a help line listing the tier's accepted
-/// parameters (or noting it takes none).
-fn invalid_arg(span: Span, message: String, params: &[(&str, ArgType)]) -> Diagnostic {
-    let help = if params.is_empty() {
-        "this tier takes no arguments".to_string()
-    } else {
-        format!(
-            "accepted arguments: {}",
-            params
-                .iter()
-                .map(|(n, t)| format!("`{n}: {}`", t.name()))
-                .collect::<Vec<_>>()
-                .join(", ")
+    let span = args.first().map(|a| a.span)?;
+    Some(
+        Diagnostic::error(
+            DiagnosticCode::InvalidDirectiveArgument,
+            span,
+            format!("tier `@{tier}` takes no arguments"),
         )
-    };
-    Diagnostic::error(DiagnosticCode::InvalidDirectiveArgument, span, message).with_help(help)
+        .with_help("only `@bench` carries a knob (`iterations: int`)"),
+    )
+}
+
+/// The attribute a tier block's directive args construct, stamped at the block's spans — the
+/// desugar `@bench(iterations: N)` ⇒ `#[Bench(iterations: N)]`. Shared by the stamping in
+/// [`activate_tiers`] and the checker's in-place validation of an inactive block, so the two paths
+/// check the identical construction.
+pub fn synthesized_config_attr(attr_name: &str, args: &[AttrArg], tier_span: Span) -> Attribute {
+    Attribute {
+        name: attr_name.to_string(),
+        name_span: tier_span,
+        args: args.to_vec(),
+        span: tier_span,
+    }
 }
 
 /// The dev-tiers the language ships built in. A `@<tier> { … }` block against any other name is an
 /// `E0036` (a typo must not silently vanish). Hardcoded for now; once `@tier` declarations + the
-/// package manifest land, the active set becomes a build profile's resolved provider-map and this
+/// package manifest land, the active set becomes a build target's resolved provider-map and this
 /// constant gives way to that set.
 pub const BUILTIN_TIERS: &[&str] = &["test", "bench", "doc", "debug"];
 
@@ -182,12 +104,10 @@ pub struct TierFn {
     pub name: String,
     /// Where it is declared (for the runner's report).
     pub span: Span,
-    /// The directive arguments on the block that introduced it — e.g. `@bench(iterations: 1000)`.
-    /// The runner reads the ones it understands (the bench runner reads `iterations`); a bare block
-    /// carries none.
-    pub args: Vec<AttrArg>,
-    /// The `#[...]` data attributes on the fn itself — test metadata the runner reads (`#[Skip]`,
-    /// `#[Name("…")]`, `#[Group("…")]`, `#[Data([…])]`). Empty for an unannotated fn.
+    /// The `#[...]` data attributes on the fn — test metadata (`#[Skip]`, `#[Name("…")]`,
+    /// `#[Group("…")]`, `#[Data([…])]`) and tier knobs (`#[Bench(iterations: N)]`, whether written
+    /// per-fn or stamped from the block's `@bench(…)` directive args). The one place a runner reads
+    /// configuration from. Empty for an unannotated fn in a bare block.
     pub attrs: Vec<Attribute>,
 }
 
@@ -296,10 +216,10 @@ fn resolve_block(
 
         if !BUILTIN_TIERS.contains(&tier.as_str()) {
             diagnostics.push(unknown_tier_diagnostic(tier, *tier_span));
-        } else {
-            // Validate the directive's arguments against the tier's schema (a known tier only; an
-            // unknown tier has no schema to check against).
-            diagnostics.extend(validate_tier_args(tier, args));
+        } else if let Some(d) = knobless_args_diagnostic(tier, args) {
+            // Directive args on a knob-less tier (`@test(x)`) — E0037. A knob-carrying tier's args
+            // are validated as the stamped attribute's construction, by the checker, below.
+            diagnostics.push(d);
         }
         if !active.contains(&tier.as_str()) {
             // Inactive (including an unknown tier): stripped, never reaches the checker or the IR.
@@ -309,13 +229,23 @@ fn resolve_block(
         // Active tier: resolve the items (so a tier block nested among them, and each item's own
         // body, are handled), then splice them in place. The items are spliced at *this* level, so
         // `collect_roots` carries through unchanged. Each lifted `fn` is marked `is_dev_tier` so the
-        // checker grants it white-box access to the module's private fields (slice 6d); a top-level
-        // `@test`/`@bench` block's fns are also recorded as roots (carrying the block's directive
-        // args, e.g. `@bench(iterations: …)`, so the runner can read them).
+        // checker grants it white-box access to the module's private fields (slice 6d), and the
+        // block's directive args are stamped onto it as the tier's config attribute
+        // (`@bench(iterations: N)` ⇒ `#[Bench(iterations: N)]`) unless the fn already carries one —
+        // a per-fn attribute wins. The checker then validates the stamp through the ordinary
+        // attribute construction gate, and the runner reads it off the fn's `attrs`; a top-level
+        // `@test`/`@bench` block's fns are also recorded as roots.
+        let config_attr = tier_config_attribute(tier).filter(|_| !args.is_empty());
         let resolved = resolve_block(items, active, diagnostics, roots, collect_roots);
         for mut item in resolved {
             if let Stmt::Fn(decl) = &mut item {
                 decl.is_dev_tier = true;
+                if let Some(attr_name) = config_attr
+                    && !decl.attrs.iter().any(|a| a.name == attr_name)
+                {
+                    decl.attrs
+                        .push(synthesized_config_attr(attr_name, args, *tier_span));
+                }
                 if collect_roots {
                     let sink = match tier.as_str() {
                         "test" => Some(&mut roots.tests),
@@ -326,7 +256,6 @@ fn resolve_block(
                         sink.push(TierFn {
                             name: decl.name.clone(),
                             span: decl.name_span,
-                            args: args.clone(),
                             attrs: decl.attrs.clone(),
                         });
                     }
@@ -469,6 +398,74 @@ mod tests {
         assert!(out.diagnostics.is_empty());
         assert!(out.tests.is_empty());
         assert_eq!(out.program.stmts.len(), 1);
+    }
+
+    /// A `@bench(iterations: N)` block's directive args are stamped onto each contained fn as the
+    /// `Bench` config attribute (the desugar), and a fn that already carries its own `#[Bench(…)]`
+    /// keeps it — the per-fn attribute wins over the block's.
+    #[test]
+    fn bench_block_args_stamp_the_config_attribute() {
+        let program = parse_program(
+            "@bench(iterations: 1000) {\n\
+                 fn plain(): void { return; }\n\
+                 #[Bench(iterations: 5)]\n\
+                 fn tuned(): void { return; }\n\
+             }\n",
+        );
+        let out = activate_tiers(&program, &["bench"]);
+        assert!(out.diagnostics.is_empty());
+        let knob = |name: &str| {
+            let bench = out.benches.iter().find(|b| b.name == name).expect(name);
+            let attr = bench
+                .attrs
+                .iter()
+                .find(|a| a.name == TIER_ATTR_BENCH)
+                .expect("Bench attr");
+            attr.args[0].value.clone()
+        };
+        assert_eq!(knob("plain"), noeta_ast::AttrValue::Int(1000));
+        assert_eq!(knob("tuned"), noeta_ast::AttrValue::Int(5));
+        // The stamped attribute type-checks through the ordinary construction gate.
+        assert!(crate::check_all(&out.program).diagnostics.is_empty());
+    }
+
+    /// The stamped construction is validated like any attribute: a wrong-typed knob
+    /// (`@bench(iterations: true)`) is rejected by the construction gate on the activated program,
+    /// and the same block fails `check_all` in place on the default (non-activated) path — the two
+    /// paths reject identically.
+    #[test]
+    fn bad_bench_arg_fails_both_paths() {
+        let program = parse_program("@bench(iterations: true) { fn b(): void { return; } }\n");
+        let activated = activate_tiers(&program, &["bench"]);
+        assert!(activated.diagnostics.is_empty(), "stamping itself is clean");
+        assert!(
+            !crate::check_all(&activated.program).diagnostics.is_empty(),
+            "activated path must reject the stamped construction"
+        );
+        assert!(
+            !crate::check_all(&program).diagnostics.is_empty(),
+            "default path must reject the in-place block args"
+        );
+    }
+
+    /// Directive args on a knob-less tier are an E0037 (`@test` takes no arguments), from both the
+    /// activation path and the checker's in-place arm.
+    #[test]
+    fn args_on_a_knobless_tier_are_e0037() {
+        let program = parse_program("@test(1) { fn t(): void { return; } }\n");
+        let out = activate_tiers(&program, &["test"]);
+        assert_eq!(out.diagnostics.len(), 1);
+        assert_eq!(
+            out.diagnostics[0].code,
+            DiagnosticCode::InvalidDirectiveArgument
+        );
+        let in_place = crate::check_all(&program).diagnostics;
+        assert!(
+            in_place
+                .iter()
+                .any(|d| d.code == DiagnosticCode::InvalidDirectiveArgument),
+            "in-place arm must also reject: {in_place:?}"
+        );
     }
 
     /// White-box (slice 6d): a private `class` field is visible inside an active dev-tier (`@test`)

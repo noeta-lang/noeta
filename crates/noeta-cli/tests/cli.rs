@@ -1300,9 +1300,11 @@ fn bench_positional_iterations_arg_is_read() {
 }
 
 #[test]
-fn bench_invalid_arg_is_e0037() {
-    // An argument of the wrong type for the tier's schema is an InvalidDirectiveArgument (E0037),
-    // reported up front rather than silently ignored.
+fn bench_invalid_arg_is_a_construction_error() {
+    // Tier directive args construct the tier's config attribute (`@bench(iterations: true)` ⇒
+    // `#[Bench(iterations: true)]`), so a wrong-typed knob is rejected by the ordinary attribute
+    // construction gate (E0007, `bool` not assignable to `iterations: int`) — reported up front
+    // rather than silently ignored.
     let file = temp_program(
         "bench_bad_arg",
         "@bench(iterations: true) fn b(): void { return }\n",
@@ -1313,7 +1315,28 @@ fn bench_invalid_arg_is_e0037() {
         .assert()
         .failure()
         .code(1)
-        .stderr(predicate::str::contains("E0037"));
+        .stderr(predicate::str::contains("E0007").and(predicate::str::contains("iterations")));
+}
+
+#[test]
+fn bench_per_fn_attribute_overrides_block_arg() {
+    // The block's `@bench(iterations: N)` is distribution sugar; a fn carrying its own
+    // `#[Bench(…)]` keeps it — the per-fn knob wins.
+    let file = temp_program(
+        "bench_override",
+        "fn work(n: int): int { return n }\n\
+         @bench(iterations: 4) {\n\
+             fn inherits(): void { work(1) }\n\
+             #[Bench(iterations: 2)]\n\
+             fn overrides(): void { work(1) }\n\
+         }\n",
+    );
+    lang().arg("bench").arg(&file).assert().success().stdout(
+        predicate::str::contains("inherits")
+            .and(predicate::str::contains("(4 iterations)"))
+            .and(predicate::str::contains("overrides"))
+            .and(predicate::str::contains("(2 iterations)")),
+    );
 }
 
 #[test]

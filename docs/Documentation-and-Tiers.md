@@ -86,12 +86,12 @@ result: 10
 
 ### Directive arguments and diagnostics
 
-A tier directive can take arguments — `@bench(iterations: 1000)` (or positional `@bench(1000)`). Arguments are validated against a per-tier schema (only `bench` has one, `iterations: int`).
+A tier directive can take arguments — `@bench(iterations: 1000)` (or positional `@bench(1000)`). A tier's knobs are declared as a prelude **config attribute** (`bench`'s is `Bench { iterations: int }`), and the directive args are distribution sugar: the block stamps `#[Bench(iterations: 1000)]` onto each contained fn that does not already carry one (a per-fn attribute wins). Validation is therefore the ordinary attribute construction gate — an unknown parameter, duplicate, or wrong type reports the same construction diagnostics (`E0005`/`E0007`/`E0009`) as any `#[…]` attribute, and the knobs are reflectable via `attributes_of`.
 
 | Code | Meaning |
 |---|---|
 | **E0036** UnknownTier | `@<name>` names a tier that is not built-in (e.g. `@tset`). Raised whether or not it would be active — a typo must never silently vanish. |
-| **E0037** InvalidDirectiveArgument | An unknown parameter, too many positional args, a duplicate, or a wrong type (`@test(x)`, since `test` takes no args). |
+| **E0037** InvalidDirectiveArgument | Arguments on a tier with no config attribute (`@test(x)` — `test` takes no arguments). |
 
 ---
 

@@ -27,7 +27,7 @@ use std::thread;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use noeta_ast::{AttrArg, AttrValue, Expr, Program, Stmt};
+use noeta_ast::{AttrValue, Expr, Program, Stmt};
 use noeta_check::TierFn;
 use noeta_diagnostics::{Diagnostic, DiagnosticCode, render, render_mapped};
 use noeta_lexer::{TokenKind, lex};
@@ -3476,7 +3476,7 @@ fn cmd_bench(
     let mut failed = 0usize;
     for bench in &activated.benches {
         let n = iterations_override
-            .or_else(|| iterations_arg(&bench.args))
+            .or_else(|| iterations_arg(bench))
             .unwrap_or(DEFAULT_BENCH_ITERATIONS)
             .max(1);
         match (
@@ -3508,15 +3508,22 @@ fn cmd_bench(
     }
 }
 
-/// The `iterations` argument of a `@bench(...)` directive, if present and positive — the per-bench
-/// override of the default iteration count. Resolved through the shared tier-arg schema, so both the
-/// positional (`@bench(1000)`) and named (`@bench(iterations: 1000)`) forms work identically.
-fn iterations_arg(args: &[AttrArg]) -> Option<u64> {
-    match noeta_check::bind_tier_args("bench", args)
-        .values
-        .get("iterations")
-    {
-        Some(AttrValue::Int(n)) if *n > 0 => Some(*n as u64),
+/// The bench's `#[Bench(iterations: N)]` knob, if present and positive — the per-bench override of
+/// the default iteration count. The attribute is either written on the fn directly or stamped from
+/// the block's `@bench(…)` directive args (activation's desugar), and the construction gate has
+/// already validated it, so this only reads: `iterations` is `Bench`'s sole field, bound
+/// positionally (`#[Bench(1000)]` / `@bench(1000)`) or by name.
+fn iterations_arg(bench: &TierFn) -> Option<u64> {
+    let attr = bench
+        .attrs
+        .iter()
+        .find(|a| a.name == noeta_ast::reflect::TIER_ATTR_BENCH)?;
+    let value = attr
+        .args
+        .iter()
+        .find(|arg| matches!(&arg.name, Some(n) if n == "iterations") || arg.name.is_none())?;
+    match value.value {
+        AttrValue::Int(n) if n > 0 => Some(n as u64),
         _ => None,
     }
 }

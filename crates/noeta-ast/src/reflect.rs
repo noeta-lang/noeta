@@ -308,11 +308,11 @@ fn fold_const_expr(expr: &Expr) -> Option<AttrValue> {
     })
 }
 
-/// The built-in test-metadata attributes' field shapes (object-model slice 6h/6i) — `(field names,
-/// their literal defaults)` — for `Skip`/`Name`/`Group`/`Data`. These are prelude `@attribute`
-/// structs the checker registers but that never reach [`build`]'s AST walk (they are not declared in
-/// the program), so their shape is supplied here for materialization. Only `Skip` has an optional
-/// field (`reason`, default `""`); the rest carry one mandatory field.
+/// The built-in test-metadata and tier-knob attributes' field shapes (object-model slice 6h/6i) —
+/// `(field names, their literal defaults)` — for `Skip`/`Name`/`Group`/`Data`/`Bench`. These are
+/// prelude `@attribute` structs the checker registers but that never reach [`build`]'s AST walk
+/// (they are not declared in the program), so their shape is supplied here for materialization. Only
+/// `Skip` has an optional field (`reason`, default `""`); the rest carry one mandatory field.
 fn builtin_attribute_shape(name: &str) -> Option<(Vec<String>, Vec<Option<AttrValue>>)> {
     let one = |field: &str| (vec![field.to_string()], vec![None]);
     Some(match name {
@@ -322,6 +322,7 @@ fn builtin_attribute_shape(name: &str) -> Option<(Vec<String>, Vec<Option<AttrVa
         ),
         TEST_ATTR_NAME | TEST_ATTR_GROUP => one("value"),
         TEST_ATTR_DATA => one("rows"),
+        TIER_ATTR_BENCH => one("iterations"),
         _ => return None,
     })
 }
@@ -675,6 +676,13 @@ pub const TEST_ATTR_SKIP: &str = "Skip";
 pub const TEST_ATTR_NAME: &str = "Name";
 pub const TEST_ATTR_GROUP: &str = "Group";
 pub const TEST_ATTR_DATA: &str = "Data";
+
+/// The **tier-knob attribute** of the `bench` tier: `#[Bench(iterations: N)]` on a bench fn sets its
+/// iteration count. A `@bench(iterations: N) { … }` block directive is distribution sugar — it
+/// stamps this attribute onto each contained fn that does not already carry one (a per-fn attribute
+/// wins over the block's). One mandatory `iterations: int` field; validated by the ordinary
+/// attribute construction gate, read by the bench runner.
+pub const TIER_ATTR_BENCH: &str = "Bench";
 
 /// The built-in `Semantic.*` variants, in declaration order. The single source of truth for the
 /// language's own role vocabulary, shared by the prelude-enum registration and both backends'

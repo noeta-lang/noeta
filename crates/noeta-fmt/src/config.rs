@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn defaults_when_no_fmt_table() {
         assert_eq!(
-            FmtConfig::from_toml("[profiles.dev.tiers]\ntest = \"std\"\n").unwrap(),
+            FmtConfig::from_toml("[targets.dev.tiers]\ntest = \"std\"\n").unwrap(),
             FmtConfig::default()
         );
     }

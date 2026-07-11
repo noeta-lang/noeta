@@ -138,7 +138,7 @@ pub enum DiagnosticCode {
     /// fires for a struct.)
     PrivateField,
     /// A **dev-tier block** `@<tier> { … }` names a tier that is not declared/active (object-model
-    /// slice 6): a typo (`@tset { }`) or a tier not provided by the build profile. Surfaced rather
+    /// slice 6): a typo (`@tset { }`) or a tier not provided by the build target. Surfaced rather
     /// than silently ignored so a misspelled tier's content is not invisibly dropped.
     UnknownTier,
     /// A directive argument is invalid: a tier directive's argument names an unknown parameter, is

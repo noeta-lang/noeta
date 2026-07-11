@@ -80,8 +80,7 @@ mod stdlib;
 pub mod tiers;
 
 pub use tiers::{
-    Activated, BUILTIN_TIERS, DocBlock, TierArgBinding, TierFn, activate_tiers, bind_tier_args,
-    collect_docs,
+    Activated, BUILTIN_TIERS, DocBlock, TierFn, activate_tiers, collect_docs, tier_config_attribute,
 };
 
 /// The full output of one checker run: the diagnostics **and** the resolved-type map both
@@ -1148,23 +1147,28 @@ impl Checker {
         }
     }
 
-    /// Register the built-in **test-metadata attributes** (object-model slice 6h) as prelude
-    /// `@attribute` structs, so `#[Skip]` / `#[Name("…")]` / `#[Group("…")]` / `#[Data([…])]` on a
-    /// `@test`/`@bench` fn type-check without the program defining them. Each is an ordinary struct
-    /// (fields validated by the construction gate) marked `@attribute` (so the capability gate E0029
-    /// passes); the runner reads them off the fn's `attrs`. Registered like any prelude type, so a
-    /// user declaration of the same name shadows it. `Skip` is field-less (a bare marker); `Name`/
-    /// `Group` carry one string; `Data` carries a `dyn` payload (the row list — heterogeneous, so the
-    /// element type is left open).
+    /// Register the built-in **test-metadata attributes** (object-model slice 6h) and **tier-knob
+    /// attributes** as prelude `@attribute` structs, so `#[Skip]` / `#[Name("…")]` / `#[Group("…")]`
+    /// / `#[Data([…])]` / `#[Bench(iterations: N)]` on a `@test`/`@bench` fn type-check without the
+    /// program defining them. Each is an ordinary struct (fields validated by the construction gate)
+    /// marked `@attribute` (so the capability gate E0029 passes); the runner reads them off the fn's
+    /// `attrs`. Registered like any prelude type, so a user declaration of the same name shadows it.
+    /// `Skip` is field-less (a bare marker); `Name`/`Group` carry one string; `Data` carries a `dyn`
+    /// payload (the row list — heterogeneous, so the element type is left open); `Bench` carries the
+    /// bench tier's one knob (`iterations: int`) — a `@bench(…)` block directive stamps it onto its
+    /// fns, so this construction gate is also what validates tier directive arguments.
     fn register_test_attributes(&mut self) {
-        use noeta_ast::reflect::{TEST_ATTR_DATA, TEST_ATTR_GROUP, TEST_ATTR_NAME, TEST_ATTR_SKIP};
-        let attrs: [(&str, Vec<(String, Type)>); 4] = [
+        use noeta_ast::reflect::{
+            TEST_ATTR_DATA, TEST_ATTR_GROUP, TEST_ATTR_NAME, TEST_ATTR_SKIP, TIER_ATTR_BENCH,
+        };
+        let attrs: [(&str, Vec<(String, Type)>); 5] = [
             // `Skip`'s `reason` is optional (default `""`), so both `#[Skip]` and `#[Skip("flaky")]`
             // construct it — see the optional-fields registration below.
             (TEST_ATTR_SKIP, vec![("reason".to_string(), Type::String)]),
             (TEST_ATTR_NAME, vec![("value".to_string(), Type::String)]),
             (TEST_ATTR_GROUP, vec![("value".to_string(), Type::String)]),
             (TEST_ATTR_DATA, vec![("rows".to_string(), Type::Dyn)]),
+            (TIER_ATTR_BENCH, vec![("iterations".to_string(), Type::Int)]),
         ];
         for (name, fields) in attrs {
             self.types.insert(name.to_string());
@@ -2352,10 +2356,18 @@ impl Checker {
                 if !BUILTIN_TIERS.contains(&tier.as_str()) {
                     self.diags
                         .push(tiers::unknown_tier_diagnostic(tier, *tier_span));
-                } else {
-                    // Validate the directive's arguments against the tier's schema (the default run
-                    // path — `activate_tiers` does the same for the runner path).
-                    self.diags.extend(tiers::validate_tier_args(tier, args));
+                } else if let Some(d) = tiers::knobless_args_diagnostic(tier, args) {
+                    // Args on a knob-less tier (`@test(x)`) — E0037.
+                    self.diags.push(d);
+                } else if !args.is_empty()
+                    && let Some(attr_name) = tiers::tier_config_attribute(tier)
+                {
+                    // Args on a knob-carrying tier construct its config attribute
+                    // (`@bench(iterations: N)` ⇒ `#[Bench(iterations: N)]`) — validate that
+                    // construction through the ordinary attribute gate, so this default path
+                    // rejects exactly what the activated path's stamped attributes would.
+                    let synth = tiers::synthesized_config_attr(attr_name, args, *tier_span);
+                    self.check_attrs(std::slice::from_ref(&synth), TargetKind::Function);
                 }
             }
         }
