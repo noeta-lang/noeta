@@ -129,6 +129,65 @@ pub struct SymbolNode {
     pub children: Vec<SymbolNode>,
 }
 
+/// One `@doc { … }` block of the project, adjacency-resolved (tier-providers T5): what it
+/// documents, where it lives, and its dedented Markdown body.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ProjectDoc {
+    /// What the block documents: `"module"`, `"decl"`, or `"section"`.
+    pub scope: String,
+    /// The documented declaration's name (`scope == "decl"` only).
+    pub target: Option<String>,
+    /// The source file the block lives in.
+    pub file: String,
+    /// 1-based line of the block.
+    pub line: usize,
+    /// The dedented Markdown body.
+    pub text: String,
+}
+
+/// The `project_docs` result.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct ProjectDocsOutput {
+    /// Every `@doc` block, in source order (entry first, then linked modules).
+    pub docs: Vec<ProjectDoc>,
+}
+
+/// Collect the project's own `@doc` documentation — every block across the linked workspace
+/// (entry + siblings + imported dependency declarations), adjacency-resolved to what it
+/// documents. Works from a bare parse: no type-checking, so docs extract from work-in-progress
+/// code (falling back to the entry file alone when a sibling fails to link).
+pub fn project_docs(p: &Prepared) -> ProjectDocsOutput {
+    let linked = noeta_db::linked(&p.db, p.ws);
+    let entry_ast = noeta_db::ast(&p.db, analyze::entry_program(p));
+    let program: &Program = match &linked.0 {
+        Ok(prog) => prog,
+        Err(_) => &entry_ast.0.program,
+    };
+    let docs = noeta_check::resolve_docs(program)
+        .into_iter()
+        .map(|doc| {
+            let source = p
+                .sources
+                .iter()
+                .find(|s| s.id() == doc.span.source)
+                .unwrap_or(&p.sources[0]);
+            let (scope, target) = match doc.target {
+                noeta_check::DocTarget::Module => ("module".to_string(), None),
+                noeta_check::DocTarget::Section => ("section".to_string(), None),
+                noeta_check::DocTarget::Decl { name, .. } => ("decl".to_string(), Some(name)),
+            };
+            ProjectDoc {
+                scope,
+                target,
+                file: source.name().to_string(),
+                line: source.line_col(doc.span.start).line as usize,
+                text: noeta_check::dedent_doc(&doc.text).trim().to_string(),
+            }
+        })
+        .collect();
+    ProjectDocsOutput { docs }
+}
+
 /// Build the entry file's outline: top-level `fn`/`struct`/`class`/`enum`/`impl`, with fields,
 /// variants, and methods as one level of children, in source order. Walks the parsed AST (available
 /// even when the program has type errors), not the merged workspace, so it describes *this file*.
@@ -294,6 +353,22 @@ fn fn_detail(f: &noeta_ast::FnDecl) -> String {
 mod tests {
     use super::*;
     use crate::analyze::prepare;
+
+    #[test]
+    fn project_docs_resolves_scopes_and_targets() {
+        let src = "@doc { The module. }\n\
+                   use std.math.sqrt\n\
+                   @doc { Adds two ints. }\n\
+                   fn add(a: int, b: int): int { return a + b }\n";
+        let p = prepare(&Some(src.to_string()), &None).expect("prepare");
+        let out = project_docs(&p);
+        assert_eq!(out.docs.len(), 2);
+        assert_eq!(out.docs[0].scope, "module");
+        assert_eq!(out.docs[0].text, "The module.");
+        assert_eq!(out.docs[1].scope, "decl");
+        assert_eq!(out.docs[1].target.as_deref(), Some("add"));
+        assert!(out.docs[1].line >= 3);
+    }
 
     const SRC: &str = "\
 fn handle(n: int): int {

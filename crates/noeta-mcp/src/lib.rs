@@ -626,6 +626,22 @@ source span). The map an agent reads before navigating a file."
         Ok(Json(understand::symbols(&prepared)))
     }
 
+    /// The project's own `@doc` documentation, adjacency-resolved.
+    #[tool(
+        description = "Collect the project's own `@doc { … }` documentation — every block across \
+the entry and its linked modules, resolved to what it documents (`module`, a named `decl`, or a \
+free `section`) with its file, line, and dedented Markdown body. Works from a parse alone, so it \
+reads docs out of work-in-progress code. Use this to understand a codebase through its authored \
+docs, or to answer \"where is X documented?\"."
+    )]
+    async fn project_docs(
+        &self,
+        Parameters(args): Parameters<AnalyzeArgs>,
+    ) -> Result<Json<understand::ProjectDocsOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(understand::project_docs(&prepared)))
+    }
+
     /// The pretty-printed AST — the parsed syntax tree with spans.
     #[tool(
         description = "Return the parsed syntax tree of Noeta code as pretty-printed S-expressions \
