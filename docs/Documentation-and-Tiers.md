@@ -18,6 +18,16 @@ A `@doc { … }` block holds verbatim prose (Markdown). Its body is captured **u
 fn add(a: int, b: int): int { return a + b }
 ```
 
+### Attachment — docs belong to declarations
+
+A `@doc` block **attaches by adjacency**: immediately above a declaration (`fn`/`struct`/`class`/`enum`), it documents that declaration. A non-attached block (above the `use` header, between sections, or standing alone) is the **module doc** if it is the file's first such block, else free-floating section prose. No new syntax — position decides.
+
+Attachment feeds the whole toolchain from one resolution:
+
+- **Hover** (LSP): hovering a documented symbol — its declaration or any call site — shows the doc prose under the type.
+- **`noeta doc`**: an attached block's source header carries the symbol (see below).
+- **Runtime docstrings**: with the `doc` tier live (`noeta run --tier doc`), the attached block is stamped as the prelude `#[Doc(text: "…")]` attribute on its declaration, so `attributes_of::<Doc>()` surfaces it at runtime — Python-style docstrings, opt-in. On a normal build nothing is stamped and the blocks strip as always, so **production carries no doc text**.
+
 Extract every `@doc` block to stdout:
 
 ```console
@@ -25,11 +35,12 @@ $ noeta doc adder.noe
 <!-- adder.noe:1 -->
 # Adder
 
+<!-- adder.noe:5 · add -->
 `add(a, b)` returns **a + b**. Pure; no side effects.
 ```
 
 - The program is **not** type-checked or run — docs extract from a parse alone, so you can pull docs from work-in-progress code.
-- Each block is **dedented** (leading/trailing blank lines dropped, common indentation stripped) and prefixed with an HTML-comment source header (`<!-- file:line -->`), which is valid Markdown that renders to nothing.
+- Each block is **dedented** (leading/trailing blank lines dropped, common indentation stripped) and prefixed with an HTML-comment source header (`<!-- file:line -->`, plus `· symbol` for an attached block), which is valid Markdown that renders to nothing.
 - No `@doc` blocks → a notice on stderr, exit `0`.
 
 ```

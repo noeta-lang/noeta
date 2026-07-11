@@ -80,7 +80,8 @@ mod stdlib;
 pub mod tiers;
 
 pub use tiers::{
-    Activated, BUILTIN_TIERS, DocBlock, TierFn, activate_tiers, collect_docs, tier_config_attribute,
+    Activated, BUILTIN_TIERS, DocBlock, DocTarget, TierFn, activate_tiers, dedent_doc,
+    resolve_docs, tier_config_attribute,
 };
 
 /// The full output of one checker run: the diagnostics **and** the resolved-type map both
@@ -1156,12 +1157,14 @@ impl Checker {
     /// `Skip` is field-less (a bare marker); `Name`/`Group` carry one string; `Data` carries a `dyn`
     /// payload (the row list — heterogeneous, so the element type is left open); `Bench` carries the
     /// bench tier's one knob (`iterations: int`) — a `@bench(…)` block directive stamps it onto its
-    /// fns, so this construction gate is also what validates tier directive arguments.
+    /// fns, so this construction gate is also what validates tier directive arguments; `Doc` carries
+    /// an attached `@doc { … }` block's text (stamped by activation when the `doc` tier is live).
     fn register_test_attributes(&mut self) {
         use noeta_ast::reflect::{
             TEST_ATTR_DATA, TEST_ATTR_GROUP, TEST_ATTR_NAME, TEST_ATTR_SKIP, TIER_ATTR_BENCH,
+            TIER_ATTR_DOC,
         };
-        let attrs: [(&str, Vec<(String, Type)>); 5] = [
+        let attrs: [(&str, Vec<(String, Type)>); 6] = [
             // `Skip`'s `reason` is optional (default `""`), so both `#[Skip]` and `#[Skip("flaky")]`
             // construct it — see the optional-fields registration below.
             (TEST_ATTR_SKIP, vec![("reason".to_string(), Type::String)]),
@@ -1169,6 +1172,7 @@ impl Checker {
             (TEST_ATTR_GROUP, vec![("value".to_string(), Type::String)]),
             (TEST_ATTR_DATA, vec![("rows".to_string(), Type::Dyn)]),
             (TIER_ATTR_BENCH, vec![("iterations".to_string(), Type::Int)]),
+            (TIER_ATTR_DOC, vec![("text".to_string(), Type::String)]),
         ];
         for (name, fields) in attrs {
             self.types.insert(name.to_string());

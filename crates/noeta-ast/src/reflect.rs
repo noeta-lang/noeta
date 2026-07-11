@@ -323,6 +323,7 @@ fn builtin_attribute_shape(name: &str) -> Option<(Vec<String>, Vec<Option<AttrVa
         TEST_ATTR_NAME | TEST_ATTR_GROUP => one("value"),
         TEST_ATTR_DATA => one("rows"),
         TIER_ATTR_BENCH => one("iterations"),
+        TIER_ATTR_DOC => one("text"),
         _ => return None,
     })
 }
@@ -683,6 +684,12 @@ pub const TEST_ATTR_DATA: &str = "Data";
 /// wins over the block's). One mandatory `iterations: int` field; validated by the ordinary
 /// attribute construction gate, read by the bench runner.
 pub const TIER_ATTR_BENCH: &str = "Bench";
+
+/// The `doc` tier's attribute: activation with the `doc` tier live stamps `#[Doc("…")]` onto the
+/// declaration a `@doc { … }` block documents (adjacency-resolved), giving runtime docstrings via
+/// `attributes_of`. On a normal build the doc blocks strip at lowering and nothing is stamped, so
+/// production carries no doc text. One mandatory `text: string` field.
+pub const TIER_ATTR_DOC: &str = "Doc";
 
 /// The built-in `Semantic.*` variants, in declaration order. The single source of truth for the
 /// language's own role vocabulary, shared by the prelude-enum registration and both backends'

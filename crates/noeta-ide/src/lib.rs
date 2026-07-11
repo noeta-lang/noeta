@@ -557,6 +557,51 @@ impl DocumentStore {
         Some((repr.clone(), note, index.range(*span, encoding)))
     }
 
+    /// The `@doc` prose attached to the declaration the cursor's identifier resolves to, if any —
+    /// what hover appends under the type. Attachment is adjacency-resolved from the merged
+    /// workspace program's bare parse (`noeta_check::resolve_docs`), so it works regardless of
+    /// which tiers a build would activate. Resolution mirrors [`Self::definition`]'s first and
+    /// third layers (the scope-aware value index, then top-level definitions by name), and the
+    /// match is by the declaration's **name-span** — the key `resolve_docs` reports.
+    pub fn hover_doc(&self, uri: &str, position: Position, encoding: Encoding) -> Option<String> {
+        let cache = self.workspaces.get(uri)?;
+        let db = &self.db;
+        let entry = cache.entry();
+        let entry_text = entry.text(db);
+        let offset = LineIndex::new(entry_text).offset(position, encoding);
+        let cursor = SourceId::FIRST;
+
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, entry);
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+
+        // Resolve the cursor to a definition's name-span: the scope-aware value index first
+        // (a call site or the declaration itself), then the top-level definitions by the
+        // identifier token's text (type references, constructors).
+        let def_span = resolve::DefUse::build(program)
+            .definition_at(offset, cursor)
+            .or_else(|| {
+                let token = noeta_db::tokens(db, entry).0.tokens.iter().find(|token| {
+                    token.kind == TokenKind::Ident
+                        && token.span.start <= offset
+                        && offset <= token.span.end
+                })?;
+                resolve::Definitions::collect(program).resolve(&entry_text[token.span.range()])
+            })?;
+
+        noeta_check::resolve_docs(program)
+            .into_iter()
+            .find_map(|doc| match doc.target {
+                noeta_check::DocTarget::Decl { name_span, .. } if name_span == def_span => {
+                    Some(noeta_check::dedent_doc(&doc.text).trim().to_string())
+                }
+                _ => None,
+            })
+    }
+
     /// Resolve the definition of the reference at `position` for go-to-definition, as a `(URI,
     /// range)` — the target may be a **different file** (a cross-module reference). Runs over the
     /// merged workspace program, so an imported name resolves to its declaration in the sibling that
@@ -1722,6 +1767,29 @@ mod tests {
         assert_eq!(store.buffers.len(), 1);
         let program = store.workspaces["file:///a.noe"].entry();
         assert_eq!(program.text(&store.db), "let x = 1");
+    }
+
+    #[test]
+    fn hover_doc_surfaces_the_attached_doc_block() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///a.noe",
+            "@doc { Adds two ints. }\n\
+             fn add(a: int, b: int): int { return a + b }\n\
+             echo add(1, 2)\n"
+                .to_string(),
+        );
+        // On the declaration's own name (line 1, within `add`).
+        let on_decl = store.hover_doc("file:///a.noe", Position::new(1, 4), Encoding::Utf16);
+        assert_eq!(on_decl.as_deref(), Some("Adds two ints."));
+        // On the call site (line 2, within `add`).
+        let on_call = store.hover_doc("file:///a.noe", Position::new(2, 6), Encoding::Utf16);
+        assert_eq!(on_call.as_deref(), Some("Adds two ints."));
+        // An undocumented position (the literal) has no doc.
+        assert_eq!(
+            store.hover_doc("file:///a.noe", Position::new(2, 10), Encoding::Utf16),
+            None
+        );
     }
 
     #[test]

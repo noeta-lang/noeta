@@ -3630,7 +3630,7 @@ fn cmd_doc(file: &std::path::Path, target: &Option<String>) -> ExitCode {
         }
     };
 
-    let docs = noeta_check::collect_docs(&linked.program);
+    let docs = noeta_check::resolve_docs(&linked.program);
     if docs.is_empty() {
         eprintln!("lang: no `@doc` blocks found");
         return ExitCode::SUCCESS;
@@ -3643,50 +3643,21 @@ fn cmd_doc(file: &std::path::Path, target: &Option<String>) -> ExitCode {
         }
         let source = linked.sources.source(doc.span.source);
         let line = source.line_col(doc.span.start).line;
-        out.push_str(&format!("<!-- {}:{} -->\n", source.name(), line));
-        out.push_str(&dedent(&doc.text));
+        // A declaration-attached block's header carries the documented symbol (adjacency-resolved);
+        // an unattached block's header is the bare location, exactly as before.
+        let header = match &doc.target {
+            noeta_check::DocTarget::Decl { name, .. } => {
+                format!("<!-- {}:{} · {} -->\n", source.name(), line, name)
+            }
+            _ => format!("<!-- {}:{} -->\n", source.name(), line),
+        };
+        out.push_str(&header);
+        out.push_str(&noeta_check::dedent_doc(&doc.text));
         out.push('\n');
     }
     print!("{out}");
     let _ = io::stdout().flush();
     ExitCode::SUCCESS
-}
-
-/// Dedent a verbatim doc body for presentation: drop leading/trailing blank lines, then strip the
-/// common leading whitespace shared by all non-blank lines (so text written indented inside
-/// `@doc { … }` renders flush-left). Blank lines do not count toward the common indent and are
-/// emitted empty. The lexer captured the body exactly; this is purely the doc generator's
-/// formatting, leaving the AST's bytes untouched.
-fn dedent(text: &str) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    // Trim leading and trailing blank lines.
-    let start = lines.iter().position(|l| !l.trim().is_empty());
-    let Some(start) = start else {
-        return String::new();
-    };
-    let end = lines
-        .iter()
-        .rposition(|l| !l.trim().is_empty())
-        .unwrap_or(start);
-    let body = &lines[start..=end];
-
-    let indent = body
-        .iter()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
-        .min()
-        .unwrap_or(0);
-
-    body.iter()
-        .map(|l| {
-            if l.trim().is_empty() {
-                ""
-            } else {
-                &l[indent..]
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// Whether an entry was consumed (evaluated or reported) or is still incomplete and needs

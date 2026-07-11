@@ -1408,6 +1408,45 @@ fn doc_extracts_verbatim_blocks() {
 }
 
 #[test]
+fn doc_attaches_to_the_following_declaration() {
+    // Adjacency: a `@doc` block immediately above a declaration documents it — `noeta doc`'s
+    // header carries the symbol — while a non-attached block (here, file-leading above `use`) is
+    // the module doc with the bare header. With the `doc` tier live, the attached block is
+    // stamped as `#[Doc]`, so `attributes_of::<Doc>()` surfaces it at runtime; on a default run
+    // nothing is stamped (production carries no doc text).
+    let file = temp_program(
+        "doc_attach",
+        "@doc { The module. }\n\
+         use std.math.sqrt\n\
+         @doc { Adds two ints. }\n\
+         fn add(a: int, b: int): int { return a + b }\n\
+         for d in attributes_of::<Doc>() { echo d.target; echo d.value.text }\n\
+         echo \"end\"\n",
+    );
+    lang().arg("doc").arg(&file).assert().success().stdout(
+        predicate::str::contains("· add -->")
+            .and(predicate::str::contains("Adds two ints."))
+            .and(predicate::str::contains("The module.")),
+    );
+    // Default run: the doc tier is stripped — no runtime docstrings.
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("add").not());
+    // `--tier doc`: the attached block is a runtime docstring.
+    lang()
+        .arg("run")
+        .arg(&file)
+        .arg("--tier")
+        .arg("doc")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("add").and(predicate::str::contains("Adds two ints.")));
+}
+
+#[test]
 fn doc_no_blocks_is_success_with_note() {
     let file = temp_program("doc_none", "echo \"hi\"\n");
     lang()

@@ -22,7 +22,7 @@
 //! activates a tier, so the differential is untouched by construction. The two E0036 sources (this
 //! module and the checker's in-place arm) share [`unknown_tier_diagnostic`], so they never drift.
 
-use noeta_ast::reflect::TIER_ATTR_BENCH;
+use noeta_ast::reflect::{TIER_ATTR_BENCH, TIER_ATTR_DOC};
 use noeta_ast::{AttrArg, Attribute, Program, Stmt};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
@@ -72,6 +72,44 @@ pub fn synthesized_config_attr(attr_name: &str, args: &[AttrArg], tier_span: Spa
     }
 }
 
+/// Dedent a verbatim `@doc` body for presentation: drop leading/trailing blank lines, then strip
+/// the common leading whitespace shared by all non-blank lines (so text written indented inside
+/// `@doc { … }` renders flush-left). Blank lines do not count toward the common indent and are
+/// emitted empty. The lexer captured the body exactly; this is purely presentation formatting —
+/// shared by `lang doc` and the LSP's hover so both render identically. The AST's bytes are
+/// untouched.
+pub fn dedent_doc(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    // Trim leading and trailing blank lines.
+    let start = lines.iter().position(|l| !l.trim().is_empty());
+    let Some(start) = start else {
+        return String::new();
+    };
+    let end = lines
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .unwrap_or(start);
+    let body = &lines[start..=end];
+
+    let indent = body
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+
+    body.iter()
+        .map(|l| {
+            if l.trim().is_empty() {
+                ""
+            } else {
+                &l[indent..]
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The dev-tiers the language ships built in. A `@<tier> { … }` block against any other name is an
 /// `E0036` (a typo must not silently vanish). Hardcoded for now; once `@tier` declarations + the
 /// package manifest land, the active set becomes a build target's resolved provider-map and this
@@ -119,29 +157,80 @@ pub struct DocBlock {
     pub text: String,
     /// The whole `@doc { … }` span, for the extractor's source-location header.
     pub span: Span,
+    /// What the block documents — resolved by adjacency (see [`resolve_docs`]).
+    pub target: DocTarget,
 }
 
-/// Collect every top-level `@doc { … }` block's verbatim body, in source order. `@doc` is a
-/// *declaration-position* text tier, so a top-level walk is the whole story; the bodies never reach
-/// the checker or lowering (a normal run strips them like any inactive tier). `lang doc` extracts
-/// these.
-pub fn collect_docs(program: &Program) -> Vec<DocBlock> {
-    program
-        .stmts
-        .iter()
-        .filter_map(|stmt| match stmt {
-            Stmt::TierBlock {
-                tier,
-                doc_text: Some(text),
-                span,
-                ..
-            } if tier == "doc" => Some(DocBlock {
-                text: text.clone(),
-                span: *span,
-            }),
-            _ => None,
-        })
-        .collect()
+/// What a `@doc { … }` block documents, resolved purely by **position** (no new syntax):
+#[derive(Debug, Clone, PartialEq)]
+pub enum DocTarget {
+    /// A block immediately followed by a declaration (`fn`/`struct`/`class`/`enum`) in the same
+    /// source: it documents that declaration. Tooling keys off `name_span` (stable through
+    /// activation's inlining), display uses `name`.
+    Decl { name: String, name_span: Span },
+    /// The first *non-attached* doc block of its source file — the module's doc. In practice a
+    /// module doc sits above the file's `use` header (or stands alone), so adjacency
+    /// disambiguates naturally: prose above a declaration belongs to the declaration, prose above
+    /// anything else opens the module.
+    Module,
+    /// Any later non-attached block — free-floating section prose between declarations.
+    Section,
+}
+
+/// Resolve every top-level `@doc { … }` block, in source order, with its adjacency-resolved
+/// [`DocTarget`]. `@doc` is a *declaration-position* text tier, so a top-level walk is the whole
+/// story; on a normal run the bodies never reach the checker or lowering (stripped like any
+/// inactive tier). Works from a bare parse — no type-checking — so docs extract from
+/// work-in-progress code. Consumers: `lang doc` (extraction with symbol association), the LSP's
+/// hover, and [`activate_tiers`]'s `#[Doc]` stamping when the `doc` tier is live.
+pub fn resolve_docs(program: &Program) -> Vec<DocBlock> {
+    // Sources that already produced a non-attached doc block — the first is the module doc, the
+    // rest are sections.
+    let mut module_doc_seen = std::collections::HashSet::new();
+    let mut docs = Vec::new();
+    for (i, stmt) in program.stmts.iter().enumerate() {
+        let Stmt::TierBlock {
+            tier,
+            doc_text: Some(text),
+            span,
+            ..
+        } = stmt
+        else {
+            continue;
+        };
+        if tier != "doc" {
+            continue;
+        }
+        let decl_target = program.stmts.get(i + 1).and_then(|next| {
+            if next.span().source != span.source {
+                return None;
+            }
+            let (name, name_span) = match next {
+                Stmt::Fn(d) => (&d.name, d.name_span),
+                Stmt::Struct(d) => (&d.name, d.name_span),
+                Stmt::Class(d) => (&d.name, d.name_span),
+                Stmt::Enum(d) => (&d.name, d.name_span),
+                _ => return None,
+            };
+            Some(DocTarget::Decl {
+                name: name.clone(),
+                name_span,
+            })
+        });
+        let target = decl_target.unwrap_or_else(|| {
+            if module_doc_seen.insert(span.source) {
+                DocTarget::Module
+            } else {
+                DocTarget::Section
+            }
+        });
+        docs.push(DocBlock {
+            text: text.clone(),
+            span: *span,
+            target,
+        });
+    }
+    docs
 }
 
 /// The result of resolving a program's tier blocks against an active set.
@@ -166,9 +255,49 @@ pub struct Activated {
 pub fn activate_tiers(program: &Program, active: &[&str]) -> Activated {
     let mut roots = Roots::default();
     let mut diagnostics = Vec::new();
+    // With the `doc` tier live, a declaration-attached `@doc` block (adjacency-resolved on the
+    // *input* program, before its blocks are gone) stamps `#[Doc("…")]` onto its declaration —
+    // the text tier's counterpart of `@bench`'s knob stamping, giving runtime docstrings via
+    // `attributes_of`. Keyed by the declaration's name-span, which survives inlining.
+    let doc_stamps: std::collections::HashMap<Span, String> = if active.contains(&"doc") {
+        resolve_docs(program)
+            .into_iter()
+            .filter_map(|d| match d.target {
+                DocTarget::Decl { name_span, .. } => Some((name_span, d.text)),
+                _ => None,
+            })
+            .collect()
+    } else {
+        std::collections::HashMap::new()
+    };
     // The top-level statement list collects roots (a `@test`/`@bench` block's fns are runnable roots
     // only here — a tier block nested in a fn body holds inline code, not roots).
-    let stmts = resolve_block(&program.stmts, active, &mut diagnostics, &mut roots, true);
+    let mut stmts = resolve_block(&program.stmts, active, &mut diagnostics, &mut roots, true);
+    if !doc_stamps.is_empty() {
+        for stmt in &mut stmts {
+            let (name_span, attrs) = match stmt {
+                Stmt::Fn(d) => (d.name_span, &mut d.attrs),
+                Stmt::Struct(d) => (d.name_span, &mut d.attrs),
+                Stmt::Class(d) => (d.name_span, &mut d.attrs),
+                Stmt::Enum(d) => (d.name_span, &mut d.attrs),
+                _ => continue,
+            };
+            if let Some(text) = doc_stamps.get(&name_span)
+                && !attrs.iter().any(|a| a.name == TIER_ATTR_DOC)
+            {
+                attrs.push(Attribute {
+                    name: TIER_ATTR_DOC.to_string(),
+                    name_span,
+                    args: vec![AttrArg {
+                        name: Some("text".to_string()),
+                        value: noeta_ast::AttrValue::Str(text.clone()),
+                        span: name_span,
+                    }],
+                    span: name_span,
+                });
+            }
+        }
+    }
     Activated {
         program: Program {
             stmts,
@@ -398,6 +527,59 @@ mod tests {
         assert!(out.diagnostics.is_empty());
         assert!(out.tests.is_empty());
         assert_eq!(out.program.stmts.len(), 1);
+    }
+
+    /// `resolve_docs` adjacency: a file-leading `@doc` is the module doc (Python-docstring rule),
+    /// a block immediately followed by a declaration attaches to it, and anything else is a
+    /// free-floating section.
+    #[test]
+    fn doc_blocks_resolve_module_decl_and_section_targets() {
+        let program = parse_program(
+            "@doc { The module. }\n\
+             @doc { Adds. }\n\
+             fn add(a: int, b: int): int { return a + b; }\n\
+             @doc { A section. }\n\
+             x = 1;\n",
+        );
+        let docs = resolve_docs(&program);
+        assert_eq!(docs.len(), 3);
+        assert_eq!(docs[0].target, DocTarget::Module);
+        assert!(
+            matches!(&docs[1].target, DocTarget::Decl { name, .. } if name == "add"),
+            "{:?}",
+            docs[1].target
+        );
+        assert_eq!(docs[2].target, DocTarget::Section);
+    }
+
+    /// With the `doc` tier live, activation stamps a declaration-attached block as `#[Doc(text:
+    /// "…")]` on that declaration (runtime docstrings); with it inactive nothing is stamped and the
+    /// blocks strip as before, so production carries no doc text.
+    #[test]
+    fn active_doc_tier_stamps_the_doc_attribute() {
+        let program = parse_program(
+            "@doc { Adds two ints. }\n\
+             fn add(a: int, b: int): int { return a + b; }\n",
+        );
+        let doc_attr_of = |activated: &Activated| {
+            activated.program.stmts.iter().find_map(|s| match s {
+                Stmt::Fn(d) => d.attrs.iter().find(|a| a.name == TIER_ATTR_DOC).cloned(),
+                _ => None,
+            })
+        };
+        let active = activate_tiers(&program, &["doc"]);
+        let attr = doc_attr_of(&active).expect("Doc attr stamped");
+        assert!(
+            matches!(&attr.args[0].value, noeta_ast::AttrValue::Str(t) if t.contains("Adds two ints")),
+            "{:?}",
+            attr.args
+        );
+        // The stamped attribute passes the ordinary construction gate.
+        assert!(crate::check_all(&active.program).diagnostics.is_empty());
+        // Inactive: no stamp, block stripped.
+        let inactive = activate_tiers(&program, &[]);
+        assert!(doc_attr_of(&inactive).is_none());
+        assert_eq!(inactive.program.stmts.len(), 1);
     }
 
     /// A `@bench(iterations: N)` block's directive args are stamped onto each contained fn as the
