@@ -315,7 +315,10 @@ impl Env for WasiHost {
 impl Os for WasiHost {
     fn os_platform(&self) -> String {
         // `"wasi"` on the wasm runner; the build target's OS in this crate's native unit tests.
-        std::env::consts::OS.to_string()
+        // Rust leaves `consts::OS` **empty** on wasm targets (verified on wasm32-wasip1), so name
+        // the platform ourselves rather than report "".
+        let os = std::env::consts::OS;
+        if os.is_empty() { "wasi" } else { os }.to_string()
     }
 
     fn os_arch(&self) -> String {

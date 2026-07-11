@@ -4085,6 +4085,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-wasm-runner"
+version = "0.1.0"
+dependencies = [
+ "noeta-backend",
+ "noeta-bundle",
+ "noeta-db",
+ "noeta-diagnostics",
+ "noeta-span",
+ "noeta-stdlib",
+ "noeta-vm",
+ "noeta-wasi-host",
+]
+
+[[package]]
 name = "noq"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

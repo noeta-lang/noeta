@@ -1,0 +1,24 @@
+[package]
+name = "noeta-wasm-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+noeta-backend = { workspace = true }
+noeta-bundle = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-span = { workspace = true }
+noeta-stdlib = { workspace = true }
+noeta-vm = { workspace = true }
+noeta-wasi-host = { workspace = true }
+
+[dev-dependencies]
+# The integration test compiles a tiny program to a bundle through the salsa pipeline and runs
+# the (native-built) runner binary over it — the runner is target-agnostic by design.
+noeta-db = { workspace = true }
+
+[lints]
+workspace = true
