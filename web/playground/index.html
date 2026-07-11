@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Noeta Playground</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1a1a; --panel: #f5f5f4; --border: #d8d8d6;
+    --accent: #4a5fc1; --error: #c0392b; --warning: #b7791f; --muted: #6b6b68;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #16161a; --fg: #e6e6e3; --panel: #1f1f24; --border: #33333a;
+            --accent: #8ea0f0; --error: #ef7566; --warning: #d9a04c; --muted: #8f8f8a; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 system-ui, sans-serif;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
+    padding: 0.6rem 1rem; border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 1.05rem; margin: 0 0.5rem 0 0; font-weight: 650; }
+  header h1 span { color: var(--muted); font-weight: 400; }
+  button, select {
+    font: inherit; padding: 0.3rem 0.9rem; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--panel); color: var(--fg); cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  #run { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+  #status { margin-left: auto; color: var(--muted); font-size: 0.9rem; }
+  main { flex: 1; display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; } }
+  #editor {
+    resize: none; border: 0; border-right: 1px solid var(--border); outline: none;
+    padding: 1rem; background: var(--bg); color: var(--fg);
+    font: 14px/1.55 ui-monospace, 'Cascadia Code', 'JetBrains Mono', monospace;
+    white-space: pre; tab-size: 2;
+  }
+  #right { display: flex; flex-direction: column; min-height: 0; background: var(--panel); }
+  #output {
+    flex: 1; margin: 0; padding: 1rem; overflow: auto; white-space: pre-wrap;
+    font: 14px/1.55 ui-monospace, 'Cascadia Code', 'JetBrains Mono', monospace;
+  }
+  #diagnostics { max-height: 40%; overflow: auto; border-top: 1px solid var(--border); }
+  #diagnostics:empty { display: none; }
+  .diagnostic { padding: 0.4rem 1rem; font-size: 0.9rem; border-bottom: 1px solid var(--border); }
+  .diagnostic.error { color: var(--error); }
+  .diagnostic.warning { color: var(--warning); }
+  .diagnostic .help { color: var(--muted); padding-left: 3.2rem; }
+  .loc {
+    font: 12px ui-monospace, monospace; padding: 0.05rem 0.4rem; margin-right: 0.4rem;
+    border-radius: 4px;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Noeta <span>playground</span></h1>
+    <button id="run" title="Ctrl+Enter">Run</button>
+    <button id="check">Check</button>
+    <button id="fmt">Format</button>
+    <select id="examples" title="examples"></select>
+    <span id="status"></span>
+  </header>
+  <main>
+    <textarea id="editor" spellcheck="false" aria-label="Noeta source"></textarea>
+    <div id="right">
+      <pre id="output" aria-label="program output"></pre>
+      <div id="diagnostics" aria-label="diagnostics"></div>
+    </div>
+  </main>
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
