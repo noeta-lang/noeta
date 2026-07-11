@@ -22,6 +22,14 @@
 //! rides `noeta-bundle` everywhere the decode side does (walrus remains a dev-dependency, to
 //! build and re-validate test modules). The contract is tiny — a 16-byte marker and two
 //! integers — so any future runner works as long as it keeps the slot.
+//!
+//! **Components too** (the `noeta build --serve` artifact): the component binary format shares
+//! the exact top-level `(id, size, contents)*` shape — only the header's version/layer bytes
+//! differ — and its core-module sections (id 1) each embed a *complete* core module, own header
+//! included. So the component staple is the same walk one level up: find the (exactly one)
+//! embedded module carrying the slot, run the core patcher on it, and re-emit the component
+//! with that section's new length. The adapter shims `wasm-component-ld` adds are copied
+//! byte-for-byte like any other section.
 
 use crate::WASM_SLOT_MAGIC;
 
@@ -66,17 +74,66 @@ const PAGE: u64 = 65536;
 const SEC_MEMORY: u8 = 5;
 const SEC_DATA: u8 = 11;
 const SEC_DATA_COUNT: u8 = 12;
+/// A component's core-module section: its contents are a complete embedded core module.
+const SEC_COMPONENT_CORE_MODULE: u8 = 1;
 
-/// Rewrite `runner` (a `noeta-wasm-runner` wasm binary) so it carries and runs `bundle` — the
-/// single-artifact `noeta build --wasm` output.
+/// The 4 bytes after `\0asm`: version 1 for a core module, version 0x0d + layer 1 for a
+/// component (the component-model framing).
+const CORE_VERSION: [u8; 4] = [1, 0, 0, 0];
+const COMPONENT_VERSION: [u8; 4] = [0x0d, 0, 1, 0];
+
+/// Rewrite `runner` (a runner core module, or a serve **component**) so it carries and runs
+/// `bundle` — the single-artifact `noeta build --wasm` / `--serve` output.
 pub fn staple_wasm(runner: &[u8], bundle: &[u8]) -> Result<Vec<u8>, WasmStapleError> {
     if !crate::is_bundle(bundle) {
         return Err(WasmStapleError::NotABundle);
     }
+    match header_version(runner)? {
+        CORE_VERSION => staple_core(runner, bundle),
+        COMPONENT_VERSION => staple_component(runner, bundle),
+        other => Err(parse_err(&format!(
+            "unrecognized wasm version/layer bytes {other:02x?}"
+        ))),
+    }
+}
 
+/// Staple into a component: locate the one embedded core module carrying the slot, patch it with
+/// the core staple, and re-emit the component around it.
+fn staple_component(component: &[u8], bundle: &[u8]) -> Result<Vec<u8>, WasmStapleError> {
+    let sections = split_sections(component, COMPONENT_VERSION)?;
+    let carriers = sections
+        .iter()
+        .filter(|s| {
+            s.id == SEC_COMPONENT_CORE_MODULE && find(s.contents, &WASM_SLOT_MAGIC).is_some()
+        })
+        .count();
+    match carriers {
+        0 => return Err(WasmStapleError::SlotMissing),
+        1 => {}
+        // Two modules carrying the marker is ambiguous at this level even before the per-module
+        // exactly-one check — refuse rather than guess which one the runtime reads.
+        _ => return Err(WasmStapleError::SlotAmbiguous),
+    }
+    let mut out = Vec::with_capacity(component.len() + bundle.len() + 64);
+    out.extend_from_slice(&component[..8]);
+    for section in &sections {
+        if section.id == SEC_COMPONENT_CORE_MODULE
+            && find(section.contents, &WASM_SLOT_MAGIC).is_some()
+        {
+            let patched = staple_core(section.contents, bundle)?;
+            push_section(&mut out, section.id, &patched);
+        } else {
+            push_section(&mut out, section.id, section.contents);
+        }
+    }
+    Ok(out)
+}
+
+/// Staple into a core module (the wasip1 runner, or a component's embedded engine module).
+fn staple_core(runner: &[u8], bundle: &[u8]) -> Result<Vec<u8>, WasmStapleError> {
     // Pass 1: the bundle's address comes from the memory section, which precedes the data
     // section — read the old minimum before emitting anything.
-    let sections = split_sections(runner)?;
+    let sections = split_sections(runner, CORE_VERSION)?;
     let memory_contents = sections
         .iter()
         .find(|s| s.id == SEC_MEMORY)
@@ -140,16 +197,27 @@ fn parse_err(msg: &str) -> WasmStapleError {
     WasmStapleError::Parse(msg.to_string())
 }
 
+/// The 4 version/layer bytes of a wasm binary (after validating the `\0asm` magic).
+fn header_version(binary: &[u8]) -> Result<[u8; 4], WasmStapleError> {
+    if binary.len() < 8 || &binary[0..4] != b"\0asm" {
+        return Err(parse_err("not a wasm binary (bad magic)"));
+    }
+    Ok(binary[4..8].try_into().expect("length checked"))
+}
+
 /// One top-level section: `(id, size, contents)` with the contents borrowed from the input.
 struct Section<'a> {
     id: u8,
     contents: &'a [u8],
 }
 
-/// Split a wasm binary into its top-level sections (after validating the 8-byte header).
-fn split_sections(binary: &[u8]) -> Result<Vec<Section<'_>>, WasmStapleError> {
-    if binary.len() < 8 || &binary[0..4] != b"\0asm" || binary[4..8] != [1, 0, 0, 0] {
-        return Err(parse_err("not a wasm module (bad magic/version)"));
+/// Split a wasm binary into its top-level sections — core modules and components share the
+/// exact `(id, size, contents)*` shape; `version` pins which header this binary must carry.
+fn split_sections(binary: &[u8], version: [u8; 4]) -> Result<Vec<Section<'_>>, WasmStapleError> {
+    if header_version(binary)? != version {
+        return Err(parse_err(
+            "unexpected wasm version/layer for this staple level",
+        ));
     }
     let mut rest = &binary[8..];
     let mut sections = Vec::new();
@@ -492,8 +560,8 @@ mod tests {
         // survive verbatim — the point of the section-level walk over an IR round-trip.
         let runner = synthetic_runner(1);
         let image = staple_wasm(&runner, &bundle()).expect("staples");
-        let before = split_sections(&runner).expect("input splits");
-        let after = split_sections(&image).expect("output splits");
+        let before = split_sections(&runner, CORE_VERSION).expect("input splits");
+        let after = split_sections(&image, CORE_VERSION).expect("output splits");
         assert_eq!(before.len(), after.len());
         for (a, b) in before.iter().zip(after.iter()) {
             assert_eq!(a.id, b.id, "section order preserved");
@@ -501,6 +569,50 @@ mod tests {
                 assert_eq!(a.contents, b.contents, "section {} copied verbatim", a.id);
             }
         }
+    }
+
+    /// Wrap core modules into a minimal component, the way the real serve artifact embeds them
+    /// (verified against `noeta-wasm-serve`'s actual binary: full inner modules, own headers).
+    fn synthetic_component(modules: &[&[u8]]) -> Vec<u8> {
+        let mut out = b"\0asm".to_vec();
+        out.extend_from_slice(&COMPONENT_VERSION);
+        for module in modules {
+            push_section(&mut out, SEC_COMPONENT_CORE_MODULE, module);
+        }
+        out
+    }
+
+    #[test]
+    fn staple_descends_into_the_component_module_that_carries_the_slot() {
+        let bundle = bundle();
+        let carrier = synthetic_runner(1);
+        let bystander = synthetic_runner(0);
+        let component = synthetic_component(&[&bystander, &carrier]);
+        let image = staple_wasm(&component, &bundle).expect("staples");
+
+        let sections = split_sections(&image, COMPONENT_VERSION).expect("still a component");
+        assert_eq!(sections.len(), 2);
+        // The bystander module is byte-identical; the carrier grew and was patched.
+        assert_eq!(sections[0].contents, &bystander[..]);
+        let patched = walrus::Module::from_buffer(sections[1].contents).expect("valid module");
+        assert_eq!(patched.memories.iter().next().expect("memory").initial, 3);
+        assert!(
+            patched.data.iter().any(|d| d.value == bundle),
+            "the bundle rides the carrier's data"
+        );
+
+        // Ambiguity across modules is refused before any patching.
+        let two_carriers = synthetic_component(&[&carrier, &carrier]);
+        assert!(matches!(
+            staple_wasm(&two_carriers, &bundle),
+            Err(WasmStapleError::SlotAmbiguous)
+        ));
+        // No carrier at all: the component-level SlotMissing.
+        let none = synthetic_component(&[&bystander]);
+        assert!(matches!(
+            staple_wasm(&none, &bundle),
+            Err(WasmStapleError::SlotMissing)
+        ));
     }
 
     #[test]

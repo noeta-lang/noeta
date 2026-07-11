@@ -11,12 +11,13 @@
 //! platform's own model (`wasmtime serve` instantiates per request), so a fresh VM per request
 //! is the *natural* shape here, not an inefficiency.
 //!
-//! The program arrives as a `.noeb` baked in at build time (`NOETA_SERVE_BUNDLE`, see
-//! `build.rs` — interim, like `--native`'s workspace ladder); the decoded module is cached in a
-//! thread-local so platforms that *do* reuse an instance skip the decode. A handler that never
-//! replies (a non-serving program, an abort, an empty placeholder bundle) answers **500** with
-//! the run's output as the body — the debugging view you want at the edge, not a hung
-//! connection.
+//! The program arrives by **stapling** (the same slot mechanism as the wasip1 runner):
+//! `noeta build --serve` patches the `.noeb` into a prebuilt generic component's data section
+//! (`noeta_bundle::staple_wasm`, component-aware) — ~1 ms, no cargo at build time. The decoded
+//! module is cached in a thread-local so platforms that *do* reuse an instance skip the decode.
+//! A handler that never replies (a non-serving program, an abort, an unstapled generic
+//! component) answers **500** with the run's output as the body — the debugging view you want
+//! at the edge, not a hung connection.
 //!
 //! Split on purpose: this module (request → run → response over neutral `NetRequest`/
 //! `NetResponse`) is target-agnostic and natively unit-tested; the `wasi:http` type glue lives
@@ -32,8 +33,45 @@ use std::cell::OnceCell;
 use noeta_stdlib::{NetRequest, NetResponse};
 use noeta_wasi_host::{OutboundHook, WasiHost};
 
-/// The program this component serves, baked in by `build.rs` (empty ⇒ the 500 build hint).
-static BUNDLE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bundle.noeb"));
+/// The patchable bundle slot — the `noeta build --serve` staple contract, identical to the
+/// wasip1 runner's (`noeta-wasm-runner/src/embedded.rs`): the shared magic, then the bundle's
+/// linear-memory address and length as little-endian `u32`s. `repr(C)` fixes the patch offsets;
+/// `#[used]` keeps the zero slot in the emitted data section.
+#[repr(C)]
+struct BundleSlot {
+    magic: [u8; 16],
+    ptr: u32,
+    len: u32,
+}
+
+#[used]
+static BUNDLE_SLOT: BundleSlot = BundleSlot {
+    magic: noeta_bundle::WASM_SLOT_MAGIC,
+    ptr: 0,
+    len: 0,
+};
+
+/// The stapled bundle, if this component has been patched — `None` in the generic build. The
+/// volatile reads are load-bearing: the static's compile-time value IS zero, and a plain read
+/// would constant-fold to it, blinding the component to the patch (see the runner's twin).
+fn stapled_bundle() -> Option<&'static [u8]> {
+    // SAFETY: same contract as the runner's `embedded::bundle()` — when `len` is non-zero the
+    // patcher guaranteed `[ptr, ptr+len)` is an initialized active data segment inside the
+    // bumped memory minimum, disjoint from every Rust allocation; the address is materialized
+    // with exposed provenance.
+    #[allow(unsafe_code)]
+    unsafe {
+        let len = std::ptr::read_volatile(&raw const BUNDLE_SLOT.len);
+        if len == 0 {
+            return None;
+        }
+        let ptr = std::ptr::read_volatile(&raw const BUNDLE_SLOT.ptr);
+        Some(std::slice::from_raw_parts(
+            std::ptr::with_exposed_provenance::<u8>(ptr as usize),
+            len as usize,
+        ))
+    }
+}
 
 thread_local! {
     /// The decoded module, cached across invocations when the platform reuses an instance.
@@ -44,15 +82,15 @@ thread_local! {
 /// the reply its handler produced — or a diagnostic `500` when it produced none. The decoded
 /// module is cached (the embedded bundle never changes), so instance reuse skips the decode.
 pub fn serve_once(request: NetRequest) -> NetResponse {
-    if BUNDLE.is_empty() {
+    let Some(bundle) = stapled_bundle() else {
         return failure(
-            "this noeta-wasm-serve component was built without a program: \
-             rebuild with NOETA_SERVE_BUNDLE=<app.noeb> (see plans/wasm/, W4)",
+            "this is the generic noeta-wasm-serve component with no program stapled in: \
+             build your app with `noeta build --serve app.noe` (see plans/wasm/, W4)",
         );
-    }
+    };
     MODULE.with(|cell| {
         let module = cell.get_or_init(|| {
-            noeta_bundle::read(BUNDLE).map_err(|e| format!("cannot load the embedded bundle: {e}"))
+            noeta_bundle::read(bundle).map_err(|e| format!("cannot load the stapled bundle: {e}"))
         });
         match module {
             Ok(module) => run(module, request, platform_outbound()),
@@ -79,8 +117,8 @@ fn platform_outbound() -> Option<OutboundHook> {
 pub fn serve_bundle(bundle: &[u8], request: NetRequest) -> NetResponse {
     if bundle.is_empty() {
         return failure(
-            "this noeta-wasm-serve component was built without a program: \
-             rebuild with NOETA_SERVE_BUNDLE=<app.noeb> (see plans/wasm/, W4)",
+            "this is the generic noeta-wasm-serve component with no program stapled in: \
+             build your app with `noeta build --serve app.noe` (see plans/wasm/, W4)",
         );
     }
     match noeta_bundle::read(bundle) {
@@ -159,7 +197,7 @@ mod tests {
     fn an_empty_bundle_answers_the_build_hint() {
         let response = serve_bundle(&[], get("/"));
         assert_eq!(response.status, 500);
-        assert!(String::from_utf8_lossy(&response.body).contains("NOETA_SERVE_BUNDLE"));
+        assert!(String::from_utf8_lossy(&response.body).contains("noeta build --serve"));
     }
 
     #[test]

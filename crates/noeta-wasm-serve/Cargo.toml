@@ -27,5 +27,12 @@ wasi = { workspace = true }
 noeta-db = { workspace = true }
 noeta-span = { workspace = true }
 
-[lints]
-workspace = true
+# One of the workspace's few `unsafe` opt-outs (see ARCHITECTURE.md): reading the stapled-bundle
+# slot — the same `read_volatile` + `from_raw_parts` pattern (and the same justification) as
+# `noeta-wasm-runner/src/embedded.rs`; gated by the e2e rather than miri, like the JIT's native
+# code. It re-states the rest of the workspace lints minus `unsafe_code = "forbid"`.
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

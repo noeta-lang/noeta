@@ -168,8 +168,9 @@ enum Command {
         /// Emit a **wasi:http serve component** (P-WASM W4): the program is baked into the
         /// `noeta-wasm-serve` component (wasm32-wasip2), whose `wasi:http/incoming-handler`
         /// export runs the program's `http.serve` handler once per request. Deploy on any
-        /// component host: `wasmtime serve -S cli=y app.serve.wasm`. Interim: rebuilds the
-        /// component via cargo (needs the `wasm32-wasip2` target).
+        /// component host: `wasmtime serve -S cli=y app.serve.wasm`. The generic component is
+        /// located via `NOETA_WASM_SERVE`, next to this binary, else built from the workspace
+        /// (interim) — then the bundle is stapled in (~1 ms, no per-app cargo build).
         #[arg(long)]
         serve: bool,
         /// Activate a dev-tier for this build, e.g. `--tier debug`. Repeatable.
@@ -2518,58 +2519,36 @@ fn emit_wasm(
     }
 }
 
-/// Emit `module` as a **wasi:http serve component** (P-WASM W4): bake its bundle into the
-/// `noeta-wasm-serve` component via a workspace cargo build (the bundle is `include_bytes!`-ed
-/// at compile time, so unlike `--wasm` there is no prebuilt artifact to patch — a per-app
-/// rebuild is inherent to this interim path; a staple-into-component rewrite is the recorded
-/// follow-up). Writes to `out` if given, else `<input>.serve.wasm`. Deploy:
-/// `wasmtime serve -S cli=y app.serve.wasm`.
+/// Emit `module` as a **wasi:http serve component** (P-WASM W4): staple its bundle into the
+/// prebuilt generic `noeta-wasm-serve` component — the exact `--wasm` mechanism one format
+/// level up (`staple_wasm` descends into the component's embedded engine module), so no cargo
+/// runs at user build time once a generic component exists. Writes to `out` if given, else
+/// `<input>.serve.wasm`. Deploy: `wasmtime serve -S cli=y app.serve.wasm`.
 fn emit_serve(
     file: &std::path::Path,
     out: Option<&std::path::Path>,
     module: &noeta_bytecode::Module,
 ) -> ExitCode {
-    let blob = noeta_bundle::write(module);
-    // The bundle must live on disk for the component's build script to embed.
-    let staging =
-        std::env::temp_dir().join(format!("noeta-serve-bundle-{}.noeb", std::process::id()));
-    if let Err(err) = std::fs::write(&staging, &blob) {
-        eprintln!("lang: cannot stage the bundle: {err}");
-        return ExitCode::from(2);
-    }
-    let output = std::process::Command::new("cargo")
-        .args([
-            "build",
-            "-p",
-            "noeta-wasm-serve",
-            "--target",
-            "wasm32-wasip2",
-            "--profile",
-            "wasm-release",
-        ])
-        .env("NOETA_SERVE_BUNDLE", &staging)
-        .output();
-    std::fs::remove_file(&staging).ok();
-    match output {
+    let component_path = match resolve_serve_component() {
+        Ok(path) => path,
         Err(err) => {
-            eprintln!("lang: cannot run cargo to build the serve component: {err}");
+            eprintln!("lang: {err}");
             return ExitCode::from(2);
         }
-        Ok(output) if !output.status.success() => {
+    };
+    let component = match std::fs::read(&component_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
             eprintln!(
-                "lang: building the serve component failed (is the wasm32-wasip2 target                  installed? `rustup target add wasm32-wasip2`):
-{}",
-                String::from_utf8_lossy(&output.stderr)
+                "lang: cannot read the serve component {}: {err}",
+                component_path.display()
             );
             return ExitCode::from(2);
         }
-        Ok(_) => {}
-    }
-    let artifact = match workspace_target_dir() {
-        Ok(dir) => dir
-            .join("wasm32-wasip2")
-            .join("wasm-release")
-            .join("noeta_wasm_serve.wasm"),
+    };
+    let blob = noeta_bundle::write(module);
+    let image = match noeta_bundle::staple_wasm(&component, &blob) {
+        Ok(image) => image,
         Err(err) => {
             eprintln!("lang: {err}");
             return ExitCode::from(2);
@@ -2580,11 +2559,12 @@ fn emit_serve(
         name.push(".serve.wasm");
         file.with_file_name(name)
     });
-    match std::fs::copy(&artifact, &out_path) {
-        Ok(bytes) => {
+    match std::fs::write(&out_path, &image) {
+        Ok(()) => {
             eprintln!(
-                "wrote {} ({bytes} bytes, wasi:http component — `wasmtime serve -S cli=y {}`)",
+                "wrote {} ({} bytes, wasi:http component — `wasmtime serve -S cli=y {}`)",
                 out_path.display(),
+                image.len(),
                 out_path.display(),
             );
             ExitCode::SUCCESS
@@ -2594,6 +2574,54 @@ fn emit_serve(
             ExitCode::from(2)
         }
     }
+}
+
+/// Locate the generic `noeta-wasm-serve` component to staple into — the serve twin of
+/// [`resolve_wasm_runner`]'s ladder: `NOETA_WASM_SERVE` → next to this binary → the workspace
+/// build, compiled on demand (interim; a packaged toolchain ships the component).
+fn resolve_serve_component() -> Result<std::path::PathBuf, String> {
+    if let Ok(path) = std::env::var("NOETA_WASM_SERVE") {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join("noeta-wasm-serve.wasm");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    // Interim workspace build. `--locked` is deliberately absent: this is the dev-tree path.
+    let output = std::process::Command::new("cargo")
+        .args([
+            "build",
+            "-p",
+            "noeta-wasm-serve",
+            "--target",
+            "wasm32-wasip2",
+            "--profile",
+            "wasm-release",
+        ])
+        .output()
+        .map_err(|e| format!("cannot run cargo to build the serve component: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "building the serve component failed (is the wasm32-wasip2 target installed? \
+             `rustup target add wasm32-wasip2`):\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let artifact = workspace_target_dir()?
+        .join("wasm32-wasip2")
+        .join("wasm-release")
+        .join("noeta_wasm_serve.wasm");
+    if !artifact.is_file() {
+        return Err(format!(
+            "the serve component was not found at {} after building",
+            artifact.display()
+        ));
+    }
+    Ok(artifact)
 }
 
 /// Locate the `noeta-wasm-runner` wasm32-wasip1 binary to staple into. Priority: an explicit
