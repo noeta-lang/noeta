@@ -2435,6 +2435,31 @@ fn tier_dep_project(name: &str) -> PathBuf {
 }
 
 #[test]
+fn tests_in_a_dependency_using_program_run() {
+    // The built-in tier runners load with dependency resolution (the fold-in after tier-providers):
+    // a `@test` exercising an imported package fn links and runs, exactly as `noeta run` would.
+    let entry = tier_dep_project("tier_dep_test_runner");
+    std::fs::write(
+        entry.parent().unwrap().join("main.noe"),
+        "use fuzzkit.tiers.helper_answer\n\
+         @test fn dep_helper_works(): void { assert(helper_answer() == 42) }\n",
+    )
+    .unwrap();
+    let lib = entry.parent().unwrap().parent().unwrap().join("fuzzkit");
+    std::fs::write(
+        lib.join("tiers.noe"),
+        "namespace fuzz.tiers;\npub fn helper_answer(): int { return 42 }\n",
+    )
+    .unwrap();
+    lang()
+        .arg("test")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 passed, 0 failed, 1 total"));
+}
+
+#[test]
 fn a_dependency_declared_tier_dispatches_cross_package() {
     // The third-party proof (tier-providers T4): the tier, its config attribute, and its runner
     // all live in a path dependency; the consumer opts in with one `use` and writes `@fuzz` blocks.

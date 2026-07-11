@@ -3036,6 +3036,34 @@ fn target_gate(entry: &std::path::Path, target: &Option<String>, tier: &str) -> 
     }
 }
 
+/// Load and link `file` **with its dependency packages resolved** — the same dep-aware path
+/// `run`/`check` use — rendering any failure. The tier runners (`test`/`bench`/`doc`) share this:
+/// a program whose tier content imports from a dependency (a test exercising `use fuzzkit.…`, a
+/// declared tier's runner) must link exactly as it does for a run.
+fn load_linked(file: &std::path::Path) -> Result<noeta_loader::Linked, ExitCode> {
+    let deps = match graph::resolve_graph(file) {
+        Ok(graph) => graph.packages,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return Err(ExitCode::from(2));
+        }
+    };
+    match noeta_loader::load_with_deps(file, &deps) {
+        Err(err) => {
+            eprintln!("lang: cannot read {}: {err}", file.display());
+            Err(ExitCode::from(2))
+        }
+        Ok(Ok(linked)) => Ok(linked),
+        Ok(Err(load_diagnostics)) => {
+            let mut stderr = io::stderr();
+            for ld in &load_diagnostics {
+                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+            }
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
 /// The outcome of running one `@test` fn: whether it passed, the failure message (the first
 /// diagnostic, typically the assertion/panic), and anything it wrote to stdout (shown on failure).
 struct TestOutcome {
@@ -3065,19 +3093,9 @@ fn cmd_test(
     if let Some(code) = target_gate(file, target, "test") {
         return code;
     }
-    let linked = match noeta_loader::load(file) {
-        Err(err) => {
-            eprintln!("lang: cannot read {}: {err}", file.display());
-            return ExitCode::from(2);
-        }
-        Ok(Ok(linked)) => linked,
-        Ok(Err(load_diagnostics)) => {
-            let mut stderr = io::stderr();
-            for ld in &load_diagnostics {
-                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
-            }
-            return ExitCode::from(1);
-        }
+    let linked = match load_linked(file) {
+        Ok(linked) => linked,
+        Err(code) => return code,
     };
 
     // Activate the `test` tier: inline its `@test` blocks as ordinary top-level declarations and
@@ -3575,19 +3593,9 @@ fn cmd_bench(
     if let Some(code) = target_gate(file, target, "bench") {
         return code;
     }
-    let linked = match noeta_loader::load(file) {
-        Err(err) => {
-            eprintln!("lang: cannot read {}: {err}", file.display());
-            return ExitCode::from(2);
-        }
-        Ok(Ok(linked)) => linked,
-        Ok(Err(load_diagnostics)) => {
-            let mut stderr = io::stderr();
-            for ld in &load_diagnostics {
-                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
-            }
-            return ExitCode::from(1);
-        }
+    let linked = match load_linked(file) {
+        Ok(linked) => linked,
+        Err(code) => return code,
     };
 
     // Activate the `bench` tier: inline its `@bench` blocks as ordinary top-level declarations and
@@ -3764,19 +3772,9 @@ fn cmd_doc(file: &std::path::Path, target: &Option<String>) -> ExitCode {
     if let Some(code) = target_gate(file, target, "doc") {
         return code;
     }
-    let linked = match noeta_loader::load(file) {
-        Err(err) => {
-            eprintln!("lang: cannot read {}: {err}", file.display());
-            return ExitCode::from(2);
-        }
-        Ok(Ok(linked)) => linked,
-        Ok(Err(load_diagnostics)) => {
-            let mut stderr = io::stderr();
-            for ld in &load_diagnostics {
-                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
-            }
-            return ExitCode::from(1);
-        }
+    let linked = match load_linked(file) {
+        Ok(linked) => linked,
+        Err(code) => return code,
     };
 
     let docs = noeta_check::resolve_docs(&linked.program);
