@@ -123,6 +123,10 @@ enum Command {
         /// `@bench(iterations: N)` directive. Without either, a default count is used.
         #[arg(long)]
         iterations: Option<u64>,
+        /// Run only the bench fn(s) with these names (repeatable; exact fn-name match) — the
+        /// impact-filtered `--watch` seam, symmetric with `noeta test --name` (server-hmr W3).
+        #[arg(long = "name")]
+        names: Vec<String>,
         /// Only run when the `bench` tier is live in this `noeta.toml` build profile; otherwise the
         /// runner does nothing.
         #[arg(long)]
@@ -482,8 +486,9 @@ pub fn run_cli(
         Command::Bench {
             file,
             iterations,
+            names,
             profile,
-        } => cmd_bench(&file, iterations, &profile),
+        } => cmd_bench(&file, iterations, &names, &profile),
         Command::Doc { file, profile } => cmd_doc(&file, &profile),
         Command::Build {
             file,
@@ -3538,6 +3543,7 @@ const DEFAULT_BENCH_ITERATIONS: u64 = 200;
 fn cmd_bench(
     file: &std::path::Path,
     iterations_override: Option<u64>,
+    names: &[String],
     profile: &Option<String>,
 ) -> ExitCode {
     if let Some(code) = compose::maybe_delegate(file) {
@@ -3577,8 +3583,21 @@ fn cmd_bench(
         return ExitCode::from(1);
     }
 
-    if activated.benches.is_empty() {
-        println!("no benchmarks found");
+    let selected: Vec<&noeta_check::TierFn> = if names.is_empty() {
+        activated.benches.iter().collect()
+    } else {
+        activated
+            .benches
+            .iter()
+            .filter(|b| names.contains(&b.name))
+            .collect()
+    };
+    if selected.is_empty() {
+        if names.is_empty() {
+            println!("no benchmarks found");
+        } else {
+            println!("no benchmarks matching --name");
+        }
         return ExitCode::SUCCESS;
     }
 
@@ -3590,11 +3609,11 @@ fn cmd_bench(
         .cloned()
         .collect();
 
-    let total = activated.benches.len();
+    let total = selected.len();
     println!("running {total} benchmark{}", plural(total));
 
     let mut failed = 0usize;
-    for bench in &activated.benches {
+    for bench in selected {
         let n = iterations_override
             .or_else(|| iterations_arg(&bench.args))
             .unwrap_or(DEFAULT_BENCH_ITERATIONS)

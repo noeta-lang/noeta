@@ -3955,6 +3955,7 @@ dependencies = [
  "noeta-dap",
  "noeta-diagnostics",
  "noeta-fmt",
+ "noeta-ide",
  "noeta-lexer",
  "noeta-loader",
  "noeta-lsp",
@@ -4125,6 +4126,7 @@ version = "0.1.0"
 dependencies = [
  "noeta-ast",
  "noeta-check",
+ "noeta-compiler",
  "noeta-db",
  "noeta-diagnostics",
  "noeta-fmt",

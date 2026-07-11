@@ -144,6 +144,21 @@ pub fn build(program: &Program, expr_types: &HashMap<Span, TypeRepr>, texts: &[&
                     functions.push(method_node(&decl.target, m));
                 }
             }
+            // Tier fns (`@test fn adds…`) are graph nodes like any top-level fn (server-hmr W3):
+            // the impact engine's reverse closure walks from a changed fn to the tests that call
+            // it, and the editor's call hierarchy works inside tier bodies.
+            Stmt::TierBlock { items, .. } => {
+                for item in items {
+                    if let Stmt::Fn(decl) = item {
+                        functions.push(FnNode {
+                            name: decl.name.clone(),
+                            name_span: decl.name_span,
+                            decl_span: decl.span,
+                            method: false,
+                        });
+                    }
+                }
+            }
             _ => {}
         }
     }

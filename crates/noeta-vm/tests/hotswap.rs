@@ -336,14 +336,14 @@ fn a_comment_edit_inside_a_type_does_not_restart() {
     // H2: the residual is compared as TOKENS, so trivia edits between fields — a doc tweak, a
     // reflowed comment — no longer read as layout changes (H0's raw-text residual forced a
     // state-losing restart here).
-    let v1 = "struct P {\n    // the x coordinate\n    x: int\n\n    fn get(self): int { return self.x; }\n}\n";
-    let v2 = "struct P {\n    // the horizontal coordinate\n    x: int\n\n    fn get(self): int { return self.x; }\n}\n";
+    let v1 = "struct P {\n    // the x coordinate\n    x: int\n\n    fn get(): int { return self.x; }\n}\n";
+    let v2 = "struct P {\n    // the horizontal coordinate\n    x: int\n\n    fn get(): int { return self.x; }\n}\n";
     assert!(
         matches!(verdict(v1, v2), SwapDiff::Unchanged),
         "a comment-only edit is no behavioral change at all"
     );
     // …and with a method edit riding along, it swaps rather than restarts.
-    let v3 = "struct P {\n    // the horizontal coordinate\n    x: int\n\n    fn get(self): int { return self.x + 0; }\n}\n";
+    let v3 = "struct P {\n    // the horizontal coordinate\n    x: int\n\n    fn get(): int { return self.x + 0; }\n}\n";
     let SwapDiff::Swap(plan) = verdict(v1, v3) else {
         panic!("comment + method-body edits must swap");
     };

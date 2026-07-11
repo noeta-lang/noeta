@@ -233,6 +233,15 @@ pub fn diff_programs(old: &Program, old_src: &str, new: &Program, new_src: &str)
             Stmt::Struct(decl) => include.contains(decl.name.as_str()),
             Stmt::Class(decl) => include.contains(decl.name.as_str()),
             Stmt::Enum(decl) => include.contains(decl.name.as_str()),
+            // A code tier block rides along when one of its fns changed (stripped at lowering —
+            // a live server re-evaluates it as a no-op; the bookkeeping is what matters).
+            Stmt::TierBlock {
+                items: tier_items,
+                doc_text: None,
+                ..
+            } => tier_items
+                .iter()
+                .any(|i| matches!(i, Stmt::Fn(d) if include.contains(d.name.as_str()))),
             Stmt::Impl(_) | Stmt::Namespace { .. } => false,
             other => {
                 if !rerun_top_level {
@@ -382,6 +391,25 @@ fn classify<'a>(stmts: &'a [Stmt], src: &'a str) -> Items<'a> {
                 items.uses.insert(text(src, stmt.span()));
             }
             Stmt::Namespace { .. } => items.namespaces.push(text(src, stmt.span())),
+            // A code tier's fns (`@test fn adds…`) diff like top-level fns (server-hmr W3): a
+            // test-body edit is a body-level change attributed to `adds` — the impact engine
+            // narrows reruns to its callers, and a hot server doesn't re-run its top level over
+            // a test tweak (the swapped block is stripped at lowering anyway). Non-fn tier items
+            // and a `@doc` text body compare as ordinary top-level statements.
+            Stmt::TierBlock {
+                items: tier_items,
+                doc_text,
+                ..
+            } if doc_text.is_none() => {
+                for item in tier_items {
+                    match item {
+                        Stmt::Fn(decl) => {
+                            items.fns.insert(decl.name.as_str(), decl);
+                        }
+                        other => items.others.push(text(src, other.span())),
+                    }
+                }
+            }
             _ => items.others.push(text(src, stmt.span())),
         }
     }

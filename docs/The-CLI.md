@@ -104,6 +104,16 @@ the file's top-level setup, then drives the handler on the given port.
 `--watch` works on **any** command (`noeta run --watch`, `noeta test --watch`, …): a file watcher
 restarts the command on change — with the startup cache, a restart is a few milliseconds.
 
+For the tier runners the watch is **impact-filtered**: `noeta test --watch` (and `bench`) diffs
+each save against the previous run, walks the reverse call graph from the changed definitions,
+and reruns only the impacted tier fns (via the runners' repeatable `--name` filter) — edit a leaf
+function and exactly its caller-tests rerun; an inert edit (formatting between declarations, a
+comment) runs nothing. Edits the engine cannot attribute — a signature/layout change, a changed
+top-level statement (fixtures live there), another file, red code — degrade to a full rerun *with
+the reason printed*. The closure is static, so code reached only through dynamic dispatch is
+matched best-effort (method calls on untyped receivers over-approximate by name); run without the
+filter occasionally if you lean on reflection-driven dispatch.
+
 `noeta serve --watch` upgrades from restarts to **in-process hot reload**. On each save of the
 entry file the watcher parses, type-checks (**transactionally** — red code never swaps; the old
 version keeps serving and the diagnostics go to the terminal *and* to connected LiveView clients

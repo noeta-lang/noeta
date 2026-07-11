@@ -17,7 +17,7 @@
 //! write-then-rename lands as one restart.
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -85,12 +85,27 @@ fn watch_loop(args: &[OsString]) -> ExitCode {
     // can absorb a change — the wrapper then restarts immediately and otherwise stays out of the
     // way (double-watching would restart the server on the very edits the child just swapped).
     let hot = args.first().is_some_and(|a| a == "serve");
+    // Impact-filtered tier watch (server-hmr W3): a `test`/`bench` rerun narrows to the
+    // declarations the edit impacted (the runners' `--name` filter), computed by the
+    // runner-agnostic engine (`noeta_ide::impact`) from the previous run's source.
+    let impact_entry = (!hot && args.first().is_some_and(|a| a == "test" || a == "bench"))
+        .then(|| {
+            args.iter()
+                .map(PathBuf::from)
+                .find(|p| p.extension().is_some_and(|e| e == "noe"))
+        })
+        .flatten();
+    let mut extra: Vec<OsString> = Vec::new();
     loop {
         let mut cmd = Command::new(&exe);
-        cmd.args(args);
+        cmd.args(args).args(&extra);
         if hot {
             cmd.env("NOETA_HOT", "1");
         }
+        // The source this run observes — the next edit's impact baseline.
+        let baseline = impact_entry
+            .as_deref()
+            .and_then(|e| std::fs::read_to_string(e).ok());
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
@@ -109,19 +124,79 @@ fn watch_loop(args: &[OsString]) -> ExitCode {
             eprintln!("[watch] finished ({status}) — waiting for changes");
             wait_for_change(&rx);
         } else {
-            let exited = run_until_change(&rx, &mut child);
+            let mut changed = Vec::new();
+            let exited = run_until_change(&rx, &mut child, &mut changed);
             if let Some(status) = exited {
                 // The program finished on its own (a `run` reaching its end, a crash): report and
                 // wait for the next change rather than looping hot.
                 eprintln!("[watch] finished ({status}) — waiting for changes");
-                wait_for_change(&rx);
+                changed = wait_for_change(&rx);
             } else {
                 // A relevant change arrived while the program was running: stop it and restart.
                 let _ = child.kill();
                 let _ = child.wait();
             }
+            // Decide the next run's filter; an inert edit skips the run entirely.
+            loop {
+                match next_filter(impact_entry.as_deref(), baseline.as_deref(), &changed) {
+                    Filter::All(reason) => {
+                        if let Some(reason) = reason {
+                            eprintln!("[watch] rerunning everything: {reason}");
+                        }
+                        extra.clear();
+                        break;
+                    }
+                    Filter::Names(names) => {
+                        eprintln!("[watch] impacted: {}", names.join(", "));
+                        extra = names
+                            .iter()
+                            .flat_map(|n| [OsString::from("--name"), OsString::from(n)])
+                            .collect();
+                        break;
+                    }
+                    Filter::Skip => {
+                        eprintln!("[watch] nothing impacted — waiting for changes");
+                        changed = wait_for_change(&rx);
+                    }
+                }
+            }
         }
         eprintln!("[watch] change detected — restarting");
+    }
+}
+
+/// What the next tier run should execute (server-hmr W3).
+enum Filter {
+    /// Everything — with the reason when the edit was unattributable.
+    All(Option<String>),
+    /// Exactly these declarations (the runner's `--name` filter drops non-tier names).
+    Names(Vec<String>),
+    /// Nothing changed behaviorally — no run at all.
+    Skip,
+}
+
+/// Decide the next run's filter from the changed paths and the previous run's source. Anything
+/// that breaks attribution — no impact entry (not a tier command), an unreadable baseline, a
+/// change to another file or the manifest — degrades to a full rerun.
+fn next_filter(entry: Option<&Path>, baseline: Option<&str>, changed: &[PathBuf]) -> Filter {
+    let (Some(entry), Some(baseline)) = (entry, baseline) else {
+        return Filter::All(None);
+    };
+    let entry_canon = entry.canonicalize().unwrap_or_else(|_| entry.to_path_buf());
+    let all_entry = !changed.is_empty()
+        && changed
+            .iter()
+            .all(|p| p.canonicalize().map(|c| c == entry_canon).unwrap_or(false));
+    if !all_entry {
+        return Filter::All(Some("a change outside the entry file".into()));
+    }
+    let Ok(new_src) = std::fs::read_to_string(entry) else {
+        return Filter::All(None);
+    };
+    match noeta_ide::impact::impact_of_edit(baseline, &new_src) {
+        noeta_ide::impact::Impact::Decls(decls) if decls.is_empty() => Filter::Skip,
+        noeta_ide::impact::Impact::Decls(decls) => Filter::Names(decls),
+        noeta_ide::impact::Impact::All { reason } => Filter::All(Some(reason)),
     }
 }
 
@@ -145,6 +220,7 @@ fn wait_ignoring_events(
 fn run_until_change(
     rx: &mpsc::Receiver<notify::Result<notify::Event>>,
     child: &mut Child,
+    changed: &mut Vec<PathBuf>,
 ) -> Option<std::process::ExitStatus> {
     loop {
         if let Ok(Some(status)) = child.try_wait() {
@@ -152,7 +228,8 @@ fn run_until_change(
         }
         match rx.recv_timeout(POLL) {
             Ok(event) if relevant(&event) => {
-                drain(rx);
+                collect_paths(&event, changed);
+                drain(rx, changed);
                 return None;
             }
             // Irrelevant event, timeout tick, or a watcher error: keep polling. A disconnected
@@ -163,13 +240,16 @@ fn run_until_change(
     }
 }
 
-/// Block until a relevant change arrives (used after the child finished on its own).
-fn wait_for_change(rx: &mpsc::Receiver<notify::Result<notify::Event>>) {
+/// Block until a relevant change arrives (used after the child finished on its own); returns the
+/// changed source paths the debounced burst touched.
+fn wait_for_change(rx: &mpsc::Receiver<notify::Result<notify::Event>>) -> Vec<PathBuf> {
     loop {
         match rx.recv() {
             Ok(event) if relevant(&event) => {
-                drain(rx);
-                return;
+                let mut changed = Vec::new();
+                collect_paths(&event, &mut changed);
+                drain(rx, &mut changed);
+                return changed;
             }
             Ok(_) => {}
             Err(_) => {
@@ -180,9 +260,19 @@ fn wait_for_change(rx: &mpsc::Receiver<notify::Result<notify::Event>>) {
     }
 }
 
-/// Debounce: keep draining events for [`DEBOUNCE`] after the first relevant one.
-fn drain(rx: &mpsc::Receiver<notify::Result<notify::Event>>) {
-    while rx.recv_timeout(DEBOUNCE).is_ok() {}
+/// Debounce: keep draining events for [`DEBOUNCE`] after the first relevant one, collecting the
+/// source paths they touch.
+fn drain(rx: &mpsc::Receiver<notify::Result<notify::Event>>, changed: &mut Vec<PathBuf>) {
+    while let Ok(event) = rx.recv_timeout(DEBOUNCE) {
+        collect_paths(&event, changed);
+    }
+}
+
+/// Append `event`'s project-source paths (the filter [`relevant_path`] applies) to `changed`.
+fn collect_paths(event: &notify::Result<notify::Event>, changed: &mut Vec<PathBuf>) {
+    if let Ok(event) = event {
+        changed.extend(event.paths.iter().filter(|p| relevant_path(p)).cloned());
+    }
 }
 
 fn relevant(event: &notify::Result<notify::Event>) -> bool {

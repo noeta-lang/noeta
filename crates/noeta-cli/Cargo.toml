@@ -34,6 +34,8 @@ noeta-loader = { workspace = true }
 noeta-runtime = { workspace = true }
 noeta-stdlib = { workspace = true }
 noeta-lsp = { workspace = true }
+# The impact engine (server-hmr W3): `noeta test/bench --watch` reruns only impacted decls.
+noeta-ide = { workspace = true }
 noeta-dap = { workspace = true }
 noeta-prof = { workspace = true }
 noeta-fmt = { workspace = true }
