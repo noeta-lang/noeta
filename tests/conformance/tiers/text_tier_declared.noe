@@ -1,0 +1,23 @@
+// A *declared* text tier (text-tiers arc): `@tier(spec, text: "xml")` makes `@spec { … }` a
+// verbatim-text block — same-file, via the lexer's two-pass self-use (no manifest involved), and
+// in either order (this use sits above the declaration). The body holds XML with quoted
+// attributes and a stray `<` — invalid as Noeta tokens — plus escaped braces (`\{`/`\}` are
+// literal, not counted; `\\` a literal backslash). On a normal run the block strips exactly like
+// `@doc`, so both backends agree by construction and the program prints only its own output.
+// expect: stdout "7"
+// expect: stdout "done"
+// expect: exit 0
+@spec {
+  <suite name="arith">
+    <case call="add(3, 4)" expect="7"/>
+    an escaped \} closer, an escaped \{ opener, and a backslash \\
+  </suite>
+}
+
+@tier(spec, text: "xml")
+fn run_specs(roots: List<TierText>): void { return }
+
+fn add(a: int, b: int): int { return a + b }
+
+echo add(3, 4)
+echo "done"
