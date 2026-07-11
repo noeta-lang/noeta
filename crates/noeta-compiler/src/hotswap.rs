@@ -447,7 +447,7 @@ fn diff_type<'a>(
     if text(old_src, old.span()) == text(new_src, new.span()) {
         return;
     }
-    if residual_text(old, old_src) != residual_text(new, new_src) {
+    if residual_fingerprint(old, old_src) != residual_fingerprint(new, new_src) {
         blockers.push(SwapBlocker::LayoutChanged {
             type_name: name.to_string(),
         });
@@ -496,32 +496,44 @@ fn diff_type<'a>(
     }
 }
 
-/// The declaration's text with each method's span removed — the layout-and-everything-else
-/// fingerprint. Methods flattened out of `impl` blocks subtract from inside the block's text,
-/// leaving the block header (`impl Add {`) in the residual, so adding/removing a trait impl still
-/// registers as a layout-level change.
-fn residual_text(item: &TypeItem, src: &str) -> String {
-    let span = item.span();
-    let mut cuts: Vec<(u32, u32)> = item
+/// The declaration's **token fingerprint** with each method's tokens removed — the
+/// layout-and-everything-else check (server-hmr H2). Everything that is not a method body is
+/// included by construction — fields, variants, defaults, derives, directives, type params,
+/// impl-block headers, the destructor — so the check stays sound against syntax it has never
+/// heard of; but it compares *tokens*, not raw text, so a comment or whitespace edit inside a
+/// type declaration no longer reads as a layout change (H0's raw-text residual forced a
+/// state-losing restart on a doc tweak between two fields). Transitivity is free: a layout
+/// change to an embedded type is a change to *that* type's own declaration, which blocks the
+/// whole swap regardless of who contains it. Deliberate staleness: a **doc-comment** edit is
+/// trivia to the compile path, so it swaps as "unchanged" and live reflection docstrings stay
+/// stale until a code change or restart.
+fn residual_fingerprint(item: &TypeItem, src: &str) -> Vec<String> {
+    let decl_span = item.span();
+    let decl_text = text(src, decl_span);
+    let source = noeta_span::Source::new(noeta_span::SourceId::FIRST, "<residual>", decl_text);
+    let lexed = noeta_lexer::lex(&source);
+    // Method ranges, relative to the declaration slice the tokens were lexed against.
+    let cuts: Vec<(u32, u32)> = item
         .methods()
         .iter()
-        .map(|m| (m.span.start.max(span.start), m.span.end.min(span.end)))
+        .map(|m| {
+            (
+                m.span.start.saturating_sub(decl_span.start),
+                m.span.end.saturating_sub(decl_span.start),
+            )
+        })
         .filter(|(s, e)| s < e)
         .collect();
-    cuts.sort_unstable();
-    let full = text(src, span);
-    let mut out = String::with_capacity(full.len());
-    let mut pos = span.start;
-    for (start, end) in cuts {
-        if start > pos {
-            out.push_str(&src[pos as usize..start as usize]);
-        }
-        pos = pos.max(end);
-    }
-    if span.end > pos {
-        out.push_str(&src[pos as usize..span.end as usize]);
-    }
-    out
+    lexed
+        .tokens
+        .iter()
+        .filter(|t| {
+            !cuts
+                .iter()
+                .any(|&(s, e)| t.span.start >= s && t.span.start < e)
+        })
+        .map(|t| decl_text[t.span.start as usize..t.span.end as usize].to_string())
+        .collect()
 }
 
 fn text(src: &str, span: Span) -> &str {

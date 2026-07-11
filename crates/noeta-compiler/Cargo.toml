@@ -21,9 +21,10 @@ noeta-object = { workspace = true }
 # (noeta-eval) keep noeta-stdlib default-on, so datetime is present everywhere else.
 noeta-stdlib = { path = "../noeta-stdlib", default-features = false }
 noeta-check = { workspace = true }
+# The hot-swap differ token-normalizes type-declaration residuals (server-hmr H2).
+noeta-lexer = { workspace = true }
 
 [dev-dependencies]
-noeta-lexer = { workspace = true }
 noeta-parser = { workspace = true }
 
 [lints]

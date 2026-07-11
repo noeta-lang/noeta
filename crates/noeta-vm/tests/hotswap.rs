@@ -232,6 +232,70 @@ fn a_field_layout_change_blocks() {
 }
 
 #[test]
+fn a_changed_embedded_packed_struct_blocks_transitively() {
+    // H2's transitive claim: `Outer` embeds `Inner` in flat packed storage, so a change to
+    // Inner's fields is a layout change for BOTH. The differ blocks on Inner's own declaration —
+    // transitivity is free because the embedded type's decl is where the edit lives; the restart
+    // covers every container.
+    let v1 = "@packed struct Inner { x: int }\n@packed struct Outer { i: Inner; y: int }\n";
+    let v2 = "@packed struct Inner { x: int; z: int }\n@packed struct Outer { i: Inner; y: int }\n";
+    let SwapDiff::NeedsRestart(blockers) = verdict(v1, v2) else {
+        panic!("an embedded packed layout change must block");
+    };
+    assert_eq!(
+        blockers,
+        vec![SwapBlocker::LayoutChanged {
+            type_name: "Inner".into()
+        }]
+    );
+}
+
+#[test]
+fn an_enum_variant_change_blocks() {
+    let v1 = "enum Shape { Dot; Line(int) }\n";
+    let v2 = "enum Shape { Dot; Line(int, int) }\n";
+    let SwapDiff::NeedsRestart(blockers) = verdict(v1, v2) else {
+        panic!("a variant payload change must block");
+    };
+    assert_eq!(
+        blockers,
+        vec![SwapBlocker::LayoutChanged {
+            type_name: "Shape".into()
+        }]
+    );
+}
+
+#[test]
+fn a_field_default_change_blocks() {
+    // A per-field default is compiled into construction sites — layout-level, not a body edit.
+    let v1 = "struct P { x: int = 1 }\n";
+    let v2 = "struct P { x: int = 2 }\n";
+    assert!(
+        matches!(verdict(v1, v2), SwapDiff::NeedsRestart(_)),
+        "a field-default change must block"
+    );
+}
+
+#[test]
+fn a_comment_edit_inside_a_type_does_not_restart() {
+    // H2: the residual is compared as TOKENS, so trivia edits between fields — a doc tweak, a
+    // reflowed comment — no longer read as layout changes (H0's raw-text residual forced a
+    // state-losing restart here).
+    let v1 = "struct P {\n    // the x coordinate\n    x: int\n\n    fn get(self): int { return self.x; }\n}\n";
+    let v2 = "struct P {\n    // the horizontal coordinate\n    x: int\n\n    fn get(self): int { return self.x; }\n}\n";
+    assert!(
+        matches!(verdict(v1, v2), SwapDiff::Unchanged),
+        "a comment-only edit is no behavioral change at all"
+    );
+    // …and with a method edit riding along, it swaps rather than restarts.
+    let v3 = "struct P {\n    // the horizontal coordinate\n    x: int\n\n    fn get(self): int { return self.x + 0; }\n}\n";
+    let SwapDiff::Swap(plan) = verdict(v1, v3) else {
+        panic!("comment + method-body edits must swap");
+    };
+    assert_eq!(plan.changed, vec!["P.get".to_string()]);
+}
+
+#[test]
 fn a_changed_top_level_statement_makes_a_rerunning_swap() {
     let v1 = "fn f(): int { return 1; }\necho f()\n";
     let v2 = "fn f(): int { return 1; }\necho f() + 1\n";
