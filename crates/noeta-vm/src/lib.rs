@@ -1036,6 +1036,10 @@ struct Vm<'m> {
     promote_sources: Vec<Value>,
     stdout: String,
     diagnostics: Vec<Diagnostic>,
+    /// A deliberate `os.exit(code)` (stdlib-gaps): the requested exit code, set when the
+    /// distinguished `ErrorKind::Exit` unwinds. Not a diagnostic — the run halts cleanly
+    /// (stdout kept, nothing reported) and the run's exit code is this value.
+    requested_exit: Option<i32>,
     /// The tier-1 JIT engine (milestone P-JIT), present only when the `jit` feature is on *and* the
     /// host ISA is available. `None` = interpret everything (tier 0). Never populated on a worker
     /// isolate — Cranelift's `JITModule` is `!Send`, and the deterministic path stays tier 0.
@@ -2170,6 +2174,7 @@ impl<'m> Vm<'m> {
             promote_sources: Vec::new(),
             stdout: String::new(),
             diagnostics: Vec::new(),
+            requested_exit: None,
             #[cfg(feature = "jit")]
             jit: None,
             #[cfg(feature = "jit")]
@@ -2776,7 +2781,11 @@ impl<'m> Vm<'m> {
             self.jit_final_stats = service.shutdown(self.jit_drain_at_exit);
         }
 
-        let exit_code = if self.diagnostics.is_empty() { 0 } else { 1 };
+        // A deliberate `os.exit(code)` wins over the diagnostic-derived code (there are no
+        // diagnostics on that path — the halt is clean).
+        let exit_code = self
+            .requested_exit
+            .unwrap_or(if self.diagnostics.is_empty() { 0 } else { 1 });
         RunResult {
             stdout: std::mem::take(&mut self.stdout),
             exit_code,
@@ -2974,6 +2983,18 @@ impl<'m> Vm<'m> {
         self.diagnostics
             .push(Diagnostic::error(code, span, message));
         Abort
+    }
+
+    /// Convert a native-dispatch [`noeta_stdlib::StdError`] into the unwind token. The
+    /// distinguished `Exit` kind (`os.exit(code)`, stdlib-gaps) is NOT a diagnostic: it records
+    /// the requested code and aborts cleanly — nothing is reported, stdout is kept. Mirrors the
+    /// tree-walker's `std_dispatch_error`.
+    fn std_dispatch_error(&mut self, error: noeta_stdlib::StdError, span: Span) -> Abort {
+        if let noeta_stdlib::ErrorKind::Exit(code) = error.kind {
+            self.requested_exit = Some(code);
+            return Abort;
+        }
+        self.error(stdlib_error_code(error.kind), span, error.message)
     }
 
     /// Release a value that may be the *last* reference to a destructor-carrying object. If so,

@@ -16,6 +16,7 @@ pub mod extern_value;
 pub mod host;
 pub mod map_key;
 pub mod net;
+pub mod os;
 pub mod p2p;
 pub mod registry;
 pub mod telemetry;
@@ -28,11 +29,12 @@ pub use ctx::{
 pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};
 pub use host::{
-    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, P2p, ReadSource, Rng,
+    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, ReadSource, Rng,
     SyncStatus,
 };
 pub use map_key::{ExternKeyRef, MapKey, PackedKeyField};
 pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
+pub use os::{ExecIo, ExecResult};
 pub use p2p::{P2pBroker, ReceiveIo};
 pub use registry::{
     ArenaGetter, BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, CtxTypeDispatch,
@@ -99,6 +101,10 @@ pub enum ErrorKind {
     /// flush's runaway guard (an effect that keeps changing a signal it depends on). Maps onto
     /// the language's reactive-cycle diagnostic (E0045).
     ReactiveCycle,
+    /// A deliberate program termination with this exit code (`os.exit(n)`, stdlib-gaps). NOT a
+    /// diagnostic: each backend intercepts it at the dispatch boundary, halts cleanly (stdout
+    /// kept, nothing printed), and surfaces the code as the run's exit code.
+    Exit(i32),
 }
 
 /// A stdlib misuse error. The `message` is rendered here so both backends report it

@@ -11,6 +11,7 @@ noeta-stdlib = { workspace = true }
 compact_str = { workspace = true }
 tokio = { workspace = true }
 getrandom = { workspace = true }
+gethostname = { workspace = true }
 # The outbound HTTP client (the `Network::net_fetch`/`net_spawn` capability on `RealHost`). Optional
 # so an AOT binary whose program never imports `std.http` links without reqwest and its ~1.5 MB TLS
 # stack (rustls/ring/hyper/h2) — dropped by `noeta build --native`'s per-ring footprint selection

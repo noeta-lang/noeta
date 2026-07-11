@@ -201,6 +201,8 @@ pub(crate) fn stdlib_error_code(kind: noeta_stdlib::ErrorKind) -> DiagnosticCode
         noeta_stdlib::ErrorKind::Io => DiagnosticCode::IoError,
         noeta_stdlib::ErrorKind::Panic => DiagnosticCode::Panic,
         noeta_stdlib::ErrorKind::ReactiveCycle => DiagnosticCode::ReactiveCycle,
+        // Intercepted upstream (`Vm::std_dispatch_error`) — defensive mapping only.
+        noeta_stdlib::ErrorKind::Exit(_) => DiagnosticCode::Panic,
     }
 }
 

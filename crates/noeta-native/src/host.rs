@@ -171,10 +171,49 @@ pub trait Network {
 
 /// **Host introspection** capability (M2.2). `env_keys` is sorted. The sandbox presents a fixed
 /// fixture; a real host reads the real environment/args.
+///
+/// `env_set` (stdlib-gaps) writes into the **program's view** of the environment, not the real
+/// process environment: the sandbox mutates its fixture map, and `RealHost` keeps a thread-safe
+/// overlay consulted before the real environment (`std::env::set_var` is unsafe with live
+/// threads, and isolates are OS threads). Reads observe writes; the parent process is untouched.
 pub trait Env {
     fn env_get(&self, key: &str) -> Option<String>;
+    fn env_set(&mut self, key: &str, value: &str);
     fn env_keys(&self) -> Vec<String>;
     fn args(&self) -> Vec<String>;
+}
+
+/// **Operating system** capability (stdlib-gaps) — process execution and system introspection,
+/// the effect seam behind `std.os`. The introspection leaves are fixed fixtures in the sandbox
+/// (`"sandbox"`/`"wasm32"`-style constants, pid 1, cwd `/`) and real values on `RealHost`;
+/// `os_exec` is a **scripted in-oracle interpreter** of a tiny fixed command set in the sandbox
+/// (deterministic — see `SandboxHost`) and a real `std::process::Command` on `RealHost`
+/// (CLI-only, like the rest of the real host). `os.exit` does not live here: terminating the
+/// *program* is interpreter control flow ([`crate::ErrorKind::Exit`]), not a host effect.
+pub trait Os {
+    /// The OS family name (`"linux"`, `"macos"`, `"windows"`, …; `"sandbox"` in the sandbox).
+    fn os_platform(&self) -> String;
+    /// The CPU architecture (`"x86_64"`, `"aarch64"`, …).
+    fn os_arch(&self) -> String;
+    /// The machine's hostname.
+    fn os_hostname(&self) -> String;
+    /// The number of logical CPUs available (≥ 1).
+    fn os_cpus(&self) -> i64;
+    /// The current working directory.
+    fn os_cwd(&self) -> String;
+    /// The process id.
+    fn os_pid(&self) -> i64;
+    /// Run `command` with `args` (verbatim — no shell), wait for it, and capture the outcome.
+    /// A command that cannot be started at all (not found, not executable) is an `Io` error;
+    /// a command that starts and fails is a successful `ExecResult` with its non-zero status.
+    fn os_exec(&mut self, command: &str, args: &[String])
+    -> Result<crate::os::ExecResult, StdError>;
+    /// Build the async exec descriptor. Default: a [`crate::os::ExecIo`] resolving through
+    /// [`Self::os_exec`] at spawn (deterministic in the sandbox); `RealHost` overrides it with
+    /// a blocking-pool body so `exec_async` genuinely overlaps.
+    fn os_exec_spawn(&self, command: String, args: Vec<String>) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::os::ExecIo { command, args })
+    }
 }
 
 /// **Peer-to-peer sync** capability (p2p P1) — the local-first stack's transport seam (§9.15). A
@@ -338,15 +377,15 @@ impl SyncStatus {
 }
 
 /// Every host-coupled effect the interpreters perform, behind one swappable seam — the union of the
-/// eleven capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Entropy`], [`Ids`],
-/// [`Network`], [`P2p`], and the three telemetry signals [`Tracing`](crate::Tracing) /
+/// twelve capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Os`], [`Entropy`],
+/// [`Ids`], [`Network`], [`P2p`], and the three telemetry signals [`Tracing`](crate::Tracing) /
 /// [`Metrics`](crate::Metrics) / [`Logging`](crate::Logging)). Backends hold a `Box<dyn Host>` and
 /// reach any capability through it; a consumer that needs only one (a read handle → [`FileReader`],
 /// the RNG dispatch → [`Rng`], …) depends on that trait instead, so a partial host (e.g. a read-only
 /// test double) implements exactly what it supports rather than stubbing the rest.
 ///
 /// Object-safe on purpose (IO is never a hot path, so the dynamic dispatch is immaterial). The
-/// blanket impl means any type providing all eleven capabilities *is* a `Host` automatically — there
+/// blanket impl means any type providing all twelve capabilities *is* a `Host` automatically — there
 /// is nothing extra to implement. Splitting telemetry into three sibling traits costs nothing at
 /// runtime: a `dyn Host` has one vtable and supertrait methods fold into it, so a call is one
 /// indirection regardless of which sub-trait declared it.
@@ -355,6 +394,7 @@ pub trait Host:
     + Rng
     + Clock
     + Env
+    + Os
     + Entropy
     + Ids
     + Network
@@ -369,6 +409,7 @@ impl<
         + Rng
         + Clock
         + Env
+        + Os
         + Entropy
         + Ids
         + Network

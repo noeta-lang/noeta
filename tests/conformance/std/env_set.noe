@@ -1,0 +1,16 @@
+// `env.set(key, value)` (stdlib-gaps) writes the program's view of the environment: reads
+// observe writes (and on a real host, `os.exec` children inherit them); the parent process is
+// never touched. The sandbox fixture is {HOME, USER}, so the new key lands third in sorted order.
+// expect: stdout "start"
+// expect: stdout "42"
+// expect: stdout "[\"HOME\", \"STDLIB_GAP\", \"USER\"]"
+// expect: stdout "overwritten"
+// expect: exit 0
+use std.{env}
+
+echo "start"
+env.set("STDLIB_GAP", "42")
+echo env.get("STDLIB_GAP")
+echo env.keys()
+env.set("STDLIB_GAP", "overwritten")
+echo env.get("STDLIB_GAP")

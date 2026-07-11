@@ -6,11 +6,12 @@
 //! it stays with the modules ([`crate::fs`], [`crate::random`], [`crate::net`]) whose state it holds.
 
 pub use noeta_native::host::{
-    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, P2p, ReadSource, Rng,
+    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, ReadSource, Rng,
 };
 pub use noeta_native::{Logging, Metrics, Tracing};
 
-use crate::StdError;
+use crate::{ErrorKind, StdError};
+use noeta_native::ExecResult;
 use crate::env;
 use crate::fs::Vfs;
 use crate::random;
@@ -373,12 +374,81 @@ impl Env for SandboxHost {
         self.env.get(key).cloned()
     }
 
+    fn env_set(&mut self, key: &str, value: &str) {
+        self.env.insert(key.to_string(), value.to_string());
+    }
+
     fn env_keys(&self) -> Vec<String> {
         self.env.keys().cloned().collect()
     }
 
     fn args(&self) -> Vec<String> {
         self.args.clone()
+    }
+}
+
+impl Os for SandboxHost {
+    // Fixed introspection fixtures, like `env`'s (`sandbox_vars`): constants both backends and
+    // every run observe identically.
+    fn os_platform(&self) -> String {
+        "sandbox".to_string()
+    }
+
+    fn os_arch(&self) -> String {
+        "sandbox".to_string()
+    }
+
+    fn os_hostname(&self) -> String {
+        "sandbox".to_string()
+    }
+
+    fn os_cpus(&self) -> i64 {
+        1
+    }
+
+    fn os_cwd(&self) -> String {
+        "/".to_string()
+    }
+
+    fn os_pid(&self) -> i64 {
+        1
+    }
+
+    /// The scripted exec interpreter — a tiny fixed command set so exec-driving programs stay
+    /// in-oracle (the exec analogue of the Vfs / the inbound request script):
+    ///
+    /// - `echo <args…>` → status 0, stdout = the args joined with spaces + `\n`.
+    /// - `status <n> [message…]` → status `n`, stderr = the message + `\n` when present — the
+    ///   fixture for exercising failure paths.
+    /// - anything else → an `Io` error, like launching a missing binary on a real host.
+    fn os_exec(&mut self, command: &str, args: &[String]) -> Result<ExecResult, StdError> {
+        match command {
+            "echo" => Ok(ExecResult {
+                status: 0,
+                stdout: format!("{}\n", args.join(" ")),
+                stderr: String::new(),
+            }),
+            "status" => {
+                let status = args
+                    .first()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0);
+                let message = args.get(1..).unwrap_or(&[]).join(" ");
+                Ok(ExecResult {
+                    status,
+                    stdout: String::new(),
+                    stderr: if message.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{message}\n")
+                    },
+                })
+            }
+            other => Err(StdError {
+                kind: ErrorKind::Io,
+                message: format!("exec: command not found: {other}"),
+            }),
+        }
     }
 }
 
@@ -572,6 +642,39 @@ mod tests {
         // entropy value differs from a fresh stream's first, seed or no seed.
         a.rng_seed(42);
         assert_ne!(a.entropy_u64(), SandboxHost::new().entropy_u64());
+    }
+
+    #[test]
+    fn os_fixtures_are_deterministic_and_exec_is_scripted() {
+        let mut host = SandboxHost::new();
+        // The introspection leaves are fixed fixtures — identical on every run/backend.
+        assert_eq!(host.os_platform(), "sandbox");
+        assert_eq!(host.os_arch(), "sandbox");
+        assert_eq!(host.os_hostname(), "sandbox");
+        assert_eq!(host.os_cpus(), 1);
+        assert_eq!(host.os_cwd(), "/");
+        assert_eq!(host.os_pid(), 1);
+        // `echo` — status 0, stdout = args joined + newline.
+        let r = host.os_exec("echo", &["a".into(), "b".into()]).unwrap();
+        assert_eq!((r.status, r.stdout.as_str(), r.stderr.as_str()), (0, "a b\n", ""));
+        // `status n msg` — the failure fixture.
+        let f = host.os_exec("status", &["3".into(), "boom".into()]).unwrap();
+        assert_eq!((f.status, f.stdout.as_str(), f.stderr.as_str()), (3, "", "boom\n"));
+        // An unscripted command cannot start — an Io error, like a missing binary.
+        let e = host.os_exec("frobnicate", &[]).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Io);
+    }
+
+    #[test]
+    fn env_set_writes_the_fixture_view() {
+        let mut host = SandboxHost::new();
+        assert_eq!(host.env_get("K"), None);
+        host.env_set("K", "v1");
+        assert_eq!(host.env_get("K"), Some("v1".to_string()));
+        host.env_set("K", "v2");
+        assert_eq!(host.env_get("K"), Some("v2".to_string()));
+        // Keys stay sorted with the fixture entries.
+        assert_eq!(host.env_keys(), vec!["HOME", "K", "USER"]);
     }
 
     #[test]

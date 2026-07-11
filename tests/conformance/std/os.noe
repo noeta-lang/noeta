@@ -1,0 +1,18 @@
+// The `os` module (stdlib-gaps): system introspection over the Os capability. The sandbox
+// presents fixed fixtures (platform/arch/hostname `"sandbox"`, 1 cpu, cwd `/`, pid 1) so both
+// backends agree; a real run (`noeta run`) reports the real machine.
+// expect: stdout "sandbox"
+// expect: stdout "sandbox"
+// expect: stdout "sandbox"
+// expect: stdout "1"
+// expect: stdout "/"
+// expect: stdout "1"
+// expect: exit 0
+use std.{os}
+
+echo os.platform()
+echo os.arch()
+echo os.hostname()
+echo os.cpus()
+echo os.cwd()
+echo os.pid()

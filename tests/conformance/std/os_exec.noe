@@ -1,0 +1,28 @@
+// `os.exec(command, args?)` — run a subprocess and capture its outcome as an `ExecResult`
+// (`status`/`ok`/`stdout`/`stderr`). The sandbox scripts a tiny fixed command set (`echo`,
+// `status`) so exec-driving programs stay in-oracle — the exec analogue of the in-memory Vfs.
+// expect: stdout "0"
+// expect: stdout "true"
+// expect: stdout "hello world"
+// expect: stdout ""
+// expect: stdout "3"
+// expect: stdout "false"
+// expect: stdout "boom"
+// expect: stdout "no args"
+// expect: exit 0
+use std.{os}
+
+r = os.exec("echo", ["hello", "world"])
+echo r.status()
+echo r.ok()
+echo r.stdout().trim()
+echo r.stderr()
+f = os.exec("status", ["3", "boom"])
+echo f.status()
+echo f.ok()
+echo f.stderr().trim()
+n = os.exec("echo")
+echo match n.ok() {
+    true => "no args",
+    false => "failed",
+}

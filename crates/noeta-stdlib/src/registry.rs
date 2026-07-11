@@ -15,7 +15,8 @@
 pub use noeta_native::registry::*;
 
 use crate::{
-    Arg, Dispatch, Host, Output, StdError, arity_error, math, no_function_error, type_error,
+    Arg, Dispatch, ErrorKind, Host, Output, StdError, arity_error, math, no_function_error,
+    type_error,
 };
 
 // Core's `std` is registered as **several in-tree [`Extension`] units** (package-manager P1.4),
@@ -235,6 +236,15 @@ const CORE_TYPES: &[ExtType] = &[
         namespace: "std.fs",
         methods: FILE_HANDLE_METHODS,
         dispatch: file_handle_dispatch,
+        key_capable: false,
+        ..ExtType::DEFAULTS
+    },
+    // `ExecResult` (stdlib-gaps) — pure, content-equal subprocess outcome (the `Response` model).
+    ExtType {
+        name: crate::os::EXEC_RESULT_TYPE_NAME,
+        namespace: "std.os",
+        methods: EXEC_RESULT_METHODS,
+        dispatch: exec_result_dispatch,
         key_capable: false,
         ..ExtType::DEFAULTS
     },
@@ -1544,7 +1554,137 @@ fn env_dispatch(
             merged.extend(ambient);
             Ok(str_map(merged))
         }
+        "set" => {
+            want_arity(func, args, 2)?;
+            let key = want_str(func, args, 0)?;
+            let value = want_str(func, args, 1)?;
+            host.env_set(key, value);
+            Ok(NativeOut::Unit)
+        }
         _ => Err(no_function_error("env", func)),
+    }
+}
+
+// --- `os`: process execution + system introspection over the Os capability (stdlib-gaps) --------
+
+/// Parse `os.exec`'s optional second argument — a `List<string>` argv (defaults to empty).
+fn want_argv(func: &str, args: &[NativeValue], index: usize) -> Result<Vec<String>, StdError> {
+    match args.get(index) {
+        None => Ok(Vec::new()),
+        Some(NativeValue::List(items)) => items
+            .iter()
+            .map(|item| match item {
+                NativeValue::Str(s) => Ok(s.clone()),
+                _ => Err(type_error(func, "list of strings")),
+            })
+            .collect(),
+        Some(_) => Err(type_error(func, "list of strings")),
+    }
+}
+
+fn os_dispatch(func: &str, host: &mut dyn Host, args: &[NativeValue]) -> Result<NativeOut, StdError> {
+    match func {
+        "platform" => {
+            want_arity(func, args, 0)?;
+            Ok(NativeOut::Str(host.os_platform()))
+        }
+        "arch" => {
+            want_arity(func, args, 0)?;
+            Ok(NativeOut::Str(host.os_arch()))
+        }
+        "hostname" => {
+            want_arity(func, args, 0)?;
+            Ok(NativeOut::Str(host.os_hostname()))
+        }
+        "cpus" => {
+            want_arity(func, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Int(host.os_cpus())))
+        }
+        "cwd" => {
+            want_arity(func, args, 0)?;
+            Ok(NativeOut::Str(host.os_cwd()))
+        }
+        "pid" => {
+            want_arity(func, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Int(host.os_pid())))
+        }
+        // `exec(command, args?)` — run a subprocess (no shell), wait, capture the outcome.
+        "exec" => {
+            want_arity_range(func, args, 1, 2)?;
+            let command = want_str(func, args, 0)?;
+            let argv = want_argv(func, args, 1)?;
+            let result = host.os_exec(command, &argv)?;
+            Ok(NativeOut::Extern(crate::ExternBox::new(result)))
+        }
+        // The async twin: returns WORK the backend tickets on its executor, like `fs.read_async`.
+        "exec_async" => {
+            want_arity_range(func, args, 1, 2)?;
+            let command = want_str(func, args, 0)?.to_string();
+            let argv = want_argv(func, args, 1)?;
+            Ok(NativeOut::Spawn(SpawnBox(host.os_exec_spawn(command, argv))))
+        }
+        // `exit(code?)` — deliberate termination. Not a host effect and not a diagnostic: the
+        // distinguished `ErrorKind::Exit` unwinds the backend, which halts cleanly and surfaces
+        // the code as the run's exit code.
+        "exit" => {
+            want_arity_range(func, args, 0, 1)?;
+            let code = match args.first() {
+                Some(_) => want_int(func, args, 0)?,
+                None => 0,
+            };
+            Err(StdError {
+                kind: ErrorKind::Exit(code as i32),
+                message: format!("exit({code})"),
+            })
+        }
+        _ => Err(no_function_error("os", func)),
+    }
+}
+
+/// The `ExecResult` instance methods (stdlib-gaps): pure reads over the captured outcome, the
+/// `Response` accessor model.
+const EXEC_RESULT_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "status",
+        params: &[],
+        ret: Concrete(Int),
+    },
+    ExtFn {
+        name: "ok",
+        params: &[],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        name: "stdout",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "stderr",
+        params: &[],
+        ret: Concrete(Str),
+    },
+];
+
+fn exec_result_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(result) = recv.as_any().downcast_ref::<crate::ExecResult>() else {
+        return Err(type_error(method, "ExecResult"));
+    };
+    want_arity(method, args, 0)?;
+    match method {
+        "status" => Ok(NativeOut::Scalar(Scalar::Int(result.status))),
+        "ok" => Ok(NativeOut::Scalar(Scalar::Bool(result.status == 0))),
+        "stdout" => Ok(NativeOut::Str(result.stdout.clone())),
+        "stderr" => Ok(NativeOut::Str(result.stderr.clone())),
+        _ => Err(crate::no_method_error(
+            crate::os::EXEC_RESULT_TYPE_NAME,
+            method,
+        )),
     }
 }
 
@@ -2217,6 +2357,13 @@ const ENV_FNS: &[ExtFn] = &[
         params: &[SigType::Optional(&Str)],
         ret: Concrete(STR_MAP),
     },
+    // `set(key, value)` writes the program's view of the environment (stdlib-gaps): sandbox
+    // fixture map, or `RealHost`'s thread-safe overlay (children via `os.exec` observe it).
+    ExtFn {
+        name: "set",
+        params: &[Str, Str],
+        ret: Concrete(SigType::Unit),
+    },
 ];
 
 const ARGS_FNS: &[ExtFn] = &[ExtFn {
@@ -2224,6 +2371,59 @@ const ARGS_FNS: &[ExtFn] = &[ExtFn {
     params: &[],
     ret: Concrete(SigType::List(&Str)),
 }];
+
+/// The `ExecResult` signature — `os.exec`'s return (stdlib-gaps).
+const EXEC_RESULT_SIG: SigType = SigType::Named(crate::os::EXEC_RESULT_TYPE_NAME);
+
+/// The `os` module (stdlib-gaps): system introspection leaves + subprocess execution + exit.
+const OS_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "platform",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "arch",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "hostname",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "cpus",
+        params: &[],
+        ret: Concrete(Int),
+    },
+    ExtFn {
+        name: "cwd",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "pid",
+        params: &[],
+        ret: Concrete(Int),
+    },
+    ExtFn {
+        name: "exec",
+        params: &[Str, SigType::Optional(&SigType::List(&Str))],
+        ret: Concrete(EXEC_RESULT_SIG),
+    },
+    ExtFn {
+        name: "exec_async",
+        params: &[Str, SigType::Optional(&SigType::List(&Str))],
+        ret: Concrete(SigType::Future(&EXEC_RESULT_SIG)),
+    },
+    // `exit(code?)` types as unit; it never actually returns.
+    ExtFn {
+        name: "exit",
+        params: &[SigType::Optional(&Int)],
+        ret: Concrete(SigType::Unit),
+    },
+];
 
 const FS_FNS: &[ExtFn] = &[
     ExtFn {
@@ -2508,6 +2708,16 @@ const CORE_MODULES: &[ExtModule] = &[
         functions: ENV_FNS,
         dispatch: env_dispatch,
         deep_marshal: false,
+        ..ExtModule::DEFAULTS
+    },
+    // `os` (stdlib-gaps): system introspection + subprocess exec + exit over the Os capability.
+    // `deep_marshal` so `exec`'s `List<string>` argv arrives as a full `NativeValue::List`
+    // (like `http`'s headers map) — the shallow projection collapses containers to opaque.
+    ExtModule {
+        name: "os",
+        functions: OS_FNS,
+        dispatch: os_dispatch,
+        deep_marshal: true,
         ..ExtModule::DEFAULTS
     },
     // `tracing` (native OTEL T1–T2) — the tracing SDK facade. `span`/`with_span`/`current_context`
@@ -3028,6 +3238,7 @@ mod tests {
             ("Response", "std.http.Response"),
             ("Request", "std.http.Request"),
             ("FileHandle", "std.fs.FileHandle"),
+            ("ExecResult", "std.os.ExecResult"),
             ("Span", "std.tracing.Span"),
             ("Counter", "std.metrics.Counter"),
             ("Histogram", "std.metrics.Histogram"),

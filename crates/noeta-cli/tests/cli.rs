@@ -533,6 +533,49 @@ fn run_reads_the_real_environment() {
 }
 
 #[test]
+fn run_os_reports_the_real_machine_and_execs_real_processes() {
+    // `os.*` introspection reads the REAL machine (RealHost) — platform is a known constant,
+    // the rest are asserted non-trivial — and `os.exec` runs a REAL subprocess. `env.set`
+    // writes the overlay that both `env.get` and the exec child's environment observe.
+    let src = "use std.{os, env}\n\
+               echo os.platform()\n\
+               echo os.cpus() > 0\n\
+               echo os.pid() > 1\n\
+               env.set(\"LANG_E2E_OVERLAY\", \"through\")\n\
+               echo env.get(\"LANG_E2E_OVERLAY\")\n\
+               r = os.exec(\"sh\", [\"-c\", \"echo $LANG_E2E_OVERLAY\"])\n\
+               echo r.ok()\n\
+               echo r.stdout().trim()\n";
+    let file = temp_program("run_os", src);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(format!(
+            "{}\ntrue\ntrue\nthrough\ntrue\nthrough\n",
+            std::env::consts::OS
+        ));
+}
+
+#[test]
+fn run_os_exit_sets_the_process_exit_code() {
+    // `os.exit(code)` terminates `noeta run` itself with the requested code — cleanly: prior
+    // output is kept, nothing after runs, and no diagnostic/traceback is printed.
+    let file = temp_program(
+        "run_os_exit",
+        "use std.{os};\necho \"before\";\nos.exit(7);\necho \"unreachable\";",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .code(7)
+        .stdout("before\n")
+        .stderr("");
+}
+
+#[test]
 fn run_does_real_disk_io() {
     // `fs.write`/`fs.read` hit the REAL disk (RealHost), relative to the working directory.
     let dir = std::env::temp_dir().join("noeta_cli_realfs_dir");

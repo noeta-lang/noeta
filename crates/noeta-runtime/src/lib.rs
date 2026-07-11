@@ -37,14 +37,12 @@ pub mod p2p_crypto;
 use compact_str::CompactString;
 use noeta_stdlib::net::accept_outcome;
 use noeta_stdlib::{
-    AttrValue, Clock, Entropy, Env, ErrorKind, ExternIo, FileReader, FileSystem, Ids, InstrumentId,
-    InstrumentKind, LogRecord, Logging, MetricData, MetricStore, MetricValue, Metrics, NativeOut,
-    NetRequest, NetResponse, Network, P2p, ReadSource, RealBody, Rng, SpanData, SpanEvent, SpanId,
-    SpanKind, SpanStatus, StdError, TraceContext, Tracing,
+    AttrValue, Clock, Entropy, Env, ErrorKind, ExecResult, ExternBox, ExternIo, FileReader,
+    FileSystem, Ids, InstrumentId, InstrumentKind, LogRecord, Logging, MetricData, MetricStore,
+    MetricValue, Metrics, NativeOut, NetRequest, NetResponse, Network, Os, P2p, ReadSource,
+    RealBody, Rng, SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, StdError, TraceContext,
+    Tracing,
 };
-// Only the outbound-client (`ring-http-client`) path builds an `ExternBox` response body.
-#[cfg(feature = "ring-http-client")]
-use noeta_stdlib::ExternBox;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -105,6 +103,10 @@ pub struct RealHost {
     /// run from source or shipped as an executable — the toolchain's own `noeta run` prefix never
     /// leaks into the program.
     args: Vec<String>,
+    /// The program's `env.set` writes (stdlib-gaps): an overlay consulted before the real process
+    /// environment, and layered into `os.exec` children. `std::env::set_var` is unsafe with live
+    /// threads (isolates are OS threads), so the real environment is never mutated.
+    env_overlay: HashMap<String, String>,
     /// The p2p broker (p2p P1/P2): the in-process pub/sub log — the `RealHost` p2p backing when the
     /// `ring-p2p` ring is OFF (single-node loopback, so `noeta run` of a p2p program works locally
     /// without a network). Under `ring-p2p` the real node below replaces it, so it isn't compiled.
@@ -212,6 +214,7 @@ impl RealHost {
             conns: Arc::new(Mutex::new(HashMap::new())),
             next_conn: Arc::new(AtomicU64::new(0)),
             args: std::env::args().collect(),
+            env_overlay: HashMap::new(),
             #[cfg(not(feature = "ring-p2p"))]
             p2p: noeta_stdlib::P2pBroker::default(),
             tel: RealTelemetry::new(),
@@ -961,17 +964,117 @@ impl Entropy for RealHost {
 
 impl Env for RealHost {
     fn env_get(&self, key: &str) -> Option<String> {
-        std::env::var(key).ok()
+        // The overlay (this program's `env.set` writes) shadows the inherited environment.
+        self.env_overlay
+            .get(key)
+            .cloned()
+            .or_else(|| std::env::var(key).ok())
+    }
+
+    fn env_set(&mut self, key: &str, value: &str) {
+        self.env_overlay.insert(key.to_string(), value.to_string());
     }
 
     fn env_keys(&self) -> Vec<String> {
         let mut keys: Vec<String> = std::env::vars().map(|(k, _)| k).collect();
+        keys.extend(self.env_overlay.keys().cloned());
         keys.sort();
+        keys.dedup();
         keys
     }
 
     fn args(&self) -> Vec<String> {
         self.args.clone()
+    }
+}
+
+/// Run `command` with `args` through `std::process::Command`, capturing status and output — the
+/// shared body of the sync `os.exec` leaf and the async descriptor's blocking body. `overlay` is
+/// the program's `env.set` writes, layered onto the inherited environment so children observe
+/// them. A command that cannot be *started* is an `Io` error; one that runs and fails is a
+/// successful [`ExecResult`] carrying its non-zero status (`-1` when killed by a signal).
+fn real_exec(
+    command: &str,
+    args: &[String],
+    overlay: &HashMap<String, String>,
+) -> Result<ExecResult, StdError> {
+    let output = std::process::Command::new(command)
+        .args(args)
+        .envs(overlay)
+        .output()
+        .map_err(|e| io_error(format!("exec: cannot run `{command}`: {e}")))?;
+    Ok(ExecResult {
+        status: i64::from(output.status.code().unwrap_or(-1)),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
+/// The real host's async exec descriptor: its real body runs the subprocess on the executor's
+/// blocking pool (a `Command::output` is exactly a blocking op), so `os.exec_async` genuinely
+/// overlaps with the program — the exec analogue of `FsIo`'s real bodies.
+#[derive(Debug)]
+struct RealExecIo {
+    command: String,
+    args: Vec<String>,
+    /// A snapshot of the host's env overlay at spawn (the descriptor outlives the borrow).
+    overlay: HashMap<String, String>,
+}
+
+impl ExternIo for RealExecIo {
+    fn run_sync(&mut self, _host: &mut dyn noeta_stdlib::Host) -> Result<NativeOut, StdError> {
+        let result = real_exec(&self.command, &self.args, &self.overlay)?;
+        Ok(NativeOut::Extern(ExternBox::new(result)))
+    }
+
+    fn run_real(&mut self) -> Option<RealBody> {
+        let command = std::mem::take(&mut self.command);
+        let args = std::mem::take(&mut self.args);
+        let overlay = std::mem::take(&mut self.overlay);
+        Some(RealBody::Blocking(Box::new(move || {
+            let result = real_exec(&command, &args, &overlay)?;
+            Ok(NativeOut::Extern(ExternBox::new(result)))
+        })))
+    }
+}
+
+impl Os for RealHost {
+    fn os_platform(&self) -> String {
+        std::env::consts::OS.to_string()
+    }
+
+    fn os_arch(&self) -> String {
+        std::env::consts::ARCH.to_string()
+    }
+
+    fn os_hostname(&self) -> String {
+        gethostname::gethostname().to_string_lossy().into_owned()
+    }
+
+    fn os_cpus(&self) -> i64 {
+        std::thread::available_parallelism().map_or(1, |n| n.get() as i64)
+    }
+
+    fn os_cwd(&self) -> String {
+        std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    fn os_pid(&self) -> i64 {
+        i64::from(std::process::id())
+    }
+
+    fn os_exec(&mut self, command: &str, args: &[String]) -> Result<ExecResult, StdError> {
+        real_exec(command, args, &self.env_overlay)
+    }
+
+    fn os_exec_spawn(&self, command: String, args: Vec<String>) -> Box<dyn ExternIo> {
+        Box::new(RealExecIo {
+            command,
+            args,
+            overlay: self.env_overlay.clone(),
+        })
     }
 }
 

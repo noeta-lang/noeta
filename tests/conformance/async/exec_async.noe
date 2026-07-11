@@ -1,0 +1,19 @@
+// `os.exec_async(command, args?)` — the async twin: returns a `Future<ExecResult>` an async
+// context awaits. On the sandbox it resolves deterministically at spawn (in-oracle); on the
+// real executor the subprocess runs on the blocking pool, genuinely overlapping.
+// expect: stdout "a=one"
+// expect: stdout "b=two"
+// expect: stdout "done"
+// expect: exit 0
+use std.{os}
+async fn run(tag: string, arg: string): string {
+    r = os.exec_async("echo", [arg]).await
+    return tag ~ "=" ~ r.stdout().trim()
+}
+concurrent {
+    a = spawn run("a", "one")
+    b = spawn run("b", "two")
+    echo a.await
+    echo b.await
+}
+echo "done"

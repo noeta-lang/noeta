@@ -399,7 +399,7 @@ impl<'m> Vm<'m> {
                     Ok(Value::make_async_io(id))
                 }
                 Ok(out) => Ok(materialize_ext(out, sig.ret, args)),
-                Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
+                Err(error) => Err(self.std_dispatch_error(error, span)),
             };
         }
         // A registered **higher-order** function (higher-order-abi H0) dispatches through the

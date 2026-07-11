@@ -72,8 +72,33 @@ Host introspection. Under the sandbox the fixture is `HOME=/home/sandbox`, `USER
 | Function | Signature | Notes |
 |---|---|---|
 | `env.get` | `get(key: string) -> string` | Missing key is E0021. |
+| `env.set` | `set(key: string, value: string) -> void` | Writes the **program's view** of the environment: reads observe it, `os.exec` children inherit it; the parent process is untouched. |
 | `env.keys` | `keys() -> List<string>` | Sorted. |
 | `args.all` | `all() -> List<string>` | Process arguments. |
+
+## `os`
+
+Process execution and system introspection. Under the sandbox the introspection leaves are fixed fixtures (`platform`/`arch`/`hostname` = `"sandbox"`, 1 cpu, cwd `/`, pid 1) and `exec` interprets a tiny scripted command set (`echo` echoes its args; `status n msg` exits `n` with `msg` on stderr) so exec-driving programs stay deterministic; `noeta run` reports the real machine and runs real subprocesses (no shell — the command is executed directly with its argument vector).
+
+| Function | Signature | Notes |
+|---|---|---|
+| `platform` | `platform() -> string` | `"linux"`, `"macos"`, `"windows"`, … |
+| `arch` | `arch() -> string` | `"x86_64"`, `"aarch64"`, … |
+| `hostname` | `hostname() -> string` | |
+| `cpus` | `cpus() -> int` | Logical CPUs, ≥ 1. |
+| `cwd` | `cwd() -> string` | Current working directory. |
+| `pid` | `pid() -> int` | Process id. |
+| `exec` | `exec(command: string, args?: List<string>) -> ExecResult` | Runs and waits. A command that cannot start is E0021; one that runs and fails is an `ExecResult` with its non-zero status. |
+| `exec_async` | `exec_async(command: string, args?: List<string>) -> Future<ExecResult>` | The async twin — the subprocess runs on the blocking pool. |
+| `exit` | `exit(code?: int) -> void` | Deliberate, clean termination: output so far is kept, nothing is reported, the run's exit code is `code` (default 0). |
+
+`ExecResult` (namespaced `std.os.ExecResult`) carries the captured outcome: `status() -> int`, `ok() -> bool` (status 0), `stdout() -> string`, `stderr() -> string`.
+
+```noeta
+use std.{os}
+r = os.exec("echo", ["hi"])
+echo if r.ok() then r.stdout().trim() else r.stderr()
+```
 
 ## `fs`
 

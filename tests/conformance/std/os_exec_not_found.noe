@@ -1,0 +1,9 @@
+// A command that cannot be started at all is an IO error (E0021) — like launching a missing
+// binary on a real host — distinct from a command that runs and exits non-zero (an ordinary
+// `ExecResult`, see os_exec.noe).
+// expect: error E0021 at 8:5
+// expect: exit 1
+use std.{os}
+
+r = os.exec("no-such-command")
+echo r.status()

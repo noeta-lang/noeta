@@ -1,0 +1,9 @@
+// `os.exit(code)` — deliberate, clean termination: output so far is kept, nothing after runs,
+// no diagnostic is reported, and the run's exit code is the requested one.
+// expect: stdout "before"
+// expect: exit 3
+use std.{os}
+
+echo "before"
+os.exit(3)
+echo "unreachable"

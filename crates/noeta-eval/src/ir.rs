@@ -190,7 +190,11 @@ impl Interpreter {
         // and reference-`class` field cycles (object-model slice 2c).
         self.reap_captured_scope_cycles();
         self.reap_object_cycles();
-        let exit_code = if self.diagnostics.is_empty() { 0 } else { 1 };
+        // A deliberate `os.exit(code)` wins over the diagnostic-derived code (there are no
+        // diagnostics on that path — the halt is clean).
+        let exit_code = self
+            .requested_exit
+            .unwrap_or(if self.diagnostics.is_empty() { 0 } else { 1 });
         (
             RunResult {
                 stdout: self.stdout,

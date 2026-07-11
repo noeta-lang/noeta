@@ -89,6 +89,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # OS entropy for RealHost's `Entropy` capability (id-entropy U1): UUID v4/v7 random bits must be
 # real entropy on the real host (the sandbox uses its own seeded SplitMix64 stream instead).
 getrandom = "0.3"
+# The machine hostname for RealHost's `Os` capability (stdlib-gaps) — std has no hostname API;
+# this is the zero-dep libc/WinAPI wrapper.
+gethostname = "1"
 # Ed25519 signing for package provenance (package-manager Phase 4, #2) — CLI-only, behind the
 # `provenance` feature so pure/offline consumers and the LSP don't pull it.
 ed25519-dalek = "2"

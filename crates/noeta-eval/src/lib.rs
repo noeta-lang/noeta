@@ -1111,6 +1111,10 @@ struct Channel {
 struct Interpreter {
     stdout: String,
     diagnostics: Vec<Diagnostic>,
+    /// A deliberate `os.exit(code)` (stdlib-gaps): the requested exit code, set when the
+    /// distinguished `ErrorKind::Exit` unwinds. Not a diagnostic — the run halts cleanly
+    /// (stdout kept, nothing reported) and the run's exit code is this value.
+    requested_exit: Option<i32>,
     /// Every declared `@packed` struct's field-type names (P-PKEY,
     /// `noeta_ast::packed_named_fields`) — the input to the key-capability fixpoint below.
     /// Accumulated across declarations (a session declares incrementally).
@@ -1242,6 +1246,7 @@ impl Interpreter {
         Interpreter {
             stdout: String::new(),
             diagnostics: Vec::new(),
+            requested_exit: None,
             packed_fields: std::collections::HashMap::new(),
             key_capable_packed: std::collections::HashSet::new(),
             globals: Rc::clone(&global),
@@ -2728,9 +2733,7 @@ impl Interpreter {
                     Ok(Value::AsyncIo(id))
                 }
                 Ok(out) => Ok(materialize_ext(out, sig.ret, args)),
-                Err(error) => {
-                    Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-                }
+                Err(error) => Err(self.std_dispatch_error(error, span)),
             };
         }
         // A registered **higher-order** function (higher-order-abi H0) dispatches through the
@@ -3992,6 +3995,17 @@ impl Interpreter {
         }
     }
 
+    /// Convert a native-dispatch [`noeta_stdlib::StdError`] into the abort sentinel. The
+    /// distinguished `Exit` kind (`os.exit(code)`, stdlib-gaps) is NOT a diagnostic: it records
+    /// the requested code and aborts cleanly — nothing is reported, stdout is kept.
+    fn std_dispatch_error(&mut self, error: noeta_stdlib::StdError, span: Span) -> Unwind {
+        if let noeta_stdlib::ErrorKind::Exit(code) = error.kind {
+            self.requested_exit = Some(code);
+            return Unwind::Abort;
+        }
+        self.runtime_error(std_error_code(error.kind), span, error.message)
+    }
+
     /// Record a runtime diagnostic and produce the abort sentinel.
     fn runtime_error(&mut self, code: DiagnosticCode, span: Span, message: String) -> Unwind {
         self.record_abort_trace(span);
@@ -4800,6 +4814,8 @@ fn std_error_code(kind: noeta_stdlib::ErrorKind) -> DiagnosticCode {
         noeta_stdlib::ErrorKind::Bounds => DiagnosticCode::IndexOutOfBounds,
         noeta_stdlib::ErrorKind::UnknownName => DiagnosticCode::UnknownName,
         noeta_stdlib::ErrorKind::Io => DiagnosticCode::IoError,
+        // Intercepted upstream (`std_dispatch_error`) — defensive mapping only.
+        noeta_stdlib::ErrorKind::Exit(_) => DiagnosticCode::Panic,
         noeta_stdlib::ErrorKind::Panic => DiagnosticCode::Panic,
         noeta_stdlib::ErrorKind::ReactiveCycle => DiagnosticCode::ReactiveCycle,
     }
