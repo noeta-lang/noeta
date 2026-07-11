@@ -46,6 +46,13 @@ pub struct SandboxHost {
     clock: u64,
     env: BTreeMap<String, String>,
     args: Vec<String>,
+    /// Scripted spawned processes (process-handle arc): id → the pre-computed instant-complete
+    /// outcome. A sandbox "child" runs to completion at spawn (the scripted `os_exec`), so `wait`
+    /// returns its stored outcome and `try_wait` always reports it done — deterministic and
+    /// in-oracle, the process analogue of the Vfs / logical clock.
+    procs: BTreeMap<u64, ExecResult>,
+    /// The next spawned-process handle id (starts at 1, like `ids`).
+    next_proc: u64,
     /// The inbound server state (http-server S1), armed by `net_listen`. A sandbox run serves at
     /// most one listener — a differential program calls `http.serve` once — so a single slot
     /// suffices; a second `net_listen` re-arms it.
@@ -114,6 +121,8 @@ impl SandboxHost {
             clock: 0,
             env: env::sandbox_vars(),
             args: env::sandbox_args(),
+            procs: BTreeMap::new(),
+            next_proc: 1,
             inbound: None,
             p2p: noeta_native::P2pBroker::default(),
             tel: TelRecorder {
@@ -450,6 +459,49 @@ impl Os for SandboxHost {
             }),
         }
     }
+
+    /// Spawn a scripted process: run the same fixed command set as `os_exec` **eagerly** (the
+    /// sandbox has no real concurrency), store the outcome, and hand back a deterministic handle
+    /// id. An unknown command is an `Io` error at spawn, exactly as a real `Command::spawn` fails
+    /// for a missing binary.
+    fn os_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, StdError> {
+        let result = self.os_exec(command, args)?;
+        let id = self.next_proc;
+        self.next_proc += 1;
+        self.procs.insert(id, result);
+        Ok(id)
+    }
+
+    /// A deterministic pseudo-pid derived from the handle (real pids are non-deterministic, so the
+    /// sandbox invents a stable one), or `None` for an unknown handle.
+    fn os_proc_pid(&self, handle: u64) -> Option<i64> {
+        self.procs
+            .contains_key(&handle)
+            .then(|| 10_000 + handle as i64)
+    }
+
+    fn os_proc_wait(&mut self, handle: u64) -> Result<ExecResult, StdError> {
+        self.procs
+            .get(&handle)
+            .cloned()
+            .ok_or_else(|| noeta_native::os::unknown_process_error(handle))
+    }
+
+    /// The scripted child completed at spawn, so `try_wait` always reports it done — a program's
+    /// supervise loop terminates on its first poll, deterministically.
+    fn os_proc_try_wait(&mut self, handle: u64) -> Result<Option<ExecResult>, StdError> {
+        Ok(Some(self.os_proc_wait(handle)?))
+    }
+
+    /// The scripted child is already complete, so a kill is a harmless no-op (the handle stays
+    /// valid, matching the real host where a later `wait` still returns the outcome).
+    fn os_proc_kill(&mut self, handle: u64) -> Result<(), StdError> {
+        if self.procs.contains_key(&handle) {
+            Ok(())
+        } else {
+            Err(noeta_native::os::unknown_process_error(handle))
+        }
+    }
 }
 
 impl Tracing for SandboxHost {
@@ -671,6 +723,35 @@ mod tests {
         // An unscripted command cannot start — an Io error, like a missing binary.
         let e = host.os_exec("frobnicate", &[]).unwrap_err();
         assert_eq!(e.kind, ErrorKind::Io);
+    }
+
+    #[test]
+    fn os_spawn_is_scripted_and_deterministic() {
+        let mut host = SandboxHost::new();
+        // Spawned children get sequential handles and deterministic pseudo-pids.
+        let a = host.os_spawn("echo", &["hi".into()]).unwrap();
+        let b = host.os_spawn("echo", &["yo".into()]).unwrap();
+        assert_eq!((a, b), (1, 2));
+        assert_eq!(host.os_proc_pid(a), Some(10_001));
+        assert_eq!(host.os_proc_pid(b), Some(10_002));
+        assert_eq!(host.os_proc_pid(999), None);
+        // The scripted child completed at spawn: wait returns its outcome, try_wait reports done.
+        assert_eq!(host.os_proc_wait(a).unwrap().stdout, "hi\n");
+        assert_eq!(
+            host.os_proc_try_wait(a).unwrap().map(|r| r.stdout),
+            Some("hi\n".to_string())
+        );
+        // kill is a no-op on the completed child; wait remains valid afterward.
+        assert!(host.os_proc_kill(a).is_ok());
+        assert_eq!(host.os_proc_wait(a).unwrap().stdout, "hi\n");
+        // Operating on an unknown handle is an Io error.
+        assert_eq!(host.os_proc_wait(999).unwrap_err().kind, ErrorKind::Io);
+        assert_eq!(host.os_proc_kill(999).unwrap_err().kind, ErrorKind::Io);
+        // A spawn of an unstartable command fails at spawn, like a real missing binary.
+        assert_eq!(
+            host.os_spawn("frobnicate", &[]).unwrap_err().kind,
+            ErrorKind::Io
+        );
     }
 
     #[test]

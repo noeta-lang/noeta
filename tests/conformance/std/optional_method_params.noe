@@ -1,0 +1,36 @@
+// Optional parameters on core built-in methods (the core analogue of a Ring 2 function's
+// trailing-optional param). `split(sep, limit?)`, string/list `slice(start, end?)`,
+// `index_of(sub, from?)`, `pad_start/pad_end(width, fill?)`, `list.join(sep?)` — the mechanism
+// lives once in noeta-native / the shared arity model, so both backends agree.
+// expect: stdout "[\"a\", \"b,c,d\"]"
+// expect: stdout "[\"a\", \"b\", \"c\"]"
+// expect: stdout "llo"
+// expect: stdout "[3, 4, 5]"
+// expect: stdout "4"
+// expect: stdout "  7"
+// expect: stdout "x--"
+// expect: stdout "123"
+// expect: stdout "1-2-3"
+// expect: exit 0
+
+// split: capped vs uncapped
+echo "a,b,c,d".split(",", 2)
+echo "a,b,c".split(",")
+
+// slice: end omitted runs to the end (string and list)
+echo "hello".slice(2)
+echo [1, 2, 3, 4, 5].slice(2)
+
+// index_of: search offset
+echo match "abcabc".index_of("b", 2) {
+    some(i) => "${i}",
+    none => "none",
+}
+
+// pad: fill omitted defaults to a space; present fill still works
+echo "7".pad_start(3)
+echo "x".pad_end(3, "-")
+
+// join: separator omitted defaults to empty
+echo [1, 2, 3].join()
+echo [1, 2, 3].join("-")

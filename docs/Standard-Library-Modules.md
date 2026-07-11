@@ -65,6 +65,41 @@ A logical monotonic clock — no wall-clock, so programs stay deterministic.
 
 (The async `sleep(ms).await` used in [Concurrency](Concurrency) is the `use std.task` future form. Wall time exists only where it belongs: `id.uuid_v7()` reads it through the host seam — real under `noeta run`, fixed-epoch deterministic in tests.)
 
+## `datetime`
+
+Calendar and timezone datetime — DST-correct arithmetic, the IANA timezone database, and RFC-3339 + strftime formatting (backed by [jiff](https://docs.rs/jiff)). This is the heavy calendar layer, distinct from the always-on lightweight `time` clock above; it lives behind the default-on `ring-datetime` footprint ring, so an AOT binary that never imports `datetime` sheds it and the tzdb.
+
+Three value types:
+
+- **`Instant`** — an absolute moment, timezone-independent. `datetime.now()` reads the host clock (real under `noeta run`, the fixed sandbox epoch in tests, so deterministic). `datetime.from_unix_ms(n)`, `datetime.parse(s)` (RFC-3339 → `?Instant`).
+- **`Zoned`** — an `Instant` resolved into a named timezone: DST-aware civil fields and calendar arithmetic.
+- **`Duration`** — a span, built with `datetime.seconds/minutes/hours/days/weeks/months/years(n)` and fed to `add`/`sub`.
+
+| Method (receiver) | Signature | Notes |
+|---|---|---|
+| `Instant.unix_ms` | `() -> int` | Milliseconds since the Unix epoch. |
+| `Instant.format` | `(fmt: string) -> string` | strftime, in UTC. |
+| `Instant.in_zone` | `(tz: string) -> Zoned` | Resolve into an IANA zone (`"America/New_York"`); unknown zone is E0021. |
+| `Instant.add` / `sub` | `(d: Duration) -> Instant` | **Time units only** (seconds/minutes/hours) — a bare instant has no zone, so calendar units like days must go through `in_zone(...)`. |
+| `Instant.diff` | `(other: Instant) -> Duration` | The span from `self` to `other` (positive when `other` is later). |
+| `Instant.is_before` / `is_after` | `(other: Instant) -> bool` | Chronological comparison (`==` also works). |
+| `Zoned.year`…`second` | `() -> int` | Civil fields in the zone. |
+| `Zoned.weekday` | `() -> int` | ISO: 1 = Monday … 7 = Sunday. |
+| `Zoned.zone` | `() -> string` | The IANA zone name. |
+| `Zoned.format` | `(fmt: string) -> string` | strftime, in the zone. |
+| `Zoned.to_instant` | `() -> Instant` | The underlying absolute moment. |
+| `Zoned.add` / `sub` | `(d: Duration) -> Zoned` | DST-correct calendar arithmetic (all units). |
+| `Zoned.is_before` / `is_after` | `(other: Zoned) -> bool` | Chronological comparison. |
+| `Duration.to_string` | `() -> string` | ISO-8601 (`PT1H30M`, `P2D`). |
+
+```noeta
+use std.{datetime}
+t = datetime.from_unix_ms(1720661640000)
+ny = t.in_zone("America/New_York")
+echo ny.format("%Y-%m-%d %H:%M %Z")        // 2024-07-10 21:34 EDT
+echo ny.add(datetime.days(1)).weekday()    // 4  (Thursday)
+```
+
 ## `env` and `args`
 
 Host introspection. Under the sandbox the fixture is `HOME=/home/sandbox`, `USER=noeta`, args `["noeta", "run"]`; `noeta run` uses the real process environment.
@@ -90,14 +125,29 @@ Process execution and system introspection. Under the sandbox the introspection 
 | `pid` | `pid() -> int` | Process id. |
 | `exec` | `exec(command: string, args?: List<string>) -> ExecResult` | Runs and waits. A command that cannot start is E0021; one that runs and fails is an `ExecResult` with its non-zero status. |
 | `exec_async` | `exec_async(command: string, args?: List<string>) -> Future<ExecResult>` | The async twin — the subprocess runs on the blocking pool. |
+| `spawn` | `spawn(command: string, args?: List<string>) -> Process` | Starts a child **without waiting** and returns a controllable handle. A command that cannot start is E0021. |
 | `exit` | `exit(code?: int) -> void` | Deliberate, clean termination: output so far is kept, nothing is reported, the run's exit code is `code` (default 0). |
 
 `ExecResult` (namespaced `std.os.ExecResult`) carries the captured outcome: `status() -> int`, `ok() -> bool` (status 0), `stdout() -> string`, `stderr() -> string`.
+
+`Process` (namespaced `std.os.Process`) is a handle to a spawned child you control over its lifetime (unlike `exec`, which runs to completion). Its stdout/stderr are captured while it runs, so `wait` returns them in full.
+
+| Method | Signature | Notes |
+|---|---|---|
+| `pid` | `pid() -> int` | The child's OS process id. |
+| `wait` | `wait() -> ExecResult` | Blocks until the child exits; returns its status + captured output. Idempotent. |
+| `try_wait` | `try_wait() -> ?ExecResult` | Non-blocking poll: `some(result)` if exited, `none` if still running. |
+| `kill` | `kill() -> void` | Forcefully terminates the child (idempotent). A later `wait` sees the killed status. |
 
 ```noeta
 use std.{os}
 r = os.exec("echo", ["hi"])
 echo if r.ok() then r.stdout().trim() else r.stderr()
+
+// A controllable child: start it, do other work, then collect its output.
+p = os.spawn("echo", ["from the child"])
+done = p.wait()
+echo done.stdout().trim()
 ```
 
 ## `fs`

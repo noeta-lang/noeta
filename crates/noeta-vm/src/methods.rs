@@ -79,10 +79,10 @@ impl<'m> Vm<'m> {
                     return Ok(list.packed_select(&indices));
                 }
                 noeta_stdlib::ListMethod::Slice => {
-                    self.stdlib_arity(name, args, 2, span)?;
+                    self.stdlib_arity_range(name, args, 1, 2, span)?;
                     let start = self.stdlib_int(name, args[0], span)?;
-                    let end = self.stdlib_int(name, args[1], span)?;
                     let len = list.list_len().expect("packed list");
+                    let end = self.stdlib_opt_int(name, args, 1, len as i64, span)?;
                     if start < 0 || end < start || end as usize > len {
                         let error = noeta_stdlib::slice_bounds_error(start, end, len);
                         return Err(self.error(stdlib_error_code(error.kind), span, error.message));
@@ -151,8 +151,11 @@ impl<'m> Vm<'m> {
                 Ok(Value::bool(found))
             }
             noeta_stdlib::ListMethod::Join => {
-                self.stdlib_arity(name, args, 1, span)?;
-                let separator = self.stdlib_string(name, args[0], span)?;
+                self.stdlib_arity_range(name, args, 0, 1, span)?;
+                let separator = match args.first() {
+                    Some(&arg) => self.stdlib_string(name, arg, span)?,
+                    None => String::new(),
+                };
                 let joined = items
                     .iter()
                     .map(|v| v.display())
@@ -182,10 +185,10 @@ impl<'m> Vm<'m> {
                 Ok(Value::list(sorted))
             }
             noeta_stdlib::ListMethod::Slice => {
-                self.stdlib_arity(name, args, 2, span)?;
+                self.stdlib_arity_range(name, args, 1, 2, span)?;
                 let start = self.stdlib_int(name, args[0], span)?;
-                let end = self.stdlib_int(name, args[1], span)?;
                 let len = items.len();
+                let end = self.stdlib_opt_int(name, args, 1, len as i64, span)?;
                 if start < 0 || end < start || end as usize > len {
                     let error = noeta_stdlib::slice_bounds_error(start, end, len);
                     return Err(self.error(stdlib_error_code(error.kind), span, error.message));
@@ -992,6 +995,24 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Accept `min..=max` arguments — a collection method with a trailing-optional parameter
+    /// (`slice(start, end?)`, `join(sep?)`). The range twin of [`Self::stdlib_arity`].
+    fn stdlib_arity_range(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        min: usize,
+        max: usize,
+        span: Span,
+    ) -> Result<(), Abort> {
+        if (min..=max).contains(&args.len()) {
+            Ok(())
+        } else {
+            let error = noeta_stdlib::arity_error(name, max, args.len());
+            Err(self.error(stdlib_error_code(error.kind), span, error.message))
+        }
+    }
+
     /// Read a string argument for a collection method, raising the shared `noeta-stdlib` type error.
     fn stdlib_string(&mut self, name: &str, value: Value, span: Span) -> Result<String, Abort> {
         match value.as_string() {
@@ -1013,6 +1034,22 @@ impl<'m> Vm<'m> {
                 let error = noeta_stdlib::type_error(name, "int");
                 Err(self.error(stdlib_error_code(error.kind), span, error.message))
             }
+        }
+    }
+
+    /// Read an **optional** int argument at `index`, falling back to `default` when it is absent —
+    /// the trailing-optional-parameter reader (`slice`'s `end?`). A present non-int is a type error.
+    fn stdlib_opt_int(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        index: usize,
+        default: i64,
+        span: Span,
+    ) -> Result<i64, Abort> {
+        match args.get(index) {
+            None => Ok(default),
+            Some(&value) => self.stdlib_int(name, value, span),
         }
     }
 }

@@ -134,7 +134,7 @@ xs: List<int> = [1, 2, 3]
 count: int = 3
 ```
 
-**Shadowing** is lexical — a new binding (or a parameter) with an existing name shadows it in that scope.
+**Shadowing** is lexical and limited to name-introducing constructs — a function parameter or loop variable whose name matches an outer binding shadows it for that scope, leaving the outer binding untouched. A plain `name = expr` never shadows: the first use in a scope declares the binding, and a later one (in the same or an inner scope) reassigns it — which is E0006 if it is immutable.
 
 **Compound assignment** `name OP= expr` desugars to `name = name OP expr` for `+= -= *= /= %= ~=`:
 
@@ -153,7 +153,8 @@ mut s = "a";  s ~= "b";  echo s            // ab
 |---|---|
 | `int` | 64-bit signed; **wraps** on overflow, never panics. |
 | `float` | 64-bit IEEE-754. |
-| `f32` | 32-bit float; literal suffix `f32`. See below. |
+| `f32` | 32-bit strict fixed-width float; literal suffix `f32`. See below. |
+| `f64` | 64-bit strict fixed-width float; literal suffix `f64`. Distinct from `float`. See below. |
 | `bool` | `true` / `false`. |
 | `string` | UTF-8 text. |
 | `void` | The unit type (a function that returns nothing). |
@@ -183,9 +184,9 @@ echo 3.141_592   // 3.141592
 > [!NOTE]
 > **Numeric conversions are explicit at a boundary.** An `int` is not implicitly a `float`: a binding, argument, return, or element of type `float` rejects an `int` — write the literal in the target type (`sqrt(4.0)`, not `sqrt(4)`). Widening happens only *inside an expression* — `int` and `float` combine in **arithmetic** (`x + 1` where `x` is a `float` is a `float`) — and that result is then checked against its boundary like any other value, so a widened `float` can never slip into an `int` binding.
 
-### `f32` — 32-bit float
+### `f32` / `f64` — strict fixed-width floats
 
-Written with an `f32` suffix. In **arithmetic**, the widening lattice is `int < f32 < float`: `f32 op int → f32`, `f32 op float → float` (this is expression-result widening, not an implicit conversion at a binding or argument — see the note above). It is observably lower-precision than `float`:
+Written with an `f32` or `f64` suffix. Unlike `float`, these are **strict fixed-width** types: they do **not** participate in the `int`/`float` widening described above. Mixing types in arithmetic is a compile error (E0044) — `f32 + float`, `f32 + int`, and `f64 + float` all require an explicit conversion; both operands must already be the same type. `f64` is a 64-bit float that is *distinct from* `float` — assigning one where the other is expected is E0007. `f32` is observably lower-precision than `float`:
 
 ```noeta
 x = 1.5f32

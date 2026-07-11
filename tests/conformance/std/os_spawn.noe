@@ -1,0 +1,29 @@
+// `os.spawn(command, args?)` returns a controllable `Process` handle (process-handle arc), unlike
+// `os.exec`'s run-to-completion. In the sandbox a spawned child completes at spawn (the scripted
+// command set) with a deterministic pseudo-pid, so `wait`/`try_wait`/`pid`/`kill` are in-oracle.
+// expect: stdout "10001"
+// expect: stdout "0"
+// expect: stdout "true"
+// expect: stdout "spawned output"
+// expect: stdout "done"
+// expect: stdout "3"
+// expect: exit 0
+use std.{os}
+
+p = os.spawn("echo", ["spawned output"])
+echo p.pid()
+r = p.wait()
+echo r.status()
+echo r.ok()
+echo r.stdout().trim()
+
+// try_wait reports the scripted child already done, so a supervise loop terminates at once.
+echo match p.try_wait() {
+    some(done) => "done",
+    none => "running",
+}
+
+// kill on an already-complete child is a harmless no-op; a second spawn gets the next pid.
+q = os.spawn("status", ["3", "boom"])
+q.kill()
+echo q.wait().status()

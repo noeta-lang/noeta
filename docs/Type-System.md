@@ -18,7 +18,7 @@ sq = fn(n) => n * n                             // inferred (int) -> int
 
 | Form | Meaning |
 |---|---|
-| `int` `float` `f32` `bool` `string` `void` | Primitives. |
+| `int` `float` `f32` `f64` `bool` `string` `void` | Primitives. |
 | `List<T>` `Map<K, V>` `Set<T>` | Collections. |
 | `?T` | Optional (`Option<T>`). |
 | `Result<T, E>` | Fallible result. |
