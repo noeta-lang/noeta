@@ -2,7 +2,7 @@
   "name": "tree-sitter-noeta",
   "version": "0.1.0",
   "description": "Noeta grammar for tree-sitter",
-  "license": "MIT",
+  "license": "MIT OR Apache-2.0",
   "keywords": [
     "parser",
     "tree-sitter",
