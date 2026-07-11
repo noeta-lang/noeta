@@ -845,14 +845,6 @@ pub fn newline_terminator_offsets(source: &Source, tokens: &[Token]) -> Vec<u32>
     out
 }
 
-/// Public view of [`is_statement_ending`]: whether a statement whose **last** token is `kind` will be
-/// terminated by a following newline. The formatter uses this to decide whether a trailing `;` is
-/// redundant (safe to strip) or structurally required — e.g. a statement ending in a generic-close
-/// `>` (`x is List<int>`) is *not* newline-terminable, so its `;` must be kept.
-pub fn token_ends_statement(kind: TokenKind) -> bool {
-    is_statement_ending(kind)
-}
-
 /// Whether a token can be the **last** token of a statement, so a following newline terminates it:
 /// a value (literal/identifier/`true`/`false`), a closing bracket, the postfix try `?`, or one of
 /// the self-contained jump keywords (`return`/`break`/`continue`).
@@ -879,6 +871,14 @@ fn is_statement_ending(kind: TokenKind) -> bool {
             | TokenKind::BreakKw
             | TokenKind::ContinueKw
     )
+}
+
+/// Public view of [`is_leading_continuation`]: whether a token, when it **starts** the next line,
+/// joins the previous line rather than beginning a new statement. The formatter uses this to decide
+/// whether stripping a trailing `;` is safe — if the next statement's first token continues the line
+/// (e.g. a unary `-`), the `;` is the only thing keeping the two statements apart and must be kept.
+pub fn token_continues_line(kind: TokenKind) -> bool {
+    is_leading_continuation(kind)
 }
 
 /// Whether a token, when it **starts** the next line, continues the previous statement (so no `;` is

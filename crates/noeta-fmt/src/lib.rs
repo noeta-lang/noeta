@@ -525,6 +525,23 @@ mod tests {
     }
 
     #[test]
+    fn remove_strips_a_semicolon_after_a_generic_close() {
+        // A statement ending in a generic-close `>` is newline-terminable (the parser's soft
+        // terminator), so its redundant `;` is stripped like any other.
+        assert_eq!(
+            fmt("x: dyn = [1]\necho x is List<int>;\necho x is List<string>;\n").unwrap(),
+            "x: dyn = [1]\necho x is List<int>\necho x is List<string>\n"
+        );
+    }
+
+    #[test]
+    fn remove_keeps_a_semicolon_a_continuation_would_swallow() {
+        // Stripping the `;` would let the next line's leading `-` bind to the previous statement
+        // (`x = 5 - y`), changing meaning — so the `;` is the only separator and is kept.
+        assert_eq!(fmt("x = 5;\n-y\n").unwrap(), "x = 5;\n-y\n");
+    }
+
+    #[test]
     fn semicolon_preserve_mode_keeps_author_choice() {
         // Kept where present, never added where absent (per-statement author choice).
         assert_eq!(

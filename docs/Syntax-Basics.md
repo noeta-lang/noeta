@@ -64,7 +64,7 @@ semicolons = "remove"   # "remove" (default) strips redundant `;`; "add" termina
                         # statement; "preserve" keeps them exactly as written
 ```
 
-`remove` only strips a `;` that is genuinely redundant — one that a newline could replace. A `;` that is structurally required is always kept: inside a closure body nested in `(`/`[` (where newlines do not terminate), and after a statement whose last token cannot end a statement, such as a generic-closing `>` in `echo x is List<int>;`.
+`remove` only strips a `;` that is genuinely redundant — one that the newline the formatter puts after the statement could replace. A `;` that is structurally required is always kept: inside a closure body nested in `(`/`[` (where newlines do not terminate), and when the next statement begins with a token that would otherwise continue this line (e.g. a leading `-`), so the `;` is the only thing separating them.
 
 ## `echo`
 

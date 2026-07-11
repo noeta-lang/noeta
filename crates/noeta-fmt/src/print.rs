@@ -78,6 +78,7 @@ pub fn print_program(
         comments,
         cursor: Cell::new(0),
         paren_depth: Cell::new(0),
+        code_tokens: code_tokens(source),
         config,
     };
     let doc = p.stmt_seq(&program.stmts, program.span.start, program.span.end)?;
@@ -117,6 +118,7 @@ pub fn print_stmt(
         comments,
         cursor: Cell::new(cursor),
         paren_depth: Cell::new(0),
+        code_tokens: code_tokens(source),
         config,
     };
     let doc = p.stmt(stmt)?;
@@ -143,24 +145,23 @@ struct Printer<'a> {
     /// terminate on newlines), so a statement here — only ever a closure/lambda body statement — needs
     /// an explicit `;` separator regardless of [`SemicolonStyle`]. Consulted in [`Printer::leaf`].
     paren_depth: Cell<u32>,
+    /// Every non-`;` token as `(start_offset, kind)`, in source order — a lex of the source. Lets
+    /// [`Printer::layout_terminates`] find the token that *follows* a statement and decide whether the
+    /// newline the formatter puts there terminates it (so a trailing `;` is redundant).
+    code_tokens: Vec<(u32, TokenKind)>,
     config: &'a FmtConfig,
 }
 
-/// Whether a newline placed after `content` — a rendered simple-statement body, without any trailing
-/// `;` — would act as a terminator. Renders the doc and asks the lexer whether its last token is
-/// statement-ending: a statement ending in a generic-close `>` (`x is List<int>`) is not, so its `;`
-/// is structurally required and must be kept. Working from the rendered text (not source spans) keeps
-/// this robust against desugared nodes whose spans do not align to source tokens (`n += 5` renders as
-/// `n = n + 5`). Synthetic `;` terminators the lexer inserts at newlines are skipped.
-fn newline_terminates(content: &Doc) -> bool {
-    let text = render(content, 1_000_000);
-    let src = Source::new(SourceId(0), "<fmt>", text.trim_end());
-    noeta_lexer::lex(&src)
+/// The `(start, kind)` of every non-`;` token in `source`, in order — the lookup behind
+/// [`Printer::layout_terminates`]. Synthetic and explicit `;` are dropped so a search finds the next
+/// *content* token, and the natural token order keeps the vec sorted by `start` for a partition search.
+fn code_tokens(source: &str) -> Vec<(u32, TokenKind)> {
+    noeta_lexer::lex(&Source::new(SourceId(0), "<fmt>", source))
         .tokens
         .iter()
-        .rev()
-        .find(|t| t.kind != TokenKind::Semicolon)
-        .is_some_and(|t| noeta_lexer::token_ends_statement(t.kind))
+        .filter(|t| t.kind != TokenKind::Semicolon)
+        .map(|t| (t.span.start, t.kind))
+        .collect()
 }
 
 impl Printer<'_> {
@@ -570,10 +571,13 @@ impl Printer<'_> {
             match self.config.semicolons {
                 SemicolonStyle::Add => true,
                 SemicolonStyle::Preserve => author_wrote_semicolon,
-                // Strip a `;` only when it is both present and *redundant* — i.e. a newline would
-                // terminate the statement. That fails when the last token is not statement-ending
-                // (e.g. a generic-close `>` in `x is List<int>`), so we keep the required `;` there.
-                SemicolonStyle::Remove => author_wrote_semicolon && !newline_terminates(&doc),
+                // Strip a `;` only when it is both present and *redundant* — i.e. the newline the
+                // formatter puts after this statement terminates it. That fails when the next
+                // statement's first token would continue this line (a leading `-`, `.`, `|>`, …), so
+                // the `;` is the only separator and must be kept.
+                SemicolonStyle::Remove => {
+                    author_wrote_semicolon && !self.layout_terminates(stmt_end)
+                }
             }
         };
         if emit {
@@ -581,6 +585,33 @@ impl Printer<'_> {
         } else {
             doc
         }
+    }
+
+    /// Whether the newline the formatter places after a statement whose span ends at `stmt_end`
+    /// terminates it — making a trailing `;` redundant. The formatter renders one statement per line,
+    /// so this depends only on the *next* token: `}` and end-of-input always terminate (the parser
+    /// peeks `}` / matches EOF), and a newline terminates unless the next token continues the line
+    /// (`token_continues_line` — e.g. a unary `-` that would bind to the previous statement). Because
+    /// the parser also terminates a complete statement on a newline regardless of its last token, a
+    /// statement ending in a generic-close `>` is now correctly stripped. `stmt_end` (the full
+    /// statement span, past any lowered-away trailing `)` and the terminator) is used rather than the
+    /// content span so the search never lands on a token that belongs to this statement.
+    fn layout_terminates(&self, stmt_end: u32) -> bool {
+        match self.next_code_token(stmt_end) {
+            None => true,                    // end of input
+            Some(TokenKind::RBrace) => true, // a peeked `}` closes the block
+            Some(kind) => !noeta_lexer::token_continues_line(kind),
+        }
+    }
+
+    /// The kind of the first non-`;` token that starts at or after `offset` — the token that follows a
+    /// statement whose span ends there (its own tokens start before `offset`). `None` past the last
+    /// token.
+    fn next_code_token(&self, offset: u32) -> Option<TokenKind> {
+        let i = self
+            .code_tokens
+            .partition_point(|(start, _)| *start < offset);
+        self.code_tokens.get(i).map(|&(_, kind)| kind)
     }
 
     /// Render `f` with the enclosing-bracket depth bumped by one — used around the children of a
