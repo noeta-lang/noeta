@@ -30,6 +30,16 @@ sigstore-verify = { workspace = true, optional = true }
 sigstore-trust-root = { workspace = true, optional = true }
 sigstore-types = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
+# The publish side of keyless (K4): ambient OIDC → Fulcio → sign → Rekor, wrapped sync.
+sigstore-sign = { workspace = true, optional = true }
+sigstore-oidc = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt"] }
+# `keyless-test-fixtures` only (see the feature): minting the hermetic test CA/CT/Rekor.
+p256 = { workspace = true, optional = true }
+x509-cert = { workspace = true, optional = true }
+tls_codec = { workspace = true, optional = true }
+const-oid = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
 
 [features]
 # Enable the networked registry `Index` (an HTTP client of the hosted index). Off by default; the CLI
@@ -46,8 +56,22 @@ keyless = [
     "dep:sigstore-verify",
     "dep:sigstore-trust-root",
     "dep:sigstore-types",
+    "dep:sigstore-sign",
+    "dep:sigstore-oidc",
+    "dep:tokio",
     "dep:serde_json",
     "dep:sha2",
+]
+# Hermetic keyless fixtures (K4): a REAL in-process test CA + CT log + Rekor log, so tests mint
+# bundles that verify under the DEFAULT policy. Public so `noeta-cli`'s e2e tests drive the same
+# minting; never enabled by a shipping binary (dev-dependency graphs only).
+keyless-test-fixtures = [
+    "keyless",
+    "dep:p256",
+    "dep:x509-cert",
+    "dep:tls_codec",
+    "dep:const-oid",
+    "dep:base64",
 ]
 
 [lints]

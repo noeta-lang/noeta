@@ -117,11 +117,22 @@ swappable.
   verify as of this slice). E2E (negative paths, no valid bundle needed): lock-driven downgrade
   rejection, live CLI bundle verification, switch rejection; the Phase-4 key e2e passes
   untouched. Positive keyless resolve e2e = K4 (needs minted bundles).
-- **K4 — keyless publish.** `noeta publish` detects ambient OIDC (GitHub Actions env) →
-  Fulcio cert for ephemeral key → DSSE sign → Rekor entry → assemble bundle → publish.
-  Key-file path unchanged when no OIDC ambient; both present → keyless wins, `--key` forces.
-  Fulcio/Rekor mocked via the existing in-process `mock_server` harness.
-  *Exit: end-to-end publish-then-resolve over LocalIndex + mocked services, keyless-pinned lock.*
+- **K4 — keyless publish. ✅ DONE.** `noeta publish` prefers the ambient OIDC identity
+  (GitHub Actions/GitLab/Buildkite via `ambient-id` through `sigstore-oidc`) → ephemeral P-256
+  key → Fulcio cert → DSSE over the K1 statement → Rekor v1 entry → bundle
+  (`keyless::publish_bundle[_at]`, sync-wrapped `sigstore-sign`; publisher **verifies its own
+  bundle before upload**). Key path unchanged without ambient identity; `--key` forces it; no
+  key + no identity = unsigned. Endpoints: production, or `NOETA_FULCIO_URL`+`NOETA_REKOR_URL`;
+  trust root override `NOETA_SIGSTORE_TRUST_ROOT` (path) = rotation escape hatch + test seam.
+  **Hermetic fixtures** (`keyless-test-fixtures`, `keyless_fixtures.rs`): a real in-process
+  test CA + CT log + Rekor log — Fulcio-profile certs w/ **embedded SCTs** (RFC 6962 precert
+  signing), size-1 inclusion proofs, **signed checkpoints**, **SETs** (JCS payload; required —
+  a v1 bundle's integrated time is only trusted with its SET), stored-entry canonicalization
+  matching the CVE-2022-36056 consistency check. Mint mirrors verify's own crates/versions so
+  they can't drift. E2E through the real CLI: ambient-token mock → keyless publish → consumer
+  resolves, verifies offline under the **default policy**, TOFU-pins identity in `noeta.lock`,
+  audit names it, identity change rejected. pm round-trip test additionally proves the
+  production root rejects fixture-minted bundles.
 - **K5 — audit, docs, staging smoke.** `noeta audit` reports per-scope trust root
   (key / keyless identity / unsigned); embedded `trusted_root.json` snapshot + provenance docs
   incl. the honest trust statement; a manual (not CI) smoke script against Sigstore **staging**.

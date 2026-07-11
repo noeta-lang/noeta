@@ -321,6 +321,11 @@ enum Command {
         /// The git tag for this release (defaults to `v<version>`).
         #[arg(long)]
         tag: Option<String>,
+        /// Force **key-based** signing even when an ambient OIDC identity (CI) is present.
+        /// Default: keyless (Sigstore) when the environment carries an identity, else the key
+        /// file, else unsigned.
+        #[arg(long)]
+        key: bool,
     },
     /// Report the dependency tree's **trust footprint** (package-manager Phase 4): every resolved
     /// dependency, its source, and which ones run **native code** or contribute **CLI commands** —
@@ -501,7 +506,7 @@ pub fn run_cli(
             version.as_deref(),
         ),
         Command::Update => cmd_update(),
-        Command::Publish { git, tag } => cmd_publish(&git, tag.as_deref()),
+        Command::Publish { git, tag, key } => cmd_publish(&git, tag.as_deref(), key),
         Command::Audit { path } => cmd_audit(&path),
         Command::Key { action } => cmd_key(&action),
     }
@@ -603,7 +608,7 @@ fn cmd_update() -> ExitCode {
 /// `noeta publish --git <url> [--tag <tag>]` — record this package's identity + version → git
 /// coordinates in the registry index (package-manager P2.5, client stub). The tag defaults to
 /// `v<version>`. Writes to the local/offline index; the hosted registry is operated separately.
-fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
+fn cmd_publish(git: &str, tag: Option<&str>, force_key: bool) -> ExitCode {
     let manifest_path = match locate_manifest() {
         Ok(p) => p,
         Err(code) => return code,
@@ -684,15 +689,54 @@ fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
         tag: tag.clone(),
         sha: sha.clone(),
     };
-    // Sign the attestation (Phase 4, #2) if a signing key is available, so consumers can verify
-    // "version → commit" against the scope's public key. The private key is read from
-    // NOETA_SIGNING_KEY (a path) or `noeta-signing.key` in the current directory; absent → publish
-    // *unsigned* (a warning — the release resolves but can't be provenance-verified).
-    let signature = match provenance_sign(&name, &version, &sha, index.as_ref()) {
-        Ok(sig) => sig,
-        Err(err) => {
-            eprintln!("lang: {err}");
+    // Attest the release (Phase 4 #2 / Phase 5) under one of two trust roots:
+    //  - **keyless** (preferred when available): an ambient OIDC identity (CI) signs via
+    //    Sigstore — ephemeral key, Fulcio cert, transparency log; nothing to steal afterwards.
+    //  - **key**: the Ed25519 file from NOETA_SIGNING_KEY / `noeta-signing.key` (`--key` forces
+    //    this even in CI).
+    // Neither available → publish *unsigned* (a warning — the release resolves, unverified).
+    let attestation = noeta_pm::provenance::Attestation {
+        name: &name,
+        version: &version,
+        sha: &sha,
+    };
+    let ambient = if force_key {
+        None
+    } else {
+        match noeta_pm::keyless::ambient_identity() {
+            Ok(identity) => identity,
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(1);
+            }
+        }
+    };
+    let (signature, bundle, provenance_tag) = if let Some(identity) = ambient {
+        let who = identity.identity().to_string();
+        let statement = noeta_pm::keyless::publish_statement(&attestation, &coords);
+        let bundle = match noeta_pm::keyless::publish_bundle(statement.as_bytes(), identity) {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(1);
+            }
+        };
+        // Verify our own bundle before uploading it: a publisher should never ship provenance
+        // consumers will reject (a broken CA response, a log that didn't include us, …).
+        let digest = noeta_pm::keyless::attested_digest(&attestation);
+        if let Err(err) = noeta_pm::keyless::verify_bundle(&bundle, &digest, None) {
+            eprintln!("lang: the freshly signed bundle does not verify — not publishing: {err}");
             return ExitCode::from(1);
+        }
+        (None, Some(bundle), format!("keyless: {who}"))
+    } else {
+        match provenance_sign(&name, &version, &sha, index.as_ref()) {
+            Ok(Some(sig)) => (Some(sig), None, "signed".to_string()),
+            Ok(None) => (None, None, "UNSIGNED".to_string()),
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(1);
+            }
         }
     };
     let release = registry::Release {
@@ -700,17 +744,11 @@ fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
         coords,
         deps,
         signature,
-        // Keyless publish (Phase 5, K4) fills this from the Sigstore flow; key/unsigned = None.
-        bundle: None,
+        bundle,
     };
     match index.publish(&name, &release) {
         Ok(()) => {
-            let signed = if release.signature.is_some() {
-                "signed"
-            } else {
-                "UNSIGNED"
-            };
-            println!("published `{name}` {version} → {git}#{tag} ({sha}) [{signed}]");
+            println!("published `{name}` {version} → {git}#{tag} ({sha}) [{provenance_tag}]");
             ExitCode::SUCCESS
         }
         Err(err) => {

@@ -104,6 +104,22 @@ ed25519-dalek = "2"
 sigstore-verify = { version = "0.11", default-features = false }
 sigstore-trust-root = { version = "0.11", default-features = false }
 sigstore-types = "0.11"
+# The keyless PUBLISH side (Phase 5, K4): ambient OIDC (GitHub Actions et al. via `ambient-id`)
+# → Fulcio cert for an ephemeral key → DSSE sign → Rekor entry → bundle. `rustls` (not the
+# default native-tls) to match the workspace's TLS posture. Async by design upstream; noeta-pm
+# wraps it in a scoped block_on (publish is CLI-only, never in the interpreter hot path).
+sigstore-sign = { version = "0.11", default-features = false, features = ["rustls"] }
+sigstore-oidc = { version = "0.11", default-features = false, features = ["rustls"] }
+# Hermetic keyless test fixtures (Phase 5, K4 — `keyless-test-fixtures`, test builds only):
+# minting a REAL test CA + CT log + Rekor log (certs with embedded SCTs, inclusion proofs,
+# signed checkpoints) so the publish→resolve loop verifies under the DEFAULT policy with no
+# network and no weakened checks. p256/x509-cert/tls-codec/const-oid mirror exactly what
+# `sigstore-verify` consumes, so mint and verify can never drift.
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pkcs8", "pem"] }
+x509-cert = { version = "0.2", default-features = false, features = ["builder", "pem"] }
+tls_codec = { version = "0.4", default-features = false, features = ["derive"] }
+const-oid = { version = "0.9", default-features = false, features = ["db"] }
+base64 = { version = "0.22", default-features = false, features = ["std"] }
 # RFC 9562 UUID type + builders for the first-class `Uuid` (extern-types X2). Deliberately
 # default-features = false: the self-generating constructors (`new_v4`/`new_v7`, behind the
 # `v4`/`v7` features) stay OUT so the Host seam remains the only entropy/time source —

@@ -93,9 +93,27 @@ pub struct VerifiedIdentity {
     pub integrated_time: Option<i64>,
 }
 
-/// The pinned production trust root embedded in the binary — sigstore.dev's Fulcio CA
-/// certificates, Rekor public keys, and CT log keys. The single out-of-band root of trust.
-pub fn production_trust_root() -> Result<TrustedRoot, String> {
+/// The trust root verification anchors to: a pinned snapshot of sigstore.dev's
+/// `trusted_root.json` embedded in the binary (Fulcio CA certificates, Rekor public keys, CT log
+/// keys) — the single out-of-band root of trust. `NOETA_SIGSTORE_TRUST_ROOT` (a path to a
+/// `trusted_root.json`) overrides it: the operational escape hatch for a Sigstore root rotation
+/// that lands before a toolchain update ships (and what hermetic tests point at their minted
+/// test root). TUF-based rotation is the surfaced v-next.
+pub fn trust_root() -> Result<TrustedRoot, String> {
+    if let Some(path) = std::env::var_os("NOETA_SIGSTORE_TRUST_ROOT") {
+        let text = std::fs::read_to_string(&path).map_err(|err| {
+            format!(
+                "cannot read NOETA_SIGSTORE_TRUST_ROOT `{}`: {err}",
+                std::path::Path::new(&path).display()
+            )
+        })?;
+        return TrustedRoot::from_json(&text).map_err(|err| {
+            format!(
+                "NOETA_SIGSTORE_TRUST_ROOT `{}` is not a valid trust root: {err}",
+                std::path::Path::new(&path).display()
+            )
+        });
+    }
     TrustedRoot::from_json(SIGSTORE_PRODUCTION_TRUSTED_ROOT)
         .map_err(|err| format!("embedded Sigstore trust root is invalid: {err}"))
 }
@@ -108,8 +126,145 @@ pub fn verify_bundle(
     artifact_sha256: &str,
     policy: Option<&IdentityPolicy>,
 ) -> Result<VerifiedIdentity, String> {
-    let root = production_trust_root()?;
+    let root = trust_root()?;
     verify_bundle_with_root(bundle_json, artifact_sha256, policy, &root)
+}
+
+/// An OIDC identity token detected from the CI environment (GitHub Actions, GitLab CI,
+/// Buildkite, …) — the ambient credential a keyless `noeta publish` signs under. `None` when the
+/// environment carries none (publish then falls back to the key path or unsigned).
+pub struct AmbientIdentity(sigstore_oidc::IdentityToken);
+
+impl std::fmt::Debug for AmbientIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The raw token is a credential — never in debug output.
+        f.debug_struct("AmbientIdentity")
+            .field("issuer", &self.issuer())
+            .field("identity", &self.identity())
+            .finish_non_exhaustive()
+    }
+}
+
+impl AmbientIdentity {
+    /// The human-facing identity the token asserts (what Fulcio will certify).
+    pub fn identity(&self) -> &str {
+        self.0.identity()
+    }
+
+    /// The OIDC issuer (e.g. `https://token.actions.githubusercontent.com`).
+    pub fn issuer(&self) -> &str {
+        self.0.issuer()
+    }
+
+    /// Wrap a raw OIDC JWT handed over directly (a CI system that injects the token itself,
+    /// or a test fixture). The token's *authenticity* is Fulcio's to judge, not ours.
+    pub fn from_jwt(jwt: &str) -> Result<AmbientIdentity, String> {
+        sigstore_oidc::IdentityToken::from_jwt(jwt)
+            .map(AmbientIdentity)
+            .map_err(|err| format!("malformed OIDC token: {err}"))
+    }
+}
+
+/// Detect an ambient OIDC identity (CI). Errors only on a *broken* ambient environment (e.g. the
+/// token endpoint refused) — a plain "not in CI" is `Ok(None)`.
+pub fn ambient_identity() -> Result<Option<AmbientIdentity>, String> {
+    let runtime = publish_runtime()?;
+    let token = runtime
+        .block_on(sigstore_oidc::IdentityToken::detect_ambient())
+        .map_err(|err| format!("ambient OIDC detection failed: {err}"))?;
+    Ok(token.map(AmbientIdentity))
+}
+
+/// Where a keyless publish sends its requests. Production sigstore.dev by default;
+/// `NOETA_FULCIO_URL` / `NOETA_REKOR_URL` override both together (tests, or a private Sigstore
+/// deployment — set both or neither).
+fn signing_config() -> Result<sigstore_sign::SigningConfig, String> {
+    let overrides = (
+        std::env::var("NOETA_FULCIO_URL").ok(),
+        std::env::var("NOETA_REKOR_URL").ok(),
+    );
+    Ok(match overrides {
+        (Some(fulcio), Some(rekor)) => sigstore_sign::SigningConfig {
+            fulcio_url: fulcio,
+            rekor_url: rekor,
+            // No TSA: the transparency log's integrated time is the signature's time source.
+            tsa_url: None,
+            signing_scheme: sigstore_sign::crypto::SigningScheme::EcdsaP256Sha256,
+            rekor_api_version: sigstore_sign::rekor::RekorApiVersion::V1,
+            oidc_url: None,
+        },
+        (None, None) => {
+            // Prefer the v1 Rekor API: its entries carry the integrated time the consumer's
+            // cert-validity check anchors on, and it is what the verify path is proven against.
+            let mut config = sigstore_sign::SigningConfig::production()
+                .with_rekor_version(sigstore_sign::rekor::RekorApiVersion::V1);
+            config.tsa_url = None;
+            config
+        }
+        _ => {
+            return Err(
+                "set both NOETA_FULCIO_URL and NOETA_REKOR_URL, or neither (production)"
+                    .to_string(),
+            );
+        }
+    })
+}
+
+/// Keyless-sign `statement` (the in-toto Statement from [`publish_statement`]) under the ambient
+/// identity: ephemeral P-256 key → Fulcio certificate → DSSE envelope → Rekor entry → the
+/// Sigstore bundle (JSON) the registry stores. The ephemeral private key exists only inside this
+/// call — nothing survives to steal. Endpoints: production sigstore.dev, or the
+/// `NOETA_FULCIO_URL`/`NOETA_REKOR_URL` override pair.
+pub fn publish_bundle(statement: &[u8], identity: AmbientIdentity) -> Result<String, String> {
+    publish_bundle_with_config(statement, identity, signing_config()?)
+}
+
+/// [`publish_bundle`] against explicit endpoints — the seam hermetic tests drive with their mock
+/// Fulcio/Rekor, bypassing the process-global env override.
+pub fn publish_bundle_at(
+    statement: &[u8],
+    identity: AmbientIdentity,
+    fulcio_url: &str,
+    rekor_url: &str,
+) -> Result<String, String> {
+    publish_bundle_with_config(
+        statement,
+        identity,
+        sigstore_sign::SigningConfig {
+            fulcio_url: fulcio_url.to_string(),
+            rekor_url: rekor_url.to_string(),
+            tsa_url: None,
+            signing_scheme: sigstore_sign::crypto::SigningScheme::EcdsaP256Sha256,
+            rekor_api_version: sigstore_sign::rekor::RekorApiVersion::V1,
+            oidc_url: None,
+        },
+    )
+}
+
+fn publish_bundle_with_config(
+    statement: &[u8],
+    identity: AmbientIdentity,
+    config: sigstore_sign::SigningConfig,
+) -> Result<String, String> {
+    let context = sigstore_sign::SigningContext::with_config(config);
+    let signer = context.signer(identity.0);
+    let runtime = publish_runtime()?;
+    let bundle = runtime
+        .block_on(signer.sign_raw_statement(statement))
+        .map_err(|err| format!("keyless signing failed: {err}"))?;
+    bundle
+        .to_json()
+        .map_err(|err| format!("cannot serialize the Sigstore bundle: {err}"))
+}
+
+/// A small current-thread runtime for the async sigstore clients — publish is a CLI-only,
+/// one-shot flow, so a scoped runtime (the `reqwest::blocking` pattern) beats threading an
+/// executor through the package manager.
+fn publish_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| format!("cannot start the signing runtime: {err}"))
 }
 
 /// [`verify_bundle`] against an explicit trust root — the seam tests use to substitute a fixture
