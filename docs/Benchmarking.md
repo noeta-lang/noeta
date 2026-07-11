@@ -36,12 +36,12 @@ The block directive is **distribution sugar**: `@bench(iterations: N) { … }` s
 1. `--iterations N` on the command line (overrides everything).
 2. The fn's own `#[Bench(iterations: N)]` attribute.
 3. The block's `@bench(iterations: N)` directive — positional `@bench(1000)` and named `@bench(iterations: 1000)` are equivalent.
-4. The default (200).
+4. **Calibration**: a short probe grows the count until one measurement run takes ~50ms, so fast and slow bodies alike get a statistically meaningful count automatically.
 
 ## How timing works
 
 - Benchmarks run **sequentially** — concurrency would corrupt the timings — unlike tests, which run in parallel.
-- Per-iteration cost is measured with a **two-point** method: the function is invoked `N` and `2N` times (in fresh isolates), and per-iter cost is `(t(2N) − t(N)) / N`. Subtracting cancels the fixed per-run overhead (runtime startup, setup evaluation, IR lowering), isolating the loop body.
+- Per-iteration cost is measured with a **two-point** method: the function is run in a counted loop of `N` and `2N` trips (in fresh isolates), and per-iter cost is `(t(2N) − t(N)) / N`. Subtracting cancels the fixed per-run overhead (runtime startup, setup evaluation, IR lowering — and the loop's JIT warm-up, which the loop form keeps identical at both points), isolating the body.
 - Each measurement is the **minimum of three runs**, a robust estimator that also discards the cold first run.
 - IR lowering and bytecode generation happen **before the clock starts** — only execution is timed.
 
@@ -55,8 +55,12 @@ noeta bench [OPTIONS] <FILE>
 
 | Flag | Effect |
 |---|---|
-| `--iterations <N>` | Override the iteration count for every benchmark. |
-| `--target <NAME>` | Only run when the `bench` tier is live in this `noeta.toml` build target; otherwise no-op with exit `0`. |
+| `--iterations <N>` | Override the iteration count for every benchmark (disables calibration). |
+| `--name <FN>` | Run only the named bench fn (repeatable, exact match) — the single-benchmark seam editors use. |
+| `--json` | One machine-readable JSON object on stdout (`benches[].{name, iterations, perIterNs, message, baselineDeltaPct}`, plus `ran`/`failed`/`total`). |
+| `--save-baseline <NAME>` | Save this run's measurements as a named baseline (per entry file, in the noeta cache — timings are machine-local, not project artifacts). |
+| `--baseline <NAME>` | Compare each result against the named baseline: the report gains `(+5.2% vs NAME)`, the JSON `baselineDeltaPct`. |
+| `--target <NAME>` | Only run when the `bench` tier is live in this `noeta.toml` build target; otherwise no-op with exit `0`. A target may also map `bench` to another **provider** (see [Documentation & Dev Tiers](Documentation-and-Tiers)). |
 
 ### Output and exit codes
 

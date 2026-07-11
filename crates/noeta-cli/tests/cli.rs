@@ -1300,6 +1300,125 @@ fn bench_positional_iterations_arg_is_read() {
 }
 
 #[test]
+fn bench_name_filter_and_json_report() {
+    // `--name` runs exactly the named bench; `--json` reports one machine-readable object with
+    // per-bench fields (the editor/CI seam, mirroring `noeta test --json`).
+    let file = temp_program(
+        "bench_ux",
+        "fn work(n: int): int { return n }\n\
+         @bench(iterations: 4) {\n\
+             fn fast(): void { work(1) }\n\
+             fn slow(): void { work(2) }\n\
+         }\n",
+    );
+    lang()
+        .arg("bench")
+        .arg(&file)
+        .arg("--name")
+        .arg("fast")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("running 1 benchmark")
+                .and(predicate::str::contains("fast"))
+                .and(predicate::str::contains("slow").not()),
+        );
+    let out = lang()
+        .arg("bench")
+        .arg(&file)
+        .arg("--name")
+        .arg("fast")
+        .arg("--json")
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("valid JSON");
+    assert_eq!(json["total"], 1);
+    assert_eq!(json["failed"], 0);
+    assert_eq!(json["benches"][0]["name"], "fast");
+    assert_eq!(json["benches"][0]["iterations"], 4);
+    assert!(json["benches"][0]["perIterNs"].is_f64());
+}
+
+#[test]
+fn bench_calibrates_without_an_iteration_count() {
+    // No `--iterations`, no `#[Bench]`: the count is calibrated (grown until a run meets the
+    // time target), so the report shows a real count and a real measurement.
+    let file = temp_program(
+        "bench_calibrate",
+        "fn work(n: int): int {\n\
+             mut t = 0\n\
+             for i in 0..n { t = t + i }\n\
+             return t\n\
+         }\n\
+         @bench fn body(): void { work(100) }\n",
+    );
+    let out = lang()
+        .arg("bench")
+        .arg(&file)
+        .arg("--json")
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("valid JSON");
+    let iters = json["benches"][0]["iterations"].as_u64().expect("count");
+    assert!(iters >= 64, "calibration must grow past the seed: {iters}");
+}
+
+#[test]
+fn bench_baseline_saves_and_compares() {
+    // `--save-baseline` persists a run (per entry file, in the cache dir); `--baseline` diffs
+    // against it — the human report gains a delta, the JSON a `baselineDeltaPct`.
+    // Enough per-iteration work that the two-point measurement is reliably non-zero — a zero
+    // baseline has no defined delta.
+    let file = temp_program(
+        "bench_baseline",
+        "fn work(n: int): int {\n\
+             mut t = 0\n\
+             for i in 0..n { t = t + i }\n\
+             return t\n\
+         }\n\
+         @bench(iterations: 2000) fn b(): void { work(500) }\n",
+    );
+    lang()
+        .arg("bench")
+        .arg(&file)
+        .arg("--save-baseline")
+        .arg("cli-test")
+        .assert()
+        .success();
+    lang()
+        .arg("bench")
+        .arg(&file)
+        .arg("--baseline")
+        .arg("cli-test")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("% vs cli-test"));
+    let out = lang()
+        .arg("bench")
+        .arg(&file)
+        .arg("--baseline")
+        .arg("cli-test")
+        .arg("--json")
+        .assert()
+        .success();
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.get_output().stdout).expect("valid JSON");
+    assert!(json["benches"][0]["baselineDeltaPct"].is_f64());
+    // An unknown baseline is a clear error.
+    lang()
+        .arg("bench")
+        .arg(&file)
+        .arg("--baseline")
+        .arg("nope")
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("no baseline `nope`"));
+}
+
+#[test]
 fn bench_invalid_arg_is_a_construction_error() {
     // Tier directive args construct the tier's config attribute (`@bench(iterations: true)` ⇒
     // `#[Bench(iterations: true)]`), so a wrong-typed knob is rejected by the ordinary attribute
