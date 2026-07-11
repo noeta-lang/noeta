@@ -24,11 +24,13 @@
 
 #[cfg(all(target_arch = "wasm32", target_os = "wasi"))]
 mod component;
+#[cfg(all(target_arch = "wasm32", target_os = "wasi"))]
+mod outbound;
 
 use std::cell::OnceCell;
 
 use noeta_stdlib::{NetRequest, NetResponse};
-use noeta_wasi_host::WasiHost;
+use noeta_wasi_host::{OutboundHook, WasiHost};
 
 /// The program this component serves, baked in by `build.rs` (empty ⇒ the 500 build hint).
 static BUNDLE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/bundle.noeb"));
@@ -53,10 +55,23 @@ pub fn serve_once(request: NetRequest) -> NetResponse {
             noeta_bundle::read(BUNDLE).map_err(|e| format!("cannot load the embedded bundle: {e}"))
         });
         match module {
-            Ok(module) => run(module, request),
+            Ok(module) => run(module, request, platform_outbound()),
             Err(e) => failure(e),
         }
     })
+}
+
+/// The platform's outbound client: the `wasi:http/outgoing-handler` dance on the wasi target
+/// (edge handlers can call upstream); `None` natively, where the lib tests inject their own.
+fn platform_outbound() -> Option<OutboundHook> {
+    #[cfg(all(target_arch = "wasm32", target_os = "wasi"))]
+    {
+        Some(Box::new(outbound::fetch))
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_os = "wasi")))]
+    {
+        None
+    }
 }
 
 /// [`serve_once`] over an explicit bundle — the natively-testable seam. Decodes fresh per call
@@ -69,15 +84,34 @@ pub fn serve_bundle(bundle: &[u8], request: NetRequest) -> NetResponse {
         );
     }
     match noeta_bundle::read(bundle) {
-        Ok(module) => run(&module, request),
+        Ok(module) => run(&module, request, platform_outbound()),
         Err(e) => failure(&format!("cannot load the embedded bundle: {e}")),
     }
 }
 
-fn run(module: &noeta_bytecode::Module, request: NetRequest) -> NetResponse {
-    let (host, reply) = WasiHost::new()
-        .with_args(vec!["app".to_string()])
-        .with_inbound(request);
+/// [`serve_bundle`] with an explicit outbound client — the natively-testable seam for the
+/// upstream-fetch path (the wasi build injects the real `wasi:http` client instead).
+pub fn serve_bundle_with_outbound(
+    bundle: &[u8],
+    request: NetRequest,
+    outbound: OutboundHook,
+) -> NetResponse {
+    match noeta_bundle::read(bundle) {
+        Ok(module) => run(&module, request, Some(outbound)),
+        Err(e) => failure(&format!("cannot load the embedded bundle: {e}")),
+    }
+}
+
+fn run(
+    module: &noeta_bytecode::Module,
+    request: NetRequest,
+    outbound: Option<OutboundHook>,
+) -> NetResponse {
+    let mut host = WasiHost::new().with_args(vec!["app".to_string()]);
+    if let Some(hook) = outbound {
+        host = host.with_outbound(hook);
+    }
+    let (host, reply) = host.with_inbound(request);
     let executor: Box<dyn noeta_stdlib::Executor> = Box::new(noeta_stdlib::SandboxExecutor::new());
     // The documented plain-run-plus-traceback entry — cooperative, tier-0, the wasm shape.
     let (result, _trace) =
@@ -143,6 +177,35 @@ mod tests {
             String::from_utf8_lossy(&response.body),
             "you asked for /hello"
         );
+    }
+
+    #[test]
+    fn a_handler_reaches_upstream_through_the_outbound_hook() {
+        // The proxy shape: the handler fetches an upstream service and composes its reply. The
+        // hook stands in for the wasi:http client (injected identically on the wasi build).
+        let module = compile(
+            "use std.http.server\nuse std.http.client\nuse std.http.{Request, Response}\n\n\
+             fn handle(req: Request): Response {\n\
+                 upstream = client.get(\"http://api.internal/data\")\n\
+                 return server.response(200, \"upstream said: ${upstream.body()}\")\n\
+             }\n\n\
+             server.serve(8080, handle)",
+        );
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = std::sync::Arc::clone(&seen);
+        let hook: OutboundHook = Box::new(move |request| {
+            log.lock().expect("log").push(request.url.clone());
+            Ok(NetResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"42".to_vec(),
+            })
+        });
+        let response =
+            serve_bundle_with_outbound(&noeta_bundle::write(&module), get("/compose"), hook);
+        assert_eq!(response.status, 200);
+        assert_eq!(String::from_utf8_lossy(&response.body), "upstream said: 42");
+        assert_eq!(*seen.lock().expect("log"), vec!["http://api.internal/data"]);
     }
 
     #[test]

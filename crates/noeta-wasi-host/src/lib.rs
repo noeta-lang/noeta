@@ -31,7 +31,6 @@ use std::io::BufRead;
 
 /// The WASI host: real preopened-directory file IO, real env/args, real wall time and entropy —
 /// all through synchronous `std`. Constructed by the wasm runner, never by the differential.
-#[derive(Debug)]
 pub struct WasiHost {
     /// The user-facing seeded PRNG state (deterministic on every host — see the module docs).
     rng: u64,
@@ -58,6 +57,11 @@ pub struct WasiHost {
     /// `wasi:http` handler invocation. `None` on the plain runner, where serving stays an honest
     /// error pointing at the serve build.
     inbound: Option<Inbound>,
+    /// The outbound HTTP hook (P-WASM W4 follow-up): the platform's client, injected by the
+    /// embedding — the serve component passes the `wasi:http/outgoing-handler` dance here.
+    /// `None` on the plain wasip1 runner, where outbound stays an honest error (wasip1 has no
+    /// sockets to offer).
+    outbound: Option<OutboundHook>,
     /// Telemetry state: in-flight spans are tracked (so `tel_span_context` and parenting stay
     /// correct for explicit `std.tracing` use) but there is no exporter — every signal reports
     /// disabled and ended spans drop at the null sink. An OTLP path needs outbound HTTP, so it
@@ -86,6 +90,7 @@ impl WasiHost {
             env_overlay: HashMap::new(),
             p2p: noeta_stdlib::P2pBroker::default(),
             inbound: None,
+            outbound: None,
             tel: WasiTelemetry::default(),
         }
     }
@@ -111,6 +116,14 @@ impl WasiHost {
         (self, slot)
     }
 
+    /// Inject the platform's outbound HTTP client (consuming-builder style). The serve component
+    /// passes a closure over `wasi:http/outgoing-handler`; anything the hook cannot express
+    /// surfaces as the hook's own `StdError`.
+    pub fn with_outbound(mut self, hook: OutboundHook) -> WasiHost {
+        self.outbound = Some(hook);
+        self
+    }
+
     /// The sorted base names of the entries in directory `dir` — the blocking analogue of
     /// `RealHost::read_dir_names`, shared by `fs_list` (cwd) and `fs_list_dir` (any path).
     fn read_dir_names(&self, dir: &str) -> Result<Vec<String>, StdError> {
@@ -134,6 +147,19 @@ impl Default for WasiHost {
 
 /// Where a served program's reply lands (see [`WasiHost::with_inbound`]).
 pub type ReplySlot = std::sync::Arc<std::sync::Mutex<Option<NetResponse>>>;
+
+/// The platform outbound-HTTP client (see [`WasiHost::with_outbound`]).
+pub type OutboundHook = Box<dyn FnMut(NetRequest) -> Result<NetResponse, StdError> + Send>;
+
+impl std::fmt::Debug for WasiHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WasiHost")
+            .field("args", &self.args)
+            .field("inbound", &self.inbound)
+            .field("outbound", &self.outbound.is_some())
+            .finish_non_exhaustive()
+    }
+}
 
 /// The armed one-request script: the pending request (taken by the first accept) and the shared
 /// slot the reply is written into.
@@ -377,8 +403,11 @@ impl Os for WasiHost {
 }
 
 impl Network for WasiHost {
-    fn net_fetch(&mut self, _request: NetRequest) -> Result<NetResponse, StdError> {
-        Err(no_network("outbound HTTP (`http.*`)"))
+    fn net_fetch(&mut self, request: NetRequest) -> Result<NetResponse, StdError> {
+        match &mut self.outbound {
+            Some(hook) => hook(request),
+            None => Err(no_network("outbound HTTP (`http.*`)")),
+        }
     }
 
     fn net_listen(&mut self, _addr: &str) -> Result<u64, StdError> {
