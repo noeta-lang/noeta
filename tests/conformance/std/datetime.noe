@@ -1,0 +1,37 @@
+// `std.datetime` (Ring 3): calendar/timezone datetime backed by jiff. Pure operations + `now()`
+// (the host clock — the sandbox's fixed epoch, so deterministic). UTC formatting and epoch-based
+// values are tzdb-independent; both backends run the same jiff, so the differential holds.
+// expect: stdout "2026-01-01T00:00:00Z"
+// expect: stdout "1970-01-01T00:00:00Z"
+// expect: stdout "1720661640000"
+// expect: stdout "2024-07-11T01:34:00Z"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "PT3H"
+// expect: stdout "2024"
+// expect: stdout "none"
+// expect: exit 0
+use std.{datetime}
+
+// now() reads the sandbox clock (fixed epoch 2026-01-01).
+echo datetime.now().format("%Y-%m-%dT%H:%M:%SZ")
+// from_unix_ms is pure.
+echo datetime.from_unix_ms(0).format("%Y-%m-%dT%H:%M:%SZ")
+
+t = datetime.from_unix_ms(1720661640000)
+echo t.unix_ms()
+echo t.format("%Y-%m-%dT%H:%M:%SZ")
+
+soon = t.add(datetime.hours(3))
+echo t.is_before(soon)
+echo t.is_after(soon)
+echo t.diff(soon).to_string()
+
+echo match datetime.parse("2024-07-11T01:14:00Z") {
+    some(p) => p.format("%Y"),
+    none => "bad",
+}
+echo match datetime.parse("not a date") {
+    some(_) => "parsed",
+    none => "none",
+}

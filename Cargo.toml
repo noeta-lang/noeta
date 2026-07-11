@@ -89,6 +89,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # OS entropy for RealHost's `Entropy` capability (id-entropy U1): UUID v4/v7 random bits must be
 # real entropy on the real host (the sandbox uses its own seeded SplitMix64 stream instead).
 getrandom = "0.3"
+# Timezone-aware calendar datetime for `std.datetime` (the Ring 3 datetime arc): DST-correct
+# arithmetic, IANA tzdb, RFC-3339 + strftime formatting. BurntSushi's library. Optional in
+# noeta-stdlib behind the default-on `ring-datetime` feature, so a `--no-default-features` /
+# footprint-tailored build that never touches datetime sheds it (and the tzdb) entirely.
+jiff = "0.2"
 # The machine hostname for RealHost's `Os` capability (stdlib-gaps) — std has no hostname API;
 # this is the zero-dep libc/WinAPI wrapper.
 gethostname = "1"

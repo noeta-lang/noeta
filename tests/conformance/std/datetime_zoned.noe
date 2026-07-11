@@ -1,0 +1,26 @@
+// `Zoned` — timezone-aware fields + DST-correct calendar arithmetic. UTC is tzdb-stable; the one
+// America/New_York check uses a fixed 2024 summer instant (EDT, -04:00, long-established) so the
+// assertion doesn't drift with a tzdb update. Both backends run the same jiff → differential holds.
+// expect: stdout "2024-7-11 1:34:0"
+// expect: stdout "4"
+// expect: stdout "UTC"
+// expect: stdout "21"
+// expect: stdout "America/New_York"
+// expect: stdout "2024-07-13"
+// expect: stdout "2024-08-10"
+// expect: exit 0
+use std.{datetime}
+
+t = datetime.from_unix_ms(1720661640000)  // 2024-07-11T01:34:00Z
+u = t.in_zone("UTC")
+echo "${u.year()}-${u.month()}-${u.day()} ${u.hour()}:${u.minute()}:${u.second()}"
+echo u.weekday()          // Thursday = 4
+echo u.zone()
+
+ny = t.in_zone("America/New_York")
+echo ny.hour()            // 01:34 UTC → 21:34 previous evening EDT
+echo ny.zone()
+
+// DST-correct calendar arithmetic on a Zoned.
+echo u.add(datetime.days(2)).format("%Y-%m-%d")
+echo ny.add(datetime.months(1)).format("%Y-%m-%d")

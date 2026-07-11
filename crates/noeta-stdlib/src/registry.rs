@@ -388,14 +388,20 @@ fn file_handle_dispatch(
 /// Phase-3 shim) passes to [`noeta_native::registry::install`] alongside its extra units. The
 /// order is cosmetic — every lookup iterates the whole list filtered by namespace root.
 pub fn std_units() -> Vec<&'static (dyn Extension + Sync)> {
-    vec![
+    #[allow(unused_mut)]
+    let mut units: Vec<&'static (dyn Extension + Sync)> = vec![
         &CoreExtension,
         &HttpExtension,
         &CryptoExtension,
         &IdExtension,
         &VecExtension,
         &P2pExtension,
-    ]
+    ];
+    // The `std.datetime` calendar/timezone unit (Ring 3) — present only when its default-on ring is
+    // compiled in, so a footprint-tailored build that sheds jiff also sheds the module + types.
+    #[cfg(feature = "ring-datetime")]
+    units.push(&crate::datetime::DateTimeExtension);
+    units
 }
 
 // --- the registry facade (package-manager Phase 3, N3.0) ----------------------------------------
