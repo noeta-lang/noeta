@@ -5,6 +5,7 @@
   "patterns": [
     { "include": "#comments" },
     { "include": "#attributes" },
+    { "include": "#text-tier-blocks" },
     { "include": "#decorators" },
     { "include": "#strings" },
     { "include": "#numbers" },
@@ -70,8 +71,42 @@
       ]
     },
 
+    "text-tier-blocks": {
+      "comment": "A text tier's `@<name> { … }` body is verbatim prose the compiler never lexes as code (text-tiers arc). std's `doc` is the built-in text tier (body language: markdown); it is matched here — before #decorators — so the body's apostrophes/backticks/quotes can never open string scopes that bleed past the block. Brace counting mirrors the compiler lexer's matching_brace exactly: braces nest (the recursive #text-tier-brace-pair), and \\{ / \\} are literal braces with \\\\ a literal backslash (the escape pattern consumes them before any brace rule sees them). A third-party declared text tier (`@tier(x, text: \"sql\")`) ships its own injection grammar with a rule of this same shape (injectionSelector `L:source.noeta`) — that is the extension mechanism; this grammar stays static.",
+      "begin": "(@)(doc)\\b\\s*(\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.decorator.noeta" },
+        "2": { "name": "entity.name.function.decorator.noeta" },
+        "3": { "name": "punctuation.section.tier.begin.noeta" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.section.tier.end.noeta" }
+      },
+      "contentName": "meta.embedded.block.markdown",
+      "patterns": [
+        { "include": "#text-tier-escape" },
+        { "include": "#text-tier-brace-pair" },
+        { "include": "text.html.markdown" }
+      ]
+    },
+    "text-tier-escape": {
+      "comment": "The three text-body escapes: \\{ \\} \\\\ — literal braces/backslash, never counted. Matched ahead of the brace rules so an escaped closer cannot end the block.",
+      "name": "constant.character.escape.noeta",
+      "match": "\\\\[{}\\\\]"
+    },
+    "text-tier-brace-pair": {
+      "comment": "A nested balanced brace pair inside a text body — recursion is how TextMate counts depth, so a `{snippet}` in prose does not close the block.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        { "include": "#text-tier-escape" },
+        { "include": "#text-tier-brace-pair" },
+        { "include": "text.html.markdown" }
+      ]
+    },
     "decorators": {
-      "comment": "Directives and tier blocks: @derive(...), @role(...), @test, @bench(...), @doc {...}, @debug. The decorator set {derive, attribute, role, semantic, packed} is fixed; every other @name is a tier (open set).",
+      "comment": "Directives and tier blocks: @derive(...), @role(...), @test, @bench(...), @debug. The decorator set {derive, attribute, role, semantic, packed} is fixed; every other @name is a tier (open set). @doc is carved out above as the built-in text tier.",
       "match": "(@)([A-Za-z_][A-Za-z0-9_]*)",
       "captures": {
         "1": { "name": "punctuation.definition.decorator.noeta" },

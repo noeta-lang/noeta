@@ -98,3 +98,82 @@ mut b = 2
   (let_statement
     name: (identifier)
     value: (integer_literal)))
+
+==================
+Doc text tier: body is verbatim prose
+==================
+
+@doc {
+  # Adder
+
+  `add(a, b)` returns **a + b**; "quotes" and a balanced {snippet} are prose.
+}
+fn add(a: int, b: int): int { return a + b }
+
+---
+
+(source_file
+  (text_tier_block
+    name: (identifier)
+    body: (text_block
+      (text_body)))
+  (function_declaration
+    name: (identifier)
+    parameters: (parameters
+      (parameter
+        name: (identifier)
+        type: (primitive_type))
+      (parameter
+        name: (identifier)
+        type: (primitive_type)))
+    return_type: (primitive_type)
+    body: (block
+      (return_statement
+        (binary_expression
+          left: (identifier)
+          right: (identifier))))))
+
+==================
+Doc text tier: escaped braces are not counted
+==================
+
+@doc {
+  a literal \} closer and a literal \{ opener, plus \\ a backslash
+}
+mut x = 1
+
+---
+
+(source_file
+  (text_tier_block
+    name: (identifier)
+    body: (text_block
+      (text_body)))
+  (let_statement
+    name: (identifier)
+    value: (integer_literal)))
+
+==================
+A code tier block still parses as code
+==================
+
+@test {
+    fn t(): void { assert(true) }
+}
+
+---
+
+(source_file
+  (decorator
+    name: (identifier)
+    (block
+      (function_declaration
+        name: (identifier)
+        parameters: (parameters)
+        return_type: (primitive_type)
+        body: (block
+          (expression_statement
+            (call_expression
+              function: (identifier)
+              arguments: (arguments
+                (boolean_literal)))))))))

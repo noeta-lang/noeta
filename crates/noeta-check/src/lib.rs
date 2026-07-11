@@ -80,8 +80,8 @@ mod stdlib;
 pub mod tiers;
 
 pub use tiers::{
-    Activated, BUILTIN_TIERS, DocBlock, DocTarget, TierFn, activate_tiers, dedent_doc,
-    resolve_docs, tier_config_attribute,
+    Activated, BUILTIN_TIERS, DocTarget, TextBlock, TierFn, activate_tiers, dedent_doc,
+    resolve_docs, resolve_texts, tier_config_attribute,
 };
 
 /// The full output of one checker run: the diagnostics **and** the resolved-type map both
@@ -1261,6 +1261,18 @@ impl Checker {
                         ret: Box::new(Type::Unit),
                     },
                 ),
+            ],
+        );
+        // Its text-tier counterpart (text-tiers arc): one `TierText` per activated verbatim body.
+        let name = noeta_ast::reflect::TIER_TEXT.to_string();
+        self.types.insert(name.clone());
+        self.type_kinds
+            .insert(name.clone(), noeta_types::TypeKind::Struct);
+        self.records.insert(
+            name,
+            vec![
+                ("target".to_string(), Type::String),
+                ("text".to_string(), Type::String),
             ],
         );
     }
@@ -5742,7 +5754,42 @@ impl Checker {
                 )
                 .help("a tier's knobs are an attribute's fields; declare the struct with `@attribute`");
             }
-            // The runner signature: exactly one `List<TierRoot>` parameter, returning `void`.
+            // `text:` and `config:` are mutually exclusive: a text tier's body is verbatim prose,
+            // so there are no contained fns to stamp knob attributes onto.
+            if let (Some(_), Some((_, text_span))) = (&decl.config, &decl.text) {
+                self.error(
+                    DiagnosticCode::InvalidTierDeclaration,
+                    *text_span,
+                    format!(
+                        "tier `{}` declares both `config:` and `text:` — a text tier has no knobs",
+                        decl.name
+                    ),
+                )
+                .help(
+                    "a `text: \"<lang>\"` tier's `@<name> { … }` bodies are captured verbatim \
+                     (no fns inside to configure); drop one of the two",
+                );
+            }
+            if let Some((lang, text_span)) = &decl.text
+                && lang.is_empty()
+            {
+                self.error(
+                    DiagnosticCode::InvalidTierDeclaration,
+                    *text_span,
+                    "`text:` needs a language ID for the body, e.g. `text: \"markdown\"`",
+                )
+                .help(
+                    "the ID tags the verbatim bodies for tooling (editor highlighting, \
+                     extraction); use a lowercase language name like \"markdown\", \"xml\", \"sql\"",
+                );
+            }
+            // The runner signature: exactly one `List<TierRoot>` parameter (`List<TierText>` for
+            // a text tier — its roots are verbatim bodies, not fns), returning `void`.
+            let root_ty = if decl.text.is_some() {
+                noeta_ast::reflect::TIER_TEXT
+            } else {
+                noeta_ast::reflect::TIER_ROOT
+            };
             let param_ok = f.params.len() == 1
                 && matches!(
                     f.params[0].ty.as_ref(),
@@ -5751,7 +5798,7 @@ impl Checker {
                             && matches!(
                                 args.as_slice(),
                                 [TypeRef::Named { name: el, args: el_args, .. }]
-                                    if el == noeta_ast::reflect::TIER_ROOT && el_args.is_empty()
+                                    if el == root_ty && el_args.is_empty()
                             )
                 );
             let ret_ok = matches!(
@@ -5763,14 +5810,18 @@ impl Checker {
                     DiagnosticCode::InvalidTierDeclaration,
                     f.name_span,
                     format!(
-                        "tier `{}`'s runner must be `fn(roots: List<TierRoot>): void`",
+                        "tier `{}`'s runner must be `fn(roots: List<{root_ty}>): void`",
                         decl.name
                     ),
                 )
-                .help(
+                .help(if decl.text.is_some() {
+                    "a text tier's runner receives one root per verbatim body — `root.target` \
+                     names the adjacent declaration (`\"\"` for module/section prose), `root.text` \
+                     is the body"
+                } else {
                     "the runner receives one activated root per fn — `root.name` for the report, \
-                     `root.run()` to invoke it; knob values come from `attributes_of::<Config>()`",
-                );
+                     `root.run()` to invoke it; knob values come from `attributes_of::<Config>()`"
+                });
             }
         }
     }

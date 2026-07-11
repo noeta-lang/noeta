@@ -1,17 +1,23 @@
 #include "tree_sitter/parser.h"
 #include <stdbool.h>
 
-// External scanner for Noeta. Two tokens:
+// External scanner for Noeta. Three tokens:
 //   * BLOCK_COMMENT   — `/* ... */`, *nestable* (a plain regex token cannot express nesting).
 //   * NEWLINE         — an automatic statement terminator. Noeta terminates a statement at a
 //                       newline, EXCEPT when the statement is syntactically incomplete: a trailing
 //                       operator (handled by the parser — after a dangling operator a terminator is
 //                       not valid, so we are never asked) or a *leading* continuation on the next
 //                       line (`.`, `|>`, a binary operator), which we detect by peeking here.
+//   * TEXT_BODY       — the verbatim body of a text-tier block (`@doc { … }`): everything up to
+//                       the balancing `}`, counted exactly like the compiler lexer's
+//                       `matching_brace` — braces nest, `\{`/`\}` are literal braces (not counted)
+//                       and `\\` a literal backslash; every other backslash is plain prose. The
+//                       closing `}` is left for the grammar.
 
 enum TokenType {
   BLOCK_COMMENT,
   NEWLINE,
+  TEXT_BODY,
 };
 
 void *tree_sitter_noeta_external_scanner_create(void) { return NULL; }
@@ -39,6 +45,38 @@ static bool is_continuation(int32_t c) {
 
 bool tree_sitter_noeta_external_scanner_scan(void *payload, TSLexer *lexer,
                                              const bool *valid_symbols) {
+  // Verbatim text-tier body — checked before anything else so prose that *looks* like a comment
+  // or code stays prose. TEXT_BODY is only grammatically valid right after a text block's `{`,
+  // where no terminator is; NEWLINE also being valid means error recovery (everything valid),
+  // where emitting a raw token would swallow real code.
+  if (valid_symbols[TEXT_BODY] && !valid_symbols[NEWLINE]) {
+    unsigned depth = 1;
+    bool consumed = false;
+    for (;;) {
+      if (lexer->eof(lexer)) return false; // unterminated block — let recovery handle it
+      int32_t c = lexer->lookahead;
+      if (c == '\\') {
+        advance(lexer);
+        int32_t n = lexer->lookahead;
+        if (n == '{' || n == '}' || n == '\\') advance(lexer);
+        consumed = true;
+        continue;
+      }
+      if (c == '}') {
+        if (depth == 1) break; // the block's own closer — not part of the body
+        depth--;
+      } else if (c == '{') {
+        depth++;
+      }
+      advance(lexer);
+      consumed = true;
+    }
+    if (!consumed) return false; // empty body — `optional(text_body)` lets `}` close directly
+    lexer->result_symbol = TEXT_BODY;
+    lexer->mark_end(lexer);
+    return true;
+  }
+
   bool saw_newline = false;
 
   // Consume inline whitespace and newlines, remembering whether a line boundary was crossed.

@@ -352,13 +352,49 @@ fn reroot_map(flat: &[String]) -> std::collections::BTreeMap<String, String> {
 /// Resolve and merge the workspace: the entry's imports against the modules' declared namespaces,
 /// producing one merged [`Program`] (or the load diagnostics). Depends on every source's [`ast`]
 /// (so editing any module re-links), but not on any cross-module edge — the per-source parse
+/// The workspace's declared text-tier names (text-tiers arc): the union of every member file's
+/// `@tier(<name>, …, text: "…")` declarations — entry, siblings, and dependency modules alike —
+/// sorted and deduped. Derived from the per-file [`tokens`] scans, so an edit that adds or
+/// removes a declaration changes this value and invalidates exactly the workspace-aware lexes
+/// ([`tokens_in`]); any other edit backdates (the value compares equal) and they stay memoized.
+#[salsa::tracked(returns(ref))]
+pub fn workspace_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> Vec<String> {
+    let mut names: Vec<String> = std::iter::once(ws.entry(db))
+        .chain(ws.modules(db).iter().copied())
+        .chain(ws.dep_modules(db).iter().map(|dm| dm.src(db)))
+        .flat_map(|src| tokens(db, src).0.text_tier_decls.iter().cloned())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Workspace-aware tokenization: like [`tokens`], but lexing with the whole workspace's text-tier
+/// set ([`workspace_text_tiers`]) — so a text tier declared in one file (or dependency package)
+/// captures `@<name> { … }` bodies verbatim in every member. What [`linked`] reads; the per-file
+/// [`tokens`] stays the single-file surface (its two-pass covers same-file declarations).
+#[salsa::tracked(returns(ref))]
+pub fn tokens_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) -> Tokens {
+    let set = noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned());
+    let source = source_of(db, src);
+    Tokens(noeta_lexer::lex_in(&source, &set))
+}
+
+/// Workspace-aware parse over [`tokens_in`] — the [`linked`] pipeline's counterpart of [`ast`].
+#[salsa::tracked(returns(ref))]
+pub fn ast_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) -> Ast {
+    let source = source_of(db, src);
+    let toks = tokens_in(db, ws, src);
+    Ast(noeta_parser::parse(&source, &toks.0.tokens))
+}
+
 /// queries remain independent. The merge means both backends run the linked program unchanged, so
 /// the differential oracle is preserved by construction.
 #[salsa::tracked(returns(ref))]
 pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> LinkedProgram {
     let entry_src = ws.entry(db);
-    let entry_tokens = tokens(db, entry_src);
-    let entry_ast = ast(db, entry_src);
+    let entry_tokens = tokens_in(db, ws, entry_src);
+    let entry_ast = ast_in(db, ws, entry_src);
     // The entry must lex and parse before it can be linked; surface its load diagnostics otherwise
     // (rendered against the entry, like every import error).
     let entry_diags: Vec<Diagnostic> = entry_tokens
@@ -377,8 +413,8 @@ pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> LinkedProgram {
     // cleanly-parsed module contributes; `link_parsed` keeps just the ones declaring a namespace.
     let mut module_programs: Vec<&Program> = Vec::new();
     for &m in ws.modules(db) {
-        let toks = tokens(db, m);
-        let parsed = ast(db, m);
+        let toks = tokens_in(db, ws, m);
+        let parsed = ast_in(db, ws, m);
         if toks.0.diagnostics.is_empty() && parsed.0.diagnostics.is_empty() {
             module_programs.push(&parsed.0.program);
         }
@@ -391,8 +427,8 @@ pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> LinkedProgram {
     let mut dep_programs: Vec<Program> = Vec::new();
     for &dm in ws.dep_modules(db) {
         let src = dm.src(db);
-        let toks = tokens(db, src);
-        let parsed = ast(db, src);
+        let toks = tokens_in(db, ws, src);
+        let parsed = ast_in(db, ws, src);
         if toks.0.diagnostics.is_empty() && parsed.0.diagnostics.is_empty() {
             let mut program = parsed.0.program.clone();
             noeta_loader::reroot_program(

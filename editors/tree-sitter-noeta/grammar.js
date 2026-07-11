@@ -30,7 +30,7 @@ module.exports = grammar({
 
   word: $ => $.identifier,
 
-  externals: $ => [$.block_comment, $._newline],
+  externals: $ => [$.block_comment, $._newline, $.text_body],
 
   extras: $ => [/\s/, $.line_comment, $.block_comment],
 
@@ -69,6 +69,7 @@ module.exports = grammar({
       $.enum_declaration,
       $.impl_block,
       $.namespace_declaration,
+      $.text_tier_block,
       $.decorator,
       $.attributed_declaration,
     ),
@@ -104,10 +105,24 @@ module.exports = grammar({
       ),
     ),
 
+    // std's `doc` tier is a **text** tier (text-tiers arc — it mirrors the compiler's default
+    // TextTiers set): its `@doc { … }` body is verbatim prose, captured raw by the external
+    // scanner with the same balanced-brace + `\{`/`\}`/`\\` escape count as the compiler's lexer,
+    // so editor and compiler always agree on where the body ends. The `queries/injections.scm`
+    // rule overlays markdown on the body. Third-party declared text tiers (`@tier(x, text: "…")`)
+    // are not modeled statically — a static grammar cannot read the declaration set; their bodies
+    // parse as code (or error-recover) until a per-project generated grammar exists.
+    text_tier_block: $ => seq(
+      '@',
+      field('name', alias('doc', $.identifier)),
+      field('body', $.text_block),
+    ),
+    text_block: $ => seq('{', optional($.text_body), '}'),
+
     // Covers both the fixed decorator directives (@derive/@role/@semantic/@attribute/@packed)
-    // and the open tier set (@test/@bench/@doc/@debug/...). The distinction is name-based and
-    // semantic, not syntactic, so one rule serves both — including the `@test fn` / `@doc {...}`
-    // annotation and block forms.
+    // and the open tier set (@test/@bench/@debug/...). The distinction is name-based and
+    // semantic, not syntactic, so one rule serves both — including the `@test fn` / `@fuzz {...}`
+    // annotation and block forms. (`@doc` is carved out above as the text-tier form.)
     decorator: $ => prec.right(seq(
       '@',
       field('name', $.identifier),

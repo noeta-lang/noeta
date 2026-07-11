@@ -144,6 +144,20 @@ production VM as `noeta run`, only with the JIT unarmed so every frame stays ins
 
 The grammar emits standard TextMate scopes so it inherits sensible colors from any theme. The Noeta-specific leaf scopes (all suffixed `.noeta`) are namespaced under the root scope `source.noeta`.
 
+## Text tiers and embedded languages
+
+A text tier's `@<name> { … }` body is verbatim prose the compiler never lexes as code. The built-in
+`doc` tier is handled by this grammar: the body scopes as `meta.embedded.block.markdown` (markdown
+highlighting via the built-in grammar), brace counting matches the compiler exactly (braces nest;
+`\{`/`\}` are literal braces, `\\` a literal backslash), and prose punctuation can no longer leak
+string scopes into the code below the block.
+
+A **third-party package** declaring its own text tier (`@tier(spec, text: "xml")`) ships a VS Code
+extension with one *injection grammar* targeting `L:source.noeta` — a `begin`/`end` rule of the same
+shape as this grammar's `text-tier-blocks` (copy it, swap the tier name and the embedded-language
+include). That is the whole mechanism: no cooperation from this extension needed, and the tier's
+bodies highlight in its declared language for every user of the package's extension.
+
 ## Roadmap
 
 - **`noeta lsp`** — the language server over the compiler's salsa query graph is **wired in**: live

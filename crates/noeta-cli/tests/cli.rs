@@ -2386,6 +2386,77 @@ fn tier_declaration_errors_are_e0051() {
         .stderr(predicate::str::contains("E0051").and(predicate::str::contains("List<TierRoot>")));
 }
 
+/// A single-file program declaring a **text** tier (`@tier(spec, text: "xml")`, text-tiers arc):
+/// its `@spec { … }` bodies are captured verbatim by the lexer (same-file two-pass — no manifest
+/// involved), adjacency-targeted like `@doc`, and dispatched to the runner as `List<TierText>`.
+/// The first body deliberately contains XML quotes (invalid as Noeta tokens) and an escaped brace.
+const DECLARED_TEXT_TIER_PROGRAM: &str = "\
+@tier(spec, text: \"xml\")\n\
+fn run_specs(roots: List<TierText>): void {\n\
+    echo \"specs: ${roots.len()}\"\n\
+    for root in roots {\n\
+        echo \"-- ${root.target}\"\n\
+        echo root.text\n\
+    }\n\
+}\n\
+@spec {\n\
+  <case name=\"adds\" expect=\"3\"/> with a literal \\} brace\n\
+}\n\
+fn add(a: int, b: int): int { return a + b }\n";
+
+#[test]
+fn a_declared_text_tier_dispatches_its_bodies() {
+    // `noeta spec <file>` invokes the text tier's runner with one TierText per body: `target` is
+    // the adjacency-resolved declaration, `text` the verbatim body with escapes undone.
+    let file = temp_program("text_tier_single", DECLARED_TEXT_TIER_PROGRAM);
+    lang().arg("spec").arg(&file).assert().success().stdout(
+        predicate::str::contains("specs: 1")
+            .and(predicate::str::contains("-- add"))
+            .and(predicate::str::contains(
+                "<case name=\"adds\" expect=\"3\"/> with a literal } brace",
+            )),
+    );
+}
+
+#[test]
+fn a_declared_text_tier_strips_on_a_normal_run() {
+    // The strip invariant holds for text tiers: `noeta run` never sees the bodies (they parse to
+    // no code at all), so the program runs clean and prints nothing.
+    let file = temp_program("text_tier_strip", DECLARED_TEXT_TIER_PROGRAM);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn text_tier_declaration_errors_are_e0051() {
+    // `config:` and `text:` are mutually exclusive, and a text tier's runner takes
+    // `List<TierText>` — each violation is an E0051 at the declaration.
+    let both = temp_program(
+        "text_tier_both",
+        "@attribute(Function)\nstruct Knobs { n: int }\n@tier(spec, config: Knobs, text: \"xml\")\nfn r(roots: List<TierText>): void { return }\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&both)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0051").and(predicate::str::contains("no knobs")));
+    let bad_sig = temp_program(
+        "text_tier_badsig",
+        "@tier(spec, text: \"xml\")\nfn r(roots: List<TierRoot>): void { return }\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&bad_sig)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0051").and(predicate::str::contains("List<TierText>")));
+}
+
 /// A consumer app + a `fuzzkit` path dependency that declares the `fuzz` tier. The consumer only
 /// imports the runner; the config struct links implicitly through the `@tier` reference, and the
 /// consumer's `@fuzz(cases: 7)` knob crosses the package boundary through the stamped attribute.
@@ -2451,6 +2522,74 @@ fn a_dependency_declared_tier_dispatches_cross_package() {
         .assert()
         .success()
         .stdout(predicate::str::is_empty());
+}
+
+/// A consumer app + a `speckit` path dependency declaring a **text** tier (text-tiers arc). The
+/// consumer writes `@spec { <xml/> }` bodies with no local declaration at all — the loader's
+/// program-wide lex (union of every package's `@tier(…, text:)` decls) is what makes the body
+/// capture verbatim across the package boundary.
+fn text_tier_dep_project(name: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("speckit");
+    std::fs::create_dir_all(&app).expect("mk app");
+    std::fs::create_dir_all(&lib).expect("mk lib");
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nspeckit = { path = \"../speckit\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use speckit.tiers.run_specs\n\
+         @spec {\n  <case name=\"adds\" expect=\"3\"/>\n}\n\
+         fn add(a: int, b: int): int { return a + b }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/spec\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("tiers.noe"),
+        "namespace spec.tiers;\n\
+         @tier(spec, text: \"xml\")\n\
+         pub fn run_specs(roots: List<TierText>): void {\n\
+             echo \"speckit: ${roots.len()} bodies\"\n\
+             for root in roots {\n\
+                 echo \"-- ${root.target}\"\n\
+                 echo root.text\n\
+             }\n\
+         }\n",
+    )
+    .unwrap();
+    app.join("main.noe")
+}
+
+#[test]
+fn a_dependency_declared_text_tier_captures_cross_package() {
+    // The third-party text-tier proof: the declaration lives in a path dependency; the consumer's
+    // `@spec { … }` XML body (quotes and all — invalid as Noeta tokens) still captures verbatim,
+    // targets the adjacent fn, and dispatches to the dependency's runner.
+    let entry = text_tier_dep_project("text_tier_dep");
+    lang().arg("spec").arg(&entry).assert().success().stdout(
+        predicate::str::contains("speckit: 1 bodies")
+            .and(predicate::str::contains("-- add"))
+            .and(predicate::str::contains(
+                "<case name=\"adds\" expect=\"3\"/>",
+            )),
+    );
+    // The same program runs and checks clean with the tier stripped.
+    lang()
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+    lang().arg("check").arg(&entry).assert().success();
 }
 
 #[test]

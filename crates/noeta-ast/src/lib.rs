@@ -662,6 +662,11 @@ pub struct TierDecl {
     pub name_span: Span,
     /// The knob attribute type (`config: Fuzz`), if the tier has knobs.
     pub config: Option<(String, Span)>,
+    /// The body language ID (`text: "markdown"`) when the tier is a **text tier** (text-tiers
+    /// arc): its `@<name> { … }` bodies are verbatim text the lexer captures un-parsed, tagged
+    /// with this language for tooling (editor injection, extraction). `None` for a code tier.
+    /// Mutually exclusive with `config` — a text body has no fns to stamp knobs onto (E0051).
+    pub text: Option<(String, Span)>,
     /// The whole `@tier(…)` directive span, for diagnostics.
     pub span: Span,
 }

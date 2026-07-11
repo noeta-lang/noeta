@@ -1,0 +1,12 @@
+// `@doc { … }` brace escapes (text-tiers arc): `\{` and `\}` are literal braces the balance scan
+// does not count, and `\\` is a literal backslash — so prose can hold *unbalanced* braces. Every
+// other backslash is ordinary text (markdown keeps its own escapes). The body below closes only
+// at the final unescaped `}`; the program still runs clean.
+// expect: stdout "ok"
+// expect: exit 0
+@doc {
+  A lone closer \} and a lone opener \{ are fine; so is a trailing backslash \\
+  and markdown's own \*escape\* (the backslashes before `*` pass through).
+}
+
+echo "ok"
