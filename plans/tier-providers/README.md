@@ -1,6 +1,9 @@
 # Tier providers — build targets, one directive mechanism, third-party tiers
 
-*Status: IN PROGRESS (started 2026-07-11, branch `tier-providers`).*
+*Status: IN PROGRESS (started 2026-07-11, branch `tier-providers`). ✅ T0 (`--target`/`[targets.*]`,
+`6457c36f`), ✅ T1 (tier knobs = attribute system, `#[Bench]`, `c6fba9dc`), ✅ T5 (`@doc` adjacency
+attachment — hover/symbol headers/runtime docstrings, `a9986539`). REMAINING: T2 `@tier`
+declarations (surface syntax awaiting user sign-off), T3 open name set, T4 runner dispatch.*
 
 ## Motivation
 
