@@ -40,6 +40,7 @@ use noeta_vm::{SessionOutput, VmBackend, VmSession};
 use noeta_pm::{graph, lock, manifest, registry};
 
 mod compose;
+mod watch;
 
 #[derive(Parser)]
 #[command(name = "noeta", version, about = "The Noeta toolchain")]
@@ -410,10 +411,23 @@ pub fn run_cli(
     if let Some(code) = try_run_stapled() {
         return code;
     }
+    // `--watch` (server-hmr W0): wrap ANY invocation in the restart-on-change dev loop. Stripped
+    // from argv before clap so it works uniformly for derive-built and extension-contributed
+    // commands (`noeta serve --watch`); the clap arg added below exists purely so `--help` and
+    // `--watch`'s error messages know the flag.
+    if let Some(code) = watch::maybe_watch() {
+        return code;
+    }
     // Extension-contributed subcommands (higher-order-abi H6): augment the derive-built CLI with
     // each registered command (so `noeta --help` lists them and each gets real clap parsing),
     // then dispatch a matched name to its extension `run` — the in-process `cargo clippy` model.
-    let mut cli = <Cli as clap::CommandFactory>::command();
+    let mut cli = <Cli as clap::CommandFactory>::command().arg(
+        clap::Arg::new("watch")
+            .long("watch")
+            .global(true)
+            .action(clap::ArgAction::SetTrue)
+            .help("Restart the command whenever project source files change (*.noe, noeta.toml)"),
+    );
     for ext in &trusted_commands {
         cli = cli.subcommand(ext_command_clap(ext));
     }

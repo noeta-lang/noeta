@@ -136,6 +136,8 @@ uuid = { version = "1", default-features = false }
 chumsky = { version = "1.0.0-alpha.8", features = ["pratt"] }
 ariadne = "0.6"
 clap = { version = "4", features = ["derive"] }
+# Filesystem watching for `--watch` (server-hmr W0): restart-on-change dev loop.
+notify = "8"
 # Language-server framework (editor-tooling milestone): the maintained community fork of
 # tower-lsp — async LanguageServer trait + JSON-RPC transport, composes with our tokio.
 tower-lsp-server = "0.23"

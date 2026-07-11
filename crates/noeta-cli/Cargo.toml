@@ -41,6 +41,8 @@ noeta-pm = { workspace = true, features = ["registry-http", "provenance", "keyle
 noeta-mcp = { workspace = true }
 sha2 = { workspace = true }
 clap = { workspace = true }
+# `--watch` restart-on-change dev loop (server-hmr W0).
+notify = { workspace = true }
 toml = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }
