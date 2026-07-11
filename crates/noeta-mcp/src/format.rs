@@ -76,7 +76,9 @@ mod tests {
         let p = prep("fn main():int{return    1;}\n");
         let out = format(&p);
         assert!(out.ok, "note: {:?}", out.note);
-        assert!(out.formatted.contains("return 1;"));
+        // Canonical form: run of spaces collapsed AND the newline-redundant `;` stripped
+        // (the fmt semicolons=remove default).
+        assert!(out.formatted.contains("return 1\n"), "{}", out.formatted);
     }
 
     #[test]
