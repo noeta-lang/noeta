@@ -7,7 +7,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-noeta-stdlib = { workspace = true }
+# Direct path (not workspace inheritance) so we can set default-features = false — an inherited
+# workspace dep may not override default-features. Drops the ring-datetime default (jiff + tzdb) so
+# an AOT binary that never imports std.datetime sheds it; the toolchain (noeta-cli) and differential
+# (noeta-eval) keep noeta-stdlib default-on, so datetime is present everywhere else.
+noeta-stdlib = { path = "../noeta-stdlib", default-features = false }
 compact_str = { workspace = true }
 tokio = { workspace = true }
 getrandom = { workspace = true }

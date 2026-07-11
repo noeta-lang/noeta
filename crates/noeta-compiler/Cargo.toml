@@ -15,7 +15,11 @@ noeta-diagnostics = { workspace = true }
 noeta-bytecode = { workspace = true }
 noeta-builtins = { workspace = true }
 noeta-object = { workspace = true }
-noeta-stdlib = { workspace = true }
+# Direct path (not workspace inheritance) so we can set default-features = false — an inherited
+# workspace dep may not override default-features. Drops the ring-datetime default (jiff + tzdb) so
+# an AOT binary that never imports std.datetime sheds it; the toolchain (noeta-cli) and differential
+# (noeta-eval) keep noeta-stdlib default-on, so datetime is present everywhere else.
+noeta-stdlib = { path = "../noeta-stdlib", default-features = false }
 noeta-check = { workspace = true }
 
 [dev-dependencies]
