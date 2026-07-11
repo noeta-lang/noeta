@@ -1,6 +1,5 @@
 ---
 source: crates/noeta-eval/tests/diagnostics.rs
-assertion_line: 66
 expression: out
 ---
 ================ E0001 unexpected character ================
