@@ -1778,10 +1778,21 @@ const PROCESS_METHODS: &[ExtFn] = &[
         params: &[],
         ret: Concrete(SigType::Unit),
     },
-    // Streaming (process-streaming arc): consume stdout line-by-line while the child runs, and
-    // feed / close its stdin. `wait` still returns the whole captured output.
+    // Streaming (process-streaming arc): consume stdout line-by-line or by character count while
+    // the child runs, read stderr, and feed / close its stdin. `wait` still returns the whole
+    // captured output.
     ExtFn {
         name: "read_line",
+        params: &[],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        name: "read",
+        params: &[Int],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        name: "read_err_line",
         params: &[],
         ret: Concrete(SigType::Option(&Str)),
     },
@@ -1796,6 +1807,15 @@ const PROCESS_METHODS: &[ExtFn] = &[
         ret: Concrete(SigType::Unit),
     },
 ];
+
+/// Wrap an optional string read (a streaming `read_line`/`read`/`read_err_line`) into a native
+/// `some(...)`/`none`.
+fn opt_str_out(line: Option<String>) -> NativeOut {
+    match line {
+        Some(s) => NativeOut::Some(Box::new(NativeOut::Str(s))),
+        None => NativeOut::None,
+    }
+}
 
 fn process_method_dispatch(
     recv: &mut dyn crate::ExternValue,
@@ -1834,10 +1854,16 @@ fn process_method_dispatch(
         }
         "read_line" => {
             want_arity(method, args, 0)?;
-            Ok(match host.os_proc_read_line(id)? {
-                Some(line) => NativeOut::Some(Box::new(NativeOut::Str(line))),
-                None => NativeOut::None,
-            })
+            Ok(opt_str_out(host.os_proc_read_line(id)?))
+        }
+        "read" => {
+            want_arity(method, args, 1)?;
+            let count = want_int(method, args, 0)?;
+            Ok(opt_str_out(host.os_proc_read(id, count)?))
+        }
+        "read_err_line" => {
+            want_arity(method, args, 0)?;
+            Ok(opt_str_out(host.os_proc_read_stderr_line(id)?))
         }
         "write" => {
             want_arity(method, args, 1)?;

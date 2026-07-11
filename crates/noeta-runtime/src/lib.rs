@@ -1059,6 +1059,36 @@ impl SharedStream {
         }
     }
 
+    /// Up to `count` characters from `cursor`, blocking only until at least one character is
+    /// available, then returning up to `count` of them (POSIX `read` shape); `None` at end of
+    /// output. Decodes the valid-UTF-8 prefix from the cursor — a multi-byte character split across
+    /// a drain chunk waits for its continuation. `count <= 0` yields the empty string.
+    fn read(&self, cursor: &mut usize, count: usize) -> Option<String> {
+        let mut buf = self.buf.lock().unwrap();
+        loop {
+            // Exhausted (nothing left and the stream ended) → end of output.
+            if *cursor >= buf.data.len() && buf.eof {
+                return None;
+            }
+            let rest = &buf.data[*cursor..];
+            // The complete-character prefix (a trailing partial UTF-8 sequence is excluded until
+            // its bytes arrive).
+            let valid = match std::str::from_utf8(rest) {
+                Ok(s) => s,
+                Err(e) => std::str::from_utf8(&rest[..e.valid_up_to()]).unwrap_or(""),
+            };
+            if !valid.is_empty() || count == 0 {
+                let chunk: String = valid.chars().take(count).collect();
+                *cursor += chunk.len();
+                return Some(chunk);
+            }
+            if buf.eof {
+                return None;
+            }
+            buf = self.more.wait(buf).unwrap();
+        }
+    }
+
     /// The whole captured content decoded lossily — read at `wait` once the draining thread has
     /// finished (so `data` is complete).
     fn snapshot(&self) -> String {
@@ -1089,6 +1119,13 @@ fn drain_pipe(mut pipe: impl std::io::Read, shared: Arc<SharedStream>) {
     shared.more.notify_all();
 }
 
+/// Which output stream a streaming read targets — selects the buffer and cursor in `stream_read`.
+#[derive(Clone, Copy)]
+enum Stream {
+    Stdout,
+    Stderr,
+}
+
 /// A spawned, still-running child (process-handle + streaming arcs). Both output pipes drain on
 /// background threads into shared buffers (see [`SharedStream`]): `read_line` streams stdout
 /// incrementally while the child runs, `wait` returns the whole captured output at exit, and
@@ -1104,8 +1141,10 @@ struct ChildProc {
     /// The stdout/stderr drain threads, joined when the child is reaped.
     stdout_join: Option<std::thread::JoinHandle<()>>,
     stderr_join: Option<std::thread::JoinHandle<()>>,
-    /// `read_line`'s cursor into the stdout buffer — independent of the whole-output `wait`.
+    /// `read_line`/`read`'s cursor into the stdout buffer — independent of the whole-output `wait`.
     stdout_cursor: usize,
+    /// `read_err_line`'s cursor into the stderr buffer.
+    stderr_cursor: usize,
     /// The child's stdin pipe; `None` once closed. Dropping it signals EOF to the child.
     stdin: Option<std::process::ChildStdin>,
     /// The reaped outcome, cached so a second `wait`/`try_wait` returns it without re-waiting.
@@ -1157,6 +1196,37 @@ impl ExternIo for RealExecIo {
             let result = real_exec(&command, &args, &overlay)?;
             Ok(NativeOut::Extern(ExternBox::new(result)))
         })))
+    }
+}
+
+impl RealHost {
+    /// Shared body of the streaming reads: clone the target stream's `Arc` and cursor out under a
+    /// short `procs` borrow, run `read` **without** holding it (the read may block on the condvar,
+    /// and the drain thread must stay free to append), then write the advanced cursor back.
+    fn stream_read(
+        &mut self,
+        handle: u64,
+        which: Stream,
+        read: impl FnOnce(&SharedStream, &mut usize) -> Option<String>,
+    ) -> Result<Option<String>, StdError> {
+        let (stream, mut cursor) = {
+            let proc = self
+                .procs
+                .get(&handle)
+                .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
+            match which {
+                Stream::Stdout => (Arc::clone(&proc.stdout), proc.stdout_cursor),
+                Stream::Stderr => (Arc::clone(&proc.stderr), proc.stderr_cursor),
+            }
+        };
+        let out = read(&stream, &mut cursor);
+        if let Some(proc) = self.procs.get_mut(&handle) {
+            match which {
+                Stream::Stdout => proc.stdout_cursor = cursor,
+                Stream::Stderr => proc.stderr_cursor = cursor,
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -1235,6 +1305,7 @@ impl Os for RealHost {
                 stdout_join,
                 stderr_join,
                 stdout_cursor: 0,
+                stderr_cursor: 0,
                 stdin,
                 result: None,
             },
@@ -1290,21 +1361,16 @@ impl Os for RealHost {
     }
 
     fn os_proc_read_line(&mut self, handle: u64) -> Result<Option<String>, StdError> {
-        // Clone the `Arc` and cursor out under a short borrow, then read without holding the
-        // `procs` borrow — `read_line` may block on the condvar, and the drain thread must stay
-        // free to append. The cursor is written back after.
-        let (stream, mut cursor) = {
-            let proc = self
-                .procs
-                .get(&handle)
-                .ok_or_else(|| noeta_stdlib::os::unknown_process_error(handle))?;
-            (Arc::clone(&proc.stdout), proc.stdout_cursor)
-        };
-        let line = stream.read_line(&mut cursor);
-        if let Some(proc) = self.procs.get_mut(&handle) {
-            proc.stdout_cursor = cursor;
-        }
-        Ok(line)
+        self.stream_read(handle, Stream::Stdout, |s, c| s.read_line(c))
+    }
+
+    fn os_proc_read(&mut self, handle: u64, count: i64) -> Result<Option<String>, StdError> {
+        let want = count.max(0) as usize;
+        self.stream_read(handle, Stream::Stdout, move |s, c| s.read(c, want))
+    }
+
+    fn os_proc_read_stderr_line(&mut self, handle: u64) -> Result<Option<String>, StdError> {
+        self.stream_read(handle, Stream::Stderr, |s, c| s.read_line(c))
     }
 
     fn os_proc_write_stdin(&mut self, handle: u64, data: &str) -> Result<(), StdError> {

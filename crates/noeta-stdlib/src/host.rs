@@ -110,11 +110,46 @@ struct InboundState {
 }
 
 /// A scripted spawned process (process-handle + streaming arcs): its instant-complete outcome and
-/// a stdout read cursor for `read_line`.
+/// independent stdout/stderr read cursors for `read_line`/`read`/`read_err_line`.
 #[derive(Debug, Clone)]
 struct ScriptedProc {
     result: ExecResult,
     stdout_cursor: usize,
+    stderr_cursor: usize,
+}
+
+/// The next line of `text` from `*cursor` (without its trailing newline), advancing past it; `None`
+/// once exhausted. A final unterminated line is returned once (like `str::lines`). Shared by the
+/// sandbox's scripted stdout/stderr streaming.
+fn scripted_read_line(text: &str, cursor: &mut usize) -> Option<String> {
+    let rest = &text[*cursor..];
+    if rest.is_empty() {
+        return None;
+    }
+    match rest.find('\n') {
+        Some(nl) => {
+            let line = rest[..nl].to_string();
+            *cursor += nl + 1;
+            Some(line)
+        }
+        None => {
+            let line = rest.to_string();
+            *cursor = text.len();
+            Some(line)
+        }
+    }
+}
+
+/// Up to `count` characters of `text` from `*cursor`, advancing past them; `None` once exhausted.
+/// `count <= 0` yields the empty string without consuming input (mirrors the real host's `read`).
+fn scripted_read(text: &str, cursor: &mut usize, count: i64) -> Option<String> {
+    if *cursor >= text.len() {
+        return None;
+    }
+    let want = count.max(0) as usize;
+    let chunk: String = text[*cursor..].chars().take(want).collect();
+    *cursor += chunk.len();
+    Some(chunk)
 }
 
 impl SandboxHost {
@@ -482,6 +517,7 @@ impl Os for SandboxHost {
             ScriptedProc {
                 result,
                 stdout_cursor: 0,
+                stderr_cursor: 0,
             },
         );
         Ok(id)
@@ -526,22 +562,35 @@ impl Os for SandboxHost {
             .procs
             .get_mut(&handle)
             .ok_or_else(|| noeta_native::os::unknown_process_error(handle))?;
-        let rest = &proc.result.stdout[proc.stdout_cursor..];
-        if rest.is_empty() {
-            return Ok(None);
-        }
-        match rest.find('\n') {
-            Some(nl) => {
-                let line = rest[..nl].to_string();
-                proc.stdout_cursor += nl + 1;
-                Ok(Some(line))
-            }
-            None => {
-                let line = rest.to_string();
-                proc.stdout_cursor = proc.result.stdout.len();
-                Ok(Some(line))
-            }
-        }
+        Ok(scripted_read_line(
+            &proc.result.stdout,
+            &mut proc.stdout_cursor,
+        ))
+    }
+
+    /// Up to `count` characters from the scripted stdout via the shared stdout cursor.
+    fn os_proc_read(&mut self, handle: u64, count: i64) -> Result<Option<String>, StdError> {
+        let proc = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| noeta_native::os::unknown_process_error(handle))?;
+        Ok(scripted_read(
+            &proc.result.stdout,
+            &mut proc.stdout_cursor,
+            count,
+        ))
+    }
+
+    /// The scripted stderr a line at a time via its own cursor — the stderr twin of `read_line`.
+    fn os_proc_read_stderr_line(&mut self, handle: u64) -> Result<Option<String>, StdError> {
+        let proc = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| noeta_native::os::unknown_process_error(handle))?;
+        Ok(scripted_read_line(
+            &proc.result.stderr,
+            &mut proc.stderr_cursor,
+        ))
     }
 
     /// The scripted commands don't read stdin, so a write is a validated no-op (the handle must
@@ -845,6 +894,41 @@ mod tests {
         assert_eq!(host.os_proc_read_line(999).unwrap_err().kind, ErrorKind::Io);
         assert_eq!(
             host.os_proc_write_stdin(999, "x").unwrap_err().kind,
+            ErrorKind::Io
+        );
+    }
+
+    #[test]
+    fn os_proc_read_chars_and_stderr_line() {
+        let mut host = SandboxHost::new();
+        // `read(n)` reads up to n characters (multibyte-aware) sharing the stdout cursor.
+        let p = host.os_spawn("echo", &["héllo".into()]).unwrap(); // stdout "héllo\n"
+        assert_eq!(host.os_proc_read(p, 3).unwrap().as_deref(), Some("hél"));
+        assert_eq!(host.os_proc_read(p, 2).unwrap().as_deref(), Some("lo"));
+        // read_line consumes the trailing newline as an empty final line; then exhausted.
+        assert_eq!(host.os_proc_read_line(p).unwrap().as_deref(), Some(""));
+        assert_eq!(host.os_proc_read(p, 1).unwrap(), None);
+        // `read(0)` reads zero characters without consuming, until exhausted.
+        let z = host.os_spawn("echo", &["z".into()]).unwrap();
+        assert_eq!(host.os_proc_read(z, 0).unwrap().as_deref(), Some(""));
+
+        // stderr streams on an independent cursor (scripted `status` writes stderr).
+        let q = host
+            .os_spawn("status", &["0".into(), "e1\ne2".into()])
+            .unwrap();
+        assert_eq!(
+            host.os_proc_read_stderr_line(q).unwrap().as_deref(),
+            Some("e1")
+        );
+        assert_eq!(
+            host.os_proc_read_stderr_line(q).unwrap().as_deref(),
+            Some("e2")
+        );
+        assert_eq!(host.os_proc_read_stderr_line(q).unwrap(), None);
+        // Unknown handle → Io error on the new readers too.
+        assert_eq!(host.os_proc_read(999, 1).unwrap_err().kind, ErrorKind::Io);
+        assert_eq!(
+            host.os_proc_read_stderr_line(999).unwrap_err().kind,
             ErrorKind::Io
         );
     }

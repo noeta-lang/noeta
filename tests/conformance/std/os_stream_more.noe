@@ -1,0 +1,27 @@
+// More process streaming (process-streaming arc): character-oriented `read(n)` over stdout, and
+// `read_err_line` over stderr on its own cursor. The scripted `echo`/`status` produce the output
+// deterministically, so both backends agree.
+// expect: stdout "some(hél)"
+// expect: stdout "some(lo)"
+// expect: stdout "some()"
+// expect: stdout "none"
+// expect: stdout "some(e1)"
+// expect: stdout "some(e2)"
+// expect: stdout "none"
+// expect: stdout "0"
+// expect: exit 0
+use std.{os}
+
+// `read(n)` reads up to n *characters* (multibyte-aware), sharing the stdout cursor with read_line.
+p = os.spawn("echo", ["héllo"])
+echo p.read(3)       // "hél" — é is one character
+echo p.read(2)       // "lo"
+echo p.read_line()   // the trailing newline as an empty final line
+echo p.read(1)       // exhausted
+
+// stderr streams line-by-line on an independent cursor (scripted `status` writes stderr).
+q = os.spawn("status", ["0", "e1\ne2"])
+echo q.read_err_line()
+echo q.read_err_line()
+echo q.read_err_line()
+echo q.wait().status()

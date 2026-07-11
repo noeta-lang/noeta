@@ -258,6 +258,16 @@ pub trait Os {
     /// output. A final unterminated line is returned once, then `None` (like `fs` `read_line`).
     fn os_proc_read_line(&mut self, handle: u64) -> Result<Option<String>, StdError>;
 
+    /// Up to `count` **characters** from the child's stdout, advancing the same cursor as
+    /// `read_line` — the not-necessarily-line-oriented read (POSIX `read` shape). Blocks only until
+    /// at least one character is available, then returns up to `count` of them; `None` at end of
+    /// output. `count <= 0` yields the empty string without consuming input.
+    fn os_proc_read(&mut self, handle: u64, count: i64) -> Result<Option<String>, StdError>;
+
+    /// The next line of the child's **stderr**, on its own independent cursor — the stderr twin of
+    /// [`Self::os_proc_read_line`]. `wait` still returns the whole captured stderr.
+    fn os_proc_read_stderr_line(&mut self, handle: u64) -> Result<Option<String>, StdError>;
+
     /// Write `data` to the child's stdin. An error if the child has no stdin or it is closed.
     fn os_proc_write_stdin(&mut self, handle: u64, data: &str) -> Result<(), StdError>;
 

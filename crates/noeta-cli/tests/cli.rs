@@ -627,6 +627,31 @@ fn run_os_spawn_streams_stdout_and_feeds_stdin() {
 }
 
 #[test]
+fn run_os_spawn_streams_stderr_and_reads_by_chars() {
+    // Over a REAL child: `read_err_line` streams stderr on its own cursor, and `read(n)` reads up
+    // to n characters (multibyte-aware) from stdout — distinct from the line-oriented read_line.
+    let src = "use std.{os}\n\
+               p = os.spawn(\"sh\", [\"-c\", \"echo out; echo e1 1>&2; echo e2 1>&2\"])\n\
+               echo p.read_line()\n\
+               echo p.read_err_line()\n\
+               echo p.read_err_line()\n\
+               echo p.read_err_line()\n\
+               echo p.wait().status()\n\
+               q = os.spawn(\"echo\", [\"héllo\"])\n\
+               echo q.read(3)\n\
+               echo q.read(2)\n\
+               echo q.read_line()\n\
+               echo q.read(1)\n";
+    let file = temp_program("run_os_stream2", src);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("some(out)\nsome(e1)\nsome(e2)\nnone\n0\nsome(hél)\nsome(lo)\nsome()\nnone\n");
+}
+
+#[test]
 fn run_does_real_disk_io() {
     // `fs.write`/`fs.read` hit the REAL disk (RealHost), relative to the working directory.
     let dir = std::env::temp_dir().join("noeta_cli_realfs_dir");

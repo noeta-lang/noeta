@@ -142,6 +142,8 @@ Process execution and system introspection. Under the sandbox the introspection 
 | `try_wait` | `try_wait() -> ?ExecResult` | Non-blocking poll: `some(result)` if exited, `none` if still running. |
 | `kill` | `kill() -> void` | Forcefully terminates the child (idempotent). A later `wait` sees the killed status. |
 | `read_line` | `read_line() -> ?string` | Streams the child's stdout a line at a time **while it runs** (blocks until a line is ready), `none` at end of output. `wait` still returns the whole capture. |
+| `read` | `read(n: int) -> ?string` | Up to `n` **characters** from stdout (POSIX-read shape: blocks only until at least one is ready), sharing the `read_line` cursor; `none` at EOF. |
+| `read_err_line` | `read_err_line() -> ?string` | Streams **stderr** a line at a time on its own cursor. |
 | `write` | `write(s: string) -> void` | Writes to the child's stdin. |
 | `close_stdin` | `close_stdin() -> void` | Closes stdin, signalling EOF to the child (idempotent). |
 
