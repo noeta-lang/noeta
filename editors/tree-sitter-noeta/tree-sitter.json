@@ -5,16 +5,27 @@
       "name": "noeta",
       "camelcase": "Noeta",
       "scope": "source.noeta",
-      "file-types": ["noe"],
-      "highlights": ["queries/highlights.scm"],
-      "injection-regex": "^noeta$"
+      "file-types": [
+        "noe"
+      ],
+      "highlights": [
+        "queries/highlights.scm"
+      ],
+      "injection-regex": "^noeta$",
+      "injections": [
+        "queries/injections.scm"
+      ]
     }
   ],
   "metadata": {
     "version": "0.1.0",
     "license": "MIT",
     "description": "Noeta grammar for tree-sitter",
-    "authors": [{ "name": "Niklas Rosenqvist" }],
+    "authors": [
+      {
+        "name": "Niklas Rosenqvist"
+      }
+    ],
     "links": {
       "repository": "https://github.com/noeta-lang/noeta"
     }
