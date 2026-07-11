@@ -25,6 +25,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Keep file/line in panic backtraces but drop full debuginfo — the debug target dir is a large
+  # multiple smaller, which matters because the composed-toolchain e2e test builds a second
+  # toolchain (its own ~700-crate lock) into the same workspace target dir on a ~20 GB runner.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   fmt:
@@ -43,6 +47,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # This job runs the composed-toolchain e2e test (via the noeta-cli integration suite), which
+      # cargo-builds a second full toolchain; reclaim the ~25 GB of preinstalled runner software the
+      # build needs as free disk.
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /usr/share/swift /usr/local/share/powershell /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force > /dev/null
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The workspace suite is the spine: the conformance corpus, the eval↔interpreter differential
@@ -78,6 +91,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Same as the test job: the JIT-enabled CLI step runs the composed-toolchain e2e test, which
+      # cargo-builds a second full toolchain — reclaim the preinstalled runner software as free disk.
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /usr/share/swift /usr/local/share/powershell /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force > /dev/null
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # The eval↔interpreter differential never exercises the JIT (it is a real-host accelerator that
