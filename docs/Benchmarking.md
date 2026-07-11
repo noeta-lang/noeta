@@ -60,6 +60,7 @@ noeta bench [OPTIONS] <FILE>
 | `--json` | One machine-readable JSON object on stdout (`benches[].{name, iterations, perIterNs, message, baselineDeltaPct}`, plus `ran`/`failed`/`total`). |
 | `--save-baseline <NAME>` | Save this run's measurements as a named baseline (per entry file, in the noeta cache — timings are machine-local, not project artifacts). |
 | `--baseline <NAME>` | Compare each result against the named baseline: the report gains `(+5.2% vs NAME)`, the JSON `baselineDeltaPct`. |
+| `--max-regress <PCT>` | The CI gate (requires `--baseline`): exit `1` when any bench regresses more than `PCT`% against the baseline, naming the offenders on stderr. Save a baseline on your main branch, gate PRs with `noeta bench app.noe --baseline main --max-regress 10 --json`. |
 | `--target <NAME>` | Only run when the `bench` tier is live in this `noeta.toml` build target; otherwise no-op with exit `0`. A target may also map `bench` to another **provider** (see [Documentation & Dev Tiers](Documentation-and-Tiers)). |
 
 ### Output and exit codes

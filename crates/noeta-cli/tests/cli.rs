@@ -1419,6 +1419,48 @@ fn bench_baseline_saves_and_compares() {
 }
 
 #[test]
+fn bench_max_regress_gates_ci() {
+    // The CI gate: an absurdly permissive limit passes; an impossible limit (any measurement
+    // "regresses" past -1000%) fails with the offending bench named on stderr.
+    let file = temp_program(
+        "bench_gate",
+        "fn work(n: int): int {\n\
+             mut t = 0\n\
+             for i in 0..n { t = t + i }\n\
+             return t\n\
+         }\n\
+         @bench(iterations: 2000) fn b(): void { work(500) }\n",
+    );
+    lang()
+        .arg("bench")
+        .arg(&file)
+        .arg("--save-baseline")
+        .arg("gate")
+        .assert()
+        .success();
+    lang()
+        .arg("bench")
+        .arg(&file)
+        .arg("--baseline")
+        .arg("gate")
+        .arg("--max-regress")
+        .arg("100000")
+        .assert()
+        .success();
+    lang()
+        .arg("bench")
+        .arg(&file)
+        .arg("--baseline")
+        .arg("gate")
+        .arg("--max-regress")
+        .arg("-1000")
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("regressed"));
+}
+
+#[test]
 fn bench_invalid_arg_is_a_construction_error() {
     // Tier directive args construct the tier's config attribute (`@bench(iterations: true)` ⇒
     // `#[Bench(iterations: true)]`), so a wrong-typed knob is rejected by the ordinary attribute

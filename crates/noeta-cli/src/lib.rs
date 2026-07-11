@@ -141,6 +141,15 @@ enum Command {
         /// (`+5.2% vs NAME`), the JSON a `baselineDeltaPct` field.
         #[arg(long, value_name = "NAME")]
         baseline: Option<String>,
+        /// The CI regression gate: with `--baseline`, fail (exit 1) when any bench regresses more
+        /// than this percentage against it (e.g. `10` allows up to +10%).
+        #[arg(
+            long,
+            value_name = "PCT",
+            requires = "baseline",
+            allow_negative_numbers = true
+        )]
+        max_regress: Option<f64>,
         /// Only run when the `bench` tier is live in this `noeta.toml` build target; otherwise the
         /// runner does nothing.
         #[arg(long)]
@@ -503,6 +512,7 @@ pub fn run_cli(
             json,
             save_baseline,
             baseline,
+            max_regress,
             target,
         } => cmd_bench(
             &file,
@@ -511,6 +521,7 @@ pub fn run_cli(
             json,
             &save_baseline,
             &baseline,
+            max_regress,
             &target,
         ),
         Command::Doc { file, out, target } => cmd_doc(&file, &out, &target),
@@ -3742,6 +3753,7 @@ fn cmd_bench(
     json: bool,
     save_baseline: &Option<String>,
     baseline: &Option<String>,
+    max_regress: Option<f64>,
     target: &Option<String>,
 ) -> ExitCode {
     if let Some(code) = compose::maybe_delegate(file) {
@@ -3878,6 +3890,15 @@ fn cmd_bench(
     }
 
     let failed = outcomes.iter().filter(|o| o.per_iter_ns.is_none()).count();
+    // The CI gate: any bench past the allowed regression fails the run (their names on stderr —
+    // the JSON stays a pure result object either way).
+    let regressed: Vec<&BenchOutcome> = match max_regress {
+        Some(limit) => outcomes
+            .iter()
+            .filter(|o| o.baseline_delta_pct.is_some_and(|pct| pct > limit))
+            .collect(),
+        None => Vec::new(),
+    };
     if json {
         let out = serde_json::json!({
             "benches": outcomes.iter().map(|o| serde_json::json!({
@@ -3889,6 +3910,7 @@ fn cmd_bench(
             })).collect::<Vec<_>>(),
             "ran": total - failed,
             "failed": failed,
+            "regressed": regressed.len(),
             "total": total,
         });
         println!("{out}");
@@ -3896,8 +3918,16 @@ fn cmd_bench(
         println!();
         println!("{} ran, {failed} failed, {total} total", total - failed,);
     }
+    for o in &regressed {
+        eprintln!(
+            "lang: `{}` regressed {:+.1}% (limit {:+.1}%)",
+            o.name,
+            o.baseline_delta_pct.unwrap_or_default(),
+            max_regress.unwrap_or_default(),
+        );
+    }
     let _ = io::stdout().flush();
-    if failed == 0 {
+    if failed == 0 && regressed.is_empty() {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
