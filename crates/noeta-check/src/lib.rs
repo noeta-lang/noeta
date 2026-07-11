@@ -2403,6 +2403,16 @@ impl Checker {
                 if !self.tier_registry.is_known(tier) {
                     self.diags
                         .push(tiers::unknown_tier_diagnostic(tier, *tier_span));
+                } else if self
+                    .tier_registry
+                    .declared(tier)
+                    .is_some_and(|d| d.expr.is_some())
+                {
+                    // An expression tier's block in *statement* position (expr-tiers arc): its
+                    // value would be silently discarded — and it never activates/strips, so a
+                    // bare block would otherwise just vanish. Shared E0052 with activation.
+                    self.diags
+                        .push(tiers::expr_tier_statement_diagnostic(tier, *tier_span));
                 } else if let Some(d) = self.tier_registry.knobless_args_diagnostic(tier, args) {
                     // Args on a knob-less tier (`@test(x)`) — E0037.
                     self.diags.push(d);
@@ -4036,30 +4046,52 @@ impl Checker {
                 }
                 Type::String
             }
-            // A `TierExpr` that reaches the checker survived tier activation's desugar, which
-            // rewrites every block of a declared **expression** tier into its handler call — so
-            // this block's tier is captured (text-bodied) but not `expr:`-declared: `x = @doc
-            // { … }`. Its holes still synth (hover/IDE coverage inside the body), the block
-            // itself is the error.
+            // An expression-tier block types as the handler call it desugars to (`Try`/`Await`
+            // architecture: the node is kept, the checker types it, IR lowering rewrites it
+            // through the same [`noeta_ast::desugar`] constructor). Checking the constructed
+            // call is the whole typing rule: each hole closure checks against the handler's
+            // `List<() -> U>` — so a hole-type error lands on the hole's real span — and the
+            // block's type is the handler's declared return. A block whose tier is not
+            // `expr:`-declared (`x = @doc { … }`) is E0052; its holes still synth for IDE
+            // coverage inside the body.
             Expr::TierExpr {
                 tier,
                 tier_span,
+                statics,
                 holes,
-                ..
+                span,
             } => {
-                for hole in holes {
-                    self.synth(hole, env);
+                let handler = self
+                    .tier_registry
+                    .declared(tier)
+                    .filter(|d| d.expr.is_some())
+                    .map(|d| d.runner.clone());
+                match handler {
+                    Some(handler) => {
+                        let call = noeta_ast::desugar::tier_expr_call(
+                            &handler, *tier_span, statics, holes, *span,
+                        );
+                        self.synth(&call, env)
+                    }
+                    None => {
+                        for hole in holes {
+                            self.synth(hole, env);
+                        }
+                        self.error(
+                            DiagnosticCode::InvalidTierExpression,
+                            *tier_span,
+                            format!(
+                                "`@{tier}` is not an expression tier — its blocks are not values"
+                            ),
+                        )
+                        .help(
+                            "only a tier declared `@tier(name, …, expr: Type)` yields a value \
+                             from `@name { … }`; a text tier's blocks are runner input, not \
+                             expressions",
+                        );
+                        Type::Unknown
+                    }
                 }
-                self.error(
-                    DiagnosticCode::InvalidTierExpression,
-                    *tier_span,
-                    format!("`@{tier}` is not an expression tier — its blocks are not values"),
-                )
-                .help(
-                    "only a tier declared `@tier(name, …, expr: Type)` yields a value from \
-                     `@name { … }`; a text tier's blocks are runner input, not expressions",
-                );
-                Type::Unknown
             }
             Expr::Ident { name, span } => match lookup(env, name)
                 // A bare user-function reference is a first-class value of its **full** signature
@@ -5803,6 +5835,68 @@ impl Checker {
                     "the ID tags the verbatim bodies for tooling (editor highlighting, \
                      extraction); use a lowercase language name like \"markdown\", \"xml\", \"sql\"",
                 );
+            }
+            // An **expression tier** (expr-tiers arc): `expr: T` makes the decorated fn the
+            // tier's *handler* — `fn(statics: List<string>, holes: List<() -> U>): T` — not a
+            // runner. Its own rules, then skip the runner-signature branch entirely.
+            if let Some((expr_ty, expr_span)) = &decl.expr {
+                if decl.config.is_some() {
+                    self.error(
+                        DiagnosticCode::InvalidTierDeclaration,
+                        *expr_span,
+                        format!(
+                            "tier `{}` declares both `config:` and `expr:` — an expression tier \
+                             has no knobs",
+                            decl.name
+                        ),
+                    )
+                    .help(
+                        "an `expr: Type` tier's `@<name> { … }` blocks are expressions (no fns \
+                         inside to configure); drop one of the two",
+                    );
+                }
+                let statics_ok = matches!(
+                    f.params.first().and_then(|p| p.ty.as_ref()),
+                    Some(TypeRef::Named { name, args, .. })
+                        if name == "List"
+                            && matches!(
+                                args.as_slice(),
+                                [TypeRef::Named { name: el, args: el_args, .. }]
+                                    if el == "string" && el_args.is_empty()
+                            )
+                );
+                // The hole type `U` is the handler's choice — only the thunk shape is fixed.
+                let holes_ok = matches!(
+                    f.params.get(1).and_then(|p| p.ty.as_ref()),
+                    Some(TypeRef::Named { name, args, .. })
+                        if name == "List"
+                            && matches!(
+                                args.as_slice(),
+                                [TypeRef::Fn { params, .. }] if params.is_empty()
+                            )
+                );
+                let ret_ok = matches!(
+                    f.ret.as_ref(),
+                    Some(TypeRef::Named { name, args, .. }) if name == expr_ty && args.is_empty()
+                );
+                if f.params.len() != 2 || !statics_ok || !holes_ok || !ret_ok {
+                    self.error(
+                        DiagnosticCode::InvalidTierDeclaration,
+                        f.name_span,
+                        format!(
+                            "tier `{}`'s handler must be `fn(statics: List<string>, holes: \
+                             List<() -> U>): {expr_ty}`",
+                            decl.name
+                        ),
+                    )
+                    .help(
+                        "an expression tier's `@<name> { … }` block desugars to \
+                         `handler(statics, holes)`: the body's literal segments (always holes + \
+                         1) and one zero-param closure per `${…}` hole, typed against the `U` \
+                         you choose; the return type must match the declared `expr:`",
+                    );
+                }
+                continue;
             }
             // The runner signature: exactly one `List<TierRoot>` parameter (`List<TierText>` for
             // a text tier — its roots are verbatim bodies, not fns), returning `void`.

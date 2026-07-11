@@ -1,0 +1,34 @@
+// An **expression tier** (expr-tiers arc): `@tier(name, …, expr: T)` makes `@name { … }` blocks
+// expressions — verbatim text with `${…}` holes — desugared at link time to a call of the
+// decorated handler `fn(statics: List<string>, holes: List<() -> U>): T`. Statics always number
+// holes + 1 (empty where holes touch); holes are zero-param closures over the enclosing scope,
+// so `${name}` reads the local. The text escapes are `\{ \} \\` plus `\$` (a literal `$` that
+// would otherwise open a hole); every other backslash is verbatim text.
+// expect: stdout " hello world! "
+// expect: stdout " { $ } world nested-world "
+// expect: stdout "s=3 h=2"
+// expect: exit 0
+@tier(greet, text: "text", expr: string)
+fn render(statics: List<string>, holes: List<() -> string>): string {
+    mut out = ""
+    mut i = 0
+    for s in statics {
+        out = out ~ s
+        if i < holes.len() {
+            h = holes[i]
+            out = out ~ h()
+        }
+        i = i + 1
+    }
+    return out
+}
+
+@tier(shape, expr: string)
+fn shape_of(statics: List<string>, holes: List<() -> string>): string {
+    return "s=${statics.len()} h=${holes.len()}"
+}
+
+name = "world"
+echo @greet { hello ${name}! }
+echo @greet { \{ \$ \} ${name} ${"nested-" ~ name} }
+echo @shape { a ${name} b ${name} c }

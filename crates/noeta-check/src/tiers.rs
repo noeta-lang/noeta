@@ -52,7 +52,13 @@ pub struct DeclaredTier {
     /// arc): its blocks hold verbatim text (lexer-captured, un-parsed) tagged with this language
     /// for tooling. `None` for a code tier. Mutually exclusive with `config` (E0051).
     pub text: Option<String>,
+    /// The block-value type from `expr: T`, when the tier is an **expression tier** (expr-tiers
+    /// arc): its `@<name> { … }` blocks are expressions, desugared during activation to a call of
+    /// the handler (`runner` doubles as the handler name). Mutually exclusive with `config`
+    /// (E0051); no runner semantics (`noeta <tier>` rejects it, blocks never activate/strip).
+    pub expr: Option<String>,
     /// The runner fn's (possibly link-qualified) name — what dispatch invokes with the roots.
+    /// For an expression tier this is the **handler** the desugar calls instead.
     pub runner: String,
     /// The declaring **package root** — the runner's first qualified segment (`fuzzkit` for
     /// `fuzzkit.tiers.run_fuzz`), or `""` for an entry-local declaration. This is the provider
@@ -109,6 +115,7 @@ impl TierRegistry {
                         name: t.name.clone(),
                         config: t.config.as_ref().map(|(n, _)| n.clone()),
                         text: t.text.as_ref().map(|(lang, _)| lang.clone()),
+                        expr: t.expr.as_ref().map(|(ty, _)| ty.clone()),
                         runner: f.name.clone(),
                         root: runner_root(&f.name),
                         span: t.span,
@@ -353,6 +360,21 @@ pub fn extension_tier_names() -> Vec<&'static str> {
     noeta_stdlib::registry::ext_tiers()
         .map(|t| t.name)
         .collect()
+}
+
+/// The E0052 an **expression tier's** block raises in *statement* position (expr-tiers arc): the
+/// block is a value and never activates/strips, so a bare statement would silently discard it.
+/// Shared by the checker's in-place arm and activation, so the two never drift.
+pub fn expr_tier_statement_diagnostic(tier: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        DiagnosticCode::InvalidTierExpression,
+        span,
+        format!("`@{tier}` is an expression tier — its block is a value; assign or return it"),
+    )
+    .with_help(format!(
+        "write `x = @{tier} {{ … }}` (or use it in any expression position); a bare statement \
+         block would discard the value"
+    ))
 }
 
 /// The `E0036 UnknownTier` diagnostic for a `@<tier>` whose name no extension declares and the
@@ -658,6 +680,9 @@ fn resolve_block(
         let config = registry.config_attribute_for(tier, providers);
         if !registry.is_known(tier) {
             diagnostics.push(unknown_tier_diagnostic(tier, *tier_span));
+        } else if registry.declared(tier).is_some_and(|d| d.expr.is_some()) {
+            // An expression tier's block in statement position (E0052) — never activates.
+            diagnostics.push(expr_tier_statement_diagnostic(tier, *tier_span));
         } else if config.is_none()
             && let Some(d) = knobless_args_diagnostic_for(tier, args)
         {

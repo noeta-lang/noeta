@@ -1,0 +1,8 @@
+// An expression tier's block in *statement* position is E0052: the block is a value (it never
+// activates or strips like a dev-tier block), so a bare statement would silently discard it.
+// expect: error E0052 at 8:2
+// expect: exit 1
+@tier(g, expr: string)
+fn r(statics: List<string>, holes: List<() -> string>): string { return "" }
+
+@g { hi }

@@ -10,6 +10,7 @@
 use noeta_span::Span;
 use serde::{Deserialize, Serialize};
 
+pub mod desugar;
 mod pretty;
 pub mod reflect;
 mod syntax_kind;

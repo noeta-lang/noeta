@@ -2078,6 +2078,15 @@ fn run_declared_tier(
         emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
         return ExitCode::from(1);
     }
+    // An expression tier has no runner semantics — its blocks are expressions in ordinary code,
+    // evaluated wherever they appear; there is nothing for a subcommand to run.
+    if tier.expr.is_some() {
+        eprintln!(
+            "`{name}` is an expression tier — its `@{name} {{ … }}` blocks are values in \
+             ordinary code (run the program instead: `noeta run <file>`)"
+        );
+        return ExitCode::from(2);
+    }
     // The activated code roots for this tier — a built-in name's roots land in the dedicated sinks
     // (an overridden `bench = "criterion"` still collects under `benches`), a custom tier's in
     // `custom`. A text tier has no code roots (its bodies come from `activated.texts`).

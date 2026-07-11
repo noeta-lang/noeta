@@ -1,0 +1,7 @@
+// An expression tier's decorated fn is its *handler* and must be exactly
+// `fn(statics: List<string>, holes: List<() -> U>): T` with `T` matching the declared `expr:` —
+// anything else is E0051 at the declaration, so a broken tier never reaches a consumer block.
+// expect: error E0051 at 7:4
+// expect: exit 1
+@tier(g, expr: string)
+fn r(roots: List<string>): string { return "" }

@@ -1,0 +1,15 @@
+// Expression-tier holes are **thunks**: each `${…}` desugars to a zero-param closure, so
+// evaluation is the handler's choice. A handler that never calls a hole never evaluates it —
+// the `panic` in the second hole is unreachable — which is what lets a reactive handler wrap
+// holes in computeds and an eager one skip unused fragments.
+// expect: stdout "first"
+// expect: stdout "done"
+// expect: exit 0
+@tier(first_only, text: "text", expr: string)
+fn first_only(statics: List<string>, holes: List<() -> string>): string {
+    h = holes[0]
+    return h()
+}
+
+echo @first_only { ${"first"} ${panic("never evaluated")} }
+echo "done"
