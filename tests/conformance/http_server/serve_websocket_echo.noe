@@ -1,0 +1,45 @@
+// server.websocket (server-hmr L0): a handler upgrades the scripted `GET /ws` request (request 6 of
+// the sandbox script); the session is driven by the fixed client conversation — "first frame",
+// "second frame", then a clean close (recv yields none). The session echoes each frame to stdout
+// and sends a reply frame per message (recorded in the sandbox's ws transcript); when the
+// conversation ends the session returns and the loop closes the stream. Ordinary requests keep
+// flowing through the same fetch handler — one signature serves bodies and sockets.
+// expect: stdout "GET /"
+// expect: stdout "GET /health"
+// expect: stdout "POST /echo"
+// expect: stdout "GET /users/42"
+// expect: stdout "DELETE /users/42"
+// expect: stdout "ws got first frame"
+// expect: stdout "ws got second frame"
+// expect: stdout "ws closed"
+// expect: stdout "served"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response, Socket}
+
+async fn session(sock: Socket): bool {
+    mut going = true
+    while going {
+        msg = sock.recv().await
+        if msg == none {
+            going = false
+            echo "ws closed"
+        } else {
+            text = msg ?? "?"
+            echo "ws got ${text}"
+            sock.send("echoed")
+        }
+    }
+    return true
+}
+
+fn fetch(req: Request): Response {
+    if req.path() == "/ws" {
+        return server.websocket(session)
+    }
+    echo "${req.method()} ${req.path()}"
+    return server.response(200, "ok")
+}
+
+server.serve(8080, fetch)
+echo "served"

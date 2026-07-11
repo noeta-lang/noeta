@@ -107,6 +107,12 @@ struct InboundState {
     script: Vec<crate::NetRequest>,
     cursor: usize,
     transcript: Vec<(u64, crate::NetResponse)>,
+    /// Upgraded websocket connections (server-hmr L0): each drives the fixed scripted client
+    /// conversation ([`crate::net::sandbox_ws_client_frames`]) — the value is the cursor into it —
+    /// and records the handler's outbound frames in `ws_transcript`. Deterministic and finite,
+    /// so an upgraded handler terminates in-oracle exactly like the request script itself.
+    ws_conns: BTreeMap<u64, usize>,
+    ws_transcript: Vec<(u64, String)>,
 }
 
 /// A scripted spawned process (process-handle + streaming arcs): its instant-complete outcome and
@@ -332,6 +338,8 @@ impl Network for SandboxHost {
             script: crate::net::sandbox_request_script(),
             cursor: 0,
             transcript: Vec::new(),
+            ws_conns: BTreeMap::new(),
+            ws_transcript: Vec::new(),
         });
         Ok(1)
     }
@@ -364,6 +372,57 @@ impl Network for SandboxHost {
             .expect("net_reply_now before net_listen")
             .transcript
             .push((conn, response));
+        Ok(())
+    }
+
+    /// Arm the fixed scripted client conversation on `conn` (the key is irrelevant to the
+    /// sandbox — no real handshake happens).
+    fn net_ws_upgrade_now(&mut self, conn: u64, _key: &str) -> Result<(), StdError> {
+        self.inbound
+            .as_mut()
+            .expect("net_ws_upgrade_now before net_listen")
+            .ws_conns
+            .insert(conn, 0);
+        Ok(())
+    }
+
+    /// Pop the next scripted client frame on `conn`; `None` once the conversation is exhausted —
+    /// the deterministic "peer closed" that lets an upgraded handler return in-oracle.
+    fn net_ws_recv_next(&mut self, conn: u64) -> Result<Option<String>, StdError> {
+        let state = self
+            .inbound
+            .as_mut()
+            .expect("net_ws_recv_next before net_listen");
+        let Some(cursor) = state.ws_conns.get_mut(&conn) else {
+            return Ok(None);
+        };
+        let frames = crate::net::sandbox_ws_client_frames();
+        match frames.get(*cursor) {
+            Some(frame) => {
+                *cursor += 1;
+                Ok(Some(frame.clone()))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Record the handler's outbound frame (test introspection; the differential observes the
+    /// handler's own output, exactly like replies).
+    fn net_ws_send_now(&mut self, conn: u64, text: &str) -> Result<(), StdError> {
+        self.inbound
+            .as_mut()
+            .expect("net_ws_send_now before net_listen")
+            .ws_transcript
+            .push((conn, text.to_string()));
+        Ok(())
+    }
+
+    fn net_ws_close_now(&mut self, conn: u64) -> Result<(), StdError> {
+        self.inbound
+            .as_mut()
+            .expect("net_ws_close_now before net_listen")
+            .ws_conns
+            .remove(&conn);
         Ok(())
     }
 }

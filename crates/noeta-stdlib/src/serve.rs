@@ -25,6 +25,12 @@ use crate::net::{REQUEST_TYPE_NAME, Request, request_header, request_path};
 
 const REQUEST_SIG: SigType = SigType::Named(REQUEST_TYPE_NAME);
 
+/// The websocket session handle's type name (server-hmr L0).
+pub const SOCKET_TYPE_NAME: &str = "Socket";
+
+const SOCKET_SIG: SigType = SigType::Named(SOCKET_TYPE_NAME);
+const OPT_STR: SigType = SigType::Option(&SigType::String);
+
 pub const HTTP_CTX_FNS: &[ExtFn] = &[
     // `serve(port, handler) -> void` — bind an inbound listener and run the accept loop, calling
     // `handler(request)` per connection. The handler's declared return is `dyn`: a sync handler
@@ -32,6 +38,37 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
     ExtFn {
         name: "serve",
         params: &[SigType::Int, SigType::Fn(&[REQUEST_SIG], &SigType::Dyn)],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
+    // `websocket(handler) -> Response` (server-hmr L0) — the connection-hijack response: returned
+    // from a `fetch` handler, it upgrades the request's connection to a websocket and runs
+    // `handler(socket)` as its session (the serve loop reaps it like any handler; the session
+    // ends when the handler returns, closing the stream). Declared `Response` so a routing
+    // handler's signature stays `(Request) -> Response` whether it serves bodies or sockets.
+    ExtFn {
+        name: "websocket",
+        params: &[SigType::Fn(&[SOCKET_SIG], &SigType::Dyn)],
+        ret: RetTy::Concrete(SigType::Named(crate::net::RESPONSE_TYPE_NAME)),
+    },
+];
+
+/// `Socket`'s ctx methods (server-hmr L0): `send` writes a text frame (driven to completion — a
+/// frame write is quick, like a reply); `recv` returns a `Future<?string>` the session awaits
+/// (`none` = the peer closed); `close` ends the stream early.
+pub const SOCKET_CTX_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "send",
+        params: &[SigType::String],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "recv",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Future(&OPT_STR)),
+    },
+    ExtFn {
+        name: "close",
+        params: &[],
         ret: RetTy::Concrete(SigType::Unit),
     },
 ];
@@ -85,6 +122,12 @@ struct InFlight {
     /// arrival time + method/route needed to record the duration histogram and balance the
     /// active-requests counter at completion.
     metrics: Option<ServerMetrics>,
+    /// The request's `Sec-WebSocket-Key`, captured at accept (server-hmr L0) — consumed if the
+    /// handler upgrades. `None` for an ordinary request; an upgrade without a key is a 400.
+    ws_key: Option<String>,
+    /// Whether this entry is a running **websocket session** (the upgrade handler) rather than an
+    /// HTTP handler: its completion closes the stream instead of replying.
+    ws: bool,
 }
 
 /// Per-request metrics auto-instrumentation state (M3). Captured at accept, consumed at completion.
@@ -100,6 +143,126 @@ struct ServerMetrics {
 struct ServerInstruments {
     duration: InstrumentId,
     active: InstrumentId,
+}
+
+/// The upgrade marker a `fetch` handler returns via `server.websocket(handler)` (server-hmr L0).
+/// Language-typed `Response` (so routing handlers keep one signature); the serve loop's reap
+/// recognizes the concrete Rust type and hijacks the connection instead of replying. The session
+/// handler rides in the retained arena until the loop takes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WsUpgrade {
+    pub handler: noeta_native::Retained,
+}
+
+impl noeta_native::ExternValue for WsUpgrade {
+    fn type_name(&self) -> &'static str {
+        crate::net::RESPONSE_TYPE_NAME
+    }
+    fn eq_value(&self, other: &dyn noeta_native::ExternValue) -> bool {
+        other.as_any().downcast_ref::<WsUpgrade>() == Some(self)
+    }
+    fn cmp_value(&self, _other: &dyn noeta_native::ExternValue) -> Option<std::cmp::Ordering> {
+        None
+    }
+    fn hash_value(&self) -> u64 {
+        0 // not key-capable
+    }
+    fn display(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
+        write!(out, "<websocket upgrade>")
+    }
+    fn clone_box(&self) -> Box<dyn noeta_native::ExternValue> {
+        Box::new(self.clone())
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+/// The websocket session handle (server-hmr L0): a plain conn id; every method reaches the
+/// `Network` capability's hijack seam. Reference semantics — copies alias the connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Socket {
+    pub conn: u64,
+}
+
+impl noeta_native::ExternValue for Socket {
+    fn type_name(&self) -> &'static str {
+        SOCKET_TYPE_NAME
+    }
+    fn eq_value(&self, other: &dyn noeta_native::ExternValue) -> bool {
+        other.as_any().downcast_ref::<Socket>() == Some(self)
+    }
+    fn cmp_value(&self, _other: &dyn noeta_native::ExternValue) -> Option<std::cmp::Ordering> {
+        None
+    }
+    fn hash_value(&self) -> u64 {
+        0 // not key-capable (identifies a host resource)
+    }
+    fn display(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
+        write!(out, "<socket {}>", self.conn)
+    }
+    fn clone_box(&self) -> Box<dyn noeta_native::ExternValue> {
+        Box::new(self.clone())
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+/// `Socket`'s ctx-method dispatch (server-hmr L0).
+pub fn socket_ctx_method_dispatch(
+    method: &str,
+    ctx: &mut dyn NativeCtx,
+    recv: Slot,
+    args: &[Slot],
+) -> Result<CtxOut, CtxError> {
+    let conn = {
+        let mut conn = None;
+        ctx.with_extern(recv, &mut |e| {
+            conn = e.as_any().downcast_ref::<Socket>().map(|s| s.conn);
+        })?;
+        conn.expect("a Socket receiver wraps a Socket")
+    };
+    match method {
+        "send" => {
+            ctx_arity(method, args, 1)?;
+            let NativeValue::Str(text) = ctx.view(args[0])? else {
+                return Err(StdError {
+                    kind: ErrorKind::ArgType,
+                    message: format!(
+                        "`Socket.send` expects a string, found {}",
+                        ctx.type_name(args[0])?
+                    ),
+                }
+                .into());
+            };
+            let io = ctx.host().net_ws_send(conn, text.to_string());
+            let future = ctx.spawn_io(io);
+            let unit = ctx.drive(future)?;
+            ctx.free(unit);
+            Ok(CtxOut::Out(NativeOut::Unit))
+        }
+        "recv" => {
+            ctx_arity(method, args, 0)?;
+            let io = ctx.host().net_ws_recv(conn);
+            Ok(CtxOut::Slot(ctx.spawn_io(io)))
+        }
+        "close" => {
+            ctx_arity(method, args, 0)?;
+            let io = ctx.host().net_ws_close(conn);
+            let future = ctx.spawn_io(io);
+            let unit = ctx.drive(future)?;
+            ctx.free(unit);
+            Ok(CtxOut::Out(NativeOut::Unit))
+        }
+        _ => Err(noeta_native::no_method_error(SOCKET_TYPE_NAME, method).into()),
+    }
 }
 
 /// The reply for a handler that errors or returns a non-`Response`.
@@ -186,6 +349,7 @@ pub fn http_ctx_dispatch(
                                 Some(request) => {
                                     ctx.free(accepted);
                                     let conn = request_conn(ctx, request)?;
+                                    let ws_key = request_ws_key(ctx, request)?;
                                     // Derive the OTel request inputs once when either signal is on —
                                     // the span and the metrics share the name/method/route/parent.
                                     let inputs = if tracing || instruments.is_some() {
@@ -226,6 +390,8 @@ pub fn http_ctx_dispatch(
                                             span,
                                             context,
                                             metrics,
+                                            ws_key,
+                                            ws: false,
                                         }),
                                         Err(CtxError::Abort) => {
                                             end_server_span(ctx, span, 500);
@@ -264,28 +430,115 @@ pub fn http_ctx_dispatch(
                     let polled = ctx.poll(fut);
                     in_flight[k].context = ctx.context_swap(prior);
                     let done = match polled {
+                        Ok(Some(value)) if in_flight[k].ws => {
+                            // A finished websocket session (server-hmr L0): the handler returned
+                            // (its value is discarded — a session "responds" by sending frames);
+                            // close the stream. Nothing to reply.
+                            ctx.free(value);
+                            ws_close(ctx, conn)?;
+                            true
+                        }
                         Ok(Some(value)) => {
+                            let mut upgrade: Option<crate::serve::WsUpgrade> = None;
                             let mut response = None;
                             // A non-extern or non-`Response` result falls to the 500.
                             let _ = ctx.with_extern(value, &mut |e| {
-                                response = e.as_any().downcast_ref::<NetResponse>().cloned();
+                                if let Some(u) = e.as_any().downcast_ref::<WsUpgrade>() {
+                                    upgrade = Some(u.clone());
+                                } else {
+                                    response = e.as_any().downcast_ref::<NetResponse>().cloned();
+                                }
                             });
                             ctx.free(value);
-                            let response = response.unwrap_or_else(server_error);
-                            // End the span with the reply's status before writing it, so the span's
-                            // duration is the handler's and its status reflects the outcome; record
-                            // the request's metrics (duration + -1 active) at the same boundary.
-                            end_server_span(ctx, span, response.status);
-                            end_server_metrics(
-                                ctx,
-                                &instruments,
-                                in_flight[k].metrics.take(),
-                                response.status,
-                            );
-                            reply(ctx, conn, response)?;
-                            true
+                            if let Some(upgrade) = upgrade {
+                                match in_flight[k].ws_key.take() {
+                                    // The hijack (server-hmr L0): 101-handshake the connection,
+                                    // then run `handler(socket)` as this entry's SECOND life — a
+                                    // websocket session reaped like any handler future.
+                                    Some(key) => {
+                                        end_server_span(ctx, span, 101);
+                                        end_server_metrics(
+                                            ctx,
+                                            &instruments,
+                                            in_flight[k].metrics.take(),
+                                            101,
+                                        );
+                                        let io = ctx.host().net_ws_upgrade(conn, key);
+                                        let upgraded = ctx.spawn_io(io);
+                                        let unit = ctx.drive(upgraded)?;
+                                        ctx.free(unit);
+                                        let socket = ctx.intern(NativeOut::Extern(
+                                            noeta_native::ExternBox::new(Socket { conn }),
+                                        ))?;
+                                        let session = ctx.retained_get(upgrade.handler)?;
+                                        let handler_ctx = std::mem::take(&mut in_flight[k].context);
+                                        let prior = ctx.context_swap(handler_ctx);
+                                        let called = ctx.call(session, &[socket]);
+                                        in_flight[k].context = ctx.context_swap(prior);
+                                        ctx.free(socket);
+                                        ctx.free(session);
+                                        ctx.release_retained(upgrade.handler);
+                                        match called {
+                                            Ok(session_fut) => {
+                                                in_flight[k].fut = session_fut;
+                                                in_flight[k].span = None;
+                                                in_flight[k].ws = true;
+                                                false
+                                            }
+                                            Err(CtxError::Abort) => {
+                                                ws_close(ctx, conn)?;
+                                                true
+                                            }
+                                            Err(e) => return Err(e),
+                                        }
+                                    }
+                                    // An upgrade returned for a request that never asked for one.
+                                    None => {
+                                        ctx.release_retained(upgrade.handler);
+                                        end_server_span(ctx, span, 400);
+                                        end_server_metrics(
+                                            ctx,
+                                            &instruments,
+                                            in_flight[k].metrics.take(),
+                                            400,
+                                        );
+                                        reply(
+                                            ctx,
+                                            conn,
+                                            NetResponse {
+                                                status: 400,
+                                                headers: Vec::new(),
+                                                body: b"not a websocket request".to_vec(),
+                                            },
+                                        )?;
+                                        true
+                                    }
+                                }
+                            } else {
+                                let response = response.unwrap_or_else(server_error);
+                                // End the span with the reply's status before writing it, so the
+                                // span's duration is the handler's and its status reflects the
+                                // outcome; record the request's metrics (duration + -1 active) at
+                                // the same boundary.
+                                end_server_span(ctx, span, response.status);
+                                end_server_metrics(
+                                    ctx,
+                                    &instruments,
+                                    in_flight[k].metrics.take(),
+                                    response.status,
+                                );
+                                reply(ctx, conn, response)?;
+                                true
+                            }
                         }
                         Ok(None) => false,
+                        Err(CtxError::Abort) if in_flight[k].ws => {
+                            // A websocket session aborting closes its stream; the server survives
+                            // (the same worker-survives contract as a handler's 500).
+                            ctx.free(fut);
+                            ws_close(ctx, conn)?;
+                            true
+                        }
                         Err(CtxError::Abort) => {
                             ctx.free(fut);
                             end_server_span(ctx, span, 500);
@@ -318,8 +571,39 @@ pub fn http_ctx_dispatch(
                 }
             }
         }
+        // `server.websocket(handler)` (server-hmr L0): retain the session handler and hand back
+        // the upgrade marker; the serve loop's reap performs the hijack.
+        "websocket" => {
+            ctx_arity(func, args, 1)?;
+            let handler = ctx.retain(args[0])?;
+            Ok(CtxOut::Out(NativeOut::Extern(
+                noeta_native::ExternBox::new(WsUpgrade { handler }),
+            )))
+        }
         _ => Err(no_function_error("http", func).into()),
     }
+}
+
+/// Close a websocket stream — an async leaf driven to completion, like [`reply`].
+fn ws_close(ctx: &mut dyn NativeCtx, conn: u64) -> CtxResult<()> {
+    let io = ctx.host().net_ws_close(conn);
+    let future = ctx.spawn_io(io);
+    let unit = ctx.drive(future)?;
+    ctx.free(unit);
+    Ok(())
+}
+
+/// The request's `Sec-WebSocket-Key` header, if it carries one (server-hmr L0) — captured at
+/// accept so an upgrading handler's connection can be handshaken at reap time, after the request
+/// value itself is gone.
+fn request_ws_key(ctx: &mut dyn NativeCtx, request: Slot) -> CtxResult<Option<String>> {
+    let mut key = None;
+    ctx.with_extern(request, &mut |e| {
+        if let Some(r) = e.as_any().downcast_ref::<Request>() {
+            key = request_header(&r.inner, "sec-websocket-key").map(str::to_string);
+        }
+    })?;
+    Ok(key)
 }
 
 /// Derive the OTel request inputs from an accepted request (the name/method/route/parent shared by

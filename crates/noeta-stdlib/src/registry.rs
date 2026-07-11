@@ -143,6 +143,18 @@ const HTTP_TYPES: &[ExtType] = &[
         key_capable: false, // an inbound request is not a map key
         ..ExtType::DEFAULTS
     },
+    // The websocket session handle (server-hmr L0) — its methods reach the `Network` hijack seam
+    // (send/recv/close ride the executor), so they live in the ctx table.
+    ExtType {
+        name: crate::serve::SOCKET_TYPE_NAME,
+        namespace: "std.http",
+        ctx_methods: crate::serve::SOCKET_CTX_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::serve::socket_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        key_capable: false, // identifies a host resource
+        ..ExtType::DEFAULTS
+    },
 ];
 
 /// The `p2p` unit's extern types: the CRDT value types (p2p P0) plus `SyncedSignal<T>` (p2p P2).
