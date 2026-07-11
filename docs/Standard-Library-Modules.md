@@ -14,7 +14,7 @@ The always-available Ring 1 surface (strings, collections, options) needs no imp
 
 ## `math`
 
-Pure scalar math. `sqrt`/`pow`/`sin`/`cos`/`tan`/`pi`/`e` always return `float`; `floor`/`ceil`/`round` return `int`; `abs`/`min`/`max` preserve kind (int in → int out; a mixed pair promotes to float).
+Pure scalar math. The real-valued functions (`sqrt`/`pow`, trig and inverse trig, logarithms/`exp`, hyperbolics, `hypot`, `pi`/`e`) always return `float`; `floor`/`ceil`/`round` return `int`; `abs`/`min`/`max` preserve kind (int in → int out; a mixed pair promotes to float). Out-of-domain inputs (`ln(-1.0)`, `asin(2.0)`) yield `NaN`, like `sqrt(-1.0)`.
 
 | Function | Signature | Example → result |
 |---|---|---|
@@ -29,6 +29,14 @@ Pure scalar math. `sqrt`/`pow`/`sin`/`cos`/`tan`/`pi`/`e` always return `float`;
 | `min` | `min(a: number, b: number) -> number` | `math.min(3, 8)` → `3` |
 | `max` | `max(a: number, b: number) -> number` | `math.max(3, 3.5)` → `3.5` |
 | `sin` / `cos` / `tan` | `(x: float) -> float` | radians; `math.cos(0)` → `1.0` |
+| `asin` / `acos` / `atan` | `(x: float) -> float` | result in radians; `math.acos(1.0)` → `0.0` |
+| `atan2` | `atan2(y: float, x: float) -> float` | quadrant-aware angle; `math.atan2(1.0, 1.0)` → `0.785…` |
+| `ln` | `ln(x: float) -> float` | natural log; `math.ln(math.e())` → `1.0` |
+| `log` | `log(x: float, base: float) -> float` | `math.log(8.0, 2.0)` → `3.0` |
+| `log2` / `log10` | `(x: float) -> float` | `math.log10(1000.0)` → `3.0` |
+| `exp` | `exp(x: float) -> float` | `math.exp(1.0)` → `2.71828…` |
+| `hypot` | `hypot(a: float, b: float) -> float` | `math.hypot(3.0, 4.0)` → `5.0` |
+| `sinh` / `cosh` / `tanh` | `(x: float) -> float` | `math.cosh(0.0)` → `1.0` |
 
 ## `random`
 

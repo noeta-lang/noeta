@@ -1,0 +1,28 @@
+// The transcendental family — `ln`/`log`/`log2`/`log10`/`exp`, inverse trig (`asin`/`acos`/
+// `atan`/`atan2`), hyperbolics, and `hypot`. All real-valued: always a float, ints widen at
+// runtime; the math lives in noeta_stdlib::math, so both backends agree (the differential pins it).
+// expect: stdout "1.0"
+// expect: stdout "3.0"
+// expect: stdout "3.0"
+// expect: stdout "3.0"
+// expect: stdout "1.0"
+// expect: stdout "5.0"
+// expect: stdout "0.0"
+// expect: stdout "0.0"
+// expect: stdout "0.0"
+// expect: stdout "1.0"
+// expect: stdout "0.0"
+// expect: exit 0
+use std.{math}
+
+echo math.ln(math.e())
+echo math.log(8.0, 2.0)
+echo math.log2(8.0)
+echo math.log10(1000.0)
+echo math.exp(0.0)
+echo math.hypot(3.0, 4.0)
+echo math.asin(0.0)
+echo math.atan(0.0)
+echo math.atan2(0.0, 1.0)
+echo math.cosh(0.0)
+echo math.tanh(0.0)

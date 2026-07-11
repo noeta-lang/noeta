@@ -1970,6 +1970,73 @@ const MATH_FNS: &[ExtFn] = &[
         params: &[Dyn, Dyn],
         ret: NumericPreserving,
     },
+    // The transcendental family — real-valued like `sqrt`, so params pin to `Float` and the
+    // return is always a float.
+    ExtFn {
+        name: "asin",
+        params: &[Float],
+        ret: Concrete(Float),
+    },
+    ExtFn {
+        name: "acos",
+        params: &[Float],
+        ret: Concrete(Float),
+    },
+    ExtFn {
+        name: "atan",
+        params: &[Float],
+        ret: Concrete(Float),
+    },
+    ExtFn {
+        name: "atan2",
+        params: &[Float, Float],
+        ret: Concrete(Float),
+    },
+    ExtFn {
+        name: "ln",
+        params: &[Float],
+        ret: Concrete(Float),
+    },
+    ExtFn {
+        name: "log",
+        params: &[Float, Float],
+        ret: Concrete(Float),
+    },
+    ExtFn {
+        name: "log2",
+        params: &[Float],
+        ret: Concrete(Float),
+    },
+    ExtFn {
+        name: "log10",
+        params: &[Float],
+        ret: Concrete(Float),
+    },
+    ExtFn {
+        name: "exp",
+        params: &[Float],
+        ret: Concrete(Float),
+    },
+    ExtFn {
+        name: "hypot",
+        params: &[Float, Float],
+        ret: Concrete(Float),
+    },
+    ExtFn {
+        name: "sinh",
+        params: &[Float],
+        ret: Concrete(Float),
+    },
+    ExtFn {
+        name: "cosh",
+        params: &[Float],
+        ret: Concrete(Float),
+    },
+    ExtFn {
+        name: "tanh",
+        params: &[Float],
+        ret: Concrete(Float),
+    },
 ];
 
 const RANDOM_FNS: &[ExtFn] = &[
