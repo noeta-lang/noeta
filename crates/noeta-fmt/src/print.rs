@@ -16,11 +16,11 @@ use noeta_ast::{
 };
 use std::cell::Cell;
 
-use noeta_lexer::Comment;
-use noeta_span::Span;
+use noeta_lexer::{Comment, TokenKind};
+use noeta_span::{Source, SourceId, Span};
 
 use crate::doc::{Doc, render};
-use crate::{ArrowStyle, FmtConfig, FmtError, trivia};
+use crate::{ArrowStyle, FmtConfig, FmtError, ParenStyle, SemicolonStyle, trivia};
 
 const INDENT: isize = 4; // 4 spaces — the house style.
 
@@ -77,6 +77,7 @@ pub fn print_program(
         source,
         comments,
         cursor: Cell::new(0),
+        code_tokens: code_tokens(source),
         config,
     };
     let doc = p.stmt_seq(&program.stmts, program.span.start, program.span.end)?;
@@ -115,6 +116,7 @@ pub fn print_stmt(
         source,
         comments,
         cursor: Cell::new(cursor),
+        code_tokens: code_tokens(source),
         config,
     };
     let doc = p.stmt(stmt)?;
@@ -136,7 +138,23 @@ struct Printer<'a> {
     /// Index of the next un-emitted comment. Advanced as the walk passes each comment's position, so
     /// every comment is emitted exactly once (the completeness invariant).
     cursor: Cell<usize>,
+    /// Every non-`;` token as `(start_offset, kind)`, in source order — a lex of the source. Lets
+    /// [`Printer::layout_terminates`] find the token that *follows* a statement and decide whether the
+    /// newline the formatter puts there terminates it (so a trailing `;` is redundant).
+    code_tokens: Vec<(u32, TokenKind)>,
     config: &'a FmtConfig,
+}
+
+/// The `(start, kind)` of every non-`;` token in `source`, in order — the lookup behind
+/// [`Printer::layout_terminates`]. Synthetic and explicit `;` are dropped so a search finds the next
+/// *content* token, and the natural token order keeps the vec sorted by `start` for a partition search.
+fn code_tokens(source: &str) -> Vec<(u32, TokenKind)> {
+    noeta_lexer::lex(&Source::new(SourceId(0), "<fmt>", source))
+        .tokens
+        .iter()
+        .filter(|t| t.kind != TokenKind::Semicolon)
+        .map(|t| (t.span.start, t.kind))
+        .collect()
 }
 
 impl Printer<'_> {
@@ -462,14 +480,14 @@ impl Printer<'_> {
                     Doc::text("for "),
                     pat,
                     Doc::text(" in "),
-                    self.restricted_head(iterable)?,
+                    self.restricted_head(iterable, true)?,
                     Doc::text(" "),
                     self.block(body, iterable.span().end, span.end)?,
                 ]))
             }
             Stmt::While { cond, body, span } => Ok(Doc::concat([
                 Doc::text("while "),
-                self.restricted_head(cond)?,
+                self.restricted_head(cond, true)?,
                 Doc::text(" "),
                 self.block(body, cond.span().end, span.end)?,
             ])),
@@ -522,23 +540,64 @@ impl Printer<'_> {
         }
     }
 
-    /// Attach a trailing `;` to a leaf iff the author wrote one (per-statement/-member trivia). Probed
-    /// three ways because a span may end before the `;` (statements: content span) or already include
-    /// it (enum variants / fields): just past `content_end`, just past `stmt_end`, or as the last
-    /// non-space char the span already covers.
+    /// Attach a trailing `;` to a leaf per [`FmtConfig::semicolons`]. `Add` always appends one, `Remove`
+    /// never does, and `Preserve` keeps exactly what the author wrote — detected three ways because a
+    /// span may end before the `;` (statements: content span) or already include it (enum variants /
+    /// fields): just past `content_end`, just past `stmt_end`, or as the last non-space char the span
+    /// already covers.
     fn leaf(&self, doc: Doc, content_end: u32, stmt_end: u32) -> Doc {
-        let covered_semicolon = self
-            .source
-            .get(..stmt_end as usize)
-            .is_some_and(|s| s.trim_end().ends_with(';'));
-        if trivia::has_trailing_semicolon(self.source, content_end)
-            || trivia::has_trailing_semicolon(self.source, stmt_end)
-            || covered_semicolon
-        {
+        let author_wrote_semicolon = {
+            let covered_semicolon = self
+                .source
+                .get(..stmt_end as usize)
+                .is_some_and(|s| s.trim_end().ends_with(';'));
+            trivia::has_trailing_semicolon(self.source, content_end)
+                || trivia::has_trailing_semicolon(self.source, stmt_end)
+                || covered_semicolon
+        };
+        let emit = match self.config.semicolons {
+            SemicolonStyle::Add => true,
+            SemicolonStyle::Preserve => author_wrote_semicolon,
+            // Strip a `;` only when it is both present and *redundant* — i.e. the newline the
+            // formatter puts after this statement terminates it. That fails when the next
+            // statement's first token would continue this line (a leading `-`, `.`, `|>`, …), so
+            // the `;` is the only separator and must be kept. Statements inside a bracket-nested
+            // closure body need no special case: the parser's brace-relative soft terminator makes
+            // them newline-terminable like any other block.
+            SemicolonStyle::Remove => author_wrote_semicolon && !self.layout_terminates(stmt_end),
+        };
+        if emit {
             Doc::concat([doc, Doc::text(";")])
         } else {
             doc
         }
+    }
+
+    /// Whether the newline the formatter places after a statement whose span ends at `stmt_end`
+    /// terminates it — making a trailing `;` redundant. The formatter renders one statement per line,
+    /// so this depends only on the *next* token: `}` and end-of-input always terminate (the parser
+    /// peeks `}` / matches EOF), and a newline terminates unless the next token continues the line
+    /// (`token_continues_line` — e.g. a unary `-` that would bind to the previous statement). Because
+    /// the parser also terminates a complete statement on a newline regardless of its last token, a
+    /// statement ending in a generic-close `>` is now correctly stripped. `stmt_end` (the full
+    /// statement span, past any lowered-away trailing `)` and the terminator) is used rather than the
+    /// content span so the search never lands on a token that belongs to this statement.
+    fn layout_terminates(&self, stmt_end: u32) -> bool {
+        match self.next_code_token(stmt_end) {
+            None => true,                    // end of input
+            Some(TokenKind::RBrace) => true, // a peeked `}` closes the block
+            Some(kind) => !noeta_lexer::token_continues_line(kind),
+        }
+    }
+
+    /// The kind of the first non-`;` token that starts at or after `offset` — the token that follows a
+    /// statement whose span ends there (its own tokens start before `offset`). `None` past the last
+    /// token.
+    fn next_code_token(&self, offset: u32) -> Option<TokenKind> {
+        let i = self
+            .code_tokens
+            .partition_point(|(start, _)| *start < offset);
+        self.code_tokens.get(i).map(|&(_, kind)| kind)
     }
 
     fn if_stmt(
@@ -550,7 +609,7 @@ impl Printer<'_> {
     ) -> Result<Doc, FmtError> {
         let mut parts = vec![
             Doc::text("if "),
-            self.restricted_head(cond)?,
+            self.restricted_head(cond, true)?,
             Doc::text(" "),
             self.block(then_body, cond.span().end, span.end)?,
         ];
@@ -1131,10 +1190,14 @@ impl Printer<'_> {
 
     /// An expression in a **restricted-head** position — the condition of `if`/`while`, a `for`
     /// iterable, or a `match` scrutinee, each immediately followed by a `{`. A struct literal at the
-    /// head would collide with the opening brace, so it is parenthesized (`if (Cfg { .. }).debug {`).
-    fn restricted_head(&self, e: &Expr) -> Result<Doc, FmtError> {
+    /// head would collide with the opening brace, so it is always parenthesized (`if (Cfg { .. }).debug
+    /// {`). When `allow_add` is set and [`FmtConfig::parens`] is [`ParenStyle::Add`], every header is
+    /// wrapped for a bracketed C-like style — the `match` scrutinee opts out (`allow_add == false`), as
+    /// `match (x) {` reads oddly.
+    fn restricted_head(&self, e: &Expr, allow_add: bool) -> Result<Doc, FmtError> {
+        let force_parens = allow_add && self.config.parens == ParenStyle::Add;
         let doc = self.expr(e)?;
-        Ok(if head_is_object(e) {
+        Ok(if force_parens || head_is_object(e) {
             Doc::concat([Doc::text("("), doc, Doc::text(")")])
         } else {
             doc
@@ -1518,7 +1581,7 @@ impl Printer<'_> {
     }
 
     fn match_expr(&self, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Result<Doc, FmtError> {
-        let head = Doc::concat([Doc::text("match "), self.restricted_head(scrutinee)?]);
+        let head = Doc::concat([Doc::text("match "), self.restricted_head(scrutinee, false)?]);
         if arms.is_empty() {
             return Ok(Doc::concat([head, Doc::text(" {}")]));
         }

@@ -16,7 +16,11 @@ noeta-value = { workspace = true }
 noeta-gc = { workspace = true }
 noeta-span = { workspace = true }
 noeta-object = { workspace = true }
-noeta-stdlib = { workspace = true }
+# Direct path (not workspace inheritance) so we can set default-features = false — an inherited
+# workspace dep may not override default-features. Drops the ring-datetime default (jiff + tzdb) so
+# an AOT binary that never imports std.datetime sheds it; the toolchain (noeta-cli) and differential
+# (noeta-eval) keep noeta-stdlib default-on, so datetime is present everywhere else.
+noeta-stdlib = { path = "../noeta-stdlib", default-features = false }
 # Debug-console module arena (tooling-unification T4): fragment installs swap the running Vm's
 # `&Module` to an extended snapshot; the arena keeps each snapshot alive to end of run.
 typed-arena = { workspace = true }

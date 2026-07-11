@@ -116,7 +116,7 @@ doc = "std"
 - `--profile <NAME>` on `noeta run` activates those tiers (unioned with `--tier`). On `noeta test`/`bench`/`doc`, `--profile` acts as a **gate** — the tool no-ops if the profile does not make its tier live.
 
 > [!NOTE]
-> **What works today vs. what is stubbed.** The full profile grammar works now: parsing, `extends` inheritance, tier-name validation, provider string-vs-table forms, cycle detection, and unknown-profile errors. But the *only* accepted provider is the built-in `"std"` — naming any other package is an error, because there is no package system yet. The grammar is validated now so the manifest shape is locked; cross-package providers land with the package manager.
+> **What works today vs. what is stubbed.** The full profile grammar works now: parsing, `extends` inheritance, tier-name validation, provider string-vs-table forms, cycle detection, and unknown-profile errors. But the *only* accepted provider is the built-in `"std"` — naming any other package is an error. The package manager itself has since shipped; wiring tier providers to third-party packages is the remaining step (the grammar was validated ahead of time so the manifest shape is already locked).
 
 ---
 

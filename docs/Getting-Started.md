@@ -96,6 +96,7 @@ A bare expression prints its value. The REPL keeps your bindings alive between e
 | `:type <expr>` / `:t` | Evaluate an expression and print its runtime type. |
 | `:bindings` / `:b` | List the live bindings. |
 | `:drop <name>` / `:free` | Run a binding's destructor now and unbind it. |
+| `:check on` / `:check off` | Toggle per-entry type-checking mid-session. |
 | `:reset` | Clear all bindings. |
 | `:help` / `:h` / `:?` | Show help. |
 | `:quit` / `:q` (or Ctrl-D) | Exit. |

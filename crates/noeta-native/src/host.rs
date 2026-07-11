@@ -217,6 +217,63 @@ pub trait Os {
     fn os_exec_spawn(&self, command: String, args: Vec<String>) -> Box<dyn crate::ExternIo> {
         Box::new(crate::os::ExecIo { command, args })
     }
+
+    // --- Process lifecycle (process-handle arc): spawn-and-hold, unlike the run-to-completion
+    // `os_exec`. `os_spawn` starts a child and returns an opaque handle id; the program then
+    // controls it through the [`crate::os::Process`] extern type, whose methods route back here by
+    // id — the listener/reader-registry model, not `FileHandle`'s self-contained state. The
+    // sandbox scripts a deterministic instant-complete child (in-oracle); `RealHost` holds a real
+    // `std::process::Child` with drained pipes (CLI-only). ---
+
+    /// Spawn `command` with `args` (verbatim — no shell) **without waiting**, returning an opaque
+    /// handle id. The child runs concurrently with the program. A command that cannot be started
+    /// at all (not found, not executable) is an `Io` error, exactly like [`Self::os_exec`].
+    fn os_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, StdError>;
+
+    /// The OS process id of a spawned child, or `None` if `handle` is not a live handle.
+    fn os_proc_pid(&self, handle: u64) -> Option<i64>;
+
+    /// Block until the child exits and return its outcome (exit status + captured output).
+    /// Idempotent: after the child is reaped the cached outcome is returned, so `wait` after a
+    /// `try_wait` that already observed exit still works.
+    fn os_proc_wait(&mut self, handle: u64) -> Result<crate::os::ExecResult, StdError>;
+
+    /// Non-blocking poll: `Some(outcome)` if the child has exited (reaping it), `None` if it is
+    /// still running. Lets a program supervise a child without blocking.
+    fn os_proc_try_wait(&mut self, handle: u64) -> Result<Option<crate::os::ExecResult>, StdError>;
+
+    /// Terminate the child (a forceful kill — SIGKILL / `TerminateProcess`). Idempotent: killing an
+    /// already-exited child is `Ok`. A later `wait` observes the killed status.
+    fn os_proc_kill(&mut self, handle: u64) -> Result<(), StdError>;
+
+    // --- Streaming (process-streaming arc): read a child's stdout line-by-line *while it runs*,
+    // and feed its stdin — unlike `wait`, which only hands back the fully-captured output at exit.
+    // The real host keeps draining both pipes on background threads (so a chatty child never
+    // deadlocks), and `read_line` consumes the stdout buffer through a per-handle cursor; the
+    // sandbox streams its scripted output line by line. `wait` still returns the *whole* captured
+    // output regardless of what was streamed. ---
+
+    /// The next line of the child's stdout (without its trailing newline), advancing a per-handle
+    /// read cursor. Blocks until a full line is available or the stream ends; `None` at end of
+    /// output. A final unterminated line is returned once, then `None` (like `fs` `read_line`).
+    fn os_proc_read_line(&mut self, handle: u64) -> Result<Option<String>, StdError>;
+
+    /// Up to `count` **characters** from the child's stdout, advancing the same cursor as
+    /// `read_line` — the not-necessarily-line-oriented read (POSIX `read` shape). Blocks only until
+    /// at least one character is available, then returns up to `count` of them; `None` at end of
+    /// output. `count <= 0` yields the empty string without consuming input.
+    fn os_proc_read(&mut self, handle: u64, count: i64) -> Result<Option<String>, StdError>;
+
+    /// The next line of the child's **stderr**, on its own independent cursor — the stderr twin of
+    /// [`Self::os_proc_read_line`]. `wait` still returns the whole captured stderr.
+    fn os_proc_read_stderr_line(&mut self, handle: u64) -> Result<Option<String>, StdError>;
+
+    /// Write `data` to the child's stdin. An error if the child has no stdin or it is closed.
+    fn os_proc_write_stdin(&mut self, handle: u64, data: &str) -> Result<(), StdError>;
+
+    /// Close the child's stdin, signalling end-of-input to it (a program reading until EOF then
+    /// unblocks). Idempotent.
+    fn os_proc_close_stdin(&mut self, handle: u64) -> Result<(), StdError>;
 }
 
 /// **Peer-to-peer sync** capability (p2p P1) — the local-first stack's transport seam (§9.15). A

@@ -46,6 +46,14 @@ pub struct SandboxHost {
     clock: u64,
     env: BTreeMap<String, String>,
     args: Vec<String>,
+    /// Scripted spawned processes (process-handle arc): id → the pre-computed instant-complete
+    /// outcome plus a stdout read cursor (process-streaming arc, for `read_line`). A sandbox
+    /// "child" runs to completion at spawn (the scripted `os_exec`), so `wait` returns its stored
+    /// outcome and `try_wait` always reports it done — deterministic and in-oracle, the process
+    /// analogue of the Vfs / logical clock.
+    procs: BTreeMap<u64, ScriptedProc>,
+    /// The next spawned-process handle id (starts at 1, like `ids`).
+    next_proc: u64,
     /// The inbound server state (http-server S1), armed by `net_listen`. A sandbox run serves at
     /// most one listener — a differential program calls `http.serve` once — so a single slot
     /// suffices; a second `net_listen` re-arms it.
@@ -101,6 +109,49 @@ struct InboundState {
     transcript: Vec<(u64, crate::NetResponse)>,
 }
 
+/// A scripted spawned process (process-handle + streaming arcs): its instant-complete outcome and
+/// independent stdout/stderr read cursors for `read_line`/`read`/`read_err_line`.
+#[derive(Debug, Clone)]
+struct ScriptedProc {
+    result: ExecResult,
+    stdout_cursor: usize,
+    stderr_cursor: usize,
+}
+
+/// The next line of `text` from `*cursor` (without its trailing newline), advancing past it; `None`
+/// once exhausted. A final unterminated line is returned once (like `str::lines`). Shared by the
+/// sandbox's scripted stdout/stderr streaming.
+fn scripted_read_line(text: &str, cursor: &mut usize) -> Option<String> {
+    let rest = &text[*cursor..];
+    if rest.is_empty() {
+        return None;
+    }
+    match rest.find('\n') {
+        Some(nl) => {
+            let line = rest[..nl].to_string();
+            *cursor += nl + 1;
+            Some(line)
+        }
+        None => {
+            let line = rest.to_string();
+            *cursor = text.len();
+            Some(line)
+        }
+    }
+}
+
+/// Up to `count` characters of `text` from `*cursor`, advancing past them; `None` once exhausted.
+/// `count <= 0` yields the empty string without consuming input (mirrors the real host's `read`).
+fn scripted_read(text: &str, cursor: &mut usize, count: i64) -> Option<String> {
+    if *cursor >= text.len() {
+        return None;
+    }
+    let want = count.max(0) as usize;
+    let chunk: String = text[*cursor..].chars().take(want).collect();
+    *cursor += chunk.len();
+    Some(chunk)
+}
+
 impl SandboxHost {
     /// A fresh sandbox: empty filesystem, default PRNG seed, clock at zero, and the
     /// fixed `env`/`args` fixture — matching the deterministic defaults both backends
@@ -114,6 +165,8 @@ impl SandboxHost {
             clock: 0,
             env: env::sandbox_vars(),
             args: env::sandbox_args(),
+            procs: BTreeMap::new(),
+            next_proc: 1,
             inbound: None,
             p2p: noeta_native::P2pBroker::default(),
             tel: TelRecorder {
@@ -450,6 +503,118 @@ impl Os for SandboxHost {
             }),
         }
     }
+
+    /// Spawn a scripted process: run the same fixed command set as `os_exec` **eagerly** (the
+    /// sandbox has no real concurrency), store the outcome, and hand back a deterministic handle
+    /// id. An unknown command is an `Io` error at spawn, exactly as a real `Command::spawn` fails
+    /// for a missing binary.
+    fn os_spawn(&mut self, command: &str, args: &[String]) -> Result<u64, StdError> {
+        let result = self.os_exec(command, args)?;
+        let id = self.next_proc;
+        self.next_proc += 1;
+        self.procs.insert(
+            id,
+            ScriptedProc {
+                result,
+                stdout_cursor: 0,
+                stderr_cursor: 0,
+            },
+        );
+        Ok(id)
+    }
+
+    /// A deterministic pseudo-pid derived from the handle (real pids are non-deterministic, so the
+    /// sandbox invents a stable one), or `None` for an unknown handle.
+    fn os_proc_pid(&self, handle: u64) -> Option<i64> {
+        self.procs
+            .contains_key(&handle)
+            .then(|| 10_000 + handle as i64)
+    }
+
+    fn os_proc_wait(&mut self, handle: u64) -> Result<ExecResult, StdError> {
+        self.procs
+            .get(&handle)
+            .map(|p| p.result.clone())
+            .ok_or_else(|| noeta_native::os::unknown_process_error(handle))
+    }
+
+    /// The scripted child completed at spawn, so `try_wait` always reports it done — a program's
+    /// supervise loop terminates on its first poll, deterministically.
+    fn os_proc_try_wait(&mut self, handle: u64) -> Result<Option<ExecResult>, StdError> {
+        Ok(Some(self.os_proc_wait(handle)?))
+    }
+
+    /// The scripted child is already complete, so a kill is a harmless no-op (the handle stays
+    /// valid, matching the real host where a later `wait` still returns the outcome).
+    fn os_proc_kill(&mut self, handle: u64) -> Result<(), StdError> {
+        if self.procs.contains_key(&handle) {
+            Ok(())
+        } else {
+            Err(noeta_native::os::unknown_process_error(handle))
+        }
+    }
+
+    /// Stream the scripted stdout a line at a time from the stored output via the per-handle
+    /// cursor — deterministic, and identical in shape to the real host's line streaming. `None`
+    /// once the output is exhausted; a final unterminated line is returned once (like `str::lines`).
+    fn os_proc_read_line(&mut self, handle: u64) -> Result<Option<String>, StdError> {
+        let proc = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| noeta_native::os::unknown_process_error(handle))?;
+        Ok(scripted_read_line(
+            &proc.result.stdout,
+            &mut proc.stdout_cursor,
+        ))
+    }
+
+    /// Up to `count` characters from the scripted stdout via the shared stdout cursor.
+    fn os_proc_read(&mut self, handle: u64, count: i64) -> Result<Option<String>, StdError> {
+        let proc = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| noeta_native::os::unknown_process_error(handle))?;
+        Ok(scripted_read(
+            &proc.result.stdout,
+            &mut proc.stdout_cursor,
+            count,
+        ))
+    }
+
+    /// The scripted stderr a line at a time via its own cursor — the stderr twin of `read_line`.
+    fn os_proc_read_stderr_line(&mut self, handle: u64) -> Result<Option<String>, StdError> {
+        let proc = self
+            .procs
+            .get_mut(&handle)
+            .ok_or_else(|| noeta_native::os::unknown_process_error(handle))?;
+        Ok(scripted_read_line(
+            &proc.result.stderr,
+            &mut proc.stderr_cursor,
+        ))
+    }
+
+    /// The scripted commands don't read stdin, so a write is a validated no-op (the handle must
+    /// exist). `close_stdin` likewise no-ops. This keeps a stdin-feeding program deterministic and
+    /// terminating in-oracle.
+    fn os_proc_write_stdin(&mut self, handle: u64, _data: &str) -> Result<(), StdError> {
+        self.require_proc(handle)
+    }
+
+    fn os_proc_close_stdin(&mut self, handle: u64) -> Result<(), StdError> {
+        self.require_proc(handle)
+    }
+}
+
+impl SandboxHost {
+    /// Assert a scripted-process handle is live (else an `Io` error) — shared by the no-op stdin
+    /// operations.
+    fn require_proc(&self, handle: u64) -> Result<(), StdError> {
+        if self.procs.contains_key(&handle) {
+            Ok(())
+        } else {
+            Err(noeta_native::os::unknown_process_error(handle))
+        }
+    }
 }
 
 impl Tracing for SandboxHost {
@@ -671,6 +836,101 @@ mod tests {
         // An unscripted command cannot start — an Io error, like a missing binary.
         let e = host.os_exec("frobnicate", &[]).unwrap_err();
         assert_eq!(e.kind, ErrorKind::Io);
+    }
+
+    #[test]
+    fn os_spawn_is_scripted_and_deterministic() {
+        let mut host = SandboxHost::new();
+        // Spawned children get sequential handles and deterministic pseudo-pids.
+        let a = host.os_spawn("echo", &["hi".into()]).unwrap();
+        let b = host.os_spawn("echo", &["yo".into()]).unwrap();
+        assert_eq!((a, b), (1, 2));
+        assert_eq!(host.os_proc_pid(a), Some(10_001));
+        assert_eq!(host.os_proc_pid(b), Some(10_002));
+        assert_eq!(host.os_proc_pid(999), None);
+        // The scripted child completed at spawn: wait returns its outcome, try_wait reports done.
+        assert_eq!(host.os_proc_wait(a).unwrap().stdout, "hi\n");
+        assert_eq!(
+            host.os_proc_try_wait(a).unwrap().map(|r| r.stdout),
+            Some("hi\n".to_string())
+        );
+        // kill is a no-op on the completed child; wait remains valid afterward.
+        assert!(host.os_proc_kill(a).is_ok());
+        assert_eq!(host.os_proc_wait(a).unwrap().stdout, "hi\n");
+        // Operating on an unknown handle is an Io error.
+        assert_eq!(host.os_proc_wait(999).unwrap_err().kind, ErrorKind::Io);
+        assert_eq!(host.os_proc_kill(999).unwrap_err().kind, ErrorKind::Io);
+        // A spawn of an unstartable command fails at spawn, like a real missing binary.
+        assert_eq!(
+            host.os_spawn("frobnicate", &[]).unwrap_err().kind,
+            ErrorKind::Io
+        );
+    }
+
+    #[test]
+    fn os_proc_read_line_streams_scripted_stdout() {
+        let mut host = SandboxHost::new();
+        // The scripted `echo` joins args with spaces; an embedded newline makes it multi-line.
+        let p = host
+            .os_spawn("echo", &["first\nsecond\nthird".into()])
+            .unwrap();
+        assert_eq!(host.os_proc_read_line(p).unwrap().as_deref(), Some("first"));
+        assert_eq!(
+            host.os_proc_read_line(p).unwrap().as_deref(),
+            Some("second")
+        );
+        assert_eq!(host.os_proc_read_line(p).unwrap().as_deref(), Some("third"));
+        // Exhausted → None, and it stays None.
+        assert_eq!(host.os_proc_read_line(p).unwrap(), None);
+        assert_eq!(host.os_proc_read_line(p).unwrap(), None);
+        // `wait` still returns the whole captured stdout, independent of the read cursor.
+        assert_eq!(
+            host.os_proc_wait(p).unwrap().stdout,
+            "first\nsecond\nthird\n"
+        );
+        // stdin ops are validated no-ops on the scripted child; unknown handle is an Io error.
+        assert!(host.os_proc_write_stdin(p, "x").is_ok());
+        assert!(host.os_proc_close_stdin(p).is_ok());
+        assert_eq!(host.os_proc_read_line(999).unwrap_err().kind, ErrorKind::Io);
+        assert_eq!(
+            host.os_proc_write_stdin(999, "x").unwrap_err().kind,
+            ErrorKind::Io
+        );
+    }
+
+    #[test]
+    fn os_proc_read_chars_and_stderr_line() {
+        let mut host = SandboxHost::new();
+        // `read(n)` reads up to n characters (multibyte-aware) sharing the stdout cursor.
+        let p = host.os_spawn("echo", &["héllo".into()]).unwrap(); // stdout "héllo\n"
+        assert_eq!(host.os_proc_read(p, 3).unwrap().as_deref(), Some("hél"));
+        assert_eq!(host.os_proc_read(p, 2).unwrap().as_deref(), Some("lo"));
+        // read_line consumes the trailing newline as an empty final line; then exhausted.
+        assert_eq!(host.os_proc_read_line(p).unwrap().as_deref(), Some(""));
+        assert_eq!(host.os_proc_read(p, 1).unwrap(), None);
+        // `read(0)` reads zero characters without consuming, until exhausted.
+        let z = host.os_spawn("echo", &["z".into()]).unwrap();
+        assert_eq!(host.os_proc_read(z, 0).unwrap().as_deref(), Some(""));
+
+        // stderr streams on an independent cursor (scripted `status` writes stderr).
+        let q = host
+            .os_spawn("status", &["0".into(), "e1\ne2".into()])
+            .unwrap();
+        assert_eq!(
+            host.os_proc_read_stderr_line(q).unwrap().as_deref(),
+            Some("e1")
+        );
+        assert_eq!(
+            host.os_proc_read_stderr_line(q).unwrap().as_deref(),
+            Some("e2")
+        );
+        assert_eq!(host.os_proc_read_stderr_line(q).unwrap(), None);
+        // Unknown handle → Io error on the new readers too.
+        assert_eq!(host.os_proc_read(999, 1).unwrap_err().kind, ErrorKind::Io);
+        assert_eq!(
+            host.os_proc_read_stderr_line(999).unwrap_err().kind,
+            ErrorKind::Io
+        );
     }
 
     #[test]

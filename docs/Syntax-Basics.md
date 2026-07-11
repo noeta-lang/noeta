@@ -28,7 +28,7 @@ echo "b"
 echo "c"; echo "d"   // two statements, one line
 ```
 
-A line **continues** onto the next (no statement break inserted) when the break is clearly mid-expression — the next line starts with an infix/postfix operator, `.`, `|>`, `??`, `..`, a comma, `=>`, `->`, a closing bracket, or a clause keyword (`else`, `then`, `in`, `as`, `is`), or the current line ends with an open `(`/`[`:
+A line **continues** onto the next (no statement break inserted) when the break is clearly mid-expression — the next line starts with an infix/postfix operator, `.`, `|>`, `??`, `..`, a comma, `=>`, `->`, a closing bracket, or a clause keyword (`else`, `then`, `in`, `as`, `is`), or the break sits inside an open `(`/`[` (a multi-line call or list):
 
 ```noeta
 total = 1 +          // trailing operator → continues
@@ -39,7 +39,41 @@ scaled = [1, 2, 3]
 echo total               // 6
 ```
 
+A `{ … }` block opens a fresh statement context wherever it appears — including a closure body nested inside a call — so newlines terminate statements there as usual:
+
+```noeta ignore
+ys = xs.map(fn(n) {
+    d = n * 2        // newline terminates, no `;` needed
+    return d + 1
+})
+```
+
 Type, `struct`, and `class` bodies are newline-separated — fields need no terminator.
+
+### Parentheses around control-flow headers
+
+The condition of `if`/`while` and the iterable of `for` may **optionally** be parenthesized — both styles are valid and mean the same thing (a lone `(expr)` is just `expr`):
+
+```noeta ignore
+if x > 0 { echo "a" }
+if (x > 0) { echo "a" }      // same thing — the parens are a readability choice
+
+while (running) { tick() }
+for x in (items) { echo x }
+```
+
+### Formatting: `noeta fmt` canonicalizes both
+
+`noeta fmt` normalizes header parentheses and trailing semicolons. Configure it in the `[fmt]` table of `noeta.toml`, or override per-run with `--parens` / `--semicolons`:
+
+```toml
+[fmt]
+parens = "remove"       # "remove" (default) strips header parens; "add" wraps them: `if (x) {`
+semicolons = "remove"   # "remove" (default) strips redundant `;`; "add" terminates every simple
+                        # statement; "preserve" keeps them exactly as written
+```
+
+`remove` only strips a `;` that is genuinely redundant — one that the newline the formatter puts after the statement could replace. A `;` that is structurally required is kept: when the next statement begins with a token that would otherwise continue this line (e.g. a leading `-`), the `;` is the only thing separating them.
 
 ## `echo`
 

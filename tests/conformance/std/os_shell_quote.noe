@@ -1,0 +1,14 @@
+// `os.shell_quote` — POSIX-shell-safe quoting for the explicit `sh -c` escape hatch (the normal
+// argv-vector exec/spawn API needs no quoting). A pure function, so both backends agree.
+// expect: stdout "plain-1.0_x"
+// expect: stdout "'has space'"
+// expect: stdout "''"
+// expect: stdout "true"
+// expect: exit 0
+use std.{os}
+
+echo os.shell_quote("plain-1.0_x")
+echo os.shell_quote("has space")
+echo os.shell_quote("")
+// A single quote is closed, escaped, and reopened — verify the exact shape.
+echo os.shell_quote("a'b") == "'a'\\''b'"

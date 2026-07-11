@@ -22,6 +22,26 @@ serde_json = { workspace = true, optional = true }
 # Ed25519 signing/verification for package provenance (Phase 4, #2). Seed bytes come from getrandom.
 ed25519-dalek = { workspace = true, optional = true }
 getrandom = { workspace = true, optional = true }
+# Sigstore keyless provenance (Phase 5): offline bundle verification against the public
+# sigstore.dev trust root. See the workspace manifest for the crate-choice rationale. sha2
+# computes the in-toto subject digest — sha256(canonical_bytes), the DSSE payload's binding
+# to the attestation.
+sigstore-verify = { workspace = true, optional = true }
+sigstore-trust-root = { workspace = true, optional = true }
+sigstore-types = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+# The publish side of keyless (K4): ambient OIDC → Fulcio → sign → Rekor, wrapped sync.
+# `browser` (K6) opens the user's browser for the interactive login; headless falls back to
+# the out-of-band print-URL/paste-code flow automatically.
+sigstore-sign = { workspace = true, optional = true }
+sigstore-oidc = { workspace = true, optional = true, features = ["browser"] }
+tokio = { workspace = true, optional = true, features = ["rt"] }
+# `keyless-test-fixtures` only (see the feature): minting the hermetic test CA/CT/Rekor.
+p256 = { workspace = true, optional = true }
+x509-cert = { workspace = true, optional = true }
+tls_codec = { workspace = true, optional = true }
+const-oid = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
 
 [features]
 # Enable the networked registry `Index` (an HTTP client of the hosted index). Off by default; the CLI
@@ -29,6 +49,32 @@ getrandom = { workspace = true, optional = true }
 registry-http = ["dep:reqwest", "dep:serde", "dep:serde_json"]
 # Package provenance: sign attestations on publish, verify them on resolve (Ed25519). CLI-only.
 provenance = ["dep:ed25519-dalek", "dep:getrandom"]
+# Keyless provenance (Phase 5): Sigstore bundles verified offline — OIDC identity in place of a
+# registered key, public transparency log in place of local-only detection. CLI-only, and
+# includes `provenance`: both trust roots sign the SAME `Attestation` (its canonical bytes are
+# what the in-toto subject digests), so keyless builds on the key path's attestation model.
+keyless = [
+    "provenance",
+    "dep:sigstore-verify",
+    "dep:sigstore-trust-root",
+    "dep:sigstore-types",
+    "dep:sigstore-sign",
+    "dep:sigstore-oidc",
+    "dep:tokio",
+    "dep:serde_json",
+    "dep:sha2",
+]
+# Hermetic keyless fixtures (K4): a REAL in-process test CA + CT log + Rekor log, so tests mint
+# bundles that verify under the DEFAULT policy. Public so `noeta-cli`'s e2e tests drive the same
+# minting; never enabled by a shipping binary (dev-dependency graphs only).
+keyless-test-fixtures = [
+    "keyless",
+    "dep:p256",
+    "dep:x509-cert",
+    "dep:tls_codec",
+    "dep:const-oid",
+    "dep:base64",
+]
 
 [lints]
 workspace = true

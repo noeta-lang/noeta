@@ -3,7 +3,7 @@
 This document is the technical overview of the **implementation**. The language's *design* — its semantics, feature set, and the "why" behind each technique — is documented in the [wiki](docs/Home.md), especially the [Concepts & design](docs/Architecture-and-Pipeline.md) section. This file describes the codebase as it actually exists and how its pieces fit together. `plans/roadmap.md` is the authoritative "what's done / what's next."
 
 > [!NOTE]
-> **Milestone status: M1 complete, M2 cluster 1 complete.** The register-based bytecode **VM**, NaN-boxed **value model** + shape-based **object model**, refcount + cycle **GC**, the bidirectional **type checker**, a **salsa** incremental query graph, traits/derives/generics, multi-file **modules**, a layered **stdlib**, and a real **host IO** boundary (sandbox + real disk) all exist and ship. The M0 tree-walker is **retained forever** as the differential oracle, never deleted. See `plans/roadmap.md` for the per-slice ledger; several later tracks (object-model redesign, reflection, isolates, an inferred-static type track) live on their own branches.
+> **Status.** The language core ships: the register-based bytecode **VM** + a Cranelift Tier-1 **JIT**, NaN-boxed **value model** + shape-based **object model**, precise refcount + cycle **GC**, the inferred-static bidirectional **type checker**, a **salsa** incremental query graph, traits/derives/generics/attributes+reflection, multi-file **modules**, a layered **stdlib**, and a real **host IO** boundary (sandbox + real disk/network) over twelve capability traits. On top of that the toolchain has grown well past M2: native **AOT** builds (`noeta-aot-runtime`/`noeta-bundle`), a **package manager** with keyless signing (`noeta-pm`), editor & agent tooling (`noeta-lsp`/`noeta-dap`/`noeta-mcp`), a canonical **formatter** (`noeta-fmt`) and **profiler** (`noeta-prof`), **reactivity** (`noeta-reactive`), local-first **CRDTs**/p2p (`noeta-crdt`), and OTLP **telemetry**. The differential oracle is now **Core-IR interpreter ↔ VM** (the original M0 AST tree-walker was retired in the memory-management migration; `noeta-eval` survives as the IR interpreter). See `plans/roadmap.md` for the authoritative per-track ledger.
 
 ## Compilation pipeline
 
@@ -25,7 +25,7 @@ tokens ──► noeta-parser (chumsky) ──► AST (noeta-ast)
                         ┌──────────────┴───────────────────────────────┐
                         ▼                                               ▼
                    noeta-eval                              noeta-compiler ─► Chunk/Module (noeta-bytecode)
-              (tree-walker, the oracle)                                  ─► noeta-vm (register VM)
+            (Core-IR interpreter, the oracle)                            ─► noeta-vm (register VM)
                         │                                               │
                         └───────────────────► RunResult ◄──────────────┘
                               (observable output; the two are asserted identical)
@@ -62,11 +62,13 @@ Dependency edges form a strict DAG (no back-edges): `noeta-span` is depended on 
 | Crate | Role |
 |---|---|
 | `noeta-backend` | The execution-backend seam: `trait Backend { fn run(&Program) -> RunResult }`. Tiny shared vocabulary both backends depend on. |
-| `noeta-eval` | AST/IR → `RunResult` (the M0 tree-walker, **frozen as the differential oracle**). `Rc`-based value model. |
+| `noeta-eval` | Core-IR → `RunResult` (the **differential-oracle reference**, `Rc`-based value model). Began as the M0 AST tree-walker; that walk was retired in the RC migration and the crate now interprets the same RC-annotated IR the VM runs. |
 | `noeta-compiler` | IR → `Chunk`/`Module` bytecode; register allocation (graph colouring). |
 | `noeta-bytecode` | Opcode set, `Chunk`/`Module`, constant pool (pure data). |
 | `noeta-vm` | `Module` → `RunResult` (the Tier-0 register VM, `VmBackend`) over NaN-boxed values + inline caches; owns the tier-promotion counters and the JIT runtime helpers. |
 | `noeta-jit` | The Tier-1 method JIT (Cranelift, behind the `jit` cargo feature): compiles hot prototypes to native code holding VM registers in SSA (typed/unboxed where provable), with a bail-to-interpreter deopt contract and per-call-site inline caches. The sandbox/differential path never uses it. |
+| `noeta-jit-abi` | The frozen calling-convention/ABI vocabulary shared between `noeta-vm` and `noeta-jit` (native ↔ interpreter frame contract). |
+| `noeta-aot-runtime` / `noeta-bundle` | Ahead-of-time native builds (`noeta build --native`): the AOT runtime support crate and the self-contained artifact bundler (per-ring stdlib + DCE). |
 | `noeta-builtins` | The prelude constructors (`Ok`/`Err`/`some`/`none`, `echo`, collection builtins). |
 
 ### VM value model
@@ -79,21 +81,36 @@ Dependency edges form a strict DAG (no back-edges): `noeta-span` is depended on 
 ### Shared runtime & host
 | Crate | Role |
 |---|---|
-| `noeta-stdlib` | The **shared semantics layer**: Ring 1/Ring 2 stdlib, the `Host` capability trait + `SandboxHost` (deterministic), the neutral `NativeValue` marshalling seam. Both backends route through it so behaviour cannot drift. |
-| `noeta-runtime` | `RealHost`: per-isolate tokio, real disk async + real `env`/`args`. CLI/REPL only; never differential-tested. |
+| `noeta-native` | The extension **ABI**: the `Host` supertrait (twelve capability traits — filesystem, rng, clock, env, os, entropy, ids, network, p2p, tracing, metrics, logging), `ExtModule`/`ExtType`/`ExtFn` registration, and the neutral `NativeValue`/`PackedView` marshalling seam. What third-party native packages link against. |
+| `noeta-stdlib` | The **shared semantics layer**: Ring 1/Ring 2 stdlib + `SandboxHost` (deterministic) implemented over the `noeta-native` ABI. Both backends route through it so behaviour cannot drift. |
+| `noeta-runtime` | `RealHost`: per-isolate tokio, real disk async + real `env`/`args`/network + telemetry export. CLI/REPL only; never differential-tested. |
+| `noeta-reactive` | Signals/computed/effects: the reactive graph, topological flush, and the E0045 runaway guard. |
+| `noeta-crdt` | Local-first CRDTs (gcounter/pncounter/gset) + the p2panda transport behind `std.synced`/`std.p2p`. |
 
 ### Modules, incremental, tooling
 | Crate | Role |
 |---|---|
 | `noeta-loader` | Multi-file module loading + linking: resolves `use` to sibling-module declarations honouring `pub`, merges into one `Program`. |
 | `noeta-db` | The salsa 0.27 query graph tying the pipeline together (`Workspace`/`linked`/`checked`/`bytecode`). |
+| `noeta-cache` | Default-on bytecode cache (`~/.cache/noeta/*.noeb`, build-identity-keyed): the `compile_whole_file` seam for run/dump/build. |
 | `noeta-conformance` | The dev-only harness: `// expect:` corpus runner, `--differential` oracle, JSON output, partial runs. |
 | `noeta-alloc-probe` | Test-only global-allocator probe for heap-residency assertions. |
-| `noeta-cli` | The `noeta` binary: `run`, `repl`, `test`, `bench`, `doc`. |
+| `noeta-cli` | The `noeta` binary. Core verbs `run`/`build`/`check`/`repl`, `test`/`bench`/`doc`, `dump`/`fmt`/`profile`/`cache`, the editor/agent servers `lsp`/`dap`/`mcp`, and the package-manager verbs `add`/`update`/`publish`/`audit`/`key` (plus the dynamically-wired `serve`). |
+
+### Editor, agent & dev tooling
+| Crate | Role |
+|---|---|
+| `noeta-ide` | Shared IDE engine (hover, go-to-def, outline, references, call/role graph) over the salsa db, reused by both the LSP and the MCP server. |
+| `noeta-lsp` | `noeta lsp`: tower-lsp language server (diagnostics/hover/def/refs/rename/completion/semantic-tokens/inlay-hints/formatting). |
+| `noeta-dap` | `noeta dap`: debug adapter driving the production VM (breakpoints/stepping/scopes/variables) via a per-op debug hook. |
+| `noeta-mcp` | `noeta mcp`: agent-native MCP server serving the reflection manifest + ~27 tools over stdio. |
+| `noeta-fmt` | `noeta fmt`: the canonical formatter (lex+trivia → AST → Doc → text), also driving LSP formatting. |
+| `noeta-prof` | `noeta profile`: the dev profiler/flamegraph (tier-0 VM), folded/inferno-SVG/speedscope output. |
+| `noeta-pm` | The package manager: manifest/lockfile, dependency resolution (path/git/registry), keyless Sigstore signing + provenance verification, native-package toolchain composition. |
 
 ## Key implementation decisions
 
-- **Two backends, one differential oracle.** The frozen tree-walker (`noeta-eval`) and the bytecode VM (`noeta-vm`) are run through `trait Backend` against the same programs, and their `RunResult`s (observable output, not internal representation) are asserted identical. Comparing output — not value layout — is exactly what lets the two backends use completely different value models (the tree-walker's `Rc`-based enum vs. the VM's NaN-boxed words). This oracle is the spine of the test strategy.
+- **Two backends, one differential oracle.** The Core-IR interpreter (`noeta-eval`) and the bytecode VM (`noeta-vm`) are run through `trait Backend` against the same programs, and their `RunResult`s (observable output, not internal representation) are asserted identical. Comparing output — not value layout — is exactly what lets the two backends use completely different memory machines (the interpreter's `Rc`-based enum vs. the VM's NaN-boxed words on a manual refcount heap) while executing the *same* RC-annotated IR. (Historically the reference was the M0 AST tree-walker; it was retired in the memory-management migration because it fired destructors only at teardown and so couldn't reproduce last-use destruction.) This oracle is the spine of the test strategy.
 - **Tiered execution, oracle-gated.** The VM is Tier 0; a Cranelift method JIT (`noeta-jit`, `jit` feature) is Tier 1, compiling hot prototypes with registers held in SSA and a bail-before-mutate deopt contract onto the interpreter's own register stack. Tier 1 has its own differential gate (`--jit-differential`: forced-JIT vs interpreter, byte-identical output, zero leaks, zero refcount anomalies) so native code can never silently disagree with the interpreter. See [The Virtual Machine → Tier 1](docs/The-Virtual-Machine.md).
 - **Shared semantics live once, in `noeta-stdlib`.** Anything both backends must agree on (stdlib method bodies, host IO, float formatting, the neutral marshalling seam) is factored into `noeta-stdlib` and dispatched through exhaustive enums (`ListMethod`/`MapMethod`/…) rather than per-backend string matching, so the compiler catches a missing case. (Routing/dispatch that is still mirrored between the backends is a known debt tracked in `plans/`.)
 - **Errors as data, centralized.** Every diagnostic is a typed variant with a stable code in `noeta-diagnostics`, rendered in exactly one place. No ad-hoc error strings in the stages.

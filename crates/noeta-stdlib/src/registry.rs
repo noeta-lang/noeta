@@ -248,6 +248,16 @@ const CORE_TYPES: &[ExtType] = &[
         key_capable: false,
         ..ExtType::DEFAULTS
     },
+    // `Process` (process-handle arc) — a spawned child's control handle: a mutable, host-coupled
+    // reference value (like `FileHandle`), its methods reaching the `Os` seam by id.
+    ExtType {
+        name: crate::os::PROCESS_TYPE_NAME,
+        namespace: "std.os",
+        methods: PROCESS_METHODS,
+        dispatch: process_method_dispatch,
+        key_capable: false,
+        ..ExtType::DEFAULTS
+    },
     // `Cell<T>` (higher-order-abi H4) — the generic, Class-3 corner of the matrix: all methods
     // higher-order (ctx table), the held value in the retained arena; `get` is a declared
     // always-open arena read (H5), so the backend inlines it.
@@ -378,14 +388,20 @@ fn file_handle_dispatch(
 /// Phase-3 shim) passes to [`noeta_native::registry::install`] alongside its extra units. The
 /// order is cosmetic — every lookup iterates the whole list filtered by namespace root.
 pub fn std_units() -> Vec<&'static (dyn Extension + Sync)> {
-    vec![
+    #[allow(unused_mut)]
+    let mut units: Vec<&'static (dyn Extension + Sync)> = vec![
         &CoreExtension,
         &HttpExtension,
         &CryptoExtension,
         &IdExtension,
         &VecExtension,
         &P2pExtension,
-    ]
+    ];
+    // The `std.datetime` calendar/timezone unit (Ring 3) — present only when its default-on ring is
+    // compiled in, so a footprint-tailored build that sheds jiff also sheds the module + types.
+    #[cfg(feature = "ring-datetime")]
+    units.push(&crate::datetime::DateTimeExtension);
+    units
 }
 
 // --- the registry facade (package-manager Phase 3, N3.0) ----------------------------------------
@@ -1629,6 +1645,17 @@ fn os_dispatch(
                 host.os_exec_spawn(command, argv),
             )))
         }
+        // `spawn(command, args?)` — start a child WITHOUT waiting and hand back a controllable
+        // `Process` handle (process-handle arc), unlike `exec`'s run-to-completion.
+        "spawn" => {
+            want_arity_range(func, args, 1, 2)?;
+            let command = want_str(func, args, 0)?;
+            let argv = want_argv(func, args, 1)?;
+            let id = host.os_spawn(command, &argv)?;
+            Ok(NativeOut::Extern(crate::ExternBox::new(
+                crate::os::Process { id },
+            )))
+        }
         // `exit(code?)` — deliberate termination. Not a host effect and not a diagnostic: the
         // distinguished `ErrorKind::Exit` unwinds the backend, which halts cleanly and surfaces
         // the code as the run's exit code.
@@ -1643,8 +1670,42 @@ fn os_dispatch(
                 message: format!("exit({code})"),
             })
         }
+        // Quote a string so it is a single, literal token to a POSIX shell — for the explicit
+        // `os.exec("sh", ["-c", ...])` escape hatch (the argv-vector `exec`/`spawn` API never
+        // touches a shell and needs no quoting). Pure and deterministic.
+        "shell_quote" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Str(shell_quote(want_str(func, args, 0)?)))
+        }
         _ => Err(no_function_error("os", func)),
     }
+}
+
+/// POSIX-shell single-quote a token so it is passed to the shell literally (no word-splitting,
+/// glob, or expansion). An empty string becomes `''`; a string of only safe characters is returned
+/// unquoted; otherwise it is wrapped in single quotes with any embedded `'` written as `'\''`
+/// (close-quote, escaped quote, reopen) — the canonical, injection-safe shell quoting.
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    let safe = s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c));
+    if safe {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// The `ExecResult` instance methods (stdlib-gaps): pure reads over the captured outcome, the
@@ -1691,6 +1752,131 @@ fn exec_result_dispatch(
             crate::os::EXEC_RESULT_TYPE_NAME,
             method,
         )),
+    }
+}
+
+/// The `Process` instance methods (process-handle arc): lifecycle control over a spawned child,
+/// each routing to the `Os` seam by the handle's id.
+const PROCESS_METHODS: &[ExtFn] = &[
+    ExtFn {
+        name: "pid",
+        params: &[],
+        ret: Concrete(Int),
+    },
+    ExtFn {
+        name: "wait",
+        params: &[],
+        ret: Concrete(EXEC_RESULT_SIG),
+    },
+    ExtFn {
+        name: "try_wait",
+        params: &[],
+        ret: Concrete(SigType::Option(&EXEC_RESULT_SIG)),
+    },
+    ExtFn {
+        name: "kill",
+        params: &[],
+        ret: Concrete(SigType::Unit),
+    },
+    // Streaming (process-streaming arc): consume stdout line-by-line or by character count while
+    // the child runs, read stderr, and feed / close its stdin. `wait` still returns the whole
+    // captured output.
+    ExtFn {
+        name: "read_line",
+        params: &[],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        name: "read",
+        params: &[Int],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        name: "read_err_line",
+        params: &[],
+        ret: Concrete(SigType::Option(&Str)),
+    },
+    ExtFn {
+        name: "write",
+        params: &[Str],
+        ret: Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "close_stdin",
+        params: &[],
+        ret: Concrete(SigType::Unit),
+    },
+];
+
+/// Wrap an optional string read (a streaming `read_line`/`read`/`read_err_line`) into a native
+/// `some(...)`/`none`.
+fn opt_str_out(line: Option<String>) -> NativeOut {
+    match line {
+        Some(s) => NativeOut::Some(Box::new(NativeOut::Str(s))),
+        None => NativeOut::None,
+    }
+}
+
+fn process_method_dispatch(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let Some(process) = recv.as_any().downcast_ref::<crate::os::Process>() else {
+        return Err(type_error(method, "Process"));
+    };
+    let id = process.id;
+    let exec_out = |r: crate::ExecResult| NativeOut::Extern(crate::ExternBox::new(r));
+    match method {
+        "pid" => {
+            want_arity(method, args, 0)?;
+            match host.os_proc_pid(id) {
+                Some(pid) => Ok(NativeOut::Scalar(Scalar::Int(pid))),
+                None => Err(crate::os::unknown_process_error(id)),
+            }
+        }
+        "wait" => {
+            want_arity(method, args, 0)?;
+            Ok(exec_out(host.os_proc_wait(id)?))
+        }
+        "try_wait" => {
+            want_arity(method, args, 0)?;
+            Ok(match host.os_proc_try_wait(id)? {
+                Some(result) => NativeOut::Some(Box::new(exec_out(result))),
+                None => NativeOut::None,
+            })
+        }
+        "kill" => {
+            want_arity(method, args, 0)?;
+            host.os_proc_kill(id)?;
+            Ok(NativeOut::Unit)
+        }
+        "read_line" => {
+            want_arity(method, args, 0)?;
+            Ok(opt_str_out(host.os_proc_read_line(id)?))
+        }
+        "read" => {
+            want_arity(method, args, 1)?;
+            let count = want_int(method, args, 0)?;
+            Ok(opt_str_out(host.os_proc_read(id, count)?))
+        }
+        "read_err_line" => {
+            want_arity(method, args, 0)?;
+            Ok(opt_str_out(host.os_proc_read_stderr_line(id)?))
+        }
+        "write" => {
+            want_arity(method, args, 1)?;
+            let data = want_str(method, args, 0)?;
+            host.os_proc_write_stdin(id, data)?;
+            Ok(NativeOut::Unit)
+        }
+        "close_stdin" => {
+            want_arity(method, args, 0)?;
+            host.os_proc_close_stdin(id)?;
+            Ok(NativeOut::Unit)
+        }
+        _ => Err(crate::no_method_error(crate::os::PROCESS_TYPE_NAME, method)),
     }
 }
 
@@ -2381,6 +2567,9 @@ const ARGS_FNS: &[ExtFn] = &[ExtFn {
 /// The `ExecResult` signature — `os.exec`'s return (stdlib-gaps).
 const EXEC_RESULT_SIG: SigType = SigType::Named(crate::os::EXEC_RESULT_TYPE_NAME);
 
+/// The `Process` signature — `os.spawn`'s return (process-handle arc).
+const PROCESS_SIG: SigType = SigType::Named(crate::os::PROCESS_TYPE_NAME);
+
 /// The `os` module (stdlib-gaps): system introspection leaves + subprocess execution + exit.
 const OS_FNS: &[ExtFn] = &[
     ExtFn {
@@ -2423,11 +2612,23 @@ const OS_FNS: &[ExtFn] = &[
         params: &[Str, SigType::Optional(&SigType::List(&Str))],
         ret: Concrete(SigType::Future(&EXEC_RESULT_SIG)),
     },
+    // `spawn(command, args?)` — start a child and return a controllable `Process` handle.
+    ExtFn {
+        name: "spawn",
+        params: &[Str, SigType::Optional(&SigType::List(&Str))],
+        ret: Concrete(PROCESS_SIG),
+    },
     // `exit(code?)` types as unit; it never actually returns.
     ExtFn {
         name: "exit",
         params: &[SigType::Optional(&Int)],
         ret: Concrete(SigType::Unit),
+    },
+    // `shell_quote(s)` — POSIX-shell-safe quoting for the explicit `sh -c` escape hatch.
+    ExtFn {
+        name: "shell_quote",
+        params: &[Str],
+        ret: Concrete(Str),
     },
 ];
 
@@ -2979,6 +3180,19 @@ mod tests {
     }
 
     #[test]
+    fn shell_quote_is_injection_safe() {
+        // Safe tokens pass through unquoted; anything with shell metacharacters is single-quoted.
+        assert_eq!(shell_quote("plain-1.0_x"), "plain-1.0_x");
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("has space"), "'has space'");
+        // An embedded single quote is closed, escaped, and reopened — the canonical POSIX form.
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        // A metacharacter payload becomes one literal token (no word-splitting / command chaining).
+        assert_eq!(shell_quote("x; rm -rf / #"), "'x; rm -rf / #'");
+        assert_eq!(shell_quote("$(whoami)"), "'$(whoami)'");
+    }
+
+    #[test]
     fn required_count_stops_at_the_first_optional_param() {
         // All-required.
         assert_eq!(SigType::required_count(&[SigType::String, SigType::Int]), 2);
@@ -3245,6 +3459,7 @@ mod tests {
             ("Request", "std.http.Request"),
             ("FileHandle", "std.fs.FileHandle"),
             ("ExecResult", "std.os.ExecResult"),
+            ("Process", "std.os.Process"),
             ("Span", "std.tracing.Span"),
             ("Counter", "std.metrics.Counter"),
             ("Histogram", "std.metrics.Histogram"),

@@ -108,4 +108,4 @@ echo match invoke(Shape.new(2, 3), "area", []) {
 
 ## Where this is headed
 
-The reflection manifest — declarations, their `#[…]` attributes, and their `@role`/`@semantic` tags — is designed to back an agentic tooling surface (querying a program's architectural graph over MCP). That server does not ship yet; see [Editor & AI Tooling](Editor-and-AI-Tooling) for the honest status.
+The reflection manifest — declarations, their `#[…]` attributes, and their `@role`/`@semantic` tags — backs an agentic tooling surface: `noeta mcp` serves this manifest over stdio (roles, attributes, and the architectural graph) to MCP clients. See [Editor & AI Tooling](Editor-and-AI-Tooling) for the tool inventory.

@@ -31,7 +31,11 @@ noeta-bytecode = { workspace = true }
 # ring features the *only* thing that turns a stdlib ring (and its native deps) on; `noeta build
 # --native` selects them per-program (DCE Axis B).
 noeta-runtime = { path = "../noeta-runtime", default-features = false }
-noeta-stdlib = { workspace = true }
+# Direct path (not workspace inheritance) so we can set default-features = false — an inherited
+# workspace dep may not override default-features. Drops the ring-datetime default (jiff + tzdb) so
+# an AOT binary that never imports std.datetime sheds it; the toolchain (noeta-cli) and differential
+# (noeta-eval) keep noeta-stdlib default-on, so datetime is present everywhere else.
+noeta-stdlib = { path = "../noeta-stdlib", default-features = false }
 noeta-span = { workspace = true }
 noeta-diagnostics = { workspace = true }
 
@@ -40,13 +44,21 @@ noeta-diagnostics = { workspace = true }
 # scan builds this crate with `--no-default-features --features <used rings>` to shed the rest, and
 # the linker then drops each unreferenced ring's native dep tree. The `aot` runtime support (on
 # `noeta-vm`) is a hard dep feature above, so it survives `--no-default-features`.
-default = ["ring-http-client", "ring-p2p"]
+default = ["ring-http-client", "ring-p2p", "ring-datetime"]
 # The `std.http` outbound-client ring — forwards to reqwest in noeta-runtime.
 ring-http-client = ["noeta-runtime/ring-http-client"]
 # The `std.p2p`/`std.synced` real-transport ring — forwards to the p2panda-net node in
 # noeta-runtime. The footprint scan drops this (and its multi-MB iroh/QUIC tree) from an AOT binary
 # whose program never imports `std.p2p`/`std.synced`.
 ring-p2p = ["noeta-runtime/ring-p2p"]
+# The `std.datetime` ring — forwards to jiff + the tzdb in noeta-stdlib. Unlike the two rings above
+# (host-deps in noeta-runtime), jiff is a *pure* dep in noeta-stdlib, so shedding it needs every
+# noeta-stdlib puller in this crate's graph (vm/value/ir/compiler/check/runtime and this crate) to
+# pull it `default-features = false` — which they do. So `--no-default-features` (a program that
+# never imports `std.datetime`) links no jiff; `--features ring-datetime` (a datetime-using program,
+# per the footprint scan) forwards the ring back on. The toolchain and differential are separate
+# builds where noeta-cli / noeta-eval keep noeta-stdlib default-on.
+ring-datetime = ["noeta-stdlib/ring-datetime"]
 
 # This crate is the one place the whole AOT scheme's `unsafe` lives: a C-ABI `main`, the reference to
 # the linker-defined `noeta_aot_dispatch` data symbol, and the `run_module_aot` binding call. Relax

@@ -36,6 +36,10 @@ pub use noeta_native::*;
 pub mod cell;
 pub mod crdt;
 pub mod crypto;
+/// The `std.datetime` calendar/timezone surface (Ring 3), gated behind the default-on
+/// `ring-datetime` feature so a footprint-tailored build can shed jiff and the tzdb.
+#[cfg(feature = "ring-datetime")]
+pub mod datetime;
 pub mod env;
 pub mod fs;
 pub mod handle;

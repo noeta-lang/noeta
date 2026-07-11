@@ -8,7 +8,7 @@ The VM (`noeta-vm`) is a Tier-0 **register machine** (Lua/Dalvik style), not a s
 
 The compiled artifact (pure data in `noeta-bytecode`):
 
-- **`Op`** — the opcode set: arithmetic and branching, `Call`/`Return`, `MakeList`/`MakeMap` and iteration ops, `CallBuiltin`, the object-model ops (`MakeRecord`/`MakeEnum`/`LoadField`/`CallMethod`), and ops added by later tracks (`MakeStructInPlace` for reuse, drop ops for RC, `MakeChannel`/`SpawnIsolate`/`ExtCall`).
+- **`Op`** — the opcode set: arithmetic and branching, `Call`/`Return`, `MakeList`/`MakeMap` and iteration ops, `CallBuiltin`/`LoadNativeFn` for native calls, the object-model ops (`MakeStruct`/`MakeEnum`/`LoadField`/`CallMethod`), and ops added by later tracks (`MakeStructInPlace` for reuse, drop ops for RC, `MakeChannel`/`SpawnIsolate`).
 - **`Chunk`** — one function prototype: its `code`, constant pool, `num_params`, `num_registers`, and `frame_locals` (destructor-teardown pins). `Chunk::disassemble` gives stable text for snapshot tests.
 - **`Module`** — the prototype table (proto 0 is the top-level program; the rest are functions/closures/methods), the flat `shapes` layout table, the `methods` dispatch table, and `cache_slots` (the inline-cache count).
 

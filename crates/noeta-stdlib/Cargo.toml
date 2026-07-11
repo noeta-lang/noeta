@@ -21,6 +21,16 @@ md-5 = { workspace = true }
 hmac = { workspace = true }
 subtle = { workspace = true }
 bcrypt = { workspace = true }
+# The `std.datetime` calendar/timezone backend (Ring 3 datetime arc). Optional + behind the
+# default-on `ring-datetime` feature so a footprint-tailored build sheds jiff and its tzdb.
+jiff = { workspace = true, optional = true }
+
+[features]
+# On by default — the plain toolchain/build has the full datetime surface. A `--no-default-features`
+# build (or the AOT footprint scan, which reads the `std.datetime` module's `ring`) drops jiff.
+default = ["ring-datetime"]
+# The `std.datetime` ring: pulls jiff (calendar/timezone/formatting) and registers the datetime unit.
+ring-datetime = ["dep:jiff"]
 
 [dev-dependencies]
 criterion = { workspace = true }

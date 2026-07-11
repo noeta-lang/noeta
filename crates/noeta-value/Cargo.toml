@@ -17,7 +17,11 @@ noeta-object = { workspace = true }
 # The M2.5 file handle stores `noeta_stdlib::FileHandle` directly so its cursor logic is shared
 # verbatim with the tree-walker (differential-by-construction). noeta-stdlib has no internal deps,
 # so this adds no dependency cycle.
-noeta-stdlib = { workspace = true }
+# Direct path (not workspace inheritance) so we can set default-features = false — an inherited
+# workspace dep may not override default-features. Drops the ring-datetime default (jiff + tzdb) so
+# an AOT binary that never imports std.datetime sheds it; the toolchain (noeta-cli) and differential
+# (noeta-eval) keep noeta-stdlib default-on, so datetime is present everywhere else.
+noeta-stdlib = { path = "../noeta-stdlib", default-features = false }
 # no internal deps, so this adds no dependency cycle.
 # Hot-path integer formatting for interpolation holes (`display_into`); bypasses `fmt::Formatter`.
 itoa = { workspace = true }

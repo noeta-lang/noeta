@@ -18,20 +18,22 @@ Semantics are Unicode-scalar-based; a wrong arity or argument type is E0007.
 | `contains` | `contains(needle: string) -> bool` | `"hello".contains("ell")` → `true` |
 | `starts_with` | `starts_with(prefix: string) -> bool` | `"hello".starts_with("he")` → `true` |
 | `ends_with` | `ends_with(suffix: string) -> bool` | `"hello".ends_with("lo")` → `true` |
-| `split` | `split(sep: string) -> List<string>` | `"a,b,c".split(",")` → `["a", "b", "c"]` |
+| `split` | `split(sep: string, limit?: int) -> List<string>` | `"a,b,c".split(",")` → `["a", "b", "c"]`; `"a,b,c".split(",", 2)` → `["a", "b,c"]` |
 | `chars` | `chars() -> List<string>` | `"héy".chars()` → `["h", "é", "y"]` |
 | `lines` | `lines() -> List<string>` | `"a\nb\n".lines()` → `["a", "b"]` (handles `\r\n`) |
 | `replace` | `replace(from: string, to: string) -> string` | `"a.b".replace(".", "/")` → `a/b` |
 | `repeat` | `repeat(n: int) -> string` | `"ab".repeat(3)` → `ababab` |
-| `slice` | `slice(start: int, end: int) -> string` | `"héllo".slice(1, 3)` → `él` (chars, half-open; out of bounds is E0016) |
+| `slice` | `slice(start: int, end?: int) -> string` | `"héllo".slice(1, 3)` → `él`; `"héllo".slice(1)` → `éllo` (end defaults to the length; chars, half-open; out of bounds is E0016) |
 | `char_at` | `char_at(i: int) -> ?string` | `"héy".char_at(1)` → `some(é)`; out of range → `none` |
-| `index_of` | `index_of(sub: string) -> ?int` | `"héllo".index_of("llo")` → `some(2)` (char index); absent → `none` |
-| `pad_start` / `pad_end` | `(width: int, fill: string) -> string` | `"7".pad_start(3, "0")` → `007` |
+| `index_of` | `index_of(sub: string, from?: int) -> ?int` | `"héllo".index_of("llo")` → `some(2)` (char index); `from` starts the search; absent → `none` |
+| `pad_start` / `pad_end` | `(width: int, fill?: string) -> string` | `"7".pad_start(3, "0")` → `007`; `"7".pad_start(3)` → `··7` (fill defaults to a space) |
 | `is_empty` | `is_empty() -> bool` | `"".is_empty()` → `true` |
 | `to_int` | `to_int() -> ?int` | `"42".to_int()` → `some(42)`; `"4.2".to_int()` → `none` |
 | `to_float` | `to_float() -> ?float` | `"4.2".to_float()` → `some(4.2)` |
 | `to_bytes` | `to_bytes() -> bytes` | `"hé".to_bytes().len()` → `3` (UTF-8; `bytes.decode()` is the inverse) |
 | `len` | `len() -> int` | `"héllo".len()` → `5` |
+
+A `?` on a parameter marks it **optional** — a built-in method with a trailing-optional parameter accepts either arity (`"a,b".split(",")` and `"a,b,c".split(",", 2)` both type-check), exactly like a `use std.{…}` module function. Supplying too many arguments is still a static error.
 
 Splitting on `""` yields characters (same as `chars()`). Parsing is strict — `to_int`/`to_float` return `none` on surrounding whitespace or malformed input; compose with `trim()`. Also: index `s[i]` returns the i-th character (out of bounds is E0016), `s.len()` counts scalars, `"…${e}…"` interpolates, and `a ~ b` concatenates (display-concatenating non-strings).
 
@@ -51,12 +53,13 @@ xs[1] = 20             // sugar for  xs = xs.set(1, 20)  (needs a mut binding)
 |---|---|---|
 | `reverse` | `reverse() -> List<T>` | `[3,1,2].reverse()` → `[2, 1, 3]` |
 | `contains` | `contains(x: T) -> bool` | `[1,2,3].contains(2)` → `true` |
-| `join` | `join(sep: string) -> string` | `["a","b"].join("-")` → `a-b` |
+| `join` | `join(sep?: string) -> string` | `["a","b"].join("-")` → `a-b`; `[1,2,3].join()` → `123` (sep defaults to empty) |
 | `sorted` | `sorted() -> List<T>` | `[3,1,2].sorted()` → `[1, 2, 3]` |
-| `slice` | `slice(start: int, end: int) -> List<T>` | `[1,2,3,4].slice(1,3)` → `[2, 3]` |
+| `slice` | `slice(start: int, end?: int) -> List<T>` | `[1,2,3,4].slice(1,3)` → `[2, 3]`; `[1,2,3,4].slice(1)` → `[2, 3, 4]` (end defaults to the length) |
 | `first` | `first() -> ?T` | `[1,2].first()` → `some(1)`; `[].first()` → `none` |
 | `last` | `last() -> ?T` | `[1,2].last()` → `some(2)` |
 | `to_set` | `to_set() -> Set<T>` | `[3,1,2,1].to_set()` → `{1, 2, 3}` |
+| `to_bytes` | `to_bytes() -> bytes` | on a `List<@packed>`, its flat backing buffer (see [packed types](Standard-Library-Modules)) |
 | `set` | `set(i: int, v: T) -> List<T>` | `[1,2,3].set(2, 30)` → `[1, 2, 30]` |
 | `len` | `len() -> int` | `[1,2,3].len()` → `3` |
 | `enumerate` | `enumerate() -> List<(int, T)>` | `["a","b"].enumerate()` → `[(0, "a"), (1, "b")]` |

@@ -400,6 +400,68 @@ impl Os for WasiHost {
             "os.exec: cannot run `{command}`: the wasm/WASI target has no subprocesses"
         )))
     }
+
+    // --- Process supervision (the process-streaming arc): a browser tab / WASI guest has no
+    // subprocesses, so the whole family is the same honest error as `os_exec` — and since
+    // `os_spawn` never succeeds, no handle can exist for the query leaves. ---
+
+    fn os_spawn(&mut self, command: &str, _args: &[String]) -> Result<u64, StdError> {
+        Err(io_error(format!(
+            "os.spawn: cannot run `{command}`: the wasm/WASI target has no subprocesses"
+        )))
+    }
+
+    fn os_proc_pid(&self, _handle: u64) -> Option<i64> {
+        None
+    }
+
+    fn os_proc_wait(&mut self, _handle: u64) -> Result<ExecResult, StdError> {
+        Err(io_error(
+            "no child process exists: the wasm/WASI target has no subprocesses".to_string(),
+        ))
+    }
+
+    fn os_proc_try_wait(&mut self, _handle: u64) -> Result<Option<ExecResult>, StdError> {
+        Err(io_error(
+            "no child process exists: the wasm/WASI target has no subprocesses".to_string(),
+        ))
+    }
+
+    fn os_proc_kill(&mut self, _handle: u64) -> Result<(), StdError> {
+        Err(io_error(
+            "no child process exists: the wasm/WASI target has no subprocesses".to_string(),
+        ))
+    }
+
+    fn os_proc_read_line(&mut self, _handle: u64) -> Result<Option<String>, StdError> {
+        Err(io_error(
+            "no child process exists: the wasm/WASI target has no subprocesses".to_string(),
+        ))
+    }
+
+    fn os_proc_read(&mut self, _handle: u64, _count: i64) -> Result<Option<String>, StdError> {
+        Err(io_error(
+            "no child process exists: the wasm/WASI target has no subprocesses".to_string(),
+        ))
+    }
+
+    fn os_proc_read_stderr_line(&mut self, _handle: u64) -> Result<Option<String>, StdError> {
+        Err(io_error(
+            "no child process exists: the wasm/WASI target has no subprocesses".to_string(),
+        ))
+    }
+
+    fn os_proc_write_stdin(&mut self, _handle: u64, _data: &str) -> Result<(), StdError> {
+        Err(io_error(
+            "no child process exists: the wasm/WASI target has no subprocesses".to_string(),
+        ))
+    }
+
+    fn os_proc_close_stdin(&mut self, _handle: u64) -> Result<(), StdError> {
+        Err(io_error(
+            "no child process exists: the wasm/WASI target has no subprocesses".to_string(),
+        ))
+    }
 }
 
 impl Network for WasiHost {

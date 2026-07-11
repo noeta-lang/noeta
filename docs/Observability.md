@@ -97,7 +97,7 @@ fn handle_order(id: int): void {
 }
 ```
 
-> `Span` is a reserved type name — declaring your own `Span` is a compile error (**E0049**).
+> `Span` is a namespaced extern type, not a reserved name — you may declare your own `Span`. A clash only arises if you also `use std.tracing.Span` in the same scope, which is an import conflict (**E0020**). (E0049 is reserved for the checker-native generics `Iterator`/`Future`/`Sender`/`Receiver`.)
 
 ## Logs (`std.log`)
 

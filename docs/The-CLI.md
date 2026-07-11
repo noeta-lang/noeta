@@ -5,6 +5,8 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | Command | Purpose |
 |---|---|
 | [`noeta run`](#noeta-run) | Type-check and execute a program. |
+| [`noeta build`](#noeta-build) | Compile to a standalone artifact (`--exe`, or `--native` for a machine-code binary). |
+| [`noeta check`](#noeta-check) | Parse and type-check without running or building (exit 0/1/2). |
 | [`noeta repl`](#noeta-repl) | Interactive REPL. |
 | [`noeta dump`](#noeta-dump) | Disassemble a program to its VM bytecode (a debugging aid). |
 | [`noeta test`](Testing) | Discover and run `@test` blocks. |
@@ -12,6 +14,7 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta doc`](Documentation-and-Tiers) | Extract `@doc { … }` prose to stdout. |
 | [`noeta lsp`](Editor-and-AI-Tooling) | The language server, over stdio (started by your editor, not by hand). |
 | [`noeta dap`](Debugging) | The debug adapter, over stdio (started by your editor's debug UI, not by hand). |
+| [`noeta mcp`](Editor-and-AI-Tooling) | The agent-native MCP server, over stdio (for AI tooling; see [Editor & AI Tooling](Editor-and-AI-Tooling)). |
 | [`noeta profile`](Profiling) | Profile a program — a hot-function table or a flamegraph. |
 | [`noeta fmt`](#noeta-fmt) | Format `.noe` source into the canonical style (files/dirs, `--check`, `--stdin`). |
 
@@ -33,6 +36,8 @@ Formats `.noe` source into the canonical style — the same layout no matter how
 noeta fmt [PATHS...]   # format files, or every .noe under a directory, in place (atomic)
 noeta fmt --check ...  # write nothing; list any file that is not already formatted, exit 1 (CI)
 noeta fmt --stdin      # read source on stdin, write the formatted result to stdout (format-on-save)
+noeta fmt --parens <remove|add> ...      # override the [fmt] parens policy for redundant header parens
+noeta fmt --semicolons <remove|add|preserve> ...   # override the [fmt] semicolons policy
 ```
 
 Style is read from a `[fmt]` table in the nearest `noeta.toml`, or built-in defaults:
@@ -43,6 +48,8 @@ wrap             = false      # false (default) keeps your line breaks; true = w
 line_width       = 100        # column budget, used only when wrap = true
 match_arm_arrows = "compact"  # "compact" (default) or "align" (column-align match `=>`)
 sort_imports     = false      # false (default); true alphabetizes each comment-free run of `use`
+parens           = "remove"   # "remove" (default) strips redundant parens around if/while headers; "add" inserts them
+semicolons       = "remove"   # "remove" (default) strips redundant statement terminators; "add" or "preserve"
 ```
 
 With `wrap = false` (the default) the formatter preserves the line breaks you wrote and only normalizes indentation, spacing, and blank lines — so a tidy file is left essentially as-is. Trailing `;` and comments are always preserved; when `wrap = true`, wrapped lists get a trailing comma. Editors format with the same engine: the VS Code extension turns on **format-on-save** and **format-on-type** (reformatting a block when you type its closing `}`) for `.noe` files by default.
@@ -64,6 +71,7 @@ Loads, type-checks, and executes a `.noe` file on the **real host** — real `en
 | `--tier <NAME>` | Activate a dev-tier for this run, e.g. `--tier debug` compiles in `@debug { … }` blocks. Repeatable. Without it, every tier block is stripped. |
 | `--profile <NAME>` | Activate the tiers a `noeta.toml` build profile makes live. Unioned with any `--tier`. |
 | `--no-cache` | Bypass the [startup cache](#the-startup-cache) for this run — don't read a cached compile and don't write one. Same effect as `NOETA_NO_CACHE`. |
+| `--jit-stats` | After the run, print the Tier-1 JIT compile-coverage summary, a bail-reason histogram, and a declined-loop report to stderr. |
 
 The active-tier set is the profile's live tiers ∪ any `--tier` flags, resolved *before* loading (a bad profile fails fast). With an empty active set — the default — every `@test`/`@bench`/`@doc`/`@debug` block strips away and the program runs as written. See [Documentation & Dev Tiers](Documentation-and-Tiers).
 
@@ -91,6 +99,32 @@ The `--` protects hyphen-prefixed values from being parsed as `noeta`'s own opti
 $ noeta run hello.noe
 hello
 ```
+
+---
+
+## `noeta build`
+
+```
+noeta build [OPTIONS] <FILE>
+```
+
+Compiles a program to a standalone artifact instead of running it. It shares the same front end (and [startup cache](#the-startup-cache)) as `noeta run`.
+
+| Flag | Effect |
+|---|---|
+| `--out <PATH>` | Where to write the artifact. |
+| `--exe` | Emit a self-contained executable that bundles the bytecode with the runtime, launchable directly. |
+| `--native` | Emit an ahead-of-time-compiled **machine-code** binary (via the AOT backend), with dead-code elimination stripping unused stdlib rings. |
+
+Both executable forms see the same `args.all()` vector as `noeta run` (argv[0] = program path), so no code changes between running from source and shipping a binary.
+
+## `noeta check`
+
+```
+noeta check [PATH]
+```
+
+Parses and type-checks without running or building — the CI/pre-commit gate (the `cargo check` / `tsc --noEmit` primitive). `PATH` defaults to the current directory, walked recursively for `.noe` files (resolving and deduping shared modules); a single file checks just that file with its sibling modules linked in. `--format json` emits a single machine-readable report on stdout for CI/editors/the MCP server; the default renders diagnostics for a terminal. Exits non-zero if any error-severity diagnostic is found (warnings print but do not fail).
 
 ---
 
@@ -174,6 +208,7 @@ Bindings persist across entries (unlike a compiled program, where a value is des
 | `:type <expr>` | `:t` | Evaluate the expression and print its runtime type. |
 | `:drop <name>` | `:free` | Run a binding's destructor now and unbind it. |
 | `:bindings` | `:b` | List the live bindings. |
+| `:check on\|off` | | Toggle per-entry type-checking mid-session (see `--no-check` above). |
 | `:reset` | | Clear all bindings. |
 | `:help` | `:h`, `:?` | Show help. |
 | `:quit` | `:q` | Exit (also Ctrl-D). |

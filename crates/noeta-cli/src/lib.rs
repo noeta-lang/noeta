@@ -300,6 +300,14 @@ enum Command {
         /// Read source from stdin and write the formatted result to stdout (editor "format on save").
         #[arg(long)]
         stdin: bool,
+        /// Override the `[fmt] parens` policy for control-flow headers: `remove` (strip) or `add`
+        /// (wrap `if (x) {`). Defaults to the manifest value, then `remove`.
+        #[arg(long, value_name = "remove|add")]
+        parens: Option<noeta_fmt::ParenStyle>,
+        /// Override the `[fmt] semicolons` policy: `remove` (strip redundant), `add` (terminate every
+        /// simple statement), or `preserve` (keep as written). Defaults to the manifest, then `remove`.
+        #[arg(long, value_name = "remove|add|preserve")]
+        semicolons: Option<noeta_fmt::SemicolonStyle>,
     },
     /// Add a dependency to the nearest `noeta.toml` and refresh `noeta.lock` (package-manager P2.4).
     /// Exactly one source must be given: `--path`, `--git` (with `--tag`), or `--version` (registry).
@@ -336,6 +344,20 @@ enum Command {
         /// The git tag for this release (defaults to `v<version>`).
         #[arg(long)]
         tag: Option<String>,
+        /// Force **key-based** signing even when an ambient OIDC identity (CI) is present.
+        /// Default: keyless (Sigstore) when the environment carries an identity, else the key
+        /// file, else unsigned.
+        #[arg(long, conflicts_with = "interactive")]
+        key: bool,
+        /// Sign keyless via an **interactive browser login** (Sigstore's OAuth: GitHub, Google,
+        /// or Microsoft — the certified identity is your email). For publishing from a laptop,
+        /// where no ambient CI identity exists.
+        #[arg(long)]
+        interactive: bool,
+        /// With `--interactive`: skip opening a browser — print the sign-in URL and prompt for
+        /// the code instead (SSH sessions, containers).
+        #[arg(long, requires = "interactive")]
+        oob: bool,
     },
     /// Report the dependency tree's **trust footprint** (package-manager Phase 4): every resolved
     /// dependency, its source, and which ones run **native code** or contribute **CLI commands** —
@@ -512,7 +534,9 @@ pub fn run_cli(
             files,
             check,
             stdin,
-        } => cmd_fmt(&files, check, stdin),
+            parens,
+            semicolons,
+        } => cmd_fmt(&files, check, stdin, parens, semicolons),
         Command::Add {
             key,
             path,
@@ -527,7 +551,13 @@ pub fn run_cli(
             version.as_deref(),
         ),
         Command::Update => cmd_update(),
-        Command::Publish { git, tag } => cmd_publish(&git, tag.as_deref()),
+        Command::Publish {
+            git,
+            tag,
+            key,
+            interactive,
+            oob,
+        } => cmd_publish(&git, tag.as_deref(), key, interactive, oob),
         Command::Audit { path } => cmd_audit(&path),
         Command::Key { action } => cmd_key(&action),
     }
@@ -629,7 +659,13 @@ fn cmd_update() -> ExitCode {
 /// `noeta publish --git <url> [--tag <tag>]` — record this package's identity + version → git
 /// coordinates in the registry index (package-manager P2.5, client stub). The tag defaults to
 /// `v<version>`. Writes to the local/offline index; the hosted registry is operated separately.
-fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
+fn cmd_publish(
+    git: &str,
+    tag: Option<&str>,
+    force_key: bool,
+    interactive: bool,
+    oob: bool,
+) -> ExitCode {
     let manifest_path = match locate_manifest() {
         Ok(p) => p,
         Err(code) => return code,
@@ -710,15 +746,65 @@ fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
         tag: tag.clone(),
         sha: sha.clone(),
     };
-    // Sign the attestation (Phase 4, #2) if a signing key is available, so consumers can verify
-    // "version → commit" against the scope's public key. The private key is read from
-    // NOETA_SIGNING_KEY (a path) or `noeta-signing.key` in the current directory; absent → publish
-    // *unsigned* (a warning — the release resolves but can't be provenance-verified).
-    let signature = match provenance_sign(&name, &version, &sha, index.as_ref()) {
-        Ok(sig) => sig,
-        Err(err) => {
-            eprintln!("lang: {err}");
+    // Attest the release (Phase 4 #2 / Phase 5) under one of two trust roots:
+    //  - **keyless** (preferred when available): an ambient OIDC identity (CI) signs via
+    //    Sigstore — ephemeral key, Fulcio cert, transparency log; nothing to steal afterwards.
+    //  - **key**: the Ed25519 file from NOETA_SIGNING_KEY / `noeta-signing.key` (`--key` forces
+    //    this even in CI).
+    // Neither available → publish *unsigned* (a warning — the release resolves, unverified).
+    let attestation = noeta_pm::provenance::Attestation {
+        name: &name,
+        version: &version,
+        sha: &sha,
+    };
+    let ambient = if force_key {
+        None
+    } else if interactive {
+        // Interactive browser login (K6): Sigstore's OAuth signs you in with GitHub/Google/
+        // Microsoft and the certified identity is the account email. `--oob` prints the URL
+        // and prompts for the code instead of opening a browser.
+        match noeta_pm::keyless::interactive_identity(oob) {
+            Ok(identity) => Some(identity),
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(1);
+            }
+        }
+    } else {
+        match noeta_pm::keyless::ambient_identity() {
+            Ok(identity) => identity,
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(1);
+            }
+        }
+    };
+    let (signature, bundle, provenance_tag) = if let Some(identity) = ambient {
+        let who = identity.identity().to_string();
+        let statement = noeta_pm::keyless::publish_statement(&attestation, &coords);
+        let bundle = match noeta_pm::keyless::publish_bundle(statement.as_bytes(), identity) {
+            Ok(bundle) => bundle,
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(1);
+            }
+        };
+        // Verify our own bundle before uploading it: a publisher should never ship provenance
+        // consumers will reject (a broken CA response, a log that didn't include us, …).
+        let digest = noeta_pm::keyless::attested_digest(&attestation);
+        if let Err(err) = noeta_pm::keyless::verify_bundle(&bundle, &digest, None) {
+            eprintln!("lang: the freshly signed bundle does not verify — not publishing: {err}");
             return ExitCode::from(1);
+        }
+        (None, Some(bundle), format!("keyless: {who}"))
+    } else {
+        match provenance_sign(&name, &version, &sha, index.as_ref()) {
+            Ok(Some(sig)) => (Some(sig), None, "signed".to_string()),
+            Ok(None) => (None, None, "UNSIGNED".to_string()),
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(1);
+            }
         }
     };
     let release = registry::Release {
@@ -726,15 +812,11 @@ fn cmd_publish(git: &str, tag: Option<&str>) -> ExitCode {
         coords,
         deps,
         signature,
+        bundle,
     };
     match index.publish(&name, &release) {
         Ok(()) => {
-            let signed = if release.signature.is_some() {
-                "signed"
-            } else {
-                "UNSIGNED"
-            };
-            println!("published `{name}` {version} → {git}#{tag} ({sha}) [{signed}]");
+            println!("published `{name}` {version} → {git}#{tag} ({sha}) [{provenance_tag}]");
             ExitCode::SUCCESS
         }
         Err(err) => {
@@ -828,19 +910,26 @@ fn cmd_audit(path: &std::path::Path) -> ExitCode {
          authorized (an unauthorized native dependency would have failed resolution)."
     );
 
-    // Provenance (Phase 4 #2): the scopes whose signing keys are pinned. Resolution *enforces*
-    // verification (a bad signature or a changed key fails the resolve), so a successful audit means
-    // every signed release verified against its pinned key.
-    println!("\n  Provenance (pinned signing keys):");
-    if graph.scope_keys.is_empty() {
-        println!("    (none — no registry dependency carried a signed release)");
+    // Provenance (Phase 4 #2 / Phase 5): each scope's pinned trust root. Resolution *enforces*
+    // verification (a bad signature/bundle, a changed key/identity, or a downgraded root fails the
+    // resolve), so a successful audit means every signed release verified against its pinned root.
+    println!("\n  Provenance (pinned trust roots):");
+    if graph.scope_trust.is_empty() {
+        println!("    (none — no registry dependency carried provenance)");
     } else {
-        for (scope, key) in &graph.scope_keys {
-            println!("    {scope}: {}…", &key[..key.len().min(16)]);
+        for (scope, trust) in &graph.scope_trust {
+            match trust {
+                noeta_pm::lock::ScopeTrust::Key(key) => {
+                    println!("    {scope}: key {}…", &key[..key.len().min(16)]);
+                }
+                noeta_pm::lock::ScopeTrust::Keyless { issuer, identity } => {
+                    println!("    {scope}: keyless {identity} (via {issuer})");
+                }
+            }
         }
         println!(
-            "    signed releases from these scopes verified during resolution; a changed key or bad \
-             signature aborts the build."
+            "    releases from these scopes verified during resolution; a changed key or identity, \
+             a downgraded trust root, or a bad signature/bundle aborts the build."
         );
     }
     ExitCode::SUCCESS
@@ -872,7 +961,8 @@ fn provenance_sign(
     if !key_path.is_file() {
         eprintln!(
             "lang: no signing key at `{}` — publishing UNSIGNED (consumers can't verify provenance). \
-             Run `noeta key new` and set NOETA_SIGNING_KEY to sign.",
+             Sign keyless with `noeta publish --interactive` (browser login), or run \
+             `noeta key new` and set NOETA_SIGNING_KEY.",
             key_path.display()
         );
         return Ok(None);
@@ -1096,9 +1186,30 @@ fn cmd_profile(
 /// left untouched and reported; the safety gate inside `noeta_fmt::format_source` guarantees a
 /// written file never changes meaning. In-place writes are atomic (temp file + rename) and skipped
 /// when the content is already canonical.
-fn cmd_fmt(paths: &[PathBuf], check: bool, stdin: bool) -> ExitCode {
+/// Apply any `--parens` / `--semicolons` CLI overrides on top of a manifest-resolved `FmtConfig`.
+fn apply_fmt_overrides(
+    mut config: noeta_fmt::FmtConfig,
+    parens: Option<noeta_fmt::ParenStyle>,
+    semicolons: Option<noeta_fmt::SemicolonStyle>,
+) -> noeta_fmt::FmtConfig {
+    if let Some(p) = parens {
+        config.parens = p;
+    }
+    if let Some(s) = semicolons {
+        config.semicolons = s;
+    }
+    config
+}
+
+fn cmd_fmt(
+    paths: &[PathBuf],
+    check: bool,
+    stdin: bool,
+    parens: Option<noeta_fmt::ParenStyle>,
+    semicolons: Option<noeta_fmt::SemicolonStyle>,
+) -> ExitCode {
     if stdin {
-        return cmd_fmt_stdin();
+        return cmd_fmt_stdin(parens, semicolons);
     }
     if paths.is_empty() {
         eprintln!("noeta fmt: no files given (use `--stdin` to format standard input)");
@@ -1121,7 +1232,7 @@ fn cmd_fmt(paths: &[PathBuf], check: bool, stdin: bool) -> ExitCode {
     for file in &files {
         let dir = file.parent().unwrap_or_else(|| std::path::Path::new("."));
         let config = match manifest::resolve_fmt_config(dir) {
-            Ok(config) => config,
+            Ok(config) => apply_fmt_overrides(config, parens, semicolons),
             Err(err) => {
                 eprintln!("noeta fmt: {err}");
                 return ExitCode::FAILURE;
@@ -1196,7 +1307,10 @@ fn atomic_write(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
 }
 
 /// Format stdin → stdout with the config discovered from the current directory.
-fn cmd_fmt_stdin() -> ExitCode {
+fn cmd_fmt_stdin(
+    parens: Option<noeta_fmt::ParenStyle>,
+    semicolons: Option<noeta_fmt::SemicolonStyle>,
+) -> ExitCode {
     let text = match io::read_to_string(io::stdin()) {
         Ok(text) => text,
         Err(err) => {
@@ -1206,7 +1320,7 @@ fn cmd_fmt_stdin() -> ExitCode {
     };
     let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = match manifest::resolve_fmt_config(&dir) {
-        Ok(config) => config,
+        Ok(config) => apply_fmt_overrides(config, parens, semicolons),
         Err(err) => {
             eprintln!("noeta fmt: {err}");
             return ExitCode::FAILURE;

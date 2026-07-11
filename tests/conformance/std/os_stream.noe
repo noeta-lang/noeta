@@ -1,0 +1,25 @@
+// Process streaming (process-streaming arc): read a spawned child's stdout line-by-line via
+// `read_line`, while `wait` still returns the whole captured output. In the sandbox the scripted
+// `echo` produces the (here multi-line) output deterministically, so both backends agree.
+// expect: stdout "some(first)"
+// expect: stdout "some(second)"
+// expect: stdout "some(third)"
+// expect: stdout "none"
+// expect: stdout "first|second|third"
+// expect: stdout "some(only)"
+// expect: exit 0
+use std.{os}
+
+p = os.spawn("echo", ["first\nsecond\nthird"])
+echo p.read_line()
+echo p.read_line()
+echo p.read_line()
+echo p.read_line()
+// wait() returns the FULL captured stdout regardless of what read_line consumed.
+echo p.wait().stdout().trim().replace("\n", "|")
+
+// stdin feeding is a validated no-op on the sandbox's scripted child; read_line still streams.
+q = os.spawn("echo", ["only"])
+q.write("ignored input")
+q.close_stdin()
+echo q.read_line()
