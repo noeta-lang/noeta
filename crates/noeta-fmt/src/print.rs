@@ -653,21 +653,27 @@ impl Printer<'_> {
     // ---- declarations ------------------------------------------------------------------------
 
     fn fn_decl(&self, decl: &FnDecl) -> Result<Doc, FmtError> {
-        let mut parts = self.attrs(&decl.attrs)?;
-        // A `@tier(…)` declaration rides on its runner fn (tier-providers T2) — re-emit it on its
-        // own line above the header, exactly as written (name, then `config:`/`text:`).
+        // A `@tier(…)` declaration rides on its runner/handler fn (tier-providers T2, expr-tiers
+        // arc) — re-emit it on its own line above the header (canonical key order: config, text,
+        // expr), *before* the fn's own attrs so the pair re-parses (the `@tier` declaration form
+        // is `@tier(…)` then the fn, whose leading `#[…]` attrs bind to it). Dropping the
+        // directive would silently un-declare the tier and stop every consumer block lexing.
+        let mut parts = Vec::new();
         if let Some(t) = &decl.tier {
-            let mut directive = format!("@tier({}", t.name);
+            let mut args = vec![t.name.clone()];
             if let Some((config, _)) = &t.config {
-                directive.push_str(&format!(", config: {config}"));
+                args.push(format!("config: {config}"));
             }
             if let Some((lang, _)) = &t.text {
-                directive.push_str(&format!(", text: {lang:?}"));
+                args.push(format!("text: {lang:?}"));
             }
-            directive.push(')');
-            parts.push(Doc::text(directive));
+            if let Some((ty, _)) = &t.expr {
+                args.push(format!("expr: {ty}"));
+            }
+            parts.push(Doc::text(format!("@tier({})", args.join(", "))));
             parts.push(Doc::hardline());
         }
+        parts.extend(self.attrs(&decl.attrs)?);
         if decl.is_public {
             parts.push(Doc::text("pub "));
         }

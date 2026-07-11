@@ -141,9 +141,12 @@ pub enum Stmt {
         args: Vec<AttrArg>,
         items: Vec<Stmt>,
         /// The **verbatim body** of a `@doc { … }` *text* tier (object-model slice 6f): the raw
-        /// source between the braces, captured un-parsed. `Some` only for a `@doc` block (whose
-        /// `items` are then empty); `None` for a code tier (`@test`/`@bench`/`@debug`), whose body
-        /// is the parsed `items`. `lang doc` extracts these; on a normal run the block is stripped.
+        /// source between the braces, captured un-parsed, with the `\{ \} \\` escapes undone
+        /// (text-tiers S1). `Some` only for a text-tier block (whose `items` are then empty);
+        /// `None` for a code tier (`@test`/`@bench`/`@debug`), whose body is the parsed `items`.
+        /// `lang doc` extracts these; on a normal run the block is stripped. The formatter
+        /// re-emits the raw source (sliced from `span`), *not* this — this is unescaped, so
+        /// printing it would drop `\{ \}` and unbalance the block.
         doc_text: Option<String>,
         span: Span,
     },
