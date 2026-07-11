@@ -53,6 +53,9 @@ noeta-stdlib = { path = "crates/noeta-stdlib" }
 noeta-native = { path = "crates/noeta-native" }
 # M2 runtime (host-coupled IO: real disk async + real env/args)
 noeta-runtime = { path = "crates/noeta-runtime" }
+# WASI host (P-WASM W1): the real-but-synchronous third `Host` for the wasm32-wasip1 runner —
+# preopened-dir fs and WASI env/args/wall-clock/entropy through plain std; no tokio, no threads.
+noeta-wasi-host = { path = "crates/noeta-wasi-host" }
 # M2 reactivity core (signal/computed/effect graph — value-generic, backend-driven)
 noeta-reactive = { path = "crates/noeta-reactive" }
 # M3 CRDT convergence core (p2p/local-first P0): state-based merge algebra — dep-free, value-less,

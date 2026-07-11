@@ -1,0 +1,18 @@
+[package]
+name = "noeta-wasi-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+noeta-stdlib = { workspace = true }
+compact_str = { workspace = true }
+# WASI entropy (`random_get` on wasip1); the same crate RealHost uses for OS entropy. The
+# browser target (wasm32-unknown-unknown, P-WASM W2) is the one that needs backend wiring —
+# this crate targets wasip1, where getrandom works out of the box.
+getrandom = { workspace = true }
+
+[lints]
+workspace = true
