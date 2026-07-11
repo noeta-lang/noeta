@@ -47,23 +47,16 @@ impl FmtConfig {
             config.sort_imports = v.as_bool().ok_or("`fmt.sort_imports` must be a boolean")?;
         }
         if let Some(v) = fmt.get("parens") {
-            config.parens = match v.as_str() {
-                Some("remove") => ParenStyle::Remove,
-                Some("add") => ParenStyle::Add,
-                _ => return Err("`fmt.parens` must be \"remove\" or \"add\"".to_string()),
-            };
+            config.parens = v
+                .as_str()
+                .and_then(|s| s.parse::<ParenStyle>().ok())
+                .ok_or("`fmt.parens` must be \"remove\" or \"add\"")?;
         }
         if let Some(v) = fmt.get("semicolons") {
-            config.semicolons = match v.as_str() {
-                Some("remove") => SemicolonStyle::Remove,
-                Some("add") => SemicolonStyle::Add,
-                Some("preserve") => SemicolonStyle::Preserve,
-                _ => {
-                    return Err(
-                        "`fmt.semicolons` must be \"remove\", \"add\", or \"preserve\"".to_string(),
-                    );
-                }
-            };
+            config.semicolons = v
+                .as_str()
+                .and_then(|s| s.parse::<SemicolonStyle>().ok())
+                .ok_or("`fmt.semicolons` must be \"remove\", \"add\", or \"preserve\"")?;
         }
         Ok(config)
     }

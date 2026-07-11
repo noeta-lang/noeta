@@ -24,8 +24,12 @@
 //! - **Indent** 4 spaces, never tabs.
 //! - **Braces** K&R (opening brace on the header line).
 //! - **Statements** one per line.
-//! - **Trailing `;`** preserved exactly as written (per-statement trivia — F1); never added or
-//!   stripped.
+//! - **Trailing `;`** governed by [`FmtConfig::semicolons`]: `remove` (default) strips a `;` that a
+//!   newline could replace, `add` terminates every simple statement, `preserve` keeps the author's.
+//!   A structurally-required `;` is always kept (inside `(`/`[`-nested closure bodies, or after a
+//!   statement whose last token cannot end one — e.g. a generic-close `>` in `x is List<int>`).
+//! - **Header parens** governed by [`FmtConfig::parens`]: `remove` (default) strips redundant parens
+//!   from `if`/`while`/`for` headers, `add` wraps them (`if (x) {`).
 //! - **Continuation** a statement broken across lines (pipelines `|>`, method / binary chains)
 //!   indents its continuation one 4-space level under the statement start.
 //! - **Wrapping** off by default ([`FmtConfig::wrap`]); when on, groups break at
@@ -97,6 +101,31 @@ pub enum SemicolonStyle {
     Add,
     /// Keep exactly what the author wrote.
     Preserve,
+}
+
+impl std::str::FromStr for ParenStyle {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "remove" => Ok(ParenStyle::Remove),
+            "add" => Ok(ParenStyle::Add),
+            _ => Err(format!("expected \"remove\" or \"add\", got {s:?}")),
+        }
+    }
+}
+
+impl std::str::FromStr for SemicolonStyle {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "remove" => Ok(SemicolonStyle::Remove),
+            "add" => Ok(SemicolonStyle::Add),
+            "preserve" => Ok(SemicolonStyle::Preserve),
+            _ => Err(format!(
+                "expected \"remove\", \"add\", or \"preserve\", got {s:?}"
+            )),
+        }
+    }
 }
 
 /// Formatter configuration — the `[fmt]` table of `noeta.toml`. Constructed with sane defaults by
@@ -507,7 +536,11 @@ mod tests {
             "echo 1\n"
         );
         assert_eq!(
-            fmt_semis("fn f(a) {\n echo a;\n return a\n}", SemicolonStyle::Preserve).unwrap(),
+            fmt_semis(
+                "fn f(a) {\n echo a;\n return a\n}",
+                SemicolonStyle::Preserve
+            )
+            .unwrap(),
             "fn f(a) {\n    echo a;\n    return a\n}\n"
         );
     }
@@ -562,8 +595,11 @@ mod tests {
         );
         // The `match` scrutinee opts out of paren-add — `match (x)` reads oddly.
         assert_eq!(
-            fmt_parens("fn f(x: int): int {\n return match x {\n  _ => 0,\n }\n}", ParenStyle::Add)
-                .unwrap(),
+            fmt_parens(
+                "fn f(x: int): int {\n return match x {\n  _ => 0,\n }\n}",
+                ParenStyle::Add
+            )
+            .unwrap(),
             "fn f(x: int): int {\n    return match x {\n        _ => 0,\n    }\n}\n"
         );
     }

@@ -41,6 +41,31 @@ echo total               // 6
 
 Type, `struct`, and `class` bodies are newline-separated — fields need no terminator.
 
+### Parentheses around control-flow headers
+
+The condition of `if`/`while` and the iterable of `for` may **optionally** be parenthesized — both styles are valid and mean the same thing (a lone `(expr)` is just `expr`):
+
+```noeta ignore
+if x > 0 { echo "a" }
+if (x > 0) { echo "a" }      // same thing — the parens are a readability choice
+
+while (running) { tick() }
+for x in (items) { echo x }
+```
+
+### Formatting: `noeta fmt` canonicalizes both
+
+`noeta fmt` normalizes header parentheses and trailing semicolons. Configure it in the `[fmt]` table of `noeta.toml`, or override per-run with `--parens` / `--semicolons`:
+
+```toml
+[fmt]
+parens = "remove"       # "remove" (default) strips header parens; "add" wraps them: `if (x) {`
+semicolons = "remove"   # "remove" (default) strips redundant `;`; "add" terminates every simple
+                        # statement; "preserve" keeps them exactly as written
+```
+
+`remove` only strips a `;` that is genuinely redundant — one that a newline could replace. A `;` that is structurally required is always kept: inside a closure body nested in `(`/`[` (where newlines do not terminate), and after a statement whose last token cannot end a statement, such as a generic-closing `>` in `echo x is List<int>;`.
+
 ## `echo`
 
 `echo` prints one value, followed by a newline, using the value's `Display` form.

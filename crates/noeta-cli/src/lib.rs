@@ -285,6 +285,14 @@ enum Command {
         /// Read source from stdin and write the formatted result to stdout (editor "format on save").
         #[arg(long)]
         stdin: bool,
+        /// Override the `[fmt] parens` policy for control-flow headers: `remove` (strip) or `add`
+        /// (wrap `if (x) {`). Defaults to the manifest value, then `remove`.
+        #[arg(long, value_name = "remove|add")]
+        parens: Option<noeta_fmt::ParenStyle>,
+        /// Override the `[fmt] semicolons` policy: `remove` (strip redundant), `add` (terminate every
+        /// simple statement), or `preserve` (keep as written). Defaults to the manifest, then `remove`.
+        #[arg(long, value_name = "remove|add|preserve")]
+        semicolons: Option<noeta_fmt::SemicolonStyle>,
     },
     /// Add a dependency to the nearest `noeta.toml` and refresh `noeta.lock` (package-manager P2.4).
     /// Exactly one source must be given: `--path`, `--git` (with `--tag`), or `--version` (registry).
@@ -486,7 +494,9 @@ pub fn run_cli(
             files,
             check,
             stdin,
-        } => cmd_fmt(&files, check, stdin),
+            parens,
+            semicolons,
+        } => cmd_fmt(&files, check, stdin, parens, semicolons),
         Command::Add {
             key,
             path,
@@ -1070,9 +1080,30 @@ fn cmd_profile(
 /// left untouched and reported; the safety gate inside `noeta_fmt::format_source` guarantees a
 /// written file never changes meaning. In-place writes are atomic (temp file + rename) and skipped
 /// when the content is already canonical.
-fn cmd_fmt(paths: &[PathBuf], check: bool, stdin: bool) -> ExitCode {
+/// Apply any `--parens` / `--semicolons` CLI overrides on top of a manifest-resolved `FmtConfig`.
+fn apply_fmt_overrides(
+    mut config: noeta_fmt::FmtConfig,
+    parens: Option<noeta_fmt::ParenStyle>,
+    semicolons: Option<noeta_fmt::SemicolonStyle>,
+) -> noeta_fmt::FmtConfig {
+    if let Some(p) = parens {
+        config.parens = p;
+    }
+    if let Some(s) = semicolons {
+        config.semicolons = s;
+    }
+    config
+}
+
+fn cmd_fmt(
+    paths: &[PathBuf],
+    check: bool,
+    stdin: bool,
+    parens: Option<noeta_fmt::ParenStyle>,
+    semicolons: Option<noeta_fmt::SemicolonStyle>,
+) -> ExitCode {
     if stdin {
-        return cmd_fmt_stdin();
+        return cmd_fmt_stdin(parens, semicolons);
     }
     if paths.is_empty() {
         eprintln!("noeta fmt: no files given (use `--stdin` to format standard input)");
@@ -1095,7 +1126,7 @@ fn cmd_fmt(paths: &[PathBuf], check: bool, stdin: bool) -> ExitCode {
     for file in &files {
         let dir = file.parent().unwrap_or_else(|| std::path::Path::new("."));
         let config = match manifest::resolve_fmt_config(dir) {
-            Ok(config) => config,
+            Ok(config) => apply_fmt_overrides(config, parens, semicolons),
             Err(err) => {
                 eprintln!("noeta fmt: {err}");
                 return ExitCode::FAILURE;
@@ -1170,7 +1201,10 @@ fn atomic_write(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
 }
 
 /// Format stdin → stdout with the config discovered from the current directory.
-fn cmd_fmt_stdin() -> ExitCode {
+fn cmd_fmt_stdin(
+    parens: Option<noeta_fmt::ParenStyle>,
+    semicolons: Option<noeta_fmt::SemicolonStyle>,
+) -> ExitCode {
     let text = match io::read_to_string(io::stdin()) {
         Ok(text) => text,
         Err(err) => {
@@ -1180,7 +1214,7 @@ fn cmd_fmt_stdin() -> ExitCode {
     };
     let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = match manifest::resolve_fmt_config(&dir) {
-        Ok(config) => config,
+        Ok(config) => apply_fmt_overrides(config, parens, semicolons),
         Err(err) => {
             eprintln!("noeta fmt: {err}");
             return ExitCode::FAILURE;
