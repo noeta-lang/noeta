@@ -55,7 +55,7 @@ noeta bench [OPTIONS] <FILE>
 | Flag | Effect |
 |---|---|
 | `--iterations <N>` | Override the iteration count for every benchmark. |
-| `--profile <NAME>` | Only run when the `bench` tier is live in this `noeta.toml` build profile; otherwise no-op with exit `0`. |
+| `--target <NAME>` | Only run when the `bench` tier is live in this `noeta.toml` build target; otherwise no-op with exit `0`. |
 
 ### Output and exit codes
 
@@ -75,4 +75,4 @@ Exit `0` when nothing failed, `1` otherwise. `no benchmarks found` exits `0`.
 ## See also
 
 - [Testing](Testing) — the `@test` sibling.
-- [Documentation & Dev Tiers](Documentation-and-Tiers) — the tier model and `noeta.toml` profiles.
+- [Documentation & Dev Tiers](Documentation-and-Tiers) — the tier model and `noeta.toml` targets.

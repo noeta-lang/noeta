@@ -63,13 +63,13 @@ enum Command {
         file: PathBuf,
         /// Activate a dev-tier for this run, e.g. `--tier debug` to compile in `@debug { … }`
         /// blocks (object-model slice 6). Repeatable. Without it, every tier block is stripped.
-        /// (The interim active-set interface, complementary to `--profile`.)
+        /// (The interim active-set interface, complementary to `--target`.)
         #[arg(long)]
         tier: Vec<String>,
-        /// Activate the tiers a build profile makes live (from `noeta.toml`), e.g.
-        /// `--profile dev`. Unioned with any `--tier`.
+        /// Activate the tiers a build target makes live (from `noeta.toml`), e.g.
+        /// `--target dev`. Unioned with any `--tier`.
         #[arg(long)]
-        profile: Option<String>,
+        target: Option<String>,
         /// Bypass the transparent startup cache for this run: don't read a cached compile and don't
         /// write one. Equivalent to setting `NOETA_NO_CACHE`. Recompiles from source regardless.
         #[arg(long)]
@@ -109,10 +109,10 @@ enum Command {
         /// the JSON (failures carry it), never interleaved.
         #[arg(long)]
         json: bool,
-        /// Only run when the `test` tier is live in this `noeta.toml` build profile; otherwise the
+        /// Only run when the `test` tier is live in this `noeta.toml` build target; otherwise the
         /// runner does nothing.
         #[arg(long)]
-        profile: Option<String>,
+        target: Option<String>,
     },
     /// Discover and run a program's `@bench` blocks, measuring each (object-model slice 6).
     Bench {
@@ -122,24 +122,24 @@ enum Command {
         /// `@bench(iterations: N)` directive. Without either, a default count is used.
         #[arg(long)]
         iterations: Option<u64>,
-        /// Only run when the `bench` tier is live in this `noeta.toml` build profile; otherwise the
+        /// Only run when the `bench` tier is live in this `noeta.toml` build target; otherwise the
         /// runner does nothing.
         #[arg(long)]
-        profile: Option<String>,
+        target: Option<String>,
     },
     /// Extract a program's `@doc { … }` text blocks to stdout (object-model slice 6).
     Doc {
         /// Path to a `.noe` file.
         file: PathBuf,
-        /// Only extract when the `doc` tier is live in this `noeta.toml` build profile; otherwise
+        /// Only extract when the `doc` tier is live in this `noeta.toml` build target; otherwise
         /// nothing is emitted.
         #[arg(long)]
-        profile: Option<String>,
+        target: Option<String>,
     },
     /// Compile a program to a self-contained `.noeb` bundle (P-AOT L1): the versioned bytecode a
     /// `noeta run app.noeb` executes directly, so a program ships **without its `.noe` source**.
     /// Uses the same compile pipeline as `run`; dev-tier blocks are stripped unless made live by
-    /// `--tier`/`--profile`, so a production build never carries `@test`/`@debug`/`@doc` content.
+    /// `--tier`/`--target`, so a production build never carries `@test`/`@debug`/`@doc` content.
     Build {
         /// Path to the entry `.noe` file.
         file: PathBuf,
@@ -161,9 +161,9 @@ enum Command {
         /// Activate a dev-tier for this build, e.g. `--tier debug`. Repeatable.
         #[arg(long)]
         tier: Vec<String>,
-        /// Activate the tiers a `noeta.toml` build profile makes live. Unioned with any `--tier`.
+        /// Activate the tiers a `noeta.toml` build target makes live. Unioned with any `--tier`.
         #[arg(long)]
-        profile: Option<String>,
+        target: Option<String>,
     },
     /// Disassemble a program to its VM bytecode (a debugging aid: shows the exact opcodes,
     /// constants, shapes, and method tables `noeta run` executes). Compiled with the same pipeline
@@ -174,9 +174,9 @@ enum Command {
         /// Activate a dev-tier before disassembling (as `noeta run --tier …`). Repeatable.
         #[arg(long)]
         tier: Vec<String>,
-        /// Activate the tiers a `noeta.toml` build profile makes live. Unioned with any `--tier`.
+        /// Activate the tiers a `noeta.toml` build target makes live. Unioned with any `--tier`.
         #[arg(long)]
-        profile: Option<String>,
+        target: Option<String>,
     },
     /// Statically check a program without running or building it: parse every `.noe` file and verify
     /// it type-checks, reporting all diagnostics (the `cargo check` / `tsc --noEmit` primitive). Uses
@@ -192,9 +192,9 @@ enum Command {
         /// blocks (as `noeta run --tier …`). Repeatable.
         #[arg(long)]
         tier: Vec<String>,
-        /// Activate the tiers a `noeta.toml` build profile makes live. Unioned with any `--tier`.
+        /// Activate the tiers a `noeta.toml` build target makes live. Unioned with any `--tier`.
         #[arg(long)]
-        profile: Option<String>,
+        target: Option<String>,
         /// Output format. `human` (default) renders diagnostics for a terminal; `json` emits a
         /// single machine-readable report on stdout for tools (CI, editors, the MCP server).
         #[arg(long, value_enum, default_value_t = OutputFormat::Human)]
@@ -228,8 +228,7 @@ enum Command {
     Mcp,
     /// Profile a program and report where it spends its time. Runs the file under the production VM
     /// tier-0 (JIT unarmed, so every frame is observable) and prints a profile to stderr; the
-    /// program's own stdout is forwarded verbatim. A dev-time tool, distinct from the `--profile`
-    /// build-tier flag on `run`/`test`/… (this profiles a program's *execution*, not build tiers).
+    /// program's own stdout is forwarded verbatim.
     Profile {
         /// Path to a `.noe` file.
         file: PathBuf,
@@ -451,11 +450,11 @@ pub fn run_cli(
         Command::Run {
             file,
             tier,
-            profile,
+            target,
             no_cache,
             jit_stats,
             args,
-        } => cmd_run(&file, &tier, &profile, no_cache, jit_stats, &args),
+        } => cmd_run(&file, &tier, &target, no_cache, jit_stats, &args),
         Command::Test {
             file,
             fail_fast,
@@ -463,33 +462,29 @@ pub fn run_cli(
             group,
             names,
             json,
-            profile,
-        } => cmd_test(&file, fail_fast, jobs, &group, &names, json, &profile),
+            target,
+        } => cmd_test(&file, fail_fast, jobs, &group, &names, json, &target),
         Command::Bench {
             file,
             iterations,
-            profile,
-        } => cmd_bench(&file, iterations, &profile),
-        Command::Doc { file, profile } => cmd_doc(&file, &profile),
+            target,
+        } => cmd_bench(&file, iterations, &target),
+        Command::Doc { file, target } => cmd_doc(&file, &target),
         Command::Build {
             file,
             out,
             exe,
             native,
             tier,
-            profile,
-        } => cmd_build(&file, out.as_deref(), exe, native, &tier, &profile),
-        Command::Dump {
-            file,
-            tier,
-            profile,
-        } => cmd_dump(&file, &tier, &profile),
+            target,
+        } => cmd_build(&file, out.as_deref(), exe, native, &tier, &target),
+        Command::Dump { file, tier, target } => cmd_dump(&file, &tier, &target),
         Command::Check {
             path,
             tier,
-            profile,
+            target,
             format,
-        } => cmd_check(&path, &tier, &profile, format),
+        } => cmd_check(&path, &tier, &target, format),
         Command::Repl { no_check, load } => cmd_repl(!no_check, load),
         Command::Lsp => cmd_lsp(),
         Command::Dap => cmd_dap(),
@@ -1328,16 +1323,16 @@ fn report_fmt_error(name: &str, err: &noeta_fmt::FmtError) {
     }
 }
 
-/// For a tier runner: whether its `tier` is live under `--profile`. `Ok(true)` when no profile was
-/// given (the runner always runs); `Ok(false)` when a profile was given but does not make `tier`
-/// live (the runner should no-op); `Err` on a profile-resolution failure (a fatal error the caller
+/// For a tier runner: whether its `tier` is live under `--target`. `Ok(true)` when no target was
+/// given (the runner always runs); `Ok(false)` when a target was given but does not make `tier`
+/// live (the runner should no-op); `Err` on a target-resolution failure (a fatal error the caller
 /// prints).
-fn tier_active_in_profile(
+fn tier_active_in_target(
     entry: &std::path::Path,
-    profile: &Option<String>,
+    target: &Option<String>,
     tier: &str,
 ) -> Result<bool, String> {
-    match profile {
+    match target {
         None => Ok(true),
         Some(name) => Ok(manifest::resolve_active_tiers(entry, name)?
             .iter()
@@ -1556,7 +1551,7 @@ fn program_args(entry: &std::path::Path, passthrough: &[String]) -> Vec<String> 
 fn cmd_run(
     file: &std::path::Path,
     tiers: &[String],
-    profile: &Option<String>,
+    target: &Option<String>,
     no_cache: bool,
     jit_stats: bool,
     args: &[String],
@@ -1566,15 +1561,13 @@ fn cmd_run(
     }
     // P-AOT L1.2: a `.noeb` bundle runs directly — no source, no compile. Sniff the magic (cheap,
     // and we need the bytes to load it anyway); anything else is source, handled below. Tiers are a
-    // *build*-time concern (they are already baked into the bundle), so `--tier`/`--profile` on a
+    // *build*-time concern (they are already baked into the bundle), so `--tier`/`--target` on a
     // bundle run are meaningless — reject them rather than silently ignore.
     if let Ok(bytes) = std::fs::read(file)
         && noeta_bundle::is_bundle(&bytes)
     {
-        if !tiers.is_empty() || profile.is_some() {
-            eprintln!(
-                "lang: --tier/--profile apply at build time; a .noeb bundle is already built"
-            );
+        if !tiers.is_empty() || target.is_some() {
+            eprintln!("lang: --tier/--target apply at build time; a .noeb bundle is already built");
             return ExitCode::from(2);
         }
         return cmd_run_bundle(file, &bytes, program_args(file, args), jit_stats);
@@ -1583,7 +1576,7 @@ fn cmd_run(
     // Everything else — resolve tiers, consult the startup cache, and (on a miss) load → check →
     // compile — is the shared whole-file pipeline. On success run the module with the program's
     // pass-through args; on failure report it.
-    match compile_whole_file(file, tiers, profile, no_cache) {
+    match compile_whole_file(file, tiers, target, no_cache) {
         Ok(compiled) => run_compiled_module(
             compiled.module,
             &compiled.sources,
@@ -1625,7 +1618,7 @@ struct CheckReport {
 fn cmd_check(
     path: &std::path::Path,
     tiers: &[String],
-    profile: &Option<String>,
+    target: &Option<String>,
     format: OutputFormat,
 ) -> ExitCode {
     if let Some(code) = compose::maybe_delegate(path) {
@@ -1633,10 +1626,10 @@ fn cmd_check(
     }
     use noeta_diagnostics::Severity;
 
-    // The active tier set — resolved once and applied to every file — is the union of a `--profile`'s
+    // The active tier set — resolved once and applied to every file — is the union of a `--target`'s
     // live tiers (from `noeta.toml`) and any explicit `--tier` flags, exactly as `cmd_run` resolves
-    // it. A bad profile fails fast before any file is read.
-    let mut active: Vec<String> = match profile {
+    // it. A bad target fails fast before any file is read.
+    let mut active: Vec<String> = match target {
         Some(name) => match manifest::resolve_active_tiers(path, name) {
             Ok(tiers) => tiers,
             Err(err) => {
@@ -2052,7 +2045,7 @@ struct Compiled {
 /// A whole-file compile failure, carrying what's needed to render it. [`report`](Self::report)
 /// prints it and yields the process exit code, matching each command's prior behavior.
 enum CompileFailure {
-    /// A message rendered as `lang: {0}` with exit 1 (profile resolution / compiler-internal error).
+    /// A message rendered as `lang: {0}` with exit 1 (target resolution / compiler-internal error).
     Message(String),
     /// The entry file could not be read (exit 2).
     Unreadable(String),
@@ -2099,7 +2092,7 @@ impl CompileFailure {
 /// command that wants "a source file → its runnable [`Module`]" goes through here, so the startup
 /// cache is applied exactly once rather than wired per command.
 ///
-/// Resolves the active tier set (profile ∪ `--tier`), then consults the startup cache: on a **hit**
+/// Resolves the active tier set (target ∪ `--tier`), then consults the startup cache: on a **hit**
 /// the decoded module is returned directly (the whole front-end is skipped); on a **miss** it loads →
 /// activates tiers → type-checks → compiles, populates the cache (best-effort), and returns. Because
 /// `run`/`dump`/`build` all compile identically (same [`compile_real`]), they share cache entries —
@@ -2111,12 +2104,12 @@ impl CompileFailure {
 fn compile_whole_file(
     file: &std::path::Path,
     tiers: &[String],
-    profile: &Option<String>,
+    target: &Option<String>,
     no_cache: bool,
 ) -> Result<Compiled, CompileFailure> {
-    // The active tier set is the union of any `--profile`'s live tiers (from `noeta.toml`) and any
-    // explicit `--tier` flags, resolved before loading so a bad profile fails fast.
-    let mut active: Vec<String> = match profile {
+    // The active tier set is the union of any `--target`'s live tiers (from `noeta.toml`) and any
+    // explicit `--tier` flags, resolved before loading so a bad target fails fast.
+    let mut active: Vec<String> = match target {
         Some(name) => {
             manifest::resolve_active_tiers(file, name).map_err(CompileFailure::Message)?
         }
@@ -2408,17 +2401,17 @@ fn source_key_name(source: &Source) -> &str {
 }
 
 /// `noeta dump <FILE>` — disassemble the program to its VM bytecode and print it to stdout. Loads,
-/// activates any `--tier`/`--profile`, type-checks, and compiles through the **same** pipeline as
+/// activates any `--tier`/`--target`, type-checks, and compiles through the **same** pipeline as
 /// `noeta run` (`compile_real`), so the disassembly is exactly what the VM executes — the tool for
 /// inspecting codegen (which ops a construct lowers to, whether a reuse/in-place fast path fired,
 /// how names/constants are laid out). A type error prints diagnostics and exits non-zero, like `run`.
-fn cmd_dump(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -> ExitCode {
+fn cmd_dump(file: &std::path::Path, tiers: &[String], target: &Option<String>) -> ExitCode {
     if let Some(code) = compose::maybe_delegate(file) {
         return code;
     }
     // Same whole-file compile as `run` (so the disassembly is exactly what the VM runs), and a cache
     // participant — a cached module is byte-identical to a fresh compile, so the disassembly matches.
-    match compile_whole_file(file, tiers, profile, false) {
+    match compile_whole_file(file, tiers, target, false) {
         Ok(compiled) => {
             print!("{}", compiled.module.disassemble());
             let _ = io::stdout().flush();
@@ -2429,7 +2422,7 @@ fn cmd_dump(file: &std::path::Path, tiers: &[String], profile: &Option<String>) 
 }
 
 /// `noeta build <FILE>` — compile a program to a self-contained artifact (P-AOT L1/L2). Loads +
-/// links, activates any `--tier`/`--profile`, type-checks, and compiles through the **same**
+/// links, activates any `--tier`/`--target`, type-checks, and compiles through the **same**
 /// `compile_real` pipeline as `run`/`dump`. The result is emitted either as a `.noeb` bundle
 /// (`noeta_bundle::write`, run by `noeta run app.noeb`) or — with `--exe` — as a self-contained
 /// executable that runs the program on its own (`emit_exe`). Either artifact carries no `.noe`
@@ -2440,7 +2433,7 @@ fn cmd_build(
     exe: bool,
     native: bool,
     tiers: &[String],
-    profile: &Option<String>,
+    target: &Option<String>,
 ) -> ExitCode {
     if let Some(code) = compose::maybe_delegate(file) {
         return code;
@@ -2451,7 +2444,7 @@ fn cmd_build(
     }
     // Same whole-file compile + startup cache as `run`/`dump`. The emit format doesn't affect the
     // module, so a `build` shares cache entries with a `run` of the same source — each warms the other.
-    let module = match compile_whole_file(file, tiers, profile, false) {
+    let module = match compile_whole_file(file, tiers, target, false) {
         Ok(compiled) => compiled.module,
         Err(failure) => return failure.report(),
     };
@@ -2873,17 +2866,17 @@ fn link_native(
     Ok(())
 }
 
-/// Gate a tier runner on `--profile`: if a profile was given and does not make `tier` live, print a
+/// Gate a tier runner on `--target`: if a target was given and does not make `tier` live, print a
 /// note and return the success exit code (the runner no-ops); on a resolution failure, print it and
-/// return the error code. `None` means "proceed" (no profile gate). The caller runs its body only
+/// return the error code. `None` means "proceed" (no target gate). The caller runs its body only
 /// when this returns `None`.
-fn profile_gate(entry: &std::path::Path, profile: &Option<String>, tier: &str) -> Option<ExitCode> {
-    match tier_active_in_profile(entry, profile, tier) {
+fn target_gate(entry: &std::path::Path, target: &Option<String>, tier: &str) -> Option<ExitCode> {
+    match tier_active_in_target(entry, target, tier) {
         Ok(true) => None,
         Ok(false) => {
             println!(
-                "tier `{tier}` is not active in profile `{}`",
-                profile.as_deref().unwrap_or_default()
+                "tier `{tier}` is not active in target `{}`",
+                target.as_deref().unwrap_or_default()
             );
             Some(ExitCode::SUCCESS)
         }
@@ -2915,12 +2908,12 @@ fn cmd_test(
     group: &Option<String>,
     names: &[String],
     json: bool,
-    profile: &Option<String>,
+    target: &Option<String>,
 ) -> ExitCode {
     if let Some(code) = compose::maybe_delegate(file) {
         return code;
     }
-    if let Some(code) = profile_gate(file, profile, "test") {
+    if let Some(code) = target_gate(file, target, "test") {
         return code;
     }
     let linked = match noeta_loader::load(file) {
@@ -3425,12 +3418,12 @@ const DEFAULT_BENCH_ITERATIONS: u64 = 200;
 fn cmd_bench(
     file: &std::path::Path,
     iterations_override: Option<u64>,
-    profile: &Option<String>,
+    target: &Option<String>,
 ) -> ExitCode {
     if let Some(code) = compose::maybe_delegate(file) {
         return code;
     }
-    if let Some(code) = profile_gate(file, profile, "bench") {
+    if let Some(code) = target_gate(file, target, "bench") {
         return code;
     }
     let linked = match noeta_loader::load(file) {
@@ -3608,11 +3601,11 @@ fn fmt_per_iter(ns: f64) -> String {
 /// HTML-comment header noting its source location — valid markdown that renders to nothing. The
 /// program is not type-checked or run; doc extraction works on a parse alone, so docs can be pulled
 /// from work-in-progress code.
-fn cmd_doc(file: &std::path::Path, profile: &Option<String>) -> ExitCode {
+fn cmd_doc(file: &std::path::Path, target: &Option<String>) -> ExitCode {
     if let Some(code) = compose::maybe_delegate(file) {
         return code;
     }
-    if let Some(code) = profile_gate(file, profile, "doc") {
+    if let Some(code) = target_gate(file, target, "doc") {
         return code;
     }
     let linked = match noeta_loader::load(file) {

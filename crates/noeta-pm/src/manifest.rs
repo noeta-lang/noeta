@@ -1,26 +1,28 @@
-//! The project manifest (`noeta.toml`) — build **profiles** (object-model slice 6g).
+//! The project manifest (`noeta.toml`) — build **targets** (object-model slice 6g).
 //!
-//! A *profile* names which dev-tiers are live in a build and which package provides each — the
-//! Cargo-profile / MSBuild-configuration axis. A `--profile` selects a tier set; the front-end tier
-//! filter (`noeta run`) and the tier runners (`noeta test`/`bench`/`doc`) consume that resolved
-//! *active-tier set*, not caring whether it came from a profile, a `--tier` flag, or a default.
+//! A *target* is a named build recipe: it says which dev-tiers are live in the build and which
+//! package provides each — the axis Cargo calls a profile and MSBuild a configuration, under the
+//! noun users actually reach for (you build "dev" or "prod"). A `--target` selects a tier set; the
+//! front-end tier filter (`noeta run`) and the tier runners (`noeta test`/`bench`/`doc`) consume
+//! that resolved *active-tier set*, not caring whether it came from a target, a `--tier` flag, or a
+//! default. The table shape leaves room for a target to absorb the rest of the recipe later
+//! (platform/artifact keys — the resolution of "target" the platform word, by subsumption).
 //!
 //! ```toml
-//! [profiles.dev.tiers]
+//! [targets.dev.tiers]
 //! test  = "std"                 # provider = the built-in stdlib tier
-//! bench = { package = "std" }   # table form (room for profile-level options later)
+//! bench = { package = "std" }   # table form (room for target-level options later)
 //! debug = "std"
 //!
-//! [profiles.ci]
+//! [targets.ci]
 //! extends = "dev"               # inherit dev's tiers…
-//! [profiles.ci.tiers]
+//! [targets.ci.tiers]
 //! debug = "std"                 # …and override / add
 //! ```
 //!
-//! The provider-string grammar is parsed and validated **now** so the manifest shape is locked, but
-//! the only provider available before the package system is the built-in `"std"` — any other
-//! provider is an error (cross-package resolution lands with packages). A profile's *active tiers*
-//! are the tier names in its (inheritance-merged) map.
+//! A tier's provider is the built-in `"std"` or a declared `[dependencies]` key (P2.6) — an
+//! undeclared name is an error. A target's *active tiers* are the tier names in its
+//! (inheritance-merged) map.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -31,18 +33,17 @@ use noeta_fmt::FmtConfig;
 /// The manifest file name, discovered at or above the entry file's directory.
 pub const MANIFEST_NAME: &str = "noeta.toml";
 
-/// The sole tier provider available before the package system: the built-in/stdlib tiers. The
-/// provider-string grammar accepts only this; naming any other package is an error until packages
-/// (and their dependency resolution) exist.
+/// The built-in/stdlib tier provider — always available; every other provider must be a declared
+/// `[dependencies]` key.
 const BUILTIN_PROVIDER: &str = "std";
 
 /// A parsed `noeta.toml`: the package's identity (`[package]`, absent for a bare script), its
-/// declared dependencies (`[dependencies]`, keyed by **import root**), and its build profiles.
+/// declared dependencies (`[dependencies]`, keyed by **import root**), and its build targets.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     package: Option<PackageMeta>,
     dependencies: BTreeMap<String, Dependency>,
-    profiles: BTreeMap<String, Profile>,
+    targets: BTreeMap<String, Target>,
     trust: Trust,
 }
 
@@ -141,10 +142,10 @@ pub enum Dependency {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct Profile {
-    /// The base profile this one inherits tiers from (`extends = "dev"`), if any.
+struct Target {
+    /// The base target this one inherits tiers from (`extends = "dev"`), if any.
     extends: Option<String>,
-    /// This profile's own tier → provider entries (overlaid on the base's during resolution).
+    /// This target's own tier → provider entries (overlaid on the base's during resolution).
     tiers: BTreeMap<String, String>,
 }
 
@@ -243,15 +244,15 @@ fn insert_dependency_entry(text: &str, entry: &str) -> String {
     }
 }
 
-/// Resolve the active-tier set for `profile` from the `noeta.toml` discovered at or above `entry`'s
+/// Resolve the active-tier set for `target` from the `noeta.toml` discovered at or above `entry`'s
 /// directory: load the manifest, follow `extends`, and return the live tier names (sorted). Every
-/// failure — no manifest, parse error, unknown profile/tier, unavailable provider, inheritance
+/// failure — no manifest, parse error, unknown target/tier, unavailable provider, inheritance
 /// cycle — is a human-readable `Err` the caller prints.
-pub fn resolve_active_tiers(entry: &Path, profile: &str) -> Result<Vec<String>, String> {
+pub fn resolve_active_tiers(entry: &Path, target: &str) -> Result<Vec<String>, String> {
     let dir = entry.parent().unwrap_or_else(|| Path::new("."));
     let path = find(dir).ok_or_else(|| {
         format!(
-            "no `{MANIFEST_NAME}` found at or above `{}` (needed for `--profile {profile}`)",
+            "no `{MANIFEST_NAME}` found at or above `{}` (needed for `--target {target}`)",
             dir.display()
         )
     })?;
@@ -259,7 +260,7 @@ pub fn resolve_active_tiers(entry: &Path, profile: &str) -> Result<Vec<String>, 
         .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
     let manifest =
         Manifest::parse(&text).map_err(|err| format!("invalid `{}`: {err}", path.display()))?;
-    manifest.active_tiers(profile)
+    manifest.active_tiers(target)
 }
 
 /// Gather the entry's **dependency packages** as loader [`DepPackage`]s (package-manager P2.1/P2.4):
@@ -309,50 +310,50 @@ pub fn resolve_fmt_config(start_dir: &Path) -> Result<FmtConfig, String> {
 
 impl Manifest {
     /// Parse a `noeta.toml`'s text into a [`Manifest`], validating every tier name (a built-in tier)
-    /// and provider (only `"std"` for now). Unknown keys outside `[profiles]` and unknown
-    /// profile-level keys are ignored, leaving room for later codegen knobs.
+    /// and provider (only `"std"` for now). Unknown keys outside `[targets]` and unknown
+    /// target-level keys are ignored, leaving room for later codegen knobs.
     pub fn parse(text: &str) -> Result<Manifest, String> {
         let table: toml::Table = text.parse().map_err(|err| format!("{err}"))?;
         let package = parse_package(&table)?;
         let dependencies = parse_dependencies(&table)?;
         let trust = parse_trust(&table)?;
-        let mut profiles = BTreeMap::new();
+        let mut targets = BTreeMap::new();
 
-        let Some(profiles_value) = table.get("profiles") else {
+        let Some(targets_value) = table.get("targets") else {
             return Ok(Manifest {
                 package,
                 dependencies,
-                profiles,
+                targets,
                 trust,
             });
         };
-        let profiles_table = profiles_value
+        let targets_table = targets_value
             .as_table()
-            .ok_or("`profiles` must be a table")?;
+            .ok_or("`targets` must be a table")?;
 
-        for (name, value) in profiles_table {
-            let profile_table = value
+        for (name, value) in targets_table {
+            let target_table = value
                 .as_table()
-                .ok_or_else(|| format!("profile `{name}` must be a table"))?;
+                .ok_or_else(|| format!("target `{name}` must be a table"))?;
 
-            let extends = match profile_table.get("extends") {
+            let extends = match target_table.get("extends") {
                 None => None,
                 Some(v) => Some(
                     v.as_str()
-                        .ok_or_else(|| format!("profile `{name}`: `extends` must be a string"))?
+                        .ok_or_else(|| format!("target `{name}`: `extends` must be a string"))?
                         .to_string(),
                 ),
             };
 
             let mut tiers = BTreeMap::new();
-            if let Some(tiers_value) = profile_table.get("tiers") {
+            if let Some(tiers_value) = target_table.get("tiers") {
                 let tiers_table = tiers_value
                     .as_table()
-                    .ok_or_else(|| format!("profile `{name}`: `tiers` must be a table"))?;
+                    .ok_or_else(|| format!("target `{name}`: `tiers` must be a table"))?;
                 for (tier, provider_value) in tiers_table {
                     if !BUILTIN_TIERS.contains(&tier.as_str()) {
                         return Err(format!(
-                            "profile `{name}`: unknown tier `{tier}` (built-in tiers are {})",
+                            "target `{name}`: unknown tier `{tier}` (built-in tiers are {})",
                             builtin_tier_list()
                         ));
                     }
@@ -363,7 +364,7 @@ impl Manifest {
                     // user to add the dependency.
                     if provider != BUILTIN_PROVIDER && !dependencies.contains_key(&provider) {
                         return Err(format!(
-                            "profile `{name}`: tier `{tier}` names provider `{provider}`, which is \
+                            "target `{name}`: tier `{tier}` names provider `{provider}`, which is \
                              neither the built-in `\"{BUILTIN_PROVIDER}\"` nor a declared \
                              dependency — add `{provider}` to `[dependencies]` to provide this tier"
                         ));
@@ -372,13 +373,13 @@ impl Manifest {
                 }
             }
 
-            profiles.insert(name.clone(), Profile { extends, tiers });
+            targets.insert(name.clone(), Target { extends, tiers });
         }
 
         Ok(Manifest {
             package,
             dependencies,
-            profiles,
+            targets,
             trust,
         })
     }
@@ -398,26 +399,26 @@ impl Manifest {
         &self.dependencies
     }
 
-    /// The active tier names for `profile`, merging inherited tiers (`extends`) under this profile's
-    /// own (which win), returned sorted. Errors on an unknown profile or an `extends` cycle.
-    pub fn active_tiers(&self, profile: &str) -> Result<Vec<String>, String> {
+    /// The active tier names for `target`, merging inherited tiers (`extends`) under this target's
+    /// own (which win), returned sorted. Errors on an unknown target or an `extends` cycle.
+    pub fn active_tiers(&self, target: &str) -> Result<Vec<String>, String> {
         let mut chain = Vec::new();
-        let merged = self.resolve(profile, &mut chain)?;
+        let merged = self.resolve(target, &mut chain)?;
         Ok(merged.into_keys().collect())
     }
 
-    /// The active tier → **provider** map for `profile` (package-manager P2.6): each live tier mapped
+    /// The active tier → **provider** map for `target` (package-manager P2.6): each live tier mapped
     /// to the package providing it — the built-in `"std"` or a declared dependency's import-root key.
     /// A future tier-execution layer reads this to dispatch a tier to its provider; today the
     /// providers are validated (a resolved dependency is a valid provider) and surfaced here.
     #[allow(dead_code)] // consumed by the tier-execution layer; validated + surfaced now
-    pub fn active_tier_providers(&self, profile: &str) -> Result<BTreeMap<String, String>, String> {
+    pub fn active_tier_providers(&self, target: &str) -> Result<BTreeMap<String, String>, String> {
         let mut chain = Vec::new();
-        self.resolve(profile, &mut chain)
+        self.resolve(target, &mut chain)
     }
 
-    /// Resolve a profile's effective tier map by walking its `extends` chain base-first, overlaying
-    /// each profile's own tiers on top. `chain` records the profiles visited along the current path
+    /// Resolve a target's effective tier map by walking its `extends` chain base-first, overlaying
+    /// each target's own tiers on top. `chain` records the targets visited along the current path
     /// to detect a cycle.
     fn resolve(
         &self,
@@ -426,21 +427,21 @@ impl Manifest {
     ) -> Result<BTreeMap<String, String>, String> {
         if chain.iter().any(|p| p == name) {
             chain.push(name.to_string());
-            return Err(format!("profile inheritance cycle: {}", chain.join(" -> ")));
+            return Err(format!("target inheritance cycle: {}", chain.join(" -> ")));
         }
-        let profile = self
-            .profiles
+        let target = self
+            .targets
             .get(name)
-            .ok_or_else(|| format!("unknown profile `{name}`"))?;
+            .ok_or_else(|| format!("unknown target `{name}`"))?;
 
         chain.push(name.to_string());
-        let mut merged = match &profile.extends {
+        let mut merged = match &target.extends {
             Some(base) => self.resolve(base, chain)?,
             None => BTreeMap::new(),
         };
         chain.pop();
 
-        for (tier, provider) in &profile.tiers {
+        for (tier, provider) in &target.tiers {
             merged.insert(tier.clone(), provider.clone());
         }
         Ok(merged)
@@ -655,9 +656,9 @@ fn is_identifier(s: &str) -> bool {
 }
 
 /// The provider package for a tier entry: a bare string (`test = "std"`) or a table whose `package`
-/// key carries it (`bench = { package = "std", samples = 100 }`); other table keys are profile-level
+/// key carries it (`bench = { package = "std", samples = 100 }`); other table keys are target-level
 /// options, ignored for now.
-fn provider_of(profile: &str, tier: &str, value: &toml::Value) -> Result<String, String> {
+fn provider_of(target: &str, tier: &str, value: &toml::Value) -> Result<String, String> {
     if let Some(s) = value.as_str() {
         return Ok(s.to_string());
     }
@@ -666,12 +667,12 @@ fn provider_of(profile: &str, tier: &str, value: &toml::Value) -> Result<String,
             .get("package")
             .and_then(|p| p.as_str())
             .ok_or_else(|| {
-                format!("profile `{profile}`: tier `{tier}` table must have a string `package`")
+                format!("target `{target}`: tier `{tier}` table must have a string `package`")
             })?;
         return Ok(package.to_string());
     }
     Err(format!(
-        "profile `{profile}`: tier `{tier}` must be a provider string or a `{{ package = … }}` table"
+        "target `{target}`: tier `{tier}` must be a provider string or a `{{ package = … }}` table"
     ))
 }
 
@@ -774,7 +775,7 @@ mod tests {
 
     #[test]
     fn a_bare_script_has_no_package() {
-        let m = Manifest::parse("[profiles.dev.tiers]\ntest = \"std\"\n").expect("valid");
+        let m = Manifest::parse("[targets.dev.tiers]\ntest = \"std\"\n").expect("valid");
         assert!(m.package().is_none());
         assert!(m.dependencies().is_empty());
     }
@@ -851,14 +852,14 @@ mod tests {
     }
 
     #[test]
-    fn package_and_dependencies_and_profiles_coexist() {
+    fn package_and_dependencies_and_targets_coexist() {
         let m = Manifest::parse(
             "[package]\n\
              name = \"acme/app\"\n\
              version = \"0.1.0\"\n\
              [dependencies]\n\
              http = { git = \"https://x/guzzle/http\", tag = \"v1.0.0\" }\n\
-             [profiles.dev.tiers]\n\
+             [targets.dev.tiers]\n\
              test = \"std\"\n",
         )
         .expect("valid");
@@ -868,9 +869,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_and_resolves_a_simple_profile() {
+    fn parses_and_resolves_a_simple_target() {
         let m = Manifest::parse(
-            "[profiles.dev.tiers]\n\
+            "[targets.dev.tiers]\n\
              test = \"std\"\n\
              debug = \"std\"\n",
         )
@@ -881,7 +882,7 @@ mod tests {
     #[test]
     fn table_provider_form_is_accepted() {
         let m = Manifest::parse(
-            "[profiles.dev.tiers]\n\
+            "[targets.dev.tiers]\n\
              bench = { package = \"std\", samples = 100 }\n",
         )
         .expect("valid manifest");
@@ -891,32 +892,32 @@ mod tests {
     #[test]
     fn extends_merges_base_then_overrides() {
         let m = Manifest::parse(
-            "[profiles.base.tiers]\n\
+            "[targets.base.tiers]\n\
              test = \"std\"\n\
              doc = \"std\"\n\
-             [profiles.ci]\n\
+             [targets.ci]\n\
              extends = \"base\"\n\
-             [profiles.ci.tiers]\n\
+             [targets.ci.tiers]\n\
              bench = \"std\"\n",
         )
         .expect("valid manifest");
         // ci inherits test+doc from base and adds bench.
         assert_eq!(m.active_tiers("ci").unwrap(), vec!["bench", "doc", "test"]);
-        // A minimalist profile opts into nothing.
-        let empty = Manifest::parse("[profiles.prod]\n").expect("valid manifest");
+        // A minimalist target opts into nothing.
+        let empty = Manifest::parse("[targets.prod]\n").expect("valid manifest");
         assert!(empty.active_tiers("prod").unwrap().is_empty());
     }
 
     #[test]
     fn unknown_tier_is_rejected() {
-        let err = Manifest::parse("[profiles.dev.tiers]\ntset = \"std\"\n").unwrap_err();
+        let err = Manifest::parse("[targets.dev.tiers]\ntset = \"std\"\n").unwrap_err();
         assert!(err.contains("unknown tier `tset`"), "{err}");
     }
 
     #[test]
     fn an_undeclared_provider_is_rejected() {
         // A provider that is neither `std` nor a declared dependency is an error.
-        let err = Manifest::parse("[profiles.dev.tiers]\nbench = \"criterion\"\n").unwrap_err();
+        let err = Manifest::parse("[targets.dev.tiers]\nbench = \"criterion\"\n").unwrap_err();
         assert!(err.contains("declared dependency"), "{err}");
     }
 
@@ -926,7 +927,7 @@ mod tests {
         let m = Manifest::parse(
             "[dependencies]\n\
              bench_kit = { path = \"../bench_kit\" }\n\
-             [profiles.dev.tiers]\n\
+             [targets.dev.tiers]\n\
              bench = \"bench_kit\"\n\
              test = \"std\"\n",
         )
@@ -937,12 +938,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_profile_is_an_error() {
-        let m = Manifest::parse("[profiles.dev.tiers]\ntest = \"std\"\n").unwrap();
+    fn unknown_target_is_an_error() {
+        let m = Manifest::parse("[targets.dev.tiers]\ntest = \"std\"\n").unwrap();
         assert!(
             m.active_tiers("nope")
                 .unwrap_err()
-                .contains("unknown profile")
+                .contains("unknown target")
         );
     }
 
@@ -1014,7 +1015,7 @@ mod tests {
 
     #[test]
     fn inheritance_cycle_is_detected() {
-        let m = Manifest::parse("[profiles.a]\nextends = \"b\"\n[profiles.b]\nextends = \"a\"\n")
+        let m = Manifest::parse("[targets.a]\nextends = \"b\"\n[targets.b]\nextends = \"a\"\n")
             .unwrap();
         assert!(m.active_tiers("a").unwrap_err().contains("cycle"));
     }

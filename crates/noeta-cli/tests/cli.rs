@@ -1404,7 +1404,7 @@ fn doc_unterminated_block_is_reported() {
     lang().arg("doc").arg(&file).assert().failure().code(1);
 }
 
-// --- `--profile` (object-model slice 6g: the `noeta.toml` build-profile manifest) ----
+// --- `--target` (object-model slice 6g: the `noeta.toml` build-target manifest) ----
 
 /// Write a `noeta.toml` alongside a program in its private temp directory, returning the program
 /// path. The manifest is discovered by walking up from the entry file's directory.
@@ -1422,18 +1422,18 @@ const TIERED_PROGRAM: &str = "fn f(x: int): void {\n\
      f(5)\n";
 
 #[test]
-fn run_profile_activates_its_tiers() {
-    // A profile that makes the `debug` tier live compiles the `@debug` block in, exactly as
+fn run_target_activates_its_tiers() {
+    // A target that makes the `debug` tier live compiles the `@debug` block in, exactly as
     // `--tier debug` would — but driven by `noeta.toml`.
     let file = temp_project(
         "prof_run",
-        "[profiles.dev.tiers]\ndebug = \"std\"\n",
+        "[targets.dev.tiers]\ndebug = \"std\"\n",
         TIERED_PROGRAM,
     );
     lang()
         .arg("run")
         .arg(&file)
-        .arg("--profile")
+        .arg("--target")
         .arg("dev")
         .assert()
         .success()
@@ -1441,13 +1441,13 @@ fn run_profile_activates_its_tiers() {
 }
 
 #[test]
-fn run_minimalist_profile_strips_everything() {
-    // A profile that opts into no tiers leaves every tier block stripped (same as a bare run).
-    let file = temp_project("prof_run_min", "[profiles.prod]\n", TIERED_PROGRAM);
+fn run_minimalist_target_strips_everything() {
+    // A target that opts into no tiers leaves every tier block stripped (same as a bare run).
+    let file = temp_project("prof_run_min", "[targets.prod]\n", TIERED_PROGRAM);
     lang()
         .arg("run")
         .arg(&file)
-        .arg("--profile")
+        .arg("--target")
         .arg("prod")
         .assert()
         .success()
@@ -1455,32 +1455,32 @@ fn run_minimalist_profile_strips_everything() {
 }
 
 #[test]
-fn test_profile_gates_the_runner() {
-    // `lang test --profile prod`, where `prod` does not make `test` live, runs nothing and says so.
-    let file = temp_project("prof_test_gate", "[profiles.prod]\n", TIERED_PROGRAM);
+fn test_target_gates_the_runner() {
+    // `lang test --target prod`, where `prod` does not make `test` live, runs nothing and says so.
+    let file = temp_project("prof_test_gate", "[targets.prod]\n", TIERED_PROGRAM);
     lang()
         .arg("test")
         .arg(&file)
-        .arg("--profile")
+        .arg("--target")
         .arg("prod")
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "tier `test` is not active in profile `prod`",
+            "tier `test` is not active in target `prod`",
         ));
 }
 
 #[test]
-fn test_profile_with_tier_live_runs() {
+fn test_target_with_tier_live_runs() {
     let file = temp_project(
         "prof_test_live",
-        "[profiles.dev.tiers]\ntest = \"std\"\n",
+        "[targets.dev.tiers]\ntest = \"std\"\n",
         TIERED_PROGRAM,
     );
     lang()
         .arg("test")
         .arg(&file)
-        .arg("--profile")
+        .arg("--target")
         .arg("dev")
         .assert()
         .success()
@@ -1488,31 +1488,31 @@ fn test_profile_with_tier_live_runs() {
 }
 
 #[test]
-fn run_unknown_profile_is_an_error() {
+fn run_unknown_target_is_an_error() {
     let file = temp_project(
         "prof_unknown",
-        "[profiles.dev.tiers]\ndebug = \"std\"\n",
+        "[targets.dev.tiers]\ndebug = \"std\"\n",
         TIERED_PROGRAM,
     );
     lang()
         .arg("run")
         .arg(&file)
-        .arg("--profile")
+        .arg("--target")
         .arg("ghost")
         .assert()
         .failure()
         .code(1)
-        .stderr(predicate::str::contains("unknown profile `ghost`"));
+        .stderr(predicate::str::contains("unknown target `ghost`"));
 }
 
 #[test]
-fn run_profile_without_manifest_is_an_error() {
-    // `--profile` with no `noeta.toml` anywhere above the entry is a clear error, not a silent run.
+fn run_target_without_manifest_is_an_error() {
+    // `--target` with no `noeta.toml` anywhere above the entry is a clear error, not a silent run.
     let file = temp_program("prof_no_manifest", "echo \"hi\"\n");
     lang()
         .arg("run")
         .arg(&file)
-        .arg("--profile")
+        .arg("--target")
         .arg("dev")
         .assert()
         .failure()

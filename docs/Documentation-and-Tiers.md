@@ -1,6 +1,6 @@
 # Documentation & Dev Tiers
 
-`@test`, `@bench`, `@doc`, and `@debug` are **dev tiers** — kinds of content you co-locate with your code that are stripped from a normal build and activated only by the right tool. This page covers `@doc` (extractable prose), the tier model that unifies all four, and the `noeta.toml` build profiles that decide which tiers are live.
+`@test`, `@bench`, `@doc`, and `@debug` are **dev tiers** — kinds of content you co-locate with your code that are stripped from a normal build and activated only by the right tool. This page covers `@doc` (extractable prose), the tier model that unifies all four, and the `noeta.toml` build targets that decide which tiers are live.
 
 ---
 
@@ -36,7 +36,7 @@ $ noeta doc adder.noe
 noeta doc [OPTIONS] <FILE>
 ```
 
-The only flag is `--profile <NAME>`, which gates extraction on the `doc` tier being live in that profile.
+The only flag is `--target <NAME>`, which gates extraction on the `doc` tier being live in that build target.
 
 ---
 
@@ -45,7 +45,7 @@ The only flag is `--profile <NAME>`, which gates extraction on the `doc` tier be
 There are two orthogonal ideas:
 
 - A **tier** is a *kind of co-located content* — a property of the **source**. Built-in tiers: `test`, `bench`, `debug` (all *code*), and `doc` (*text*).
-- A **profile** is a *build configuration* — a property of the **build invocation** (in `noeta.toml`) — that decides which tiers are live.
+- A **target** is a *named build recipe* — a property of the **build invocation** (in `noeta.toml`) — that decides which tiers are live: a `dev` target includes them, a `prod` target strips them all.
 
 ### How activation works
 
@@ -74,7 +74,7 @@ debug: x is 5
 result: 10
 ```
 
-`--tier <NAME>` is repeatable and unions with any `--profile`.
+`--tier <NAME>` is repeatable and unions with any `--target`.
 
 ### The annotation form
 
@@ -95,28 +95,28 @@ A tier directive can take arguments — `@bench(iterations: 1000)` (or positiona
 
 ---
 
-## Build profiles — `noeta.toml`
+## Build targets — `noeta.toml`
 
-A `noeta.toml` at (or above) your entry file's directory defines named build profiles. Each maps tier names to the package that provides them:
+A `noeta.toml` at (or above) your entry file's directory defines named build targets. Each maps tier names to the package that provides them:
 
 ```toml
-[profiles.dev.tiers]
+[targets.dev.tiers]
 test  = "std"
 bench = { package = "std", samples = 100 }
 debug = "std"
 
-[profiles.ci]
+[targets.ci]
 extends = "dev"
-[profiles.ci.tiers]
+[targets.ci.tiers]
 doc = "std"
 ```
 
-- A profile's **active tiers** are the tier names in its (inheritance-merged) map.
-- `extends = "<base>"` inherits another profile's tiers; the child's own entries override the base's. Cycles are detected and rejected.
-- `--profile <NAME>` on `noeta run` activates those tiers (unioned with `--tier`). On `noeta test`/`bench`/`doc`, `--profile` acts as a **gate** — the tool no-ops if the profile does not make its tier live.
+- A target's **active tiers** are the tier names in its (inheritance-merged) map.
+- `extends = "<base>"` inherits another target's tiers; the child's own entries override the base's. Cycles are detected and rejected.
+- `--target <NAME>` on `noeta run` activates those tiers (unioned with `--tier`). On `noeta test`/`bench`/`doc`, `--target` acts as a **gate** — the tool no-ops if the target does not make its tier live.
 
 > [!NOTE]
-> **What works today vs. what is stubbed.** The full profile grammar works now: parsing, `extends` inheritance, tier-name validation, provider string-vs-table forms, cycle detection, and unknown-profile errors. But the *only* accepted provider is the built-in `"std"` — naming any other package is an error. The package manager itself has since shipped; wiring tier providers to third-party packages is the remaining step (the grammar was validated ahead of time so the manifest shape is already locked).
+> **What works today vs. what is stubbed.** The full target grammar works now: parsing, `extends` inheritance, tier-name validation, provider string-vs-table forms, cycle detection, and unknown-target errors. A tier's provider may be the built-in `"std"` or any declared `[dependencies]` key — but naming a third-party provider is not yet *consumed*: the built-in runners always run. Wiring provider dispatch (and `@tier` declarations, so packages can define new tiers) is the remaining step; the table shape also leaves room for a target to carry platform/artifact keys later.
 
 ---
 
