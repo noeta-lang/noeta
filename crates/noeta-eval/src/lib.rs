@@ -2362,6 +2362,10 @@ impl Interpreter {
             ("to_hex", Value::Bytes(b)) if arity_ok => {
                 Some(Value::Str(noeta_stdlib::bytes_to_hex(b)))
             }
+            // UTF-8 decode — the inverse of `string.to_bytes()`; invalid UTF-8 is `none`.
+            ("decode", Value::Bytes(b)) if arity_ok => Some(optional_to_value(
+                noeta_stdlib::bytes_decode_utf8(b).map(Value::Str),
+            )),
             // `.enumerate()` yields a list of `(index, value)` **tuples** (object-model slice 4b —
             // tuples are the positional-pair type), destructured by a `for (i, x) in …` pattern.
             ("enumerate", Value::List(items)) if arity_ok => {
@@ -4769,6 +4773,20 @@ fn output_to_value(output: noeta_stdlib::Output) -> Value {
         noeta_stdlib::Output::StrList(items) => {
             Value::list(items.into_iter().map(Value::Str).collect())
         }
+        noeta_stdlib::Output::Bytes(data) => Value::Bytes(Rc::new(data)),
+        // Optional shapes — the shared dispatch reports presence; the backend builds its own
+        // `some(...)`/`none` enum value.
+        noeta_stdlib::Output::OptStr(opt) => optional_to_value(opt.map(Value::Str)),
+        noeta_stdlib::Output::OptInt(opt) => optional_to_value(opt.map(Value::Int)),
+        noeta_stdlib::Output::OptFloat(opt) => optional_to_value(opt.map(Value::Float)),
+    }
+}
+
+/// Wrap an already-lifted optional payload into the built-in `Option` enum value.
+fn optional_to_value(opt: Option<Value>) -> Value {
+    match opt {
+        Some(value) => builtin_enum("Option", "some", vec![value]),
+        None => builtin_enum("Option", "none", Vec::new()),
     }
 }
 

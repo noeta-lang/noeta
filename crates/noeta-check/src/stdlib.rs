@@ -333,6 +333,7 @@ fn bytes_method(name: &str) -> Option<Type> {
     Some(match name {
         "len" => Type::Int,       // the buffer length in bytes
         "to_hex" => Type::String, // lowercase hex rendering (crypto arc C1)
+        "decode" => opt(Type::String), // UTF-8 decode — `none` on invalid UTF-8
         _ => return None,
     })
 }
@@ -390,10 +391,17 @@ fn float_conversion_return(name: &str) -> Option<Type> {
 
 fn string_method(name: &str) -> Option<Type> {
     Some(match name {
-        "upper" | "lower" | "trim" | "replace" | "repeat" => Type::String,
-        "contains" | "starts_with" | "ends_with" => Type::Bool,
-        "split" => list(Type::String),
+        "upper" | "lower" | "trim" | "trim_start" | "trim_end" | "replace" | "repeat" | "slice"
+        | "pad_start" | "pad_end" => Type::String,
+        "contains" | "starts_with" | "ends_with" | "is_empty" => Type::Bool,
+        "split" | "chars" | "lines" => list(Type::String),
         "len" => Type::Int,
+        // The safe probes/parses — `none` on absence or malformed input.
+        "index_of" => opt(Type::Int),
+        "char_at" => opt(Type::String),
+        "to_int" => opt(Type::Int),
+        "to_float" => opt(Type::Float),
+        "to_bytes" => Type::Bytes,
         _ => return None,
     })
 }
@@ -467,7 +475,7 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         Type::List(elem) => list_params(name, elem),
         Type::Set(elem) => set_params(name, elem),
         Type::Map(key, val) => map_params(name, key, val),
-        Type::Bytes if name == "len" || name == "to_hex" => Some(vec![]),
+        Type::Bytes if name == "len" || name == "to_hex" || name == "decode" => Some(vec![]),
         Type::Named(n, args) if n == ITERATOR => {
             iterator_params(name, args.first().unwrap_or(&Type::Dyn))
         }
@@ -553,10 +561,14 @@ fn int_params(name: &str) -> Option<Vec<Type>> {
 
 fn string_params(name: &str) -> Option<Vec<Type>> {
     Some(match name {
-        "upper" | "lower" | "trim" | "len" => vec![],
-        "contains" | "starts_with" | "ends_with" | "split" => vec![Type::String],
+        "upper" | "lower" | "trim" | "trim_start" | "trim_end" | "len" | "is_empty" | "chars"
+        | "lines" | "to_int" | "to_float" | "to_bytes" => vec![],
+        "contains" | "starts_with" | "ends_with" | "split" | "index_of" => vec![Type::String],
         "replace" => vec![Type::String, Type::String],
-        "repeat" => vec![Type::Int],
+        "repeat" | "char_at" => vec![Type::Int],
+        "slice" => vec![Type::Int, Type::Int],
+        // `pad_start(width, fill)` / `pad_end(width, fill)` — JS semantics, explicit fill.
+        "pad_start" | "pad_end" => vec![Type::Int, Type::String],
         _ => return None,
     })
 }

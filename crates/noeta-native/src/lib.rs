@@ -68,6 +68,14 @@ pub enum Output {
     Float(f64),
     /// A list of strings (e.g. `split`). The caller builds its native list of string values.
     StrList(Vec<String>),
+    /// A byte buffer (e.g. `to_bytes`). The caller wraps it in its bytes value.
+    Bytes(Vec<u8>),
+    /// An optional string (e.g. `char_at`). The caller builds its `some(...)`/`none` value.
+    OptStr(Option<String>),
+    /// An optional int (e.g. `to_int`, `index_of`).
+    OptInt(Option<i64>),
+    /// An optional float (e.g. `to_float`).
+    OptFloat(Option<f64>),
 }
 
 /// The category of a stdlib misuse, mapped by each backend onto a `DiagnosticCode`.
@@ -118,12 +126,25 @@ pub const STRING_METHODS: &[&str] = &[
     "upper",
     "lower",
     "trim",
+    "trim_start",
+    "trim_end",
     "contains",
     "starts_with",
     "ends_with",
     "split",
     "replace",
     "repeat",
+    "is_empty",
+    "chars",
+    "lines",
+    "slice",
+    "char_at",
+    "index_of",
+    "pad_start",
+    "pad_end",
+    "to_int",
+    "to_float",
+    "to_bytes",
 ];
 
 /// Dispatch a built-in string method. `recv` is the receiver string; `args` are the
@@ -180,8 +201,134 @@ fn string_method_inner(recv: &str, method: &str, args: &[Arg]) -> Result<Output,
             let count = want_int(method, args, 0)?;
             Ok(Output::Str(recv.repeat(count.max(0) as usize)))
         }
+        "trim_start" => {
+            want_arity(method, args, 0)?;
+            Ok(Output::Str(recv.trim_start().to_string()))
+        }
+        "trim_end" => {
+            want_arity(method, args, 0)?;
+            Ok(Output::Str(recv.trim_end().to_string()))
+        }
+        "is_empty" => {
+            want_arity(method, args, 0)?;
+            Ok(Output::Bool(recv.is_empty()))
+        }
+        // `chars()` — the Unicode scalar characters, each as a string (identical to `split("")`).
+        "chars" => {
+            want_arity(method, args, 0)?;
+            Ok(Output::StrList(split(recv, "")))
+        }
+        // `lines()` — split on `\n`, dropping a trailing `\r` (so `\r\n` input works) and the
+        // final empty segment after a trailing newline (Rust's `str::lines`).
+        "lines" => {
+            want_arity(method, args, 0)?;
+            Ok(Output::StrList(recv.lines().map(str::to_string).collect()))
+        }
+        // `slice(start, end)` — the half-open character range `[start, end)`, with the same
+        // bounds rule as list `slice` (out of bounds is an error, not a clamp). Character-based,
+        // so multi-byte text slices at scalar boundaries.
+        "slice" => {
+            want_arity(method, args, 2)?;
+            let start = want_int(method, args, 0)?;
+            let end = want_int(method, args, 1)?;
+            let len = recv.chars().count();
+            if start < 0 || end < start || end as usize > len {
+                return Err(str_slice_bounds_error(start, end, len));
+            }
+            let taken: String = recv
+                .chars()
+                .skip(start as usize)
+                .take((end - start) as usize)
+                .collect();
+            Ok(Output::Str(taken))
+        }
+        // `char_at(i)` — the character at index `i` as a string, or `none` out of range: the
+        // safe probe (unlike `slice`, which errors).
+        "char_at" => {
+            want_arity(method, args, 1)?;
+            let index = want_int(method, args, 0)?;
+            let found = usize::try_from(index)
+                .ok()
+                .and_then(|i| recv.chars().nth(i))
+                .map(|c| c.to_string());
+            Ok(Output::OptStr(found))
+        }
+        // `index_of(sub)` — the character index of the first occurrence, or `none`.
+        "index_of" => {
+            want_arity(method, args, 1)?;
+            let sub = want_str(method, args, 0)?;
+            let found = recv
+                .find(sub)
+                .map(|byte| recv[..byte].chars().count() as i64);
+            Ok(Output::OptInt(found))
+        }
+        "pad_start" => {
+            want_arity(method, args, 2)?;
+            let width = want_int(method, args, 0)?;
+            let fill = want_str(method, args, 1)?;
+            Ok(Output::Str(pad(recv, width, fill, method, Pad::Start)?))
+        }
+        "pad_end" => {
+            want_arity(method, args, 2)?;
+            let width = want_int(method, args, 0)?;
+            let fill = want_str(method, args, 1)?;
+            Ok(Output::Str(pad(recv, width, fill, method, Pad::End)?))
+        }
+        // `to_int()`/`to_float()` — strict numeric parsing (no implicit trim; compose with
+        // `trim()`), `none` on any malformed input. The safe bridge from text to numbers.
+        "to_int" => {
+            want_arity(method, args, 0)?;
+            Ok(Output::OptInt(recv.parse::<i64>().ok()))
+        }
+        "to_float" => {
+            want_arity(method, args, 0)?;
+            Ok(Output::OptFloat(recv.parse::<f64>().ok()))
+        }
+        // `to_bytes()` — the UTF-8 encoding. `bytes.decode()` is the inverse.
+        "to_bytes" => {
+            want_arity(method, args, 0)?;
+            Ok(Output::Bytes(recv.as_bytes().to_vec()))
+        }
         // STRING_METHODS gates entry, so every listed method is handled above.
         _ => unreachable!("unlisted string method `{method}`"),
+    }
+}
+
+enum Pad {
+    Start,
+    End,
+}
+
+/// Pad `recv` with repetitions of `fill` (truncated to fit) until it is `width` characters —
+/// JS `padStart`/`padEnd` semantics. A string already at least `width` long is returned
+/// unchanged; an empty `fill` is a type error (it can never make progress).
+fn pad(recv: &str, width: i64, fill: &str, method: &str, side: Pad) -> Result<String, StdError> {
+    if fill.is_empty() {
+        return Err(type_error(method, "non-empty string fill"));
+    }
+    let len = recv.chars().count();
+    let width = usize::try_from(width).unwrap_or(0);
+    if len >= width {
+        return Ok(recv.to_string());
+    }
+    let padding: String = fill.chars().cycle().take(width - len).collect();
+    Ok(match side {
+        Pad::Start => format!("{padding}{recv}"),
+        Pad::End => format!("{recv}{padding}"),
+    })
+}
+
+/// Decode a byte buffer as UTF-8 — the shared body of `bytes.decode()`, `None` when the bytes
+/// are not valid UTF-8 (the caller renders its `none`).
+pub fn bytes_decode_utf8(data: &[u8]) -> Option<String> {
+    std::str::from_utf8(data).ok().map(str::to_string)
+}
+
+/// The string twin of [`slice_bounds_error`] — same shape, "string" noun, character count.
+fn str_slice_bounds_error(start: i64, end: i64, len: usize) -> StdError {
+    StdError {
+        kind: ErrorKind::Bounds,
+        message: format!("slice [{start}..{end}] is out of bounds for string of length {len}"),
     }
 }
 
@@ -830,6 +977,113 @@ mod tests {
                 "o".into()
             ])
         );
+    }
+
+    #[test]
+    fn trim_sides_and_emptiness() {
+        assert_eq!(done("  x  ", "trim_start", &[]), Output::Str("x  ".into()));
+        assert_eq!(done("  x  ", "trim_end", &[]), Output::Str("  x".into()));
+        assert_eq!(done("", "is_empty", &[]), Output::Bool(true));
+        assert_eq!(done(" ", "is_empty", &[]), Output::Bool(false));
+    }
+
+    #[test]
+    fn chars_and_lines() {
+        assert_eq!(
+            done("héy", "chars", &[]),
+            Output::StrList(vec!["h".into(), "é".into(), "y".into()])
+        );
+        // `\r\n` and a trailing newline both normalize away (Rust `str::lines`).
+        assert_eq!(
+            done("a\r\nb\nc\n", "lines", &[]),
+            Output::StrList(vec!["a".into(), "b".into(), "c".into()])
+        );
+    }
+
+    #[test]
+    fn slice_is_char_based_and_bounds_checked() {
+        assert_eq!(
+            done("héllo", "slice", &[Arg::Int(1), Arg::Int(3)]),
+            Output::Str("él".into())
+        );
+        assert_eq!(
+            done("abc", "slice", &[Arg::Int(0), Arg::Int(0)]),
+            Output::Str(String::new())
+        );
+        match string_method("abc", "slice", &[Arg::Int(1), Arg::Int(9)]) {
+            Dispatch::Err(error) => assert_eq!(error.kind, ErrorKind::Bounds),
+            other => panic!("expected Err, got {other:?}"),
+        }
+        match string_method("abc", "slice", &[Arg::Int(-1), Arg::Int(2)]) {
+            Dispatch::Err(error) => assert_eq!(error.kind, ErrorKind::Bounds),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn char_at_and_index_of_are_safe_probes() {
+        assert_eq!(
+            done("héy", "char_at", &[Arg::Int(1)]),
+            Output::OptStr(Some("é".into()))
+        );
+        assert_eq!(done("héy", "char_at", &[Arg::Int(9)]), Output::OptStr(None));
+        assert_eq!(done("héy", "char_at", &[Arg::Int(-1)]), Output::OptStr(None));
+        // `index_of` reports the *character* index, not the byte offset.
+        assert_eq!(
+            done("héllo", "index_of", &[Arg::Str("llo")]),
+            Output::OptInt(Some(2))
+        );
+        assert_eq!(done("héllo", "index_of", &[Arg::Str("z")]), Output::OptInt(None));
+        assert_eq!(done("abc", "index_of", &[Arg::Str("")]), Output::OptInt(Some(0)));
+    }
+
+    #[test]
+    fn pad_fills_to_width() {
+        assert_eq!(
+            done("7", "pad_start", &[Arg::Int(3), Arg::Str("0")]),
+            Output::Str("007".into())
+        );
+        assert_eq!(
+            done("ab", "pad_end", &[Arg::Int(5), Arg::Str("xy")]),
+            Output::Str("abxyx".into())
+        );
+        // Already wide enough — unchanged (and a negative width is a no-op, not a panic).
+        assert_eq!(
+            done("abcd", "pad_start", &[Arg::Int(2), Arg::Str("0")]),
+            Output::Str("abcd".into())
+        );
+        assert_eq!(
+            done("ab", "pad_end", &[Arg::Int(-3), Arg::Str("0")]),
+            Output::Str("ab".into())
+        );
+        match string_method("x", "pad_start", &[Arg::Int(3), Arg::Str("")]) {
+            Dispatch::Err(error) => assert_eq!(error.kind, ErrorKind::ArgType),
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn numeric_parsing_is_strict() {
+        assert_eq!(done("42", "to_int", &[]), Output::OptInt(Some(42)));
+        assert_eq!(done("-7", "to_int", &[]), Output::OptInt(Some(-7)));
+        // No implicit trim, no float acceptance — compose with `trim()` instead.
+        assert_eq!(done(" 42", "to_int", &[]), Output::OptInt(None));
+        assert_eq!(done("4.2", "to_int", &[]), Output::OptInt(None));
+        assert_eq!(done("nope", "to_int", &[]), Output::OptInt(None));
+        assert_eq!(done("4.2", "to_float", &[]), Output::OptFloat(Some(4.2)));
+        assert_eq!(done("-3", "to_float", &[]), Output::OptFloat(Some(-3.0)));
+        assert_eq!(done("x", "to_float", &[]), Output::OptFloat(None));
+    }
+
+    #[test]
+    fn bytes_round_trip() {
+        assert_eq!(
+            done("hé", "to_bytes", &[]),
+            Output::Bytes(vec![0x68, 0xc3, 0xa9])
+        );
+        assert_eq!(bytes_decode_utf8(&[0x68, 0xc3, 0xa9]), Some("hé".to_string()));
+        // Invalid UTF-8 decodes to `None`, not a lossy replacement.
+        assert_eq!(bytes_decode_utf8(&[0xff, 0xfe]), None);
     }
 
     #[test]

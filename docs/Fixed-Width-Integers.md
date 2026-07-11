@@ -135,7 +135,7 @@ echo ys == xs                           // true
 echo blob.len()                         // 24  (2 elements × 3 × 4-byte f32)
 ```
 
-`bytes` is an opaque binary buffer: `b.len()` gives its length, `b.to_hex()` renders it as lowercase hex (the usual way to display a `crypto` digest), it compares by content, and `type_of(b)` is `Type.Bytes`.
+`bytes` is an opaque binary buffer: `b.len()` gives its length, `b.to_hex()` renders it as lowercase hex (the usual way to display a `crypto` digest), `b.decode()` decodes it as UTF-8 (`?string` — `none` when the bytes are not valid UTF-8; the inverse of `string.to_bytes()`), it compares by content, and `type_of(b)` is `Type.Bytes`.
 
 ## Bulk vector kernels
 

@@ -1,0 +1,51 @@
+// The extended Ring 1 string surface (stdlib-gaps): trim sides, emptiness, chars/lines,
+// char-based slice, safe probes (char_at/index_of), padding, and strict numeric parsing.
+// Semantics live once in noeta-native, shared by both backends.
+// expect: stdout "x  "
+// expect: stdout "  x"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "[\"h\", \"é\", \"y\"]"
+// expect: stdout "[\"a\", \"b\", \"c\"]"
+// expect: stdout "él"
+// expect: stdout ""
+// expect: stdout "some(é)"
+// expect: stdout "none"
+// expect: stdout "some(2)"
+// expect: stdout "none"
+// expect: stdout "007"
+// expect: stdout "abxyx"
+// expect: stdout "abcd"
+// expect: stdout "some(42)"
+// expect: stdout "some(-7)"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "some(4.2)"
+// expect: stdout "none"
+// expect: stdout "parsed 42"
+// expect: exit 0
+echo "  x  ".trim_start();
+echo "  x  ".trim_end();
+echo "".is_empty();
+echo " ".is_empty();
+echo "héy".chars();
+echo "a\r\nb\nc\n".lines();
+echo "héllo".slice(1, 3);
+echo "abc".slice(0, 0);
+echo "héy".char_at(1);
+echo "héy".char_at(9);
+echo "héllo".index_of("llo");
+echo "héllo".index_of("z");
+echo "7".pad_start(3, "0");
+echo "ab".pad_end(5, "xy");
+echo "abcd".pad_start(2, "0");
+echo "42".to_int();
+echo "-7".to_int();
+echo " 42".to_int();
+echo "4.2".to_int();
+echo "4.2".to_float();
+echo "nope".to_float();
+echo match " 42 ".trim().to_int() {
+    some(n) => "parsed ${n}",
+    none => "not a number",
+};

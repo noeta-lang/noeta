@@ -7050,6 +7050,12 @@ impl<'m> Vm<'m> {
             // so both backends print digests identically.
             v.bytes_data()
                 .map(|b| Value::string(&noeta_stdlib::bytes_to_hex(&b)))
+        } else if method == "decode" {
+            // UTF-8 decode — the inverse of `string.to_bytes()`; invalid UTF-8 is `none`.
+            v.bytes_data().map(|b| match noeta_stdlib::bytes_decode_utf8(&b) {
+                Some(s) => make_some(Value::string(&s)),
+                None => make_none(),
+            })
         } else if method == "enumerate" && matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
         {
             // A list of `(index, value)` **tuples** (object-model slice 4b), matching the

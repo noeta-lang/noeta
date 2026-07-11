@@ -171,6 +171,21 @@ pub(crate) fn stdlib_output_to_value(output: noeta_stdlib::Output) -> Value {
         noeta_stdlib::Output::StrList(items) => {
             Value::list(items.iter().map(|s| Value::string(s)).collect())
         }
+        noeta_stdlib::Output::Bytes(data) => Value::bytes(data),
+        // Optional shapes — the shared dispatch reports presence; the backend builds its own
+        // `some(...)`/`none` enum value (fresh, so `make_some` adopts the payload's reference).
+        noeta_stdlib::Output::OptStr(opt) => match opt {
+            Some(s) => make_some(Value::string(&s)),
+            None => make_none(),
+        },
+        noeta_stdlib::Output::OptInt(opt) => match opt {
+            Some(i) => make_some(Value::int(i)),
+            None => make_none(),
+        },
+        noeta_stdlib::Output::OptFloat(opt) => match opt {
+            Some(f) => make_some(Value::float(f)),
+            None => make_none(),
+        },
     }
 }
 

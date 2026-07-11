@@ -193,6 +193,7 @@ fn build_interpolated(ctx: Ctx<'_>, inner: &str, base: u32, span: Span) -> Expr 
                 let escaped = match chars.next() {
                     Some((_, 'n')) => '\n',
                     Some((_, 't')) => '\t',
+                    Some((_, 'r')) => '\r',
                     Some((_, '"')) => '"',
                     Some((_, '\\')) => '\\',
                     // `\$` is a literal `$` — the one escape interpolation needs, so a literal

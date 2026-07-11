@@ -685,6 +685,19 @@ fn from_output(output: Output) -> NativeOut {
         Output::Int(n) => NativeOut::Scalar(Scalar::Int(n)),
         Output::Float(f) => NativeOut::Scalar(Scalar::Float(f)),
         Output::StrList(items) => str_list(items),
+        Output::Bytes(data) => NativeOut::Bytes(data),
+        Output::OptStr(opt) => match opt {
+            Some(s) => NativeOut::Some(Box::new(NativeOut::Str(s))),
+            None => NativeOut::None,
+        },
+        Output::OptInt(opt) => match opt {
+            Some(n) => NativeOut::Some(Box::new(NativeOut::Scalar(Scalar::Int(n)))),
+            None => NativeOut::None,
+        },
+        Output::OptFloat(opt) => match opt {
+            Some(f) => NativeOut::Some(Box::new(NativeOut::Scalar(Scalar::Float(f)))),
+            None => NativeOut::None,
+        },
     }
 }
 

@@ -14,15 +14,26 @@ Semantics are Unicode-scalar-based; a wrong arity or argument type is E0007.
 | `upper` | `upper() -> string` | `"hi".upper()` → `HI` |
 | `lower` | `lower() -> string` | `"HI".lower()` → `hi` |
 | `trim` | `trim() -> string` | `"  x  ".trim()` → `x` |
+| `trim_start` / `trim_end` | `() -> string` | `"  x  ".trim_start()` → `x  ` |
 | `contains` | `contains(needle: string) -> bool` | `"hello".contains("ell")` → `true` |
 | `starts_with` | `starts_with(prefix: string) -> bool` | `"hello".starts_with("he")` → `true` |
 | `ends_with` | `ends_with(suffix: string) -> bool` | `"hello".ends_with("lo")` → `true` |
 | `split` | `split(sep: string) -> List<string>` | `"a,b,c".split(",")` → `["a", "b", "c"]` |
+| `chars` | `chars() -> List<string>` | `"héy".chars()` → `["h", "é", "y"]` |
+| `lines` | `lines() -> List<string>` | `"a\nb\n".lines()` → `["a", "b"]` (handles `\r\n`) |
 | `replace` | `replace(from: string, to: string) -> string` | `"a.b".replace(".", "/")` → `a/b` |
 | `repeat` | `repeat(n: int) -> string` | `"ab".repeat(3)` → `ababab` |
+| `slice` | `slice(start: int, end: int) -> string` | `"héllo".slice(1, 3)` → `él` (chars, half-open; out of bounds is E0016) |
+| `char_at` | `char_at(i: int) -> ?string` | `"héy".char_at(1)` → `some(é)`; out of range → `none` |
+| `index_of` | `index_of(sub: string) -> ?int` | `"héllo".index_of("llo")` → `some(2)` (char index); absent → `none` |
+| `pad_start` / `pad_end` | `(width: int, fill: string) -> string` | `"7".pad_start(3, "0")` → `007` |
+| `is_empty` | `is_empty() -> bool` | `"".is_empty()` → `true` |
+| `to_int` | `to_int() -> ?int` | `"42".to_int()` → `some(42)`; `"4.2".to_int()` → `none` |
+| `to_float` | `to_float() -> ?float` | `"4.2".to_float()` → `some(4.2)` |
+| `to_bytes` | `to_bytes() -> bytes` | `"hé".to_bytes().len()` → `3` (UTF-8; `bytes.decode()` is the inverse) |
 | `len` | `len() -> int` | `"héllo".len()` → `5` |
 
-Splitting on `""` yields characters. Also: index `s[i]` returns the i-th character (out of bounds is E0016), `s.len()` counts scalars, `"…${e}…"` interpolates, and `a ~ b` concatenates (display-concatenating non-strings).
+Splitting on `""` yields characters (same as `chars()`). Parsing is strict — `to_int`/`to_float` return `none` on surrounding whitespace or malformed input; compose with `trim()`. Also: index `s[i]` returns the i-th character (out of bounds is E0016), `s.len()` counts scalars, `"…${e}…"` interpolates, and `a ~ b` concatenates (display-concatenating non-strings).
 
 ## `List<T>`
 

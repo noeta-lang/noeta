@@ -1,0 +1,18 @@
+// The string↔bytes bridge: `to_bytes()` is the UTF-8 encoding, `bytes.decode()` the inverse
+// (`none` on invalid UTF-8 — exercised via a sliced multi-byte digest elsewhere; here the
+// round trip and length agreement: string len is chars, bytes len is bytes).
+// expect: stdout "2"
+// expect: stdout "3"
+// expect: stdout "68c3a9"
+// expect: stdout "some(hé)"
+// expect: stdout "hé"
+// expect: exit 0
+b = "hé".to_bytes();
+echo "hé".len();
+echo b.len();
+echo b.to_hex();
+echo b.decode();
+echo match b.decode() {
+    some(s) => s,
+    none => "invalid",
+};
