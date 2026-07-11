@@ -22,9 +22,11 @@
 //! change rather than a second pipeline.
 
 mod abi;
+mod browser_executor;
 mod browser_host;
 mod ide;
 
+pub use browser_executor::BrowserExecutor;
 pub use browser_host::BrowserHost;
 pub use ide::{complete_source, definition_source, hover_source, signature_source};
 
@@ -52,14 +54,42 @@ pub fn run_source(text: &str) -> String {
 }
 
 /// [`run_source`] on the [`BrowserHost`] (W3.0): real entropy, wall clock, and outbound HTTP
-/// through the embedder's `noeta_host` imports — the playground's "real host" mode.
+/// through the embedder's `noeta_host` imports — the playground's "real host" mode. Serial
+/// async (the sandbox executor resolves at spawn); the JSPI embedder uses
+/// [`run_source_browser_async`] instead.
 pub fn run_source_browser(text: &str) -> String {
-    run_with(text, Box::new(BrowserHost::new()))
+    run_with_executor(
+        text,
+        Box::new(BrowserHost::new()),
+        Box::new(noeta_stdlib::SandboxExecutor::new()),
+    )
+}
+
+/// [`run_source_browser`] under the JSPI pump (W3.1): the [`BrowserExecutor`] puts async work
+/// genuinely in flight (overlapping fetches, real-time `sleep`), suspending the wasm stack on
+/// its one suspending import while the browser event loop runs. Only callable from an embedder
+/// that wrapped the imports with `WebAssembly.Suspending` and this entry with
+/// `WebAssembly.promising` — the worker feature-detects and falls back to the serial entry.
+pub fn run_source_browser_async(text: &str) -> String {
+    run_with_executor(
+        text,
+        Box::new(BrowserHost::new()),
+        Box::new(BrowserExecutor::new()),
+    )
 }
 
 /// The shared run tail: compile through the salsa front end and execute on `host` (cooperative,
 /// tier-0, with the abort traceback — `run_module_debug(…, None)` is the documented plain run).
 fn run_with(text: &str, host: Box<dyn noeta_stdlib::Host>) -> String {
+    run_with_executor(text, host, Box::new(noeta_stdlib::SandboxExecutor::new()))
+}
+
+/// [`run_with`] under an explicit executor (the JSPI pump swaps it — W3.1).
+fn run_with_executor(
+    text: &str,
+    host: Box<dyn noeta_stdlib::Host>,
+    executor: Box<dyn noeta_stdlib::Executor>,
+) -> String {
     let (db, src, diagnostics) = front_end(text);
     if !diagnostics.is_empty() {
         return json!({ "compiled": false, "diagnostics": diagnostics }).to_string();
@@ -80,7 +110,6 @@ fn run_with(text: &str, host: Box<dyn noeta_stdlib::Host>) -> String {
         }
     };
 
-    let executor: Box<dyn noeta_stdlib::Executor> = Box::new(noeta_stdlib::SandboxExecutor::new());
     let (result, trace) = noeta_vm::VmBackend::new().run_module_debug(module, host, executor, None);
     let runtime_diagnostics: Vec<_> = result
         .diagnostics

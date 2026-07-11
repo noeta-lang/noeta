@@ -146,6 +146,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1,wasm32-unknown-unknown,wasm32-wasip2
+      # Node 26's V8 ships JSPI unflagged, so the browser smoke exercises the W3.1 pump (the
+      # script degrades to the serial-fallback assertions on older runtimes, printing which).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
       - uses: Swatinem/rust-cache@v2
       # The wasm target (plans/wasm/) rides on the interpreter pipeline being OS-free: every effect
       # behind the `Host` trait, threads/Cranelift feature-gated off the default path. That held by

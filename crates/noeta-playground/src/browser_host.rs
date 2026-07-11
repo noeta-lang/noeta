@@ -37,12 +37,21 @@ use serde_json::json;
 /// length-prefixed buffer (`[len: u32 LE][json]`) the JS side allocates through `noeta_alloc` —
 /// the same packing the export surface uses, so both directions share one convention.
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-mod imports {
+pub(crate) mod imports {
     #[link(wasm_import_module = "noeta_host")]
     unsafe extern "C" {
         pub fn js_entropy_u64() -> u64;
         pub fn js_now_ms() -> f64;
         pub fn js_net_fetch(ptr: *const u8, len: usize) -> *mut u8;
+        // The JSPI pump (W3.1). `js_fetch_start` begins a fetch in JS and returns a ticket
+        // WITHOUT suspending; `js_fetch_take` polls it (null pointer = still pending);
+        // `js_wait` is the one SUSPENDING import — it parks the whole wasm stack on
+        // `Promise.race([any pending ticket settles, optional timeout])`, letting the browser
+        // event loop run. On a non-JSPI embedder these are plain stubs and never called (the
+        // worker routes to the synchronous entry point instead).
+        pub fn js_fetch_start(ptr: *const u8, len: usize) -> u64;
+        pub fn js_fetch_take(ticket: u64) -> *mut u8;
+        pub fn js_wait(timeout_ms: f64);
     }
 
     pub fn entropy_u64() -> u64 {
@@ -55,9 +64,32 @@ mod imports {
 
     /// Round-trip a request JSON through the embedder, reclaiming the packed response buffer.
     pub fn net_fetch(request_json: &str) -> String {
+        unsafe { read_packed(js_net_fetch(request_json.as_ptr(), request_json.len())) }
+    }
+
+    /// Begin a fetch without suspending; the returned ticket is polled via [`fetch_take`].
+    pub fn fetch_start(request_json: &str) -> u64 {
+        unsafe { js_fetch_start(request_json.as_ptr(), request_json.len()) }
+    }
+
+    /// Poll a started fetch: the reply JSON once settled, `None` while in flight.
+    pub fn fetch_take(ticket: u64) -> Option<String> {
+        let ptr = unsafe { js_fetch_take(ticket) };
+        if ptr.is_null() {
+            return None;
+        }
+        Some(unsafe { read_packed(ptr) })
+    }
+
+    /// Suspend until any pending ticket settles or `timeout_ms` elapses (negative = no timeout).
+    pub fn wait(timeout_ms: f64) {
+        unsafe { js_wait(timeout_ms) }
+    }
+
+    /// Reclaim a `[len: u32 LE][bytes]` buffer the embedder allocated through `noeta_alloc`.
+    unsafe fn read_packed(ptr: *mut u8) -> String {
         #[allow(unsafe_code)]
         unsafe {
-            let ptr = js_net_fetch(request_json.as_ptr(), request_json.len());
             let mut len_bytes = [0u8; 4];
             std::ptr::copy_nonoverlapping(ptr, len_bytes.as_mut_ptr(), 4);
             let len = u32::from_le_bytes(len_bytes) as usize;
@@ -67,9 +99,11 @@ mod imports {
     }
 }
 
-/// Native fallbacks: honest time/entropy, no network (the import marshalling is node-proven).
+/// Native fallbacks: honest time/entropy; the sync fetch is an honest error (the import
+/// marshalling is node-proven), while the ticketed async pair answers a canned reply — that is
+/// what lets the executor's whole future path be unit-tested natively.
 #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
-mod imports {
+pub(crate) mod imports {
     pub fn entropy_u64() -> u64 {
         getrandom::u64().expect("the OS entropy source is unavailable")
     }
@@ -84,6 +118,16 @@ mod imports {
     pub fn net_fetch(_request_json: &str) -> String {
         r#"{"error":"the browser host's network runs only in a JS embedding"}"#.to_string()
     }
+
+    pub fn fetch_start(_request_json: &str) -> u64 {
+        1
+    }
+
+    pub fn fetch_take(_ticket: u64) -> Option<String> {
+        Some(r#"{"status":200,"headers":[],"body":"native-pong"}"#.to_string())
+    }
+
+    pub fn wait(_timeout_ms: f64) {}
 }
 
 /// The browser host: real entropy/wall-clock/outbound-HTTP through the embedder's imports;
@@ -282,48 +326,66 @@ impl Os for BrowserHost {
     }
 }
 
+/// Lower a request to the JSON that crosses the `noeta_host` import boundary. Bodies cross as
+/// text (an HTTP API's common case); a binary body would arrive lossy — acceptable for the
+/// playground, noted here rather than hidden.
+pub(crate) fn request_json(request: &NetRequest) -> String {
+    json!({
+        "method": request.method,
+        "url": request.url,
+        "headers": request.headers,
+        "body": String::from_utf8_lossy(&request.body),
+    })
+    .to_string()
+}
+
+/// Raise the embedder's reply JSON (`{status, headers, body}` or `{error}`) back into a
+/// [`NetResponse`]. Shared by the synchronous leaf and the JSPI future (W3.1).
+pub(crate) fn parse_reply(reply: &str, url: &str) -> Result<NetResponse, StdError> {
+    let parsed: serde_json::Value = serde_json::from_str(reply)
+        .map_err(|e| io_error(format!("malformed embedder fetch reply: {e}")))?;
+    if let Some(error) = parsed.get("error").and_then(|e| e.as_str()) {
+        return Err(io_error(format!("cannot fetch `{url}`: {error}")));
+    }
+    let headers = parsed
+        .get("headers")
+        .and_then(|h| h.as_array())
+        .map(|pairs| {
+            pairs
+                .iter()
+                .filter_map(|pair| {
+                    Some((
+                        pair.get(0)?.as_str()?.to_string(),
+                        pair.get(1)?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(NetResponse {
+        status: parsed.get("status").and_then(|s| s.as_u64()).unwrap_or(0) as u16,
+        headers,
+        body: parsed
+            .get("body")
+            .and_then(|b| b.as_str())
+            .unwrap_or_default()
+            .as_bytes()
+            .to_vec(),
+    })
+}
+
 impl Network for BrowserHost {
     fn net_fetch(&mut self, request: NetRequest) -> Result<NetResponse, StdError> {
-        // Bodies cross the import as text (an HTTP API's common case); a binary body would
-        // arrive lossy — acceptable for the playground, noted here rather than hidden.
-        let request_json = json!({
-            "method": request.method,
-            "url": request.url,
-            "headers": request.headers,
-            "body": String::from_utf8_lossy(&request.body),
-        })
-        .to_string();
-        let reply = imports::net_fetch(&request_json);
-        let parsed: serde_json::Value = serde_json::from_str(&reply)
-            .map_err(|e| io_error(format!("malformed embedder fetch reply: {e}")))?;
-        if let Some(error) = parsed.get("error").and_then(|e| e.as_str()) {
-            return Err(io_error(format!("cannot fetch `{}`: {error}", request.url)));
-        }
-        let headers = parsed
-            .get("headers")
-            .and_then(|h| h.as_array())
-            .map(|pairs| {
-                pairs
-                    .iter()
-                    .filter_map(|pair| {
-                        Some((
-                            pair.get(0)?.as_str()?.to_string(),
-                            pair.get(1)?.as_str()?.to_string(),
-                        ))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(NetResponse {
-            status: parsed.get("status").and_then(|s| s.as_u64()).unwrap_or(0) as u16,
-            headers,
-            body: parsed
-                .get("body")
-                .and_then(|b| b.as_str())
-                .unwrap_or_default()
-                .as_bytes()
-                .to_vec(),
-        })
+        let reply = imports::net_fetch(&request_json(&request));
+        parse_reply(&reply, &request.url)
+    }
+
+    fn net_spawn(&self, request: NetRequest) -> Box<dyn noeta_stdlib::ExternIo> {
+        // The JSPI seam (W3.1): hand the executor a descriptor whose real body is a plain Rust
+        // future over a JS fetch ticket — `BrowserExecutor` starts it without suspending, so
+        // `all([get_async(..), ..])` genuinely overlaps. Under the synchronous entry point the
+        // sandbox executor takes the `run_sync` body instead (serial-but-correct, unchanged).
+        Box::new(crate::browser_executor::BrowserFetchIo::new(request))
     }
 
     fn net_listen(&mut self, _addr: &str) -> Result<u64, StdError> {

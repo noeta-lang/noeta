@@ -27,6 +27,15 @@ function packReply(json) {
   new Uint8Array(engine.memory.buffer, ptr + 4, replyBytes.length).set(replyBytes);
   return ptr;
 }
+// The JSPI trio (W3.1), with **controlled resolution** so overlap is provable: every started
+// fetch settles on a macrotask, and the event log records starts vs settles.
+const JSPI = typeof WebAssembly.Suspending === 'function' && typeof WebAssembly.promising === 'function';
+const tickets = new Map();
+let nextTicket = 1n;
+const events = [];
+let settledSinceWait = false;
+let wakeResolve = () => {};
+let wakePromise = new Promise((resolve) => { wakeResolve = resolve; });
 const imports = {
   noeta_host: {
     js_entropy_u64() {
@@ -40,6 +49,45 @@ const imports = {
       fetched.push(request);
       return packReply(JSON.stringify({ status: 200, headers: [['x-test', 'yes']], body: 'pong' }));
     },
+    js_fetch_start(ptr, len) {
+      const request = JSON.parse(new TextDecoder().decode(new Uint8Array(engine.memory.buffer, ptr, len)));
+      const ticket = nextTicket++;
+      const entry = { done: false, resultJson: null };
+      tickets.set(ticket, entry);
+      events.push(`start ${request.url}`);
+      setTimeout(() => {
+        entry.resultJson = JSON.stringify({
+          status: 200,
+          headers: [],
+          body: `${new URL(request.url).pathname}-pong`,
+        });
+        entry.done = true;
+        events.push(`settle ${request.url}`);
+        settledSinceWait = true;
+        wakeResolve();
+      }, 5);
+      return ticket;
+    },
+    js_fetch_take(ticket) {
+      const entry = tickets.get(ticket);
+      if (!entry?.done) return 0;
+      tickets.delete(ticket);
+      return packReply(entry.resultJson);
+    },
+    js_wait: JSPI
+      ? new WebAssembly.Suspending(async (timeoutMs) => {
+          if (settledSinceWait) {
+            settledSinceWait = false;
+            wakePromise = new Promise((resolve) => { wakeResolve = resolve; });
+            return;
+          }
+          const racers = [wakePromise];
+          if (timeoutMs >= 0) racers.push(new Promise((r) => setTimeout(r, timeoutMs)));
+          await Promise.race(racers);
+          settledSinceWait = false;
+          wakePromise = new Promise((resolve) => { wakeResolve = resolve; });
+        })
+      : () => { throw new Error('js_wait requires JSPI'); },
   },
 };
 const { instance } = await WebAssembly.instantiate(bytes, imports);
@@ -124,5 +172,43 @@ assert.notEqual(a, b);
 const sandboxUuids = call(noeta_run, 'use std.id;\necho id.uuid();\necho id.uuid();');
 const again = call(noeta_run, 'use std.id;\necho id.uuid();\necho id.uuid();');
 assert.equal(sandboxUuids.stdout, again.stdout);
+
+// The JSPI pump (W3.1): two async fetches must genuinely OVERLAP — both start before either
+// settles — and the run entry suspends/resumes through WebAssembly.promising.
+if (JSPI) {
+  const promisingRun = WebAssembly.promising(instance.exports.noeta_run_browser_async);
+  const fanOut = [
+    'use std.http.client',
+    'use std.task.{all}',
+    '',
+    'async fn run(): void {',
+    '    rs = all([',
+    '        client.get_async("https://svc.test/a"),',
+    '        client.get_async("https://svc.test/b"),',
+    '    ])',
+    '    echo "${rs[0].status()},${rs[1].status()}"',
+    '    echo rs[0].body()',
+    '    echo rs[1].body()',
+    '}',
+    'run().await',
+  ].join('\n');
+  const encoded = new TextEncoder().encode(fanOut);
+  const input = noeta_alloc(encoded.length);
+  new Uint8Array(memory.buffer, input, encoded.length).set(encoded);
+  const out = await promisingRun(input, encoded.length);
+  const len = new DataView(memory.buffer).getUint32(out, true);
+  const jspiRun = JSON.parse(new TextDecoder().decode(new Uint8Array(memory.buffer, out + 4, len)));
+  noeta_free_result(out);
+
+  assert.equal(jspiRun.compiled, true, JSON.stringify(jspiRun));
+  assert.equal(jspiRun.exit_code, 0, JSON.stringify(jspiRun));
+  assert.equal(jspiRun.stdout, '200,200\n/a-pong\n/b-pong\n');
+  // The overlap proof: both requests were in flight before either settled.
+  assert.deepEqual(events.slice(0, 2), ['start https://svc.test/a', 'start https://svc.test/b'], `events: ${events}`);
+  assert.ok(events.slice(2).every((e) => e.startsWith('settle ')), `events: ${events}`);
+  console.log('JSPI pump: two fetches overlapped (both started before either settled) ✓');
+} else {
+  console.log('JSPI pump: not supported by this runtime — serial fallback path is the one under test');
+}
 
 console.log('browser-engine smoke: all assertions passed ✓');

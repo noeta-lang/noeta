@@ -73,6 +73,18 @@ pub unsafe extern "C" fn noeta_run_browser(ptr: *mut u8, len: usize) -> *mut u8 
     pack(crate::run_source_browser(&text))
 }
 
+/// [`crate::run_source_browser_async`] over the ABI — the JSPI-pumped run (W3.1). The embedder
+/// MUST have wrapped the `noeta_host` imports with `WebAssembly.Suspending` and this export with
+/// `WebAssembly.promising`; calling it plainly would trap at the first suspension.
+///
+/// # Safety
+/// `ptr`/`len` must be a live [`noeta_alloc`] allocation holding UTF-8 (lossily decoded if not).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn noeta_run_browser_async(ptr: *mut u8, len: usize) -> *mut u8 {
+    let text = unsafe { take_input(ptr, len) };
+    pack(crate::run_source_browser_async(&text))
+}
+
 /// [`crate::hover_source`] over the ABI: `line`/`character` are a zero-based UTF-16 position
 /// (the LSP convention — see `ide.rs`).
 ///
