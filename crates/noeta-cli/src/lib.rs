@@ -158,6 +158,13 @@ enum Command {
         /// located via `NOETA_AOT_RUNTIME_LIB`, else built from the workspace (interim).
         #[arg(long)]
         native: bool,
+        /// Emit a single **wasm** artifact (P-WASM W1.2): the bundle is injected into the
+        /// `noeta-wasm-runner` wasm32-wasip1 binary's data section, producing one `.wasm` that
+        /// runs the program under any WASI runtime (`wasmtime run app.wasm`). The runner is
+        /// located via `NOETA_WASM_RUNNER`, next to this binary, else built from the workspace
+        /// (interim; needs cargo + the `wasm32-wasip1` target).
+        #[arg(long)]
+        wasm: bool,
         /// Activate a dev-tier for this build, e.g. `--tier debug`. Repeatable.
         #[arg(long)]
         tier: Vec<String>,
@@ -454,9 +461,10 @@ pub fn run_cli(
             out,
             exe,
             native,
+            wasm,
             tier,
             profile,
-        } => cmd_build(&file, out.as_deref(), exe, native, &tier, &profile),
+        } => cmd_build(&file, out.as_deref(), exe, native, wasm, &tier, &profile),
         Command::Dump {
             file,
             tier,
@@ -2325,14 +2333,15 @@ fn cmd_build(
     out: Option<&std::path::Path>,
     exe: bool,
     native: bool,
+    wasm: bool,
     tiers: &[String],
     profile: &Option<String>,
 ) -> ExitCode {
     if let Some(code) = compose::maybe_delegate(file) {
         return code;
     }
-    if exe && native {
-        eprintln!("lang: --exe and --native are mutually exclusive");
+    if usize::from(exe) + usize::from(native) + usize::from(wasm) > 1 {
+        eprintln!("lang: --exe, --native, and --wasm are mutually exclusive");
         return ExitCode::from(2);
     }
     // Same whole-file compile + startup cache as `run`/`dump`. The emit format doesn't affect the
@@ -2346,6 +2355,8 @@ fn cmd_build(
         emit_native(file, out, module)
     } else if exe {
         emit_exe(file, out, module)
+    } else if wasm {
+        emit_wasm(file, out, module)
     } else {
         emit_bundle(file, out, module)
     }
@@ -2430,6 +2441,109 @@ fn emit_exe(
         image.len()
     );
     ExitCode::SUCCESS
+}
+
+/// Emit `module` as a single **wasm** artifact (P-WASM W1.2) — the `--exe` analogue for the wasm
+/// target. A wasm guest cannot read its own binary, so instead of a tail trailer the bundle is
+/// injected into the runner's data section and its compiled-in slot patched to point at it
+/// (`noeta_bundle::staple_wasm`). Writes to `out` if given, else the input path with a `.wasm`
+/// extension. Runs under any WASI runtime: `wasmtime run app.wasm [args…]`.
+fn emit_wasm(
+    file: &std::path::Path,
+    out: Option<&std::path::Path>,
+    module: &noeta_bytecode::Module,
+) -> ExitCode {
+    let runner_path = match resolve_wasm_runner() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let runner = match std::fs::read(&runner_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!(
+                "lang: cannot read the wasm runner {}: {err}",
+                runner_path.display()
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let blob = noeta_bundle::write(module);
+    let image = match noeta_bundle::staple_wasm(&runner, &blob) {
+        Ok(image) => image,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let out_path = out
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| file.with_extension("wasm"));
+    match std::fs::write(&out_path, &image) {
+        Ok(()) => {
+            eprintln!(
+                "wrote {} ({} bytes, single wasm artifact)",
+                out_path.display(),
+                image.len()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("lang: cannot write {}: {err}", out_path.display());
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Locate the `noeta-wasm-runner` wasm32-wasip1 binary to staple into. Priority: an explicit
+/// `NOETA_WASM_RUNNER` (the packaged/hermetic path) → a runner shipped next to this toolchain
+/// binary → the workspace build, compiled on demand with cargo (interim: needs cargo + the
+/// `wasm32-wasip1` target, mirroring `resolve_aot_runtime`'s ladder). Packaging the runner with
+/// a shipped toolchain is the same later distribution decision as the AOT archive's.
+fn resolve_wasm_runner() -> Result<std::path::PathBuf, String> {
+    if let Ok(path) = std::env::var("NOETA_WASM_RUNNER") {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join("noeta-wasm-runner.wasm");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    // Interim workspace build. `--locked` is deliberately absent: this is the dev-tree path.
+    let output = std::process::Command::new("cargo")
+        .args([
+            "build",
+            "-p",
+            "noeta-wasm-runner",
+            "--target",
+            "wasm32-wasip1",
+            "--release",
+        ])
+        .output()
+        .map_err(|e| format!("cannot run cargo to build the wasm runner: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "building the wasm runner failed (is the wasm32-wasip1 target installed? \
+             `rustup target add wasm32-wasip1`):\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let artifact = workspace_target_dir()?
+        .join("wasm32-wasip1")
+        .join("release")
+        .join("noeta-wasm-runner.wasm");
+    if !artifact.is_file() {
+        return Err(format!(
+            "the wasm runner was not found at {} after building",
+            artifact.display()
+        ));
+    }
+    Ok(artifact)
 }
 
 /// Emit `module` as a **native** executable (P-AOT L3.2b(3)) — the final level. Steps:
@@ -2706,7 +2820,7 @@ fn default_native_libs() -> Vec<String> {
 
 /// The workspace's Cargo target directory: `CARGO_TARGET_DIR` if set, else `<workspace root>/target`
 /// found by walking up from the current directory for the `Cargo.toml` that declares `[workspace]`.
-#[cfg(feature = "jit")]
+/// Shared by the `--native` (jit builds) and `--wasm` interim workspace-build ladders.
 fn workspace_target_dir() -> Result<std::path::PathBuf, String> {
     if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
         return Ok(std::path::PathBuf::from(dir));

@@ -79,6 +79,8 @@ impl WasmDiffReport {
 struct WasmTools {
     wasmtime: PathBuf,
     runner: PathBuf,
+    /// The runner's bytes, read once — every stapled case patches a fresh copy.
+    runner_bytes: Vec<u8>,
     /// One scratch dir, reused (overwritten) per case — the host side of `/work`.
     workdir: PathBuf,
 }
@@ -107,12 +109,15 @@ fn discover_tools() -> Result<WasmTools, String> {
             runner.display()
         ));
     }
+    let runner_bytes =
+        std::fs::read(&runner).map_err(|e| format!("cannot read the wasm runner: {e}"))?;
     let workdir =
         std::env::temp_dir().join(format!("noeta-wasm-differential-{}", std::process::id()));
     std::fs::create_dir_all(&workdir).map_err(|e| format!("cannot create workdir: {e}"))?;
     Ok(WasmTools {
         wasmtime,
         runner,
+        runner_bytes,
         workdir,
     })
 }
@@ -212,7 +217,9 @@ fn diff_workspace(
     }
 }
 
-/// Run `module` natively and through the wasm runner; fold any divergence into `report`.
+/// Run `module` natively and through the wasm runner — in **both** deployment shapes, two-file
+/// (W1.1) and stapled single-artifact (W1.2) — folding any divergence into `report`. A case
+/// counts as matched only when both shapes match.
 fn diff_module(
     name: &str,
     module: &noeta_bytecode::Module,
@@ -222,23 +229,10 @@ fn diff_module(
     // Native truth: the traced sandbox run — the same semantics the runner executes
     // (SandboxHost + SandboxExecutor, cooperative, trace-collector mode).
     let (native, trace) = VmBackend::new().run_module_traced(module);
-
-    // The runner's exact observable output, composed through the same rendering calls it makes.
-    let sources = SourceMap::new(vec![Source::new(SourceId::FIRST, GUEST_BUNDLE, "")]);
-    let mut expected_stderr = String::new();
-    if !native.diagnostics.is_empty() {
-        expected_stderr.push_str(&noeta_diagnostics::render_mapped(
-            &sources,
-            native.diagnostics.iter(),
-        ));
-    }
-    if trace.len() >= 2 {
-        expected_stderr.push_str(&noeta_vm::render_trace(&trace, &sources));
-    }
-    let expected_exit = exit_code_byte(&native);
-
-    // The wasm run: bundle to the shared workdir, hand it to the runner as `/work/case.noeb`.
     let bundle = noeta_bundle::write(module);
+
+    // Two-file (W1.1): bundle to the shared workdir, handed to the runner as `/work/case.noeb`.
+    // The runner module is byte-identical across the corpus, so wasmtime's cache pays off.
     let host_bundle = tools.workdir.join("case.noeb");
     if let Err(e) = std::fs::write(&host_bundle, &bundle) {
         report.failures.push(WasmDiffFailure {
@@ -247,29 +241,80 @@ fn diff_module(
         });
         return;
     }
-    let out = Command::new(&tools.wasmtime)
+    let two_file = Command::new(&tools.wasmtime)
         .arg("run")
-        // Cache compiled wasm across the corpus — the runner module is identical every time.
         .args(["-C", "cache=y"])
         .arg(format!("--dir={}::/work", tools.workdir.display()))
         .arg(&tools.runner)
         .arg("--sandbox")
         .arg(GUEST_BUNDLE)
         .output();
+    let mut divergence =
+        compare(&native, &trace, GUEST_BUNDLE, two_file).map(|d| format!("two-file: {d}"));
+
+    // Stapled (W1.2): the same bundle injected into the runner binary, run with no preopens at
+    // all — exactly the shipped single-artifact shape. Every stapled module is unique, so the
+    // cache is off (a cold compile is cheap; caching 500+ 2.4 MB variants is not). The guest
+    // argv[0] wasmtime reports is the artifact's basename — the runner's synthetic source name.
+    if divergence.is_none() {
+        divergence = match noeta_bundle::staple_wasm(&tools.runner_bytes, &bundle) {
+            Err(e) => Some(format!("stapled: staple_wasm failed: {e}")),
+            Ok(image) => {
+                let host_wasm = tools.workdir.join("case.wasm");
+                match std::fs::write(&host_wasm, &image) {
+                    Err(e) => Some(format!("stapled: cannot write artifact: {e}")),
+                    Ok(()) => {
+                        let stapled = Command::new(&tools.wasmtime)
+                            .arg("run")
+                            .args(["--env", "NOETA_WASM_SANDBOX=1"])
+                            .arg(&host_wasm)
+                            .output();
+                        compare(&native, &trace, "case.wasm", stapled)
+                            .map(|d| format!("stapled: {d}"))
+                    }
+                }
+            }
+        };
+    }
+
+    match divergence {
+        Some(detail) => report.failures.push(WasmDiffFailure {
+            name: name.to_string(),
+            detail,
+        }),
+        None => report.matched += 1,
+    }
+}
+
+/// Compare one wasm execution against the native truth. `source_name` is the synthetic-source
+/// name the runner rendered against (the bundle's guest path, or the stapled artifact's
+/// basename); the expected stderr is composed through the same rendering calls the runner makes.
+fn compare(
+    native: &RunResult,
+    trace: &[noeta_vm::TraceFrame],
+    source_name: &str,
+    out: std::io::Result<std::process::Output>,
+) -> Option<String> {
     let out = match out {
         Ok(out) => out,
-        Err(e) => {
-            report.failures.push(WasmDiffFailure {
-                name: name.to_string(),
-                detail: format!("wasmtime failed to launch: {e}"),
-            });
-            return;
-        }
+        Err(e) => return Some(format!("wasmtime failed to launch: {e}")),
     };
+    let sources = SourceMap::new(vec![Source::new(SourceId::FIRST, source_name, "")]);
+    let mut expected_stderr = String::new();
+    if !native.diagnostics.is_empty() {
+        expected_stderr.push_str(&noeta_diagnostics::render_mapped(
+            &sources,
+            native.diagnostics.iter(),
+        ));
+    }
+    if trace.len() >= 2 {
+        expected_stderr.push_str(&noeta_vm::render_trace(trace, &sources));
+    }
+    let expected_exit = exit_code_byte(native);
 
     let wasm_stdout = String::from_utf8_lossy(&out.stdout);
     let wasm_stderr = String::from_utf8_lossy(&out.stderr);
-    let detail = if wasm_stdout != native.stdout {
+    if wasm_stdout != native.stdout {
         Some(format!(
             "stdout: native {:?}, wasm {:?}",
             native.stdout, wasm_stdout
@@ -287,13 +332,6 @@ fn diff_module(
         ))
     } else {
         None
-    };
-    match detail {
-        Some(detail) => report.failures.push(WasmDiffFailure {
-            name: name.to_string(),
-            detail,
-        }),
-        None => report.matched += 1,
     }
 }
 

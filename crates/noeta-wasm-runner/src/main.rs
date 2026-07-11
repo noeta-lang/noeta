@@ -1,19 +1,27 @@
-//! The wasm runner (P-WASM W1.1): a `wasm32-wasip1` binary that runs a `.noeb` bundle on the
-//! bytecode VM.
+//! The wasm runner (P-WASM W1.1/W1.2): a `wasm32-wasip1` binary that runs a `.noeb` bundle on
+//! the bytecode VM.
 //!
 //! This is the wasm analogue of a `noeta build --exe` artifact — VM on embedded bytecode, no
-//! compiler, no source — except the bundle arrives as a WASI-preopened file (two-file
-//! deployment: `wasmtime --dir . noeta-wasm-runner.wasm app.noeb`). The single-artifact form
-//! (`noeta build --wasm` injecting the bundle into this binary's data) is W1.2.
+//! compiler, no source — in two deployment shapes:
+//!
+//! - **Stapled (single artifact, W1.2)**: `noeta build --wasm` injects the bundle into this
+//!   binary's data section (see [`embedded`]); the whole argv belongs to the program, exactly
+//!   like a stapled `--exe` binary invoked directly.
+//! - **Two-file (W1.1)**: the bundle arrives as a WASI-preopened file
+//!   (`wasmtime --dir . noeta-wasm-runner.wasm app.noeb`).
 //!
 //! Hosts: [`noeta_wasi_host::WasiHost`] by default (the real WASI world), or the deterministic
-//! `SandboxHost` under `--sandbox` — the configuration the wasm differential oracle (W1.3) runs,
-//! asserting this runner byte-identical to a native run. Execution is cooperative
-//! (single-threaded, `SandboxExecutor`) — wasm has no OS threads, and async leaves degrade
-//! serial-but-correct exactly as they do on any host without a real executor.
+//! `SandboxHost` under `--sandbox` / `NOETA_WASM_SANDBOX=1` — the configuration the wasm
+//! differential oracle (W1.3) runs, asserting this runner byte-identical to a native run. (The
+//! env form exists because a stapled artifact's argv belongs to the program, so a flag cannot
+//! claim it.) Execution is cooperative (single-threaded, `SandboxExecutor`) — wasm has no OS
+//! threads, and async leaves degrade serial-but-correct exactly as they do on any host without a
+//! real executor.
 //!
-//! The crate is deliberately **target-agnostic** — it builds and behaves identically on native,
-//! which is how its integration test drives it; nothing is `cfg(target_family = "wasm")`-gated.
+//! The crate is target-agnostic — it builds and behaves identically on native, which is how its
+//! integration tests drive both shapes; nothing is `cfg(target_family = "wasm")`-gated.
+
+mod embedded;
 
 use std::io::Write;
 use std::process::ExitCode;
@@ -25,11 +33,27 @@ fn usage() -> ExitCode {
     ExitCode::from(2)
 }
 
+/// The oracle configuration via environment — the only channel a stapled artifact has.
+fn sandbox_env() -> bool {
+    std::env::var_os("NOETA_WASM_SANDBOX").is_some_and(|v| v == "1")
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
-    // `--sandbox` (the oracle configuration) precedes the bundle path; everything from the bundle
-    // path on is the program's argument vector, `noeta run`'s `program_args` shape:
-    // `[<bundle>, <pass-through…>]`.
+
+    // A stapled artifact (W1.2): the bundle rides the binary and the whole real argv is the
+    // program's — same convention as a `noeta build --exe` binary invoked directly.
+    if let Some(bytes) = embedded::bundle() {
+        let name = argv
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "app.wasm".to_string());
+        return run(bytes, &name, argv, sandbox_env());
+    }
+
+    // Two-file mode: `--sandbox` (the oracle configuration) precedes the bundle path; everything
+    // from the bundle path on is the program's argument vector, `noeta run`'s `program_args`
+    // shape: `[<bundle>, <pass-through…>]`.
     let mut rest = argv[1..].iter().peekable();
     let sandbox = rest.peek().is_some_and(|a| *a == "--sandbox");
     if sandbox {
@@ -53,10 +77,17 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    let module = match noeta_bundle::read(&bytes) {
+    run(&bytes, &bundle_path, program_argv, sandbox || sandbox_env())
+}
+
+/// Decode `bytes` and run the module: the shared tail of the stapled and two-file paths.
+/// `name` labels the synthetic source diagnostics render against; `program_argv` is what the
+/// program observes through `args.all()`.
+fn run(bytes: &[u8], name: &str, program_argv: Vec<String>, sandbox: bool) -> ExitCode {
+    let module = match noeta_bundle::read(bytes) {
         Ok(module) => module,
         Err(err) => {
-            eprintln!("noeta-wasm-runner: cannot load {bundle_path}: {err}");
+            eprintln!("noeta-wasm-runner: cannot load {name}: {err}");
             return ExitCode::from(2);
         }
     };
@@ -82,7 +113,7 @@ fn main() -> ExitCode {
 
     // A bundle ships no source: diagnostics and tracebacks render against a synthetic empty
     // source (message/code/file:line show, no snippet) — the `noeta run app.noeb` convention.
-    let sources = SourceMap::new(vec![Source::new(SourceId::FIRST, &bundle_path, "")]);
+    let sources = SourceMap::new(vec![Source::new(SourceId::FIRST, name, "")]);
     if !result.diagnostics.is_empty() {
         let rendered = noeta_diagnostics::render_mapped(&sources, result.diagnostics.iter());
         let _ = std::io::stderr().write_all(rendered.as_bytes());

@@ -94,6 +94,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # OS entropy for RealHost's `Entropy` capability (id-entropy U1): UUID v4/v7 random bits must be
 # real entropy on the real host (the sandbox uses its own seeded SplitMix64 stream instead).
 getrandom = "0.3"
+# Dev-only (P-WASM W1.2 tests): build synthetic wasm modules and re-validate `staple_wasm`'s
+# output with a full IR parse. The shipping patcher is a hand-rolled section-level rewrite.
+walrus = "0.26"
 # The machine hostname for RealHost's `Os` capability (stdlib-gaps) — std has no hostname API;
 # this is the zero-dep libc/WinAPI wrapper.
 gethostname = "1"

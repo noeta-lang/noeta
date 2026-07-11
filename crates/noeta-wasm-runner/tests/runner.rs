@@ -65,6 +65,16 @@ fn sandbox_mode_matches_a_native_sandbox_run() {
         .expect("runner runs");
     assert_eq!(String::from_utf8_lossy(&out.stdout), native.stdout);
     assert_eq!(out.status.code(), Some(native.exit_code));
+
+    // The env channel (`NOETA_WASM_SANDBOX=1`) selects the same configuration — it exists for
+    // stapled artifacts, whose argv belongs to the program (W1.2).
+    let out = runner()
+        .env("NOETA_WASM_SANDBOX", "1")
+        .arg(&path)
+        .output()
+        .expect("runner runs");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), native.stdout);
+    assert_eq!(out.status.code(), Some(native.exit_code));
     std::fs::remove_file(path).ok();
 }
 
