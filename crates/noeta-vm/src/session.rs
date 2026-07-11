@@ -288,6 +288,26 @@ impl VmSession {
         })
     }
 
+    /// Apply a hot-swap plan (server-hmr H0): re-evaluate the plan's fragment — added/changed `use`
+    /// imports, changed/added `fn` declarations, method-level type re-declarations — as one session
+    /// entry. Running the fragment *is* the swap: each `fn` declaration stores a fresh closure into
+    /// its **existing** global slot, so every live `Op::CallGlobal` site (old and new code alike)
+    /// dispatches to the new body from now on; a re-declared type re-registers its methods against
+    /// the same content-interned shape, so existing instances flow into the new bodies.
+    ///
+    /// The caller owns the two gates the plan's existence implies (see
+    /// [`noeta_compiler::hotswap::diff_programs`]): the NEW program checked green (transactional —
+    /// never swap red code), and the differ found only body-level changes. The fragment itself
+    /// compiles checkerless (conservative codegen — always sound; the session's accumulated checker
+    /// state describes v1, not v2, so precise site-keyed codegen would be built on the wrong
+    /// universe).
+    ///
+    /// A function *value* captured before the swap (`mut h = f`) keeps the old body by design —
+    /// closures hold their proto directly; only slot-routed calls rebind.
+    pub fn hot_swap(&mut self, plan: &noeta_compiler::hotswap::SwapPlan) -> SessionOutput {
+        self.run_capturing(&plan.fragment, None, |_| None)
+    }
+
     /// `:type <expr>` — evaluate `program`'s trailing expression and report its **runtime** type. The
     /// REPL runs no checker across entries, so the type is read from the produced value (like the
     /// language's `type_of`), which means the expression is evaluated and any side effects run. Uses

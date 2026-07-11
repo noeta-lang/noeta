@@ -60,6 +60,7 @@ use noeta_ir::{
 };
 
 mod freevars;
+pub mod hotswap;
 mod regalloc;
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 // Re-exported so the VM session API can name the checker's compile-input bundle through its
