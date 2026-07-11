@@ -35,7 +35,7 @@ Execution is the tier-0 interpreter; the wasm engine's own JIT compiles the inte
 
 An unchanged `server.serve` program — the same one `noeta serve` runs on your machine — deploys as a **`wasi:http` component**:
 
-```noeta ignore
+```noeta check
 use std.http.server
 use std.http.{Request, Response}
 
@@ -59,7 +59,7 @@ The execution model matches how these platforms actually work: the host instanti
 
 Handlers are full HTTP clients: `client.get(...)` (and the rest of `std.http`) goes out through the platform's own connection-pooled client (`wasi:http/outgoing-handler`), so proxying and API composition work as they do anywhere else:
 
-```noeta ignore
+```noeta check
 use std.http.server
 use std.http.client
 use std.http.{Request, Response}

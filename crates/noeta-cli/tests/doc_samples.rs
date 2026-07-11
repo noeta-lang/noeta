@@ -8,9 +8,13 @@
 //! A fenced block's info string selects how it is checked:
 //!
 //! * ```` ```noeta ```` — a complete program; it **must** run to a zero exit (`noeta run` succeeds).
+//! * ```` ```noeta check ```` — a complete program the gate cannot *execute* (a server binds a real
+//!   socket and runs until Ctrl-C) but that **must** still type-check (`noeta check` succeeds) — so
+//!   a renamed API or type error in the sample fails CI even though it never runs.
 //! * ```` ```noeta ignore ```` — an illustrative fragment (references a type defined elsewhere on the
-//!   page, or shows declaration syntax in isolation). Not executed, exactly like a Rust `ignore`
-//!   doctest. Keep these to a minimum; prefer a self-contained runnable block.
+//!   page, or shows declaration syntax in isolation). Not verified at all, exactly like a Rust
+//!   `ignore` doctest. Keep these to a minimum; prefer a runnable block, or `check` if it at least
+//!   stands alone.
 //! * ```` ```noeta error ```` — a sample that is *meant* to fail (an error demo); it must exit non-zero.
 //!
 //! ```` ```console ````, ```` ```toml ````, and other languages are ignored entirely.
@@ -80,6 +84,9 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
     let path = dir.join("main.noe");
     std::fs::write(&path, &sample.code).expect("write sample");
 
+    // `check`-tagged samples type-check without executing (they would bind sockets / never
+    // exit); everything else runs for real.
+    let verb = if sample.tag == "check" { "check" } else { "run" };
     let output = Command::cargo_bin("noeta")
         .expect("the `noeta` binary builds")
         // Hermetic startup cache — don't touch the developer's real ~/.cache/noeta during tests.
@@ -88,7 +95,7 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
             concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
         )
         .current_dir(&dir)
-        .arg("run")
+        .arg(verb)
         .arg(&path)
         .output()
         .expect("spawn noeta");
@@ -104,7 +111,13 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
             .chain(stdout.lines())
             .find(|l| !l.trim().is_empty())
             .unwrap_or("<no output>");
-        let wanted = if expect_error { "fail" } else { "run cleanly" };
+        let wanted = if expect_error {
+            "fail"
+        } else if verb == "check" {
+            "type-check cleanly"
+        } else {
+            "run cleanly"
+        };
         return Err(format!(
             "{}:{} (tag {:?}) was expected to {} but did not — {}",
             sample.file,

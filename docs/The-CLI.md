@@ -141,10 +141,15 @@ noeta serve <FILE> [--port <PORT>]
 Runs a program as an HTTP server: executes the file's top-level setup, then calls
 `server.serve(<port>, fetch)` for it — the exact call the program could write itself, so `noeta
 serve` is pure ergonomics over [`std.http.server`](Standard-Library-Modules). The program supplies
-two things: `use std.http.server` and a top-level handler
+two things: `use std.http.server` and a top-level handler named `fetch`:
 
-```noeta ignore
-fn fetch(req: Request): Response { … }
+```noeta check
+use std.http.server
+use std.http.{Request, Response}
+
+fn fetch(req: Request): Response {
+    return server.response(200, "hello from ${req.path()}")
+}
 ```
 
 (sync or `async` — both are handled identically). Default port `8080`, bound on all interfaces
