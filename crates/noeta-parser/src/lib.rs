@@ -25,6 +25,7 @@
 //! M0 scope grows one vertical slice at a time.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 
 use chumsky::input::ValueInput;
 use chumsky::pratt::{infix, left, postfix, prefix};
@@ -89,6 +90,11 @@ type Extra<'src> = extra::Err<Rich<'src, T, SimpleSpan>>;
 pub(crate) struct Ctx<'src> {
     source: &'src Source,
     diags: &'src RefCell<Vec<Diagnostic>>,
+    /// Byte offsets at which a newline terminates the preceding statement (see
+    /// [`noeta_lexer::newline_terminator_offsets`]). Consulted by [`stmt_terminator`] as a soft
+    /// terminator so a complete statement is newline-ended even when its last token is not one the
+    /// lexer treats as statement-ending (e.g. a generic-close `>`).
+    soft_terminators: &'src HashSet<u32>,
 }
 
 impl Ctx<'_> {
@@ -759,9 +765,13 @@ fn nesting_depth(tokens: &[Token]) -> (usize, Option<Span>) {
 
 fn parse_inner(source: &Source, tokens: &[Token]) -> Parsed {
     let diags = RefCell::new(Vec::new());
+    let soft_terminators: HashSet<u32> = noeta_lexer::newline_terminator_offsets(source, tokens)
+        .into_iter()
+        .collect();
     let ctx = Ctx {
         source,
         diags: &diags,
+        soft_terminators: &soft_terminators,
     };
     let len = source.text().len();
     let toks: Vec<(T, SimpleSpan)> = tokens.iter().map(|t| (t.kind, to_simple(t.span))).collect();
@@ -1915,9 +1925,11 @@ where
 
 /// A statement terminator (object-model slice 7): an explicit or lexer-synthesized `;`, or — making
 /// the `;` before a closing brace or end-of-input optional, Go-style — a **peeked** `}` or EOF that
-/// is left unconsumed. So a one-line `{ echo 1 }` and a trailing statement with no newline both
-/// terminate, while two statements with neither `;` nor newline between them stay an error.
-fn stmt_terminator<'src, I>() -> impl Parser<'src, I, (), Extra<'src>> + Clone
+/// is left unconsumed, or a **soft** newline terminator ([`newline_terminator`]). So a one-line
+/// `{ echo 1 }` and a trailing statement with no newline both terminate, a newline reliably ends a
+/// complete statement even when its last token is not statement-ending (`x is List<int>`), while two
+/// statements with neither `;` nor a newline between them stay an error.
+fn stmt_terminator<'src, I>(ctx: Ctx<'src>) -> impl Parser<'src, I, (), Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
 {
@@ -1925,7 +1937,30 @@ where
         just(T::Semicolon).ignored(),
         just(T::RBrace).rewind().ignored(),
         end(),
+        newline_terminator(ctx),
     ))
+}
+
+/// A soft statement terminator: succeeds **without consuming** when the next token starts a new line
+/// (its start offset is in [`Ctx::soft_terminators`]). Because the terminator is only queried after a
+/// statement's expression has parsed to completion, this turns a newline into a terminator exactly
+/// where the lexer's synthetic `;` would have, minus the requirement that the previous token be
+/// statement-ending — the expression grammar never sees it, so operator-led continuations (`1 +\n2`)
+/// are unaffected. At end-of-input `any()` fails, but the `end()` branch has already matched there.
+fn newline_terminator<'src, I>(ctx: Ctx<'src>) -> impl Parser<'src, I, (), Extra<'src>> + Clone
+where
+    I: ValueInput<'src, Token = T, Span = SimpleSpan>,
+{
+    any()
+        .try_map_with(move |_tok, e| {
+            let span: SimpleSpan = e.span();
+            if ctx.soft_terminators.contains(&(span.start as u32)) {
+                Ok(())
+            } else {
+                Err(Rich::custom(span, "expected a statement terminator"))
+            }
+        })
+        .rewind()
 }
 
 /// The statement grammar (recursive: blocks contain statements).
@@ -1946,7 +1981,7 @@ where
 
         let echo = just(T::EchoKw)
             .ignore_then(expr.clone())
-            .then_ignore(stmt_terminator())
+            .then_ignore(stmt_terminator(ctx))
             .map_with(move |value, e| Stmt::Echo {
                 value,
                 span: ctx.to_span(e.span()),
@@ -1957,7 +1992,7 @@ where
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then_ignore(just(T::Eq))
             .then(expr.clone())
-            .then_ignore(stmt_terminator())
+            .then_ignore(stmt_terminator(ctx))
             .map_with(move |(((name, name_span), ty), value), e| Stmt::Binding {
                 mut_decl: true,
                 name,
@@ -1969,7 +2004,7 @@ where
 
         let return_ = just(T::ReturnKw)
             .ignore_then(expr.clone().or_not())
-            .then_ignore(stmt_terminator())
+            .then_ignore(stmt_terminator(ctx))
             .map_with(move |value, e| Stmt::Return {
                 value,
                 span: ctx.to_span(e.span()),
@@ -1978,19 +2013,19 @@ where
         // `yield <expr>` — a generator step (Track G). The value is required (no bare `yield`).
         let yield_ = just(T::YieldKw)
             .ignore_then(expr.clone())
-            .then_ignore(stmt_terminator())
+            .then_ignore(stmt_terminator(ctx))
             .map_with(move |value, e| Stmt::Yield {
                 value,
                 span: ctx.to_span(e.span()),
             });
 
         let break_ = just(T::BreakKw)
-            .then_ignore(stmt_terminator())
+            .then_ignore(stmt_terminator(ctx))
             .map_with(move |_, e| Stmt::Break {
                 span: ctx.to_span(e.span()),
             });
         let continue_ = just(T::ContinueKw)
-            .then_ignore(stmt_terminator())
+            .then_ignore(stmt_terminator(ctx))
             .map_with(move |_, e| Stmt::Continue {
                 span: ctx.to_span(e.span()),
             });
@@ -2207,7 +2242,7 @@ where
                     .map(|value| (Vec::new(), Some(value))),
                 empty().to((Vec::new(), None)),
             )))
-            .then_ignore(stmt_terminator())
+            .then_ignore(stmt_terminator(ctx))
             .map_with(
                 move |((attrs, (name, name_span)), (fields, backed_value)), e| VariantDecl {
                     name,
@@ -2529,7 +2564,7 @@ where
                     .repeated()
                     .collect::<Vec<_>>(),
             )
-            .then_ignore(stmt_terminator())
+            .then_ignore(stmt_terminator(ctx))
             .map_with(move |((first, _), rest), e| {
                 let mut path = vec![first];
                 path.extend(rest.into_iter().map(|(name, _)| name));
@@ -2565,7 +2600,7 @@ where
             .then(use_tail.repeated().collect::<Vec<_>>())
             // A trailing `as <alias>` renames the single-import form (`use App.Models.User as Customer`).
             .then(as_alias)
-            .then_ignore(stmt_terminator())
+            .then_ignore(stmt_terminator(ctx))
             .map_with(move |(((first, first_span), tails), alias), e| {
                 build_use(
                     first,
@@ -2595,7 +2630,7 @@ where
             .clone()
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(assign_op.then(expr.clone()).or_not())
-            .then_ignore(stmt_terminator())
+            .then_ignore(stmt_terminator(ctx))
             .map_with(move |((lhs, ty), tail), e| {
                 let span = ctx.to_span(e.span());
                 match tail {
@@ -3198,6 +3233,29 @@ mod tests {
             first_binary.contains("(binary \"|\""),
             "the outermost operator of `a` should be bitwise-or (`&`/`^` bind tighter), got: {first_binary}"
         );
+    }
+
+    #[test]
+    fn newline_terminates_a_statement_ending_in_a_generic_close() {
+        // A generic-close `>` is not statement-ending (indistinguishable at the token level from a
+        // dangling `>` comparison), so the lexer inserts no synthetic `;`. The parser's soft newline
+        // terminator closes that gap: these `is`-tests on consecutive lines need no `;`.
+        let parsed = parse_str("echo xs is List<int>\necho xs is List<string>\necho 1\n");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        assert_eq!(parsed.program.stmts.len(), 3);
+    }
+
+    #[test]
+    fn soft_terminator_leaves_operator_continuation_and_one_line_pairs_untouched() {
+        // Trailing-operator continuation still spans the newline (expression incomplete at the `>`/`+`),
+        // so this is one statement, not two.
+        let cont = parse_str("total = 1 +\n2\n");
+        assert!(cont.diagnostics.is_empty(), "{:?}", cont.diagnostics);
+        assert_eq!(cont.program.stmts.len(), 1);
+        // Two statements on ONE line with no `;` between them remain an error — the soft terminator
+        // only fires across a newline.
+        let joined = parse_str("echo 1 echo 2\n");
+        assert!(!joined.diagnostics.is_empty());
     }
 
     #[test]

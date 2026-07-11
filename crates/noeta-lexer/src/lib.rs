@@ -811,6 +811,40 @@ fn gap_has_newline(text: &str, start: u32, end: u32) -> bool {
         .is_some_and(|gap| gap.contains('\n'))
 }
 
+/// Byte offsets (token starts) at which a newline **terminates** the preceding statement — the exact
+/// rule [`insert_terminators`] uses, *minus* the [`is_statement_ending`] gate on the previous token.
+///
+/// The lexer only synthesizes a `;` when the previous token can end a statement, which misses complete
+/// statements whose last token cannot (a generic-close `>` in `x is List<int>`, indistinguishable at
+/// the token level from a dangling `>` comparison). The parser consults these offsets as a **soft**
+/// terminator — a peek that the expression grammar never sees, so trailing-operator continuation
+/// (`1 +\n2`) is unaffected: the offset is only honored at a point where the expression is already
+/// complete. Depth of `(`/`[` and the leading-continuation rule match [`insert_terminators`] exactly,
+/// so termination is uniform whether or not a `;` was synthesized. Runs on the post-`insert_terminators`
+/// token stream (synthetic `;` are zero-width and change nothing).
+pub fn newline_terminator_offsets(source: &Source, tokens: &[Token]) -> Vec<u32> {
+    let text = source.text();
+    let mut out = Vec::new();
+    let mut depth: u32 = 0;
+    let mut prev: Option<&Token> = None;
+    for tok in tokens {
+        if let Some(p) = prev
+            && depth == 0
+            && !is_leading_continuation(tok.kind)
+            && gap_has_newline(text, p.span.end, tok.span.start)
+        {
+            out.push(tok.span.start);
+        }
+        match tok.kind {
+            TokenKind::LParen | TokenKind::LBracket => depth += 1,
+            TokenKind::RParen | TokenKind::RBracket => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        prev = Some(tok);
+    }
+    out
+}
+
 /// Public view of [`is_statement_ending`]: whether a statement whose **last** token is `kind` will be
 /// terminated by a following newline. The formatter uses this to decide whether a trailing `;` is
 /// redundant (safe to strip) or structurally required — e.g. a statement ending in a generic-close

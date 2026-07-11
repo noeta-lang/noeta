@@ -1,0 +1,23 @@
+// A newline reliably terminates a *complete* statement even when its last token is not one the lexer
+// treats as statement-ending. The clearest case is a generic type argument's closing `>`: at the
+// token level `>` is indistinguishable from a dangling comparison, so the lexer cannot synthesize a
+// `;` after `x is List<int>`. The parser's soft newline terminator (consulted only once the
+// expression has parsed to completion) closes that gap — so these `is`-tests need no `;`, while
+// operator-led continuation (`total = 1 +` / newline / `2`) is untouched because the expression is
+// still incomplete at the newline.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "3"
+// expect: exit 0
+xs: dyn = [1, 2, 3]
+
+// Each line ends in a generic-close `>` — previously these required a trailing `;`.
+echo xs is List<int>
+echo xs is List<string>
+echo xs is List<dyn>
+
+// Operator-led continuation still spans the newline (the `>` case must not have broken it).
+total = 1 +
+        2
+echo total
