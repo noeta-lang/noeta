@@ -50,6 +50,10 @@ pub struct DeclaredTier {
     pub config: Option<String>,
     /// The runner fn's (possibly link-qualified) name — what dispatch invokes with the roots.
     pub runner: String,
+    /// The declaring **package root** — the runner's first qualified segment (`fuzzkit` for
+    /// `fuzzkit.tiers.run_fuzz`), or `""` for an entry-local declaration. This is the provider
+    /// identity a target's `tiers` map selects (`bench = "fuzzkit"`).
+    pub root: String,
     /// The `@tier` directive's span, for diagnostics.
     pub span: Span,
 }
@@ -60,24 +64,48 @@ pub struct DeclaredTier {
 /// runner dispatch all resolve against.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TierRegistry {
-    declared: std::collections::HashMap<String, DeclaredTier>,
+    /// Declarations keyed by tier name. Several packages may declare the same tier name (each a
+    /// distinct **provider**, told apart by [`DeclaredTier::root`]); a target's `tiers` map picks
+    /// which one is live. In declaration order per name.
+    declared: std::collections::HashMap<String, Vec<DeclaredTier>>,
+}
+
+/// Who provides a tier under a given provider selection — the extension declaration (native
+/// runner for the built-ins) or a program/package `@tier` declaration.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResolvedProvider<'a> {
+    Extension,
+    Declared(&'a DeclaredTier),
+}
+
+/// The declaring package root of a link-qualified fn name (`fuzzkit` for
+/// `fuzzkit.tiers.run_fuzz`; `""` for an unqualified entry-local name).
+fn runner_root(qualified: &str) -> String {
+    match qualified.rsplit_once('.') {
+        Some((path, _)) => path.split('.').next().unwrap_or("").to_string(),
+        None => String::new(),
+    }
 }
 
 impl TierRegistry {
-    /// Collect every `@tier` declaration from `program`'s top-level fns. Duplicates keep the first
-    /// (the checker reports the collision as E0051; resolution just stays stable).
+    /// Collect every `@tier` declaration from `program`'s top-level fns, in source order per tier
+    /// name (the checker reports same-provider duplicates as E0051; collection keeps everything so
+    /// provider selection stays total).
     pub fn collect(program: &Program) -> TierRegistry {
-        let mut declared = std::collections::HashMap::new();
+        let mut declared: std::collections::HashMap<String, Vec<DeclaredTier>> =
+            std::collections::HashMap::new();
         for stmt in &program.stmts {
             if let Stmt::Fn(f) = stmt
                 && let Some(t) = &f.tier
             {
                 declared
                     .entry(t.name.clone())
-                    .or_insert_with(|| DeclaredTier {
+                    .or_default()
+                    .push(DeclaredTier {
                         name: t.name.clone(),
                         config: t.config.as_ref().map(|(n, _)| n.clone()),
                         runner: f.name.clone(),
+                        root: runner_root(&f.name),
                         span: t.span,
                     });
             }
@@ -90,37 +118,110 @@ impl TierRegistry {
         is_extension_tier(tier) || self.declared.contains_key(tier)
     }
 
-    /// The declared tier named `tier`, if any (`None` for a built-in).
+    /// The **default-provider** declaration for `tier`: the first program/package declaration —
+    /// what resolution falls back to when no target selects a provider and no extension declares
+    /// the name. `None` for a purely-extension tier.
     pub fn declared(&self, tier: &str) -> Option<&DeclaredTier> {
-        self.declared.get(tier)
+        self.declared.get(tier).and_then(|v| v.first())
     }
 
-    /// The tier's config attribute — the extension declaration's for an extension tier, the
-    /// `@tier` directive's `config:` for a program-declared one.
+    /// The declaration of `tier` from the package rooted at `root`, if any — the lookup a
+    /// target's explicit provider selection uses.
+    pub fn declared_by(&self, tier: &str, root: &str) -> Option<&DeclaredTier> {
+        self.declared.get(tier)?.iter().find(|d| d.root == root)
+    }
+
+    /// Resolve who provides `tier` under `providers` (a target's tier → provider map; empty ⇒ no
+    /// target). Explicit `"std"` selects the extension declaration; an explicit dependency key
+    /// selects that package's `@tier` declaration; no entry falls back to the extension
+    /// declaration if one exists, else the first program declaration. `Err` is the human-readable
+    /// mismatch (a provider that declares no such tier) the caller reports.
+    pub fn resolve_provider<'a>(
+        &'a self,
+        tier: &str,
+        providers: &std::collections::BTreeMap<String, String>,
+    ) -> Result<ResolvedProvider<'a>, String> {
+        match providers.get(tier).map(String::as_str) {
+            Some("std") => {
+                if is_extension_tier(tier) {
+                    Ok(ResolvedProvider::Extension)
+                } else {
+                    Err(format!(
+                        "tier `{tier}` is mapped to provider `std`, but no installed extension \
+                         declares it"
+                    ))
+                }
+            }
+            Some(root) => self
+                .declared_by(tier, root)
+                .map(ResolvedProvider::Declared)
+                .ok_or_else(|| {
+                    format!(
+                        "tier `{tier}` is mapped to provider `{root}`, but `{root}` declares no \
+                     `@tier({tier})` — is the dependency imported (`use {root}.…`)?"
+                    )
+                }),
+            None => {
+                if is_extension_tier(tier) {
+                    Ok(ResolvedProvider::Extension)
+                } else if let Some(d) = self.declared(tier) {
+                    Ok(ResolvedProvider::Declared(d))
+                } else {
+                    Err(format!("unknown dev-tier `{tier}`"))
+                }
+            }
+        }
+    }
+
+    /// The tier's config attribute under `providers` — the extension declaration's or the
+    /// selected `@tier` directive's `config:`. Falls back to default resolution on a provider
+    /// mismatch (the mismatch itself is reported where the provider map is validated).
+    pub fn config_attribute_for(
+        &self,
+        tier: &str,
+        providers: &std::collections::BTreeMap<String, String>,
+    ) -> Option<String> {
+        match self.resolve_provider(tier, providers) {
+            Ok(ResolvedProvider::Extension) => tier_config_attribute(tier).map(str::to_string),
+            Ok(ResolvedProvider::Declared(d)) => d.config.clone(),
+            Err(_) => self.config_attribute(tier).map(str::to_string),
+        }
+    }
+
+    /// The tier's config attribute under **default** resolution (no target) — the extension
+    /// declaration's for an extension tier, the first `@tier` directive's `config:` for a
+    /// program-declared one.
     pub fn config_attribute<'a>(&'a self, tier: &str) -> Option<&'a str> {
         tier_config_attribute(tier)
-            .or_else(|| self.declared.get(tier).and_then(|d| d.config.as_deref()))
+            .or_else(|| self.declared(tier).and_then(|d| d.config.as_deref()))
     }
 
     /// The `E0037` for directive arguments on a tier that has no knob attribute (`@test(x)` —
-    /// `test` takes no arguments), or `None` when the args are acceptable at this level. Args on a
-    /// knob-carrying tier are *not* validated here — they construct the tier's config attribute,
-    /// checked by the ordinary attribute construction gate (in place by the checker's `TierBlock`
-    /// arm on the default path; on the stamped fns when activated).
+    /// `test` takes no arguments) under **default** provider resolution, or `None` when the args
+    /// are acceptable at this level. Args on a knob-carrying tier are *not* validated here — they
+    /// construct the tier's config attribute, checked by the ordinary attribute construction gate
+    /// (in place by the checker's `TierBlock` arm on the default path; on the stamped fns when
+    /// activated, where the resolution is provider-aware).
     pub fn knobless_args_diagnostic(&self, tier: &str, args: &[AttrArg]) -> Option<Diagnostic> {
         if self.config_attribute(tier).is_some() {
             return None;
         }
-        let span = args.first().map(|a| a.span)?;
-        Some(
-            Diagnostic::error(
-                DiagnosticCode::InvalidDirectiveArgument,
-                span,
-                format!("tier `@{tier}` takes no arguments"),
-            )
-            .with_help("a tier's knobs come from its config attribute (`@bench`'s is `Bench { iterations: int }`; a declared tier's is its `@tier(…, config: T)`)"),
-        )
+        knobless_args_diagnostic_for(tier, args)
     }
+}
+
+/// The `E0037` for directive args on a tier resolved to no config attribute — the shared message
+/// both the default-resolution wrapper and the provider-aware activation path emit.
+fn knobless_args_diagnostic_for(tier: &str, args: &[AttrArg]) -> Option<Diagnostic> {
+    let span = args.first().map(|a| a.span)?;
+    Some(
+        Diagnostic::error(
+            DiagnosticCode::InvalidDirectiveArgument,
+            span,
+            format!("tier `@{tier}` takes no arguments"),
+        )
+        .with_help("a tier's knobs come from its config attribute (`@bench`'s is `Bench { iterations: int }`; a declared tier's is its `@tier(…, config: T)`)"),
+    )
 }
 
 /// The attribute a tier block's directive args construct, stamped at the block's spans — the
@@ -374,6 +475,18 @@ pub struct Activated {
 /// are inlined in place; inactive blocks are dropped; every block's name is validated. The `@test`
 /// fns among the activated *top-level* blocks are collected as roots the runner invokes.
 pub fn activate_tiers(program: &Program, active: &[&str]) -> Activated {
+    activate_tiers_with(program, active, &std::collections::BTreeMap::new())
+}
+
+/// [`activate_tiers`] under a target's tier → **provider** map (tier-providers provider
+/// dispatch): the provider selection decides which declaration's config attribute a
+/// `@<tier>(args)` block stamps — `bench = "criterion"` stamps criterion's config, not std's
+/// `Bench`. An empty map is default resolution (extension first, then first declaration).
+pub fn activate_tiers_with(
+    program: &Program,
+    active: &[&str],
+    providers: &std::collections::BTreeMap<String, String>,
+) -> Activated {
     let mut roots = Roots::default();
     let mut diagnostics = Vec::new();
     // The tier name-space: built-ins ∪ the program's own `@tier` declarations (imported packages'
@@ -401,6 +514,7 @@ pub fn activate_tiers(program: &Program, active: &[&str]) -> Activated {
         &program.stmts,
         active,
         &registry,
+        providers,
         &mut diagnostics,
         &mut roots,
         true,
@@ -462,6 +576,7 @@ fn resolve_block(
     stmts: &[Stmt],
     active: &[&str],
     registry: &TierRegistry,
+    providers: &std::collections::BTreeMap<String, String>,
     diagnostics: &mut Vec<Diagnostic>,
     roots: &mut Roots,
     collect_roots: bool,
@@ -476,13 +591,22 @@ fn resolve_block(
             ..
         } = stmt
         else {
-            out.push(resolve_children(stmt, active, registry, diagnostics));
+            out.push(resolve_children(
+                stmt,
+                active,
+                registry,
+                providers,
+                diagnostics,
+            ));
             continue;
         };
 
+        let config = registry.config_attribute_for(tier, providers);
         if !registry.is_known(tier) {
             diagnostics.push(unknown_tier_diagnostic(tier, *tier_span));
-        } else if let Some(d) = registry.knobless_args_diagnostic(tier, args) {
+        } else if config.is_none()
+            && let Some(d) = knobless_args_diagnostic_for(tier, args)
+        {
             // Directive args on a knob-less tier (`@test(x)`) — E0037. A knob-carrying tier's args
             // are validated as the stamped attribute's construction, by the checker, below.
             diagnostics.push(d);
@@ -501,11 +625,16 @@ fn resolve_block(
         // a per-fn attribute wins. The checker then validates the stamp through the ordinary
         // attribute construction gate, and the runner reads it off the fn's `attrs`; a top-level
         // `@test`/`@bench` block's fns are also recorded as roots.
-        let config_attr = registry
-            .config_attribute(tier)
-            .filter(|_| !args.is_empty())
-            .map(str::to_string);
-        let resolved = resolve_block(items, active, registry, diagnostics, roots, collect_roots);
+        let config_attr = config.filter(|_| !args.is_empty());
+        let resolved = resolve_block(
+            items,
+            active,
+            registry,
+            providers,
+            diagnostics,
+            roots,
+            collect_roots,
+        );
         for mut item in resolved {
             if let Stmt::Fn(decl) = &mut item {
                 decl.is_dev_tier = true;
@@ -549,6 +678,7 @@ fn resolve_children(
     stmt: &Stmt,
     active: &[&str],
     registry: &TierRegistry,
+    providers: &std::collections::BTreeMap<String, String>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Stmt {
     let mut stmt = stmt.clone();
@@ -556,7 +686,7 @@ fn resolve_children(
         // Nested statement lists never produce runnable roots (`collect_roots = false`); the sink is
         // a throwaway.
         let mut sink = Roots::default();
-        resolve_block(stmts, active, registry, diags, &mut sink, false)
+        resolve_block(stmts, active, registry, providers, diags, &mut sink, false)
     };
     match &mut stmt {
         Stmt::If {
@@ -676,6 +806,56 @@ mod tests {
         assert!(out.diagnostics.is_empty());
         assert!(out.tests.is_empty());
         assert_eq!(out.program.stmts.len(), 1);
+    }
+
+    /// Provider resolution: no selection falls back extension-first; `"std"` selects the
+    /// extension; a dependency key selects that package's declaration; a mismatch is a
+    /// human-readable error. Two packages may declare one tier name (told apart by root).
+    #[test]
+    fn provider_resolution_selects_between_extension_and_declared() {
+        let program = parse_program(
+            "@tier(bench, config: Fuzz)\n\
+             fn my_bench(roots: List<TierRoot>): void { return; }\n\
+             @attribute(Function)\n\
+             struct Fuzz { cases: int }\n",
+        );
+        let reg = TierRegistry::collect(&program);
+        let none = std::collections::BTreeMap::new();
+        // Default: the extension declaration wins for a built-in name.
+        assert_eq!(
+            reg.resolve_provider("bench", &none),
+            Ok(ResolvedProvider::Extension)
+        );
+        assert_eq!(
+            reg.config_attribute_for("bench", &none).as_deref(),
+            Some("Bench")
+        );
+        // Explicit std: same.
+        let std_sel = std::collections::BTreeMap::from([("bench".into(), "std".into())]);
+        assert_eq!(
+            reg.resolve_provider("bench", &std_sel),
+            Ok(ResolvedProvider::Extension)
+        );
+        // Explicit entry-local provider (root "" — an entry-declared runner).
+        let local = std::collections::BTreeMap::from([("bench".into(), String::new())]);
+        match reg.resolve_provider("bench", &local) {
+            Ok(ResolvedProvider::Declared(d)) => {
+                assert_eq!(d.runner, "my_bench");
+                assert_eq!(d.config.as_deref(), Some("Fuzz"));
+            }
+            other => panic!("expected the local declaration, got {other:?}"),
+        }
+        assert_eq!(
+            reg.config_attribute_for("bench", &local).as_deref(),
+            Some("Fuzz")
+        );
+        // A provider that declares no such tier is a clear error.
+        let missing = std::collections::BTreeMap::from([("bench".into(), "ghost".into())]);
+        assert!(
+            reg.resolve_provider("bench", &missing)
+                .unwrap_err()
+                .contains("ghost")
+        );
     }
 
     /// The extension-declared names and the `noeta_ast::reflect` constants are two spellings of

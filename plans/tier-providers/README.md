@@ -24,6 +24,18 @@ tier unit to name their own signature. Runners stay native as planned. Also fold
 built-in runners (`test`/`bench`/`doc`) now load with dependency resolution (shared
 `load_linked`), fixing tier content that imports from packages.
 
+**✅ PROVIDER-OVERRIDE DISPATCH (same day):** the manifest's tier → provider map is consumed.
+`resolve_active_tier_providers` (noeta-pm) feeds `activate_tiers_with(program, active,
+providers)`; `TierRegistry` keeps every same-named declaration (distinguished by
+`DeclaredTier::root` — the runner's package root) and `resolve_provider` selects: explicit
+`"std"` → extension declaration, explicit dep key → that package's `@tier`, none → extension
+first. `bench = "fuzzkit"` makes `noeta bench --target custom` stamp fuzzkit's config and
+dispatch to its runner; no target keeps the native path and validates knobs against std's.
+E0051 relaxed to same-provider duplicates (redeclaring a built-in name = dormant override).
+Provider map rides the startup-cache key; `noeta <tier> <file> --target N` steers custom
+dispatch; `doc = "<pkg>"` is the doc-site-generator seam (runner reads `#[Doc]` stamps via
+reflection).
+
 ## Motivation
 
 The dev-tier system (object-model slice 6) shipped complete but closed: four hardcoded tiers

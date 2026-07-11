@@ -2352,15 +2352,25 @@ fn a_declared_tier_strips_on_a_normal_run() {
 
 #[test]
 fn tier_declaration_errors_are_e0051() {
-    // A `@tier` name colliding with a built-in, a non-attribute config, and a wrong runner
+    // Redeclaring a built-in tier's name is LEGAL (provider override — dormant until a target
+    // selects it); a same-provider duplicate, a non-attribute config, and a wrong runner
     // signature are each an E0051 at the declaration.
-    let collide = temp_program(
-        "tier_decl_collide",
+    let redeclare = temp_program(
+        "tier_decl_redeclare",
         "@tier(bench)\nfn r(roots: List<TierRoot>): void { return }\n",
     );
-    lang().arg("check").arg(&collide).assert().failure().stderr(
-        predicate::str::contains("E0051").and(predicate::str::contains("extension-declared")),
+    lang().arg("check").arg(&redeclare).assert().success();
+    let dup = temp_program(
+        "tier_decl_dup",
+        "@tier(fuzz)\nfn r1(roots: List<TierRoot>): void { return }\n\
+         @tier(fuzz)\nfn r2(roots: List<TierRoot>): void { return }\n",
     );
+    lang()
+        .arg("check")
+        .arg(&dup)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0051").and(predicate::str::contains("more than once")));
     let bad_config = temp_program(
         "tier_decl_badcfg",
         "struct NotAttr { x: int }\n@tier(fuzz, config: NotAttr)\nfn r(roots: List<TierRoot>): void { return }\n",
@@ -2429,6 +2439,87 @@ fn tier_dep_project(name: &str) -> PathBuf {
     )
     .unwrap();
     app.join("main.noe")
+}
+
+/// The provider-override e2e: `fuzzkit` also declares `@tier(bench, config: Fuzz)`; the app's
+/// `custom` target maps `bench = "fuzzkit"`. Extends [`tier_dep_project`]'s fixture.
+fn tier_override_project(name: &str) -> PathBuf {
+    let entry = tier_dep_project(name);
+    let app_dir = entry.parent().unwrap().to_path_buf();
+    let lib = app_dir.parent().unwrap().join("fuzzkit");
+    let mut tiers = std::fs::read_to_string(lib.join("tiers.noe")).unwrap();
+    tiers.push_str(
+        "@tier(bench, config: Fuzz)\n\
+         pub fn run_bench_alt(roots: List<TierRoot>): void {\n\
+             echo \"ALT BENCH: ${roots.len()} roots\"\n\
+             for root in roots { run = root.run; run() }\n\
+         }\n",
+    );
+    std::fs::write(lib.join("tiers.noe"), tiers).unwrap();
+    std::fs::write(
+        app_dir.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nfuzzkit = { path = \"../fuzzkit\" }\n\
+         [targets.custom.tiers]\nbench = \"fuzzkit\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app_dir.join("main.noe"),
+        "use fuzzkit.tiers.run_bench_alt\n\
+         @bench(cases: 3) {\n    fn measures(): void { echo \"  measures ran\" }\n}\n",
+    )
+    .unwrap();
+    entry
+}
+
+#[test]
+fn a_target_overrides_a_builtin_tier_provider() {
+    // `bench = "fuzzkit"` in the target's tiers map: `--target custom` stamps fuzzkit's config
+    // (`cases:` is a `Fuzz` knob, not std's `Bench`) and dispatches to fuzzkit's runner; without
+    // the target the native bench runs and the same knob is correctly rejected against std's
+    // `Bench { iterations }`.
+    let entry = tier_override_project("tier_override_bench");
+    lang()
+        .arg("bench")
+        .arg(&entry)
+        .arg("--target")
+        .arg("custom")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("ALT BENCH: 1 roots")
+                .and(predicate::str::contains("  measures ran")),
+        );
+    lang()
+        .arg("bench")
+        .arg(&entry)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("has no field `cases`"));
+}
+
+#[test]
+fn a_provider_that_declares_no_such_tier_is_an_error() {
+    // The target maps `bench = "fuzzkit"` but the package declares no `@tier(bench)` — a clear
+    // error naming both sides, not a silent native fallback.
+    let entry = tier_dep_project("tier_override_missing");
+    let app_dir = entry.parent().unwrap();
+    std::fs::write(
+        app_dir.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nfuzzkit = { path = \"../fuzzkit\" }\n\
+         [targets.custom.tiers]\nbench = \"fuzzkit\"\n",
+    )
+    .unwrap();
+    lang()
+        .arg("bench")
+        .arg(&entry)
+        .arg("--target")
+        .arg("custom")
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("declares no"));
 }
 
 #[test]

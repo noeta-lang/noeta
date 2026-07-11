@@ -262,6 +262,29 @@ pub fn resolve_active_tiers(entry: &Path, target: &str) -> Result<Vec<String>, S
     manifest.active_tiers(target)
 }
 
+/// Resolve the active tier → **provider** map for `target` (see
+/// [`Manifest::active_tier_providers`]) — the same discovery/parse path as
+/// [`resolve_active_tiers`], returning who provides each live tier: `"std"` (the extension
+/// declaration, with its native runner for the built-ins) or a declared dependency's import-root
+/// key (that package's `@tier` declaration). The tier-execution layer dispatches on this.
+pub fn resolve_active_tier_providers(
+    entry: &Path,
+    target: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let dir = entry.parent().unwrap_or_else(|| Path::new("."));
+    let path = find(dir).ok_or_else(|| {
+        format!(
+            "no `{MANIFEST_NAME}` found at or above `{}` (needed for `--target {target}`)",
+            dir.display()
+        )
+    })?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
+    let manifest =
+        Manifest::parse(&text).map_err(|err| format!("invalid `{}`: {err}", path.display()))?;
+    manifest.active_tier_providers(target)
+}
+
 /// Gather the entry's **dependency packages** as loader [`DepPackage`]s (package-manager P2.1/P2.4):
 /// resolve the full transitive dependency graph and hand back the re-rooted packages the loader links.
 /// No manifest, or no `[dependencies]`, yields an empty list (a bare script has no deps). The graph
@@ -412,9 +435,8 @@ impl Manifest {
 
     /// The active tier → **provider** map for `target` (package-manager P2.6): each live tier mapped
     /// to the package providing it — the built-in `"std"` or a declared dependency's import-root key.
-    /// A future tier-execution layer reads this to dispatch a tier to its provider; today the
-    /// providers are validated (a resolved dependency is a valid provider) and surfaced here.
-    #[allow(dead_code)] // consumed by the tier-execution layer; validated + surfaced now
+    /// The tier-execution layer dispatches on this: `"std"` runs the built-in native runner, a
+    /// dependency key runs that package's `@tier` runner (`resolve_active_tier_providers`).
     pub fn active_tier_providers(&self, target: &str) -> Result<BTreeMap<String, String>, String> {
         let mut chain = Vec::new();
         self.resolve(target, &mut chain)

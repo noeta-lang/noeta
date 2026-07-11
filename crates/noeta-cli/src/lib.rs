@@ -1333,6 +1333,19 @@ fn report_fmt_error(name: &str, err: &noeta_fmt::FmtError) {
 /// given (the runner always runs); `Ok(false)` when a target was given but does not make `tier`
 /// live (the runner should no-op); `Err` on a target-resolution failure (a fatal error the caller
 /// prints).
+/// The active tier → provider map for `--target` (empty with no target — default resolution:
+/// extension declarations first). The tier-execution layer dispatches on this: `"std"` runs the
+/// native built-in runner, a dependency key runs that package's `@tier` runner.
+fn resolve_providers(
+    entry: &std::path::Path,
+    target: &Option<String>,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    match target {
+        None => Ok(std::collections::BTreeMap::new()),
+        Some(name) => manifest::resolve_active_tier_providers(entry, name),
+    }
+}
+
 fn tier_active_in_target(
     entry: &std::path::Path,
     target: &Option<String>,
@@ -1650,6 +1663,15 @@ fn cmd_check(
             active.push(tier.clone());
         }
     }
+    // The target's tier → provider map steers which declaration's config attribute activation
+    // stamps (provider dispatch); empty without a target.
+    let providers = match resolve_providers(path, target) {
+        Ok(map) => map,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(1);
+        }
+    };
     let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
 
     // The set of entry files to check: the file itself, or every `.noe` file under the directory.
@@ -1721,7 +1743,8 @@ fn cmd_check(
                 let program_diags = if active_refs.is_empty() {
                     noeta_check::check_all(&linked.program).diagnostics
                 } else {
-                    let activated = noeta_check::activate_tiers(&linked.program, &active_refs);
+                    let activated =
+                        noeta_check::activate_tiers_with(&linked.program, &active_refs, &providers);
                     let mut ds = activated.diagnostics;
                     ds.extend(noeta_check::check_all(&activated.program).diagnostics);
                     ds
@@ -1844,14 +1867,46 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     if !file.is_file() {
         return None;
     }
+    // An optional `--target <NAME>` after the subcommand selects a build target whose tier →
+    // provider map steers resolution (same-named tiers from different packages).
+    let argv: Vec<String> = std::env::args()
+        .skip(1)
+        .skip_while(|a| *a != name)
+        .collect();
+    let target = argv
+        .iter()
+        .position(|a| a == "--target")
+        .and_then(|i| argv.get(i + 1))
+        .cloned();
+    let providers = match resolve_providers(&file, &target) {
+        Ok(map) => map,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return Some(ExitCode::from(2));
+        }
+    };
     // A file that fails to load or link cannot tell us whether it declares the tier — fall
     // through (the external probe, then clap's error). Dependencies resolve first: a declared
     // tier typically lives in a dependency package (`use fuzzkit.tiers.run_fuzz`).
     let deps = graph::resolve_graph(&file).ok()?.packages;
     let linked = noeta_loader::load_with_deps(&file, &deps).ok()?.ok()?;
-    let activated = noeta_check::activate_tiers(&linked.program, &[&name]);
-    activated.registry.declared(&name)?;
-    Some(run_declared_tier(&name, &linked, activated))
+    let activated = noeta_check::activate_tiers_with(&linked.program, &[&name], &providers);
+    let tier = match activated.registry.resolve_provider(&name, &providers) {
+        Ok(noeta_check::ResolvedProvider::Declared(d)) => d.clone(),
+        // A built-in name or an unknown one — not this fallback's command; clap's error (or the
+        // external probe) is the right answer.
+        Ok(noeta_check::ResolvedProvider::Extension) => return None,
+        Err(err) => {
+            // The name is tier-shaped (the target maps it) but the provider doesn't resolve —
+            // that is a real user error, not fall-through material.
+            if providers.contains_key(name.as_str()) {
+                eprintln!("lang: {err}");
+                return Some(ExitCode::from(2));
+            }
+            return None;
+        }
+    };
+    Some(run_declared_tier(&name, &linked, activated, tier))
 }
 
 /// Run a declared tier's dispatch over an already-activated program: type-check, synthesize the
@@ -1861,17 +1916,20 @@ fn run_declared_tier(
     name: &str,
     linked: &noeta_loader::Linked,
     activated: noeta_check::Activated,
+    tier: noeta_check::DeclaredTier,
 ) -> ExitCode {
     if !activated.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
         return ExitCode::from(1);
     }
-    let tier = activated
-        .registry
-        .declared(name)
-        .expect("caller checked")
-        .clone();
-    let roots = activated.custom.get(name).cloned().unwrap_or_default();
+    // The activated roots for this tier — a built-in name's roots land in the dedicated sinks
+    // (an overridden `bench = "criterion"` still collects under `benches`), a custom tier's in
+    // `custom`.
+    let roots = match name {
+        "test" => activated.tests.clone(),
+        "bench" => activated.benches.clone(),
+        _ => activated.custom.get(name).cloned().unwrap_or_default(),
+    };
 
     // The runner call — `<runner>([TierRoot { name: "<fn>", run: <fn> }, …])` — is built as AST
     // directly: the runner (and, in a namespaced entry, a root) carries its **link-qualified**
@@ -2270,12 +2328,16 @@ fn compile_whole_file(
         }
     }
 
+    // The target's tier → provider map (provider dispatch): decides which declaration's config
+    // attribute activation stamps, so it is part of the compiled program — and of the cache key.
+    let providers = resolve_providers(file, target).map_err(CompileFailure::Message)?;
+
     // The entry's dependency packages (package-manager P2.1): their sources feed both the cache key
     // (so a dep change never serves stale bytecode) and the loader (so `use <dep-key>.…` resolves).
     let deps = manifest::dependency_packages(file).map_err(CompileFailure::Message)?;
 
     // Startup cache (M3): on a hit, return the cached module — load/check/compile all skipped.
-    let cache = open_startup_cache(file, &active, &deps, no_cache);
+    let cache = open_startup_cache(file, &active, &providers, &deps, no_cache);
     if let Some(slot) = &cache
         && let Some(blob) = slot.cache.load(&slot.key)
         && let Ok(module) = noeta_bundle::read(&blob)
@@ -2306,7 +2368,7 @@ fn compile_whole_file(
         linked.program
     } else {
         let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
-        let activated = noeta_check::activate_tiers(&linked.program, &active_refs);
+        let activated = noeta_check::activate_tiers_with(&linked.program, &active_refs, &providers);
         if !activated.diagnostics.is_empty() {
             return Err(CompileFailure::Diagnostics {
                 sources,
@@ -2470,6 +2532,7 @@ fn render_jit_report(
 fn open_startup_cache(
     file: &std::path::Path,
     active: &[String],
+    providers: &std::collections::BTreeMap<String, String>,
     deps: &[noeta_loader::DepPackage],
     no_cache: bool,
 ) -> Option<CacheSlot> {
@@ -2515,6 +2578,12 @@ fn open_startup_cache(
         .binary_identity(binary);
     for tier in active {
         key.tier(tier);
+    }
+    // The provider selection changes what activation stamps (`bench = "criterion"` stamps
+    // criterion's config attribute), so it is key material — encoded distinctly from bare tier
+    // names; `BTreeMap` iteration keeps it deterministic.
+    for (tier, provider) in providers {
+        key.tier(format!("{tier}={provider}"));
     }
     let key = key.finish();
 
@@ -3100,7 +3169,28 @@ fn cmd_test(
 
     // Activate the `test` tier: inline its `@test` blocks as ordinary top-level declarations and
     // collect the test fns. An unknown-tier block is an E0036 (a typo must not silently vanish).
-    let activated = noeta_check::activate_tiers(&linked.program, &["test"]);
+    // The target's provider selection (provider dispatch): `test = "<pkg>"` in the target's
+    // tiers map hands this tier to that package's `@tier(test)` runner instead of the native
+    // one. Default (no target, or `"std"`) keeps the native path below.
+    let providers = match resolve_providers(file, target) {
+        Ok(map) => map,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let activated = noeta_check::activate_tiers_with(&linked.program, &["test"], &providers);
+    match activated.registry.resolve_provider("test", &providers) {
+        Ok(noeta_check::ResolvedProvider::Extension) => {}
+        Ok(noeta_check::ResolvedProvider::Declared(d)) => {
+            let tier = d.clone();
+            return run_declared_tier("test", &linked, activated, tier);
+        }
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(2);
+        }
+    }
     if !activated.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
         return ExitCode::from(1);
@@ -3599,8 +3689,29 @@ fn cmd_bench(
     };
 
     // Activate the `bench` tier: inline its `@bench` blocks as ordinary top-level declarations and
-    // collect the bench fns (with their directive args). An unknown-tier block is an E0036.
-    let activated = noeta_check::activate_tiers(&linked.program, &["bench"]);
+    // collect the bench fns. An unknown-tier block is an E0036.
+    // The target's provider selection (provider dispatch): `bench = "<pkg>"` in the target's
+    // tiers map hands this tier to that package's `@tier(bench)` runner instead of the native
+    // one. Default (no target, or `"std"`) keeps the native path below.
+    let providers = match resolve_providers(file, target) {
+        Ok(map) => map,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let activated = noeta_check::activate_tiers_with(&linked.program, &["bench"], &providers);
+    match activated.registry.resolve_provider("bench", &providers) {
+        Ok(noeta_check::ResolvedProvider::Extension) => {}
+        Ok(noeta_check::ResolvedProvider::Declared(d)) => {
+            let tier = d.clone();
+            return run_declared_tier("bench", &linked, activated, tier);
+        }
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(2);
+        }
+    }
     if !activated.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
         return ExitCode::from(1);
@@ -3776,6 +3887,32 @@ fn cmd_doc(file: &std::path::Path, target: &Option<String>) -> ExitCode {
         Ok(linked) => linked,
         Err(code) => return code,
     };
+
+    // The target's provider selection (provider dispatch): `doc = "<pkg>"` hands documentation
+    // to that package's `@tier(doc)` runner — activation stamps every adjacency-attached block as
+    // `#[Doc]`, so the runner reads the documented symbols through `attributes_of::<Doc>()` (the
+    // doc-site-generator seam). Default keeps the native extractor below.
+    let providers = match resolve_providers(file, target) {
+        Ok(map) => map,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    if providers.get("doc").is_some_and(|p| p != "std") {
+        let activated = noeta_check::activate_tiers_with(&linked.program, &["doc"], &providers);
+        match activated.registry.resolve_provider("doc", &providers) {
+            Ok(noeta_check::ResolvedProvider::Declared(d)) => {
+                let tier = d.clone();
+                return run_declared_tier("doc", &linked, activated, tier);
+            }
+            Ok(noeta_check::ResolvedProvider::Extension) => {}
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(2);
+            }
+        }
+    }
 
     let docs = noeta_check::resolve_docs(&linked.program);
     if docs.is_empty() {

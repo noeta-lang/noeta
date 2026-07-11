@@ -80,8 +80,9 @@ mod stdlib;
 pub mod tiers;
 
 pub use tiers::{
-    Activated, DocBlock, DocTarget, TierFn, activate_tiers, dedent_doc, extend_reflection,
-    is_extension_tier, resolve_docs, tier_config_attribute,
+    Activated, DeclaredTier, DocBlock, DocTarget, ResolvedProvider, TierFn, activate_tiers,
+    activate_tiers_with, dedent_doc, extend_reflection, is_extension_tier, resolve_docs,
+    tier_config_attribute,
 };
 
 /// The full output of one checker run: the diagnostics **and** the resolved-type map both
@@ -5699,36 +5700,33 @@ impl Checker {
     /// signature dispatch calls with the activated roots.
     fn check_tier_decls(&mut self, program: &Program) {
         self.tier_registry = tiers::TierRegistry::collect(program);
-        let mut seen: HashMap<String, Span> = HashMap::new();
+        let mut seen: HashMap<(String, String), Span> = HashMap::new();
         for stmt in &program.stmts {
             let Stmt::Fn(f) = stmt else { continue };
             let Some(decl) = &f.tier else { continue };
-            if tiers::is_extension_tier(&decl.name) {
-                self.error(
-                    DiagnosticCode::InvalidTierDeclaration,
-                    decl.name_span,
-                    format!(
-                        "tier `{}` collides with an extension-declared tier of that name",
-                        decl.name
-                    ),
-                )
-                .help(
-                    "extension tiers (std's `test`/`bench`/`doc`/`debug` among them) cannot be \
-                     redeclared; pick another name",
-                );
-            }
-            if let Some(first) = seen.get(&decl.name) {
+            // Redeclaring an extension tier's name is legal (provider override): the declaration
+            // is dormant until a target's `tiers` map selects its package as the provider
+            // (`bench = "criterion"`); the extension declaration stays the default. Only a
+            // duplicate within one provider — two `@tier(x)` declarations whose runners share a
+            // package root — is a real collision (E0051): provider selection could not tell them
+            // apart.
+            let root = decl_runner_root(&f.name);
+            if let Some(first) = seen.get(&(decl.name.clone(), root.clone())) {
                 let first = *first;
                 self.error(
                     DiagnosticCode::InvalidTierDeclaration,
                     decl.name_span,
-                    format!("tier `{}` is declared more than once", decl.name),
+                    format!(
+                        "tier `{}` is declared more than once by one provider",
+                        decl.name
+                    ),
                 )
                 .help(format!(
-                    "the first declaration is at {first:?}; a tier has exactly one runner"
+                    "the first declaration is at {first:?}; a tier has exactly one runner per \
+                     package"
                 ));
             } else {
-                seen.insert(decl.name.clone(), decl.name_span);
+                seen.insert((decl.name.clone(), root), decl.name_span);
             }
             if let Some((config, config_span)) = &decl.config
                 && !self.attributes.contains(config)
@@ -6611,6 +6609,16 @@ impl Checker {
 /// maps to a bool. It resolves to a [`Type::Named`] but is a legal annotation, so the unknown-type
 /// check (`E0013`) accepts it. (The bare `list`/`map`/`set` spellings are now lattice built-ins —
 /// they desugar to collections of `dyn`.)
+/// The declaring package root of a link-qualified runner name (`fuzzkit` for
+/// `fuzzkit.tiers.run_fuzz`; `""` for an entry-local name) — the provider identity a target's
+/// `tiers` map selects. Mirrors `tiers::TierRegistry`'s collection.
+fn decl_runner_root(qualified: &str) -> String {
+    match qualified.rsplit_once('.') {
+        Some((path, _)) => path.split('.').next().unwrap_or("").to_string(),
+        None => String::new(),
+    }
+}
+
 /// Map an extension attribute field's declared literal type onto the checker lattice.
 fn attr_field_type(ty: noeta_stdlib::registry::AttrFieldType) -> Type {
     match ty {
