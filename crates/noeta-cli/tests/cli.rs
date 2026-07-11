@@ -2524,6 +2524,112 @@ fn provenance_signs_verifies_and_pins_the_scope_key() {
 }
 
 #[test]
+fn keyless_trust_pins_downgrades_and_switches_are_enforced_end_to_end() {
+    // The keyless trust model (Phase 5, K3) through the whole stack: the `noeta.lock` scope pin
+    // drives resolution. Negative paths only — they need no verifiable bundle (a *positive*
+    // keyless resolve is exercised with minted bundles in the K4 publish tests).
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_keyless_trust");
+    let _ = std::fs::remove_dir_all(&base);
+    let reg = base.join("registry");
+    let repo = base.join("greet_repo");
+    let app = base.join("app");
+    for d in [&reg, &repo, &app] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+
+    // A tagged package repo, published UNSIGNED (no signing key in the environment).
+    git_in(&["init", "-q"], &repo);
+    std::fs::write(
+        repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("m.noe"),
+        "namespace greet.core;\npub fn v(): int { return 1; }\n",
+    )
+    .unwrap();
+    git_in(&["add", "."], &repo);
+    git_in(&["commit", "-q", "-m", "r"], &repo);
+    git_in(&["tag", "v1.0.0"], &repo);
+    lang()
+        .current_dir(&repo)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env_remove("NOETA_SIGNING_KEY")
+        .args([
+            "publish",
+            "--git",
+            repo.to_str().unwrap(),
+            "--tag",
+            "v1.0.0",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("UNSIGNED"));
+
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 42;\n").unwrap();
+
+    // 1. Downgrade rejection: the scope is keyless-pinned in the lock, but the registry serves an
+    //    unsigned release — exactly what a compromised registry smuggling a forged release looks
+    //    like. The resolve must fail and name the defense.
+    std::fs::write(
+        app.join("noeta.lock"),
+        "version = 1\n\n[[scope]]\nname = \"acme\"\n\
+         issuer = \"https://token.actions.githubusercontent.com\"\n\
+         identity = \"https://github.com/acme/greet/.github/workflows/r.yaml@refs/heads/main\"\n",
+    )
+    .unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("downgrade"));
+
+    // 2. Keyless verification is live in the CLI: an unpinned consumer receiving a garbage bundle
+    //    must fail *in the verifier* (malformed bundle), not silently accept.
+    let _ = std::fs::remove_file(app.join("noeta.lock"));
+    let entry = reg.join("acme__greet.toml");
+    let text = std::fs::read_to_string(&entry).unwrap();
+    std::fs::write(&entry, format!("{text}bundle = \"{{}}\"\n")).unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Sigstore bundle"));
+
+    // 3. Root-switch rejection: a key-pinned scope served a keyless release. Never implicit —
+    //    any OIDC identity could otherwise take over a key-pinned scope.
+    std::fs::write(
+        app.join("noeta.lock"),
+        format!(
+            "version = 1\n\n[[scope]]\nname = \"acme\"\npublic_key = \"{}\"\n",
+            "b".repeat(64)
+        ),
+    )
+    .unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("never implicit"));
+}
+
+#[test]
 fn a_registry_diamond_backtracks_to_a_compatible_set() {
     // The end-to-end proof of PubGrub range resolution (Phase 4, S5): a diamond where the greedy
     // pick (highest `foo`) forces an incompatible `bar`, but a lower `foo` resolves. The walk must

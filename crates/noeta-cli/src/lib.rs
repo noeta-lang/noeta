@@ -804,19 +804,26 @@ fn cmd_audit(path: &std::path::Path) -> ExitCode {
          authorized (an unauthorized native dependency would have failed resolution)."
     );
 
-    // Provenance (Phase 4 #2): the scopes whose signing keys are pinned. Resolution *enforces*
-    // verification (a bad signature or a changed key fails the resolve), so a successful audit means
-    // every signed release verified against its pinned key.
-    println!("\n  Provenance (pinned signing keys):");
-    if graph.scope_keys.is_empty() {
-        println!("    (none — no registry dependency carried a signed release)");
+    // Provenance (Phase 4 #2 / Phase 5): each scope's pinned trust root. Resolution *enforces*
+    // verification (a bad signature/bundle, a changed key/identity, or a downgraded root fails the
+    // resolve), so a successful audit means every signed release verified against its pinned root.
+    println!("\n  Provenance (pinned trust roots):");
+    if graph.scope_trust.is_empty() {
+        println!("    (none — no registry dependency carried provenance)");
     } else {
-        for (scope, key) in &graph.scope_keys {
-            println!("    {scope}: {}…", &key[..key.len().min(16)]);
+        for (scope, trust) in &graph.scope_trust {
+            match trust {
+                noeta_pm::lock::ScopeTrust::Key(key) => {
+                    println!("    {scope}: key {}…", &key[..key.len().min(16)]);
+                }
+                noeta_pm::lock::ScopeTrust::Keyless { issuer, identity } => {
+                    println!("    {scope}: keyless {identity} (via {issuer})");
+                }
+            }
         }
         println!(
-            "    signed releases from these scopes verified during resolution; a changed key or bad \
-             signature aborts the build."
+            "    releases from these scopes verified during resolution; a changed key or identity, \
+             a downgraded trust root, or a bad signature/bundle aborts the build."
         );
     }
     ExitCode::SUCCESS

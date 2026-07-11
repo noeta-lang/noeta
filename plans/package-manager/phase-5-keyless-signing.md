@@ -102,10 +102,21 @@ swappable.
   issuer pin mismatch, malformed inputs — every one rejected with a distinct error (asserted).
   *(Re-sequenced, not cut: the in-repo test CA + test log generator lands in K4, where the
   mocked Fulcio/Rekor structurally require it to mint bundles that genuinely verify.)*
-- **K3 — trust model in lock + graph.** Three-way `check_provenance`; lockfile schema for
-  keyless pins; TOFU-on-identity; **downgrade rejection**; identity-changed error with
-  re-pin guidance (`noeta update` parity with the key path). *Exit: graph tests cover
-  first-pin, match, mismatch, downgrade-attack, unsigned-scope-unchanged.*
+- **K3 — trust model in lock + graph. ✅ DONE.** `lock::ScopeTrust` enum
+  (`Key(hex) | Keyless{issuer, identity}`, crypto-free by design — the LSP reasons about trust
+  *shapes* without linking a verification stack); `[[scope]]` entries discriminate by field
+  (`public_key` vs `issuer`+`identity`), lock v1 format backward-compatible. The trust logic is
+  a **pure decision function** (`graph::provenance_decision`) with the full matrix unit-tested;
+  `check_provenance` is a thin feature-gated crypto wrapper (pins established only *after*
+  verification). Rules: keyless pin → bundle required (else **downgrade rejection**) + identity
+  must match; key pin → key-change rejection as before, and a bundle = **root-switch rejection**
+  (never implicit in either direction — key→keyless would let *any* OIDC identity take over a
+  scope); first use pins whichever root the release carries; unsigned stays allowed for
+  unpinned/key-pinned scopes (gradual adoption; the strictness asymmetry is deliberate — a
+  keyless pin is an explicit strong-trust statement). CLI now builds with `keyless` (consumers
+  verify as of this slice). E2E (negative paths, no valid bundle needed): lock-driven downgrade
+  rejection, live CLI bundle verification, switch rejection; the Phase-4 key e2e passes
+  untouched. Positive keyless resolve e2e = K4 (needs minted bundles).
 - **K4 — keyless publish.** `noeta publish` detects ambient OIDC (GitHub Actions env) →
   Fulcio cert for ephemeral key → DSSE sign → Rekor entry → assemble bundle → publish.
   Key-file path unchanged when no OIDC ambient; both present → keyless wins, `--key` forces.
