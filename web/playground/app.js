@@ -2,6 +2,8 @@
 // dependency-free — no bundler, no CDN — so the page is a pair of static files next to the
 // engine artifact, servable from anywhere (see README.md).
 
+import { decodeShare, encodeShare } from './share.js';
+
 const RUN_TIMEOUT_MS = 5000;
 
 const editor = document.getElementById('editor');
@@ -165,9 +167,23 @@ async function doFmt() {
   }
 }
 
+async function doShare() {
+  const url = new URL(location.href);
+  url.hash = encodeShare(editor.value);
+  history.replaceState(null, '', url);
+  try {
+    await navigator.clipboard.writeText(url.href);
+    setStatus('share link copied ✓');
+  } catch {
+    // Clipboard needs a secure context / permission; the address bar already holds the link.
+    setStatus('share link is in the address bar');
+  }
+}
+
 document.getElementById('run').addEventListener('click', doRun);
 document.getElementById('check').addEventListener('click', doCheck);
 document.getElementById('fmt').addEventListener('click', doFmt);
+document.getElementById('share').addEventListener('click', doShare);
 editor.addEventListener('keydown', (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
     event.preventDefault();
@@ -187,6 +203,7 @@ examplePicker.addEventListener('change', () => {
   diagnosticsPane.replaceChildren();
 });
 
-editor.value = EXAMPLES.hello;
+// A shared link restores its buffer; otherwise start on the hello example.
+editor.value = decodeShare(location.hash.slice(1)) ?? EXAMPLES.hello;
 setStatus('loading engine…');
 spawnWorker();

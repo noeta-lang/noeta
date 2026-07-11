@@ -177,10 +177,29 @@ jobs:
         run: cargo build -p noeta-playground --target wasm32-unknown-unknown --profile wasm-release --locked
       - name: Browser-engine smoke (node over the raw ABI)
         run: node crates/noeta-playground/tests/browser_smoke.mjs target/wasm32-unknown-unknown/wasm-release/noeta_playground.wasm
+      - name: Share-by-URL round trip
+        run: node crates/noeta-playground/tests/share_roundtrip.mjs
       # The edge-serve payoff (W4): `noeta build --serve` a real handler, run the wasi:http
       # component under `wasmtime serve`, assert a live HTTP round trip.
       - name: wasi:http serve e2e (component under wasmtime serve)
         run: PATH="$HOME/.wasmtime/bin:$PATH" bash crates/noeta-wasm-serve/tests/e2e.sh
+      # Hosting prep: every run leaves a deployable playground bundle and the generic wasm
+      # engines as artifacts — when noeta.dev hosting exists, deploying is "download + upload";
+      # the engines double as the packaged-toolchain distribution blobs.
+      - name: Build the playground bundle
+        run: bash web/playground/build.sh
+      - name: Upload the playground bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: playground-dist
+          path: web/playground/dist/
+      - name: Upload the generic wasm engines
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-engines
+          path: |
+            target/wasm32-wasip1/wasm-release/noeta-wasm-runner.wasm
+            target/wasm32-wasip2/wasm-release/noeta_wasm_serve.wasm
 
   miri:
     name: Miri (unsafe value & collector paths)

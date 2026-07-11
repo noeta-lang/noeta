@@ -7,14 +7,17 @@ sandbox. No backend to operate — three static files plus the engine artifact.
 ## Build & serve
 
 ```sh
-# From the workspace root: build the engine and place it next to the page.
-cargo build -p noeta-playground --target wasm32-unknown-unknown --profile wasm-release
-cp target/wasm32-unknown-unknown/wasm-release/noeta_playground.wasm web/playground/
+# One command: engine + page + brotli side-cars → web/playground/dist/ (the deployable bundle —
+# when hosting exists, upload this directory as-is).
+bash web/playground/build.sh
 
 # Any static file server works (the page needs http(s) for workers + streaming instantiation):
-python -m http.server -d web/playground 8080
+python -m http.server -d web/playground/dist 8080
 # → http://localhost:8080
 ```
+
+The CI `wasm` job builds the same bundle on every run and uploads it as the
+`playground-dist` artifact — a deployable playground is always one download away.
 
 ## How it works
 
@@ -27,5 +30,7 @@ python -m http.server -d web/playground 8080
   has no fuel counter.
 - Diagnostics arrive in the stable `JsonDiagnostic` shape (`noeta check --format json`); the
   pane links each one back to its byte span in the editor.
+- **Share** encodes the buffer into the URL fragment (`share.js`, versioned base64url — pure
+  functions, node-tested) — no backend, and the fragment never reaches the server.
 - Everything is dependency-free (no bundler, no CDN): the playground works offline and its only
   build step is `cargo build`.
