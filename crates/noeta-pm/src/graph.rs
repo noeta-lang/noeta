@@ -53,10 +53,11 @@ pub struct ResolvedGraph {
     /// shim so `run_cli` registers a dependency's `noeta <cmd>` only when its package is
     /// command-trusted; std's own commands (root `"std"`) are always allowed. Sorted + deduped.
     pub trusted_command_roots: Vec<String>,
-    /// scope (`company`) → the Ed25519 public key the registry served for it (provenance, Phase 4
-    /// #2), to be **pinned** in `noeta.lock` (trust-on-first-use). Empty when no registry dependency
-    /// carried a scope key.
-    pub scope_keys: BTreeMap<String, String>,
+    /// scope (`company`) → the trust root established for it during the walk (provenance, Phase 4
+    /// #2 / Phase 5) — a registry-served Ed25519 key or a keyless-verified OIDC identity — to be
+    /// **pinned** in `noeta.lock` (trust-on-first-use). Empty when no registry dependency carried
+    /// provenance.
+    pub scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
 }
 
 /// A resolved package's native entry crate (Phase 3, N3.1): where the composed build finds its
@@ -124,7 +125,7 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
             locked: Vec::new(),
             native_crates: Vec::new(),
             trusted_command_roots: Vec::new(),
-            scope_keys: BTreeMap::new(),
+            scope_trust: BTreeMap::new(),
         });
     };
     let manifest = read_manifest(&manifest_path)?;
@@ -147,7 +148,7 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
         index: None,
         native_trust,
         solution: BTreeMap::new(),
-        scope_keys: BTreeMap::new(),
+        scope_trust: BTreeMap::new(),
     };
     // Phase 4, S5b: first *select versions* — gather the candidate graph (materialize the path/git
     // spine, query the index for every registry candidate + its deps) and run PubGrub. This backtracks
@@ -157,18 +158,18 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
     let mut root_edges = BTreeMap::new();
     walker.walk(manifest.dependencies(), &manifest_dir, &mut root_edges)?;
 
-    let scope_keys = walker.scope_keys;
+    let scope_trust = walker.scope_trust;
     let graph = assemble(
         walker.instances,
         &root_edges,
         &manifest.trust().commands,
-        scope_keys,
+        scope_trust,
     );
 
     // Refresh the lockfile (best-effort: a read-only project must not fail a build). Skipped for a
     // manifest with no resolved dependencies, so a bare-`[profiles]` project grows no lock.
     if !graph.locked.is_empty() {
-        let _ = crate::lock::write(&manifest_dir, &graph.locked, &graph.scope_keys);
+        let _ = crate::lock::write(&manifest_dir, &graph.locked, &graph.scope_trust);
     }
     Ok(graph)
 }
@@ -187,9 +188,9 @@ struct Walker<'a> {
     /// greedily picking the highest; empty until `solve` runs (a pure path/git graph leaves registry
     /// selection unused).
     solution: BTreeMap<String, Version>,
-    /// scope → public key served by the registry, gathered while materializing registry deps
-    /// (provenance, Phase 4 #2); pinned into `noeta.lock` afterwards.
-    scope_keys: BTreeMap<String, String>,
+    /// scope → the trust root established while materializing registry deps (provenance, Phase 4
+    /// #2 / Phase 5); pinned into `noeta.lock` afterwards.
+    scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
 }
 
 impl Walker<'_> {
@@ -337,16 +338,10 @@ impl Walker<'_> {
                     .ok_or_else(|| {
                         format!("dependency `{key}` (`{name}`): resolved version {version} is not in the index")
                     })?;
-                // Provenance (Phase 4 #2): pin the scope key trust-on-first-use, reject a changed key,
-                // and verify the release signature (when the `provenance` feature is on).
-                self.check_provenance(
-                    key,
-                    &name,
-                    &version,
-                    &release.coords.sha,
-                    release.signature.as_deref(),
-                    scope_key.as_deref(),
-                )?;
+                // Provenance (Phase 4 #2 / Phase 5): pin the scope's trust root on first use,
+                // reject a changed key / changed identity / downgraded root, and verify the
+                // signature or keyless bundle (under the `provenance`/`keyless` features).
+                self.check_provenance(key, &name, &release, scope_key.as_deref())?;
                 let coords = release.coords;
                 // The registry pins the SHA (Phase 4, S2), so a first resolve fetches by it rather
                 // than trusting the tag's current target.
@@ -389,55 +384,96 @@ impl Walker<'_> {
         ))
     }
 
-    /// Provenance check for a resolved registry release (Phase 4, #2). Two parts:
-    ///  1. **Key TOFU** (always, no crypto): a scope's public key is pinned in `noeta.lock` on first
-    ///     use; a later registry serving a *different* key for that scope is rejected — this is what
-    ///     defends a registry compromised *after* first use. The effective key is recorded to re-pin.
-    ///  2. **Signature verification** (only with the `provenance` feature — the CLI; the LSP does the
-    ///     key checks but skips the crypto): a signed release must verify against the effective key.
+    /// Provenance check for a resolved registry release (Phase 4 #2 / Phase 5). Three layers:
+    ///  1. **Trust-root TOFU** (always, no crypto — [`provenance_decision`]): a scope's trust root
+    ///     (key or keyless identity) is pinned in `noeta.lock` on first use. A later registry
+    ///     serving a *different* key, or switching a scope's root in either direction, or serving
+    ///     a key-signed/unsigned release for a keyless-pinned scope (**downgrade**), is rejected —
+    ///     this is what defends a registry compromised *after* first use.
+    ///  2. **Key verification** (`provenance` feature — the CLI; the LSP does the trust-shape
+    ///     checks but skips crypto): a key-signed release must verify against the pinned key.
+    ///  3. **Keyless verification** (`keyless` feature): a bundle must verify offline — chain,
+    ///     SCT, inclusion proof + checkpoint — and prove exactly the pinned identity (first use:
+    ///     whatever identity it proves is what gets pinned).
     ///
-    /// An **unsigned** release is allowed (unverified) while provenance is adopted gradually; `noeta
-    /// audit` surfaces which dependencies are verified.
+    /// An **unsigned** release from an *unpinned or key-pinned* scope is allowed (unverified,
+    /// gradual adoption); `noeta audit` surfaces which dependencies are verified.
     fn check_provenance(
         &mut self,
         key: &str,
         name: &str,
-        version: &Version,
-        sha: &str,
-        signature: Option<&str>,
+        release: &crate::registry::Release,
         served_key: Option<&str>,
     ) -> Result<(), String> {
         let scope = name.split('/').next().unwrap_or(name);
-        let pinned = self.lock.scope_key(scope).map(str::to_string);
-        if let (Some(pinned), Some(served)) = (&pinned, served_key)
-            && pinned != served
-        {
-            return Err(format!(
-                "dependency `{key}` (`{name}`): the registry's public key for scope `{scope}` \
-                 changed from the one pinned in `{}` — a moved or compromised signing key. Reconcile \
-                 with the maintainer, then run `noeta update` to re-pin.",
-                crate::lock::LOCK_NAME
-            ));
+        let action = provenance_decision(
+            self.lock.scope_trust(scope),
+            release.signature.as_deref(),
+            release.bundle.as_deref(),
+            served_key,
+        )
+        .map_err(|reason| format!("dependency `{key}` (`{name}`): {reason}"))?;
+        #[cfg(any(feature = "provenance", feature = "keyless"))]
+        let (version, sha) = (&release.version, release.coords.sha.as_str());
+        match action {
+            ProvenanceAction::AllowUnverified => {}
+            ProvenanceAction::Key {
+                key: public_key,
+                signature,
+            } => {
+                #[cfg(feature = "provenance")]
+                if let Some(sig) = &signature {
+                    let attestation = crate::provenance::Attestation { name, version, sha };
+                    crate::provenance::verify(&attestation, sig, &public_key).map_err(|err| {
+                        format!("dependency `{key}` (`{name}`): provenance {err}")
+                    })?;
+                }
+                #[cfg(not(feature = "provenance"))]
+                let _ = signature;
+                // Pin on first use / re-pin (stable) — after verification, so a bad signature
+                // never establishes a pin.
+                self.scope_trust
+                    .insert(scope.to_string(), crate::lock::ScopeTrust::Key(public_key));
+            }
+            ProvenanceAction::Keyless { bundle, pinned } => {
+                #[cfg(feature = "keyless")]
+                {
+                    let attestation = crate::provenance::Attestation { name, version, sha };
+                    let digest = crate::keyless::attested_digest(&attestation);
+                    let policy =
+                        pinned
+                            .as_ref()
+                            .map(|(issuer, identity)| crate::keyless::IdentityPolicy {
+                                issuer: issuer.clone(),
+                                identity: identity.clone(),
+                            });
+                    let verified = crate::keyless::verify_bundle(&bundle, &digest, policy.as_ref())
+                        .map_err(|err| format!("dependency `{key}` (`{name}`): {err}"))?;
+                    // Pin what verification *proved* (== the pin when one existed, since the
+                    // policy enforced it); on first use this is the TOFU identity pin.
+                    self.scope_trust.insert(
+                        scope.to_string(),
+                        crate::lock::ScopeTrust::Keyless {
+                            issuer: verified.issuer,
+                            identity: verified.identity,
+                        },
+                    );
+                }
+                #[cfg(not(feature = "keyless"))]
+                {
+                    let _ = bundle;
+                    // No crypto (the LSP): the downgrade/shape checks above still ran. Keep an
+                    // existing pin stable; a *first* pin needs verification to learn the identity,
+                    // so it waits for a CLI resolve.
+                    if let Some((issuer, identity)) = pinned {
+                        self.scope_trust.insert(
+                            scope.to_string(),
+                            crate::lock::ScopeTrust::Keyless { issuer, identity },
+                        );
+                    }
+                }
+            }
         }
-        let effective = pinned.or_else(|| served_key.map(str::to_string));
-        if let Some(k) = &effective {
-            // Re-pin (stable) / pin on first use.
-            self.scope_keys.insert(scope.to_string(), k.clone());
-        }
-        #[cfg(feature = "provenance")]
-        if let Some(sig) = signature {
-            let Some(k) = &effective else {
-                return Err(format!(
-                    "dependency `{key}` (`{name}`) is signed, but scope `{scope}` has no public key \
-                     to verify it against"
-                ));
-            };
-            let attestation = crate::provenance::Attestation { name, version, sha };
-            crate::provenance::verify(&attestation, sig, k)
-                .map_err(|err| format!("dependency `{key}` (`{name}`): provenance {err}"))?;
-        }
-        #[cfg(not(feature = "provenance"))]
-        let _ = (signature, version, sha);
         Ok(())
     }
 
@@ -631,6 +667,127 @@ impl crate::resolve::Registry for Candidates<'_> {
     }
 }
 
+/// What [`provenance_decision`] tells [`Walker::check_provenance`] to do for one release — the
+/// crypto-free half of the trust check, split out so the trust matrix is directly unit-testable
+/// (the crypto half is a thin, feature-gated wrapper around the verified seams).
+#[derive(Debug, PartialEq, Eq)]
+enum ProvenanceAction {
+    /// No provenance and no pin constraining it: allowed, unverified, nothing pinned.
+    AllowUnverified,
+    /// The key root: verify `signature` (when present) against `key`, then pin `Key(key)`.
+    /// `signature: None` = an unsigned release from a key-pinned/key-served scope — allowed
+    /// (gradual adoption), the key still pins.
+    Key {
+        key: String,
+        signature: Option<String>,
+    },
+    /// The keyless root: verify `bundle` offline; `pinned` is the identity it must prove
+    /// (`None` = first use — pin whatever identity verification establishes).
+    Keyless {
+        bundle: String,
+        pinned: Option<(String, String)>,
+    },
+}
+
+/// The **trust-root decision** for one resolved release (Phase 4 #2 / Phase 5): given the scope's
+/// pinned root (if any) and the release's provenance shape, decide what to verify and what to pin —
+/// or reject. Pure (no IO, no crypto), so every cell of the trust matrix is unit-tested:
+///
+/// | pinned ↓ / release → | bundle              | signature            | unsigned             |
+/// |----------------------|---------------------|----------------------|----------------------|
+/// | Keyless(identity)    | verify against pin  | **reject** (downgrade) | **reject** (downgrade) |
+/// | Key(k)               | **reject** (switch) | verify against k     | allow, keep pin      |
+/// | (none)               | verify, TOFU-pin    | verify vs served key, TOFU-pin | allow    |
+///
+/// Root *switches* are never implicit in either direction: keyless→key is a downgrade an attacker
+/// wants, and key→keyless would let anyone with *any* OIDC identity re-pin a stolen scope. Both
+/// require the consumer's explicit `noeta update` (which re-resolves with no pin and re-TOFUs).
+fn provenance_decision(
+    pinned: Option<&crate::lock::ScopeTrust>,
+    signature: Option<&str>,
+    bundle: Option<&str>,
+    served_key: Option<&str>,
+) -> Result<ProvenanceAction, String> {
+    use crate::lock::ScopeTrust;
+    // Defense in depth: publish already rejects a release carrying both roots
+    // (`Release::check_provenance_shape`), but a malicious registry can serve anything.
+    if signature.is_some() && bundle.is_some() {
+        return Err(
+            "the registry served a release carrying both a key signature and a keyless bundle — \
+             malformed provenance (a release has exactly one trust root)"
+                .to_string(),
+        );
+    }
+    match (pinned, signature, bundle) {
+        // Both-set was rejected above; spelled out so the match stays provably exhaustive.
+        (_, Some(_), Some(_)) => unreachable!("rejected by the both-roots check"),
+        // ── Scope pinned keyless ───────────────────────────────────────────────────────────────
+        (Some(ScopeTrust::Keyless { issuer, identity }), None, Some(bundle)) => {
+            Ok(ProvenanceAction::Keyless {
+                bundle: bundle.to_string(),
+                pinned: Some((issuer.clone(), identity.clone())),
+            })
+        }
+        (Some(ScopeTrust::Keyless { .. }), ..) => Err(format!(
+            "this scope is pinned to keyless (Sigstore) provenance in `{}`, but the registry \
+             served a release without a keyless bundle — a downgrade to a weaker trust root, which \
+             is how a compromised registry would smuggle a forged release past the transparency \
+             log. If the maintainer really stepped back from keyless signing, reconcile with them, \
+             then run `noeta update` to re-pin.",
+            crate::lock::LOCK_NAME
+        )),
+        // ── Scope pinned to a key ──────────────────────────────────────────────────────────────
+        (Some(ScopeTrust::Key(_)), None, Some(_)) => Err(format!(
+            "this scope is pinned to a signing key in `{}`, but the registry served a \
+             keyless-signed release — a trust-root switch is never implicit (any OIDC identity \
+             would otherwise be able to take over a key-pinned scope). If the maintainer migrated \
+             to keyless signing, reconcile with them, then run `noeta update` to re-pin.",
+            crate::lock::LOCK_NAME
+        )),
+        (Some(ScopeTrust::Key(pinned_key)), signature, None) => {
+            if let Some(served) = served_key
+                && served != pinned_key
+            {
+                return Err(format!(
+                    "the registry's public key for this scope changed from the one pinned in \
+                     `{}` — a moved or compromised signing key. Reconcile with the maintainer, \
+                     then run `noeta update` to re-pin.",
+                    crate::lock::LOCK_NAME
+                ));
+            }
+            Ok(ProvenanceAction::Key {
+                key: pinned_key.clone(),
+                signature: signature.map(str::to_string),
+            })
+        }
+        // ── No pin: first use ──────────────────────────────────────────────────────────────────
+        (None, None, Some(bundle)) => Ok(ProvenanceAction::Keyless {
+            bundle: bundle.to_string(),
+            pinned: None,
+        }),
+        (None, Some(sig), None) => match served_key {
+            Some(served) => Ok(ProvenanceAction::Key {
+                key: served.to_string(),
+                signature: Some(sig.to_string()),
+            }),
+            None => Err(
+                "the release is signed, but the scope has no public key to verify it against"
+                    .to_string(),
+            ),
+        },
+        (None, None, None) => match served_key {
+            // A served key with an unsigned release still pins (the existing Phase 4 behavior):
+            // the scope's key is known, so a later key change is detectable even before the
+            // maintainer signs releases.
+            Some(served) => Ok(ProvenanceAction::Key {
+                key: served.to_string(),
+                signature: None,
+            }),
+            None => Ok(ProvenanceAction::AllowUnverified),
+        },
+    }
+}
+
 /// Turn the walked instances into the loader's [`DepPackage`] list + the lockfile pins. Assigns each
 /// identity its global segment (a direct dependency keeps the root's dep-table key; a transitive-only
 /// package gets a synthesized unique segment) and rewrites each package's local dependency keys to the
@@ -639,7 +796,7 @@ fn assemble(
     instances: BTreeMap<String, Instance>,
     root_edges: &BTreeMap<String, String>,
     trusted_commands: &std::collections::BTreeSet<String>,
-    scope_keys: BTreeMap<String, String>,
+    scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
 ) -> ResolvedGraph {
     // Global segment per identity. Direct dependencies keep the consumer's key (so the entry's
     // `use <key>.…` needs no rewrite); transitive-only packages get a unique synthesized segment.
@@ -708,7 +865,7 @@ fn assemble(
         locked,
         native_crates,
         trusted_command_roots,
-        scope_keys,
+        scope_trust,
     }
 }
 
@@ -963,5 +1120,130 @@ mod tests {
         .unwrap();
         let graph = resolve_graph(&entry).expect("resolves");
         assert!(graph.native_crates.is_empty());
+    }
+
+    // ── The trust-root decision matrix (Phase 4 #2 / Phase 5) ─────────────────────────────────
+    // `provenance_decision` is the crypto-free half of `check_provenance`; every cell of its
+    // matrix is pinned here. The crypto halves are covered in `provenance`/`keyless` tests.
+
+    use crate::lock::ScopeTrust;
+
+    fn keyless_pin() -> ScopeTrust {
+        ScopeTrust::Keyless {
+            issuer: "https://token.actions.githubusercontent.com".to_string(),
+            identity: "https://github.com/acme/imgfx/.github/workflows/r.yaml@refs/heads/main"
+                .to_string(),
+        }
+    }
+
+    #[test]
+    fn trust_first_use_pins_whichever_root_the_release_carries() {
+        // Bundle, no pin → verify keyless with no identity constraint (TOFU establishes it).
+        assert_eq!(
+            provenance_decision(None, None, Some("{bundle}"), None).unwrap(),
+            ProvenanceAction::Keyless {
+                bundle: "{bundle}".to_string(),
+                pinned: None,
+            }
+        );
+        // Signature + served key, no pin → verify against the served key (which then pins).
+        assert_eq!(
+            provenance_decision(None, Some("sig"), None, Some("key")).unwrap(),
+            ProvenanceAction::Key {
+                key: "key".to_string(),
+                signature: Some("sig".to_string()),
+            }
+        );
+        // Unsigned but the scope serves a key → the key still pins (change detection starts now).
+        assert_eq!(
+            provenance_decision(None, None, None, Some("key")).unwrap(),
+            ProvenanceAction::Key {
+                key: "key".to_string(),
+                signature: None,
+            }
+        );
+        // Nothing at all → allowed, unverified, unpinned (gradual adoption).
+        assert_eq!(
+            provenance_decision(None, None, None, None).unwrap(),
+            ProvenanceAction::AllowUnverified
+        );
+        // Signed but no key anywhere → fail closed (a signature nobody can check proves nothing).
+        let err = provenance_decision(None, Some("sig"), None, None).unwrap_err();
+        assert!(err.contains("no public key"), "{err}");
+    }
+
+    #[test]
+    fn trust_a_keyless_pin_holds_the_release_to_that_identity() {
+        let pin = keyless_pin();
+        let ScopeTrust::Keyless { issuer, identity } = pin.clone() else {
+            unreachable!()
+        };
+        assert_eq!(
+            provenance_decision(Some(&pin), None, Some("{bundle}"), None).unwrap(),
+            ProvenanceAction::Keyless {
+                bundle: "{bundle}".to_string(),
+                pinned: Some((issuer, identity)),
+            }
+        );
+    }
+
+    #[test]
+    fn trust_downgrade_from_keyless_is_rejected() {
+        let pin = keyless_pin();
+        // Key-signed release for a keyless-pinned scope: the downgrade a compromised registry
+        // would use to smuggle a forged release past the transparency log.
+        let err = provenance_decision(Some(&pin), Some("sig"), None, Some("key")).unwrap_err();
+        assert!(err.contains("downgrade"), "{err}");
+        // Unsigned release for a keyless-pinned scope: same rejection.
+        let err = provenance_decision(Some(&pin), None, None, None).unwrap_err();
+        assert!(err.contains("downgrade"), "{err}");
+    }
+
+    #[test]
+    fn trust_switch_from_key_to_keyless_is_never_implicit() {
+        // Anyone owns *some* OIDC identity, so a key-pinned scope accepting any keyless bundle
+        // would hand takeover to whoever compromises the registry. Explicit `noeta update` only.
+        let pin = ScopeTrust::Key("key".to_string());
+        let err = provenance_decision(Some(&pin), None, Some("{bundle}"), None).unwrap_err();
+        assert!(err.contains("never implicit"), "{err}");
+    }
+
+    #[test]
+    fn trust_a_changed_key_is_rejected_and_a_stable_key_verifies() {
+        let pin = ScopeTrust::Key("old-key".to_string());
+        let err = provenance_decision(Some(&pin), Some("sig"), None, Some("new-key")).unwrap_err();
+        assert!(err.contains("changed"), "{err}");
+        // Same served key (or none served): verify against the pinned key.
+        assert_eq!(
+            provenance_decision(Some(&pin), Some("sig"), None, Some("old-key")).unwrap(),
+            ProvenanceAction::Key {
+                key: "old-key".to_string(),
+                signature: Some("sig".to_string()),
+            }
+        );
+        assert_eq!(
+            provenance_decision(Some(&pin), Some("sig"), None, None).unwrap(),
+            ProvenanceAction::Key {
+                key: "old-key".to_string(),
+                signature: Some("sig".to_string()),
+            }
+        );
+        // Unsigned from a key-pinned scope stays allowed (gradual adoption), pin kept.
+        assert_eq!(
+            provenance_decision(Some(&pin), None, None, Some("old-key")).unwrap(),
+            ProvenanceAction::Key {
+                key: "old-key".to_string(),
+                signature: None,
+            }
+        );
+    }
+
+    #[test]
+    fn trust_both_roots_on_one_release_is_malformed() {
+        for pin in [None, Some(keyless_pin()), Some(ScopeTrust::Key("k".into()))] {
+            let err =
+                provenance_decision(pin.as_ref(), Some("sig"), Some("{bundle}"), None).unwrap_err();
+            assert!(err.contains("exactly one trust root"), "{err}");
+        }
     }
 }
