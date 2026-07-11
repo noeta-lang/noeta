@@ -1650,9 +1650,14 @@ fn build_exe_reports_a_runtime_abort_from_the_stapled_program() {
 /// the native-static-libs link line rustc reports. `None` if the toolchain can't produce it (no
 /// `cargo`, or the build failed) — the caller then skips, so the differential is a no-op on a host
 /// without a build toolchain rather than a spurious failure.
+#[cfg(feature = "jit")]
 fn build_aot_archive() -> Option<(PathBuf, String)> {
     let output = std::process::Command::new(env!("CARGO"))
         .current_dir(workspace())
+        // The link line is scraped from rustc's `native-static-libs` note; under
+        // `CARGO_TERM_COLOR=always` (CI) the note arrives ANSI-colored and a stray `\x1b[0m`
+        // ends up inside the last `-l` flag. Force plain output regardless of ambient config.
+        .env("CARGO_TERM_COLOR", "never")
         .args([
             "rustc",
             "-p",
@@ -1682,6 +1687,7 @@ fn build_aot_archive() -> Option<(PathBuf, String)> {
 
 /// Whether a C toolchain (`cc`) is on PATH — `--native`'s linker. Overridable via `NOETA_CC`, as the
 /// CLI's linker driver is.
+#[cfg(feature = "jit")]
 fn has_cc() -> bool {
     let cc = std::env::var("NOETA_CC").unwrap_or_else(|_| "cc".to_string());
     std::process::Command::new(cc)
@@ -1692,6 +1698,7 @@ fn has_cc() -> bool {
 }
 
 #[test]
+#[cfg(feature = "jit")] // `--native` exists only in the JIT-enabled build (it exits 2 otherwise).
 fn build_native_matches_a_source_run_byte_for_byte() {
     // P-AOT L3.2b(3), the end-to-end AOT differential: `noeta build --native` compiles the eligible
     // prototypes to machine code, links them into a native binary, and staples the bundle on. That
