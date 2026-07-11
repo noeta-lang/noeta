@@ -4,7 +4,7 @@
 //! side effect* — invisible to program output, so the differential can't see it — so this test
 //! observes the spans directly: it runs a served program on a [`SandboxHost`] whose recorder feeds a
 //! shared sink ([`SandboxHost::set_span_sink`]) that outlives the host (the VM consumes it), then
-//! asserts on the emitted spans. Under the sandbox the accept leaf drives the fixed five-request
+//! asserts on the emitted spans. Under the sandbox the accept leaf drives the fixed six-request
 //! script (`GET /`, `GET /health`, `POST /echo`, `GET /users/42?active=true`, `DELETE /users/42`),
 //! so the emitted spans are deterministic.
 
@@ -113,7 +113,8 @@ fn serve_emits_one_server_span_per_request() {
             "GET /health",
             "POST /echo",
             "GET /users/42",
-            "DELETE /users/42"
+            "DELETE /users/42",
+            "GET /ws"
         ]
     );
     assert!(
@@ -174,8 +175,8 @@ fn handler_spans_nest_under_the_server_span() {
         .iter()
         .filter(|s| s.kind == SpanKind::Server)
         .collect();
-    assert_eq!(db.len(), 5, "one child span per scripted request");
-    assert_eq!(servers.len(), 5);
+    assert_eq!(db.len(), 6, "one child span per scripted request");
+    assert_eq!(servers.len(), 6);
     for (child, server) in db.iter().zip(&servers) {
         let parent = child.parent.expect("child has a parent");
         assert_eq!(
@@ -213,8 +214,8 @@ fn interleaved_handlers_keep_their_own_context() {
         .iter()
         .filter(|s| s.kind == SpanKind::Server)
         .collect();
-    assert_eq!(work.len(), 5);
-    assert_eq!(servers.len(), 5);
+    assert_eq!(work.len(), 6);
+    assert_eq!(servers.len(), 6);
     // Every work span parents under exactly one distinct server span (a bijection), and shares its
     // trace — no cross-request leakage.
     let mut claimed: Vec<[u8; 8]> = Vec::new();
@@ -264,8 +265,8 @@ fn handler_spawned_task_inherits_the_server_span() {
         .iter()
         .filter(|s| s.kind == SpanKind::Server)
         .collect();
-    assert_eq!(bg.len(), 5);
-    assert_eq!(servers.len(), 5);
+    assert_eq!(bg.len(), 6);
+    assert_eq!(servers.len(), 6);
     for (child, server) in bg.iter().zip(&servers) {
         let parent = child.parent.expect("bg has a parent");
         assert_eq!(
