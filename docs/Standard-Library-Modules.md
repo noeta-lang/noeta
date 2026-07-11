@@ -207,7 +207,9 @@ echo reader.read_line() ?? "<eof>"   // alpha
 | `parse` | `parse(text: string) -> dyn` | Objects → maps, arrays → lists, `null` → unit. Malformed is E0007. |
 | `parse::<T>` | `parse::<T>(text: string) -> T` | **Typed** decode into a real value. |
 
-```noeta ignore
+```noeta check
+struct Point { x: int  y: int }
+
 use std.{json}
 echo json.stringify({"b": 2, "a": 1})               // {"a":1,"b":2}
 
@@ -344,9 +346,14 @@ Every verb takes an **optional** trailing `headers: Map<string, string>`. `Respo
 `status() -> int`, `ok() -> bool` (2xx), `body() -> string`, `body_bytes() -> bytes`, and
 `header(name) -> string?` (case-insensitive).
 
-```noeta ignore
+```noeta check
 use std.http.client
 use std.json
+
+struct User { name: string }
+token = "s3cret"
+payload = {"name": "Niro"}
+filter = {"q": "cats"}
 
 resp = client.get("https://api.example.com/users/1", {"authorization": "Bearer " ~ token})
 if resp.ok() {
@@ -364,7 +371,7 @@ found = client.query("https://api.example.com/search", json.stringify(filter))
 Concurrent fan-out: `all` (from `std.task`) awaits a batch of futures together, returning their
 results in input order (see [Concurrency](Concurrency)):
 
-```noeta ignore
+```noeta check
 use std.http.client
 use std.task.{all}
 codes = all([
@@ -397,8 +404,9 @@ all on Noeta's own async runtime. A handler that errors becomes a `500`; the ser
 | `Request` methods | `method() -> string`, `path() -> string`, `query(name) -> string?`, `header(name) -> string?` (case-insensitive), `body() -> string`, `body_bytes() -> bytes` | Read the inbound request. |
 | `Response.with_header` | `with_header(name, value) -> Response` | Copy-modify — returns a new response (a `Response` is immutable). |
 
-```noeta ignore
+```noeta check
 use std.http.server
+use std.http.{Request, Response}
 
 fn fetch(req: Request): Response {
     if req.path() == "/health" {
@@ -432,7 +440,7 @@ scoped `with_span(name, body)` is the primary API; `span(name) -> Span` (with `s
 `add_event` / `record_error` / `end`) is the manual form; `current_context()` / `span_from(name,
 traceparent)` bridge W3C context across boundaries Noeta doesn't own.
 
-```noeta ignore
+```noeta check
 use std.{tracing}
 tracing.with_span("checkout", fn(): void {
     span = tracing.span("charge")
@@ -455,7 +463,7 @@ OpenTelemetry **log records** ([Observability](Observability)), auto-correlated 
 `log.log(severity, message)`); the `*_with(message, attrs)` forms attach a `Map<string,
 string|int|float|bool>` of attributes.
 
-```noeta ignore
+```noeta check
 use std.{log}
 log.info("server started")
 log.error_with("checkout failed", {"order": 42, "stage": "charge"})
@@ -471,7 +479,7 @@ OpenTelemetry **metrics** ([Observability](Observability)) — aggregated host-s
 `Counter` / `Histogram` / `Gauge` handle; counters record with `.add(n)`, histograms/gauges with
 `.record(v)` (plus the `.add_with(n, attrs)` / `.record_with(v, attrs)` attributed forms).
 
-```noeta ignore
+```noeta check
 use std.{metrics}
 hits = metrics.counter("http.requests")
 hits.add_with(1, {"route": "/orders", "status": 200})
@@ -486,7 +494,7 @@ counter. Keep attribute cardinality low — each distinct attribute set is a sto
 
 Scalar 3D vector and quaternion math over any struct with the right shape — a `Vec3` is any struct with three `f32` fields, a `Quat` any struct with four. Result-shape operations return the *same* struct type as the input.
 
-```noeta ignore
+```noeta check
 use std.{vec}
 a = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }
 b = V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }

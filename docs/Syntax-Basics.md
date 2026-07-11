@@ -41,7 +41,7 @@ echo total               // 6
 
 A `{ … }` block opens a fresh statement context wherever it appears — including a closure body nested inside a call — so newlines terminate statements there as usual:
 
-```noeta ignore
+```noeta check
 ys = xs.map(fn(n) {
     d = n * 2        // newline terminates, no `;` needed
     return d + 1
@@ -54,7 +54,7 @@ Type, `struct`, and `class` bodies are newline-separated — fields need no term
 
 The condition of `if`/`while` and the iterable of `for` may **optionally** be parenthesized — both styles are valid and mean the same thing (a lone `(expr)` is just `expr`):
 
-```noeta ignore
+```noeta check
 if x > 0 { echo "a" }
 if (x > 0) { echo "a" }      // same thing — the parens are a readability choice
 

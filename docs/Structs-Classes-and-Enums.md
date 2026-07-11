@@ -15,7 +15,9 @@ The language has two aggregate kinds and one sum kind. `struct` and `class` shar
 
 The choice is about whether a value *is* its contents (a `Point` is its `x` and `y`) or has an *identity* that persists across mutation (an `Order` you keep updating).
 
-```noeta ignore
+```noeta check
+enum Status { Open; Shipped }
+
 struct Point { x: int  y: int }        // value type
 
 class Order {
@@ -78,27 +80,27 @@ cfg = Cfg { name: "svc" }   // retries = 3, tags = [1, 2]
 
 The all-fields literal `T { f: v, … }` must set every non-defaulted field (a missing one is E0009).
 
-```noeta ignore
+```noeta check
 p = Point { x: 1, y: 2 }
 ```
 
 **Field-init shorthand** puns an in-scope variable of the same name:
 
-```noeta ignore
+```noeta check
 name = "Ada"; email = "ada@x.io"
 u = User { name, email }    // ≡ User { name: name, email: email }
 ```
 
 The **empty literal** `T {}` is valid iff every field has a default:
 
-```noeta ignore
+```noeta check
 c = Cfg { name: "x" }   // ok
 d = Defaults {}         // ok only if every field of Defaults has a default
 ```
 
 **Spread** `T { ...base, f: override }` copies every field from `base`, then applies overrides. The original is unchanged (structural update):
 
-```noeta ignore
+```noeta check
 a = Money { amount: 100, currency: "USD" }
 b = Money { amount: 300, ...a }    // amount: 300, currency: "USD"
 ```
@@ -124,7 +126,7 @@ class Counter {
 
 **Associated functions** take no receiver (constructors are the usual case) and are called on the bare type name; **methods** dispatch on a value:
 
-```noeta ignore
+```noeta check
 c = Counter.new()   // associated function
 c.set_then_read()   // method
 ```

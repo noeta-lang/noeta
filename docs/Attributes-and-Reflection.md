@@ -84,7 +84,13 @@ echo match type_of(5) {
 
 Materializes every `#[T(...)]` attribute in the program — each entry's `.value` is a real `T`, and `.target` is the annotated declaration's name:
 
-```noeta ignore
+```noeta check
+@attribute
+struct Route { path: string }
+
+#[Route("/users")]
+fn list_users(): string { return "…" }
+
 routes = attributes_of::<Route>()
 for r in routes {
     echo "${r.target} -> ${r.value.path}"
@@ -99,7 +105,7 @@ The compile-time `(declaration, role)` index built from `@role(...)` tags — ea
 
 Fallible dispatch by name — `recv` is a value (→ an instance method) or a bare type name (→ an associated function). Returns `Err` on an unknown name, a non-string name, or an arity mismatch:
 
-```noeta ignore
+```noeta check
 echo match invoke(Shape.new(2, 3), "area", []) {
     Ok(v)  => "area = ${v}",
     Err(e) => "no such method",

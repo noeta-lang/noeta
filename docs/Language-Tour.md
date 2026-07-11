@@ -218,7 +218,9 @@ All three kinds share the same body grammar — they can hold methods and `impl 
 
 `match` is an expression, and it is checked for exhaustiveness — a missing case (with no `_`) is a compile error:
 
-```noeta ignore
+```noeta check
+enum Status { Pending; Paid; Refunded }
+
 fn label(s: Status): string {
     return match s {
         Status.Pending  => "awaiting payment",
@@ -359,7 +361,7 @@ pub class User {
 }
 ```
 
-```noeta ignore
+```noeta check
 // main.noe
 namespace App.Main;
 use App.Models.User;
