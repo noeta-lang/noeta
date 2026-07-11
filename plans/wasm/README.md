@@ -1,6 +1,6 @@
 # WASM target arc (P-WASM) — playground + edge
 
-**Status: planned, not started.** Goal: make wasm a first-class deployment target driven by two
+**Status: W0 + W1.0/W1.1/W1.3 DONE (branch `wasm-target`); W1.2/W1.4 next, then W2.** Goal: make wasm a first-class deployment target driven by two
 confirmed use cases (user, 2026-07-11): **an in-browser playground on noeta.dev** (the whole
 toolchain — lex/parse/check/compile/run — client-side) and **edge deployments** (Noeta programs
 running on wasmtime/Fastly/Spin-class runtimes, ultimately serving HTTP via `wasi:http`). This is
@@ -62,7 +62,7 @@ The clean check is an accident until CI enforces it.
 
 | # | Slice | Depends | Notes |
 |---|---|---|---|
-| W0.0 | CI: `cargo check --target wasm32-wasip1` for the core set | — | Add `wasm32-wasip1` to the toolchain step in `.github/workflows/ci.yml`; check the pipeline crates (`noeta-vm`, `noeta-stdlib`, `noeta-compiler`, `noeta-db`, `noeta-bundle`, `noeta-eval` + transitive). Fast (few seconds warm); keeps a stray `std::thread`/tokio/getrandom from silently landing in core. `unknown-unknown` joins in W2.0 once its getrandom wiring exists. |
+| W0.0 | CI: `cargo check --target wasm32-wasip1` for the core set | — | ✅ **DONE** (`100f4ffd`). New `wasm` CI job checks the nine pipeline crates on wasip1, `--locked`. `unknown-unknown` joins in W2.0 once its getrandom wiring exists. |
 
 ## W1 — WASI runner (the edge foundation)
 
@@ -72,10 +72,10 @@ works); the wasip2/`wasi:http` component is W4, where the edge story completes.
 
 | # | Slice | Depends | Notes |
 |---|---|---|---|
-| W1.0 | `WasiHost` | — | New small crate (e.g. `noeta-wasi-host`) implementing `Host` over what wasip1 gives via `std`: real fs (`std::fs`), env/args (`std::env`), clock (`std::time`), entropy (WASI random via `getrandom`). **Network = clear runtime error in W1** ("networking requires the wasi:http build, see W4") — wasip1 has no standard sockets. Os::exec likewise errors. Synchronous, no tokio. |
-| W1.1 | `noeta-wasm-runner` bin target | W1.0 | A `wasm32-wasip1` binary: reads a `.noeb` (argv path or embedded — see W1.2), decodes via `noeta-bundle`, runs on the VM with `parallel_isolates=false`, `WasiHost` by default / `SandboxHost` behind a flag (for the oracle). Two-file deployment (`runner.wasm` + `app.noeb`) works immediately under `wasmtime --dir`. |
+| W1.0 | `WasiHost` | — | ✅ **DONE** (`43d3e547`). `noeta-wasi-host`: the third `Host`, real-but-synchronous — std fs (lazy P-LAZY readers), env overlay, wall clock/entropy, seeded PRNG + logical monotonic (the RealHost rules), loopback `P2pBroker`, null-sink telemetry that still tracks live-span contexts. Network/`os.exec` = honest errors. Note: Rust leaves `env::consts::OS` **empty** on wasm targets — `os_platform` names `"wasi"` itself. |
+| W1.1 | `noeta-wasm-runner` bin target | W1.0 | ✅ **DONE** (`ece433f3`). Target-agnostic bin: preopened `.noeb` → `noeta-bundle` decode → `run_module_debug(…, None)` (the documented plain-run-plus-traceback entry; cooperative, tier-0). `--sandbox` pins the oracle configuration. Diagnostics/trace render against the synthetic empty source (`noeta run app.noeb` convention). Verified under wasmtime 46: real fs writes, uuids, panic tracebacks, exit codes. 2.4 MB release module. |
 | W1.2 | single-artifact `noeta build --wasm` | W1.1 | One `.wasm` you hand to a platform. Recommended mechanism: post-build **data-segment/custom-section injection** into the prebuilt runner (patch the wasm binary; `wasm-encoder`/`walrus`-class rewrite, or a fixed-size reserved region) — no cargo at user build time, mirroring the L2 "staple onto a copy of the toolchain" trick. Composed-toolchain rebuild (PM Phase 3 machinery) is the fallback if patching gets ugly, and is required anyway for W1.4 ring DCE. |
-| W1.3 | wasm differential oracle | W1.1 | Conformance corpus through the runner under wasmtime (sandbox configuration), asserted byte-identical to the native VM; `0 skipped`. Shell out to the `wasmtime` binary from `noeta-conformance` (dev-only dep, same posture as the jit-differential). CI job behind a wasmtime install. |
+| W1.3 | wasm differential oracle | W1.1 | ✅ **DONE**. `noeta-conformance --wasm-differential`: corpus → bundle → runner under wasmtime (`--sandbox`) vs native `run_module_traced`; compares stdout, exit byte, and stderr composed through the *same* rendering calls (`render_mapped` + `render_trace`). First full run: **576 matched, 0 skipped, 0 divergences** (~15 s with `-C cache=y`). Tool discovery via `NOETA_WASMTIME`/`NOETA_WASM_RUNNER`; missing tooling = loud exit 2, never a silent pass. Wired into the CI `wasm` job. |
 | W1.4 | size budget + ring DCE | W1.2 | Measure the runner (`opt-level = "z"`, `lto`, no mimalloc — wasm uses dlmalloc). Apply the P-AOT per-ring feature scan (`ExtCall` module set → `--no-default-features --features <rings>`) to the runner build. Optional `wasm-opt` pass if the win justifies the tool dependency. Record numbers in this file. |
 
 **Outcome of W1:** `noeta build --wasm app.noe` → one `.wasm` that runs anywhere wasmtime-class

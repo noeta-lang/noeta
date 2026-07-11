@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 noeta-span = { workspace = true }
+noeta-bundle = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-ast = { workspace = true }
 noeta-ir = { workspace = true }

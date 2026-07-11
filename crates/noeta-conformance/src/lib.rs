@@ -37,6 +37,7 @@ mod leaks;
 // IR pipeline the differential uses.
 pub mod reference;
 mod report;
+mod wasm;
 
 pub use bundle::{BundleFailure, BundleReport, run_bundle_roundtrip};
 pub use differential::{DiffReport, Mismatch, run_differential};
@@ -46,6 +47,7 @@ pub use ir_corpus::{IrCorpusReport, run_ir_corpus};
 pub use jit_differential::{JitDiffReport, run_jit_differential};
 pub use leaks::{Leak, LeakReport, run_leak_check};
 pub use report::{CaseResult, CaseStatus, Report};
+pub use wasm::{WasmDiffFailure, WasmDiffReport, run_wasm_differential};
 
 /// Which pipeline stages to run a case through. Narrowing the stage makes an agent's
 /// inner loop fast (`--stage parser` reruns only lexing+parsing).
