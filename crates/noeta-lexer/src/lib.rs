@@ -811,21 +811,30 @@ fn gap_has_newline(text: &str, start: u32, end: u32) -> bool {
         .is_some_and(|gap| gap.contains('\n'))
 }
 
-/// Byte offsets (token starts) at which a newline **terminates** the preceding statement — the exact
-/// rule [`insert_terminators`] uses, *minus* the [`is_statement_ending`] gate on the previous token.
+/// Byte offsets (token starts) at which a newline **terminates** the preceding statement — the rule
+/// [`insert_terminators`] uses, *minus* the [`is_statement_ending`] gate on the previous token, and
+/// with the `(`/`[` depth measured **relative to the innermost `{`** rather than absolutely.
 ///
 /// The lexer only synthesizes a `;` when the previous token can end a statement, which misses complete
 /// statements whose last token cannot (a generic-close `>` in `x is List<int>`, indistinguishable at
 /// the token level from a dangling `>` comparison). The parser consults these offsets as a **soft**
 /// terminator — a peek that the expression grammar never sees, so trailing-operator continuation
 /// (`1 +\n2`) is unaffected: the offset is only honored at a point where the expression is already
-/// complete. Depth of `(`/`[` and the leading-continuation rule match [`insert_terminators`] exactly,
-/// so termination is uniform whether or not a `;` was synthesized. Runs on the post-`insert_terminators`
-/// token stream (synthetic `;` are zero-width and change nothing).
+/// complete.
+///
+/// **Brace-relative depth:** a `{` saves the current bracket depth and resets it to zero; the matching
+/// `}` restores it. A `{ … }` body nested inside a call — `xs.map(fn(n) { … })` — thus gets exactly
+/// the newline treatment the same block has at top level, fixing the wart where a multi-statement
+/// closure body inside `(`/`[` required explicit `;` separators. Non-block `{…}` constructs (map
+/// literals, match, struct literals) are also reset, which is harmless: the parser only consults these
+/// offsets at statement boundaries, and those constructs already occur at depth zero today, where the
+/// leading-continuation and comma gates keep their gaps unmarked or unconsulted. Runs on the
+/// post-[`insert_terminators`] token stream (synthetic `;` are zero-width and change nothing).
 pub fn newline_terminator_offsets(source: &Source, tokens: &[Token]) -> Vec<u32> {
     let text = source.text();
     let mut out = Vec::new();
     let mut depth: u32 = 0;
+    let mut saved: Vec<u32> = Vec::new(); // bracket depth outside each enclosing `{`
     let mut prev: Option<&Token> = None;
     for tok in tokens {
         if let Some(p) = prev
@@ -838,6 +847,11 @@ pub fn newline_terminator_offsets(source: &Source, tokens: &[Token]) -> Vec<u32>
         match tok.kind {
             TokenKind::LParen | TokenKind::LBracket => depth += 1,
             TokenKind::RParen | TokenKind::RBracket => depth = depth.saturating_sub(1),
+            TokenKind::LBrace => {
+                saved.push(depth);
+                depth = 0;
+            }
+            TokenKind::RBrace => depth = saved.pop().unwrap_or(0),
             _ => {}
         }
         prev = Some(tok);

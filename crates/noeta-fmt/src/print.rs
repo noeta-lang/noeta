@@ -77,7 +77,6 @@ pub fn print_program(
         source,
         comments,
         cursor: Cell::new(0),
-        paren_depth: Cell::new(0),
         code_tokens: code_tokens(source),
         config,
     };
@@ -117,7 +116,6 @@ pub fn print_stmt(
         source,
         comments,
         cursor: Cell::new(cursor),
-        paren_depth: Cell::new(0),
         code_tokens: code_tokens(source),
         config,
     };
@@ -140,11 +138,6 @@ struct Printer<'a> {
     /// Index of the next un-emitted comment. Advanced as the walk passes each comment's position, so
     /// every comment is emitted exactly once (the completeness invariant).
     cursor: Cell<usize>,
-    /// Depth of enclosing `(`/`[` brackets at the current render point. Inside them the lexer does
-    /// **not** insert a synthetic terminator at a newline (only `{`/`}` blocks at bracket-depth 0
-    /// terminate on newlines), so a statement here — only ever a closure/lambda body statement — needs
-    /// an explicit `;` separator regardless of [`SemicolonStyle`]. Consulted in [`Printer::leaf`].
-    paren_depth: Cell<u32>,
     /// Every non-`;` token as `(start_offset, kind)`, in source order — a lex of the source. Lets
     /// [`Printer::layout_terminates`] find the token that *follows* a statement and decide whether the
     /// newline the formatter puts there terminates it (so a trailing `;` is redundant).
@@ -562,23 +555,16 @@ impl Printer<'_> {
                 || trivia::has_trailing_semicolon(self.source, stmt_end)
                 || covered_semicolon
         };
-        let emit = if self.paren_depth.get() > 0 {
-            // Inside `(`/`[` a newline does not terminate a statement (only `{`-blocks at bracket-depth
-            // 0 do), so a closure-body statement here *requires* an explicit `;`. Force one regardless
-            // of policy — always a safe superset (a redundant trailing `;` is an empty statement).
-            true
-        } else {
-            match self.config.semicolons {
-                SemicolonStyle::Add => true,
-                SemicolonStyle::Preserve => author_wrote_semicolon,
-                // Strip a `;` only when it is both present and *redundant* — i.e. the newline the
-                // formatter puts after this statement terminates it. That fails when the next
-                // statement's first token would continue this line (a leading `-`, `.`, `|>`, …), so
-                // the `;` is the only separator and must be kept.
-                SemicolonStyle::Remove => {
-                    author_wrote_semicolon && !self.layout_terminates(stmt_end)
-                }
-            }
+        let emit = match self.config.semicolons {
+            SemicolonStyle::Add => true,
+            SemicolonStyle::Preserve => author_wrote_semicolon,
+            // Strip a `;` only when it is both present and *redundant* — i.e. the newline the
+            // formatter puts after this statement terminates it. That fails when the next
+            // statement's first token would continue this line (a leading `-`, `.`, `|>`, …), so
+            // the `;` is the only separator and must be kept. Statements inside a bracket-nested
+            // closure body need no special case: the parser's brace-relative soft terminator makes
+            // them newline-terminable like any other block.
+            SemicolonStyle::Remove => author_wrote_semicolon && !self.layout_terminates(stmt_end),
         };
         if emit {
             Doc::concat([doc, Doc::text(";")])
@@ -612,18 +598,6 @@ impl Printer<'_> {
             .code_tokens
             .partition_point(|(start, _)| *start < offset);
         self.code_tokens.get(i).map(|&(_, kind)| kind)
-    }
-
-    /// Render `f` with the enclosing-bracket depth bumped by one — used around the children of a
-    /// `(`/`[` delimiter (call args, list/tuple elements, an index expression, a parenthesized
-    /// operand). Guarantees the depth is restored even on the error path. `{`-delimited constructs
-    /// (maps, objects) do **not** bump: the lexer does not track braces, so a newline still terminates
-    /// inside them.
-    fn bracketed<T>(&self, f: impl FnOnce(&Self) -> Result<T, FmtError>) -> Result<T, FmtError> {
-        self.paren_depth.set(self.paren_depth.get() + 1);
-        let out = f(self);
-        self.paren_depth.set(self.paren_depth.get() - 1);
-        out
     }
 
     fn if_stmt(
@@ -1200,12 +1174,11 @@ impl Printer<'_> {
     fn operand(&self, e: &Expr, parent_prec: u8, is_right: bool) -> Result<Doc, FmtError> {
         let cp = prec(e);
         let need_parens = cp < parent_prec || (cp == parent_prec && is_right);
+        let doc = self.expr(e)?;
         Ok(if need_parens {
-            // The child is wrapped in `( … )`, so it renders at bumped bracket depth.
-            let doc = self.bracketed(|p| p.expr(e))?;
             Doc::concat([Doc::text("("), doc, Doc::text(")")])
         } else {
-            self.expr(e)?
+            doc
         })
     }
 
@@ -1223,11 +1196,11 @@ impl Printer<'_> {
     /// `match (x) {` reads oddly.
     fn restricted_head(&self, e: &Expr, allow_add: bool) -> Result<Doc, FmtError> {
         let force_parens = allow_add && self.config.parens == ParenStyle::Add;
+        let doc = self.expr(e)?;
         Ok(if force_parens || head_is_object(e) {
-            let doc = self.bracketed(|p| p.expr(e))?;
             Doc::concat([Doc::text("("), doc, Doc::text(")")])
         } else {
-            self.expr(e)?
+            doc
         })
     }
 
@@ -1298,25 +1271,22 @@ impl Printer<'_> {
                 ..
             } if self.spread_list_chunks(expr).is_some() => {
                 let chunks = self.spread_list_chunks(expr).expect("checked");
-                let elems = self.bracketed(|p| {
-                    let mut elems = Vec::new();
-                    for chunk in chunks {
-                        match chunk {
-                            Expr::Unary {
-                                op: noeta_ast::UnaryOp::Spread,
-                                operand,
-                                ..
-                            } => elems.push(Doc::concat([Doc::text("..."), p.expr(operand)?])),
-                            Expr::List { items, .. } => {
-                                for it in items {
-                                    elems.push(p.expr(it)?);
-                                }
+                let mut elems = Vec::new();
+                for chunk in chunks {
+                    match chunk {
+                        Expr::Unary {
+                            op: noeta_ast::UnaryOp::Spread,
+                            operand,
+                            ..
+                        } => elems.push(Doc::concat([Doc::text("..."), self.expr(operand)?])),
+                        Expr::List { items, .. } => {
+                            for it in items {
+                                elems.push(self.expr(it)?);
                             }
-                            other => elems.push(p.expr(other)?),
                         }
+                        other => elems.push(self.expr(other)?),
                     }
-                    Ok(elems)
-                })?;
+                }
                 Doc::concat([
                     Doc::text("["),
                     Doc::join(elems, Doc::text(", ")),
@@ -1381,27 +1351,21 @@ impl Printer<'_> {
             } => Doc::concat([
                 self.receiver(receiver)?,
                 Doc::text("["),
-                self.bracketed(|p| p.expr(index))?,
+                self.expr(index)?,
                 Doc::text("]"),
             ]),
             Expr::List { items, .. } => {
-                let ds = self.bracketed(|p| {
-                    let mut ds = Vec::new();
-                    for i in items {
-                        ds.push(p.expr(i)?);
-                    }
-                    Ok(ds)
-                })?;
+                let mut ds = Vec::new();
+                for i in items {
+                    ds.push(self.expr(i)?);
+                }
                 self.delimited("[", ds, "]", false)
             }
             Expr::Tuple { items, .. } => {
-                let ds = self.bracketed(|p| {
-                    let mut ds = Vec::new();
-                    for i in items {
-                        ds.push(p.expr(i)?);
-                    }
-                    Ok(ds)
-                })?;
+                let mut ds = Vec::new();
+                for i in items {
+                    ds.push(self.expr(i)?);
+                }
                 self.delimited("(", ds, ")", false)
             }
             Expr::Map { entries, .. } => {
@@ -1561,13 +1525,10 @@ impl Printer<'_> {
     }
 
     fn arg_list(&self, args: &[Expr]) -> Result<Doc, FmtError> {
-        let ds = self.bracketed(|p| {
-            let mut ds = Vec::new();
-            for a in args {
-                ds.push(p.expr(a)?);
-            }
-            Ok(ds)
-        })?;
+        let mut ds = Vec::new();
+        for a in args {
+            ds.push(self.expr(a)?);
+        }
         Ok(self.delimited("(", ds, ")", false))
     }
 

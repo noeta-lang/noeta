@@ -26,8 +26,8 @@
 //! - **Statements** one per line.
 //! - **Trailing `;`** governed by [`FmtConfig::semicolons`]: `remove` (default) strips a `;` that a
 //!   newline could replace, `add` terminates every simple statement, `preserve` keeps the author's.
-//!   A structurally-required `;` is always kept (inside `(`/`[`-nested closure bodies, or after a
-//!   statement whose last token cannot end one — e.g. a generic-close `>` in `x is List<int>`).
+//!   A structurally-required `;` is always kept: when the next statement's first token would
+//!   otherwise continue this line (e.g. a leading unary `-`), the `;` is the only separator.
 //! - **Header parens** governed by [`FmtConfig::parens`]: `remove` (default) strips redundant parens
 //!   from `if`/`while`/`for` headers, `add` wraps them (`if (x) {`).
 //! - **Continuation** a statement broken across lines (pipelines `|>`, method / binary chains)
@@ -531,6 +531,16 @@ mod tests {
         assert_eq!(
             fmt("x: dyn = [1]\necho x is List<int>;\necho x is List<string>;\n").unwrap(),
             "x: dyn = [1]\necho x is List<int>\necho x is List<string>\n"
+        );
+    }
+
+    #[test]
+    fn remove_strips_semicolons_in_a_bracket_nested_closure_body() {
+        // The parser's brace-relative soft terminator makes closure-body statements inside a call
+        // newline-terminable, so their `;` are redundant and stripped like any other.
+        assert_eq!(
+            fmt("ys = [1].map(fn(n) {\n d = n * 2;\n return d + 1;\n})\n").unwrap(),
+            "ys = [1].map(fn(n) {\n    d = n * 2\n    return d + 1\n})\n"
         );
     }
 

@@ -1,0 +1,36 @@
+// The soft newline terminator's bracket depth is **brace-relative**: a `{ … }` body opened inside
+// `(`/`[` resets the depth, so a multi-statement closure body nested in a call newline-terminates
+// like any top-level block — previously every statement here required an explicit `;` because the
+// enclosing `map(` suppressed newline termination for the whole closure body. Closing the body's `}`
+// restores the depth, so newlines in the surrounding arg list still continue (the multi-line call
+// and map-literal below are unaffected).
+// expect: stdout "[3, 5, 7]"
+// expect: stdout "[1, 20]"
+// expect: stdout "6"
+// expect: exit 0
+xs = [1, 2, 3]
+
+// Multi-statement closure body inside a call — no semicolons.
+ys = xs.map(fn(n) {
+    d = n * 2
+    return d + 1
+})
+echo ys
+
+// Nested blocks inside the bracket-nested closure body reset again.
+zs = [1, 2].map(fn(n) {
+    mut m = n
+    if n > 1 {
+        m = n * 10
+    }
+    return m
+})
+echo zs
+
+// The `}` restores bracket depth: a multi-line arg list still continues across newlines.
+fn add3(a: int, b: int, c: int): int { return a + b + c }
+echo add3(
+    1,
+    2,
+    3,
+)

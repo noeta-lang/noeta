@@ -1946,7 +1946,10 @@ where
 /// statement's expression has parsed to completion, this turns a newline into a terminator exactly
 /// where the lexer's synthetic `;` would have, minus the requirement that the previous token be
 /// statement-ending — the expression grammar never sees it, so operator-led continuations (`1 +\n2`)
-/// are unaffected. At end-of-input `any()` fails, but the `end()` branch has already matched there.
+/// are unaffected. The offsets measure bracket depth **relative to the innermost `{`** (see
+/// [`noeta_lexer::newline_terminator_offsets`]), so statements in a closure body nested inside a call
+/// (`xs.map(fn(n) { … })`) newline-terminate like any other block. At end-of-input `any()` fails, but
+/// the `end()` branch has already matched there.
 fn newline_terminator<'src, I>(ctx: Ctx<'src>) -> impl Parser<'src, I, (), Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
@@ -3243,6 +3246,21 @@ mod tests {
         let parsed = parse_str("echo xs is List<int>\necho xs is List<string>\necho 1\n");
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         assert_eq!(parsed.program.stmts.len(), 3);
+    }
+
+    #[test]
+    fn newline_terminates_inside_a_bracket_nested_closure_body() {
+        // The soft terminator's depth is brace-relative: a closure body opened inside `(`/`[` resets
+        // the bracket depth, so its statements newline-terminate like any top-level block — no `;`
+        // needed between them.
+        let parsed = parse_str("ys = [1].map(fn(n) {\n    d = n * 2\n    return d + 1\n})\n");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        // Closing the body's `}` restores the bracket depth: newlines in the surrounding arg list
+        // still continue, and a multi-line map literal in a call is untouched.
+        let args = parse_str(
+            "f(\n    1,\n    {\n        \"a\": fn() {\n            x = 1\n            return x\n        },\n    },\n)\n",
+        );
+        assert!(args.diagnostics.is_empty(), "{:?}", args.diagnostics);
     }
 
     #[test]
