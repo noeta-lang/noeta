@@ -378,6 +378,7 @@ fn parse_packed_layout(args: &[DirectiveArg], _directive_span: Span, ctx: &Ctx) 
 fn tier_decl_from_args(args: &[AttrArg], directive_span: Span, ctx: &Ctx) -> Option<TierDecl> {
     let mut name: Option<(String, Span)> = None;
     let mut config: Option<(String, Span)> = None;
+    let mut text: Option<(String, Span)> = None;
     let mut bad = false;
     for arg in args {
         match (&arg.name, &arg.value) {
@@ -387,16 +388,20 @@ fn tier_decl_from_args(args: &[AttrArg], directive_span: Span, ctx: &Ctx) -> Opt
             (Some(k), AttrValue::TypeRef(ty)) if k == "config" && config.is_none() => {
                 config = Some((ty.clone(), arg.span));
             }
+            (Some(k), AttrValue::Str(lang)) if k == "text" && text.is_none() => {
+                text = Some((lang.clone(), arg.span));
+            }
             _ => {
                 ctx.diags.borrow_mut().push(
                     Diagnostic::error(
                         DiagnosticCode::InvalidDirectiveArgument,
                         arg.span,
-                        "`@tier` takes a tier name and an optional `config: Type`",
+                        "`@tier` takes a tier name and an optional `config: Type` or `text: \"<lang>\"`",
                     )
                     .with_help(
-                        "declare a tier as `@tier(fuzz, config: FuzzConfig) fn runner(roots: \
-                         List<TierRoot>): void { … }`",
+                        "declare a code tier as `@tier(fuzz, config: FuzzConfig) fn runner(roots: \
+                         List<TierRoot>): void { … }`, or a text tier (verbatim `@<name> { … }` \
+                         bodies) as `@tier(spec, text: \"xml\") fn runner(…)`",
                     ),
                 );
                 bad = true;
@@ -418,6 +423,7 @@ fn tier_decl_from_args(args: &[AttrArg], directive_span: Span, ctx: &Ctx) -> Opt
         name,
         name_span,
         config,
+        text,
         span: directive_span,
     })
 }

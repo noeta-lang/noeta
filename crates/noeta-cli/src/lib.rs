@@ -1897,27 +1897,34 @@ fn run_declared_tier(
         .declared(name)
         .expect("caller checked")
         .clone();
-    let roots = activated.custom.get(name).cloned().unwrap_or_default();
-
-    // The runner call — `<runner>([TierRoot { name: "<fn>", run: <fn> }, …])` — is built as AST
+    // The runner call — `<runner>([TierRoot { name: "<fn>", run: <fn> }, …])`, or for a text
+    // tier `<runner>([TierText { target: "<decl>", text: "<body>" }, …])` — is built as AST
     // directly: the runner (and, in a namespaced entry, a root) carries its **link-qualified**
     // dotted name, which is an identifier to the resolved program but would parse as member
-    // access from text. The `TierRoot` *declaration* is textual (no names to qualify) and only
-    // synthesized when the program doesn't already declare one: the checker knows `TierRoot` as a
+    // access from text. The root *declaration* is textual (no names to qualify) and only
+    // synthesized when the program doesn't already declare one: the checker knows it as a
     // prelude type — that is what lets the runner's package name `List<TierRoot>` standalone —
     // but the backends build record literals from real declarations, and a declaration of the
     // same name shadows the prelude registration by design.
+    let is_text = tier.text.is_some();
+    let (root_ty, root_decl) = if is_text {
+        (
+            noeta_ast::reflect::TIER_TEXT,
+            "struct TierText { target: string  text: string }",
+        )
+    } else {
+        (
+            noeta_ast::reflect::TIER_ROOT,
+            "struct TierRoot { name: string  run: () -> void }",
+        )
+    };
     let mut program = activated.program;
-    let declares_tier_root = program
+    let declares_root_ty = program
         .stmts
         .iter()
-        .any(|s| matches!(s, Stmt::Struct(d) if d.name == noeta_ast::reflect::TIER_ROOT));
-    if !declares_tier_root {
-        let fragment = parse_fragment(
-            SourceId(u32::MAX),
-            "<tier-dispatch>",
-            "struct TierRoot { name: string  run: () -> void }",
-        );
+        .any(|s| matches!(s, Stmt::Struct(d) if d.name == root_ty));
+    if !declares_root_ty {
+        let fragment = parse_fragment(SourceId(u32::MAX), "<tier-dispatch>", root_decl);
         if !fragment.diagnostics.is_empty() {
             eprintln!("lang: internal error synthesizing the `{name}` dispatch");
             return ExitCode::from(2);
@@ -1925,37 +1932,61 @@ fn run_declared_tier(
         program.stmts.extend(fragment.program.stmts);
     }
     let span = program.span;
-    let root_items: Vec<Expr> = roots
-        .iter()
-        .map(|root| {
-            Expr::Object(noeta_ast::ObjectLit {
-                type_name: noeta_ast::reflect::TIER_ROOT.to_string(),
-                type_name_span: span,
-                fields: vec![
-                    noeta_ast::FieldInit {
-                        name: "name".to_string(),
-                        name_span: span,
-                        value: Expr::Str {
-                            value: root.name.clone(),
-                            span,
-                        },
-                        span,
-                    },
-                    noeta_ast::FieldInit {
-                        name: "run".to_string(),
-                        name_span: span,
-                        value: Expr::Ident {
+    let field = |name: &str, value: Expr| noeta_ast::FieldInit {
+        name: name.to_string(),
+        name_span: span,
+        value,
+        span,
+    };
+    let str_expr = |value: String| Expr::Str { value, span };
+    let object = |fields: Vec<noeta_ast::FieldInit>| {
+        Expr::Object(noeta_ast::ObjectLit {
+            type_name: root_ty.to_string(),
+            type_name_span: span,
+            fields,
+            spread: None,
+            span,
+        })
+    };
+    let root_items: Vec<Expr> = if is_text {
+        activated
+            .texts
+            .get(name)
+            .map(|blocks| blocks.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .map(|block| {
+                let target = match &block.target {
+                    noeta_check::DocTarget::Decl { name, .. } => name.clone(),
+                    _ => String::new(),
+                };
+                object(vec![
+                    field("target", str_expr(target)),
+                    field("text", str_expr(block.text.clone())),
+                ])
+            })
+            .collect()
+    } else {
+        activated
+            .custom
+            .get(name)
+            .map(|roots| roots.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .map(|root| {
+                object(vec![
+                    field("name", str_expr(root.name.clone())),
+                    field(
+                        "run",
+                        Expr::Ident {
                             name: root.name.clone(),
                             span,
                         },
-                        span,
-                    },
-                ],
-                spread: None,
-                span,
+                    ),
+                ])
             })
-        })
-        .collect();
+            .collect()
+    };
     program.stmts.push(call_stmt(
         &tier.runner,
         vec![Expr::List {

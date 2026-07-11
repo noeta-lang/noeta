@@ -2386,6 +2386,77 @@ fn tier_declaration_errors_are_e0051() {
         .stderr(predicate::str::contains("E0051").and(predicate::str::contains("List<TierRoot>")));
 }
 
+/// A single-file program declaring a **text** tier (`@tier(spec, text: "xml")`, text-tiers arc):
+/// its `@spec { … }` bodies are captured verbatim by the lexer (same-file two-pass — no manifest
+/// involved), adjacency-targeted like `@doc`, and dispatched to the runner as `List<TierText>`.
+/// The first body deliberately contains XML quotes (invalid as Noeta tokens) and an escaped brace.
+const DECLARED_TEXT_TIER_PROGRAM: &str = "\
+@tier(spec, text: \"xml\")\n\
+fn run_specs(roots: List<TierText>): void {\n\
+    echo \"specs: ${roots.len()}\"\n\
+    for root in roots {\n\
+        echo \"-- ${root.target}\"\n\
+        echo root.text\n\
+    }\n\
+}\n\
+@spec {\n\
+  <case name=\"adds\" expect=\"3\"/> with a literal \\} brace\n\
+}\n\
+fn add(a: int, b: int): int { return a + b }\n";
+
+#[test]
+fn a_declared_text_tier_dispatches_its_bodies() {
+    // `noeta spec <file>` invokes the text tier's runner with one TierText per body: `target` is
+    // the adjacency-resolved declaration, `text` the verbatim body with escapes undone.
+    let file = temp_program("text_tier_single", DECLARED_TEXT_TIER_PROGRAM);
+    lang().arg("spec").arg(&file).assert().success().stdout(
+        predicate::str::contains("specs: 1")
+            .and(predicate::str::contains("-- add"))
+            .and(predicate::str::contains(
+                "<case name=\"adds\" expect=\"3\"/> with a literal } brace",
+            )),
+    );
+}
+
+#[test]
+fn a_declared_text_tier_strips_on_a_normal_run() {
+    // The strip invariant holds for text tiers: `noeta run` never sees the bodies (they parse to
+    // no code at all), so the program runs clean and prints nothing.
+    let file = temp_program("text_tier_strip", DECLARED_TEXT_TIER_PROGRAM);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn text_tier_declaration_errors_are_e0051() {
+    // `config:` and `text:` are mutually exclusive, and a text tier's runner takes
+    // `List<TierText>` — each violation is an E0051 at the declaration.
+    let both = temp_program(
+        "text_tier_both",
+        "@attribute(Function)\nstruct Knobs { n: int }\n@tier(spec, config: Knobs, text: \"xml\")\nfn r(roots: List<TierText>): void { return }\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&both)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0051").and(predicate::str::contains("no knobs")));
+    let bad_sig = temp_program(
+        "text_tier_badsig",
+        "@tier(spec, text: \"xml\")\nfn r(roots: List<TierRoot>): void { return }\n",
+    );
+    lang()
+        .arg("check")
+        .arg(&bad_sig)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E0051").and(predicate::str::contains("List<TierText>")));
+}
+
 /// A consumer app + a `fuzzkit` path dependency that declares the `fuzz` tier. The consumer only
 /// imports the runner; the config struct links implicitly through the `@tier` reference, and the
 /// consumer's `@fuzz(cases: 7)` knob crosses the package boundary through the stamped attribute.
