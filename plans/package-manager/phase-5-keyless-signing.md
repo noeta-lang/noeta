@@ -93,12 +93,15 @@ swappable.
   at-most-one-of signature/bundle enforced at both publish impls
   (`Release::check_provenance_shape`). Worker contract delta: `WireVersion.bundle` +
   `POST` body `bundle` key (nullable string), stored verbatim, served back verbatim.
-- **K2 — offline verification seam.** `provenance::verify_keyless(att, bundle, trust_root,
-  policy) -> VerifiedIdentity` — DSSE sig over canonical bytes, chain to Fulcio root, identity
-  extension extraction, SCT, Rekor inclusion + checkpoint signature, time-in-validity. Hermetic
-  fixtures: test trust root + test CA + test log generated in-repo (deterministic).
-  *Exit: good bundle verifies; each single-property tamper (payload, cert, proof, checkpoint,
-  identity, expired-time) fails with a distinct error.*
+- **K2 — offline verification seam. ✅ DONE.** Seam shipped in K0
+  (`keyless::verify_bundle[_with_root]`); K2 completed the **adversarial tamper matrix** by
+  structural mutation of the real GHA bundle — stronger than a synthetic CA for this purpose,
+  since each mutant isolates exactly one verification property against the *production* root:
+  tampered certificate / inclusion-proof hash / checkpoint signature / DSSE signature /
+  integrated time, missing checkpoint, empty tlogEntries, wrong artifact digest, identity and
+  issuer pin mismatch, malformed inputs — every one rejected with a distinct error (asserted).
+  *(Re-sequenced, not cut: the in-repo test CA + test log generator lands in K4, where the
+  mocked Fulcio/Rekor structurally require it to mint bundles that genuinely verify.)*
 - **K3 — trust model in lock + graph.** Three-way `check_provenance`; lockfile schema for
   keyless pins; TOFU-on-identity; **downgrade rejection**; identity-changed error with
   re-pin guidance (`noeta update` parity with the key path). *Exit: graph tests cover

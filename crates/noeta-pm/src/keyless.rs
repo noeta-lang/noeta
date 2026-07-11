@@ -209,6 +209,114 @@ mod tests {
         assert!(err.contains("does not match any subject"), "{err}");
     }
 
+    /// Parse the real bundle, apply one structural mutation, re-serialize. Each K2 tamper test
+    /// corrupts exactly one verification property, so a pass proves that property is *actually
+    /// checked* (a verifier that skipped it would accept the mutant).
+    fn mutated(mutate: impl FnOnce(&mut serde_json::Value)) -> String {
+        let mut bundle: serde_json::Value = serde_json::from_str(GHA_BUNDLE).unwrap();
+        mutate(&mut bundle);
+        bundle.to_string()
+    }
+
+    /// Flip one base64 character (M↔N) somewhere inside `s` — keeps it decodable, changes bytes.
+    fn flip(s: &str) -> String {
+        if let Some(i) = s.find(['M', 'N']) {
+            let mut out = s.to_string();
+            let flipped = if &s[i..=i] == "M" { "N" } else { "M" };
+            out.replace_range(i..=i, flipped);
+            out
+        } else {
+            panic!("no flippable char in {s}");
+        }
+    }
+
+    #[test]
+    fn a_tampered_certificate_is_rejected() {
+        let bundle = mutated(|b| {
+            let cert = b["verificationMaterial"]["certificate"]["rawBytes"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            b["verificationMaterial"]["certificate"]["rawBytes"] = flip(&cert).into();
+        });
+        let err = verify_bundle(&bundle, GHA_SUBJECT_SHA256, None).unwrap_err();
+        assert!(err.contains("keyless verification failed"), "{err}");
+    }
+
+    #[test]
+    fn a_tampered_inclusion_proof_is_rejected() {
+        let bundle = mutated(|b| {
+            let entry = &mut b["verificationMaterial"]["tlogEntries"][0];
+            let h = entry["inclusionProof"]["hashes"][0]
+                .as_str()
+                .unwrap()
+                .to_string();
+            entry["inclusionProof"]["hashes"][0] = flip(&h).into();
+        });
+        let err = verify_bundle(&bundle, GHA_SUBJECT_SHA256, None).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("inclusion") || err.to_lowercase().contains("proof"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_tampered_checkpoint_is_rejected() {
+        // The checkpoint is the log's signed tree head. Corrupt its signature line: an attacker
+        // who can forge inclusion in an unsigned tree could otherwise serve a private fork of
+        // the log — checkpoint verification is what makes "in the log" mean something.
+        let bundle = mutated(|b| {
+            let entry = &mut b["verificationMaterial"]["tlogEntries"][0];
+            let env = entry["inclusionProof"]["checkpoint"]["envelope"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            // Flip inside the signature line (after "— rekor.sigstore.dev "), not the body.
+            let sig_at = env.rfind("wNI9aj").unwrap();
+            let (head, sig) = env.split_at(sig_at);
+            entry["inclusionProof"]["checkpoint"]["envelope"] =
+                format!("{head}{}", flip(sig)).into();
+        });
+        let err = verify_bundle(&bundle, GHA_SUBJECT_SHA256, None).unwrap_err();
+        assert!(err.to_lowercase().contains("checkpoint"), "{err}");
+    }
+
+    #[test]
+    fn a_missing_checkpoint_is_rejected() {
+        let bundle = mutated(|b| {
+            let proof = &mut b["verificationMaterial"]["tlogEntries"][0]["inclusionProof"];
+            proof["checkpoint"] = serde_json::json!({ "envelope": "" });
+        });
+        let err = verify_bundle(&bundle, GHA_SUBJECT_SHA256, None).unwrap_err();
+        assert!(
+            err.to_lowercase().contains("checkpoint") || err.contains("validation failed"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_bundle_with_no_log_entry_is_rejected() {
+        // No transparency-log entry = no public detectability = not keyless-verified. The
+        // structural validator fails closed before any crypto runs.
+        let bundle = mutated(|b| {
+            b["verificationMaterial"]["tlogEntries"] = serde_json::json!([]);
+        });
+        let err = verify_bundle(&bundle, GHA_SUBJECT_SHA256, None).unwrap_err();
+        assert!(err.contains("must have inclusion proof"), "{err}");
+    }
+
+    #[test]
+    fn a_tampered_integrated_time_is_rejected() {
+        // integratedTime is when the log recorded the signature; the inclusion promise (SET)
+        // signs it. Moving it (e.g. to sneak inside a revoked cert's validity) must fail.
+        let bundle = mutated(|b| {
+            b["verificationMaterial"]["tlogEntries"][0]["integratedTime"] =
+                "1838060096".to_string().into();
+        });
+        let err = verify_bundle(&bundle, GHA_SUBJECT_SHA256, None).unwrap_err();
+        assert!(err.contains("keyless verification failed"), "{err}");
+    }
+
     #[test]
     fn a_tampered_signature_is_rejected() {
         // Corrupt the DSSE signature (flip its first byte): the payload is untouched and still
