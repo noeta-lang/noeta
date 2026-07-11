@@ -331,8 +331,8 @@ fn iterator_method(name: &str, elem: &Type) -> Option<Type> {
 
 fn bytes_method(name: &str) -> Option<Type> {
     Some(match name {
-        "len" => Type::Int,       // the buffer length in bytes
-        "to_hex" => Type::String, // lowercase hex rendering (crypto arc C1)
+        "len" => Type::Int,            // the buffer length in bytes
+        "to_hex" => Type::String,      // lowercase hex rendering (crypto arc C1)
         "decode" => opt(Type::String), // UTF-8 decode — `none` on invalid UTF-8
         _ => return None,
     })

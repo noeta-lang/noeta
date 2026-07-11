@@ -1033,14 +1033,23 @@ mod tests {
             Output::OptStr(Some("é".into()))
         );
         assert_eq!(done("héy", "char_at", &[Arg::Int(9)]), Output::OptStr(None));
-        assert_eq!(done("héy", "char_at", &[Arg::Int(-1)]), Output::OptStr(None));
+        assert_eq!(
+            done("héy", "char_at", &[Arg::Int(-1)]),
+            Output::OptStr(None)
+        );
         // `index_of` reports the *character* index, not the byte offset.
         assert_eq!(
             done("héllo", "index_of", &[Arg::Str("llo")]),
             Output::OptInt(Some(2))
         );
-        assert_eq!(done("héllo", "index_of", &[Arg::Str("z")]), Output::OptInt(None));
-        assert_eq!(done("abc", "index_of", &[Arg::Str("")]), Output::OptInt(Some(0)));
+        assert_eq!(
+            done("héllo", "index_of", &[Arg::Str("z")]),
+            Output::OptInt(None)
+        );
+        assert_eq!(
+            done("abc", "index_of", &[Arg::Str("")]),
+            Output::OptInt(Some(0))
+        );
     }
 
     #[test]
@@ -1087,7 +1096,10 @@ mod tests {
             done("hé", "to_bytes", &[]),
             Output::Bytes(vec![0x68, 0xc3, 0xa9])
         );
-        assert_eq!(bytes_decode_utf8(&[0x68, 0xc3, 0xa9]), Some("hé".to_string()));
+        assert_eq!(
+            bytes_decode_utf8(&[0x68, 0xc3, 0xa9]),
+            Some("hé".to_string())
+        );
         // Invalid UTF-8 decodes to `None`, not a lossy replacement.
         assert_eq!(bytes_decode_utf8(&[0xff, 0xfe]), None);
     }

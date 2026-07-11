@@ -301,12 +301,21 @@ mod tests {
 
     #[test]
     fn transcendentals_yield_float() {
-        assert_eq!(done("ln", &[Arg::Float(std::f64::consts::E)]), Output::Float(1.0));
-        assert_eq!(done("log", &[Arg::Float(8.0), Arg::Float(2.0)]), Output::Float(3.0));
+        assert_eq!(
+            done("ln", &[Arg::Float(std::f64::consts::E)]),
+            Output::Float(1.0)
+        );
+        assert_eq!(
+            done("log", &[Arg::Float(8.0), Arg::Float(2.0)]),
+            Output::Float(3.0)
+        );
         assert_eq!(done("log2", &[Arg::Float(8.0)]), Output::Float(3.0));
         assert_eq!(done("log10", &[Arg::Float(1000.0)]), Output::Float(3.0));
         assert_eq!(done("exp", &[Arg::Float(0.0)]), Output::Float(1.0));
-        assert_eq!(done("hypot", &[Arg::Float(3.0), Arg::Float(4.0)]), Output::Float(5.0));
+        assert_eq!(
+            done("hypot", &[Arg::Float(3.0), Arg::Float(4.0)]),
+            Output::Float(5.0)
+        );
         assert_eq!(done("asin", &[Arg::Float(0.0)]), Output::Float(0.0));
         assert_eq!(done("acos", &[Arg::Float(1.0)]), Output::Float(0.0));
         assert_eq!(done("atan", &[Arg::Float(0.0)]), Output::Float(0.0));

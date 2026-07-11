@@ -1582,7 +1582,11 @@ fn want_argv(func: &str, args: &[NativeValue], index: usize) -> Result<Vec<Strin
     }
 }
 
-fn os_dispatch(func: &str, host: &mut dyn Host, args: &[NativeValue]) -> Result<NativeOut, StdError> {
+fn os_dispatch(
+    func: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
     match func {
         "platform" => {
             want_arity(func, args, 0)?;
@@ -1621,7 +1625,9 @@ fn os_dispatch(func: &str, host: &mut dyn Host, args: &[NativeValue]) -> Result<
             want_arity_range(func, args, 1, 2)?;
             let command = want_str(func, args, 0)?.to_string();
             let argv = want_argv(func, args, 1)?;
-            Ok(NativeOut::Spawn(SpawnBox(host.os_exec_spawn(command, argv))))
+            Ok(NativeOut::Spawn(SpawnBox(
+                host.os_exec_spawn(command, argv),
+            )))
         }
         // `exit(code?)` — deliberate termination. Not a host effect and not a diagnostic: the
         // distinguished `ErrorKind::Exit` unwinds the backend, which halts cleanly and surfaces

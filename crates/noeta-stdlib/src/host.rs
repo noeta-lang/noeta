@@ -10,11 +10,11 @@ pub use noeta_native::host::{
 };
 pub use noeta_native::{Logging, Metrics, Tracing};
 
-use crate::{ErrorKind, StdError};
-use noeta_native::ExecResult;
 use crate::env;
 use crate::fs::Vfs;
 use crate::random;
+use crate::{ErrorKind, StdError};
+use noeta_native::ExecResult;
 use noeta_native::{
     AttrValue, InstrumentId, InstrumentKind, LogRecord, MetricData, MetricStore, MetricValue,
     SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, TraceContext,
@@ -656,10 +656,18 @@ mod tests {
         assert_eq!(host.os_pid(), 1);
         // `echo` — status 0, stdout = args joined + newline.
         let r = host.os_exec("echo", &["a".into(), "b".into()]).unwrap();
-        assert_eq!((r.status, r.stdout.as_str(), r.stderr.as_str()), (0, "a b\n", ""));
+        assert_eq!(
+            (r.status, r.stdout.as_str(), r.stderr.as_str()),
+            (0, "a b\n", "")
+        );
         // `status n msg` — the failure fixture.
-        let f = host.os_exec("status", &["3".into(), "boom".into()]).unwrap();
-        assert_eq!((f.status, f.stdout.as_str(), f.stderr.as_str()), (3, "", "boom\n"));
+        let f = host
+            .os_exec("status", &["3".into(), "boom".into()])
+            .unwrap();
+        assert_eq!(
+            (f.status, f.stdout.as_str(), f.stderr.as_str()),
+            (3, "", "boom\n")
+        );
         // An unscripted command cannot start — an Io error, like a missing binary.
         let e = host.os_exec("frobnicate", &[]).unwrap_err();
         assert_eq!(e.kind, ErrorKind::Io);

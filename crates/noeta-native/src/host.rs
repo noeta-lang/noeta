@@ -206,8 +206,11 @@ pub trait Os {
     /// Run `command` with `args` (verbatim — no shell), wait for it, and capture the outcome.
     /// A command that cannot be started at all (not found, not executable) is an `Io` error;
     /// a command that starts and fails is a successful `ExecResult` with its non-zero status.
-    fn os_exec(&mut self, command: &str, args: &[String])
-    -> Result<crate::os::ExecResult, StdError>;
+    fn os_exec(
+        &mut self,
+        command: &str,
+        args: &[String],
+    ) -> Result<crate::os::ExecResult, StdError>;
     /// Build the async exec descriptor. Default: a [`crate::os::ExecIo`] resolving through
     /// [`Self::os_exec`] at spawn (deterministic in the sandbox); `RealHost` overrides it with
     /// a blocking-pool body so `exec_async` genuinely overlaps.
