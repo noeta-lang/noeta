@@ -135,6 +135,15 @@ impl Debugger for EvalBudget {
     }
 }
 
+/// The hot-reload mailbox (server-hmr W1): a watcher thread — which owns parsing, checking
+/// (transactional gate), and diffing — deposits a ready-to-apply [`SwapPlan`]; the run thread
+/// takes it at the next scheduler tick and applies it to the live program. A deposit replaces an
+/// unconsumed predecessor (the depositor is responsible for diffing against the last *consumed*
+/// version — see the CLI's hot-serve driver).
+///
+/// [`SwapPlan`]: noeta_compiler::hotswap::SwapPlan
+pub type HotSwapMailbox = Arc<std::sync::Mutex<Option<noeta_compiler::hotswap::SwapPlan>>>;
+
 /// What the VM does after consulting the [`Debugger`] for an instruction.
 #[derive(Debug)]
 pub enum DebugAction {
@@ -436,6 +445,38 @@ impl VmBackend {
             arena: &arena,
             memo: HashMap::new(),
         });
+        let result = run_and_teardown(&mut vm, mode);
+        let trace = std::mem::take(&mut vm.abort_trace);
+        (result, trace)
+    }
+
+    /// Run a module with **in-process hot reload armed** (server-hmr W1): the debug-session
+    /// machinery (live [`SessionCompiler`] + module arena — the same stable-prefix swap the debug
+    /// console uses) plus a [`HotSwapMailbox`] the run thread polls at every scheduler tick. This
+    /// is `noeta serve --watch`'s hot mode: the CLI's watcher thread deposits [`SwapPlan`]s and the
+    /// serving program absorbs them between polls without restarting. JIT stays unarmed (the
+    /// debug-path contract `install_fragment` asserts; H3 lifts this).
+    ///
+    /// [`SessionCompiler`]: noeta_compiler::SessionCompiler
+    /// [`SwapPlan`]: noeta_compiler::hotswap::SwapPlan
+    pub fn run_module_hot(
+        &self,
+        module: &Module,
+        session: noeta_compiler::SessionCompiler,
+        host: Box<dyn noeta_stdlib::Host>,
+        executor: Box<dyn noeta_stdlib::Executor>,
+        mailbox: HotSwapMailbox,
+    ) -> (RunResult, Vec<TraceFrame>) {
+        let mode = noeta_value::CollectorMode::Trace;
+        noeta_value::set_collector_mode(mode);
+        let arena = typed_arena::Arena::new();
+        let mut vm = Vm::load(module, host, executor);
+        vm.debug_session = Some(DebugSession {
+            compiler: session,
+            arena: &arena,
+            memo: HashMap::new(),
+        });
+        vm.hot_mailbox = Some(mailbox);
         let result = run_and_teardown(&mut vm, mode);
         let trace = std::mem::take(&mut vm.abort_trace);
         (result, trace)
@@ -895,6 +936,13 @@ struct Vm<'m> {
     module: &'m Module,
     /// See [`DebugSession`]; `None` on every non-debug run.
     debug_session: Option<DebugSession<'m>>,
+    /// The hot-reload mailbox (server-hmr W1); `None` on every run but `noeta serve --watch`'s
+    /// in-process hot mode. A watcher thread deposits ready-to-apply [`SwapPlan`]s; the VM applies
+    /// the pending one at the scheduler tick ([`Vm::apply_pending_hotswap`] via `advance_tasks`) —
+    /// a safepoint every ctx-driven loop (the HTTP serve loop) passes through each iteration.
+    ///
+    /// [`SwapPlan`]: noeta_compiler::hotswap::SwapPlan
+    hot_mailbox: Option<HotSwapMailbox>,
     /// Set while a **hover** fragment runs (tooling-unification T6): a hover must stay
     /// side-effect-free, so the dispatch loop refuses any frame push beyond the fragment wrapper's
     /// own frame — the one chokepoint every way of running user code (a call, an object's `Index`
@@ -2138,6 +2186,7 @@ impl<'m> Vm<'m> {
         Vm {
             module,
             debug_session: None,
+            hot_mailbox: None,
             pure_eval: false,
             shapes,
             packed_schemas,
@@ -6262,6 +6311,87 @@ impl<'m> Vm<'m> {
     ///
     /// Returns the relocated entry's proto index; the caller runs it via [`Vm::run_thunk`]. Debug
     /// runs keep the JIT unarmed (asserted): tier-1 mirror tables never see a swapped module.
+    /// Apply a pending hot-swap plan, if one is waiting in the mailbox (server-hmr W1). Called at
+    /// the scheduler tick (`advance_tasks` — every ctx-driven loop's per-iteration safepoint), so
+    /// a `noeta serve --watch` process absorbs edits between polls. Mirrors
+    /// [`VmSession::hot_swap`]'s semantics on the live VM: on a re-running swap, dispose the
+    /// previous effect epoch and the reactive nodes the re-run re-binds ([`Vm::hotswap_prepare`]),
+    /// then install the fragment ([`Vm::install_fragment`] — the debug console's stable-prefix
+    /// module swap) and run its entry under the console's evaluation budget. In-flight frames keep
+    /// executing old code (stable-prefix invariant); every slot-routed call dispatches to the new
+    /// bodies from now on.
+    ///
+    /// Failures are reported to stderr and leave the program serving its previous version — the
+    /// watcher thread already gated on parse/check, so a failure here is compile-internal (or the
+    /// fragment's own top-level code erroring at run time, e.g. a re-run initializer panicking).
+    fn apply_pending_hotswap(&mut self) {
+        let Some(mailbox) = &self.hot_mailbox else {
+            return;
+        };
+        let plan = match mailbox.try_lock() {
+            Ok(mut slot) => slot.take(),
+            Err(_) => None,
+        };
+        let Some(plan) = plan else { return };
+        // Slots the re-run overwrites — resolved against the session compiler BEFORE the fragment
+        // extends it, so only pre-existing bindings (the ones with old nodes) are collected.
+        let rebound: Vec<u32> = if plan.rerun_top_level {
+            let Some(session) = self.debug_session.as_ref() else {
+                eprintln!("[hot] no live session — swap skipped");
+                return;
+            };
+            plan.fragment
+                .stmts
+                .iter()
+                .flat_map(session::binding_targets)
+                .filter_map(|name| session.compiler.global_slots().get(name).copied())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if plan.rerun_top_level {
+            self.hotswap_prepare(&rebound);
+        }
+        let entry = match self.install_fragment(&plan.fragment) {
+            Ok(entry) => entry,
+            Err(msg) => {
+                eprintln!("[hot] swap failed to compile: {msg} — still serving the old version");
+                return;
+            }
+        };
+        // Run the fragment's entry under the console's budget (a runaway re-run initializer must
+        // not wedge the server); the budget debugger swap is the same dance the console does.
+        let tripped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saved = self.debugger.take();
+        self.debugger = Some(Box::new(EvalBudget {
+            steps: 0,
+            deadline: std::time::Instant::now()
+                + std::time::Duration::from_millis(DEBUG_EVAL_TIMEOUT_MS),
+            tripped: Arc::clone(&tripped),
+        }));
+        let outcome = self.run_thunk(entry, &[]);
+        self.debugger = saved;
+        match outcome {
+            Ok(v) => {
+                release(v);
+                let what = if plan.changed.is_empty() {
+                    plan.added.join(", ")
+                } else {
+                    plan.changed.join(", ")
+                };
+                eprintln!(
+                    "[hot] swapped{}{}",
+                    if what.is_empty() { "" } else { ": " },
+                    what
+                );
+            }
+            Err(Abort) => {
+                let msg = self.last_diag_message();
+                eprintln!("[hot] swap fragment aborted: {msg} — the program keeps running");
+            }
+        }
+    }
+
     fn install_fragment(&mut self, fragment: &Program) -> Result<u32, String> {
         #[cfg(feature = "jit")]
         assert!(

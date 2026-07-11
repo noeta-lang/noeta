@@ -307,6 +307,13 @@ impl NativeCtx for VmCtx<'_, '_> {
     }
 
     fn advance_tasks(&mut self) -> CtxResult<bool> {
+        // The hot-reload safepoint (server-hmr W1): every ctx-driven loop (the HTTP serve loop)
+        // ticks the scheduler each iteration, so a pending swap lands here — before the poll, so
+        // the next accepted request already dispatches into the new bodies. One `Option` branch
+        // on every run that isn't `serve --watch`.
+        if self.vm.hot_mailbox.is_some() {
+            self.vm.apply_pending_hotswap();
+        }
         self.vm
             .poll_all_scopes_round(self.span)
             .map_err(|Abort| CtxError::Abort)

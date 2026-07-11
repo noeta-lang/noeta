@@ -567,7 +567,8 @@ fn rewrite_trailing_expr(program: &Program) -> (Program, bool) {
 }
 
 /// The binding names a top-level statement (re)binds — the globals a re-running swap overwrites.
-fn binding_targets(stmt: &Stmt) -> Vec<&str> {
+/// Shared with the live-VM hot path ([`Vm::apply_pending_hotswap`]).
+pub(crate) fn binding_targets(stmt: &Stmt) -> Vec<&str> {
     match stmt {
         Stmt::Binding { name, .. } => vec![name.as_str()],
         Stmt::Destructure { targets, .. } => targets.iter().map(|(n, _)| n.as_str()).collect(),

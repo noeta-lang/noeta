@@ -1983,12 +1983,33 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                 name_span: sp,
                 span: sp,
             };
+            let hot = std::env::var_os("NOETA_HOT").is_some();
             let args = entry
                 .args
                 .iter()
                 .map(|arg| match arg {
                     noeta_stdlib::EntryArg::Int(value) => Expr::Int {
                         value: *value,
+                        span: sp,
+                    },
+                    // In hot mode (server-hmr W1), late-bind an identifier argument through a
+                    // trampoline closure `fn(req) => fetch(req)`: the serve loop captures its
+                    // handler argument ONCE at startup, but the trampoline's body re-resolves the
+                    // global per call — so a hot swap rebinding `fetch` reaches the live loop.
+                    noeta_stdlib::EntryArg::Ident(name) if hot => Expr::Closure {
+                        params: vec![noeta_ast::Param {
+                            name: "req".to_string(),
+                            name_span: sp,
+                            ty: None,
+                            default: None,
+                            span: sp,
+                        }],
+                        ret: None,
+                        body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Call {
+                            callee: Box::new(ident(name)),
+                            args: vec![ident("req")],
+                            span: sp,
+                        })),
                         span: sp,
                     },
                     noeta_stdlib::EntryArg::Ident(name) => ident(name),
@@ -2008,6 +2029,11 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         if let Some(banner) = banner {
             eprintln!("{banner}");
         }
+        // Hot mode (server-hmr W1, armed by the `--watch` wrapper for `serve`): run through the
+        // debug-session machinery with the hot-swap mailbox, so edits swap into the LIVE process.
+        if std::env::var_os("NOETA_HOT").is_some() {
+            return run_program_hot(file, &linked.program, &linked.sources);
+        }
         // An entry call injected before compiling means the module differs from `run`'s for the
         // same source — a command run must never share the startup cache's `(source+tiers)` key,
         // and stays on the uncached `run_program` path (commands like `serve` are also
@@ -2020,6 +2046,68 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         ))
         .unwrap_or(1)
     }
+}
+
+/// Run an entry-call program with **in-process hot reload** (server-hmr W1) — `noeta serve
+/// --watch`'s hot mode. The program compiles through the *session* compiler (kept alive for
+/// fragment installs) and runs on the real host with a [`noeta_vm::HotSwapMailbox`] armed; a
+/// watcher thread ([`watch::spawn_hot_watcher`]) parses/checks/diffs each edit of the entry file
+/// and deposits swappable plans (blockers or non-entry edits exit with the restart sentinel the
+/// `--watch` wrapper honors). JIT stays unarmed on this path (H3 lifts).
+fn run_program_hot(
+    entry_path: &std::path::Path,
+    program: &noeta_ast::Program,
+    sources: &SourceMap,
+) -> u8 {
+    let checked = noeta_check::check_all(program);
+    if !checked.diagnostics.is_empty() {
+        emit_diagnostics_mapped(sources, checked.diagnostics.iter());
+        return 1;
+    }
+    let (module, compiler) = match noeta_compiler::compile_with_sites_session(
+        program,
+        checked.sites.clone(),
+        // Cooperative isolates: the hot path is the debug-session path (single OS thread).
+        false,
+        false,
+    ) {
+        Ok(pair) => pair,
+        Err(u) => {
+            eprintln!(
+                "lang: internal error: cannot compile for hot reload: {}",
+                u.reason
+            );
+            return 1;
+        }
+    };
+    let mailbox: noeta_vm::HotSwapMailbox = std::sync::Arc::new(std::sync::Mutex::new(None));
+    watch::spawn_hot_watcher(entry_path.to_path_buf(), std::sync::Arc::clone(&mailbox));
+
+    let args: Vec<String> = std::env::args().collect();
+    let app_id = p2p_app_namespace(&args);
+    let host: Box<dyn noeta_stdlib::Host> = match noeta_runtime::RealHost::new() {
+        Ok(host) => Box::new(host.with_args(args).with_p2p_app(app_id)),
+        Err(e) => {
+            eprintln!("lang: cannot start the runtime: {e}");
+            return 1;
+        }
+    };
+    let executor: Box<dyn noeta_stdlib::Executor> = match noeta_runtime::RealExecutor::new() {
+        Ok(executor) => Box::new(executor),
+        Err(e) => {
+            eprintln!("lang: cannot start the async executor: {e}");
+            return 1;
+        }
+    };
+    let (result, trace) =
+        VmBackend::new().run_module_hot(&module, compiler, host, executor, mailbox);
+    print!("{}", result.stdout);
+    let _ = io::stdout().flush();
+    emit_diagnostics_mapped(sources, result.diagnostics.iter());
+    if trace.len() >= 2 {
+        eprint!("{}", noeta_vm::render_trace(&trace, sources));
+    }
+    u8::try_from(result.exit_code).unwrap_or(1)
 }
 
 /// Run a `.noeb` bundle (P-AOT L1.2): decode the module from the versioned container and execute it

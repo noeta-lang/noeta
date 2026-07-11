@@ -31,6 +31,12 @@ const DEBOUNCE: Duration = Duration::from_millis(150);
 /// How often the loop checks whether the child exited on its own while also polling for events.
 const POLL: Duration = Duration::from_millis(100);
 
+/// The child-exit sentinel meaning "restart me now" (server-hmr W1): the in-process hot path
+/// exits with this code when an edit needs a full restart (a `SwapBlocker`, or a change outside
+/// the entry file), and the `--watch` wrapper restarts immediately instead of waiting for the
+/// next filesystem event.
+pub(crate) const HOT_RESTART_CODE: i32 = 91;
+
 /// If the invocation carries `--watch`, strip it and run the restart-on-change loop instead of a
 /// single execution. `None` means no flag: the ordinary CLI proceeds. Called before clap parsing
 /// (see module docs for why).
@@ -74,26 +80,62 @@ fn watch_loop(args: &[OsString]) -> ExitCode {
             .join(" ")
     );
 
+    // `serve` gets the in-process HOT path (server-hmr W1): the child owns watching, swapping
+    // edits into the live process, and exiting with [`HOT_RESTART_CODE`] when only a full restart
+    // can absorb a change — the wrapper then restarts immediately and otherwise stays out of the
+    // way (double-watching would restart the server on the very edits the child just swapped).
+    let hot = args.first().is_some_and(|a| a == "serve");
     loop {
-        let mut child = match Command::new(&exe).args(args).spawn() {
+        let mut cmd = Command::new(&exe);
+        cmd.args(args);
+        if hot {
+            cmd.env("NOETA_HOT", "1");
+        }
+        let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
                 eprintln!("[watch] failed to start: {e}");
                 return ExitCode::FAILURE;
             }
         };
-        let exited = run_until_change(&rx, &mut child);
-        if let Some(status) = exited {
-            // The program finished on its own (a `run` reaching its end, a crash): report and
-            // wait for the next change rather than looping hot.
+        if hot {
+            let status = wait_ignoring_events(&rx, &mut child);
+            if status.code() == Some(HOT_RESTART_CODE) {
+                eprintln!("[watch] restarting");
+                continue;
+            }
+            // The server stopped for real (boot-time compile error, crash, Ctrl-C races): wait
+            // for the next edit and try again — a red boot must retry once the code is fixed.
             eprintln!("[watch] finished ({status}) — waiting for changes");
             wait_for_change(&rx);
         } else {
-            // A relevant change arrived while the program was running: stop it and restart.
-            let _ = child.kill();
-            let _ = child.wait();
+            let exited = run_until_change(&rx, &mut child);
+            if let Some(status) = exited {
+                // The program finished on its own (a `run` reaching its end, a crash): report and
+                // wait for the next change rather than looping hot.
+                eprintln!("[watch] finished ({status}) — waiting for changes");
+                wait_for_change(&rx);
+            } else {
+                // A relevant change arrived while the program was running: stop it and restart.
+                let _ = child.kill();
+                let _ = child.wait();
+            }
         }
         eprintln!("[watch] change detected — restarting");
+    }
+}
+
+/// Wait for the child to exit while draining (and ignoring) watcher events — the hot child owns
+/// reacting to changes; the wrapper only cares how it exits.
+fn wait_ignoring_events(
+    rx: &mpsc::Receiver<notify::Result<notify::Event>>,
+    child: &mut Child,
+) -> std::process::ExitStatus {
+    loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            return status;
+        }
+        let _ = rx.recv_timeout(POLL);
     }
 }
 
@@ -169,6 +211,160 @@ fn relevant_path(path: &Path) -> bool {
         .file_name()
         .is_some_and(|n| n == "noeta.toml" || n == "noeta.lock");
     is_noe || is_manifest
+}
+
+// ------------------------------------------------------------------ the in-process hot watcher
+
+/// Spawn the hot-reload watcher thread (server-hmr W1) inside a `NOETA_HOT` serve process. On an
+/// edit of `entry` it parses, checks (transactional: red code is reported and the old version
+/// keeps serving), diffs against the last version the VM consumed, and deposits swappable plans
+/// into `mailbox` — the run thread applies them at its next scheduler tick. Anything the live
+/// process cannot absorb — a [`SwapBlocker`], a change to any *other* project file, an entry file
+/// that declares a `namespace` (its definitions get qualified identity the raw parse won't match)
+/// — exits the process with [`HOT_RESTART_CODE`] so the `--watch` wrapper restarts it.
+pub(crate) fn spawn_hot_watcher(entry: std::path::PathBuf, mailbox: noeta_vm::HotSwapMailbox) {
+    std::thread::spawn(move || hot_watcher(entry, mailbox));
+}
+
+fn hot_watcher(entry: std::path::PathBuf, mailbox: noeta_vm::HotSwapMailbox) {
+    let entry_canon = entry.canonicalize().unwrap_or_else(|_| entry.clone());
+    // The baseline: the source that is currently RUNNING (read back at spawn — the run thread
+    // just compiled exactly this file).
+    let Ok(mut applied_src) = std::fs::read_to_string(&entry) else {
+        eprintln!(
+            "[hot] cannot re-read {} — falling back to restarts",
+            entry.display()
+        );
+        return;
+    };
+    // A namespaced entry's definitions carry qualified identity through the linker; the raw
+    // per-file diff would rebind unqualified names. Restart-only until the differ learns
+    // qualification.
+    let hot_capable = parse_entry(&entry, &applied_src).is_some_and(|p| {
+        !p.stmts
+            .iter()
+            .any(|s| matches!(s, noeta_ast::Stmt::Namespace { .. }))
+    });
+
+    let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
+    let Ok(mut watcher) = notify::recommended_watcher(tx) else {
+        eprintln!("[hot] cannot start the file watcher — edits will not reload");
+        return;
+    };
+    let root = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let mut roots = vec![root];
+    // The entry may live outside the cwd; watch its directory too.
+    if let Some(parent) = entry_canon.parent()
+        && !roots.iter().any(|r| entry_canon.starts_with(r))
+    {
+        roots.push(parent.to_path_buf());
+    }
+    for r in &roots {
+        if watcher.watch(r, RecursiveMode::Recursive).is_err() {
+            eprintln!(
+                "[hot] cannot watch {} — edits there will not reload",
+                r.display()
+            );
+        }
+    }
+    // The last version deposited but possibly not yet consumed: promoted to `applied_src` once
+    // the mailbox slot is observed empty again (the VM took it) — under the mailbox lock, so the
+    // next diff is always against what actually runs.
+    let mut deposited: Option<String> = None;
+
+    loop {
+        let event = match rx.recv() {
+            Ok(event) => event,
+            Err(_) => return,
+        };
+        if !relevant(&event) {
+            continue;
+        }
+        let mut paths: Vec<std::path::PathBuf> = match &event {
+            Ok(e) => e.paths.clone(),
+            Err(_) => Vec::new(),
+        };
+        // Debounce, collecting every path the edit burst touched.
+        while let Ok(more) = rx.recv_timeout(DEBOUNCE) {
+            if relevant(&more)
+                && let Ok(e) = &more
+            {
+                paths.extend(e.paths.iter().cloned());
+            }
+        }
+        // Only source-relevant paths participate: an editor's atomic save emits a rename event
+        // carrying BOTH paths (temp file + target), and the temp half must not read as "a change
+        // outside the entry file".
+        paths.retain(|p| relevant_path(p));
+        let all_entry = paths
+            .iter()
+            .all(|p| p.canonicalize().map(|c| c == entry_canon).unwrap_or(false));
+        if !all_entry || !hot_capable {
+            eprintln!("[hot] change outside the entry file — restarting");
+            std::process::exit(HOT_RESTART_CODE);
+        }
+        let Ok(new_src) = std::fs::read_to_string(&entry) else {
+            continue;
+        };
+        let Some(new_program) = parse_entry(&entry, &new_src) else {
+            eprintln!("[hot] parse error — still serving the old version");
+            continue;
+        };
+        // The transactional gate: red code never swaps; the old version keeps serving.
+        let checked = noeta_check::check_all(&new_program);
+        if !checked.diagnostics.is_empty() {
+            let source = noeta_span::Source::new(noeta_span::SourceId::FIRST, "<entry>", &new_src);
+            for d in &checked.diagnostics {
+                eprint!("{}", crate::render(&source, d));
+            }
+            eprintln!("[hot] check failed — still serving the old version");
+            continue;
+        }
+        // Diff against the last CONSUMED version; the lock makes "was the previous deposit
+        // taken?" exact, so a replaced deposit still diffs from what actually runs.
+        let mut slot = match mailbox.lock() {
+            Ok(slot) => slot,
+            Err(_) => return,
+        };
+        if slot.is_none()
+            && let Some(consumed) = deposited.take()
+        {
+            applied_src = consumed;
+        }
+        let Some(applied_program) = parse_entry(&entry, &applied_src) else {
+            std::process::exit(HOT_RESTART_CODE);
+        };
+        match noeta_compiler::hotswap::diff_programs(
+            &applied_program,
+            &applied_src,
+            &new_program,
+            &new_src,
+        ) {
+            noeta_compiler::hotswap::SwapDiff::Unchanged => {}
+            noeta_compiler::hotswap::SwapDiff::Swap(plan) => {
+                *slot = Some(plan);
+                deposited = Some(new_src);
+            }
+            noeta_compiler::hotswap::SwapDiff::NeedsRestart(blockers) => {
+                drop(slot);
+                for b in &blockers {
+                    eprintln!("[hot] restart needed: {b:?}");
+                }
+                std::process::exit(HOT_RESTART_CODE);
+            }
+        }
+    }
+}
+
+fn parse_entry(entry: &Path, src: &str) -> Option<noeta_ast::Program> {
+    let source = noeta_span::Source::new(
+        noeta_span::SourceId::FIRST,
+        entry.display().to_string(),
+        src,
+    );
+    let lexed = noeta_lexer::lex(&source);
+    let parsed = noeta_parser::parse(&source, &lexed.tokens);
+    (lexed.diagnostics.is_empty() && parsed.diagnostics.is_empty()).then_some(parsed.program)
 }
 
 #[cfg(test)]
