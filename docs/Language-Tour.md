@@ -24,7 +24,7 @@ Reassigning an immutable binding is a compile error. A `mut` binding also keeps 
 xs: List<int> = [1, 2, 3]
 ```
 
-The primitive types are `int` (64-bit, wraps on overflow), `float`, `f32`, `bool`, `string`, and `void`. Number literals support underscores and radix prefixes:
+The primitive types are `int` (64-bit, wraps on overflow), `float`, `f32`, `f64`, `bool`, `string`, and `void`. Number literals support underscores and radix prefixes:
 
 ```noeta
 echo 1_000_000     // 1000000
