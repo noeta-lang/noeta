@@ -18,11 +18,16 @@
 //!   new protos while existing instances keep the same `&'static Shape` and flow into the new
 //!   bodies untouched.
 //!
+//! A changed **top-level statement** makes the swap re-running (server-hmr H1): the new top level
+//! re-executes with the unchanged reactive anchors (`signal`/`computed`/`cell.new`/`synced_signal`
+//! bindings) withheld, so their live nodes — the state — survive; the previous epoch's effects are
+//! disposed first and re-created by the re-run. The language rule this implements: *reactive state
+//! survives edits; plain state re-initializes.*
+//!
 //! Everything else — a changed signature (arity/defaults compiled at call sites we cannot
 //! enumerate), a changed field/variant layout (a different interned shape; positional
-//! `Op::ExtractField` indices would misread old instances), a changed top-level statement
-//! (re-running it would double its effects) — is a [`SwapBlocker`]: the driver falls back to a
-//! full restart.
+//! `Op::ExtractField` indices would misread old instances), a changed `namespace` (re-links the
+//! world) — is a [`SwapBlocker`]: the driver falls back to a full restart.
 //!
 //! Known, deliberate semantic edge: a **function value captured before the swap** (`mut h = f`)
 //! keeps the old body — closure values hold their proto directly; only slot-routed calls rebind.
@@ -50,6 +55,18 @@ pub struct SwapPlan {
     /// global/method entry is unreachable from freshly-checked code but keeps in-flight callers
     /// sound); reported so a driver can surface them.
     pub removed: Vec<String>,
+    /// Whether the top level changed, making this a **re-running** swap (server-hmr H1): the
+    /// fragment carries the new version's top-level statements (minus `preserved`), and the
+    /// session first disposes the previous epoch's effects plus the reactive nodes the re-run
+    /// re-binds. `false` = the H0 body-only swap: no top-level statement re-runs, all state
+    /// (reactive or plain) is trivially preserved.
+    pub rerun_top_level: bool,
+    /// Binding names whose statements were **withheld from the re-run** because they are
+    /// unchanged reactive anchors (`mut s = signal(…)` / `computed(…)` / `cell.new(…)` /
+    /// `synced_signal(…)`): the live node survives the swap and re-run code keeps referring to
+    /// it through the untouched global. This is the language's HMR state rule — *reactive state
+    /// survives edits; plain state re-initializes.*
+    pub preserved: Vec<String>,
 }
 
 /// A change the live session cannot absorb — the driver must restart instead.
@@ -67,9 +84,9 @@ pub enum SwapBlocker {
     /// A standalone `impl Trait for Type` was added/removed/edited — trait coherence is
     /// whole-program.
     ImplChanged { trait_name: String, target: String },
-    /// A top-level non-declaration statement changed: re-running top-level effects is not sound to
-    /// do implicitly (H1 adds the signal-preserving re-run policy; until then, restart).
-    TopLevelChanged { detail: String },
+    /// The `namespace` declaration changed — qualified identity is baked into everything the
+    /// linker resolved; only a restart re-links.
+    NamespaceChanged { detail: String },
 }
 
 /// The differ's verdict for one old→new program pair.
@@ -96,12 +113,17 @@ pub fn diff_programs(old: &Program, old_src: &str, new: &Program, new_src: &str)
     // Names of fn/type declarations to include in the fragment (uses are selected by text below).
     let mut include: HashSet<&str> = HashSet::new();
 
-    // Top-level non-declaration statements must match as an ordered sequence — a changed, added,
-    // removed, or reordered statement would re-run (or silently not run) top-level effects.
-    if old_items.others != new_items.others {
-        let detail = first_divergence(&old_items.others, &new_items.others);
-        blockers.push(SwapBlocker::TopLevelChanged { detail });
+    // A changed `namespace` declaration re-links the world — restart.
+    if old_items.namespaces != new_items.namespaces {
+        let detail = first_divergence(&old_items.namespaces, &new_items.namespaces);
+        blockers.push(SwapBlocker::NamespaceChanged { detail });
     }
+
+    // Top-level non-declaration statements compared as an ordered text sequence. Any difference
+    // makes this a RE-RUNNING swap (server-hmr H1): the new top level re-executes — with the
+    // unchanged reactive anchors withheld (preserved) so their live nodes survive — instead of
+    // blocking. Identical sequences keep the H0 body-only swap, which re-runs nothing.
+    let rerun_top_level = old_items.others != new_items.others;
 
     // Free functions: keyed by name; body-only edits swap, signature edits block.
     for (&name, new_fn) in &new_items.fns {
@@ -174,8 +196,11 @@ pub fn diff_programs(old: &Program, old_src: &str, new: &Program, new_src: &str)
     }
 
     // Assemble the fragment in the NEW program's source order: added `use`s (an import re-run is
-    // an idempotent global (re)bind; removed ones just leave a stale binding) and the included
-    // declarations. Cloned as-is — the fragment carries the new version's spans.
+    // an idempotent global (re)bind; removed ones just leave a stale binding), the included
+    // declarations, and — on a re-running swap — every top-level statement except the preserved
+    // reactive anchors. Cloned as-is — the fragment carries the new version's spans.
+    let old_other_texts: HashSet<&str> = old_items.others.iter().copied().collect();
+    let mut preserved = Vec::new();
     let fragment_stmts: Vec<Stmt> = new
         .stmts
         .iter()
@@ -185,17 +210,37 @@ pub fn diff_programs(old: &Program, old_src: &str, new: &Program, new_src: &str)
             Stmt::Struct(decl) => include.contains(decl.name.as_str()),
             Stmt::Class(decl) => include.contains(decl.name.as_str()),
             Stmt::Enum(decl) => include.contains(decl.name.as_str()),
-            _ => false,
+            Stmt::Impl(_) | Stmt::Namespace { .. } => false,
+            other => {
+                if !rerun_top_level {
+                    return false;
+                }
+                // An unchanged reactive-anchor binding is withheld: its live node IS the state
+                // the swap preserves. A *changed* anchor re-runs — the developer redefined the
+                // signal itself, so it resets (its replaced node is disposed pre-run).
+                if reactive_anchor_name(other).is_some()
+                    && old_other_texts.contains(text(new_src, other.span()))
+                {
+                    preserved.push(
+                        reactive_anchor_name(other)
+                            .expect("just matched Some")
+                            .to_string(),
+                    );
+                    return false;
+                }
+                true
+            }
         })
         .cloned()
         .collect();
 
-    if fragment_stmts.is_empty() && removed.is_empty() {
+    if !rerun_top_level && fragment_stmts.is_empty() && removed.is_empty() {
         return SwapDiff::Unchanged;
     }
     changed.sort();
     added.sort();
     removed.sort();
+    preserved.sort();
     SwapDiff::Swap(SwapPlan {
         fragment: Program {
             stmts: fragment_stmts,
@@ -204,7 +249,35 @@ pub fn diff_programs(old: &Program, old_src: &str, new: &Program, new_src: &str)
         changed,
         added,
         removed,
+        rerun_top_level,
+        preserved,
     })
+}
+
+/// If `stmt` is a top-level binding whose initializer is a **reactive constructor** call —
+/// `signal(…)`, `computed(…)`, `synced_signal(…)`, or `cell.new(…)` — return the bound name.
+/// These are the state anchors the HMR rule preserves when their text is unchanged. Detection is
+/// syntactic and conservative: an aliased constructor (`use std.reactive.signal as s`) is missed,
+/// which degrades to a reset (never to unsoundness).
+fn reactive_anchor_name(stmt: &Stmt) -> Option<&str> {
+    let Stmt::Binding { name, value, .. } = stmt else {
+        return None;
+    };
+    let noeta_ast::Expr::Call { callee, .. } = value else {
+        return None;
+    };
+    let is_anchor = match callee.as_ref() {
+        noeta_ast::Expr::Ident { name, .. } => {
+            matches!(name.as_str(), "signal" | "computed" | "synced_signal")
+        }
+        noeta_ast::Expr::Member { receiver, name, .. } => {
+            name == "new"
+                && matches!(receiver.as_ref(),
+                    noeta_ast::Expr::Ident { name, .. } if name == "cell")
+        }
+        _ => false,
+    };
+    is_anchor.then_some(name.as_str())
 }
 
 /// The top-level statements of one version, bucketed for comparison.
@@ -216,6 +289,8 @@ struct Items<'a> {
     impls: HashSet<(String, String)>,
     /// Text of every `use` statement (idempotent to re-run; set-compared).
     uses: HashSet<&'a str>,
+    /// Text of every `namespace` declaration (must be identical across versions).
+    namespaces: Vec<&'a str>,
     /// Text of every other top-level statement, in source order.
     others: Vec<&'a str>,
 }
@@ -251,6 +326,7 @@ fn classify<'a>(stmts: &'a [Stmt], src: &'a str) -> Items<'a> {
         types: HashMap::new(),
         impls: HashSet::new(),
         uses: HashSet::new(),
+        namespaces: Vec::new(),
         others: Vec::new(),
     };
     for stmt in stmts {
@@ -282,6 +358,7 @@ fn classify<'a>(stmts: &'a [Stmt], src: &'a str) -> Items<'a> {
             Stmt::Use { .. } => {
                 items.uses.insert(text(src, stmt.span()));
             }
+            Stmt::Namespace { .. } => items.namespaces.push(text(src, stmt.span())),
             _ => items.others.push(text(src, stmt.span())),
         }
     }

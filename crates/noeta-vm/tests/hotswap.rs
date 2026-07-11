@@ -59,8 +59,13 @@ fn verdict(old_src: &str, new_src: &str) -> SwapDiff {
 }
 
 /// The full driver dance: gate on the NEW version's check (transactional), require a swappable
-/// verdict, apply it. Returns the plan for assertions on its bookkeeping.
-fn apply(session: &mut VmSession, old_src: &str, new_src: &str) -> SwapPlan {
+/// verdict, apply it. Returns the plan (for bookkeeping assertions) and the swap entry's output
+/// (a re-running swap's re-executed top level lands its stdout here).
+fn apply(
+    session: &mut VmSession,
+    old_src: &str,
+    new_src: &str,
+) -> (SwapPlan, noeta_vm::SessionOutput) {
     let checked = noeta_check::check_all(&parse(new_src));
     assert!(
         checked.diagnostics.is_empty(),
@@ -76,7 +81,7 @@ fn apply(session: &mut VmSession, old_src: &str, new_src: &str) -> SwapPlan {
                 out.diagnostics,
                 out.trace
             );
-            plan
+            (plan, out)
         }
         other => panic!("expected a swappable diff, got {other:?}"),
     }
@@ -227,13 +232,25 @@ fn a_field_layout_change_blocks() {
 }
 
 #[test]
-fn a_changed_top_level_statement_blocks() {
+fn a_changed_top_level_statement_makes_a_rerunning_swap() {
     let v1 = "fn f(): int { return 1; }\necho f()\n";
     let v2 = "fn f(): int { return 1; }\necho f() + 1\n";
-    let SwapDiff::NeedsRestart(blockers) = verdict(v1, v2) else {
-        panic!("a top-level statement change must block");
+    let SwapDiff::Swap(plan) = verdict(v1, v2) else {
+        panic!("a top-level statement change must produce a re-running swap");
     };
-    assert!(matches!(blockers[0], SwapBlocker::TopLevelChanged { .. }));
+    assert!(plan.rerun_top_level);
+    // The changed statement rides in the fragment; `f` is unchanged and does not.
+    assert_eq!(plan.fragment.stmts.len(), 1);
+}
+
+#[test]
+fn a_changed_namespace_blocks() {
+    let v1 = "namespace App.One;\nfn f(): int { return 1; }\n";
+    let v2 = "namespace App.Two;\nfn f(): int { return 1; }\n";
+    let SwapDiff::NeedsRestart(blockers) = verdict(v1, v2) else {
+        panic!("a namespace change must block");
+    };
+    assert!(matches!(blockers[0], SwapBlocker::NamespaceChanged { .. }));
 }
 
 #[test]
@@ -294,7 +311,7 @@ fn a_removed_fn_stays_live_for_old_callers() {
     let v1 = "fn gone(): int { return 7; }\nfn keep(): int { return gone(); }\n";
     let v2 = "fn keep(): int { return 1; }\n";
     let mut session = boot(v1);
-    let plan = apply(&mut session, v1, v2);
+    let (plan, _) = apply(&mut session, v1, v2);
     assert_eq!(plan.removed, vec!["gone".to_string()]);
     // The stale global stays bound: an in-flight caller compiled against v1 would still resolve
     // it. (Freshly checked v2 code can no longer name it — the checker never saw it.)
@@ -349,5 +366,158 @@ fn residency_returns_to_baseline_across_repeated_swaps() {
         noeta_value::live_count(),
         before,
         "teardown after swap churn returns residency to baseline"
+    );
+}
+
+// ------------------------------------------- H1: re-running swaps & the reactive state rule
+
+#[test]
+fn a_rerunning_swap_matches_cold_start_for_stateless_programs() {
+    // Both the fn body and the top level changed; the re-run recomputes `r` exactly as a cold
+    // start would.
+    oracle(
+        "fn f(): int { return 1; }\nr = f()\n",
+        "fn f(): int { return 2; }\nr = f() + 10\n",
+        "echo r;",
+    );
+}
+
+#[test]
+fn plain_bindings_reinitialize_on_a_rerunning_swap() {
+    // `v = version()` is byte-identical across versions, but the swap re-runs the top level
+    // (because `marker` changed), so `v` re-initializes against the NEW `version` body — plain
+    // state behaves as if the program restarted.
+    let v1 = "fn version(): string { return \"v1\"; }\nv = version()\nmarker = 1\n";
+    let v2 = "fn version(): string { return \"v2\"; }\nv = version()\nmarker = 2\n";
+    let mut session = boot(v1);
+    let (plan, _) = apply(&mut session, v1, v2);
+    assert!(plan.rerun_top_level);
+    assert_eq!(probe(&mut session, "echo v;"), "v2\n");
+    assert_eq!(probe(&mut session, "echo marker;"), "2\n");
+    session.teardown();
+}
+
+#[test]
+fn signal_state_survives_a_swap_and_the_effect_reruns_with_its_new_body() {
+    // THE state rule: `count` (unchanged reactive anchor) is withheld from the re-run — its
+    // value survives — while the edited effect is disposed and re-created, firing once with the
+    // new body over the preserved value. A post-swap set fires the new effect exactly once (the
+    // old one is gone — no duplicate subscription).
+    let v1 = "use std.reactive.{signal, effect}\n\
+              count = signal(0)\n\
+              effect(fn() {\n    echo \"v1:${count.get()}\"\n})\n";
+    let v2 = "use std.reactive.{signal, effect}\n\
+              count = signal(0)\n\
+              effect(fn() {\n    echo \"v2:${count.get()}\"\n})\n";
+    let mut session = boot(v1);
+    assert_eq!(probe(&mut session, "count.set(5);"), "v1:5\n");
+    let (plan, out) = apply(&mut session, v1, v2);
+    assert!(plan.rerun_top_level);
+    assert_eq!(plan.preserved, vec!["count".to_string()]);
+    assert_eq!(
+        out.stdout, "v2:5\n",
+        "the re-created effect runs once, with the new body, over the PRESERVED signal value"
+    );
+    assert_eq!(
+        probe(&mut session, "count.set(6);"),
+        "v2:6\n",
+        "exactly one effect fires — the old epoch was disposed"
+    );
+    assert_eq!(probe(&mut session, "echo count.get();"), "6\n");
+    session.teardown();
+}
+
+#[test]
+fn a_changed_signal_binding_resets_its_state() {
+    // The developer redefined the signal itself — it is NOT preserved: the re-run creates the
+    // replacement (initial 100) and the old node is disposed pre-run.
+    let v1 = "use std.reactive.{signal}\ncount = signal(0)\n";
+    let v2 = "use std.reactive.{signal}\ncount = signal(100)\n";
+    let mut session = boot(v1);
+    assert_eq!(
+        probe(&mut session, "count.set(5); echo count.get();"),
+        "5\n"
+    );
+    let (plan, _) = apply(&mut session, v1, v2);
+    assert!(plan.preserved.is_empty());
+    assert_eq!(probe(&mut session, "echo count.get();"), "100\n");
+    session.teardown();
+}
+
+#[test]
+fn a_preserved_computed_keeps_deriving_after_a_swap() {
+    let v1 = "use std.reactive.{signal, computed}\n\
+              count = signal(2)\n\
+              double = computed(fn() => count.get() * 2)\n\
+              marker = 1\n";
+    let v2 = "use std.reactive.{signal, computed}\n\
+              count = signal(2)\n\
+              double = computed(fn() => count.get() * 2)\n\
+              marker = 2\n";
+    let mut session = boot(v1);
+    assert_eq!(probe(&mut session, "echo double.get();"), "4\n");
+    let (plan, _) = apply(&mut session, v1, v2);
+    assert_eq!(
+        plan.preserved,
+        vec!["count".to_string(), "double".to_string()]
+    );
+    assert_eq!(
+        probe(&mut session, "count.set(10); echo double.get();"),
+        "20\n",
+        "the preserved computed re-derives from the preserved signal after the swap"
+    );
+    session.teardown();
+}
+
+#[test]
+fn a_user_disposed_effect_does_not_break_a_rerunning_swap() {
+    // The dispose arm prunes the epoch registry, so the swap's disposal pass must not
+    // double-release the already-disposed effect's body.
+    let v1 = "use std.reactive.{signal, effect}\n\
+              count = signal(0)\n\
+              e = effect(fn() {\n    echo \"fx:${count.get()}\"\n})\n\
+              marker = 1\n";
+    let v2 = "use std.reactive.{signal, effect}\n\
+              count = signal(0)\n\
+              e = effect(fn() {\n    echo \"fx:${count.get()}\"\n})\n\
+              marker = 2\n";
+    let mut session = boot(v1);
+    assert_eq!(probe(&mut session, "e.dispose(); count.set(1);"), "");
+    let (_, out) = apply(&mut session, v1, v2);
+    assert_eq!(
+        out.stdout, "fx:1\n",
+        "the re-run re-creates the effect over the preserved signal"
+    );
+    session.teardown();
+}
+
+#[test]
+fn residency_returns_to_baseline_across_rerunning_swaps_with_reactivity() {
+    // The leak-oracle shape for the H1 disposal paths: swap back and forth between two versions
+    // that re-run the top level with signals + effects live, then teardown to baseline.
+    let before = noeta_value::live_count();
+    let v_a = "use std.reactive.{signal, effect}\n\
+               count = signal(0)\n\
+               effect(fn() {\n    echo \"a:${count.get()}\"\n})\n\
+               marker = 1\n";
+    let v_b = "use std.reactive.{signal, effect}\n\
+               count = signal(0)\n\
+               effect(fn() {\n    echo \"b:${count.get()}\"\n})\n\
+               marker = 2\n";
+    let mut session = boot(v_a);
+    for round in 0..6 {
+        let (from, to) = if round % 2 == 0 {
+            (v_a, v_b)
+        } else {
+            (v_b, v_a)
+        };
+        apply(&mut session, from, to);
+    }
+    probe(&mut session, "count.set(9);");
+    session.teardown();
+    assert_eq!(
+        noeta_value::live_count(),
+        before,
+        "teardown after re-running swap churn returns residency to baseline"
     );
 }

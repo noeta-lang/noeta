@@ -288,24 +288,55 @@ impl VmSession {
         })
     }
 
-    /// Apply a hot-swap plan (server-hmr H0): re-evaluate the plan's fragment — added/changed `use`
-    /// imports, changed/added `fn` declarations, method-level type re-declarations — as one session
-    /// entry. Running the fragment *is* the swap: each `fn` declaration stores a fresh closure into
-    /// its **existing** global slot, so every live `Op::CallGlobal` site (old and new code alike)
-    /// dispatches to the new body from now on; a re-declared type re-registers its methods against
-    /// the same content-interned shape, so existing instances flow into the new bodies.
+    /// Apply a hot-swap plan (server-hmr H0/H1): re-evaluate the plan's fragment — added/changed
+    /// `use` imports, changed/added `fn` declarations, method-level type re-declarations, and (on
+    /// a re-running swap) the new top-level statements — as one session entry. Running the
+    /// fragment *is* the swap: each `fn` declaration stores a fresh closure into its **existing**
+    /// global slot, so every live `Op::CallGlobal` site (old and new code alike) dispatches to the
+    /// new body from now on; a re-declared type re-registers its methods against the same
+    /// content-interned shape, so existing instances flow into the new bodies.
+    ///
+    /// A **re-running** swap (`plan.rerun_top_level`) implements the HMR state rule — *reactive
+    /// state survives edits; plain state re-initializes*: the plan withholds unchanged reactive
+    /// anchors (their live nodes survive untouched in their global slots), and before the
+    /// fragment runs, the previous epoch's effects are disposed (the re-run re-creates them) and
+    /// the reactive nodes held by re-bound globals are disposed (their replacements arrive with
+    /// the re-run). Top-level side effects (an `echo`, a write) DO re-run — their output lands in
+    /// the returned [`SessionOutput`] for the driver to surface.
     ///
     /// The caller owns the two gates the plan's existence implies (see
     /// [`noeta_compiler::hotswap::diff_programs`]): the NEW program checked green (transactional —
-    /// never swap red code), and the differ found only body-level changes. The fragment itself
-    /// compiles checkerless (conservative codegen — always sound; the session's accumulated checker
-    /// state describes v1, not v2, so precise site-keyed codegen would be built on the wrong
-    /// universe).
+    /// never swap red code), and the differ found no blockers. The fragment itself compiles
+    /// checkerless (conservative codegen — always sound; the session's accumulated checker state
+    /// describes v1, not v2, so precise site-keyed codegen would be built on the wrong universe).
     ///
     /// A function *value* captured before the swap (`mut h = f`) keeps the old body by design —
     /// closures hold their proto directly; only slot-routed calls rebind.
     pub fn hot_swap(&mut self, plan: &noeta_compiler::hotswap::SwapPlan) -> SessionOutput {
-        self.run_capturing(&plan.fragment, None, |_| None)
+        // Slots the fragment's binding statements will overwrite — resolved BEFORE the fragment
+        // compiles, so only names that already exist (v1 bindings being replaced) are collected;
+        // genuinely new bindings have no old node to dispose.
+        let rebound: Vec<u32> = if plan.rerun_top_level {
+            plan.fragment
+                .stmts
+                .iter()
+                .flat_map(binding_targets)
+                .filter_map(|name| self.compiler.global_slots().get(name).copied())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let prepare = plan.rerun_top_level;
+        self.run_capturing_with(
+            &plan.fragment,
+            None,
+            |vm| {
+                if prepare {
+                    vm.hotswap_prepare(&rebound);
+                }
+            },
+            |_| None,
+        )
     }
 
     /// `:type <expr>` — evaluate `program`'s trailing expression and report its **runtime** type. The
@@ -331,6 +362,19 @@ impl VmSession {
         sites: Option<&noeta_compiler::Sites>,
         describe: impl FnOnce(Value) -> Option<String>,
     ) -> SessionOutput {
+        self.run_capturing_with(program, sites, |_| {}, describe)
+    }
+
+    /// [`VmSession::run_capturing`] with a pre-run hook, invoked on the seeded ephemeral `Vm`
+    /// after the entry compiled but before it runs — the hot-swap disposal window
+    /// ([`VmSession::hot_swap`]).
+    fn run_capturing_with(
+        &mut self,
+        program: &Program,
+        sites: Option<&noeta_compiler::Sites>,
+        pre_run: impl FnOnce(&mut Vm),
+        describe: impl FnOnce(Value) -> Option<String>,
+    ) -> SessionOutput {
         // A trailing bare expression is rewritten to `mut <sentinel> = expr;` so the IR path captures
         // its value in a global slot we read back below — pure AST surgery, backend-agnostic.
         let (lowerable, captures_value) = rewrite_trailing_expr(program);
@@ -349,6 +393,7 @@ impl VmSession {
         state.sync_to(&module);
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
         let mut vm = Vm::load_seeded(&module, state);
+        pre_run(&mut vm);
         vm.run_top();
 
         let value = if captures_value {
@@ -518,6 +563,15 @@ fn rewrite_trailing_expr(program: &Program) -> (Program, bool) {
             )
         }
         _ => (program.clone(), false),
+    }
+}
+
+/// The binding names a top-level statement (re)binds — the globals a re-running swap overwrites.
+fn binding_targets(stmt: &Stmt) -> Vec<&str> {
+    match stmt {
+        Stmt::Binding { name, .. } => vec![name.as_str()],
+        Stmt::Destructure { targets, .. } => targets.iter().map(|(n, _)| n.as_str()).collect(),
+        _ => Vec::new(),
     }
 }
 

@@ -109,6 +109,11 @@ pub const COMPUTED_ARENA_GETTER: ArenaGetter = ("get", |e| computed_box(e).memo)
 pub(crate) struct ReactiveExt {
     pub(crate) graph: ReactiveGraph<Retained>,
     gates_open: std::cell::Cell<bool>,
+    /// Every live effect `(node, body)` in creation order — the hot-swap epoch registry
+    /// (server-hmr H1). A swap that re-runs the top level disposes all of them first
+    /// ([`hotswap_dispose_effects`]) and lets the re-run re-create them; a user-level
+    /// `.dispose()` prunes its entry so the swap never double-releases a body cell.
+    effects: std::cell::RefCell<Vec<(NodeId, Retained)>>,
 }
 
 pub(crate) const STATE_KEY: &str = "std.reactive";
@@ -119,6 +124,7 @@ pub(crate) fn state_of<C: NativeCtx + ?Sized>(ctx: &mut C) -> ExtState {
             graph: ReactiveGraph::new(),
             // The backend's gates start open — mirror that.
             gates_open: std::cell::Cell::new(true),
+            effects: std::cell::RefCell::new(Vec::new()),
         })
     })
 }
@@ -174,6 +180,52 @@ pub(crate) fn drive_flush<C: NativeCtx + ?Sized>(
     Ok(())
 }
 
+/// Hot-swap hook (server-hmr H1): dispose **every live effect** and release its body cell — the
+/// swap's re-run of the (new) top level re-creates the ones that still exist. Exactly the
+/// user-level `.dispose()` per effect, driven off the epoch registry. A program that never touched
+/// reactivity gets an empty state and this is a no-op.
+pub fn hotswap_dispose_effects<C: NativeCtx + ?Sized>(ctx: &mut C) {
+    let state = state_of(ctx);
+    let ext = state.borrow();
+    let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
+    let drained: Vec<(NodeId, Retained)> = ext.effects.borrow_mut().drain(..).collect();
+    for (node, body) in drained {
+        ext.graph.dispose(node);
+        ctx.release_retained(body);
+    }
+    sync_gates(ctx, ext);
+}
+
+/// Hot-swap hook (server-hmr H1): the given slots hold globals a swap fragment is about to
+/// re-bind. Any that carry a `Signal`/`Computed` handle gets its graph node disposed, so the
+/// replaced node stops participating in flushes (a preserved subscriber re-subscribes to the
+/// replacement on its next run — dependency edges are rebuilt per run). The content/memo arena
+/// cells are deliberately **not** released: an alias captured elsewhere may still read them;
+/// they reclaim at teardown (bounded by replaced bindings per swap). Effects are not handled
+/// here — the epoch registry ([`hotswap_dispose_effects`]) owns them.
+pub fn hotswap_dispose_handles<C: NativeCtx + ?Sized>(ctx: &mut C, handles: &[Slot]) {
+    let mut nodes: Vec<NodeId> = Vec::new();
+    for &handle in handles {
+        let _ = ctx.with_extern(handle, &mut |e| {
+            if let Some(s) = e.as_any().downcast_ref::<SignalBox>() {
+                nodes.push(s.node);
+            } else if let Some(c) = e.as_any().downcast_ref::<ComputedBox>() {
+                nodes.push(c.node);
+            }
+        });
+    }
+    if nodes.is_empty() {
+        return;
+    }
+    let state = state_of(ctx);
+    let ext = state.borrow();
+    let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
+    for node in nodes {
+        ext.graph.dispose(node);
+    }
+    sync_gates(ctx, ext);
+}
+
 pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
     func: &str,
     ctx: &mut C,
@@ -216,6 +268,7 @@ pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
             let ext = state.borrow();
             let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
             let node = ext.graph.effect(body);
+            ext.effects.borrow_mut().push((node, body));
             // Run it once now (subscribing it to the signals it reads) — unless we are already
             // inside a flush, which will drain it (no nested flush; reactivity S4).
             if !ext.graph.is_flushing() {
@@ -362,6 +415,8 @@ pub fn effect_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             let ext = state.borrow();
             let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
             ext.graph.dispose(node);
+            // Prune the hot-swap epoch registry so a later swap never double-releases this body.
+            ext.effects.borrow_mut().retain(|(n, _)| *n != node);
             sync_gates(ctx, ext);
             // The node held only ids; the body's arena cell is ours to release (its closure —
             // and whatever it captured — drops at its last reference, destructor-aware).
