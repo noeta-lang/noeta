@@ -40,6 +40,7 @@ use noeta_vm::{SessionOutput, VmBackend, VmSession};
 use noeta_pm::{graph, lock, manifest, registry};
 
 mod compose;
+mod docgen;
 
 #[derive(Parser)]
 #[command(name = "noeta", version, about = "The Noeta toolchain")]
@@ -145,10 +146,17 @@ enum Command {
         #[arg(long)]
         target: Option<String>,
     },
-    /// Extract a program's `@doc { … }` text blocks to stdout (object-model slice 6).
+    /// Extract a program's `@doc { … }` text blocks to stdout, or — with `--out` — generate the
+    /// package's documentation artifact (a registry-ready `docs.json` plus a Markdown tree).
     Doc {
         /// Path to a `.noe` file.
         file: PathBuf,
+        /// Generate the documentation artifact into this directory instead of extracting to
+        /// stdout: `docs.json` (schema-versioned, keyed by the package's `[package]` identity —
+        /// the canonical form a registry indexes) plus `index.md` and one Markdown page per
+        /// module, woven from `@doc` prose and the public API's signatures.
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
         /// Only extract when the `doc` tier is live in this `noeta.toml` build target; otherwise
         /// nothing is emitted.
         #[arg(long)]
@@ -505,7 +513,7 @@ pub fn run_cli(
             &baseline,
             &target,
         ),
-        Command::Doc { file, target } => cmd_doc(&file, &target),
+        Command::Doc { file, out, target } => cmd_doc(&file, &out, &target),
         Command::Build {
             file,
             out,
@@ -4129,12 +4137,36 @@ fn fmt_per_iter(ns: f64) -> String {
 /// HTML-comment header noting its source location — valid markdown that renders to nothing. The
 /// program is not type-checked or run; doc extraction works on a parse alone, so docs can be pulled
 /// from work-in-progress code.
-fn cmd_doc(file: &std::path::Path, target: &Option<String>) -> ExitCode {
+fn cmd_doc(file: &std::path::Path, out: &Option<PathBuf>, target: &Option<String>) -> ExitCode {
     if let Some(code) = compose::maybe_delegate(file) {
         return code;
     }
     if let Some(code) = target_gate(file, target, "doc") {
         return code;
+    }
+    // `--out`: the generator path — a registry-ready artifact from a bare parse, before (and
+    // independent of) the extraction/provider machinery below.
+    if let Some(out_dir) = out {
+        return match docgen::generate(file, out_dir) {
+            Ok(done) => {
+                for skipped in &done.skipped {
+                    eprintln!("lang: skipped `{skipped}` (does not parse)");
+                }
+                println!(
+                    "documented {} module{} ({} declaration{}) → {}",
+                    done.modules,
+                    plural(done.modules),
+                    done.decls,
+                    plural(done.decls),
+                    out_dir.display(),
+                );
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("lang: {err}");
+                ExitCode::from(2)
+            }
+        };
     }
     let linked = match load_linked(file) {
         Ok(linked) => linked,

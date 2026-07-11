@@ -31,6 +31,7 @@ noeta-bundle = { workspace = true }
 noeta-cache = { workspace = true }
 noeta-check = { workspace = true }
 noeta-loader = { workspace = true }
+noeta-ide = { workspace = true }
 noeta-runtime = { workspace = true }
 noeta-stdlib = { workspace = true }
 noeta-lsp = { workspace = true }

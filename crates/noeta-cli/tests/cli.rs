@@ -1566,6 +1566,63 @@ fn doc_attaches_to_the_following_declaration() {
 }
 
 #[test]
+fn doc_out_generates_the_registry_artifact() {
+    // `noeta doc --out DIR` generates the package documentation artifact: a schema-versioned
+    // `docs.json` keyed by the `[package]` identity (the canonical, registry-indexable form)
+    // plus a Markdown tree — public API only for a namespaced package module, signatures carrying
+    // the `@tier`/`@attribute` directives, prose woven by adjacency.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("docgen_pkg");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(
+        base.join("noeta.toml"),
+        "[package]\nname = \"acme/mathy\"\nversion = \"2.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        base.join("lib.noe"),
+        "@doc { Mathy helpers. }\n\
+         namespace mathy.lib;\n\
+         @doc { Adds two ints. }\n\
+         pub fn add(a: int, b: int): int { return a + b }\n\
+         fn hidden(): int { return 0 }\n",
+    )
+    .unwrap();
+    let out = base.join("docs");
+    lang()
+        .arg("doc")
+        .arg(base.join("lib.noe"))
+        .arg("--out")
+        .arg(&out)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "documented 1 module (1 declaration)",
+        ));
+    let json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("docs.json")).unwrap())
+            .expect("valid docs.json");
+    assert_eq!(json["schema"], 1);
+    assert_eq!(json["package"]["name"], "acme/mathy");
+    assert_eq!(json["package"]["version"], "2.1.0");
+    assert_eq!(json["modules"][0]["namespace"], "mathy.lib");
+    assert_eq!(json["modules"][0]["doc"], "Mathy helpers.");
+    let items = json["modules"][0]["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "private decls are excluded: {items:?}");
+    assert_eq!(items[0]["name"], "add");
+    assert_eq!(items[0]["signature"], "pub fn add(a: int, b: int): int");
+    assert_eq!(items[0]["doc"], "Adds two ints.");
+    // The Markdown rendering exists and carries the same content.
+    let page = std::fs::read_to_string(out.join("lib.md")).unwrap();
+    assert!(page.contains("pub fn add(a: int, b: int): int"), "{page}");
+    assert!(
+        std::fs::read_to_string(out.join("index.md"))
+            .unwrap()
+            .contains("acme/mathy `2.1.0`")
+    );
+}
+
+#[test]
 fn doc_no_blocks_is_success_with_note() {
     let file = temp_program("doc_none", "echo \"hi\"\n");
     lang()

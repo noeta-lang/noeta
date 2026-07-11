@@ -210,7 +210,7 @@ pub(crate) fn param_detail(param: &Param) -> String {
 
 /// Render a surface [`TypeRef`] back to compact source syntax for symbol detail (`List<int>`, `?T`,
 /// `A | B`, `(A, B)`, `(A) -> R`). Shared with member completion.
-pub(crate) fn render_type_ref(ty: &TypeRef) -> String {
+pub fn render_type_ref(ty: &TypeRef) -> String {
     match ty {
         TypeRef::Named { name, args, .. } => {
             if args.is_empty() {
