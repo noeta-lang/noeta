@@ -544,7 +544,7 @@ impl TokenKind {
             TokenKind::Bang => "`!`",
             TokenKind::Hash => "`#`",
             TokenKind::At => "`@`",
-            TokenKind::DocText => "a `@doc` text body",
+            TokenKind::DocText => "a text-tier body",
             TokenKind::BlockCommentOpen => "`/*`",
             TokenKind::LineComment => "`//`",
         }
@@ -587,19 +587,95 @@ pub struct Lexed {
     pub comments: Vec<Comment>,
 }
 
+/// The set of tier names whose `@<name> { … }` bodies are **verbatim text** rather than code
+/// (text tiers, object-model slice 6f generalized by the text-tiers arc). The lexer captures a
+/// member's body as one [`TokenKind::DocText`] token instead of tokenizing it, so arbitrary
+/// prose/markup never produces lex errors.
+///
+/// The default set is std's `{doc}` — every bare `lex` call (tests, snippets, tools without a
+/// manifest) behaves exactly as before. Pipeline paths that know more (the loader accumulating
+/// dependency `@tier(…, text: "…")` declarations) pass an extended set via [`lex_in`]. Same-file
+/// declarations need no help at all: [`lex_in`] discovers them itself (see the two-pass note
+/// there).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextTiers(std::collections::HashSet<String>);
+
+impl Default for TextTiers {
+    fn default() -> Self {
+        TextTiers(std::iter::once("doc".to_string()).collect())
+    }
+}
+
+impl TextTiers {
+    /// The std set (`{doc}`) extended with `names` — how the pipeline folds in the text tiers
+    /// declared by dependencies.
+    pub fn with(names: impl IntoIterator<Item = String>) -> Self {
+        let mut set = TextTiers::default();
+        set.0.extend(names);
+        set
+    }
+
+    /// Whether `name` is a text tier in this set.
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.contains(name)
+    }
+
+    /// Add a tier name to the set.
+    pub fn insert(&mut self, name: String) {
+        self.0.insert(name);
+    }
+}
+
 /// Lex a source file into a token stream, discarding comments (the compile path). Byte-for-byte
 /// identical token output to lexing with trivia collection off — the parser never sees a comment.
+/// Text-tier bodies are captured for the default [`TextTiers`] set plus any `@tier(…, text: "…")`
+/// declaration in the file itself.
 pub fn lex(source: &Source) -> Lexed {
-    lex_impl(source, false)
+    lex_in(source, &TextTiers::default())
 }
 
 /// Lex a source file, additionally collecting every comment into [`Lexed::comments`] (the formatter
 /// path). The token stream is identical to [`lex`]'s; only trivia recovery is added.
 pub fn lex_with_trivia(source: &Source) -> Lexed {
-    lex_impl(source, true)
+    lex_with_trivia_in(source, &TextTiers::default())
 }
 
-fn lex_impl(source: &Source, collect_trivia: bool) -> Lexed {
+/// [`lex`] with an explicit text-tier set — the pipeline entry point when declarations from other
+/// files (dependencies) are in play.
+///
+/// **Two-pass self-use:** a file can *declare* a text tier and use it, in either order, with no
+/// caller help. After a first pass, the token stream is scanned for `@tier(<name>, …, text: …)`
+/// declarations; if that discovers text-tier names the supplied set lacks, the file is re-lexed
+/// once with the augmented set, so `@<name> { prose }` bodies capture verbatim. Only files
+/// declaring text tiers pay the second pass.
+pub fn lex_in(source: &Source, text_tiers: &TextTiers) -> Lexed {
+    lex_impl(source, false, text_tiers)
+}
+
+/// [`lex_with_trivia`] with an explicit text-tier set (see [`lex_in`]).
+pub fn lex_with_trivia_in(source: &Source, text_tiers: &TextTiers) -> Lexed {
+    lex_impl(source, true, text_tiers)
+}
+
+fn lex_impl(source: &Source, collect_trivia: bool, text_tiers: &TextTiers) -> Lexed {
+    let lexed = lex_pass(source, collect_trivia, text_tiers);
+    // Two-pass self-use: fold in text tiers this file itself declares (`@tier(x, …, text: "…")`)
+    // and re-lex so their `@x { … }` bodies capture verbatim. Declaration order doesn't matter —
+    // the scan sees the whole stream. At most one extra pass: the re-scan works from pass-1
+    // tokens, and a declaration can only *disappear* in pass 2 (were it inside another text
+    // body — prose, not a declaration), never appear.
+    let declared = declared_text_tiers(source.text(), &lexed.tokens);
+    if declared.iter().any(|name| !text_tiers.contains(name)) {
+        let mut augmented = text_tiers.clone();
+        for name in declared {
+            augmented.insert(name);
+        }
+        return lex_pass(source, collect_trivia, &augmented);
+    }
+    lexed
+}
+
+fn lex_pass(source: &Source, collect_trivia: bool, text_tiers: &TextTiers) -> Lexed {
     let mut tokens = Vec::new();
     let mut diagnostics = Vec::new();
     let mut comments = Vec::new();
@@ -618,11 +694,13 @@ fn lex_impl(source: &Source, collect_trivia: bool) -> Lexed {
                     });
                 }
             }
-            Ok(TokenKind::LBrace) if opens_doc_block(text, &tokens) => {
-                // A `@doc {` (object-model slice 6f): capture the brace-delimited body **verbatim**
-                // as one `DocText` token instead of tokenizing it, so arbitrary prose/markdown never
-                // produces lex errors. Emit `{`, the raw body, and `}`, then advance the lexer past
-                // the whole span. The body's braces must balance (the matching `}` closes the block).
+            Ok(TokenKind::LBrace) if opens_text_block(text, &tokens, text_tiers) => {
+                // A text-tier `@<name> {` (object-model slice 6f, generalized): capture the
+                // brace-delimited body **verbatim** as one `DocText` token instead of tokenizing
+                // it, so arbitrary prose/markup never produces lex errors. Emit `{`, the raw body,
+                // and `}`, then advance the lexer past the whole span. The body's braces must
+                // balance (the matching `}` closes the block); `\{`/`\}` are literal braces and
+                // `\\` a literal backslash — not counted (see `matching_brace`).
                 let open_end = span.end;
                 match matching_brace(text, open_end) {
                     Some(close_start) => {
@@ -643,7 +721,13 @@ fn lex_impl(source: &Source, collect_trivia: bool) -> Lexed {
                         lexer.bump((close_start + 1 - open_end) as usize);
                     }
                     None => {
-                        diagnostics.push(unterminated_doc_block(span));
+                        // The tier name is the token just before the `{` (opens_text_block
+                        // established the `@ <ident> {` shape).
+                        let name = tokens
+                            .last()
+                            .map(|t| &text[t.span.start as usize..t.span.end as usize])
+                            .unwrap_or("doc");
+                        diagnostics.push(unterminated_text_block(span, name));
                         tokens.push(Token {
                             kind: TokenKind::LBrace,
                             span,
@@ -689,35 +773,116 @@ fn lex_impl(source: &Source, collect_trivia: bool) -> Lexed {
     }
 }
 
-/// Whether the just-lexed `{` opens a `@doc { … }` text-tier body — i.e. the two preceding tokens
-/// are `@` then the identifier `doc`. (Only `@doc` is a text tier; every other `@<tier> {` is a
-/// code block tokenized normally.)
-fn opens_doc_block(text: &str, tokens: &[Token]) -> bool {
+/// Whether the just-lexed `{` opens a text-tier body `@<name> { … }` — i.e. the two preceding
+/// tokens are `@` then an identifier in the text-tier set. (Every other `@<tier> {` is a code
+/// block tokenized normally. A text tier takes no directive args — `text:` and `config:` are
+/// mutually exclusive on the declaration — so `@<name>(…) {` never needs this check.)
+fn opens_text_block(text: &str, tokens: &[Token], text_tiers: &TextTiers) -> bool {
     let [.., at, name] = tokens else { return false };
     at.kind == TokenKind::At
         && name.kind == TokenKind::Ident
-        && text.get(name.span.start as usize..name.span.end as usize) == Some("doc")
+        && text
+            .get(name.span.start as usize..name.span.end as usize)
+            .is_some_and(|name| text_tiers.contains(name))
 }
 
-/// Find the `}` that closes a brace block whose opening `{` ends at `open_end`, returning its byte
-/// offset. Braces nest (a `{` in the body must be matched by a `}` before the block closes), so a
-/// balanced code snippet inside doc prose is fine; an unbalanced `}` is treated as the closer and an
-/// unbalanced `{` runs to end-of-input (`None` — an unterminated block).
+/// Scan a lexed token stream for `@tier(<name>, …, text: <string>)` declarations and return the
+/// declared text-tier names — the lexical shape is fixed, so this needs no parse. Powers
+/// [`lex_in`]'s two-pass self-use: a file's own text-tier declarations take effect within the
+/// file, whatever the order of declaration and use.
+fn declared_text_tiers(text: &str, tokens: &[Token]) -> Vec<String> {
+    let ident = |t: &Token| -> Option<&str> {
+        (t.kind == TokenKind::Ident).then(|| &text[t.span.start as usize..t.span.end as usize])
+    };
+    let mut names = Vec::new();
+    for (i, window) in tokens.windows(4).enumerate() {
+        let [at, kw, open, name_tok] = window else {
+            unreachable!()
+        };
+        if !(at.kind == TokenKind::At
+            && ident(kw) == Some("tier")
+            && open.kind == TokenKind::LParen)
+        {
+            continue;
+        }
+        let Some(name) = ident(name_tok) else {
+            continue;
+        };
+        // Within the directive's parens (depth-tracked to its close), look for a `text: <string>`
+        // key — the marker that makes the declared tier a text tier.
+        let mut depth = 1u32;
+        let mut rest = tokens[i + 4..].iter().peekable();
+        while let Some(tok) = rest.next() {
+            match tok.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                TokenKind::Ident
+                    if depth == 1
+                        && ident(tok) == Some("text")
+                        && rest.peek().is_some_and(|t| t.kind == TokenKind::Colon) =>
+                {
+                    names.push(name.to_string());
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    names
+}
+
+/// Find the `}` that closes a text-tier body whose opening `{` ends at `open_end`, returning its
+/// byte offset. Braces nest (a `{` in the body must be matched by a `}` before the block closes),
+/// so a balanced code snippet inside prose is fine; an unbalanced `}` is treated as the closer and
+/// an unbalanced `{` runs to end-of-input (`None` — an unterminated block). Exactly three escape
+/// sequences are honored — `\{` and `\}` (literal braces, not counted) and `\\` (a literal
+/// backslash, so `\\{` is a backslash then a *counted* brace); every other backslash is ordinary
+/// text (markup formats need their own escapes untouched). The tree-sitter scanner and the
+/// TextMate rule implement this same count, so editors and the compiler always agree on where a
+/// body ends.
 fn matching_brace(text: &str, open_end: u32) -> Option<u32> {
+    let bytes = text.as_bytes();
     let mut depth: u32 = 1;
-    for (offset, byte) in text.as_bytes().iter().enumerate().skip(open_end as usize) {
-        match byte {
-            b'{' => depth += 1,
+    let mut i = open_end as usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if matches!(bytes.get(i + 1), Some(b'{' | b'}' | b'\\')) => i += 2,
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
             b'}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(offset as u32);
+                    return Some(i as u32);
                 }
+                i += 1;
             }
-            _ => {}
+            _ => i += 1,
         }
     }
     None
+}
+
+/// Undo the text-body escapes for consumers of the *content* (extraction, hover, runners): `\{`,
+/// `\}`, `\\` become `{`, `}`, `\`; everything else — including every other backslash sequence —
+/// is untouched. The formatter must NOT use this: it re-emits source, where the escapes stay.
+pub fn unescape_text_body(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && matches!(chars.peek(), Some('{' | '}' | '\\')) {
+            out.push(chars.next().unwrap());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Find the end of a `/* … */` block comment whose opening `/*` ends at `open_end`, returning the
@@ -756,14 +921,18 @@ fn unterminated_block_comment(open: Span) -> Diagnostic {
     .with_help("add a closing `*/`; block comments nest, so each `/*` needs its own `*/`")
 }
 
-/// The diagnostic for a `@doc {` whose body never closes (no matching `}` before end-of-input).
-fn unterminated_doc_block(open: Span) -> Diagnostic {
+/// The diagnostic for a text-tier `@<name> {` whose body never closes (no matching `}` before
+/// end-of-input).
+fn unterminated_text_block(open: Span, tier: &str) -> Diagnostic {
     Diagnostic::error(
         DiagnosticCode::UnexpectedEndOfInput,
         open,
-        "unterminated `@doc` block",
+        format!("unterminated `@{tier}` block"),
     )
-    .with_help("add a closing `}` to end the doc block; braces inside the body must balance")
+    .with_help(
+        "add a closing `}` to end the text block; braces inside the body must balance \
+         (write a literal unbalanced brace as `\\{` or `\\}`)",
+    )
 }
 
 /// Insert synthetic statement terminators (`;`) at newlines (object-model slice 7): a line end can
@@ -1334,6 +1503,105 @@ mod tests {
         let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
         assert!(!kinds.contains(&TokenKind::DocText));
         assert!(kinds.contains(&TokenKind::FnKw));
+    }
+
+    #[test]
+    fn text_body_escapes_are_not_counted() {
+        // `\{` and `\}` are literal braces (not counted by the balance scan); `\\` is a literal
+        // backslash, so `\\}` below is a backslash then the *counted* closer of the inner `{x`.
+        // Every other backslash (markdown's `\*`) passes through untouched.
+        let (source, lexed) = lex_str("@doc {\n  a \\{ not counted \\} b {x\\\\} \\*c\n}\nx = 1\n");
+        assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+        let body = source.slice(lexed.tokens[3].span);
+        assert_eq!(body, "\n  a \\{ not counted \\} b {x\\\\} \\*c\n");
+        // Unescaping (what content consumers see) undoes exactly the three sequences.
+        assert_eq!(
+            unescape_text_body(body),
+            "\n  a { not counted } b {x\\} \\*c\n"
+        );
+        // Lexing resumed after the body: the trailing assignment tokenized.
+        let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
+        assert!(kinds.contains(&TokenKind::Eq));
+    }
+
+    #[test]
+    fn escaped_closer_extends_the_body() {
+        // A body whose only `}` is escaped never closes — the escape genuinely suppresses the
+        // count (this is the unbalanced-prose case `\}` exists for, in reverse).
+        let (_source, lexed) = lex_str("@doc { all escaped \\} so never closed\n");
+        assert!(
+            lexed
+                .diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::UnexpectedEndOfInput)
+        );
+    }
+
+    #[test]
+    fn declared_text_tier_captures_in_same_file() {
+        // Two-pass self-use: a `@tier(spec, text: "xml")` declaration makes `@spec { … }` bodies
+        // capture verbatim in the same file. The body is invalid as code (an unmatched quote runs
+        // to end-of-input in pass 1); pass 2 captures it raw, and the pass-1 error is discarded
+        // with the pass-1 stream.
+        let src = "@tier(spec, text: \"xml\")\nfn run_specs(roots: List<TierRoot>): void {}\n@spec {\n  <case name=\"unterminated>\n}\n";
+        let (source, lexed) = lex_str(src);
+        assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+        let doc = lexed
+            .tokens
+            .iter()
+            .find(|t| t.kind == TokenKind::DocText)
+            .expect("body captured as DocText");
+        assert_eq!(source.slice(doc.span), "\n  <case name=\"unterminated>\n");
+    }
+
+    #[test]
+    fn text_tier_use_before_declaration_captures() {
+        // Declaration order doesn't matter: the decl scan sees the whole pass-1 stream, so a
+        // `@spec { … }` above the `@tier(spec, text: …)` decl still captures. (The prose here must
+        // survive pass-1 tokenization well enough to leave the decl intact — quote-free.)
+        let src = "@spec {\n  <case attr=unterminated>\n}\n@tier(spec, text: \"xml\")\nfn run_specs(roots: List<TierRoot>): void {}\n";
+        let (source, lexed) = lex_str(src);
+        assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+        let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            &kinds[..5],
+            &[
+                TokenKind::At,
+                TokenKind::Ident,
+                TokenKind::LBrace,
+                TokenKind::DocText,
+                TokenKind::RBrace,
+            ]
+        );
+        assert_eq!(
+            source.slice(lexed.tokens[3].span),
+            "\n  <case attr=unterminated>\n"
+        );
+    }
+
+    #[test]
+    fn undeclared_custom_tier_stays_code() {
+        // Without a `text:` declaration (here: a code tier's decl, no `text:` key), `@spec {` is an
+        // ordinary code block — the open tier set does not imply raw capture.
+        let src = "@tier(spec, config: SpecKnobs)\nfn run_specs(roots: List<TierRoot>): void {}\n@spec { fn t() { return 1 } }\n";
+        let (_source, lexed) = lex_str(src);
+        let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
+        assert!(!kinds.contains(&TokenKind::DocText));
+        assert!(kinds.contains(&TokenKind::FnKw));
+    }
+
+    #[test]
+    fn pipeline_supplied_text_tier_set_captures_without_local_decl() {
+        // The loader path: a dependency declared the tier, the consumer file only uses it.
+        let source = Source::new(
+            SourceId(0),
+            "<t>",
+            "@spec {\n  # prose \"unmatched\n}\n".to_string(),
+        );
+        let lexed = lex_in(&source, &TextTiers::with(["spec".to_string()]));
+        assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+        let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
+        assert!(kinds.contains(&TokenKind::DocText));
     }
 
     #[test]

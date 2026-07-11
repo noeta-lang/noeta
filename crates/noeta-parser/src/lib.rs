@@ -3124,15 +3124,22 @@ where
             .or_not()
             .map(Option::unwrap_or_default);
 
-        // A tier block's body is **either** the verbatim text of a `@doc` block — the lexer captured
-        // it as a single `DocText` token (slice 6f), which is sliced back out of the source here — or
-        // a statement list for a code tier (the same recovering list a `{ }` block uses, absorbing
-        // the synthetic `;` the lexer inserts between members on separate lines, slice 7). The text
-        // branch is tried first; a code body's first token is never `DocText`, so it falls through.
+        // A tier block's body is **either** the verbatim text of a text-tier block (`@doc` et al.)
+        // — the lexer captured it as a single `DocText` token (slice 6f), which is sliced back out
+        // of the source here — or a statement list for a code tier (the same recovering list a
+        // `{ }` block uses, absorbing the synthetic `;` the lexer inserts between members on
+        // separate lines, slice 7). The text branch is tried first; a code body's first token is
+        // never `DocText`, so it falls through. This is the one point the body text materializes,
+        // so the brace escapes (`\{`/`\}`/`\\`) are undone here — every content consumer
+        // (extraction, hover, runners) sees clean text, while the formatter re-emits raw source
+        // and never touches them.
         let tier_body = choice((
             just(T::DocText).map_with(move |_, e| {
                 let span = ctx.to_span(e.span());
-                (Vec::new(), Some(ctx.source.slice(span).to_string()))
+                (
+                    Vec::new(),
+                    Some(noeta_lexer::unescape_text_body(ctx.source.slice(span))),
+                )
             }),
             recovering_list(stmt.clone()).map(|items| (items, None)),
         ))
