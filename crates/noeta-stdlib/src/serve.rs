@@ -50,6 +50,14 @@ pub const HTTP_CTX_FNS: &[ExtFn] = &[
         params: &[SigType::Fn(&[SOCKET_SIG], &SigType::Dyn)],
         ret: RetTy::Concrete(SigType::Named(crate::net::RESPONSE_TYPE_NAME)),
     },
+    // `liveview_js() -> string` (server-hmr L2) — the bundled browser client for the view/diff
+    // push protocol ([`crate::liveview::LIVEVIEW_JS`]); a handler serves it as
+    // `application/javascript`. Pure, so it is sandbox-deterministic like any string.
+    ExtFn {
+        name: "liveview_js",
+        params: &[],
+        ret: RetTy::Concrete(SigType::String),
+    },
 ];
 
 /// `Socket`'s ctx methods (server-hmr L0): `send` writes a text frame (driven to completion — a
@@ -578,6 +586,13 @@ pub fn http_ctx_dispatch(
             let handler = ctx.retain(args[0])?;
             Ok(CtxOut::Out(NativeOut::Extern(
                 noeta_native::ExternBox::new(WsUpgrade { handler }),
+            )))
+        }
+        // `server.liveview_js()` (server-hmr L2): the bundled client shim source.
+        "liveview_js" => {
+            ctx_arity(func, args, 0)?;
+            Ok(CtxOut::Out(NativeOut::Str(
+                crate::liveview::LIVEVIEW_JS.to_string(),
             )))
         }
         _ => Err(no_function_error("http", func).into()),

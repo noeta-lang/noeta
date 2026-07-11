@@ -421,6 +421,86 @@ deterministic sandbox (tests) `server.serve` instead drives a fixed, documented 
 through the handler and returns — so a served program is reproducible and terminates in-oracle,
 the inbound mirror of the client's pure responder.
 
+### WebSockets
+
+A handler upgrades a connection by returning `server.websocket(session)` — the signature stays
+`(Request) -> Response` whether it serves bodies or sockets. The `session` is an
+`async fn (Socket)` that becomes the connection's second life: it runs concurrently with the rest
+of the server and the stream closes when it returns.
+
+| Type / function | Signature | Notes |
+|---|---|---|
+| `server.websocket` | `websocket(session: (Socket) -> dyn) -> Response` | The connection-hijack response: 101 handshake, then `session(socket)` runs. |
+| `Socket.send` | `send(text: string) -> void` | Write one text frame. |
+| `Socket.recv` | `recv() -> Future<?string>` | Await the next text frame; `none` means the peer closed. |
+| `Socket.close` | `close() -> void` | End the stream early. |
+
+```noeta ignore
+use std.http.server
+use std.http.{Request, Response, Socket}
+
+async fn session(sock: Socket): bool {
+    mut going = true
+    while going {
+        msg = sock.recv().await
+        if msg == none { going = false }
+        else { sock.send("echo: ${msg ?? ""}") }
+    }
+    return true
+}
+
+fn fetch(req: Request): Response {
+    if req.path() == "/ws" { return server.websocket(session) }
+    return server.response(200, "ok")
+}
+```
+
+Real hosts speak RFC 6455 (text frames, ping/pong, clean close). Under the sandbox an upgraded
+session is driven by a fixed, documented client conversation and then a close — deterministic and
+terminating, like the request script.
+
+### LiveView — pushing reactive state to the browser
+
+The server-side [view/diff protocol](Reactivity) composes with websockets into a LiveView: the
+session exposes signals/computeds through a `view`, sends `snapshot()` on connect, applies client
+events to the signals, and pushes `diff()` — a frame containing **only what changed**. The browser
+half is a bundled ~50-line shim, available in-language:
+
+| Function | Signature | Notes |
+|---|---|---|
+| `server.liveview_js` | `liveview_js() -> string` | The bundled browser client; serve it as `application/javascript`. |
+
+The shim connects to `/ws` (override with `window.NOETA_LIVE_PATH`), renders every binding into
+elements marked `data-live="name"` (strings verbatim, other values as JSON), sends
+`{"type":"event","name":"…"}` when an element with `data-live-click="…"` is clicked, exposes
+`window.noetaLive = { state, send }`, and reconnects on close (the server re-snapshots each
+connect, so recovery is total-state). It is a patch-applier, not a component framework — the
+server renders the page however it likes.
+
+```noeta ignore
+async fn session(sock: Socket): bool {
+    v = view()
+    v.expose("count", count)
+    sock.send(v.snapshot())
+    mut going = true
+    while going {
+        msg = sock.recv().await
+        if msg == none { going = false }
+        else {
+            evt = json.parse(msg ?? "{}")
+            if evt["name"] == "increment" { count.update(fn(n) { return n + 1 }) }
+            patch = v.diff() ?? ""
+            if patch != "" { sock.send(patch) }
+        }
+    }
+    return true
+}
+```
+
+The complete runnable app — page, `/live.js` route, event dispatch — is
+`examples/liveview_counter.noe` (`noeta serve examples/liveview_counter.noe`, then open
+`http://localhost:8080`). Run it with `--watch` and edits hot-swap while signal state survives.
+
 ## `tracing`
 
 Production distributed tracing, emitted as OpenTelemetry ([Observability](Observability)). The
