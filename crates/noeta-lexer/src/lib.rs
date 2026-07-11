@@ -585,6 +585,11 @@ pub struct Lexed {
     pub tokens: Vec<Token>,
     pub diagnostics: Vec<Diagnostic>,
     pub comments: Vec<Comment>,
+    /// The text-tier names this file itself declares (`@tier(<name>, …, text: "…")`), scanned
+    /// from the token stream. Already applied to this result (the two-pass self-use in
+    /// [`lex_in`]); surfaced so multi-file callers (the loader) can union the sets across a
+    /// program and re-lex files that *use* a tier some other file declares.
+    pub text_tier_decls: Vec<String>,
 }
 
 /// The set of tier names whose `@<name> { … }` bodies are **verbatim text** rather than code
@@ -658,7 +663,7 @@ pub fn lex_with_trivia_in(source: &Source, text_tiers: &TextTiers) -> Lexed {
 }
 
 fn lex_impl(source: &Source, collect_trivia: bool, text_tiers: &TextTiers) -> Lexed {
-    let lexed = lex_pass(source, collect_trivia, text_tiers);
+    let mut lexed = lex_pass(source, collect_trivia, text_tiers);
     // Two-pass self-use: fold in text tiers this file itself declares (`@tier(x, …, text: "…")`)
     // and re-lex so their `@x { … }` bodies capture verbatim. Declaration order doesn't matter —
     // the scan sees the whole stream. At most one extra pass: the re-scan works from pass-1
@@ -667,11 +672,12 @@ fn lex_impl(source: &Source, collect_trivia: bool, text_tiers: &TextTiers) -> Le
     let declared = declared_text_tiers(source.text(), &lexed.tokens);
     if declared.iter().any(|name| !text_tiers.contains(name)) {
         let mut augmented = text_tiers.clone();
-        for name in declared {
-            augmented.insert(name);
+        for name in &declared {
+            augmented.insert(name.clone());
         }
-        return lex_pass(source, collect_trivia, &augmented);
+        lexed = lex_pass(source, collect_trivia, &augmented);
     }
+    lexed.text_tier_decls = declared;
     lexed
 }
 
@@ -770,6 +776,7 @@ fn lex_pass(source: &Source, collect_trivia: bool, text_tiers: &TextTiers) -> Le
         tokens,
         diagnostics,
         comments,
+        text_tier_decls: Vec::new(),
     }
 }
 

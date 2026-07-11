@@ -252,8 +252,24 @@ impl Pretty for Stmt {
 impl Pretty for FnDecl {
     fn pretty(&self, out: &mut String, level: usize) {
         indent(out, level);
+        // A `@tier(…)` declaration rides on its runner fn — render it so structural comparisons
+        // (e.g. the formatter's safety gate) see it: dropping the directive is a program change.
+        let tier = match &self.tier {
+            Some(t) => {
+                let config = match &t.config {
+                    Some((c, _)) => format!(", config: {c}"),
+                    None => String::new(),
+                };
+                let text = match &t.text {
+                    Some((lang, _)) => format!(", text: {lang:?}"),
+                    None => String::new(),
+                };
+                format!("@tier({}{config}{text}) ", t.name)
+            }
+            None => String::new(),
+        };
         out.push_str(&format!(
-            "({}fn {}{}{} [{}] {}",
+            "({tier}{}fn {}{}{} [{}] {}",
             if self.is_async { "async " } else { "" },
             pub_str(self.is_public),
             self.name,

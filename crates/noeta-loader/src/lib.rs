@@ -259,9 +259,18 @@ pub fn link(
     // The entry is always SourceId 0; siblings follow. Each module keeps its own source so its
     // spans stay valid and its diagnostics render against it.
     let entry = Source::new(SourceId(0), entry_name, entry_text);
-    let entry_lexed = lex(&entry);
-    let entry_parsed = parse(&entry, &entry_lexed.tokens);
-    let entry_diags: Vec<Diagnostic> = entry_lexed
+    let mut sources: Vec<Source> = vec![entry.clone()];
+    for (i, raw) in siblings.iter().enumerate() {
+        sources.push(Source::new(
+            SourceId((i + 1) as u32),
+            raw.name.as_str(),
+            raw.text.as_str(),
+        ));
+    }
+    let lexeds = lex_program(&sources);
+
+    let entry_parsed = parse(&entry, &lexeds[0].tokens);
+    let entry_diags: Vec<Diagnostic> = lexeds[0]
         .diagnostics
         .iter()
         .chain(entry_parsed.diagnostics.iter())
@@ -283,20 +292,9 @@ pub fn link(
     // Every sibling's `Source` is retained (whether or not it parsed) so the `SourceMap` indices
     // line up with the `SourceId`s the parser stamped onto spans (entry = 0, sibling i = i + 1).
     let mut module_programs: Vec<Program> = Vec::new();
-    let mut sources: Vec<Source> = vec![entry.clone()];
-    for (i, raw) in siblings.iter().enumerate() {
-        let source = Source::new(
-            SourceId((i + 1) as u32),
-            raw.name.as_str(),
-            raw.text.as_str(),
-        );
-        let lexed = lex(&source);
-        let parsed = (lexed.diagnostics.is_empty())
-            .then(|| parse(&source, &lexed.tokens))
-            .filter(|parsed| parsed.diagnostics.is_empty());
-        sources.push(source);
-        if let Some(parsed) = parsed {
-            module_programs.push(parsed.program);
+    for (source, lexed) in sources.iter().zip(&lexeds).skip(1) {
+        if let Some(program) = parse_clean(source, lexed) {
+            module_programs.push(program);
         }
     }
 
@@ -322,10 +320,36 @@ pub fn link_with_deps(
     siblings: &[RawModule],
     deps: &[DepPackage],
 ) -> Result<Linked, Vec<LoadDiagnostic>> {
+    // Assemble every module's `Source` up front — entry = 0, siblings `1..=S`, dependency modules
+    // continuing the sequence — then lex them as one program (see [`lex_program`]: a text tier
+    // declared in any file, a dependency package's included, captures verbatim bodies in every
+    // file) before any parsing.
     let entry = Source::new(SourceId(0), entry_name, entry_text);
-    let entry_lexed = lex(&entry);
-    let entry_parsed = parse(&entry, &entry_lexed.tokens);
-    let entry_diags: Vec<Diagnostic> = entry_lexed
+    let mut next_id: u32 = 1;
+    let mut sources: Vec<Source> = vec![entry.clone()];
+    for raw in siblings {
+        sources.push(Source::new(
+            SourceId(next_id),
+            raw.name.as_str(),
+            raw.text.as_str(),
+        ));
+        next_id += 1;
+    }
+    let sibling_end = sources.len();
+    for dep in deps {
+        for raw in &dep.modules {
+            sources.push(Source::new(
+                SourceId(next_id),
+                raw.name.as_str(),
+                raw.text.as_str(),
+            ));
+            next_id += 1;
+        }
+    }
+    let lexeds = lex_program(&sources);
+
+    let entry_parsed = parse(&entry, &lexeds[0].tokens);
+    let entry_diags: Vec<Diagnostic> = lexeds[0]
         .diagnostics
         .iter()
         .chain(entry_parsed.diagnostics.iter())
@@ -341,33 +365,25 @@ pub fn link_with_deps(
             .collect());
     }
 
-    let mut next_id: u32 = 1;
-    let mut sources: Vec<Source> = vec![entry.clone()];
-
-    // Parse the siblings (pure decl-sources), assigning SourceIds `1..=S`.
+    // Parse the siblings (pure decl-sources).
     let mut sibling_programs: Vec<Program> = Vec::new();
-    for raw in siblings {
-        let source = Source::new(SourceId(next_id), raw.name.as_str(), raw.text.as_str());
-        next_id += 1;
-        let parsed = parse_clean(&source);
-        sources.push(source);
-        if let Some(program) = parsed {
+    for (source, lexed) in sources[1..sibling_end].iter().zip(&lexeds[1..sibling_end]) {
+        if let Some(program) = parse_clean(source, lexed) {
             sibling_programs.push(program);
         }
     }
 
-    // Parse + re-root each dependency package's modules, continuing the SourceId sequence.
+    // Parse + re-root each dependency package's modules (the sources continue past the siblings
+    // in the same package order they were assembled above).
     let mut dep_programs: Vec<Program> = Vec::new();
+    let mut dep_idx = sibling_end;
     for dep in deps {
-        for raw in &dep.modules {
-            let source = Source::new(SourceId(next_id), raw.name.as_str(), raw.text.as_str());
-            next_id += 1;
-            let parsed = parse_clean(&source);
-            sources.push(source);
-            if let Some(mut program) = parsed {
+        for _ in &dep.modules {
+            if let Some(mut program) = parse_clean(&sources[dep_idx], &lexeds[dep_idx]) {
                 reroot_program(&mut program, &dep.root, &dep.key, &dep.dep_renames);
                 dep_programs.push(program);
             }
+            dep_idx += 1;
         }
     }
 
@@ -381,11 +397,32 @@ pub fn link_with_deps(
     })
 }
 
-/// Lex + parse a source, yielding its [`Program`] only if both are clean (a module that fails to
-/// parse cannot be resolved against and is skipped). The shared helper behind [`link`]'s sibling
-/// loop and [`link_with_deps`].
-fn parse_clean(source: &Source) -> Option<Program> {
-    let lexed = lex(source);
+/// Lex every module of a program as one unit (text-tiers arc): each file lexes with the default
+/// text-tier set first; if any file declares a text tier (`@tier(x, …, text: "…")`), the union of
+/// all declarations is applied and every file re-lexes with it — so a tier declared in one file
+/// (or one dependency package) captures `@x { … }` bodies verbatim in every other. Only programs
+/// declaring text tiers pay the second pass.
+fn lex_program(sources: &[Source]) -> Vec<noeta_lexer::Lexed> {
+    let lexeds: Vec<_> = sources.iter().map(lex).collect();
+    let declared: Vec<String> = lexeds
+        .iter()
+        .flat_map(|l| l.text_tier_decls.iter().cloned())
+        .collect();
+    let default = noeta_lexer::TextTiers::default();
+    if declared.iter().all(|name| default.contains(name)) {
+        return lexeds;
+    }
+    let set = noeta_lexer::TextTiers::with(declared);
+    sources
+        .iter()
+        .map(|source| noeta_lexer::lex_in(source, &set))
+        .collect()
+}
+
+/// Parse an already-lexed source, yielding its [`Program`] only if both lex and parse are clean
+/// (a module that fails cannot be resolved against and is skipped). The shared helper behind
+/// [`link`]'s sibling loop and [`link_with_deps`].
+fn parse_clean(source: &Source, lexed: &noeta_lexer::Lexed) -> Option<Program> {
     (lexed.diagnostics.is_empty())
         .then(|| parse(source, &lexed.tokens))
         .filter(|parsed| parsed.diagnostics.is_empty())

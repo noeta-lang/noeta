@@ -1229,6 +1229,10 @@ fn cmd_fmt(
 
     let mut failed = false; // a parse or IO error on any file
     let mut would_change = false; // `--check`: some file is not already formatted
+    // Per-directory text-tier sets (text-tiers arc): a tier declared in a sibling file or a
+    // dependency package must keep this file's `@<name> { … }` bodies verbatim.
+    let mut tier_sets: std::collections::HashMap<PathBuf, noeta_lexer::TextTiers> =
+        std::collections::HashMap::new();
 
     for file in &files {
         let dir = file.parent().unwrap_or_else(|| std::path::Path::new("."));
@@ -1247,8 +1251,13 @@ fn cmd_fmt(
                 continue;
             }
         };
+        let text_tiers = tier_sets
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| fmt_text_tiers(dir, file))
+            .clone();
 
-        match noeta_fmt::format_source(&file.to_string_lossy(), &original, &config) {
+        match noeta_fmt::format_source_in(&file.to_string_lossy(), &original, &config, &text_tiers)
+        {
             Ok(formatted) => {
                 if formatted == original {
                     continue; // already canonical — no write, no churn
@@ -1273,6 +1282,38 @@ fn cmd_fmt(
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// The project-wide text-tier set for formatting files in `dir` (text-tiers arc): the union of
+/// `@tier(…, text: "…")` declarations across the directory's sibling `.noe` files and — when the
+/// entry's package graph resolves (a manifest with dependencies) — every dependency module.
+/// Mirrors the loader's program-wide lex, so `noeta fmt` and `noeta run` agree on which bodies
+/// are verbatim. A standalone file with no siblings or manifest gets the default set (same-file
+/// declarations need no help — the lexer discovers those itself).
+fn fmt_text_tiers(dir: &std::path::Path, entry: &std::path::Path) -> noeta_lexer::TextTiers {
+    let mut names: Vec<String> = Vec::new();
+    let mut scan = |name: &str, text: &str| {
+        let source = Source::new(SourceId(0), name, text);
+        names.extend(noeta_lexer::lex(&source).text_tier_decls);
+    };
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "noe")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                scan(&path.to_string_lossy(), &text);
+            }
+        }
+    }
+    if let Ok(graph) = graph::resolve_graph(entry) {
+        for dep in &graph.packages {
+            for module in &dep.modules {
+                scan(&module.name, &module.text);
+            }
+        }
+    }
+    noeta_lexer::TextTiers::with(names)
 }
 
 /// Recursively collect every `.noe` file under `dir` (skipping dot-directories like `.git`).

@@ -197,18 +197,31 @@ impl std::error::Error for FmtError {}
 /// The output is guaranteed to (a) re-parse and (b) re-parse to the same AST modulo spans — the
 /// safety gate enforces this before returning `Ok`.
 pub fn format_source(name: &str, text: &str, config: &FmtConfig) -> Result<String, FmtError> {
+    format_source_in(name, text, config, &noeta_lexer::TextTiers::default())
+}
+
+/// [`format_source`] with an explicit text-tier set (text-tiers arc): tiers declared in *other*
+/// files (siblings, dependency packages) whose `@<name> { … }` bodies in this file must be
+/// preserved verbatim, never formatted as code. Same-file declarations need no help (the lexer's
+/// two-pass self-use); the CLI passes the project-wide set, the LSP its workspace's.
+pub fn format_source_in(
+    name: &str,
+    text: &str,
+    config: &FmtConfig,
+    text_tiers: &noeta_lexer::TextTiers,
+) -> Result<String, FmtError> {
     let source = Source::new(SourceId(0), name, text);
 
     // Lex with trivia so comments are available to the printer (reattached in F4). The token stream
     // is identical to a plain `lex`, so parsing is unaffected.
-    let lexed = noeta_lexer::lex_with_trivia(&source);
+    let lexed = noeta_lexer::lex_with_trivia_in(&source, text_tiers);
     let program = parse_checked(&source, &lexed)?;
 
-    let out = print::print_program(&program, text, &lexed.comments, config)?;
+    let out = print::print_program(&program, text, &lexed.comments, config, text_tiers)?;
 
     // Safety gate: the formatted text must parse, and parse to the same program modulo spans.
     let formatted = Source::new(SourceId(0), name, out.as_str());
-    let reparsed = parse_clean(&formatted).map_err(|_| {
+    let reparsed = parse_clean(&formatted, text_tiers).map_err(|_| {
         FmtError::Safety("formatted output does not re-parse (printer bug)".to_string())
     })?;
     if !safety::ast_equal_modulo_spans(&program, &reparsed) {
@@ -234,8 +247,25 @@ pub fn format_stmt_at(
     offset: u32,
     config: &FmtConfig,
 ) -> Option<(u32, u32, String)> {
+    format_stmt_at_in(
+        name,
+        text,
+        offset,
+        config,
+        &noeta_lexer::TextTiers::default(),
+    )
+}
+
+/// [`format_stmt_at`] with an explicit text-tier set (see [`format_source_in`]).
+pub fn format_stmt_at_in(
+    name: &str,
+    text: &str,
+    offset: u32,
+    config: &FmtConfig,
+    text_tiers: &noeta_lexer::TextTiers,
+) -> Option<(u32, u32, String)> {
     let source = Source::new(SourceId(0), name, text);
-    let lexed = noeta_lexer::lex_with_trivia(&source);
+    let lexed = noeta_lexer::lex_with_trivia_in(&source, text_tiers);
     let program = parse_checked(&source, &lexed).ok()?;
 
     let stmt = program.stmts.iter().find(|s| {
@@ -245,7 +275,7 @@ pub fn format_stmt_at(
     let span = stmt.span();
     let (start, end) = (span.start as usize, span.end as usize);
 
-    let formatted = print::print_stmt(stmt, text, &lexed.comments, config).ok()?;
+    let formatted = print::print_stmt(stmt, text, &lexed.comments, config, text_tiers).ok()?;
     if text.get(start..end) == Some(formatted.as_str()) {
         return None; // already canonical
     }
@@ -255,7 +285,8 @@ pub fn format_stmt_at(
     edited.push_str(&text[..start]);
     edited.push_str(&formatted);
     edited.push_str(&text[end..]);
-    let reparsed = parse_clean(&Source::new(SourceId(0), name, edited.as_str())).ok()?;
+    let reparsed =
+        parse_clean(&Source::new(SourceId(0), name, edited.as_str()), text_tiers).ok()?;
     if !safety::ast_equal_modulo_spans(&program, &reparsed) {
         return None;
     }
@@ -278,8 +309,27 @@ pub fn format_range(
     end: u32,
     config: &FmtConfig,
 ) -> Option<Vec<(u32, u32, String)>> {
+    format_range_in(
+        name,
+        text,
+        start,
+        end,
+        config,
+        &noeta_lexer::TextTiers::default(),
+    )
+}
+
+/// [`format_range`] with an explicit text-tier set (see [`format_source_in`]).
+pub fn format_range_in(
+    name: &str,
+    text: &str,
+    start: u32,
+    end: u32,
+    config: &FmtConfig,
+    text_tiers: &noeta_lexer::TextTiers,
+) -> Option<Vec<(u32, u32, String)>> {
     let source = Source::new(SourceId(0), name, text);
-    let lexed = noeta_lexer::lex_with_trivia(&source);
+    let lexed = noeta_lexer::lex_with_trivia_in(&source, text_tiers);
     let program = parse_checked(&source, &lexed).ok()?;
 
     let mut edits: Vec<(u32, u32, String)> = Vec::new();
@@ -287,7 +337,8 @@ pub fn format_range(
         let span = stmt.span();
         // A statement overlaps the (possibly zero-width) selection when their ranges touch.
         if span.start <= end && start <= span.end {
-            let formatted = print::print_stmt(stmt, text, &lexed.comments, config).ok()?;
+            let formatted =
+                print::print_stmt(stmt, text, &lexed.comments, config, text_tiers).ok()?;
             if text.get(span.start as usize..span.end as usize) != Some(formatted.as_str()) {
                 edits.push((span.start, span.end, formatted));
             }
@@ -307,7 +358,8 @@ pub fn format_range(
         prev = *e as usize;
     }
     edited.push_str(&text[prev..]);
-    let reparsed = parse_clean(&Source::new(SourceId(0), name, edited.as_str())).ok()?;
+    let reparsed =
+        parse_clean(&Source::new(SourceId(0), name, edited.as_str()), text_tiers).ok()?;
     if !safety::ast_equal_modulo_spans(&program, &reparsed) {
         return None;
     }
@@ -330,9 +382,13 @@ fn parse_checked(
 }
 
 /// Lex (no trivia) + parse `source` cleanly — the reparse arm of the safety gate, which only needs
-/// the AST.
-fn parse_clean(source: &Source) -> Result<noeta_ast::Program, FmtError> {
-    parse_checked(source, &noeta_lexer::lex(source))
+/// the AST. Lexes with the same text-tier set as the forward pass, so verbatim bodies compare as
+/// the same node on both sides.
+fn parse_clean(
+    source: &Source,
+    text_tiers: &noeta_lexer::TextTiers,
+) -> Result<noeta_ast::Program, FmtError> {
+    parse_checked(source, &noeta_lexer::lex_in(source, text_tiers))
 }
 
 #[cfg(test)]
@@ -353,6 +409,28 @@ mod tests {
                 ..FmtConfig::default()
             },
         )
+    }
+
+    #[test]
+    fn text_tier_bodies_are_preserved_verbatim() {
+        // Text-tiers arc: a `@doc`/declared-text-tier body is raw prose — the formatter must keep
+        // it byte-identical (odd spacing, escapes, punctuation and all), while still formatting
+        // the code around it.
+        let src = "@doc {\n    weird   spacing, a \\} escaped brace, \"quotes\"\n}\nfn   f(): int { return 1 }\n";
+        let out = fmt(src).unwrap();
+        assert!(out.contains("\n    weird   spacing, a \\} escaped brace, \"quotes\"\n"));
+        assert!(out.contains("fn f(): int"));
+        // A tier declared `text:` in the same file gets the same treatment through the explicit
+        // set entry point (what the CLI/LSP pass for cross-file declarations).
+        let src = "@tier(spec, text: \"xml\")\nfn r(roots: List<TierText>): void { return }\n@spec {\n  <a  b=\"c\"/>\n}\n";
+        let out = format_source_in(
+            "test.noe",
+            src,
+            &FmtConfig::default(),
+            &noeta_lexer::TextTiers::default(),
+        )
+        .unwrap();
+        assert!(out.contains("\n  <a  b=\"c\"/>\n"), "got:\n{out}");
     }
 
     #[test]

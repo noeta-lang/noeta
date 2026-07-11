@@ -2524,6 +2524,74 @@ fn a_dependency_declared_tier_dispatches_cross_package() {
         .stdout(predicate::str::is_empty());
 }
 
+/// A consumer app + a `speckit` path dependency declaring a **text** tier (text-tiers arc). The
+/// consumer writes `@spec { <xml/> }` bodies with no local declaration at all — the loader's
+/// program-wide lex (union of every package's `@tier(…, text:)` decls) is what makes the body
+/// capture verbatim across the package boundary.
+fn text_tier_dep_project(name: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("speckit");
+    std::fs::create_dir_all(&app).expect("mk app");
+    std::fs::create_dir_all(&lib).expect("mk lib");
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nspeckit = { path = \"../speckit\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use speckit.tiers.run_specs\n\
+         @spec {\n  <case name=\"adds\" expect=\"3\"/>\n}\n\
+         fn add(a: int, b: int): int { return a + b }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/spec\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("tiers.noe"),
+        "namespace spec.tiers;\n\
+         @tier(spec, text: \"xml\")\n\
+         pub fn run_specs(roots: List<TierText>): void {\n\
+             echo \"speckit: ${roots.len()} bodies\"\n\
+             for root in roots {\n\
+                 echo \"-- ${root.target}\"\n\
+                 echo root.text\n\
+             }\n\
+         }\n",
+    )
+    .unwrap();
+    app.join("main.noe")
+}
+
+#[test]
+fn a_dependency_declared_text_tier_captures_cross_package() {
+    // The third-party text-tier proof: the declaration lives in a path dependency; the consumer's
+    // `@spec { … }` XML body (quotes and all — invalid as Noeta tokens) still captures verbatim,
+    // targets the adjacent fn, and dispatches to the dependency's runner.
+    let entry = text_tier_dep_project("text_tier_dep");
+    lang().arg("spec").arg(&entry).assert().success().stdout(
+        predicate::str::contains("speckit: 1 bodies")
+            .and(predicate::str::contains("-- add"))
+            .and(predicate::str::contains(
+                "<case name=\"adds\" expect=\"3\"/>",
+            )),
+    );
+    // The same program runs and checks clean with the tier stripped.
+    lang()
+        .arg("run")
+        .arg(&entry)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+    lang().arg("check").arg(&entry).assert().success();
+}
+
 #[test]
 fn a_path_dependency_resolves_and_runs() {
     let entry = path_dep_project("pm_pathdep_run");

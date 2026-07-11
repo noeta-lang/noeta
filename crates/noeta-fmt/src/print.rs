@@ -72,12 +72,13 @@ pub fn print_program(
     source: &str,
     comments: &[Comment],
     config: &FmtConfig,
+    text_tiers: &noeta_lexer::TextTiers,
 ) -> Result<String, FmtError> {
     let p = Printer {
         source,
         comments,
         cursor: Cell::new(0),
-        code_tokens: code_tokens(source),
+        code_tokens: code_tokens(source, text_tiers),
         config,
     };
     let doc = p.stmt_seq(&program.stmts, program.span.start, program.span.end)?;
@@ -107,6 +108,7 @@ pub fn print_stmt(
     source: &str,
     comments: &[Comment],
     config: &FmtConfig,
+    text_tiers: &noeta_lexer::TextTiers,
 ) -> Result<String, FmtError> {
     let cursor = comments
         .iter()
@@ -116,7 +118,7 @@ pub fn print_stmt(
         source,
         comments,
         cursor: Cell::new(cursor),
-        code_tokens: code_tokens(source),
+        code_tokens: code_tokens(source, text_tiers),
         config,
     };
     let doc = p.stmt(stmt)?;
@@ -148,8 +150,8 @@ struct Printer<'a> {
 /// The `(start, kind)` of every non-`;` token in `source`, in order — the lookup behind
 /// [`Printer::layout_terminates`]. Synthetic and explicit `;` are dropped so a search finds the next
 /// *content* token, and the natural token order keeps the vec sorted by `start` for a partition search.
-fn code_tokens(source: &str) -> Vec<(u32, TokenKind)> {
-    noeta_lexer::lex(&Source::new(SourceId(0), "<fmt>", source))
+fn code_tokens(source: &str, text_tiers: &noeta_lexer::TextTiers) -> Vec<(u32, TokenKind)> {
+    noeta_lexer::lex_in(&Source::new(SourceId(0), "<fmt>", source), text_tiers)
         .tokens
         .iter()
         .filter(|t| t.kind != TokenKind::Semicolon)
@@ -522,13 +524,28 @@ impl Printer<'_> {
                     ])
                 };
                 match doc_text {
-                    // `@doc { … }` — a text tier: emit the body verbatim (it is free-form prose).
-                    Some(text) => Ok(Doc::concat([
-                        head,
-                        Doc::text(" {"),
-                        Doc::raw_text(text.clone()),
-                        Doc::text("}"),
-                    ])),
+                    // A text tier (`@doc { … }` or a declared `text:` tier): emit the body
+                    // verbatim from the *raw source* between the braces — `doc_text` is the
+                    // unescaped content view (`\{` → `{`), and printing it would drop the escapes
+                    // and unbalance the block. The formatter re-emits source, escapes included.
+                    Some(text) => {
+                        let raw_body = self
+                            .source
+                            .get(span.start as usize..span.end as usize)
+                            .and_then(|s| {
+                                let open = s.find('{')?;
+                                let close = s.rfind('}')?;
+                                (open < close).then(|| s[open + 1..close].to_string())
+                            })
+                            // Degenerate span (synthesized AST) — the content view is all there is.
+                            .unwrap_or_else(|| text.clone());
+                        Ok(Doc::concat([
+                            head,
+                            Doc::text(" {"),
+                            Doc::raw_text(raw_body),
+                            Doc::text("}"),
+                        ]))
+                    }
                     // A code tier (`@test`/`@bench`/`@debug`): its items are ordinary statements.
                     None => Ok(Doc::concat([
                         head,
@@ -637,6 +654,20 @@ impl Printer<'_> {
 
     fn fn_decl(&self, decl: &FnDecl) -> Result<Doc, FmtError> {
         let mut parts = self.attrs(&decl.attrs)?;
+        // A `@tier(…)` declaration rides on its runner fn (tier-providers T2) — re-emit it on its
+        // own line above the header, exactly as written (name, then `config:`/`text:`).
+        if let Some(t) = &decl.tier {
+            let mut directive = format!("@tier({}", t.name);
+            if let Some((config, _)) = &t.config {
+                directive.push_str(&format!(", config: {config}"));
+            }
+            if let Some((lang, _)) = &t.text {
+                directive.push_str(&format!(", text: {lang:?}"));
+            }
+            directive.push(')');
+            parts.push(Doc::text(directive));
+            parts.push(Doc::hardline());
+        }
         if decl.is_public {
             parts.push(Doc::text("pub "));
         }
