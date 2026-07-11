@@ -87,6 +87,7 @@ async fn drain(): void {
 
 - `p2p.publish(topic, message: string | bytes)` — broadcast to everyone on the topic.
 - `p2p.receive(topic): Future<?bytes>` — the next message (`await` it); `none` once there is nothing more.
+- `p2p.identity(): ?string` — this node's stable identity (the hex Ed25519 public key it signs with); `none` under the sandbox, which has no network identity.
 
 Topics are independent broadcast channels: every subscriber sees every message, and receiving from an empty topic yields `none` immediately.
 

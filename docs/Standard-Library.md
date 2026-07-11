@@ -59,6 +59,7 @@ xs[1] = 20             // sugar for  xs = xs.set(1, 20)  (needs a mut binding)
 | `first` | `first() -> ?T` | `[1,2].first()` → `some(1)`; `[].first()` → `none` |
 | `last` | `last() -> ?T` | `[1,2].last()` → `some(2)` |
 | `to_set` | `to_set() -> Set<T>` | `[3,1,2,1].to_set()` → `{1, 2, 3}` |
+| `to_bytes` | `to_bytes() -> bytes` | on a `List<@packed>`, its flat backing buffer (see [packed types](Standard-Library-Modules)) |
 | `set` | `set(i: int, v: T) -> List<T>` | `[1,2,3].set(2, 30)` → `[1, 2, 30]` |
 | `len` | `len() -> int` | `[1,2,3].len()` → `3` |
 | `enumerate` | `enumerate() -> List<(int, T)>` | `["a","b"].enumerate()` → `[(0, "a"), (1, "b")]` |

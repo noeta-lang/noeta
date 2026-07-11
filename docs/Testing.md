@@ -84,6 +84,8 @@ noeta test [OPTIONS] <FILE>
 | `--fail-fast` | Stop after the first failing test. |
 | `-j, --jobs <N>` | Number of tests to run concurrently (default: machine parallelism). |
 | `--group <NAME>` | Run only tests tagged `#[Group("<NAME>")]`. |
+| `--name <NAME>` | Run only the test function(s) with this exact name. Repeatable; composes with `--group`. (This is the seam the editor test explorer uses.) |
+| `--json` | Emit a single machine-readable JSON report on stdout instead of the human table (per-test stdout captured, not interleaved) — for CI and editors. |
 | `--profile <NAME>` | Only run when the `test` tier is live in this `noeta.toml` build profile; otherwise no-op with exit `0`. |
 
 ### Report format

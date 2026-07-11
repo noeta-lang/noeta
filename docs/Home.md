@@ -31,12 +31,14 @@ Learn the language from zero.
 ### 2 · Bundled tools
 Everything the `noeta` binary does beyond running code.
 - [The `noeta` CLI](The-CLI)
+- [Package Provenance](Package-Provenance)
 - [Testing](Testing)
 - [Benchmarking](Benchmarking)
 - [Documentation & Dev Tiers](Documentation-and-Tiers)
 - [Editor & AI Tooling (highlighting / LSP)](Editor-and-AI-Tooling)
 - [Debugging (`noeta dap`)](Debugging)
 - [Profiling (`noeta profile`)](Profiling)
+- [Observability](Observability)
 
 ### 3 · Language & standard-library reference
 The exhaustive reference for syntax, semantics, and the stdlib.
@@ -52,6 +54,7 @@ The exhaustive reference for syntax, semantics, and the stdlib.
 - [Attributes & Reflection](Attributes-and-Reflection)
 - [Concurrency](Concurrency)
 - [Reactivity](Reactivity)
+- [Local-First & P2P](Local-First-and-P2P)
 - [Standard Library](Standard-Library)
 - [Standard-Library Modules](Standard-Library-Modules)
 

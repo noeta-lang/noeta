@@ -49,6 +49,10 @@ Traits are a **fixed built-in set** — naming an unknown one is E0014. Operator
 | `Comparable` | `compare(other): Ordering` | `< <= > >=` |
 | `Display` | `to_string(): string` | `echo`, `${…}` |
 | `Add` | `add(other): T` | `+` |
+| `Sub` | `sub(other): T` | `-` |
+| `Mul` | `mul(other): T` | `*` |
+| `Div` | `div(other): T` | `/` |
+| `Concat` | `concat(other): T` | `~` |
 | `TryAdd` | `try_add(other): Result<T, E>` | fallible `+` (via `?`) |
 | `Index` | `get(i): T` | `a[i]` |
 | `Length` | `len(): int` | `x.len()` on a `<T: Length>` parameter |

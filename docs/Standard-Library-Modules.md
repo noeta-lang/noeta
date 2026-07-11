@@ -109,6 +109,8 @@ Host introspection. Under the sandbox the fixture is `HOME=/home/sandbox`, `USER
 | `env.get` | `get(key: string) -> string` | Missing key is E0021. |
 | `env.set` | `set(key: string, value: string) -> void` | Writes the **program's view** of the environment: reads observe it, `os.exec` children inherit it; the parent process is untouched. |
 | `env.keys` | `keys() -> List<string>` | Sorted. |
+| `env.parse` | `parse(s: string) -> Map<string, string>` | Parse `.env`-format text into a map (no environment mutation). |
+| `env.load` | `load(path?: string) -> Map<string, string>` | Load a `.env` file (default `.env`), applying its entries as defaults under real-env-wins precedence. |
 | `args.all` | `all() -> List<string>` | Process arguments. |
 
 ## `os`
@@ -225,7 +227,7 @@ The concurrency combinators ([Concurrency](Concurrency)): `sleep(ms) -> Future<v
 
 ## `crdt`, `p2p`, `synced`
 
-The local-first / peer-to-peer stack ([Local-First & P2P](Local-First-and-P2P)): `crdt` builds conflict-free replicated values (`gcounter`/`pncounter`/`gset`) that `.merge` to convergence; `p2p` publishes/receives messages over topics (`publish`, `receive(topic) -> Future<?bytes>`); `synced` fuses them with reactivity — `synced_signal(initial, topic)` where `initial: Mergeable` is a [reactive](Reactivity) signal holding a CRDT, converging over p2p (`.get`/`.merge`/`.sync`). Misuse maps onto E0007/E0025 as noted on that page.
+The local-first / peer-to-peer stack ([Local-First & P2P](Local-First-and-P2P)): `crdt` builds conflict-free replicated values (`gcounter`/`pncounter`/`gset`) that `.merge` to convergence; `p2p` publishes/receives messages over topics (`publish`, `receive(topic) -> Future<?bytes>`) and reports this node's stable identity (`identity() -> ?string`, the hex public key); `synced` fuses them with reactivity — `synced_signal(initial, topic)` where `initial: Mergeable` is a [reactive](Reactivity) signal holding a CRDT, converging over p2p (`.get`/`.merge`/`.sync`). Misuse maps onto E0007/E0025 as noted on that page.
 
 ## `cell`
 
