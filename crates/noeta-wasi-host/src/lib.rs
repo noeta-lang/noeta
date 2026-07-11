@@ -54,6 +54,10 @@ pub struct WasiHost {
     /// The p2p backing: the in-process loopback broker (single-node, the same type the sandbox
     /// and ring-p2p-less `RealHost` use), so a p2p/synced program runs locally without peers.
     p2p: noeta_stdlib::P2pBroker,
+    /// The one-request inbound script (P-WASM W4): armed by [`WasiHost::with_inbound`] for a
+    /// `wasi:http` handler invocation. `None` on the plain runner, where serving stays an honest
+    /// error pointing at the serve build.
+    inbound: Option<Inbound>,
     /// Telemetry state: in-flight spans are tracked (so `tel_span_context` and parenting stay
     /// correct for explicit `std.tracing` use) but there is no exporter — every signal reports
     /// disabled and ended spans drop at the null sink. An OTLP path needs outbound HTTP, so it
@@ -81,6 +85,7 @@ impl WasiHost {
             args: std::env::args().collect(),
             env_overlay: HashMap::new(),
             p2p: noeta_stdlib::P2pBroker::default(),
+            inbound: None,
             tel: WasiTelemetry::default(),
         }
     }
@@ -90,6 +95,20 @@ impl WasiHost {
     pub fn with_args(mut self, args: Vec<String>) -> WasiHost {
         self.args = args;
         self
+    }
+
+    /// Arm the one-request inbound script (P-WASM W4): the `wasi:http` handler model inverted
+    /// onto the accept-loop `Network` capability, exactly the deterministic sandbox's shape — a
+    /// served program accepts this request, replies, sees `None` on the next accept, and its
+    /// `http.serve` loop returns. The reply lands in the returned [`ReplySlot`] (the host itself
+    /// is consumed by the VM, so the slot is the post-run channel — the sandbox's sink pattern).
+    pub fn with_inbound(mut self, request: NetRequest) -> (WasiHost, ReplySlot) {
+        let slot: ReplySlot = std::sync::Arc::default();
+        self.inbound = Some(Inbound {
+            request: Some(request),
+            reply: std::sync::Arc::clone(&slot),
+        });
+        (self, slot)
     }
 
     /// The sorted base names of the entries in directory `dir` — the blocking analogue of
@@ -111,6 +130,17 @@ impl Default for WasiHost {
     fn default() -> WasiHost {
         WasiHost::new()
     }
+}
+
+/// Where a served program's reply lands (see [`WasiHost::with_inbound`]).
+pub type ReplySlot = std::sync::Arc<std::sync::Mutex<Option<NetResponse>>>;
+
+/// The armed one-request script: the pending request (taken by the first accept) and the shared
+/// slot the reply is written into.
+#[derive(Debug)]
+struct Inbound {
+    request: Option<NetRequest>,
+    reply: ReplySlot,
 }
 
 /// Build an `ErrorKind::Io` (`E0021`) error from a WASI failure.
@@ -352,16 +382,32 @@ impl Network for WasiHost {
     }
 
     fn net_listen(&mut self, _addr: &str) -> Result<u64, StdError> {
-        Err(no_network("serving (`http.serve`)"))
+        // Armed (a `wasi:http` handler invocation, W4): one listener serving the one-request
+        // script; the bind address is the platform's concern, not the guest's — ignored, like
+        // the sandbox. Unarmed (the plain runner): an honest error.
+        match &self.inbound {
+            Some(_) => Ok(1),
+            None => Err(no_network("serving (`http.serve`)")),
+        }
     }
 
     fn net_accept_next(&mut self, _listener: u64) -> Result<Option<(u64, NetRequest)>, StdError> {
-        // Unreachable in practice — `net_listen` already refused — but stay honest if called.
-        Err(no_network("serving (`http.serve`)"))
+        match &mut self.inbound {
+            // The script: this invocation's request once, then `None` — so the serve loop
+            // returns and the per-request VM run terminates (the sandbox's exact model).
+            Some(inbound) => Ok(inbound.request.take().map(|request| (1, request))),
+            None => Err(no_network("serving (`http.serve`)")),
+        }
     }
 
-    fn net_reply_now(&mut self, _conn: u64, _response: NetResponse) -> Result<(), StdError> {
-        Err(no_network("serving (`http.serve`)"))
+    fn net_reply_now(&mut self, _conn: u64, response: NetResponse) -> Result<(), StdError> {
+        match &self.inbound {
+            Some(inbound) => {
+                *inbound.reply.lock().expect("reply slot not poisoned") = Some(response);
+                Ok(())
+            }
+            None => Err(no_network("serving (`http.serve`)")),
+        }
     }
 }
 
@@ -569,6 +615,40 @@ mod tests {
         let e1 = host.entropy_u64();
         let e2 = host.entropy_u64();
         assert_ne!(e1, e2, "two entropy draws colliding is ~impossible");
+    }
+
+    #[test]
+    fn inbound_script_serves_one_request_then_ends() {
+        let (mut host, reply) = WasiHost::new().with_inbound(NetRequest {
+            method: "GET".into(),
+            url: "/ping".into(),
+            headers: vec![("x-a".into(), "1".into())],
+            body: Vec::new(),
+        });
+        let listener = host.net_listen("ignored:0").expect("armed listener");
+        let (conn, request) = host
+            .net_accept_next(listener)
+            .expect("accept works")
+            .expect("the one scripted request");
+        assert_eq!(request.url, "/ping");
+        // The script is finite: the next accept ends the serve loop.
+        assert!(
+            host.net_accept_next(listener)
+                .expect("accept works")
+                .is_none()
+        );
+        host.net_reply_now(
+            conn,
+            NetResponse {
+                status: 200,
+                headers: Vec::new(),
+                body: b"pong".to_vec(),
+            },
+        )
+        .expect("reply lands");
+        let landed = reply.lock().expect("slot").take().expect("reply captured");
+        assert_eq!(landed.status, 200);
+        assert_eq!(landed.body, b"pong");
     }
 
     #[test]

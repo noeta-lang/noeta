@@ -1,6 +1,6 @@
 # WASM target arc (P-WASM) — playground + edge
 
-**Status: W0 + W1 COMPLETE (branch `wasm-target`) — the edge foundation ships; W2 (playground) next.** Goal: make wasm a first-class deployment target driven by two
+**Status: W0–W4 COMPLETE (branch `wasm-target`) — both use cases delivered: single-artifact edge binaries + `wasi:http` serve components, and the in-browser playground with IDE-grade smarts. Remaining: recorded follow-ups (W3.1 pump, component staple, outgoing-handler, docs/hosted-platform pass, CodeMirror UI).** Goal: make wasm a first-class deployment target driven by two
 confirmed use cases (user, 2026-07-11): **an in-browser playground on noeta.dev** (the whole
 toolchain — lex/parse/check/compile/run — client-side) and **edge deployments** (Noeta programs
 running on wasmtime/Fastly/Spin-class runtimes, ultimately serving HTTP via `wasi:http`). This is
@@ -112,9 +112,9 @@ Edge platforms (wasmtime `serve`, Fastly, Spin) speak **wasip2 components** with
 
 | # | Slice | Depends | Notes |
 |---|---|---|---|
-| W4.0 | wasip2 target + component build | W1.2 | `wasm32-wasip2` (or wasip1 + adapter), `wit-bindgen`/`cargo-component` wiring for the runner. |
-| W4.1 | `wasi:http` ↔ inbound `Network` | W4.0 | Implement the incoming-handler world over the same `Request` extern / `http.response` surface the bundled server uses (HTTP-server arc S0–S6); outbound client over `wasi:http/outgoing-handler`, closing W1.0's Network gap. |
-| W4.2 | edge deploy proof + docs | W4.1 | One real handler deployed under `wasmtime serve` + one hosted platform; a `docs/` page: "deploying Noeta to the edge". |
+| W4.0 | wasip2 target + component build | W1.2 | ✅ **DONE**. No `cargo-component`/`wit-bindgen` needed: Rust's native `wasm32-wasip2` target emits a component directly, and the `wasi` crate (0.14) provides the proxy-world bindings + `export!` macro. `noeta-wasm-serve` (cdylib+rlib): the target-agnostic core (request → per-request VM run → response over neutral `NetRequest`/`NetResponse`) is natively unit-tested; the `wasi:http` type glue is `cfg`'d to the wasi target. The program bakes in at build time (`NOETA_SERVE_BUNDLE` → `include_bytes!`; an empty placeholder lets the crate check appless — and LTO then deletes the whole VM, 69 KB vs 2.05 MB, an accidental proof of the DCE). Staple-into-*component* (the no-cargo path) = recorded follow-up. |
+| W4.1 | `wasi:http` ↔ inbound `Network` | W4.0 | ✅ **DONE — zero VM changes.** The inversion: a wasi:http component is invoked *per request*, and the sandbox already models inbound serving as a **finite request script that ends the serve loop**. So `WasiHost` gained `with_inbound(request) → (host, ReplySlot)`: `net_listen` arms, the first `net_accept_next` yields the one request, the next yields `None` (the serve loop returns), `net_reply_now` lands in the shared slot (the sandbox's sink pattern — the host is consumed by the VM). Unchanged `server.serve(port, handler)` programs work verbatim; a program that never replies answers a diagnostic **500** carrying its stdout/diagnostics. Per-request VM instantiation matches the platform's own per-request component model. Outbound client over `wasi:http/outgoing-handler` (closing W1.0's gap) = follow-up. |
+| W4.2 | `noeta build --serve` + e2e | W4.1 | ✅ **DONE**. CLI verb: compile → bundle → cargo-bake the component (`wasm32-wasip2` + `wasm-release`) → `<app>.serve.wasm`; deploy with `wasmtime serve -S cli=y app.serve.wasm` (`-S cli=y` because Rust std imports the cli world beyond the proxy world). E2E proven live: `curl /ping` → `200 "edge says hi: /ping"`; scripted as `crates/noeta-wasm-serve/tests/e2e.sh` in the CI `wasm` job. Hosted-platform proof (Fastly/Spin) + a docs page = the arc's remaining docs pass. |
 
 ## Out of scope (this arc) — each with its revisit condition
 

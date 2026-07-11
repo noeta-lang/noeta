@@ -165,6 +165,13 @@ enum Command {
         /// (interim; needs cargo + the `wasm32-wasip1` target).
         #[arg(long)]
         wasm: bool,
+        /// Emit a **wasi:http serve component** (P-WASM W4): the program is baked into the
+        /// `noeta-wasm-serve` component (wasm32-wasip2), whose `wasi:http/incoming-handler`
+        /// export runs the program's `http.serve` handler once per request. Deploy on any
+        /// component host: `wasmtime serve -S cli=y app.serve.wasm`. Interim: rebuilds the
+        /// component via cargo (needs the `wasm32-wasip2` target).
+        #[arg(long)]
+        serve: bool,
         /// Activate a dev-tier for this build, e.g. `--tier debug`. Repeatable.
         #[arg(long)]
         tier: Vec<String>,
@@ -462,9 +469,19 @@ pub fn run_cli(
             exe,
             native,
             wasm,
+            serve,
             tier,
             profile,
-        } => cmd_build(&file, out.as_deref(), exe, native, wasm, &tier, &profile),
+        } => cmd_build(
+            &file,
+            out.as_deref(),
+            exe,
+            native,
+            wasm,
+            serve,
+            &tier,
+            &profile,
+        ),
         Command::Dump {
             file,
             tier,
@@ -2328,20 +2345,22 @@ fn cmd_dump(file: &std::path::Path, tiers: &[String], profile: &Option<String>) 
 /// (`noeta_bundle::write`, run by `noeta run app.noeb`) or — with `--exe` — as a self-contained
 /// executable that runs the program on its own (`emit_exe`). Either artifact carries no `.noe`
 /// source. A type error prints diagnostics and exits non-zero, like `run`.
+#[allow(clippy::too_many_arguments)]
 fn cmd_build(
     file: &std::path::Path,
     out: Option<&std::path::Path>,
     exe: bool,
     native: bool,
     wasm: bool,
+    serve: bool,
     tiers: &[String],
     profile: &Option<String>,
 ) -> ExitCode {
     if let Some(code) = compose::maybe_delegate(file) {
         return code;
     }
-    if usize::from(exe) + usize::from(native) + usize::from(wasm) > 1 {
-        eprintln!("lang: --exe, --native, and --wasm are mutually exclusive");
+    if usize::from(exe) + usize::from(native) + usize::from(wasm) + usize::from(serve) > 1 {
+        eprintln!("lang: --exe, --native, --wasm, and --serve are mutually exclusive");
         return ExitCode::from(2);
     }
     // Same whole-file compile + startup cache as `run`/`dump`. The emit format doesn't affect the
@@ -2357,6 +2376,8 @@ fn cmd_build(
         emit_exe(file, out, module)
     } else if wasm {
         emit_wasm(file, out, module)
+    } else if serve {
+        emit_serve(file, out, module)
     } else {
         emit_bundle(file, out, module)
     }
@@ -2487,6 +2508,84 @@ fn emit_wasm(
                 "wrote {} ({} bytes, single wasm artifact)",
                 out_path.display(),
                 image.len()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("lang: cannot write {}: {err}", out_path.display());
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Emit `module` as a **wasi:http serve component** (P-WASM W4): bake its bundle into the
+/// `noeta-wasm-serve` component via a workspace cargo build (the bundle is `include_bytes!`-ed
+/// at compile time, so unlike `--wasm` there is no prebuilt artifact to patch — a per-app
+/// rebuild is inherent to this interim path; a staple-into-component rewrite is the recorded
+/// follow-up). Writes to `out` if given, else `<input>.serve.wasm`. Deploy:
+/// `wasmtime serve -S cli=y app.serve.wasm`.
+fn emit_serve(
+    file: &std::path::Path,
+    out: Option<&std::path::Path>,
+    module: &noeta_bytecode::Module,
+) -> ExitCode {
+    let blob = noeta_bundle::write(module);
+    // The bundle must live on disk for the component's build script to embed.
+    let staging =
+        std::env::temp_dir().join(format!("noeta-serve-bundle-{}.noeb", std::process::id()));
+    if let Err(err) = std::fs::write(&staging, &blob) {
+        eprintln!("lang: cannot stage the bundle: {err}");
+        return ExitCode::from(2);
+    }
+    let output = std::process::Command::new("cargo")
+        .args([
+            "build",
+            "-p",
+            "noeta-wasm-serve",
+            "--target",
+            "wasm32-wasip2",
+            "--profile",
+            "wasm-release",
+        ])
+        .env("NOETA_SERVE_BUNDLE", &staging)
+        .output();
+    std::fs::remove_file(&staging).ok();
+    match output {
+        Err(err) => {
+            eprintln!("lang: cannot run cargo to build the serve component: {err}");
+            return ExitCode::from(2);
+        }
+        Ok(output) if !output.status.success() => {
+            eprintln!(
+                "lang: building the serve component failed (is the wasm32-wasip2 target                  installed? `rustup target add wasm32-wasip2`):
+{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return ExitCode::from(2);
+        }
+        Ok(_) => {}
+    }
+    let artifact = match workspace_target_dir() {
+        Ok(dir) => dir
+            .join("wasm32-wasip2")
+            .join("wasm-release")
+            .join("noeta_wasm_serve.wasm"),
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let out_path = out.map(std::path::Path::to_path_buf).unwrap_or_else(|| {
+        let mut name = file.file_stem().unwrap_or_default().to_os_string();
+        name.push(".serve.wasm");
+        file.with_file_name(name)
+    });
+    match std::fs::copy(&artifact, &out_path) {
+        Ok(bytes) => {
+            eprintln!(
+                "wrote {} ({bytes} bytes, wasi:http component — `wasmtime serve -S cli=y {}`)",
+                out_path.display(),
+                out_path.display(),
             );
             ExitCode::SUCCESS
         }

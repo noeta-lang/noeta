@@ -61,6 +61,9 @@ noeta-wasm-runner = { path = "crates/noeta-wasm-runner" }
 # The in-browser toolchain cdylib (P-WASM W2): the noeta.dev playground engine — check/run/fmt
 # over the deterministic sandbox, compiled to wasm32-unknown-unknown behind a hand-rolled ABI.
 noeta-playground = { path = "crates/noeta-playground" }
+# The edge-serve component (P-WASM W4): `http.serve` handlers as wasi:http components for
+# wasmtime-serve-class platforms (wasm32-wasip2).
+noeta-wasm-serve = { path = "crates/noeta-wasm-serve" }
 # M2 reactivity core (signal/computed/effect graph — value-generic, backend-driven)
 noeta-reactive = { path = "crates/noeta-reactive" }
 # M3 CRDT convergence core (p2p/local-first P0): state-based merge algebra — dep-free, value-less,
@@ -100,6 +103,9 @@ getrandom = "0.3"
 # Dev-only (P-WASM W1.2 tests): build synthetic wasm modules and re-validate `staple_wasm`'s
 # output with a full IR parse. The shipping patcher is a hand-rolled section-level rewrite.
 walrus = "0.26"
+# wasi 0.2 bindings for the edge-serve component (P-WASM W4): the `wasi:http/incoming-handler`
+# export + proxy-world types. Target-gated to wasm32-wasip2 in the consuming crate.
+wasi = "0.14"
 # The machine hostname for RealHost's `Os` capability (stdlib-gaps) — std has no hostname API;
 # this is the zero-dep libc/WinAPI wrapper.
 gethostname = "1"
