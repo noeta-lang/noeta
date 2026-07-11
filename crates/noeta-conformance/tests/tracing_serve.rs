@@ -409,3 +409,97 @@ fn serve_span_status_reflects_5xx_only() {
         "only the 5xx span is an error"
     );
 }
+
+/// L4 (native-otel T5e) — opt-in reactive-flush telemetry. With `NOETA_TRACE_REACTIVE` set (the
+/// program's own env view suffices), every non-empty flush emits a `reactive.flush` span whose
+/// attributes count the effects run and the distinct changed nodes, a `view.diff` emits its
+/// dirty-inspected/actually-pushed counts, and a span created *inside* an effect body parents
+/// under its flush span — reactive propagation joins the trace. Backend parity is asserted by
+/// the harness (byte-identical spans).
+#[test]
+fn reactive_flush_spans_are_opt_in_and_carry_propagation_counts() {
+    let spans = emitted_spans(
+        "use std.{env, tracing}\n\
+         use std.reactive.{signal, computed, effect, view}\n\
+         env.set(\"NOETA_TRACE_REACTIVE\", \"1\")\n\
+         count = signal(1)\n\
+         double = computed(fn() { return count.get() * 2 })\n\
+         v = view()\n\
+         v.expose(\"count\", count)\n\
+         v.expose(\"double\", double)\n\
+         effect(fn() {\n\
+         \x20   tracing.with_span(\"inside\", fn(): void {})\n\
+         \x20   count.get()\n\
+         })\n\
+         count.set(2)\n\
+         v.diff()\n",
+    );
+
+    let flushes: Vec<_> = spans
+        .iter()
+        .filter(|s| s.name == "reactive.flush")
+        .collect();
+    assert_eq!(
+        flushes.len(),
+        2,
+        "one span per non-empty flush: effect creation + the set"
+    );
+    for f in &flushes {
+        assert_eq!(
+            attr(f, "reactive.effects"),
+            Some(&AttrValue::Int(1)),
+            "each flush ran the one effect"
+        );
+    }
+    assert_eq!(
+        attr(flushes[0], "reactive.changed"),
+        Some(&AttrValue::Int(0)),
+        "the creation flush changed nothing"
+    );
+    assert_eq!(
+        attr(flushes[1], "reactive.changed"),
+        Some(&AttrValue::Int(2)),
+        "the set changed the signal and dirtied its computed"
+    );
+
+    // The effect body's own span parents under the flush that ran it (both runs of the effect).
+    let insides: Vec<_> = spans.iter().filter(|s| s.name == "inside").collect();
+    assert_eq!(
+        insides.len(),
+        2,
+        "the effect ran at creation and at the set"
+    );
+    for (inside, flush) in insides.iter().zip(&flushes) {
+        assert_eq!(
+            inside.parent.as_ref().map(|c| c.span_id),
+            Some(flush.context.span_id),
+            "an effect-body span nests under its flush"
+        );
+    }
+
+    let diffs: Vec<_> = spans.iter().filter(|s| s.name == "view.diff").collect();
+    assert_eq!(diffs.len(), 1);
+    assert_eq!(attr(diffs[0], "view.dirty"), Some(&AttrValue::Int(2)));
+    assert_eq!(attr(diffs[0], "view.pushed"), Some(&AttrValue::Int(2)));
+}
+
+/// The flag off (the default): the same reactive program emits NO reactive/view spans — per-flush
+/// tracing is opt-in, and the off path is one cached-bool branch.
+#[test]
+fn reactive_flush_spans_are_absent_without_the_flag() {
+    let spans = emitted_spans(
+        "use std.reactive.{signal, effect, view}\n\
+         count = signal(1)\n\
+         v = view()\n\
+         v.expose(\"count\", count)\n\
+         effect(fn() { count.get() })\n\
+         count.set(2)\n\
+         v.diff()\n",
+    );
+    assert!(
+        spans
+            .iter()
+            .all(|s| s.name != "reactive.flush" && s.name != "view.diff"),
+        "no reactive spans without NOETA_TRACE_REACTIVE: {spans:?}"
+    );
+}

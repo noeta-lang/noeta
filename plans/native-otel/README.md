@@ -274,8 +274,10 @@ so tracing calls in un-configured programs are ~free (the perf gate below).
   `tel_enabled()` virtual call cost pingpong_coop **+3.2%** → cached as a `Vm` bool at load →
   re-measured **+0.4% / −0.1%** (flat, cumulative T5a–d vs pre-T5a). T3's explicit string form
   remains (interop with non-Noeta peers).
-- **T5e — deferred (own follow-on).** **Reactive-flush spans behind an opt-in flag** (per-signal-
-  flush tracing is too noisy by default).
+- **T5e — ✅ LANDED as server-hmr L4** (this arc had deferred it): **reactive-flush spans behind
+  the opt-in `NOETA_TRACE_REACTIVE` flag** — `reactive.flush` (effects/changed counts, active
+  parent while effect bodies run) + `view.diff` (dirty/pushed counts); parity-pinned in
+  `tracing_serve.rs`, flush bench flat. See `plans/server-hmr/README.md`.
 - **T6 ✅ DONE.** Close-out. New **`docs/Observability.md`** — profiler-vs-tracing split, the opt-in
   table (endpoint on-switch, `OTEL_SDK_DISABLED` opt-out, the deliberate localhost-default deviation),
   full SDK surface, auto-instrumentation, propagation (auto + manual interop), and the write-only /

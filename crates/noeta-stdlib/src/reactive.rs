@@ -35,8 +35,8 @@ use std::cmp::Ordering;
 
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    ArenaGetter, CtxError, CtxOut, ErrorKind, ExtState, ExternValue, NativeCtx, Retained, Slot,
-    StdError, ctx_arity, no_function_error,
+    ArenaGetter, AttrValue, CtxError, CtxOut, ErrorKind, ExtState, ExternValue, NativeCtx,
+    Retained, Slot, SpanKind, SpanStatus, StdError, ctx_arity, no_function_error,
 };
 use noeta_reactive::{MAX_FLUSH_STEPS, NodeId, ReactiveGraph};
 
@@ -154,6 +154,10 @@ pub(crate) struct ReactiveExt {
     views: std::cell::RefCell<Vec<ViewState>>,
     /// Reused drain buffer for [`distribute_changes`] — a hot set→flush loop allocates nothing.
     changed_scratch: std::cell::RefCell<Vec<NodeId>>,
+    /// Whether the opt-in flush telemetry is on (server-hmr L4 / native-otel T5e): resolved once
+    /// per run on first use — `tel_enabled()` AND `NOETA_TRACE_REACTIVE` truthy — then a plain
+    /// bool read on the hot path. `None` until the first flush asks.
+    trace: std::cell::Cell<Option<bool>>,
 }
 
 pub(crate) const STATE_KEY: &str = "std.reactive";
@@ -167,6 +171,7 @@ pub(crate) fn state_of<C: NativeCtx + ?Sized>(ctx: &mut C) -> ExtState {
             effects: std::cell::RefCell::new(Vec::new()),
             views: std::cell::RefCell::new(Vec::new()),
             changed_scratch: std::cell::RefCell::new(Vec::new()),
+            trace: std::cell::Cell::new(None),
         })
     })
 }
@@ -192,11 +197,27 @@ pub(crate) fn drive_flush<C: NativeCtx + ?Sized>(
     ctx: &mut C,
     ext: &ReactiveExt,
 ) -> Result<(), CtxError> {
+    // Opt-in flush telemetry (server-hmr L4 / native-otel T5e): a span only when the flag is on
+    // AND the flush will actually run something — a no-op flush (a `set` with no subscribers)
+    // emits nothing. The span is pushed as the active context so spans the effect bodies create
+    // nest under it, connecting reactive propagation into the request/session trace.
+    let span = if reactive_tracing(ctx, ext) && ext.graph.pending_effects() > 0 {
+        let parent = crate::tracing::current_parent(ctx);
+        let id = ctx
+            .host()
+            .tel_span_start("reactive.flush", SpanKind::Internal, parent);
+        crate::tracing::push_active(ctx, id);
+        Some(id)
+    } else {
+        None
+    };
+    let mut effects_run: i64 = 0;
     let mut aborted: Option<CtxError> = None;
     let overflowed = ext
         .graph
         .flush(&mut |body: Retained| -> Retained {
             if aborted.is_none() {
+                effects_run += 1;
                 sync_gates(ctx, ext);
                 if let Err(e) = ctx.run_thunk(body) {
                     aborted = Some(e);
@@ -210,7 +231,22 @@ pub(crate) fn drive_flush<C: NativeCtx + ?Sized>(
     // `set`/`update`/effect-creation/synced-merge drives a flush even when no effect is queued;
     // a set *inside* a flush lands in the graph's change log and is drained by this outer call),
     // so distributing once per flush marks every view binding whose node changed.
-    distribute_changes(ext);
+    let changed = distribute_changes(ext);
+    if let Some(id) = span {
+        crate::tracing::pop_active(ctx, id);
+        let host = ctx.host();
+        host.tel_span_set_attr(id, "reactive.effects", AttrValue::Int(effects_run));
+        host.tel_span_set_attr(id, "reactive.changed", AttrValue::Int(changed as i64));
+        if aborted.is_some() {
+            host.tel_span_set_status(id, SpanStatus::Error("effect body aborted".into()));
+        } else if overflowed {
+            host.tel_span_set_status(
+                id,
+                SpanStatus::Error("reactive update did not converge".into()),
+            );
+        }
+        host.tel_span_end(id);
+    }
     if let Some(e) = aborted {
         return Err(e);
     }
@@ -225,6 +261,23 @@ pub(crate) fn drive_flush<C: NativeCtx + ?Sized>(
         .into());
     }
     Ok(())
+}
+
+/// Resolve (once per run, then a plain bool read) the opt-in flush-telemetry flag (server-hmr
+/// L4): spans are emitted only when telemetry is active AND `NOETA_TRACE_REACTIVE` is `1`/`true`
+/// — per-flush tracing is far too noisy for default-on, and the flush is a perf-gated hot path,
+/// so the off state must cost one cached-bool branch.
+fn reactive_tracing<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) -> bool {
+    if let Some(on) = ext.trace.get() {
+        return on;
+    }
+    let host = ctx.host();
+    let on = host.tel_enabled()
+        && host
+            .env_get("NOETA_TRACE_REACTIVE")
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    ext.trace.set(Some(on));
+    on
 }
 
 /// Hot-swap hook (server-hmr H1): dispose **every live effect** and release its body cell — the
@@ -314,13 +367,14 @@ struct ViewState {
 
 /// Drain the graph's change log and mark every matching binding dirty, in every view. Runs once
 /// per [`drive_flush`]; alloc-free in the steady state (the drain buffer is reused, and with no
-/// views the log is empty because observation is only switched on by `view()`).
-fn distribute_changes(ext: &ReactiveExt) {
+/// views the log is empty because observation is only switched on by `view()`). Returns the
+/// number of distinct changed nodes (the `reactive.changed` span attribute, server-hmr L4).
+fn distribute_changes(ext: &ReactiveExt) -> usize {
     let mut changed = ext.changed_scratch.borrow_mut();
     changed.clear();
     ext.graph.drain_changed_into(&mut changed);
     if changed.is_empty() {
-        return;
+        return 0;
     }
     changed.sort_unstable();
     changed.dedup();
@@ -332,6 +386,7 @@ fn distribute_changes(ext: &ReactiveExt) {
             }
         }
     }
+    changed.len()
 }
 
 /// Serialize a binding's *current* value as JSON — the shared `json.stringify` walk, so both
@@ -520,18 +575,53 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                     })
                     .collect()
             };
+            // Opt-in diff telemetry (server-hmr L4): a span only when there is dirt to inspect,
+            // active while serializing (a recompute's own spans nest under it). Aborts are
+            // captured, not propagated mid-span, so the context stack cannot be left imbalanced.
+            let dirty_count = work.len() as i64;
+            let span = if !work.is_empty() && reactive_tracing(ctx, ext) {
+                let parent = crate::tracing::current_parent(ctx);
+                let id = ctx
+                    .host()
+                    .tel_span_start("view.diff", SpanKind::Internal, parent);
+                crate::tracing::push_active(ctx, id);
+                Some(id)
+            } else {
+                None
+            };
             let mut entries = std::collections::BTreeMap::new();
             let mut fresh: Vec<(usize, Option<String>)> = Vec::new();
+            let mut failure: Option<CtxError> = None;
             for (idx, name, node, source, last) in work {
-                match binding_value_json(ctx, ext, node, &source)? {
-                    Some(json) if json != last => {
+                match binding_value_json(ctx, ext, node, &source) {
+                    Ok(Some(json)) if json != last => {
                         entries.insert(name, json.clone());
                         fresh.push((idx, Some(json)));
                     }
                     // Equal to the baseline (a no-op set / a recompute landing on the same
                     // value), or the node was disposed — either way, nothing to push.
-                    _ => fresh.push((idx, None)),
+                    Ok(_) => fresh.push((idx, None)),
+                    Err(e) => {
+                        failure = Some(e);
+                        break;
+                    }
                 }
+            }
+            if let Some(id) = span {
+                crate::tracing::pop_active(ctx, id);
+                let host = ctx.host();
+                host.tel_span_set_attr(id, "view.dirty", AttrValue::Int(dirty_count));
+                host.tel_span_set_attr(id, "view.pushed", AttrValue::Int(entries.len() as i64));
+                if failure.is_some() {
+                    host.tel_span_set_status(
+                        id,
+                        SpanStatus::Error("binding serialization aborted".into()),
+                    );
+                }
+                host.tel_span_end(id);
+            }
+            if let Some(e) = failure {
+                return Err(e);
             }
             let mut views = ext.views.borrow_mut();
             let view = &mut views[id];

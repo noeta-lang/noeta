@@ -719,6 +719,13 @@ impl<V: Clone> ReactiveGraph<V> {
     pub fn is_live(&self, node: NodeId) -> bool {
         self.inner.borrow().nodes[node.index()].live
     }
+
+    /// How many effects are queued for the next flush — the "will this flush do anything?"
+    /// pre-check the opt-in flush telemetry gates its span on (server-hmr L4), so a no-op flush
+    /// (a `set` with no subscribers) emits nothing.
+    pub fn pending_effects(&self) -> usize {
+        self.inner.borrow().queue.len()
+    }
 }
 
 #[cfg(test)]

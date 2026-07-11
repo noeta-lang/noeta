@@ -56,6 +56,7 @@ Read through the standard environment variables (via the `Env` capability):
 | `OTEL_SERVICE_NAME` | The `service.name` resource attribute (default `noeta`). |
 | `OTEL_METRIC_EXPORT_INTERVAL` | Metrics periodic-export interval in ms (default `60000`). |
 | `OTEL_SDK_DISABLED` | `true` forces the null sink for all signals. |
+| `NOETA_TRACE_REACTIVE` | `1`/`true` additionally traces reactive flushes and view diffs (opt-in — too noisy for default-on; see below). |
 
 Export is **OTLP over HTTP/JSON**. Traces and logs batch and flush on a threshold or at teardown;
 metrics aggregate host-side and export on a periodic reader (plus a final flush at teardown).
@@ -184,6 +185,14 @@ changes:
 - **Channels & isolates.** Sending on a channel attaches the sender's trace context to the message;
   the receiver — and a spawned `isolate` — is seeded with it automatically, so the far side continues
   the same trace with no manual threading. (The message's *type* is untouched.)
+- **Reactive propagation** (opt-in: set `NOETA_TRACE_REACTIVE=1` alongside the endpoint). Every
+  non-empty reactive flush becomes a `reactive.flush` span carrying `reactive.effects` (effect
+  bodies run) and `reactive.changed` (distinct nodes whose value changed); a LiveView `view.diff`
+  becomes a `view.diff` span carrying `view.dirty` (bindings inspected) vs `view.pushed` (bindings
+  actually sent). The flush span is the active parent while effect bodies run, so their own spans
+  nest under it — a click's trace reads *event → signal set → flush (N effects) → diff (K pushed)*.
+  Opt-in because per-set flush tracing is far too noisy for default-on; when off, the cost is one
+  cached-boolean branch per flush.
 
 ### Manual propagation (interop)
 
