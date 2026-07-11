@@ -73,6 +73,32 @@ pub enum ArrowStyle {
     Align,
 }
 
+/// Whether the formatter emits parentheses around a control-flow header — the condition of
+/// `if`/`while` and the iterable of `for`. Both `if x {` and `if (x) {` parse to the same AST (a
+/// single-element paren lowers to its inner expression), so this is purely a stylistic canonical form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParenStyle {
+    /// Strip redundant parens from headers: `if x {`. The default.
+    #[default]
+    Remove,
+    /// Wrap every header in parens for a bracketed, C-like look: `if (x) {`.
+    Add,
+}
+
+/// How the formatter treats a statement's trailing `;`. Semicolons are optional terminators (a
+/// newline ends a statement just as well), and never appear in the AST, so add/remove/preserve are all
+/// behavior-preserving canonical forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SemicolonStyle {
+    /// Strip redundant trailing `;` — the newline is the terminator. The default.
+    #[default]
+    Remove,
+    /// Append a `;` to every simple statement (never to block statements like `if`/`fn`).
+    Add,
+    /// Keep exactly what the author wrote.
+    Preserve,
+}
+
 /// Formatter configuration — the `[fmt]` table of `noeta.toml`. Constructed with sane defaults by
 /// [`FmtConfig::default`]; the CLI overlays the manifest's `[fmt]` values on top.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -90,6 +116,12 @@ pub struct FmtConfig {
     /// carries comments is left untouched, so a hand-grouped, commented import block is never
     /// scrambled. Import order is semantically irrelevant, so this never changes behavior.
     pub sort_imports: bool,
+    /// Parentheses policy for `if`/`while`/`for` headers. [`ParenStyle::Remove`] (default) strips
+    /// them; [`ParenStyle::Add`] wraps every header.
+    pub parens: ParenStyle,
+    /// Trailing-`;` policy for statements. [`SemicolonStyle::Remove`] (default) strips redundant
+    /// terminators; `Add` appends one to every simple statement; `Preserve` keeps the author's.
+    pub semicolons: SemicolonStyle,
 }
 
 impl Default for FmtConfig {
@@ -99,6 +131,8 @@ impl Default for FmtConfig {
             line_width: 100,
             match_arm_arrows: ArrowStyle::default(),
             sort_imports: false,
+            parens: ParenStyle::default(),
+            semicolons: SemicolonStyle::default(),
         }
     }
 }
@@ -428,14 +462,109 @@ mod tests {
         assert_eq!(fmt(src).unwrap(), "fn greet(name) {\n    echo name\n}\n");
     }
 
+    fn fmt_semis(text: &str, style: SemicolonStyle) -> Result<String, FmtError> {
+        format_source(
+            "test.noe",
+            text,
+            &FmtConfig {
+                semicolons: style,
+                ..FmtConfig::default()
+            },
+        )
+    }
+
+    fn fmt_parens(text: &str, style: ParenStyle) -> Result<String, FmtError> {
+        format_source(
+            "test.noe",
+            text,
+            &FmtConfig {
+                parens: style,
+                ..FmtConfig::default()
+            },
+        )
+    }
+
     #[test]
-    fn preserves_semicolons_as_written() {
-        // Kept where present, never added where absent (per-statement author choice).
-        assert_eq!(fmt("echo 1;").unwrap(), "echo 1;\n");
+    fn semicolons_removed_by_default() {
+        // The default policy strips redundant terminators — the newline is the terminator.
+        assert_eq!(fmt("echo 1;").unwrap(), "echo 1\n");
         assert_eq!(fmt("echo 1").unwrap(), "echo 1\n");
         assert_eq!(
-            fmt("fn f(a) {\n echo a;\n return a\n}").unwrap(),
+            fmt("fn f(a) {\n echo a;\n return a;\n}").unwrap(),
+            "fn f(a) {\n    echo a\n    return a\n}\n"
+        );
+    }
+
+    #[test]
+    fn semicolon_preserve_mode_keeps_author_choice() {
+        // Kept where present, never added where absent (per-statement author choice).
+        assert_eq!(
+            fmt_semis("echo 1;", SemicolonStyle::Preserve).unwrap(),
+            "echo 1;\n"
+        );
+        assert_eq!(
+            fmt_semis("echo 1", SemicolonStyle::Preserve).unwrap(),
+            "echo 1\n"
+        );
+        assert_eq!(
+            fmt_semis("fn f(a) {\n echo a;\n return a\n}", SemicolonStyle::Preserve).unwrap(),
             "fn f(a) {\n    echo a;\n    return a\n}\n"
+        );
+    }
+
+    #[test]
+    fn semicolon_add_mode_terminates_simple_statements_only() {
+        // Every simple statement gets a `;`; block statements (`if`/`fn`) never do.
+        assert_eq!(
+            fmt_semis("echo 1", SemicolonStyle::Add).unwrap(),
+            "echo 1;\n"
+        );
+        assert_eq!(
+            fmt_semis(
+                "fn f(a) {\n echo a\n if a { echo a }\n return a\n}",
+                SemicolonStyle::Add
+            )
+            .unwrap(),
+            "fn f(a) {\n    echo a;\n    if a {\n        echo a;\n    }\n    return a;\n}\n"
+        );
+    }
+
+    #[test]
+    fn parens_removed_by_default() {
+        // Redundant header parens are stripped: `if (x)` → `if x`, `while`/`for` likewise.
+        assert_eq!(
+            fmt("if (x) {\n echo 1\n}").unwrap(),
+            "if x {\n    echo 1\n}\n"
+        );
+        assert_eq!(
+            fmt("while (a < b) {\n echo 1\n}").unwrap(),
+            "while a < b {\n    echo 1\n}\n"
+        );
+        assert_eq!(
+            fmt("for x in (xs) {\n echo x\n}").unwrap(),
+            "for x in xs {\n    echo x\n}\n"
+        );
+    }
+
+    #[test]
+    fn paren_add_mode_wraps_headers_but_not_match() {
+        assert_eq!(
+            fmt_parens("if x {\n echo 1\n}", ParenStyle::Add).unwrap(),
+            "if (x) {\n    echo 1\n}\n"
+        );
+        assert_eq!(
+            fmt_parens("while a < b {\n echo 1\n}", ParenStyle::Add).unwrap(),
+            "while (a < b) {\n    echo 1\n}\n"
+        );
+        assert_eq!(
+            fmt_parens("for x in xs {\n echo x\n}", ParenStyle::Add).unwrap(),
+            "for x in (xs) {\n    echo x\n}\n"
+        );
+        // The `match` scrutinee opts out of paren-add — `match (x)` reads oddly.
+        assert_eq!(
+            fmt_parens("fn f(x: int): int {\n return match x {\n  _ => 0,\n }\n}", ParenStyle::Add)
+                .unwrap(),
+            "fn f(x: int): int {\n    return match x {\n        _ => 0,\n    }\n}\n"
         );
     }
 

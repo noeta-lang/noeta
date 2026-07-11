@@ -811,6 +811,14 @@ fn gap_has_newline(text: &str, start: u32, end: u32) -> bool {
         .is_some_and(|gap| gap.contains('\n'))
 }
 
+/// Public view of [`is_statement_ending`]: whether a statement whose **last** token is `kind` will be
+/// terminated by a following newline. The formatter uses this to decide whether a trailing `;` is
+/// redundant (safe to strip) or structurally required — e.g. a statement ending in a generic-close
+/// `>` (`x is List<int>`) is *not* newline-terminable, so its `;` must be kept.
+pub fn token_ends_statement(kind: TokenKind) -> bool {
+    is_statement_ending(kind)
+}
+
 /// Whether a token can be the **last** token of a statement, so a following newline terminates it:
 /// a value (literal/identifier/`true`/`false`), a closing bracket, the postfix try `?`, or one of
 /// the self-contained jump keywords (`return`/`break`/`continue`).

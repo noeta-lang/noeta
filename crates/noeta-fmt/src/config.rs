@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use crate::{ArrowStyle, FmtConfig};
+use crate::{ArrowStyle, FmtConfig, ParenStyle, SemicolonStyle};
 
 /// The project manifest that carries the `[fmt]` table.
 const MANIFEST_NAME: &str = "noeta.toml";
@@ -46,6 +46,25 @@ impl FmtConfig {
         if let Some(v) = fmt.get("sort_imports") {
             config.sort_imports = v.as_bool().ok_or("`fmt.sort_imports` must be a boolean")?;
         }
+        if let Some(v) = fmt.get("parens") {
+            config.parens = match v.as_str() {
+                Some("remove") => ParenStyle::Remove,
+                Some("add") => ParenStyle::Add,
+                _ => return Err("`fmt.parens` must be \"remove\" or \"add\"".to_string()),
+            };
+        }
+        if let Some(v) = fmt.get("semicolons") {
+            config.semicolons = match v.as_str() {
+                Some("remove") => SemicolonStyle::Remove,
+                Some("add") => SemicolonStyle::Add,
+                Some("preserve") => SemicolonStyle::Preserve,
+                _ => {
+                    return Err(
+                        "`fmt.semicolons` must be \"remove\", \"add\", or \"preserve\"".to_string(),
+                    );
+                }
+            };
+        }
         Ok(config)
     }
 
@@ -82,13 +101,22 @@ mod tests {
     #[test]
     fn overlays_known_keys() {
         let c = FmtConfig::from_toml(
-            "[fmt]\nwrap = true\nline_width = 80\nmatch_arm_arrows = \"align\"\nsort_imports = true\n",
+            "[fmt]\nwrap = true\nline_width = 80\nmatch_arm_arrows = \"align\"\nsort_imports = true\nparens = \"add\"\nsemicolons = \"preserve\"\n",
         )
         .unwrap();
         assert!(c.wrap);
         assert_eq!(c.line_width, 80);
         assert_eq!(c.match_arm_arrows, ArrowStyle::Align);
         assert!(c.sort_imports);
+        assert_eq!(c.parens, ParenStyle::Add);
+        assert_eq!(c.semicolons, SemicolonStyle::Preserve);
+    }
+
+    #[test]
+    fn paren_and_semicolon_defaults_are_remove() {
+        let c = FmtConfig::default();
+        assert_eq!(c.parens, ParenStyle::Remove);
+        assert_eq!(c.semicolons, SemicolonStyle::Remove);
     }
 
     #[test]
@@ -96,5 +124,7 @@ mod tests {
         assert!(FmtConfig::from_toml("[fmt]\nwrap = 1\n").is_err());
         assert!(FmtConfig::from_toml("[fmt]\nline_width = 0\n").is_err());
         assert!(FmtConfig::from_toml("[fmt]\nmatch_arm_arrows = \"aligned\"\n").is_err());
+        assert!(FmtConfig::from_toml("[fmt]\nparens = \"keep\"\n").is_err());
+        assert!(FmtConfig::from_toml("[fmt]\nsemicolons = \"maybe\"\n").is_err());
     }
 }
