@@ -5,7 +5,7 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | Command | Purpose |
 |---|---|
 | [`noeta run`](#noeta-run) | Type-check and execute a program. |
-| [`noeta build`](#noeta-build) | Compile to a standalone artifact (`--exe`, or `--native` for a machine-code binary). |
+| [`noeta build`](#noeta-build) | Compile to a standalone artifact (`--exe`, `--native` for machine code, `--wasm`/`--serve` for [WebAssembly](WebAssembly-and-the-Edge)). |
 | [`noeta check`](#noeta-check) | Parse and type-check without running or building (exit 0/1/2). |
 | [`noeta repl`](#noeta-repl) | Interactive REPL. |
 | [`noeta dump`](#noeta-dump) | Disassemble a program to its VM bytecode (a debugging aid). |
@@ -115,8 +115,10 @@ Compiles a program to a standalone artifact instead of running it. It shares the
 | `--out <PATH>` | Where to write the artifact. |
 | `--exe` | Emit a self-contained executable that bundles the bytecode with the runtime, launchable directly. |
 | `--native` | Emit an ahead-of-time-compiled **machine-code** binary (via the AOT backend), with dead-code elimination stripping unused stdlib rings. |
+| `--wasm` | Emit a single **WebAssembly** module (`wasm32-wasip1`) that runs under any WASI runtime: `wasmtime run app.wasm`. See [WebAssembly & the Edge](WebAssembly-and-the-Edge). |
+| `--serve` | Emit a **`wasi:http` serve component** (`wasm32-wasip2`): your `server.serve` handler on `wasmtime serve`, Spin, and Spin-class edge clouds. See [WebAssembly & the Edge](WebAssembly-and-the-Edge). |
 
-Both executable forms see the same `args.all()` vector as `noeta run` (argv[0] = program path), so no code changes between running from source and shipping a binary.
+All executable forms see the same `args.all()` vector as `noeta run` (argv[0] = program path), so no code changes between running from source and shipping a binary.
 
 ## `noeta check`
 

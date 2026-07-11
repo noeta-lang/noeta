@@ -79,4 +79,37 @@ for _ in $(seq 1 100); do
 done
 BODY=$(curl -s "http://$ADDR/go")
 [ "$BODY" = "edge proxied: 42 from upstream" ] || { echo "unexpected proxy body: $BODY"; exit 1; }
+kill "$SERVE_PID" 2>/dev/null; SERVE_PID=""
 echo "wasi:http outbound e2e: the handler proxied a real upstream through outgoing-handler ✓"
+
+# --- Second engine (hosted-platform proof): the same artifacts under Spin, the runtime the
+# Spin-class edge clouds host. Optional — runs when `spin` is on PATH, skips loudly otherwise
+# (the wasmtime legs above are the required gate). ---
+if command -v spin > /dev/null 2>&1; then
+  cat > "$SCRATCH/spin.toml" <<EOF
+spin_manifest_version = 2
+
+[application]
+name = "noeta-e2e"
+version = "0.1.0"
+
+[[trigger.http]]
+route = "/..."
+component = "app"
+
+[component.app]
+source = "$SCRATCH/proxy.serve.wasm"
+allowed_outbound_hosts = ["http://127.0.0.1:8916"]
+EOF
+  spin up -f "$SCRATCH/spin.toml" --listen "127.0.0.1:8915" &
+  SERVE_PID=$!
+  for _ in $(seq 1 100); do
+    curl -s -o /dev/null "http://127.0.0.1:8915/" && break
+    sleep 0.2
+  done
+  BODY=$(curl -s "http://127.0.0.1:8915/go")
+  [ "$BODY" = "edge proxied: 42 from upstream" ] || { echo "unexpected Spin body: $BODY"; exit 1; }
+  echo "Spin e2e: the same component served and proxied under Spin ✓"
+else
+  echo "Spin e2e: skipped — spin not on PATH (wasmtime legs above are the required gate)"
+fi
