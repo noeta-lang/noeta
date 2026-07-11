@@ -113,7 +113,7 @@ Host introspection. Under the sandbox the fixture is `HOME=/home/sandbox`, `USER
 
 ## `os`
 
-Process execution and system introspection. Under the sandbox the introspection leaves are fixed fixtures (`platform`/`arch`/`hostname` = `"sandbox"`, 1 cpu, cwd `/`, pid 1) and `exec` interprets a tiny scripted command set (`echo` echoes its args; `status n msg` exits `n` with `msg` on stderr) so exec-driving programs stay deterministic; `noeta run` reports the real machine and runs real subprocesses (no shell — the command is executed directly with its argument vector).
+Process execution and system introspection. Under the sandbox the introspection leaves are fixed fixtures (`platform`/`arch`/`hostname` = `"sandbox"`, 1 cpu, cwd `/`, pid 1) and `exec` interprets a tiny scripted command set (`echo` echoes its args; `status n msg` exits `n` with `msg` on stderr) so exec-driving programs stay deterministic; `noeta run` reports the real machine and runs real subprocesses (no shell — the command is executed directly with its argument vector, so there is no shell-injection surface and nothing to escape). If you deliberately want a shell (`os.exec("sh", ["-c", …])`), quote any interpolated input with `os.shell_quote` so it stays one literal token.
 
 | Function | Signature | Notes |
 |---|---|---|
@@ -127,6 +127,7 @@ Process execution and system introspection. Under the sandbox the introspection 
 | `exec_async` | `exec_async(command: string, args?: List<string>) -> Future<ExecResult>` | The async twin — the subprocess runs on the blocking pool. |
 | `spawn` | `spawn(command: string, args?: List<string>) -> Process` | Starts a child **without waiting** and returns a controllable handle. A command that cannot start is E0021. |
 | `exit` | `exit(code?: int) -> void` | Deliberate, clean termination: output so far is kept, nothing is reported, the run's exit code is `code` (default 0). |
+| `shell_quote` | `shell_quote(s: string) -> string` | POSIX-shell-safe quoting for the explicit `sh -c` escape hatch (below). |
 
 `ExecResult` (namespaced `std.os.ExecResult`) carries the captured outcome: `status() -> int`, `ok() -> bool` (status 0), `stdout() -> string`, `stderr() -> string`.
 

@@ -1670,8 +1670,42 @@ fn os_dispatch(
                 message: format!("exit({code})"),
             })
         }
+        // Quote a string so it is a single, literal token to a POSIX shell — for the explicit
+        // `os.exec("sh", ["-c", ...])` escape hatch (the argv-vector `exec`/`spawn` API never
+        // touches a shell and needs no quoting). Pure and deterministic.
+        "shell_quote" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Str(shell_quote(want_str(func, args, 0)?)))
+        }
         _ => Err(no_function_error("os", func)),
     }
+}
+
+/// POSIX-shell single-quote a token so it is passed to the shell literally (no word-splitting,
+/// glob, or expansion). An empty string becomes `''`; a string of only safe characters is returned
+/// unquoted; otherwise it is wrapped in single quotes with any embedded `'` written as `'\''`
+/// (close-quote, escaped quote, reopen) — the canonical, injection-safe shell quoting.
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    let safe = s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c));
+    if safe {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// The `ExecResult` instance methods (stdlib-gaps): pure reads over the captured outcome, the
@@ -2564,6 +2598,12 @@ const OS_FNS: &[ExtFn] = &[
         params: &[SigType::Optional(&Int)],
         ret: Concrete(SigType::Unit),
     },
+    // `shell_quote(s)` — POSIX-shell-safe quoting for the explicit `sh -c` escape hatch.
+    ExtFn {
+        name: "shell_quote",
+        params: &[Str],
+        ret: Concrete(Str),
+    },
 ];
 
 const FS_FNS: &[ExtFn] = &[
@@ -3111,6 +3151,19 @@ mod tests {
 
     fn host() -> SandboxHost {
         SandboxHost::new()
+    }
+
+    #[test]
+    fn shell_quote_is_injection_safe() {
+        // Safe tokens pass through unquoted; anything with shell metacharacters is single-quoted.
+        assert_eq!(shell_quote("plain-1.0_x"), "plain-1.0_x");
+        assert_eq!(shell_quote(""), "''");
+        assert_eq!(shell_quote("has space"), "'has space'");
+        // An embedded single quote is closed, escaped, and reopened — the canonical POSIX form.
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        // A metacharacter payload becomes one literal token (no word-splitting / command chaining).
+        assert_eq!(shell_quote("x; rm -rf / #"), "'x; rm -rf / #'");
+        assert_eq!(shell_quote("$(whoami)"), "'$(whoami)'");
     }
 
     #[test]
