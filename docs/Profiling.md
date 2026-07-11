@@ -5,11 +5,6 @@ table or a flamegraph. Like the debugger, it is a dev-time tool over the **produ
 `load → check → compile → run` pipeline `noeta run` uses, with the JIT unarmed so every frame is
 observable. What you profile is what ships (see [*Tier-0, and what it means*](#tier-0-and-what-it-means)).
 
-> **Not `--profile`.** The `--profile <name>` *flag* on `run`/`test`/`build`/… selects a
-> [`noeta.toml` build profile](Documentation-and-Tiers) (which dev tiers are live). The `noeta
-> profile` *subcommand* is unrelated — it profiles a program's execution and takes no `--profile`
-> flag.
-
 ## Two profilers
 
 | Mode | Flag | What it measures | Exact? |

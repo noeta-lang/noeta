@@ -31,11 +31,12 @@ fn sum_to(n: int): int {
 
 ### Iteration count
 
-The iteration count comes from the first of these that is set:
+The block directive is **distribution sugar**: `@bench(iterations: N) { … }` stamps the prelude `#[Bench(iterations: N)]` attribute onto each contained fn — validated like any attribute construction, visible to reflection. A fn can carry its own `#[Bench(…)]` to override the block's. The count comes from the first of these that is set:
 
 1. `--iterations N` on the command line (overrides everything).
-2. A per-bench `@bench(iterations: N)` directive — positional `@bench(1000)` and named `@bench(iterations: 1000)` are equivalent.
-3. The default (200).
+2. The fn's own `#[Bench(iterations: N)]` attribute.
+3. The block's `@bench(iterations: N)` directive — positional `@bench(1000)` and named `@bench(iterations: 1000)` are equivalent.
+4. The default (200).
 
 ## How timing works
 
@@ -55,7 +56,7 @@ noeta bench [OPTIONS] <FILE>
 | Flag | Effect |
 |---|---|
 | `--iterations <N>` | Override the iteration count for every benchmark. |
-| `--profile <NAME>` | Only run when the `bench` tier is live in this `noeta.toml` build profile; otherwise no-op with exit `0`. |
+| `--target <NAME>` | Only run when the `bench` tier is live in this `noeta.toml` build target; otherwise no-op with exit `0`. |
 
 ### Output and exit codes
 
@@ -75,4 +76,4 @@ Exit `0` when nothing failed, `1` otherwise. `no benchmarks found` exits `0`.
 ## See also
 
 - [Testing](Testing) — the `@test` sibling.
-- [Documentation & Dev Tiers](Documentation-and-Tiers) — the tier model and `noeta.toml` profiles.
+- [Documentation & Dev Tiers](Documentation-and-Tiers) — the tier model and `noeta.toml` targets.

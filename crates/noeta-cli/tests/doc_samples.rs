@@ -86,7 +86,11 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
 
     // `check`-tagged samples type-check without executing (they would bind sockets / never
     // exit); everything else runs for real.
-    let verb = if sample.tag == "check" { "check" } else { "run" };
+    let verb = if sample.tag == "check" {
+        "check"
+    } else {
+        "run"
+    };
     let output = Command::cargo_bin("noeta")
         .expect("the `noeta` binary builds")
         // Hermetic startup cache — don't touch the developer's real ~/.cache/noeta during tests.

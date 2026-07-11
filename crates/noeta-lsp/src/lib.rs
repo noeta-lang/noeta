@@ -615,27 +615,47 @@ impl LanguageServer for Backend {
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
         let position_params = params.text_document_position_params;
         let uri = position_params.text_document.uri;
-        let found = {
+        let position = ide_position(position_params.position);
+        let (found, doc) = {
             let store = self.store.lock().expect("document store poisoned");
-            store.hover_type(
-                uri.as_str(),
-                ide_position(position_params.position),
-                self.encoding(),
+            (
+                store.hover_type(uri.as_str(), position, self.encoding()),
+                store.hover_doc(uri.as_str(), position, self.encoding()),
             )
         };
-        Ok(found.map(|(repr, note, range)| Hover {
-            contents: HoverContents::Markup(MarkupContent {
+        let markdown = |value: String| {
+            HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                // `TypeRepr` displays as its Noeta surface spelling (`impl Display` in
-                // `noeta_ast::reflect`) — the same rendering the debugger's Variables view uses.
-                // A non-default storage fact (`@packed` / flat list) follows as a plain line.
-                value: match note {
+                value,
+            })
+        };
+        Ok(match (found, doc) {
+            // `TypeRepr` displays as its Noeta surface spelling (`impl Display` in
+            // `noeta_ast::reflect`) — the same rendering the debugger's Variables view uses.
+            // A non-default storage fact (`@packed` / flat list) follows as a plain line, and
+            // the declaration's attached `@doc` prose (already Markdown) follows after a rule.
+            (Some((repr, note, range)), doc) => {
+                let mut value = match note {
                     Some(note) => format!("```noeta\n{repr}\n```\n{note}"),
                     None => format!("```noeta\n{repr}\n```"),
-                },
+                };
+                if let Some(doc) = doc {
+                    value.push_str("\n\n---\n\n");
+                    value.push_str(&doc);
+                }
+                Some(Hover {
+                    contents: markdown(value),
+                    range: Some(wire_range(range)),
+                })
+            }
+            // No typed expression under the cursor (e.g. the declaration's own name), but the
+            // symbol has attached `@doc` prose — a doc-only hover.
+            (None, Some(doc)) => Some(Hover {
+                contents: markdown(doc),
+                range: None,
             }),
-            range: Some(wire_range(range)),
-        }))
+            (None, None) => None,
+        })
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {

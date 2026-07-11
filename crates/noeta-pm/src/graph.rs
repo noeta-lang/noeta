@@ -167,7 +167,7 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
     );
 
     // Refresh the lockfile (best-effort: a read-only project must not fail a build). Skipped for a
-    // manifest with no resolved dependencies, so a bare-`[profiles]` project grows no lock.
+    // manifest with no resolved dependencies, so a bare-`[targets]` project grows no lock.
     if !graph.locked.is_empty() {
         let _ = crate::lock::write(&manifest_dir, &graph.locked, &graph.scope_trust);
     }

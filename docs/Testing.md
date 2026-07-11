@@ -86,7 +86,7 @@ noeta test [OPTIONS] <FILE>
 | `--group <NAME>` | Run only tests tagged `#[Group("<NAME>")]`. |
 | `--name <NAME>` | Run only the test function(s) with this exact name. Repeatable; composes with `--group`. (This is the seam the editor test explorer uses.) |
 | `--json` | Emit a single machine-readable JSON report on stdout instead of the human table (per-test stdout captured, not interleaved) — for CI and editors. |
-| `--profile <NAME>` | Only run when the `test` tier is live in this `noeta.toml` build profile; otherwise no-op with exit `0`. |
+| `--target <NAME>` | Only run when the `test` tier is live in this `noeta.toml` build target; otherwise no-op with exit `0`. |
 
 ### Report format
 
@@ -108,5 +108,5 @@ running <N> tests on <J> threads[, <K> skipped]
 ## See also
 
 - [Benchmarking](Benchmarking) — the `@bench` sibling of `@test`.
-- [Documentation & Dev Tiers](Documentation-and-Tiers) — the tier model these blocks belong to, and `noeta.toml` profiles.
+- [Documentation & Dev Tiers](Documentation-and-Tiers) — the tier model these blocks belong to, and `noeta.toml` targets.
 - [Attributes & Reflection](Attributes-and-Reflection) — how `#[…]` attributes work in general.

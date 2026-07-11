@@ -641,7 +641,28 @@ pub struct FnDecl {
     /// `T` is the declared inner return type; its body may use the postfix `.await` suspend operator.
     /// `false` for an ordinary function, method, or generator.
     pub is_async: bool,
+    /// The `@tier(name, config: Type)` directive when this fn **declares a dev-tier** and is its
+    /// runner (tier-providers T2). A package exporting such a fn makes `@<name> { … }` blocks
+    /// available to consumers; the runner is invoked with the activated roots. `None` for an
+    /// ordinary fn (the overwhelmingly common case).
+    pub tier: Option<TierDecl>,
     pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
+/// A `@tier(name[, config: Type])` directive on a runner `fn` — the declaration that brings a
+/// dev-tier into existence (tier-providers T2). `name` is the tier consumers write as
+/// `@<name> { … }`; `config`, when present, names an `@attribute` struct whose fields are the
+/// tier's knobs (the directive args a `@<name>(…)` block stamps onto its fns, exactly the
+/// `Bench { iterations }` model). The decorated fn is the tier's **runner**: it receives the
+/// activated roots as `List<TierRoot>`. The checker validates all three (E0051).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TierDecl {
+    pub name: String,
+    pub name_span: Span,
+    /// The knob attribute type (`config: Fuzz`), if the tier has knobs.
+    pub config: Option<(String, Span)>,
+    /// The whole `@tier(…)` directive span, for diagnostics.
     pub span: Span,
 }
 

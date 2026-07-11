@@ -80,8 +80,8 @@ mod stdlib;
 pub mod tiers;
 
 pub use tiers::{
-    Activated, BUILTIN_TIERS, DocBlock, TierArgBinding, TierFn, activate_tiers, bind_tier_args,
-    collect_docs,
+    Activated, BUILTIN_TIERS, DocBlock, DocTarget, TierFn, activate_tiers, dedent_doc,
+    resolve_docs, tier_config_attribute,
 };
 
 /// The full output of one checker run: the diagnostics **and** the resolved-type map both
@@ -210,6 +210,7 @@ fn check_all_impl(program: &Program, record_expr_types: bool) -> Checked {
     // relevance is recorded inline during `check_program`, and needs the reachable set ready).
     checker.compute_relevance(program);
     checker.check_semantic_roles(program);
+    checker.check_tier_decls(program);
     checker.check_program(program);
     checker.into_checked()
 }
@@ -226,6 +227,7 @@ pub fn check_all_session(program: &Program) -> (Checked, SessionChecker) {
     checker.collect(program);
     checker.compute_relevance(program);
     checker.check_semantic_roles(program);
+    checker.check_tier_decls(program);
     let mut env: Env = vec![HashMap::new()];
     checker.check_program_in(program, &mut env);
     let checked = Checked {
@@ -315,6 +317,7 @@ impl SessionChecker {
         // parameter relevance.
         self.checker.compute_relevance(entry);
         self.checker.check_semantic_roles(entry);
+        self.checker.check_tier_decls(entry);
         self.checker.check_program_in(entry, &mut self.env);
         let diagnostics = self.checker.diags.split_off(diag_mark);
         if diagnostics
@@ -869,6 +872,10 @@ struct Checker {
     /// set, so it runs after `collect` has registered every declaration (a struct's `@role` may name
     /// a `@semantic` enum declared later in the file).
     semantic_enums: HashSet<String>,
+    /// The tier name-space (tier-providers T2): built-ins ∪ this program's `@tier` declarations.
+    /// Built by [`Self::check_tier_decls`] (which also validates each declaration, E0051); the
+    /// in-place `TierBlock` arm resolves names and config attributes against it.
+    tier_registry: tiers::TierRegistry,
     /// Every struct marked `@packed` (P-PACK) — the value structs laid out unboxed and contiguous.
     /// Collected in pass 1 so a packed struct's field-type validation (a field may be another packed
     /// struct declared later) sees the full set, and so `List<Packed>` specialization can consult it.
@@ -1126,6 +1133,7 @@ impl Checker {
             .insert("Attributed".to_string(), noeta_types::TypeKind::Struct);
         self.register_type_enum();
         self.register_semantic_prelude();
+        self.register_tier_prelude();
         self.register_test_attributes();
         self.seed_extern_type_traits();
     }
@@ -1148,23 +1156,31 @@ impl Checker {
         }
     }
 
-    /// Register the built-in **test-metadata attributes** (object-model slice 6h) as prelude
-    /// `@attribute` structs, so `#[Skip]` / `#[Name("…")]` / `#[Group("…")]` / `#[Data([…])]` on a
-    /// `@test`/`@bench` fn type-check without the program defining them. Each is an ordinary struct
-    /// (fields validated by the construction gate) marked `@attribute` (so the capability gate E0029
-    /// passes); the runner reads them off the fn's `attrs`. Registered like any prelude type, so a
-    /// user declaration of the same name shadows it. `Skip` is field-less (a bare marker); `Name`/
-    /// `Group` carry one string; `Data` carries a `dyn` payload (the row list — heterogeneous, so the
-    /// element type is left open).
+    /// Register the built-in **test-metadata attributes** (object-model slice 6h) and **tier-knob
+    /// attributes** as prelude `@attribute` structs, so `#[Skip]` / `#[Name("…")]` / `#[Group("…")]`
+    /// / `#[Data([…])]` / `#[Bench(iterations: N)]` on a `@test`/`@bench` fn type-check without the
+    /// program defining them. Each is an ordinary struct (fields validated by the construction gate)
+    /// marked `@attribute` (so the capability gate E0029 passes); the runner reads them off the fn's
+    /// `attrs`. Registered like any prelude type, so a user declaration of the same name shadows it.
+    /// `Skip` is field-less (a bare marker); `Name`/`Group` carry one string; `Data` carries a `dyn`
+    /// payload (the row list — heterogeneous, so the element type is left open); `Bench` carries the
+    /// bench tier's one knob (`iterations: int`) — a `@bench(…)` block directive stamps it onto its
+    /// fns, so this construction gate is also what validates tier directive arguments; `Doc` carries
+    /// an attached `@doc { … }` block's text (stamped by activation when the `doc` tier is live).
     fn register_test_attributes(&mut self) {
-        use noeta_ast::reflect::{TEST_ATTR_DATA, TEST_ATTR_GROUP, TEST_ATTR_NAME, TEST_ATTR_SKIP};
-        let attrs: [(&str, Vec<(String, Type)>); 4] = [
+        use noeta_ast::reflect::{
+            TEST_ATTR_DATA, TEST_ATTR_GROUP, TEST_ATTR_NAME, TEST_ATTR_SKIP, TIER_ATTR_BENCH,
+            TIER_ATTR_DOC,
+        };
+        let attrs: [(&str, Vec<(String, Type)>); 6] = [
             // `Skip`'s `reason` is optional (default `""`), so both `#[Skip]` and `#[Skip("flaky")]`
             // construct it — see the optional-fields registration below.
             (TEST_ATTR_SKIP, vec![("reason".to_string(), Type::String)]),
             (TEST_ATTR_NAME, vec![("value".to_string(), Type::String)]),
             (TEST_ATTR_GROUP, vec![("value".to_string(), Type::String)]),
             (TEST_ATTR_DATA, vec![("rows".to_string(), Type::Dyn)]),
+            (TIER_ATTR_BENCH, vec![("iterations".to_string(), Type::Int)]),
+            (TIER_ATTR_DOC, vec![("text".to_string(), Type::String)]),
         ];
         for (name, fields) in attrs {
             self.types.insert(name.to_string());
@@ -1218,6 +1234,33 @@ impl Checker {
             vec![
                 ("target".to_string(), Type::String),
                 ("role".to_string(), Type::Kind(noeta_types::TypeKind::Enum)),
+            ],
+        );
+    }
+
+    /// Register the prelude `TierRoot` struct (tier-providers T2) — the element type of the roots
+    /// list a declared tier's runner receives: `fn runner(roots: List<TierRoot>): void`. One root
+    /// per activated fn: its `name` (for the runner's report) and `run`, the fn itself as a
+    /// first-class `() -> void` value (in-process reflected-handle dispatch — the runner calls
+    /// `root.run()`). Knob values are not carried here: the stamped config attribute is read via
+    /// `attributes_of::<Config>()`, whose `target` matches `name`. Registered like any prelude
+    /// type, so a user declaration shadows it.
+    fn register_tier_prelude(&mut self) {
+        let name = noeta_ast::reflect::TIER_ROOT.to_string();
+        self.types.insert(name.clone());
+        self.type_kinds
+            .insert(name.clone(), noeta_types::TypeKind::Struct);
+        self.records.insert(
+            name,
+            vec![
+                ("name".to_string(), Type::String),
+                (
+                    "run".to_string(),
+                    Type::Fn {
+                        params: Vec::new(),
+                        ret: Box::new(Type::Unit),
+                    },
+                ),
             ],
         );
     }
@@ -2349,13 +2392,24 @@ impl Checker {
                 args,
                 ..
             } => {
-                if !BUILTIN_TIERS.contains(&tier.as_str()) {
+                if !self.tier_registry.is_known(tier) {
                     self.diags
                         .push(tiers::unknown_tier_diagnostic(tier, *tier_span));
-                } else {
-                    // Validate the directive's arguments against the tier's schema (the default run
-                    // path — `activate_tiers` does the same for the runner path).
-                    self.diags.extend(tiers::validate_tier_args(tier, args));
+                } else if let Some(d) = self.tier_registry.knobless_args_diagnostic(tier, args) {
+                    // Args on a knob-less tier (`@test(x)`) — E0037.
+                    self.diags.push(d);
+                } else if !args.is_empty()
+                    && let Some(attr_name) = self
+                        .tier_registry
+                        .config_attribute(tier)
+                        .map(str::to_string)
+                {
+                    // Args on a knob-carrying tier construct its config attribute
+                    // (`@bench(iterations: N)` ⇒ `#[Bench(iterations: N)]`) — validate that
+                    // construction through the ordinary attribute gate, so this default path
+                    // rejects exactly what the activated path's stamped attributes would.
+                    let synth = tiers::synthesized_config_attr(&attr_name, args, *tier_span);
+                    self.check_attrs(std::slice::from_ref(&synth), TargetKind::Function);
                 }
             }
         }
@@ -5642,6 +5696,85 @@ impl Checker {
     /// must tag a struct that is itself an attribute and must name a fieldless variant of a
     /// `@semantic` enum. Well-formed tags are surfaced purely by `reflect::build`, so nothing is
     /// stored here.
+    /// Validate every `@tier` declaration (tier-providers T2, E0051) and build the program's
+    /// [`tiers::TierRegistry`]. Runs after `collect`, so a `config:` type declared later in the
+    /// file (or in an imported module) is visible. Four rules: the name must not collide with a
+    /// built-in tier; two declarations must not claim one name; `config:` must name an
+    /// `@attribute` struct; and the runner must be `fn(roots: List<TierRoot>): void` — the
+    /// signature dispatch calls with the activated roots.
+    fn check_tier_decls(&mut self, program: &Program) {
+        self.tier_registry = tiers::TierRegistry::collect(program);
+        let mut seen: HashMap<String, Span> = HashMap::new();
+        for stmt in &program.stmts {
+            let Stmt::Fn(f) = stmt else { continue };
+            let Some(decl) = &f.tier else { continue };
+            if BUILTIN_TIERS.contains(&decl.name.as_str()) {
+                self.error(
+                    DiagnosticCode::InvalidTierDeclaration,
+                    decl.name_span,
+                    format!(
+                        "tier `{}` collides with the built-in tier of that name",
+                        decl.name
+                    ),
+                )
+                .help("built-in tiers cannot be redeclared; pick another name");
+            }
+            if let Some(first) = seen.get(&decl.name) {
+                let first = *first;
+                self.error(
+                    DiagnosticCode::InvalidTierDeclaration,
+                    decl.name_span,
+                    format!("tier `{}` is declared more than once", decl.name),
+                )
+                .help(format!(
+                    "the first declaration is at {first:?}; a tier has exactly one runner"
+                ));
+            } else {
+                seen.insert(decl.name.clone(), decl.name_span);
+            }
+            if let Some((config, config_span)) = &decl.config
+                && !self.attributes.contains(config)
+            {
+                self.error(
+                    DiagnosticCode::InvalidTierDeclaration,
+                    *config_span,
+                    format!("`config: {config}` does not name an `@attribute` struct"),
+                )
+                .help("a tier's knobs are an attribute's fields; declare the struct with `@attribute`");
+            }
+            // The runner signature: exactly one `List<TierRoot>` parameter, returning `void`.
+            let param_ok = f.params.len() == 1
+                && matches!(
+                    f.params[0].ty.as_ref(),
+                    Some(TypeRef::Named { name, args, .. })
+                        if name == "List"
+                            && matches!(
+                                args.as_slice(),
+                                [TypeRef::Named { name: el, args: el_args, .. }]
+                                    if el == noeta_ast::reflect::TIER_ROOT && el_args.is_empty()
+                            )
+                );
+            let ret_ok = matches!(
+                f.ret.as_ref(),
+                Some(TypeRef::Named { name, args, .. }) if name == "void" && args.is_empty()
+            );
+            if !param_ok || !ret_ok {
+                self.error(
+                    DiagnosticCode::InvalidTierDeclaration,
+                    f.name_span,
+                    format!(
+                        "tier `{}`'s runner must be `fn(roots: List<TierRoot>): void`",
+                        decl.name
+                    ),
+                )
+                .help(
+                    "the runner receives one activated root per fn — `root.name` for the report, \
+                     `root.run()` to invoke it; knob values come from `attributes_of::<Config>()`",
+                );
+            }
+        }
+    }
+
     fn check_semantic_roles(&mut self, program: &Program) {
         for stmt in &program.stmts {
             match stmt {
@@ -6485,6 +6618,8 @@ const PRELUDE_TYPES: &[&str] = &[
     "Type",
     "Semantic",
     "RoleBinding",
+    // The roots-list element a declared tier's runner receives (tier-providers T2).
+    "TierRoot",
     // The lazy-iterator type (Track I): a writable annotation now that `iter()`/adapters and
     // generator returns produce `Iterator<T>` values.
     "Iterator",

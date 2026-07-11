@@ -138,7 +138,7 @@ pub enum DiagnosticCode {
     /// fires for a struct.)
     PrivateField,
     /// A **dev-tier block** `@<tier> { … }` names a tier that is not declared/active (object-model
-    /// slice 6): a typo (`@tset { }`) or a tier not provided by the build profile. Surfaced rather
+    /// slice 6): a typo (`@tset { }`) or a tier not provided by the build target. Surfaced rather
     /// than silently ignored so a misspelled tier's content is not invisibly dropped.
     UnknownTier,
     /// A directive argument is invalid: a tier directive's argument names an unknown parameter, is
@@ -211,6 +211,11 @@ pub enum DiagnosticCode {
     /// `Serialize` over a function-typed field. The derive would type-check and then fail at the
     /// first runtime comparison/serialization, so it is rejected statically at the declaration.
     UnderivableTrait,
+    /// A `@tier(name, config: Type)` declaration is invalid (tier-providers T2): the name collides
+    /// with a built-in tier or another declaration, the `config` does not name an `@attribute`
+    /// struct, or the runner's signature is not `fn(roots: List<TierRoot>): void`. Rejected at the
+    /// declaration so a broken tier never reaches a consumer's `@<name> { … }` block.
+    InvalidTierDeclaration,
 }
 
 impl DiagnosticCode {
@@ -267,6 +272,7 @@ impl DiagnosticCode {
         DiagnosticCode::MissingReturn,
         DiagnosticCode::ReservedTypeName,
         DiagnosticCode::UnderivableTrait,
+        DiagnosticCode::InvalidTierDeclaration,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -323,6 +329,7 @@ impl DiagnosticCode {
             DiagnosticCode::MissingReturn => "E0048",
             DiagnosticCode::ReservedTypeName => "E0049",
             DiagnosticCode::UnderivableTrait => "E0050",
+            DiagnosticCode::InvalidTierDeclaration => "E0051",
         }
     }
 
