@@ -1444,7 +1444,9 @@ fn e0023_is_fixed_by_an_annotation_or_a_mut_accumulator() {
 #[test]
 fn e0023_does_not_fire_in_expression_position_or_on_typed_values() {
     // Empty collections in expression position are fine — only a *binding* commits to a type.
-    assert!(codes("echo [];\necho len([]);\necho [].first();\n").is_empty());
+    // (`.len()` is the method form; the free `len([])` was never valid — it left the prelude in
+    // P1.2 and is now caught at check time by the F1 unknown-name gate.)
+    assert!(codes("echo [];\necho [].len();\necho [].first();\n").is_empty());
     // A non-empty literal infers its elements; a typed value carries its type — neither is E0023.
     assert!(codes("xs = [1, 2, 3];\nm = {\"a\": 1};\n").is_empty());
 }
@@ -2221,4 +2223,63 @@ fn an_erroring_entry_is_transactional_and_commits_nothing() {
     );
     // `fixed2` was never committed: binding it fresh (not E0006-reassigning) is clean.
     assert!(entry_codes(&mut session, 1, "fixed2 = 3\nfixed2 = 4\n") == vec!["E0006"]);
+}
+
+// ----- F1: unknown-name gate (a genuinely undefined name is a static E0005) -----
+
+#[test]
+fn unknown_names_are_caught_at_check_time_in_a_file() {
+    // A call to an undefined function, and a bare reference to an undefined value, are both
+    // static errors now — the gap that let a typo swap into a hot-reloaded server and fail at
+    // request time instead of showing the diagnostic.
+    assert_eq!(codes("x = nonexistent_fn()\n"), vec!["E0005"]);
+    assert_eq!(codes("y = undefined_name\n"), vec!["E0005"]);
+    assert_eq!(codes("echo also_missing()\n"), vec!["E0005"]);
+    // Inside a closure body too.
+    assert_eq!(codes("f = fn() => gone()\necho \"ok\"\n"), vec!["E0005"]);
+}
+
+#[test]
+fn legitimate_forward_and_nested_references_stay_clean() {
+    // Top-level fns forward-reference each other (two-pass collect).
+    assert!(codes("fn a(): int { return b() }\nfn b(): int { return 1 }\necho a()\n").is_empty());
+    // A fn body forward-references a top-level global declared later (globals are hoisted).
+    assert!(codes("fn use_g(): int { return g }\ng = 10\necho use_g()\n").is_empty());
+    // A nested fn calls a sibling / itself / an enclosing global.
+    assert!(
+        codes(
+            "fn outer(): int {\n  \
+               fn inner(): int { return 2 }\n  \
+               return inner() + inner()\n\
+             }\n\
+             echo outer()\n"
+        )
+        .is_empty()
+    );
+    // A local closure value is callable without being flagged.
+    assert!(codes("f = fn(x: int): int => x + 1\necho f(5)\n").is_empty());
+    // A `concurrent {}` binding leaks to the enclosing scope (transparent scope).
+    assert!(
+        codes(
+            "use std.task.{sleep}\n\
+             async fn run(): int {\n  \
+               concurrent { w = 7 }\n  \
+               return w\n\
+             }\n\
+             echo run().await\n"
+        )
+        .is_empty()
+    );
+    // The prelude and built-in enums are always known.
+    assert!(codes("panic(\"x\")\n").is_empty());
+    assert!(codes("echo Ordering.Less\n").is_empty());
+}
+
+#[test]
+fn a_repl_session_defers_unknown_names_to_a_later_entry() {
+    // A session is the ONE place an unknown name stays deferred — a later entry may define it.
+    let mut session = super::SessionChecker::new();
+    assert!(entry_codes(&mut session, 0, "echo later()\n").is_empty());
+    assert!(entry_codes(&mut session, 1, "fn later(): int { return 3 }\n").is_empty());
+    assert!(entry_codes(&mut session, 2, "echo later()\n").is_empty());
 }

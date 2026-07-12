@@ -50,6 +50,7 @@ fn divmod(a: int, b: int): (int, int) {
 A closure is `fn(params) => expr` (arrow) or `fn(params) { … }` (block, with `return`). Unlike named functions, a closure's parameter and return types are **optional** — they are inferred:
 
 ```noeta
+base     = 100
 add_base = fn(x) => x + base            // arrow; captures `base`
 sumsq    = fn(xs) { mut t = 0; for x in xs { t = t + x * x }; return t }   // block body
 classify = fn(n): string { if n > 0 { return "pos" }; return "nonpos" }    // return annotation

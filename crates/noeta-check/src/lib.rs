@@ -235,6 +235,11 @@ pub fn check_all_session(program: &Program) -> (Checked, SessionChecker) {
         bundle_bindings: checker.bundle_bindings_public(),
         packed_layouts: checker.packed_layouts_public(),
     };
+    // The whole-program check above ran strict (file mode) — unknown names in a debugged program
+    // are real errors. But the returned session, over which console fragments and later entries
+    // are checked, defers unknown names (F1): a fragment may reference a name a *later* fragment
+    // defines, and frame locals a fragment reads are seeded per-evaluation, not in this env.
+    checker.session_mode = true;
     (checked, SessionChecker { checker, env })
 }
 
@@ -284,7 +289,10 @@ impl std::fmt::Debug for SessionChecker {
 impl SessionChecker {
     /// A fresh session: prelude registered, empty registries, an empty persistent global scope.
     pub fn new() -> SessionChecker {
-        let mut checker = Checker::default();
+        let mut checker = Checker {
+            session_mode: true,
+            ..Checker::default()
+        };
         checker.register_prelude();
         SessionChecker {
             checker,
@@ -611,6 +619,10 @@ fn lookup(env: &Env, name: &str) -> Option<Type> {
         .find_map(|frame| frame.get(name).map(|b| b.ty.clone()))
 }
 
+/// The reserved prelude names (`Ok`/`Err`/`some`/`none`/`panic`/`assert`) — always resolvable,
+/// so the unknown-name gate never flags them (see [`Checker::is_known_name`]).
+const RESERVED_PRELUDE: &[&str] = &["Ok", "Err", "some", "none", "panic", "assert"];
+
 /// A representative `Type` for a built-in type *name* used as a method-handle receiver
 /// (`list.len`, `string.upper`), with unknown element/value types as `dyn`. `None` for a name that
 /// is not a handle-able built-in type. Built-in types carry only instance methods (no associated
@@ -803,6 +815,18 @@ struct Checker {
     /// [`SiteMaps::expr_types`] for the IDE hover path. Off by default so the compile path is
     /// unaffected; enabled by [`check_all_with_types`].
     record_expr_types: bool,
+    /// A REPL / debug-console session (set only by [`SessionChecker`]). Relaxes the unknown-name
+    /// gate (F1): a name undefined *this* entry may be defined in a *later* one, so an unresolved
+    /// reference stays deferred to the runtime rather than being a static `E0005` — the
+    /// cross-entry forward reference the prompt relies on. A whole-file check (the default, and
+    /// the hot-reload transactional gate) has no future entry, so an unknown name is an error.
+    session_mode: bool,
+    /// Every top-level value binding's name, collected in the pre-pass (F1). Top-level globals are
+    /// **hoisted** — a function body may reference one declared textually later — so the
+    /// unknown-name gate treats them all as known regardless of order. (A top-level *direct*
+    /// reference to a not-yet-bound global still fails at runtime; this gate does not try to catch
+    /// that ordering case, only genuine typos.)
+    global_binding_names: HashSet<String>,
     /// Declared type → its kind (`Enum`/`Struct`/`Class`). Drives the abstract kind-type
     /// membership rule (`Named(n) <: Enum` iff `n` is an enum) — the registry-dependent piece the
     /// pure lattice cannot decide, consulted by [`Checker::assignable`].
@@ -1040,7 +1064,6 @@ impl Checker {
     }
 
     fn check_reserved_name(&mut self, name: &str, span: Span) {
-        const RESERVED_PRELUDE: &[&str] = &["Ok", "Err", "some", "none", "panic", "assert"];
         if RESERVED_PRELUDE.contains(&name) {
             self.diags.push(
                 Diagnostic::error(
@@ -1441,6 +1464,21 @@ impl Checker {
     /// Pass 1: register every top-level declaration so forward references resolve before any
     /// body is checked. Mirrors the compiler's "register types first" pass.
     fn collect(&mut self, program: &Program) {
+        // Hoist top-level value-binding names (F1): a function body may reference a global
+        // declared textually later, so they are all "known" to the unknown-name gate.
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::Binding { name, .. } => {
+                    self.global_binding_names.insert(name.clone());
+                }
+                Stmt::Destructure { targets, .. } => {
+                    for (name, _) in targets {
+                        self.global_binding_names.insert(name.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
         for stmt in &program.stmts {
             match stmt {
                 Stmt::Struct(r) => {
@@ -1924,10 +1962,41 @@ impl Checker {
 
     fn check_block(&mut self, stmts: &[Stmt], env: &mut Env) {
         env.push(HashMap::new());
+        self.bind_nested_fns(stmts, env);
         for stmt in stmts {
             self.check_stmt(stmt, env);
         }
         env.pop();
+    }
+
+    /// Pre-register a block's **nested `fn` declarations** into the current scope frame (F1): a
+    /// nested function is not in [`Self::functions`] (top-level only), so a sibling, forward, or
+    /// recursive call to one must resolve here — otherwise the unknown-name gate would flag it.
+    /// Bound as its (erased) `Fn` type so a bare reference is precise too; the call's own argument
+    /// checking stays deferred (a nested-fn call routes through the prelude fallback), unchanged.
+    fn bind_nested_fns(&self, stmts: &[Stmt], env: &mut Env) {
+        for stmt in stmts {
+            if let Stmt::Fn(decl) = stmt {
+                let params = decl
+                    .params
+                    .iter()
+                    .map(|p| param_type(p, &self.extern_types))
+                    .collect();
+                let ret = decl
+                    .ret
+                    .as_ref()
+                    .map(|t| from_ref_q(t, &self.extern_types))
+                    .unwrap_or(Type::Unknown);
+                bind(
+                    env,
+                    &decl.name,
+                    Type::Fn {
+                        params,
+                        ret: Box::new(ret),
+                    },
+                );
+            }
+        }
     }
 
     /// Check a closure body (arrow or block) and return the closure's return type. `expected` is the
@@ -2298,8 +2367,16 @@ impl Checker {
                     );
                 }
                 // Inside the scope, `spawn` is legal; check the body with the depth raised.
+                // `concurrent { }` is a **transparent** scope at runtime — a binding made inside it
+                // (`w = race([a, b])`) leaks to the enclosing function, exactly like an `if` body's
+                // bindings do not but a concurrent block's do. So check the body *in the current
+                // frame* rather than pushing one (F1: the unknown-name gate would otherwise flag a
+                // later reference to such a binding, which the tolerated-unknown behavior masked).
                 self.concurrent_depth += 1;
-                self.check_block(body, env);
+                self.bind_nested_fns(body, env);
+                for stmt in body {
+                    self.check_stmt(stmt, env);
+                }
                 self.concurrent_depth -= 1;
             }
             Stmt::Break { span } | Stmt::Continue { span } => {
@@ -2459,6 +2536,7 @@ impl Checker {
             self.check_reserved_name(&p.name, p.name_span);
             bind(env, &p.name, param_type(p, &self.extern_types));
         }
+        self.bind_nested_fns(&decl.body, env);
         for stmt in &decl.body {
             self.check_stmt(stmt, env);
         }
@@ -4016,6 +4094,15 @@ impl Checker {
                                 "member access is explicit — the field is `self.{name}`"
                             )),
                         );
+                    } else if !self.session_mode && !self.is_known_name(name, env) {
+                        // A bare reference to a name that resolves to nothing — a genuinely
+                        // undefined value (F1), the same static `E0005` as an unknown callee. A
+                        // session defers (a later entry may define it).
+                        self.diags.push(Diagnostic::error(
+                            DiagnosticCode::UnknownName,
+                            *span,
+                            format!("cannot find `{name}` in this scope"),
+                        ));
                     }
                     Type::Unknown
                 }
@@ -5119,6 +5206,25 @@ impl Checker {
         }
     }
 
+    /// Whether `name` resolves to **something the checker knows** — a local binding, a top-level
+    /// or selectively-imported function, a bound module, a user type or enum, or a reserved
+    /// prelude name. The unknown-name gate (F1) uses its negation: a name that is none of these
+    /// is genuinely undefined, a static `E0005` rather than a deferral to the runtime `E0005`.
+    fn is_known_name(&self, name: &str, env: &Env) -> bool {
+        lookup(env, name).is_some()
+            || self.functions.contains_key(name)
+            || self.imported_fns.contains_key(name)
+            || self.modules.contains_key(name)
+            || self.types.contains(name)
+            || self.enums.contains_key(name)
+            || RESERVED_PRELUDE.contains(&name)
+            // Built-in namable types/enums (`Ordering`, `Type`, `Semantic`, iterator types, …)
+            // are legitimate bare references — `Ordering.Less` names the prelude enum's variant.
+            || PRELUDE_TYPES.contains(&name)
+            // A hoisted top-level global (a fn body may reference one declared later).
+            || self.global_binding_names.contains(name)
+    }
+
     fn synth_call(
         &mut self,
         callee: &Expr,
@@ -5198,7 +5304,23 @@ impl Checker {
                 // the free form left the prelude, P1.2.) Closure arguments synthesize standalone
                 // first, so a payload-typed result (`some(fn…)`) sees the real closure type.
                 self.finalize_closure_args(&[], args, arg_exprs, env);
-                stdlib::prelude_return(name, args).unwrap_or(Type::Unknown)
+                if let Some(t) = stdlib::prelude_return(name, args) {
+                    return t;
+                }
+                // Not a user fn, import, or prelude free function. A local (a closure value) or a
+                // module/type name called here stays deferred to the runtime (a local closure's
+                // args are not statically checked, unchanged); a name that resolves to *nothing*
+                // is a genuinely undefined callee — a static `E0005` (F1), so a typo is caught at
+                // check time instead of failing at runtime. A session defers (a later entry may
+                // define it).
+                if !self.session_mode && !self.is_known_name(name, env) {
+                    self.diags.push(Diagnostic::error(
+                        DiagnosticCode::UnknownName,
+                        span,
+                        format!("cannot find `{name}` in this scope"),
+                    ));
+                }
+                Type::Unknown
             }
             Expr::Member { receiver, name, .. } => {
                 // `Enum.try_from(s)` → `?Enum` / `Enum.from(s)` → `Enum` — the built-in string→case
