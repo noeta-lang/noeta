@@ -1243,7 +1243,9 @@ impl Printer<'_> {
 
     fn expr(&self, expr: &Expr) -> Result<Doc, FmtError> {
         Ok(match expr {
-            Expr::Str { value, .. } => Doc::text(format!("\"{}\"", escape(value))),
+            Expr::Str { value, span } => self
+                .backtick_verbatim(*span)
+                .unwrap_or_else(|| Doc::text(format!("\"{}\"", escape(value)))),
             Expr::Int { value, .. } => Doc::text(value.to_string()),
             Expr::Float { value, .. } => Doc::text(format_float(*value)),
             Expr::F32 { value, .. } => Doc::text(format!("{}f32", format_float(*value as f64))),
@@ -1385,7 +1387,10 @@ impl Printer<'_> {
                 Doc::text(if *inclusive { "..=" } else { ".." }),
                 self.operand(end, 6, true)?,
             ]),
-            Expr::Interp { parts, .. } => self.interp(parts)?,
+            Expr::Interp { parts, span } => match self.backtick_verbatim(*span) {
+                Some(doc) => doc,
+                None => self.interp(parts)?,
+            },
             Expr::Closure {
                 params, ret, body, ..
             } => self.closure(params, ret.as_ref(), body)?,
@@ -1530,6 +1535,24 @@ impl Printer<'_> {
             ds.push(self.expr(a)?);
         }
         Ok(self.delimited("(", ds, ")", false))
+    }
+
+    /// Preserve a **multiline backtick template** verbatim (F4). All string kinds decode to
+    /// `Expr::Str`/`Expr::Interp`, so the canonical form is a double-quoted literal — but a
+    /// multiline `` `…` `` template's dedented layout collapses into an escaped `\n`-laden
+    /// one-liner, which defeats the point of the template. When the original source of a string
+    /// expression is a backtick template that spans lines, emit that source slice as-is. A
+    /// single-line backtick canonicalizes cleanly (equivalent to `"…"`), so it is left to the
+    /// normal path. Returns `None` when the span is unavailable or the source is not a multiline
+    /// backtick. The re-parse safety gate still holds: the verbatim slice decodes to the same
+    /// value.
+    fn backtick_verbatim(&self, span: Span) -> Option<Doc> {
+        let slice = self.source.get(span.start as usize..span.end as usize)?;
+        if slice.starts_with('`') && slice.contains('\n') {
+            Some(Doc::raw_text(slice.to_string()))
+        } else {
+            None
+        }
     }
 
     fn interp(&self, parts: &[StrPart]) -> Result<Doc, FmtError> {
