@@ -84,11 +84,9 @@ fn watch_loop(args: &[OsString]) -> ExitCode {
     // edits into the live process, and exiting with [`HOT_RESTART_CODE`] when only a full restart
     // can absorb a change — the wrapper then restarts immediately and otherwise stays out of the
     // way (double-watching would restart the server on the very edits the child just swapped).
-    // EXCEPT with `--parallel` (server-hmr S1): in-process swap-broadcast across N worker isolates
-    // is a future refinement, so a multi-core watch falls back to the generic restart-on-change
-    // path (the whole worker fleet restarts on edit — correct, just not a live swap).
-    let parallel = args.iter().any(|a| a == "--parallel");
-    let hot = args.first().is_some_and(|a| a == "serve") && !parallel;
+    // `--parallel` (server-hmr F5) hot-reloads too: the swap broadcasts to every worker isolate
+    // via the shared queue, so the whole fleet swaps in place.
+    let hot = args.first().is_some_and(|a| a == "serve");
     // Impact-filtered tier watch (server-hmr W3): a `test`/`bench` rerun narrows to the
     // declarations the edit impacted (the runners' `--name` filter), computed by the
     // runner-agnostic engine (`noeta_ide::impact`) from the previous run's source.
@@ -369,11 +367,6 @@ fn hot_watcher(
             );
         }
     }
-    // The last version deposited but possibly not yet consumed: promoted to `applied_src` once
-    // the mailbox slot is observed empty again (the VM took it) — under the mailbox lock, so the
-    // next diff is always against what actually runs.
-    let mut deposited: Option<String> = None;
-
     loop {
         let event = match rx.recv() {
             Ok(event) => event,
@@ -428,20 +421,13 @@ fn hot_watcher(
             if let Ok(mut slot) = mailbox.error.lock() {
                 *slot = Some(rendered);
             }
-            wake.notify_one();
+            wake_all(&wake);
             continue;
         }
-        // Diff against the last CONSUMED version; the lock makes "was the previous deposit
-        // taken?" exact, so a replaced deposit still diffs from what actually runs.
-        let mut slot = match mailbox.plan.lock() {
-            Ok(slot) => slot,
-            Err(_) => return,
-        };
-        if slot.is_none()
-            && let Some(consumed) = deposited.take()
-        {
-            applied_src = consumed;
-        }
+        // Diff against the last version this watcher DEPOSITED (server-hmr F5). The watcher is the
+        // single depositor, so `applied_src` is the exact baseline of the append-only broadcast
+        // queue: each plan is diffed against its predecessor, and every worker applies the queue
+        // in order — no per-consumer reconciliation.
         let Some(applied_program) = parse_entry(&entry, &applied_src) else {
             std::process::exit(HOT_RESTART_CODE);
         };
@@ -453,17 +439,19 @@ fn hot_watcher(
         ) {
             noeta_compiler::hotswap::SwapDiff::Unchanged => {}
             noeta_compiler::hotswap::SwapDiff::Swap(plan) => {
-                *slot = Some(plan);
-                deposited = Some(new_src);
-                // A green deposit supersedes any pending red-check overlay, and the wake makes
-                // an idle server apply it now rather than at its next request.
+                match mailbox.plans.lock() {
+                    Ok(mut plans) => plans.push(plan),
+                    Err(_) => return,
+                }
+                applied_src = new_src;
+                // A green deposit supersedes any pending red-check overlay, and the wake rouses
+                // every (possibly idle) worker to apply it now rather than at its next request.
                 if let Ok(mut err) = mailbox.error.lock() {
                     err.take();
                 }
-                wake.notify_one();
+                wake_all(&wake);
             }
             noeta_compiler::hotswap::SwapDiff::NeedsRestart(blockers) => {
-                drop(slot);
                 for b in &blockers {
                     eprintln!("[hot] restart needed: {b}");
                 }
@@ -471,6 +459,14 @@ fn hot_watcher(
             }
         }
     }
+}
+
+/// Rouse every worker executor parked on the shared wake (server-hmr F5): `notify_waiters` wakes
+/// all currently-parked accepts at once, and `notify_one` leaves a stored permit for a worker
+/// racing into its wait.
+fn wake_all(wake: &noeta_runtime::Notify) {
+    wake.notify_waiters();
+    wake.notify_one();
 }
 
 fn parse_entry(entry: &Path, src: &str) -> Option<noeta_ast::Program> {

@@ -2154,14 +2154,39 @@ fn serve_parallel_impl(file: &std::path::Path, port: i64, host: &str, workers: u
         Ok(Ok(linked)) => linked,
     };
 
-    // The same synthesized entry the single-worker path uses: `server.serve(port, fetch, host)`.
+    // In hot mode (`--parallel --watch`, server-hmr F5) the handler is a TRAMPOLINE
+    // `fn(req) => fetch(req)`, so the serve loop's one-shot handler capture late-binds `fetch`
+    // per request and a swap that rebinds `fetch` reaches every worker's live loop (the same
+    // trick the single-worker hot path uses). A plain run passes `fetch` directly.
+    let hot = std::env::var_os("NOETA_HOT").is_some();
     let sp = Span::empty_at(0);
+    let ident = |name: &str| Expr::Ident {
+        name: name.to_string(),
+        span: sp,
+    };
+    let handler = if hot {
+        Expr::Closure {
+            params: vec![noeta_ast::Param {
+                name: "req".to_string(),
+                name_span: sp,
+                ty: None,
+                default: None,
+                span: sp,
+            }],
+            ret: None,
+            body: noeta_ast::ClosureBody::Expr(Box::new(Expr::Call {
+                callee: Box::new(ident("fetch")),
+                args: vec![ident("req")],
+                span: sp,
+            })),
+            span: sp,
+        }
+    } else {
+        ident("fetch")
+    };
     let call = Expr::Call {
         callee: Box::new(Expr::Member {
-            receiver: Box::new(Expr::Ident {
-                name: "server".to_string(),
-                span: sp,
-            }),
+            receiver: Box::new(ident("server")),
             name: "serve".to_string(),
             name_span: sp,
             span: sp,
@@ -2171,10 +2196,7 @@ fn serve_parallel_impl(file: &std::path::Path, port: i64, host: &str, workers: u
                 value: port,
                 span: sp,
             },
-            Expr::Ident {
-                name: "fetch".to_string(),
-                span: sp,
-            },
+            handler,
             Expr::Str {
                 value: host.to_string(),
                 span: sp,
@@ -2192,13 +2214,6 @@ fn serve_parallel_impl(file: &std::path::Path, port: i64, host: &str, workers: u
         emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
         return 1;
     }
-    let module = match compile_real(&linked.program, &checked) {
-        Ok(m) => std::sync::Arc::new(m),
-        Err(err) => {
-            eprintln!("lang: {err}");
-            return 1;
-        }
-    };
 
     // Bind the listening socket once; each worker inherits a cloned fd.
     let addr = format!("{host}:{port}");
@@ -2209,10 +2224,33 @@ fn serve_parallel_impl(file: &std::path::Path, port: i64, host: &str, workers: u
             return 1;
         }
     };
-    eprintln!("noeta serve: listening on http://{addr} across {workers} workers (Ctrl-C to stop)");
-
     let args: Vec<String> = std::env::args().collect();
     let app_id = p2p_app_namespace(&args);
+
+    // Hot multi-core (F5): each worker runs the debug-session hot path; ONE watcher deposits into
+    // the shared broadcast queue and every worker drains it, so a swap spans the whole fleet.
+    if hot {
+        return serve_parallel_hot(
+            file,
+            &linked.program,
+            &checked,
+            &linked.sources,
+            base,
+            workers,
+            args,
+            app_id,
+            &addr,
+        );
+    }
+
+    let module = match compile_real(&linked.program, &checked) {
+        Ok(m) => std::sync::Arc::new(m),
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return 1;
+        }
+    };
+    eprintln!("noeta serve: listening on http://{addr} across {workers} workers (Ctrl-C to stop)");
     let mut handles = Vec::with_capacity(workers);
     for worker in 0..workers {
         let listener = match base.try_clone() {
@@ -2282,6 +2320,115 @@ fn run_worker(
     });
     let (result, trace, _) = VmBackend::new()
         .run_module_with_host_and_executor_parallel(module, host, executor, factory, false);
+    print!("{}", result.stdout);
+    let _ = io::stdout().flush();
+    if trace.len() >= 2 {
+        eprintln!("[worker] aborted");
+    }
+    u8::try_from(result.exit_code).unwrap_or(1)
+}
+
+/// Hot multi-core serve (server-hmr F5): each of `workers` worker isolates runs the debug-session
+/// hot path against a `try_clone`d listener, all sharing ONE [`noeta_vm::HotChannel`] broadcast
+/// queue that a single watcher deposits into — so an edit swaps into every worker in place. The
+/// `--parallel --watch` wrapper spawned this (via `NOETA_HOT`); a change the fleet cannot absorb
+/// exits with the restart sentinel, restarting the whole wrapper.
+#[allow(clippy::too_many_arguments)]
+fn serve_parallel_hot(
+    entry_path: &std::path::Path,
+    program: &noeta_ast::Program,
+    checked: &noeta_check::Checked,
+    sources: &SourceMap,
+    base: std::net::TcpListener,
+    workers: usize,
+    args: Vec<String>,
+    app_id: Option<String>,
+    addr: &str,
+) -> u8 {
+    let _ = sources;
+    let mailbox: noeta_vm::HotSwapMailbox = std::sync::Arc::new(noeta_vm::HotChannel::default());
+    let wake = std::sync::Arc::new(noeta_runtime::Notify::new());
+    watch::spawn_hot_watcher(
+        entry_path.to_path_buf(),
+        std::sync::Arc::clone(&mailbox),
+        std::sync::Arc::clone(&wake),
+    );
+    eprintln!(
+        "noeta serve: listening on http://{addr} across {workers} workers, hot-reloading \
+         (Ctrl-C to stop)"
+    );
+    let mut handles = Vec::with_capacity(workers);
+    for worker in 0..workers {
+        let listener = match base.try_clone() {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("lang: cannot clone the listener for worker {worker}: {e}");
+                return 1;
+            }
+        };
+        let program = program.clone();
+        let sites = checked.sites.clone();
+        let mailbox = std::sync::Arc::clone(&mailbox);
+        let wake = std::sync::Arc::clone(&wake);
+        let args = args.clone();
+        let app_id = app_id.clone();
+        handles.push(std::thread::spawn(move || {
+            run_worker_hot(program, sites, listener, mailbox, wake, args, app_id)
+        }));
+    }
+    let mut code = 0u8;
+    for handle in handles {
+        match handle.join() {
+            Ok(worker_code) => code = code.max(worker_code),
+            Err(_) => code = code.max(1),
+        }
+    }
+    code
+}
+
+/// One hot `--parallel` worker (server-hmr F5): compiles its own session (each isolate is
+/// shared-nothing, so it holds its own `SessionCompiler` for fragment installs), adopts the
+/// pre-bound listener, arms the shared broadcast queue + wake, and runs the debug-session hot VM.
+fn run_worker_hot(
+    program: noeta_ast::Program,
+    sites: noeta_compiler::Sites,
+    listener: std::net::TcpListener,
+    mailbox: noeta_vm::HotSwapMailbox,
+    wake: std::sync::Arc<noeta_runtime::Notify>,
+    args: Vec<String>,
+    app_id: Option<String>,
+) -> u8 {
+    let (module, compiler) =
+        match noeta_compiler::compile_with_sites_session(&program, sites, false, false) {
+            Ok(pair) => pair,
+            Err(u) => {
+                eprintln!("lang: cannot compile a hot worker: {}", u.reason);
+                return 1;
+            }
+        };
+    let host: Box<dyn noeta_stdlib::Host> = match noeta_runtime::RealHost::new() {
+        Ok(h) => Box::new(
+            h.with_args(args)
+                .with_p2p_app(app_id)
+                .with_prebound_listener(listener),
+        ),
+        Err(e) => {
+            eprintln!("lang: cannot start a hot worker runtime: {e}");
+            return 1;
+        }
+    };
+    let executor: Box<dyn noeta_stdlib::Executor> = match noeta_runtime::RealExecutor::new() {
+        Ok(mut ex) => {
+            ex.set_wake(wake);
+            Box::new(ex)
+        }
+        Err(e) => {
+            eprintln!("lang: cannot start a hot worker executor: {e}");
+            return 1;
+        }
+    };
+    let (result, trace) =
+        VmBackend::new().run_module_hot(&module, compiler, host, executor, mailbox);
     print!("{}", result.stdout);
     let _ = io::stdout().flush();
     if trace.len() >= 2 {

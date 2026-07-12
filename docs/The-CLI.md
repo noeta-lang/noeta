@@ -107,9 +107,11 @@ the listener, and exits — a second Ctrl-C forces an immediate stop.
 `--parallel N` serves across **N worker isolates** for true multi-core throughput: the listener
 is bound once and each worker inherits a cloned handle to it, so the kernel load-balances
 connections across cores (no `SO_REUSEPORT`, no extra dependency). All workers share the process
-and drain together on Ctrl-C. In-process hot reload does not yet span the fleet, so
-`--parallel --watch` falls back to a full restart of all workers on each edit (single-worker
-`--watch` keeps the live in-process swap).
+and drain together on Ctrl-C. `--parallel --watch` hot-reloads across the whole fleet — a swap
+**broadcasts** to every worker's live session, so all cores serve the new code without a restart.
+(Reactive/LiveView state is per-worker: signals and WebSocket subscribers live in the worker that
+handled the connection, so a LiveView app still runs best single-worker — the sticky-routing
+question is a separate follow-on.)
 
 `--watch` works on **any** command (`noeta run --watch`, `noeta test --watch`, …): a file watcher
 restarts the command on change — with the startup cache, a restart is a few milliseconds.

@@ -157,9 +157,13 @@ pub type HotSwapMailbox = Arc<HotChannel>;
 /// [`NativeCtx`]: noeta_stdlib::NativeCtx
 #[derive(Debug, Default)]
 pub struct HotChannel {
-    pub plan: std::sync::Mutex<Option<noeta_compiler::hotswap::SwapPlan>>,
+    /// The **append-only queue** of swap plans, generation = index (server-hmr F5). A single
+    /// depositor (the watcher) pushes; every consuming VM drains the tail it has not yet applied,
+    /// so a swap **broadcasts** to every worker isolate (`serve --parallel --watch`) rather than
+    /// being taken by one. Each plan is diffed against the previous *deposited* version, so
+    /// applying them in order keeps each worker's session in lockstep.
+    pub plans: std::sync::Mutex<Vec<noeta_compiler::hotswap::SwapPlan>>,
     pub error: std::sync::Mutex<Option<String>>,
-    pub swaps: std::sync::atomic::AtomicU64,
 }
 
 /// What the VM does after consulting the [`Debugger`] for an instruction.
@@ -996,6 +1000,11 @@ struct Vm<'m> {
     ///
     /// [`SwapPlan`]: noeta_compiler::hotswap::SwapPlan
     hot_mailbox: Option<HotSwapMailbox>,
+    /// How many swap plans this VM has applied from its [`HotChannel`] queue (server-hmr F5): the
+    /// generation index it drains from, and — via [`NativeCtx::hot_swap_count`] — how the serve
+    /// loop detects its own swaps to push `reload` to *its* clients. Per-VM, so N workers each
+    /// track their own progress against the shared broadcast queue.
+    applied_swaps: usize,
     /// Set while a **hover** fragment runs (tooling-unification T6): a hover must stay
     /// side-effect-free, so the dispatch loop refuses any frame push beyond the fragment wrapper's
     /// own frame — the one chokepoint every way of running user code (a call, an object's `Index`
@@ -2260,6 +2269,7 @@ impl<'m> Vm<'m> {
             module,
             debug_session: None,
             hot_mailbox: None,
+            applied_swaps: 0,
             pure_eval: false,
             shapes,
             packed_schemas,
@@ -6444,11 +6454,24 @@ impl<'m> Vm<'m> {
         let Some(mailbox) = &self.hot_mailbox else {
             return;
         };
-        let plan = match mailbox.plan.try_lock() {
-            Ok(mut slot) => slot.take(),
-            Err(_) => None,
+        // Drain the broadcast queue from this VM's own generation (server-hmr F5): clone the
+        // plans it has not applied yet (the lock is held only for the clone, never across the
+        // apply), then apply each in order. N workers each drain the same queue independently.
+        let pending: Vec<noeta_compiler::hotswap::SwapPlan> = match mailbox.plans.try_lock() {
+            Ok(plans) if plans.len() > self.applied_swaps => plans[self.applied_swaps..].to_vec(),
+            _ => return,
         };
-        let Some(plan) = plan else { return };
+        for plan in pending {
+            self.apply_one_swap(plan);
+            // Count the generation as applied even if the fragment errored at run time (the
+            // watcher already gated parse/check): a re-attempt would re-run the same fragment.
+            self.applied_swaps += 1;
+        }
+    }
+
+    /// Apply a single swap plan to the live session (server-hmr W1/H1; the per-plan body the F5
+    /// queue drain calls). Failures report to stderr and keep the previous version serving.
+    fn apply_one_swap(&mut self, plan: noeta_compiler::hotswap::SwapPlan) {
         // Slots the re-run overwrites — resolved against the session compiler BEFORE the fragment
         // extends it, so only pre-existing bindings (the ones with old nodes) are collected.
         let rebound: Vec<u32> = if plan.rerun_top_level {
@@ -6500,13 +6523,9 @@ impl<'m> Vm<'m> {
                     if what.is_empty() { "" } else { ": " },
                     what
                 );
-                // Bump the generation so the serve loop (via `NativeCtx::hot_swap_count`) pushes
-                // `reload` to live LiveView clients (server-hmr L3).
-                if let Some(mailbox) = &self.hot_mailbox {
-                    mailbox
-                        .swaps
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
+                // The serve loop detects this via `NativeCtx::hot_swap_count` (this VM's
+                // `applied_swaps`, bumped by the drain) and pushes `reload` to its live clients
+                // (server-hmr L3).
             }
             Err(Abort) => {
                 let msg = self.last_diag_message();

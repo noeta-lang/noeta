@@ -647,11 +647,9 @@ impl NativeCtx for VmCtx<'_, '_> {
     }
 
     fn hot_swap_count(&mut self) -> u64 {
-        self.vm
-            .hot_mailbox
-            .as_ref()
-            .map(|m| m.swaps.load(std::sync::atomic::Ordering::Relaxed))
-            .unwrap_or(0)
+        // Per-VM (server-hmr F5): each worker reports its OWN applied-swap generation, so its
+        // serve loop pushes `reload` to its OWN clients when it applies a broadcast swap.
+        self.vm.applied_swaps as u64
     }
 
     fn take_hot_error(&mut self) -> Option<String> {

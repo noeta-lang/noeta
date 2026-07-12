@@ -269,7 +269,7 @@ fn a_swap_lands_under_a_live_force_jit_engine() {
         panic!("a body edit must be swappable");
     };
     let mailbox: HotSwapMailbox = std::sync::Arc::new(HotChannel::default());
-    *mailbox.plan.lock().unwrap() = Some(plan);
+    mailbox.plans.lock().unwrap().push(plan);
 
     let (result, trace) = VmBackend::new().run_module_hot_forced_jit(
         &module,
