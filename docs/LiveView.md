@@ -49,12 +49,13 @@ So a **loop is `.map` producing a `List<Html>`** — the JSX/React model, not a 
 <ul>${items.map(fn(t) => @html { <li>${t.title}</li> })}</ul>
 ```
 
-or factored into a named function when the row is non-trivial (e.g. a conditional over two templates — see "attribute holes" below):
+or factored into a named function when the row is non-trivial:
 
 ```noeta ignore
 fn row(t: Todo): Html {
-    if t.done { return @html { <li class="done">[x] ${t.title}</li> } }
-    return @html { <li class="todo">[ ] ${t.title}</li> }
+    // A hole in *attribute* position (`class="${…}"`) is inlined and escaped; a hole in
+    // text position gets a reactive span.
+    return @html { <li class="${if t.done then "done" else "todo"}">${t.title}</li> }
 }
 
 fn page(): Html {
@@ -93,9 +94,10 @@ The bundled client turns a `data-live-click="name"` into an event; the app's `on
 
 `@html`'s handler is pure Noeta (it composes `std.reactive`). The same `@html` mechanism also supports a **native** handler — see [expression tiers](Documentation-and-Tiers#native-rust-package-expression-tiers), where std's `@json` is a native example — but a *reactive* template composes signals most naturally in Noeta.
 
+A hole in **attribute position** (`class="${…}"`, `title="${…}"`) is detected from the preceding text and **inlined** (escaped, including the quote) rather than wrapped in a `<span>`. Its value re-renders with the enclosing region (a row), not on its own.
+
 ## Current limitations (v1)
 
-- **Attribute-position holes** are wrapped in a `<span>` rather than inlined, so `class="${…}"` breaks. Use conditional template *branches* for dynamic attributes (as `row` above does). Inlining attribute holes is a planned refinement.
 - **Nested holes** re-render with their parent region, not independently: a change inside a loop re-renders the whole list (via `innerHTML`), not one row. Per-row keyed reactivity is a planned refinement.
 - **Single-worker**: signals are per-isolate, so a LiveView app runs single-worker (`--parallel` documents this).
 

@@ -42,6 +42,23 @@ fn escape(s: string): string {
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 }
 
+// Escaping for an **attribute value** (inside `"…"`): the text escapes plus the quote.
+fn attr_escape(s: string): string {
+    return escape(s).replace("\"", "&quot;")
+}
+
+// Whether the skeleton so far ends **inside an open tag** — i.e. the hole about to be emitted sits
+// in *attribute* position (`<li class="${…}">`) rather than text position. Detected from the
+// preceding text: an unclosed `<` (no `>` after the last `<`). Such a hole is inlined (a `<span>`
+// wrapper would be illegal inside a tag); a text-position hole gets the reactive `<span>` marker.
+fn in_tag(s: string): bool {
+    segs = s.split("<")
+    if segs.len() <= 1 {
+        return false
+    }
+    return segs[segs.len() - 1].index_of(">") == none
+}
+
 // Whether a hole value is itself markup (an `Html` from a nested `@html { … }`, or a `List<Html>`
 // from a loop like `${rows.map(...)}`) — such a hole embeds *raw*; every other value is escaped
 // text. This is the JSX rule: `{child}` composes, `{text}` is escaped.
@@ -54,7 +71,7 @@ fn is_markup(v: dyn): bool {
 fn render_value(v: dyn): string {
     single = v.as<Html>()
     if single != none {
-        return (single ?? Html { skeleton: "", holes: [] }).skeleton
+        return (single ?? Html { skeleton: "", holes: [], ids: [] }).skeleton
     }
     many = v.as<List<Html>>()
     if many != none {
@@ -77,21 +94,30 @@ fn render_value(v: dyn): string {
 pub fn render(statics: List<string>, holes: List<() -> dyn>): Html {
     computeds = holes.map(fn(h) => computed(fn() => render_value(h())))
     mut skeleton = ""
+    mut exposed: List<dyn> = []
     mut ids: List<string> = []
     mut i = 0
     for s in statics {
         skeleton = skeleton ~ s
         if i < computeds.len() {
-            c = computeds[i]
             hole = holes[i]
-            hid = fresh_id()
-            ids = ids ~ [hid]
-            marker = if is_markup(hole()) then "data-live-html" else "data-live"
-            skeleton = skeleton ~ "<span ${marker}=\"${hid}\">" ~ c.get() ~ "</span>"
+            if in_tag(skeleton) {
+                // Attribute position: inline the escaped value (no `<span>` — it would be illegal
+                // inside a tag). Its value re-renders with the enclosing region (a row), not on its
+                // own, so it needs no marker id.
+                skeleton = skeleton ~ attr_escape("${hole()}")
+            } else {
+                c = computeds[i]
+                hid = fresh_id()
+                ids = ids ~ [hid]
+                exposed = exposed ~ [c]
+                marker = if is_markup(hole()) then "data-live-html" else "data-live"
+                skeleton = skeleton ~ "<span ${marker}=\"${hid}\">" ~ c.get() ~ "</span>"
+            }
         }
         i = i + 1
     }
-    return Html { skeleton: skeleton, holes: computeds, ids: ids }
+    return Html { skeleton: skeleton, holes: exposed, ids: ids }
 }
 
 // The client runtime — the bundled `server.liveview_js()` shim, extended so a **markup** hole

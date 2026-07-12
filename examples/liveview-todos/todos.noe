@@ -19,12 +19,11 @@ todos = signal([
     Todo { title: "Write the <docs>", done: false },
 ])
 
-// A row is its own `@html` value; the dynamic class stays in static position via two branches.
+// A row is its own `@html` value. A `${…}` hole in *attribute* position (`class="${…}"`) is
+// inlined and escaped; a hole in *text* position gets a reactive span.
 fn row(t: Todo): Html {
-    if t.done {
-        return @html { <li class="done">[x] ${t.title}</li> }
-    }
-    return @html { <li class="todo">[ ] ${t.title}</li> }
+    box = if t.done then "[x]" else "[ ]"
+    return @html { <li class="${if t.done then "done" else "todo"}">${box} ${t.title}</li> }
 }
 
 fn remaining(): int {
