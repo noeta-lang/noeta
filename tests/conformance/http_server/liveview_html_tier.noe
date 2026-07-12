@@ -1,0 +1,78 @@
+// LiveView through the `@html` expression tier (expr-tiers ∘ server-hmr): an `@html { … ${expr}
+// … }` template compiles each hole into a `computed`, the session exposes those as a `view`, and a
+// client event pushes a minimal diff of exactly the holes that changed. Same in-sandbox two-frame
+// client conversation as `serve_liveview_push.noe`, but the reactive bindings come from a template
+// value, not hand-wired `expose` calls — proving the reactive-template-to-diff-push path end to end.
+// expect: stdout "snapshot {"type":"snapshot","values":{"h0":"0","h1":"0"}}"
+// expect: stdout "patch {"type":"patch","changes":{"h0":"1","h1":"2"}}"
+// expect: stdout "patch {"type":"patch","changes":{"h0":"2","h1":"4"}}"
+// expect: stdout "live session over"
+// expect: stdout "served"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response, Socket}
+use std.reactive.{signal, computed, view}
+
+struct Html {
+    skeleton: string
+    holes: List<dyn>
+}
+
+@tier(html, text: "html", expr: Html)
+fn render(statics: List<string>, holes: List<() -> dyn>): Html {
+    computeds = holes.map(fn(h) => computed(fn() => "${h()}"))
+    mut skeleton = ""
+    mut i = 0
+    for s in statics {
+        skeleton = skeleton ~ s
+        if i < computeds.len() {
+            c = computeds[i]
+            skeleton = skeleton ~ "<span data-live=\"h${i}\">" ~ c.get() ~ "</span>"
+        }
+        i = i + 1
+    }
+    return Html { skeleton: skeleton, holes: computeds }
+}
+
+count = signal(0)
+
+fn page(): Html {
+    return @html { count: ${count.get()} double: ${count.get() * 2} }
+}
+
+async fn session(sock: Socket): bool {
+    doc = page()
+    v = view()
+    mut i = 0
+    for c in doc.holes {
+        v.expose("h${i}", c)
+        i = i + 1
+    }
+    snap = v.snapshot()
+    sock.send(snap)
+    echo "snapshot ${snap}"
+    mut going = true
+    while going {
+        msg = sock.recv().await
+        if msg == none {
+            going = false
+        } else {
+            count.set(count.get() + 1)
+            patch = v.diff() ?? "{}"
+            sock.send(patch)
+            echo "patch ${patch}"
+        }
+    }
+    echo "live session over"
+    return true
+}
+
+fn fetch(req: Request): Response {
+    if req.path() == "/ws" {
+        return server.websocket(session)
+    }
+    return server.response(200, "ok")
+}
+
+server.serve(8080, fetch)
+echo "served"
