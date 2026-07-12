@@ -83,7 +83,9 @@ for n in 0..100 {
 
 `match scrut { pat => expr, … }` is an **expression**, and it is checked for **exhaustiveness** — a missing case with no `_` is E0011.
 
-```noeta ignore
+```noeta check
+enum Status { Pending; Paid; Refunded }
+
 fn label(s: Status): string {
     return match s {
         Status.Pending  => "awaiting payment",
@@ -106,7 +108,7 @@ fn label(s: Status): string {
 | Result | `Ok(v)`, `Err(e)` |
 | Type | `is int`, `is string`, `is Point` (on unions / `dyn`) |
 
-```noeta ignore
+```noeta check
 fn classify(p: (int, int)): string {
     return match p {
         (0, 0) => "origin",
@@ -140,7 +142,9 @@ fn kind(x: int | string): string {
 
 An `is` test narrows a variable's type in the block it guards:
 
-```noeta ignore
+```noeta check
+struct Circle { r: float }
+
 fn area(x: dyn): float {
     if x is Circle {
         return 3.14159 * x.r * x.r   // x is Circle here

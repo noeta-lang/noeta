@@ -42,6 +42,13 @@ struct Cli {
     /// zero heap residency under JIT. Requires the `jit` build feature. Any divergence or leak fails.
     #[arg(long)]
     jit_differential: bool,
+    /// Run the wasm differential oracle (P-WASM W1.3): compile every corpus program to a `.noeb`
+    /// and execute it through the wasm runner under wasmtime (`--sandbox`), asserting stdout,
+    /// exit code, and rendered stderr byte-identical to the native VM. Needs `wasmtime` (or
+    /// `NOETA_WASMTIME`) and a built runner (`cargo build -p noeta-wasm-runner --target
+    /// wasm32-wasip1 --release`, or `NOETA_WASM_RUNNER`). Any divergence fails.
+    #[arg(long)]
+    wasm_differential: bool,
     /// The corpus root directory.
     #[arg(long, default_value = "tests/conformance")]
     dir: PathBuf,
@@ -51,6 +58,8 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     if cli.jit_differential {
         cmd_jit_differential(cli.file.as_deref(), &cli.dir)
+    } else if cli.wasm_differential {
+        cmd_wasm_differential(cli.file.as_deref(), &cli.dir)
     } else if cli.check_leaks {
         cmd_leaks(cli.file.as_deref(), &cli.dir)
     } else if cli.differential {
@@ -120,6 +129,26 @@ fn cmd_leaks(file: Option<&std::path::Path>, dir: &std::path::Path) -> ExitCode 
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// Run the wasm differential oracle (P-WASM W1.3): the wasm runner under wasmtime vs the native
+/// VM over the corpus. Missing tooling (wasmtime / built runner) is a loud setup error and exit 2
+/// — never a silent pass.
+fn cmd_wasm_differential(file: Option<&std::path::Path>, dir: &std::path::Path) -> ExitCode {
+    match noeta_conformance::run_wasm_differential(dir, file) {
+        Ok(report) => {
+            print!("{}", report.to_human());
+            if report.ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            }
+        }
+        Err(setup) => {
+            eprintln!("noeta-conformance: --wasm-differential setup failed: {setup}");
+            ExitCode::from(2)
+        }
     }
 }
 

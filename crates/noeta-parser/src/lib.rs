@@ -378,6 +378,7 @@ fn parse_packed_layout(args: &[DirectiveArg], _directive_span: Span, ctx: &Ctx) 
 fn tier_decl_from_args(args: &[AttrArg], directive_span: Span, ctx: &Ctx) -> Option<TierDecl> {
     let mut name: Option<(String, Span)> = None;
     let mut config: Option<(String, Span)> = None;
+    let mut text: Option<(String, Span)> = None;
     let mut bad = false;
     for arg in args {
         match (&arg.name, &arg.value) {
@@ -387,16 +388,20 @@ fn tier_decl_from_args(args: &[AttrArg], directive_span: Span, ctx: &Ctx) -> Opt
             (Some(k), AttrValue::TypeRef(ty)) if k == "config" && config.is_none() => {
                 config = Some((ty.clone(), arg.span));
             }
+            (Some(k), AttrValue::Str(lang)) if k == "text" && text.is_none() => {
+                text = Some((lang.clone(), arg.span));
+            }
             _ => {
                 ctx.diags.borrow_mut().push(
                     Diagnostic::error(
                         DiagnosticCode::InvalidDirectiveArgument,
                         arg.span,
-                        "`@tier` takes a tier name and an optional `config: Type`",
+                        "`@tier` takes a tier name and an optional `config: Type` or `text: \"<lang>\"`",
                     )
                     .with_help(
-                        "declare a tier as `@tier(fuzz, config: FuzzConfig) fn runner(roots: \
-                         List<TierRoot>): void { … }`",
+                        "declare a code tier as `@tier(fuzz, config: FuzzConfig) fn runner(roots: \
+                         List<TierRoot>): void { … }`, or a text tier (verbatim `@<name> { … }` \
+                         bodies) as `@tier(spec, text: \"xml\") fn runner(…)`",
                     ),
                 );
                 bad = true;
@@ -418,6 +423,7 @@ fn tier_decl_from_args(args: &[AttrArg], directive_span: Span, ctx: &Ctx) -> Opt
         name,
         name_span,
         config,
+        text,
         span: directive_span,
     })
 }
@@ -3124,15 +3130,22 @@ where
             .or_not()
             .map(Option::unwrap_or_default);
 
-        // A tier block's body is **either** the verbatim text of a `@doc` block — the lexer captured
-        // it as a single `DocText` token (slice 6f), which is sliced back out of the source here — or
-        // a statement list for a code tier (the same recovering list a `{ }` block uses, absorbing
-        // the synthetic `;` the lexer inserts between members on separate lines, slice 7). The text
-        // branch is tried first; a code body's first token is never `DocText`, so it falls through.
+        // A tier block's body is **either** the verbatim text of a text-tier block (`@doc` et al.)
+        // — the lexer captured it as a single `DocText` token (slice 6f), which is sliced back out
+        // of the source here — or a statement list for a code tier (the same recovering list a
+        // `{ }` block uses, absorbing the synthetic `;` the lexer inserts between members on
+        // separate lines, slice 7). The text branch is tried first; a code body's first token is
+        // never `DocText`, so it falls through. This is the one point the body text materializes,
+        // so the brace escapes (`\{`/`\}`/`\\`) are undone here — every content consumer
+        // (extraction, hover, runners) sees clean text, while the formatter re-emits raw source
+        // and never touches them.
         let tier_body = choice((
             just(T::DocText).map_with(move |_, e| {
                 let span = ctx.to_span(e.span());
-                (Vec::new(), Some(ctx.source.slice(span).to_string()))
+                (
+                    Vec::new(),
+                    Some(noeta_lexer::unescape_text_body(ctx.source.slice(span))),
+                )
             }),
             recovering_list(stmt.clone()).map(|items| (items, None)),
         ))

@@ -39,6 +39,7 @@ Everything the `noeta` binary does beyond running code.
 - [Debugging (`noeta dap`)](Debugging)
 - [Profiling (`noeta profile`)](Profiling)
 - [Observability](Observability)
+- [WebAssembly & the Edge (`--wasm`, `--serve`, the playground)](WebAssembly-and-the-Edge)
 
 ### 3 · Language & standard-library reference
 The exhaustive reference for syntax, semantics, and the stdlib.

@@ -48,6 +48,10 @@ pub struct DeclaredTier {
     pub name: String,
     /// The knob-attribute type from `config: T`, if the tier has knobs.
     pub config: Option<String>,
+    /// The body language ID from `text: "<lang>"`, when the tier is a **text tier** (text-tiers
+    /// arc): its blocks hold verbatim text (lexer-captured, un-parsed) tagged with this language
+    /// for tooling. `None` for a code tier. Mutually exclusive with `config` (E0051).
+    pub text: Option<String>,
     /// The runner fn's (possibly link-qualified) name — what dispatch invokes with the roots.
     pub runner: String,
     /// The declaring **package root** — the runner's first qualified segment (`fuzzkit` for
@@ -104,6 +108,7 @@ impl TierRegistry {
                     .push(DeclaredTier {
                         name: t.name.clone(),
                         config: t.config.as_ref().map(|(n, _)| n.clone()),
+                        text: t.text.as_ref().map(|(lang, _)| lang.clone()),
                         runner: f.name.clone(),
                         root: runner_root(&f.name),
                         span: t.span,
@@ -186,6 +191,26 @@ impl TierRegistry {
             Ok(ResolvedProvider::Declared(d)) => d.config.clone(),
             Err(_) => self.config_attribute(tier).map(str::to_string),
         }
+    }
+
+    /// The body language of `tier` when it is a **text tier** — `"markdown"` for the built-in
+    /// `doc`, the declaration's `text: "<lang>"` for a declared one, `None` for a code tier. Reads
+    /// the first declaration (text tiers are single-provider today).
+    pub fn text_lang(&self, tier: &str) -> Option<&str> {
+        if tier == "doc" {
+            return Some("markdown");
+        }
+        self.declared(tier).and_then(|d| d.text.as_deref())
+    }
+
+    /// Every declared text tier's name — what the pipeline feeds the lexer
+    /// (`noeta_lexer::TextTiers::with`) so consumer files capture these bodies verbatim.
+    pub fn text_tier_names(&self) -> impl Iterator<Item = &str> {
+        self.declared
+            .values()
+            .flatten()
+            .filter(|d| d.text.is_some())
+            .map(|d| d.name.as_str())
     }
 
     /// The tier's config attribute under **default** resolution (no target) — the extension
@@ -364,15 +389,18 @@ pub struct TierFn {
     pub attrs: Vec<Attribute>,
 }
 
-/// A `@doc { … }` text-tier block's verbatim body, surfaced for extraction by `lang doc` (slice
-/// 6f). The text is the raw source between the braces, captured un-parsed by the lexer.
+/// A text-tier block's verbatim body (`@doc { … }`, or any declared `text:` tier — slice 6f,
+/// generalized by the text-tiers arc). The text is the source between the braces, captured
+/// un-parsed by the lexer, with the `\{`/`\}`/`\\` escapes undone.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DocBlock {
+pub struct TextBlock {
+    /// The tier the block belongs to (`"doc"`, `"spec"`, …).
+    pub tier: String,
     /// The verbatim body text.
     pub text: String,
-    /// The whole `@doc { … }` span, for the extractor's source-location header.
+    /// The whole `@<tier> { … }` span, for the extractor's source-location header.
     pub span: Span,
-    /// What the block documents — resolved by adjacency (see [`resolve_docs`]).
+    /// What the block annotates — resolved by adjacency (see [`resolve_texts`]).
     pub target: DocTarget,
 }
 
@@ -393,14 +421,24 @@ pub enum DocTarget {
 }
 
 /// Resolve every top-level `@doc { … }` block, in source order, with its adjacency-resolved
-/// [`DocTarget`]. `@doc` is a *declaration-position* text tier, so a top-level walk is the whole
-/// story; on a normal run the bodies never reach the checker or lowering (stripped like any
-/// inactive tier). Works from a bare parse — no type-checking — so docs extract from
-/// work-in-progress code. Consumers: `lang doc` (extraction with symbol association), the LSP's
-/// hover, and [`activate_tiers`]'s `#[Doc]` stamping when the `doc` tier is live.
-pub fn resolve_docs(program: &Program) -> Vec<DocBlock> {
-    // Sources that already produced a non-attached doc block — the first is the module doc, the
-    // rest are sections.
+/// [`DocTarget`] — [`resolve_texts`] filtered to the built-in `doc` tier. Consumers: `lang doc`
+/// (extraction with symbol association), the LSP's hover, and [`activate_tiers`]'s `#[Doc]`
+/// stamping when the `doc` tier is live.
+pub fn resolve_docs(program: &Program) -> Vec<TextBlock> {
+    let mut texts = resolve_texts(program);
+    texts.retain(|t| t.tier == "doc");
+    texts
+}
+
+/// Resolve every top-level text-tier block (`@doc` or any declared `text:` tier), in source
+/// order, with its adjacency-resolved [`DocTarget`]. Text tiers are *declaration-position*, so a
+/// top-level walk is the whole story; on a normal run the bodies never reach the checker or
+/// lowering (stripped like any inactive tier). Works from a bare parse — no type-checking — so
+/// text extracts from work-in-progress code. Matches on the lexer's verbatim capture
+/// (`doc_text`), which is exactly the set of blocks whose tier was a known text tier at lex time.
+pub fn resolve_texts(program: &Program) -> Vec<TextBlock> {
+    // Sources that already produced a non-attached text block — the first is the module doc, the
+    // rest are sections. Adjacency state is per-tier, so a module doc and a module spec coexist.
     let mut module_doc_seen = std::collections::HashSet::new();
     let mut docs = Vec::new();
     for (i, stmt) in program.stmts.iter().enumerate() {
@@ -413,9 +451,6 @@ pub fn resolve_docs(program: &Program) -> Vec<DocBlock> {
         else {
             continue;
         };
-        if tier != "doc" {
-            continue;
-        }
         let decl_target = program.stmts.get(i + 1).and_then(|next| {
             if next.span().source != span.source {
                 return None;
@@ -433,13 +468,14 @@ pub fn resolve_docs(program: &Program) -> Vec<DocBlock> {
             })
         });
         let target = decl_target.unwrap_or_else(|| {
-            if module_doc_seen.insert(span.source) {
+            if module_doc_seen.insert((span.source, tier.clone())) {
                 DocTarget::Module
             } else {
                 DocTarget::Section
             }
         });
-        docs.push(DocBlock {
+        docs.push(TextBlock {
+            tier: tier.clone(),
             text: text.clone(),
             span: *span,
             target,
@@ -461,6 +497,11 @@ pub struct Activated {
     /// The roots of every activated **declared** tier (tier-providers T2), keyed by tier name — a
     /// `@fuzz { fn f() }` block's fns under `"fuzz"`, for the dispatching runner.
     pub custom: std::collections::BTreeMap<String, Vec<TierFn>>,
+    /// The text blocks of every activated declared **text** tier (text-tiers arc), keyed by tier
+    /// name — a `@spec { <case/> }` body under `"spec"`, for the dispatching runner (which
+    /// receives them as `List<TierText>`). Built-in `doc` is not collected here: its activation
+    /// surface is the `#[Doc]` stamp.
+    pub texts: std::collections::BTreeMap<String, Vec<TextBlock>>,
     /// The tier name-space this resolution ran against — built-ins plus the program's `@tier`
     /// declarations. Surfaced so the caller (the CLI's dispatch) resolves the runner from the same
     /// registry activation validated with.
@@ -508,6 +549,18 @@ pub fn activate_tiers_with(
     } else {
         std::collections::HashMap::new()
     };
+    // The text roots of active *declared* text tiers (text-tiers arc), resolved on the input
+    // program like the doc stamps — the blocks themselves strip below, exactly like `@doc`.
+    let mut texts: std::collections::BTreeMap<String, Vec<TextBlock>> =
+        std::collections::BTreeMap::new();
+    for block in resolve_texts(program) {
+        if block.tier != "doc"
+            && active.contains(&block.tier.as_str())
+            && registry.declared(&block.tier).is_some()
+        {
+            texts.entry(block.tier.clone()).or_default().push(block);
+        }
+    }
     // The top-level statement list collects roots (a `@test`/`@bench` block's fns are runnable roots
     // only here — a tier block nested in a fn body holds inline code, not roots).
     let mut stmts = resolve_block(
@@ -552,6 +605,7 @@ pub fn activate_tiers_with(
         tests: roots.tests,
         benches: roots.benches,
         custom: roots.custom,
+        texts,
         registry,
         diagnostics,
     }

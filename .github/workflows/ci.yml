@@ -12,6 +12,9 @@ name: CI
 #   - fmt    : `cargo fmt --check` — the tree is kept stable-rustfmt-clean.
 #   - miri   : the one place `unsafe` lives — the NaN-box value model and the cycle collector —
 #              run under Miri to prove the refcount/heap paths are sound.
+#   - wasm   : the portability invariant behind the WASM target (plans/wasm/): the interpreter
+#              pipeline must keep checking on wasm32-wasip1 — no tokio/threads/Cranelift/getrandom
+#              may creep onto the default path.
 
 on:
   push:
@@ -134,6 +137,69 @@ jobs:
         run: >
           cargo clippy -p noeta-vm -p noeta-jit -p noeta-conformance -p noeta-cli
           --features "noeta-vm/jit noeta-conformance/jit" --all-targets --locked -- -D warnings
+
+  wasm:
+    name: WASM portability (wasm32-wasip1 check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1,wasm32-unknown-unknown,wasm32-wasip2
+      # Node 26's V8 ships JSPI unflagged, so the browser smoke exercises the W3.1 pump (the
+      # script degrades to the serial-fallback assertions on older runtimes, printing which).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - uses: Swatinem/rust-cache@v2
+      # The wasm target (plans/wasm/) rides on the interpreter pipeline being OS-free: every effect
+      # behind the `Host` trait, threads/Cranelift feature-gated off the default path. That held by
+      # architecture before it was ever checked; this job makes it an invariant instead of an
+      # accident. Check (not build): linkage is the runner crate's concern, portability is this one's.
+      - name: cargo check pipeline crates (wasm32-wasip1)
+        run: >
+          cargo check -p noeta-vm -p noeta-stdlib -p noeta-compiler -p noeta-lexer
+          -p noeta-parser -p noeta-loader -p noeta-db -p noeta-bundle -p noeta-eval
+          --target wasm32-wasip1 --locked
+      # The wasm differential oracle (W1.3): every corpus program, bundled and executed by the
+      # wasm runner under wasmtime (--sandbox), must match the native VM byte-for-byte — stdout,
+      # exit code, and rendered stderr. The wasm analogue of the bundle oracle's L1.3 gate.
+      - name: Install wasmtime
+        run: curl -sSf https://wasmtime.dev/install.sh | bash
+      - name: Build the wasm runner (the shipping artifact profile)
+        run: cargo build -p noeta-wasm-runner --target wasm32-wasip1 --profile wasm-release --locked
+      - name: Wasm differential oracle (runner under wasmtime vs native VM)
+        run: PATH="$HOME/.wasmtime/bin:$PATH" cargo run -p noeta-conformance --locked -- --wasm-differential
+      # The browser engine (W2): the playground cdylib must build for wasm32-unknown-unknown and
+      # actually execute in a plain JS embedding — the node smoke drives check/run/fmt through the
+      # hand-rolled ABI, the same way the playground's Web Worker does.
+      - name: Build the playground engine (wasm32-unknown-unknown)
+        run: cargo build -p noeta-playground --target wasm32-unknown-unknown --profile wasm-release --locked
+      - name: Browser-engine smoke (node over the raw ABI)
+        run: node crates/noeta-playground/tests/browser_smoke.mjs target/wasm32-unknown-unknown/wasm-release/noeta_playground.wasm
+      - name: Share-by-URL round trip
+        run: node crates/noeta-playground/tests/share_roundtrip.mjs
+      # The edge-serve payoff (W4): `noeta build --serve` a real handler, run the wasi:http
+      # component under `wasmtime serve`, assert a live HTTP round trip.
+      - name: wasi:http serve e2e (component under wasmtime serve)
+        run: PATH="$HOME/.wasmtime/bin:$PATH" bash crates/noeta-wasm-serve/tests/e2e.sh
+      # Hosting prep: every run leaves a deployable playground bundle and the generic wasm
+      # engines as artifacts — when noeta.dev hosting exists, deploying is "download + upload";
+      # the engines double as the packaged-toolchain distribution blobs.
+      - name: Build the playground bundle
+        run: bash web/playground/build.sh
+      - name: Upload the playground bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: playground-dist
+          path: web/playground/dist/
+      - name: Upload the generic wasm engines
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-engines
+          path: |
+            target/wasm32-wasip1/wasm-release/noeta-wasm-runner.wasm
+            target/wasm32-wasip2/wasm-release/noeta_wasm_serve.wasm
 
   miri:
     name: Miri (unsafe value & collector paths)

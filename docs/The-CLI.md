@@ -5,8 +5,9 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | Command | Purpose |
 |---|---|
 | [`noeta run`](#noeta-run) | Type-check and execute a program. |
-| [`noeta build`](#noeta-build) | Compile to a standalone artifact (`--exe`, or `--native` for a machine-code binary). |
+| [`noeta build`](#noeta-build) | Compile to a standalone artifact (`--exe`, `--native` for machine code, `--wasm`/`--serve` for [WebAssembly](WebAssembly-and-the-Edge)). |
 | [`noeta check`](#noeta-check) | Parse and type-check without running or building (exit 0/1/2). |
+| [`noeta serve`](#noeta-serve) | Run a program's HTTP handler as a server (`fn fetch(req: Request): Response`). |
 | [`noeta repl`](#noeta-repl) | Interactive REPL. |
 | [`noeta dump`](#noeta-dump) | Disassemble a program to its VM bytecode (a debugging aid). |
 | [`noeta test`](Testing) | Discover and run `@test` blocks. |
@@ -17,6 +18,9 @@ The `noeta` binary is the whole toolchain. Its main subcommands:
 | [`noeta mcp`](Editor-and-AI-Tooling) | The agent-native MCP server, over stdio (for AI tooling; see [Editor & AI Tooling](Editor-and-AI-Tooling)). |
 | [`noeta profile`](Profiling) | Profile a program — a hot-function table or a flamegraph. |
 | [`noeta fmt`](#noeta-fmt) | Format `.noe` source into the canonical style (files/dirs, `--check`, `--stdin`). |
+| [`noeta publish`](#noeta-publish) | Publish a tagged release of your package to the registry, signed ([provenance](Package-Provenance)). |
+| [`noeta audit`](#noeta-audit) | Report the dependency tree's trust footprint — native/command grants and pinned provenance. |
+| [`noeta key`](#noeta-key) | Manage the Ed25519 signing key (the key-based provenance path). |
 
 Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
@@ -115,8 +119,10 @@ Compiles a program to a standalone artifact instead of running it. It shares the
 | `--out <PATH>` | Where to write the artifact. |
 | `--exe` | Emit a self-contained executable that bundles the bytecode with the runtime, launchable directly. |
 | `--native` | Emit an ahead-of-time-compiled **machine-code** binary (via the AOT backend), with dead-code elimination stripping unused stdlib rings. |
+| `--wasm` | Emit a single **WebAssembly** module (`wasm32-wasip1`) that runs under any WASI runtime: `wasmtime run app.wasm`. See [WebAssembly & the Edge](WebAssembly-and-the-Edge). |
+| `--serve` | Emit a **`wasi:http` serve component** (`wasm32-wasip2`): your `server.serve` handler on `wasmtime serve`, Spin, and Spin-class edge clouds. See [WebAssembly & the Edge](WebAssembly-and-the-Edge). |
 
-Both executable forms see the same `args.all()` vector as `noeta run` (argv[0] = program path), so no code changes between running from source and shipping a binary.
+All executable forms see the same `args.all()` vector as `noeta run` (argv[0] = program path), so no code changes between running from source and shipping a binary.
 
 ## `noeta check`
 
@@ -125,6 +131,31 @@ noeta check [PATH]
 ```
 
 Parses and type-checks without running or building — the CI/pre-commit gate (the `cargo check` / `tsc --noEmit` primitive). `PATH` defaults to the current directory, walked recursively for `.noe` files (resolving and deduping shared modules); a single file checks just that file with its sibling modules linked in. `--format json` emits a single machine-readable report on stdout for CI/editors/the MCP server; the default renders diagnostics for a terminal. Exits non-zero if any error-severity diagnostic is found (warnings print but do not fail).
+
+## `noeta serve`
+
+```
+noeta serve <FILE> [--port <PORT>]
+```
+
+Runs a program as an HTTP server: executes the file's top-level setup, then calls
+`server.serve(<port>, fetch)` for it — the exact call the program could write itself, so `noeta
+serve` is pure ergonomics over [`std.http.server`](Standard-Library-Modules). The program supplies
+two things: `use std.http.server` and a top-level handler named `fetch`:
+
+```noeta check
+use std.http.server
+use std.http.{Request, Response}
+
+fn fetch(req: Request): Response {
+    return server.response(200, "hello from ${req.path()}")
+}
+```
+
+(sync or `async` — both are handled identically). Default port `8080`, bound on all interfaces
+(`0.0.0.0`); a single cooperatively-concurrent worker; runs until Ctrl-C. A missing `fetch` or
+import surfaces as an ordinary check error. The same unchanged program also deploys to the edge
+as a `wasi:http` component — see [WebAssembly & the Edge](WebAssembly-and-the-Edge).
 
 ---
 
@@ -280,3 +311,45 @@ The opcode set and prototype/side-table layout are described in [The Virtual Mac
 A program (or a dependency) can also declare its **own** tier with `@tier` — `noeta <tier> <FILE>` dispatches to the declaring package's runner; see [Documentation & Dev Tiers](Documentation-and-Tiers).
 
 All three accept `--target <NAME>`, which acts as a **gate**: if the named `noeta.toml` target does not make that tier live, the command prints a notice and no-ops with exit `0`. With no `--target`, they always proceed.
+
+---
+
+## Packages: `publish`, `audit`, `key`
+
+Dependencies are declared in `noeta.toml` (`[dependencies]`, with elevated grants in `[trust]`) and resolve automatically on `run`/`build`/`check` — there is no separate install step; the resolved pins live in `noeta.lock` (commit it). These three verbs are the *publisher/consumer trust* surface. The trust model behind them — attestations, the two signing roots, pinning, downgrade protection — is documented on [Package Provenance](Package-Provenance).
+
+### `noeta publish`
+
+```
+noeta publish --git <URL> [--tag <TAG>] [--key | --interactive [--oob]]
+```
+
+Publishes the package in the current directory's `noeta.toml` to the registry: resolves `--tag` (default `v<version>`) to its commit SHA, pins that into the index entry, and **signs an attestation** binding *name + version → commit* so consumers can verify the release independently of trusting the registry.
+
+How it signs — an explicit flag wins, then the environment decides:
+
+| Situation | Result |
+|---|---|
+| `--key` | Force **key-based** Ed25519 signing with the key file — `[signed]`. |
+| `--interactive` | Keyless via a **browser sign-in** (GitHub/Google/Microsoft; your email is the identity). `--oob` prints the URL and prompts for a code instead of opening a browser. |
+| Ambient CI identity (GitHub Actions, GitLab, Buildkite) | **Keyless** (Sigstore), zero-config — `[keyless: <identity>]`. |
+| A key file exists (`NOETA_SIGNING_KEY` or `./noeta-signing.key`) | **Key-based** Ed25519 — `[signed]`. |
+| None of the above | `[UNSIGNED]` (resolves, but consumers can't verify it). |
+
+A published version is **immutable** — re-publishing the same version with different coordinates is rejected. A package with `path`/`git` dependencies is rejected at publish (consumers couldn't resolve them); depend via the registry. Publishing to the hosted registry needs `NOETA_REGISTRY_TOKEN`; `NOETA_REGISTRY_URL` selects it (otherwise the file-backed local index is used — offline development and tests).
+
+### `noeta audit`
+
+```
+noeta audit [PATH]
+```
+
+Answers *"what am I actually running?"* for the resolved dependency tree: every package and its source, which ones run **native code** or add **CLI commands** (the `[trust]` grants that make that authority active), and each scope's **pinned provenance trust root** — a signing key or a keyless identity. Resolution *enforces* verification, so a build that succeeds already means every signed release verified; the audit is the human-readable report of what that trust rests on.
+
+### `noeta key`
+
+```
+noeta key new [--out <PATH>]
+```
+
+Generates an Ed25519 keypair for the key-based signing path: writes the **private** key (default `noeta-signing.key`, mode 0600 — keep it out of git) and prints the **public** key to register with your registry scope. Only needed if you can't sign keyless (no CI identity and no browser); see [Package Provenance](Package-Provenance) for the trade-offs — keyless has nothing to steal and is publicly monitorable, a key file is neither.

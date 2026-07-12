@@ -1,0 +1,38 @@
+[package]
+name = "noeta-wasm-serve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+# The wasip2 build is a component exporting `wasi:http/incoming-handler` (`wasmtime serve` runs
+# it); `rlib` keeps the request→run→response core natively unit-testable.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+noeta-bundle = { workspace = true }
+noeta-bytecode = { workspace = true }
+noeta-stdlib = { workspace = true }
+noeta-vm = { workspace = true }
+noeta-wasi-host = { workspace = true }
+
+# The wasi:http glue only exists on the wasi target; native builds compile the core alone.
+[target.'cfg(all(target_arch = "wasm32", target_os = "wasi"))'.dependencies]
+wasi = { workspace = true }
+
+[dev-dependencies]
+# The unit tests compile handler programs through the salsa pipeline, like the runner's tests.
+noeta-db = { workspace = true }
+noeta-span = { workspace = true }
+
+# One of the workspace's few `unsafe` opt-outs (see ARCHITECTURE.md): reading the stapled-bundle
+# slot — the same `read_volatile` + `from_raw_parts` pattern (and the same justification) as
+# `noeta-wasm-runner/src/embedded.rs`; gated by the e2e rather than miri, like the JIT's native
+# code. It re-states the rest of the workspace lints minus `unsafe_code = "forbid"`.
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

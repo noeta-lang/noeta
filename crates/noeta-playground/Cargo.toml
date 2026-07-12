@@ -1,0 +1,42 @@
+[package]
+name = "noeta-playground"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+# `cdylib` is the browser artifact (wasm32-unknown-unknown); `rlib` keeps the crate natively
+# testable — the JSON core is plain Rust, and the unit tests drive it directly.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+noeta-db = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-fmt = { workspace = true }
+# The IDE engine (W2.3): hover/completion/definition/signature — the same DocumentStore the LSP
+# adapts over, so the playground answers are the LSP's answers.
+noeta-ide = { workspace = true }
+noeta-span = { workspace = true }
+# The Host trait + SandboxHost/SandboxExecutor + Vfs the browser host embeds (W3.0).
+noeta-stdlib = { workspace = true }
+compact_str = { workspace = true }
+noeta-vm = { workspace = true }
+serde_json = { workspace = true }
+# Only for the custom-backend hook + Error type (see `abi.rs`): the browser build must satisfy
+# getrandom's `custom` backend symbol even though the only consumer (bcrypt's salt path) is
+# unreachable — salts arrive from the Host `Entropy` capability.
+getrandom = { workspace = true }
+
+# One of the workspace's few `unsafe` opt-outs (see ARCHITECTURE.md): the hand-rolled wasm ABI in
+# `abi.rs` — reading the caller's (ptr, len) source buffer, handing out length-prefixed result
+# buffers, and the getrandom custom-backend hook. Deliberately no wasm-bindgen: three
+# string→string exports do not justify a codegen tool locked in version step with the crate. The
+# unsafe surface is a dozen lines, quarantined in `abi.rs`; the JSON core stays safe and is what
+# the unit tests drive. It re-states the rest of the workspace lints minus `unsafe_code = "forbid"`.
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

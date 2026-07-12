@@ -84,7 +84,7 @@ A `Span` is a mutable handle to one live span (like a file handle — no auto-cl
 | `context` | `context() -> string` | This span's own `traceparent` — inject a *specific* held span (vs. `current_context`'s active one). |
 | `end` | `end() -> void` | Finalize; the span is exported. |
 
-```noeta ignore
+```noeta check
 use std.{tracing}
 
 fn handle_order(id: int): void {
@@ -113,7 +113,7 @@ is *not* a `print`/stdout bridge.
 | `log.log` | `log(severity: string, message: string) -> void` | Generic form; severity parsed case-insensitively (unknown → `info`), reaching `trace`/`fatal` too. |
 | `log.*_with` | `info_with(message: string, attrs: Map<string, string\|int\|float\|bool>) -> void` | Structured attributes (`log_with`/`debug_with`/…). A non-scalar attribute value is a **compile-time** error. |
 
-```noeta ignore
+```noeta check
 use std.{log}
 use std.{tracing}
 
@@ -143,7 +143,7 @@ Counters record with `.add(n)`; histograms and gauges with `.record(v)`. The `.a
 `.record_with(v, attrs)` forms attach a `Map<string, string|int|float|bool>` of attributes (each
 distinct set is its own series).
 
-```noeta ignore
+```noeta check
 use std.{metrics}
 
 requests = metrics.counter("http.requests")
@@ -190,7 +190,7 @@ changes:
 Auto-propagation covers Noeta's own boundaries. To bridge a boundary Noeta doesn't own — an outbound
 HTTP call to another service, a queue — thread the `traceparent` yourself:
 
-```noeta ignore
+```noeta check
 // Inject on the way out:
 tp = tracing.current_context()          // "00-<trace>-<span>-01"
 // … send `tp` as the `traceparent` header / message field …

@@ -44,7 +44,8 @@ pub use registry::{
 pub use telemetry::{
     AttrValue, DEFAULT_HISTOGRAM_BOUNDS, HistogramPoint, InstrumentId, InstrumentKind, LogRecord,
     Logging, MetricData, MetricPoints, MetricStore, MetricValue, Metrics, NumberPoint, Severity,
-    SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, Temporality, TraceContext, Tracing,
+    SpanData, SpanEvent, SpanId, SpanKind, SpanStatus, SpanTracker, Temporality, TraceContext,
+    Tracing,
 };
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the

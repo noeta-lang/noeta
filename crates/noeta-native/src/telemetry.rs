@@ -615,6 +615,145 @@ fn attr_set_key(attrs: &[(CompactString, AttrValue)]) -> String {
     s
 }
 
+/// Live-span bookkeeping for hosts with **no exporter** (the WASI and browser hosts — P-WASM):
+/// spans mint real W3C ids from caller-supplied entropy, live contexts serve parenting and
+/// propagation, remote contexts intern as pseudo-handles, and an ended span is handed back for
+/// the caller to drop (the null sink) — so `tel_span_context` on it yields the fresh zero
+/// context, exactly the `RealHost`-without-`telemetry` semantics. `RealHost` and the sandbox
+/// keep their own state (an exporter buffer and a deterministic recorder respectively); this
+/// struct is the shared shape for hosts that track without emitting.
+#[derive(Debug)]
+pub struct SpanTracker {
+    /// Opaque span-handle counter (shared with remote interns, so the id spaces cannot collide).
+    next_span: u64,
+    /// In-flight spans by handle, ended entries removed.
+    live: std::collections::HashMap<SpanId, SpanData>,
+    /// Remote-interned contexts: read by [`SpanTracker::context`], no-ops elsewhere.
+    remote: std::collections::HashMap<SpanId, TraceContext>,
+}
+
+impl Default for SpanTracker {
+    fn default() -> SpanTracker {
+        SpanTracker {
+            next_span: 1,
+            live: std::collections::HashMap::new(),
+            remote: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl SpanTracker {
+    /// Start a span: `span_id`/`fresh_trace_id` are caller-drawn entropy (a child inherits its
+    /// parent's trace id instead of `fresh_trace_id`), `now` the host's wall clock.
+    pub fn start(
+        &mut self,
+        name: &str,
+        kind: SpanKind,
+        parent: Option<TraceContext>,
+        span_id: [u8; 8],
+        fresh_trace_id: [u8; 16],
+        now: u64,
+    ) -> SpanId {
+        let handle = self.next_span;
+        self.next_span += 1;
+        let context = TraceContext {
+            trace_id: parent.map_or(fresh_trace_id, |p| p.trace_id),
+            span_id,
+            sampled: true,
+        };
+        self.live.insert(
+            handle,
+            SpanData {
+                name: name.into(),
+                kind,
+                context,
+                parent,
+                start_unix_ms: now,
+                end_unix_ms: None,
+                attributes: Vec::new(),
+                events: Vec::new(),
+                status: SpanStatus::Unset,
+            },
+        );
+        handle
+    }
+
+    /// Set (or overwrite) an attribute on a live span.
+    pub fn set_attr(&mut self, span: SpanId, key: &str, value: AttrValue) {
+        if let Some(s) = self.live.get_mut(&span) {
+            match s.attributes.iter_mut().find(|(k, _)| k == key) {
+                Some(slot) => slot.1 = value,
+                None => s.attributes.push((key.into(), value)),
+            }
+        }
+    }
+
+    /// Append a timestamped event to a live span.
+    pub fn add_event(
+        &mut self,
+        span: SpanId,
+        name: &str,
+        attrs: Vec<(CompactString, AttrValue)>,
+        now: u64,
+    ) {
+        if let Some(s) = self.live.get_mut(&span) {
+            s.events.push(SpanEvent {
+                name: name.into(),
+                unix_ms: now,
+                attributes: attrs,
+            });
+        }
+    }
+
+    /// Set a live span's terminal status.
+    pub fn set_status(&mut self, span: SpanId, status: SpanStatus) {
+        if let Some(s) = self.live.get_mut(&span) {
+            s.status = status;
+        }
+    }
+
+    /// End a live span, returning its completed record — the caller drops it (null sink) or
+    /// exports it. `None` for an unknown/already-ended span (a no-op end).
+    pub fn end(&mut self, span: SpanId, now: u64) -> Option<SpanData> {
+        let mut data = self.live.remove(&span)?;
+        data.end_unix_ms = Some(now);
+        Some(data)
+    }
+
+    /// The context of a live span or remote intern; the fresh zero context for anything else.
+    pub fn context(&self, span: SpanId) -> TraceContext {
+        if let Some(remote) = self.remote.get(&span) {
+            return *remote;
+        }
+        self.live.get(&span).map_or(
+            TraceContext {
+                trace_id: [0u8; 16],
+                span_id: [0u8; 8],
+                sampled: false,
+            },
+            |s| s.context,
+        )
+    }
+
+    /// Intern a remote context as a pseudo-handle (shares the span counter — no collisions).
+    pub fn intern_remote(&mut self, context: TraceContext) -> SpanId {
+        let id = self.next_span;
+        self.next_span += 1;
+        self.remote.insert(id, context);
+        id
+    }
+
+    /// Whether `span` is a remote-interned handle.
+    pub fn is_remote(&self, span: SpanId) -> bool {
+        self.remote.contains_key(&span)
+    }
+
+    /// Release a remote-interned handle.
+    pub fn release_remote(&mut self, span: SpanId) {
+        self.remote.remove(&span);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -89,3 +89,9 @@
 ; ------------------------------------------------------------------ punctuation
 ["(" ")" "[" "]" "{" "}"] @punctuation.bracket
 ["," ";" ":" "::" "."] @punctuation.delimiter
+
+; ------------------------------------------------------------- text tiers
+; The `@doc` head highlights like every other tier directive; the body is prose (injected as
+; markdown via queries/injections.scm — editors without injection support leave it unstyled,
+; which is already a win: prose can no longer bleed string scopes into the code below).
+(text_tier_block "@" @attribute name: (identifier) @attribute)

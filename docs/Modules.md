@@ -21,7 +21,7 @@ pub class User {
 
 Import a declaration by its full path. Grouped imports share a prefix:
 
-```noeta ignore
+```noeta check
 namespace App.Main;
 
 use App.Models.User;                       // single import
@@ -36,7 +36,7 @@ echo customer.name                          // Ada
 
 An import can be renamed locally with `as`. This is how a file brings in two types that share a short name from different namespaces — each under its own local name:
 
-```noeta ignore
+```noeta check
 namespace App.Main;
 
 use App.Money.Amount as Money;      // App.Money.Amount
@@ -58,7 +58,7 @@ Because identity is qualified, a short name only ever clashes *within a single f
 
 **Native types work identically.** A standard-library type such as `std.id.Uuid` is imported — and aliased — with the same `use`, and carries the same kind of qualified identity (`std.id.Uuid`). A file may declare its own `Counter` while importing a native one under an alias; the two coexist:
 
-```noeta ignore
+```noeta check
 use std.id.Uuid as NativeId          // the native type, renamed locally
 
 struct Uuid { tag: int }             // your own, unrelated type

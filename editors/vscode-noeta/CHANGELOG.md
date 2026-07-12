@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.1
+
+Text tiers (text-tiers arc): `@doc { ... }` bodies now highlight as **embedded markdown** and are
+bounded exactly like the compiler bounds them -- braces nest, `\{`/`\}`/`\\` are literal escapes --
+fixing the long-standing leak where an apostrophe or backtick in doc prose opened a string scope
+that corrupted highlighting for the rest of the file. Third-party declared text tiers
+(`@tier(x, text: "...")`) plug in via a one-rule injection grammar (see README, "Text tiers and
+embedded languages").
+
 ## 0.7.0
 
 Adds **architecture navigation** over the compiler's static call graph (the same engine the

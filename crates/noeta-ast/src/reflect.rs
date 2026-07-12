@@ -675,6 +675,13 @@ pub const TIER_ATTR_DOC: &str = "Doc";
 /// as a prelude type; dispatch constructs instances in the synthesized runner-call fragment.
 pub const TIER_ROOT: &str = "TierRoot";
 
+/// The prelude struct a declared **text** tier's runner receives its roots as (text-tiers arc):
+/// `TierText { target: string, text: string }` — one per activated verbatim body. `target` is the
+/// adjacency-resolved declaration name (`""` for a module/section block); `text` is the body with
+/// the `\{`/`\}`/`\\` escapes undone. The checker registers it as a prelude type; dispatch
+/// constructs instances in the synthesized runner-call fragment.
+pub const TIER_TEXT: &str = "TierText";
+
 /// The built-in `Semantic.*` variants, in declaration order. The single source of truth for the
 /// language's own role vocabulary, shared by the prelude-enum registration and both backends'
 /// materialization. All are payload-free (a richer parameterized form, e.g. `Layer(name)`, would

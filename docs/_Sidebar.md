@@ -14,6 +14,7 @@
 - [Debugging](Debugging)
 - [Profiling](Profiling)
 - [Observability](Observability)
+- [WebAssembly & the Edge](WebAssembly-and-the-Edge)
 
 **Language reference**
 - [Syntax Basics](Syntax-Basics)

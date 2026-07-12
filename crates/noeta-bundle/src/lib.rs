@@ -248,6 +248,20 @@ pub fn extract_stapled(image: &[u8]) -> Option<&[u8]> {
         .map(|start| &body[start..])
 }
 
+// Wasm stapling (P-WASM W1.2) — the `noeta build --wasm` analogue of [`staple`]: instead of a
+// tail trailer (a wasm guest cannot read its own binary), the bundle is injected into the wasm
+// runner's data section and a compiled-in slot is patched to point at it. The patcher is a
+// dependency-free section-level rewrite, so it compiles everywhere this crate does (the runner
+// included — dead code there, stripped by the linker).
+mod wasm;
+pub use wasm::{WasmStapleError, staple_wasm};
+
+/// The 16-byte marker the wasm runner's bundle slot starts with (P-WASM W1.2) — the
+/// patcher↔runner contract. Slot layout: `magic, ptr: u32 LE, len: u32 LE`; the runner keeps
+/// exactly one copy in its data section (the slot initializer), and `staple_wasm` refuses to
+/// patch zero or several occurrences.
+pub const WASM_SLOT_MAGIC: [u8; 16] = *b"NOETA_BUNDLE_SLT";
+
 #[cfg(test)]
 mod tests {
     use super::*;

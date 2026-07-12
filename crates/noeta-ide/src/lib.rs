@@ -267,6 +267,21 @@ impl DocumentStore {
         self.buffers.keys().cloned().collect()
     }
 
+    /// The document's workspace-wide text-tier set (text-tiers arc) — what keeps a `@<name> { … }`
+    /// body verbatim under formatting when the tier is declared in a sibling or dependency. A
+    /// document with no workspace falls back to the default set (same-file declarations are
+    /// discovered by the lexer itself).
+    fn text_tiers_of(&self, uri: &str) -> noeta_lexer::TextTiers {
+        match self.workspaces.get(uri) {
+            Some(cache) => noeta_lexer::TextTiers::with(
+                noeta_db::workspace_text_tiers(&self.db, cache.workspace)
+                    .iter()
+                    .cloned(),
+            ),
+            None => noeta_lexer::TextTiers::default(),
+        }
+    }
+
     /// Format the whole document at `uri` into the canonical style, returning a single
     /// full-document replacement edit — or `None` if the document is not open, or an empty edit list
     /// if it is already canonical. Style is the nearest `noeta.toml` `[fmt]` config (defaults if
@@ -277,7 +292,8 @@ impl DocumentStore {
         let config = uri_to_path(uri)
             .and_then(|p| p.parent().map(noeta_fmt::FmtConfig::discover))
             .unwrap_or_default();
-        let formatted = noeta_fmt::format_source(uri, text, &config).ok()?;
+        let tiers = self.text_tiers_of(uri);
+        let formatted = noeta_fmt::format_source_in(uri, text, &config, &tiers).ok()?;
         if formatted == *text {
             return Some(Vec::new()); // already canonical — no edit, no churn
         }
@@ -304,7 +320,9 @@ impl DocumentStore {
             .unwrap_or_default();
         let index = LineIndex::new(text);
         let offset = index.offset(position, encoding);
-        let (start, end, new_text) = noeta_fmt::format_stmt_at(uri, text, offset, &config)?;
+        let tiers = self.text_tiers_of(uri);
+        let (start, end, new_text) =
+            noeta_fmt::format_stmt_at_in(uri, text, offset, &config, &tiers)?;
         Some(vec![TextEdit {
             range: Range::new(
                 index.position(start, encoding),
@@ -330,7 +348,8 @@ impl DocumentStore {
         let index = LineIndex::new(text);
         let start = index.offset(range.start, encoding);
         let end = index.offset(range.end, encoding);
-        let edits = noeta_fmt::format_range(uri, text, start, end, &config)?;
+        let tiers = self.text_tiers_of(uri);
+        let edits = noeta_fmt::format_range_in(uri, text, start, end, &config, &tiers)?;
         Some(
             edits
                 .into_iter()
@@ -2119,6 +2138,32 @@ mod tests {
         assert!(
             diags.is_empty(),
             "imported name should resolve; got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_captures_a_text_tier_declared_in_a_sibling() {
+        // Text-tiers arc: a sibling declares `@tier(spec, text: "xml")`; the open document's
+        // `@spec { … }` body — invalid as Noeta tokens (XML quotes) — must still capture verbatim
+        // in the editor, i.e. the workspace lex (`tokens_in` via `workspace_text_tiers`) applies
+        // the sibling's declaration and the file diagnoses clean.
+        let dir = temp_workspace(
+            "text_tier_sibling",
+            &[(
+                "tiers.noe",
+                "namespace App.Tiers;\n@tier(spec, text: \"xml\")\npub fn run_specs(roots: List<TierText>): void { return }\n",
+            )],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let mut store = DocumentStore::default();
+        store.open(
+            &entry_uri,
+            "use App.Tiers.run_specs\n@spec {\n  <case name=\"quoted\"/>\n}\nfn add(a: int, b: int): int { return a + b }\necho add(1, 2)\n".to_string(),
+        );
+        let (diags, _text) = store.diagnostics(&entry_uri).unwrap();
+        assert!(
+            diags.is_empty(),
+            "sibling-declared text tier should capture; got {diags:?}"
         );
     }
 

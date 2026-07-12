@@ -24,7 +24,9 @@ Many stdlib operations return options — `[1, 2, 3].first()` → `some(1)`, `[]
 
 A result is either `Ok(x)` or `Err(e)`. Use `Ok()` (no argument) for `Result<void, E>`.
 
-```noeta ignore
+```noeta check
+struct Item { price: float }
+
 enum OrderError { Empty; NegativePrice(index: int) }
 
 fn validate(items: List<Item>): Result<void, OrderError> {
@@ -64,7 +66,7 @@ fn pipeline(path: string): Result<Report, Error> {
 
 `expr ?? fallback` unwraps a `some`, or evaluates the fallback for a `none`/absent value. It short-circuits — the fallback runs only when needed:
 
-```noeta ignore
+```noeta check
 echo find(false) ?? "guest"      // "guest" if find returns none
 
 mut present = some(5)

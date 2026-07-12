@@ -199,6 +199,21 @@ enum Command {
         /// located via `NOETA_AOT_RUNTIME_LIB`, else built from the workspace (interim).
         #[arg(long)]
         native: bool,
+        /// Emit a single **wasm** artifact (P-WASM W1.2): the bundle is injected into the
+        /// `noeta-wasm-runner` wasm32-wasip1 binary's data section, producing one `.wasm` that
+        /// runs the program under any WASI runtime (`wasmtime run app.wasm`). The runner is
+        /// located via `NOETA_WASM_RUNNER`, next to this binary, else built from the workspace
+        /// (interim; needs cargo + the `wasm32-wasip1` target).
+        #[arg(long)]
+        wasm: bool,
+        /// Emit a **wasi:http serve component** (P-WASM W4): the program is baked into the
+        /// `noeta-wasm-serve` component (wasm32-wasip2), whose `wasi:http/incoming-handler`
+        /// export runs the program's `http.serve` handler once per request. Deploy on any
+        /// component host: `wasmtime serve -S cli=y app.serve.wasm`. The generic component is
+        /// located via `NOETA_WASM_SERVE`, next to this binary, else built from the workspace
+        /// (interim) — then the bundle is stapled in (~1 ms, no per-app cargo build).
+        #[arg(long)]
+        serve: bool,
         /// Activate a dev-tier for this build, e.g. `--tier debug`. Repeatable.
         #[arg(long)]
         tier: Vec<String>,
@@ -546,9 +561,20 @@ pub fn run_cli(
             out,
             exe,
             native,
+            wasm,
+            serve,
             tier,
             target,
-        } => cmd_build(&file, out.as_deref(), exe, native, &tier, &target),
+        } => cmd_build(
+            &file,
+            out.as_deref(),
+            exe,
+            native,
+            wasm,
+            serve,
+            &tier,
+            &target,
+        ),
         Command::Dump { file, tier, target } => cmd_dump(&file, &tier, &target),
         Command::Check {
             path,
@@ -1292,6 +1318,10 @@ fn cmd_fmt(
 
     let mut failed = false; // a parse or IO error on any file
     let mut would_change = false; // `--check`: some file is not already formatted
+    // Per-directory text-tier sets (text-tiers arc): a tier declared in a sibling file or a
+    // dependency package must keep this file's `@<name> { … }` bodies verbatim.
+    let mut tier_sets: std::collections::HashMap<PathBuf, noeta_lexer::TextTiers> =
+        std::collections::HashMap::new();
 
     for file in &files {
         let dir = file.parent().unwrap_or_else(|| std::path::Path::new("."));
@@ -1310,8 +1340,13 @@ fn cmd_fmt(
                 continue;
             }
         };
+        let text_tiers = tier_sets
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| fmt_text_tiers(dir, file))
+            .clone();
 
-        match noeta_fmt::format_source(&file.to_string_lossy(), &original, &config) {
+        match noeta_fmt::format_source_in(&file.to_string_lossy(), &original, &config, &text_tiers)
+        {
             Ok(formatted) => {
                 if formatted == original {
                     continue; // already canonical — no write, no churn
@@ -1336,6 +1371,38 @@ fn cmd_fmt(
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// The project-wide text-tier set for formatting files in `dir` (text-tiers arc): the union of
+/// `@tier(…, text: "…")` declarations across the directory's sibling `.noe` files and — when the
+/// entry's package graph resolves (a manifest with dependencies) — every dependency module.
+/// Mirrors the loader's program-wide lex, so `noeta fmt` and `noeta run` agree on which bodies
+/// are verbatim. A standalone file with no siblings or manifest gets the default set (same-file
+/// declarations need no help — the lexer discovers those itself).
+fn fmt_text_tiers(dir: &std::path::Path, entry: &std::path::Path) -> noeta_lexer::TextTiers {
+    let mut names: Vec<String> = Vec::new();
+    let mut scan = |name: &str, text: &str| {
+        let source = Source::new(SourceId(0), name, text);
+        names.extend(noeta_lexer::lex(&source).text_tier_decls);
+    };
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "noe")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                scan(&path.to_string_lossy(), &text);
+            }
+        }
+    }
+    if let Ok(graph) = graph::resolve_graph(entry) {
+        for dep in &graph.packages {
+            for module in &dep.modules {
+                scan(&module.name, &module.text);
+            }
+        }
+    }
+    noeta_lexer::TextTiers::with(names)
 }
 
 /// Recursively collect every `.noe` file under `dir` (skipping dot-directories like `.git`).
@@ -2011,34 +2078,43 @@ fn run_declared_tier(
         emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
         return ExitCode::from(1);
     }
-    // The activated roots for this tier — a built-in name's roots land in the dedicated sinks
+    // The activated code roots for this tier — a built-in name's roots land in the dedicated sinks
     // (an overridden `bench = "criterion"` still collects under `benches`), a custom tier's in
-    // `custom`.
+    // `custom`. A text tier has no code roots (its bodies come from `activated.texts`).
     let roots = match name {
         "test" => activated.tests.clone(),
         "bench" => activated.benches.clone(),
         _ => activated.custom.get(name).cloned().unwrap_or_default(),
     };
 
-    // The runner call — `<runner>([TierRoot { name: "<fn>", run: <fn> }, …])` — is built as AST
+    // The runner call — `<runner>([TierRoot { name: "<fn>", run: <fn> }, …])`, or for a text
+    // tier `<runner>([TierText { target: "<decl>", text: "<body>" }, …])` — is built as AST
     // directly: the runner (and, in a namespaced entry, a root) carries its **link-qualified**
     // dotted name, which is an identifier to the resolved program but would parse as member
-    // access from text. The `TierRoot` *declaration* is textual (no names to qualify) and only
-    // synthesized when the program doesn't already declare one: the checker knows `TierRoot` as a
+    // access from text. The root *declaration* is textual (no names to qualify) and only
+    // synthesized when the program doesn't already declare one: the checker knows it as a
     // prelude type — that is what lets the runner's package name `List<TierRoot>` standalone —
     // but the backends build record literals from real declarations, and a declaration of the
     // same name shadows the prelude registration by design.
+    let is_text = tier.text.is_some();
+    let (root_ty, root_decl) = if is_text {
+        (
+            noeta_ast::reflect::TIER_TEXT,
+            "struct TierText { target: string  text: string }",
+        )
+    } else {
+        (
+            noeta_ast::reflect::TIER_ROOT,
+            "struct TierRoot { name: string  run: () -> void }",
+        )
+    };
     let mut program = activated.program;
-    let declares_tier_root = program
+    let declares_root_ty = program
         .stmts
         .iter()
-        .any(|s| matches!(s, Stmt::Struct(d) if d.name == noeta_ast::reflect::TIER_ROOT));
-    if !declares_tier_root {
-        let fragment = parse_fragment(
-            SourceId(u32::MAX),
-            "<tier-dispatch>",
-            "struct TierRoot { name: string  run: () -> void }",
-        );
+        .any(|s| matches!(s, Stmt::Struct(d) if d.name == root_ty));
+    if !declares_root_ty {
+        let fragment = parse_fragment(SourceId(u32::MAX), "<tier-dispatch>", root_decl);
         if !fragment.diagnostics.is_empty() {
             eprintln!("lang: internal error synthesizing the `{name}` dispatch");
             return ExitCode::from(2);
@@ -2046,37 +2122,59 @@ fn run_declared_tier(
         program.stmts.extend(fragment.program.stmts);
     }
     let span = program.span;
-    let root_items: Vec<Expr> = roots
-        .iter()
-        .map(|root| {
-            Expr::Object(noeta_ast::ObjectLit {
-                type_name: noeta_ast::reflect::TIER_ROOT.to_string(),
-                type_name_span: span,
-                fields: vec![
-                    noeta_ast::FieldInit {
-                        name: "name".to_string(),
-                        name_span: span,
-                        value: Expr::Str {
-                            value: root.name.clone(),
-                            span,
-                        },
-                        span,
-                    },
-                    noeta_ast::FieldInit {
-                        name: "run".to_string(),
-                        name_span: span,
-                        value: Expr::Ident {
+    let field = |name: &str, value: Expr| noeta_ast::FieldInit {
+        name: name.to_string(),
+        name_span: span,
+        value,
+        span,
+    };
+    let str_expr = |value: String| Expr::Str { value, span };
+    let object = |fields: Vec<noeta_ast::FieldInit>| {
+        Expr::Object(noeta_ast::ObjectLit {
+            type_name: root_ty.to_string(),
+            type_name_span: span,
+            fields,
+            spread: None,
+            span,
+        })
+    };
+    let root_items: Vec<Expr> = if is_text {
+        activated
+            .texts
+            .get(name)
+            .map(|blocks| blocks.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .map(|block| {
+                let target = match &block.target {
+                    noeta_check::DocTarget::Decl { name, .. } => name.clone(),
+                    _ => String::new(),
+                };
+                object(vec![
+                    field("target", str_expr(target)),
+                    field("text", str_expr(block.text.clone())),
+                ])
+            })
+            .collect()
+    } else {
+        // `roots` already handles the built-in sinks, so a provider-overridden `test`/`bench`
+        // dispatches its collected roots correctly (they never land in `custom`).
+        roots
+            .iter()
+            .map(|root| {
+                object(vec![
+                    field("name", str_expr(root.name.clone())),
+                    field(
+                        "run",
+                        Expr::Ident {
                             name: root.name.clone(),
                             span,
                         },
-                        span,
-                    },
-                ],
-                spread: None,
-                span,
+                    ),
+                ])
             })
-        })
-        .collect();
+            .collect()
+    };
     program.stmts.push(call_stmt(
         &tier.runner,
         vec![Expr::List {
@@ -2734,19 +2832,22 @@ fn cmd_dump(file: &std::path::Path, tiers: &[String], target: &Option<String>) -
 /// (`noeta_bundle::write`, run by `noeta run app.noeb`) or — with `--exe` — as a self-contained
 /// executable that runs the program on its own (`emit_exe`). Either artifact carries no `.noe`
 /// source. A type error prints diagnostics and exits non-zero, like `run`.
+#[allow(clippy::too_many_arguments)]
 fn cmd_build(
     file: &std::path::Path,
     out: Option<&std::path::Path>,
     exe: bool,
     native: bool,
+    wasm: bool,
+    serve: bool,
     tiers: &[String],
     target: &Option<String>,
 ) -> ExitCode {
     if let Some(code) = compose::maybe_delegate(file) {
         return code;
     }
-    if exe && native {
-        eprintln!("lang: --exe and --native are mutually exclusive");
+    if usize::from(exe) + usize::from(native) + usize::from(wasm) + usize::from(serve) > 1 {
+        eprintln!("lang: --exe, --native, --wasm, and --serve are mutually exclusive");
         return ExitCode::from(2);
     }
     // Same whole-file compile + startup cache as `run`/`dump`. The emit format doesn't affect the
@@ -2760,6 +2861,10 @@ fn cmd_build(
         emit_native(file, out, module)
     } else if exe {
         emit_exe(file, out, module)
+    } else if wasm {
+        emit_wasm(file, out, module)
+    } else if serve {
+        emit_serve(file, out, module)
     } else {
         emit_bundle(file, out, module)
     }
@@ -2844,6 +2949,215 @@ fn emit_exe(
         image.len()
     );
     ExitCode::SUCCESS
+}
+
+/// Emit `module` as a single **wasm** artifact (P-WASM W1.2) — the `--exe` analogue for the wasm
+/// target. A wasm guest cannot read its own binary, so instead of a tail trailer the bundle is
+/// injected into the runner's data section and its compiled-in slot patched to point at it
+/// (`noeta_bundle::staple_wasm`). Writes to `out` if given, else the input path with a `.wasm`
+/// extension. Runs under any WASI runtime: `wasmtime run app.wasm [args…]`.
+fn emit_wasm(
+    file: &std::path::Path,
+    out: Option<&std::path::Path>,
+    module: &noeta_bytecode::Module,
+) -> ExitCode {
+    let runner_path = match resolve_wasm_runner() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let runner = match std::fs::read(&runner_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!(
+                "lang: cannot read the wasm runner {}: {err}",
+                runner_path.display()
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let blob = noeta_bundle::write(module);
+    let image = match noeta_bundle::staple_wasm(&runner, &blob) {
+        Ok(image) => image,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let out_path = out
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| file.with_extension("wasm"));
+    match std::fs::write(&out_path, &image) {
+        Ok(()) => {
+            eprintln!(
+                "wrote {} ({} bytes, single wasm artifact)",
+                out_path.display(),
+                image.len()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("lang: cannot write {}: {err}", out_path.display());
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Emit `module` as a **wasi:http serve component** (P-WASM W4): staple its bundle into the
+/// prebuilt generic `noeta-wasm-serve` component — the exact `--wasm` mechanism one format
+/// level up (`staple_wasm` descends into the component's embedded engine module), so no cargo
+/// runs at user build time once a generic component exists. Writes to `out` if given, else
+/// `<input>.serve.wasm`. Deploy: `wasmtime serve -S cli=y app.serve.wasm`.
+fn emit_serve(
+    file: &std::path::Path,
+    out: Option<&std::path::Path>,
+    module: &noeta_bytecode::Module,
+) -> ExitCode {
+    let component_path = match resolve_serve_component() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let component = match std::fs::read(&component_path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!(
+                "lang: cannot read the serve component {}: {err}",
+                component_path.display()
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let blob = noeta_bundle::write(module);
+    let image = match noeta_bundle::staple_wasm(&component, &blob) {
+        Ok(image) => image,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let out_path = out.map(std::path::Path::to_path_buf).unwrap_or_else(|| {
+        let mut name = file.file_stem().unwrap_or_default().to_os_string();
+        name.push(".serve.wasm");
+        file.with_file_name(name)
+    });
+    match std::fs::write(&out_path, &image) {
+        Ok(()) => {
+            eprintln!(
+                "wrote {} ({} bytes, wasi:http component — `wasmtime serve -S cli=y {}`)",
+                out_path.display(),
+                image.len(),
+                out_path.display(),
+            );
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("lang: cannot write {}: {err}", out_path.display());
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Locate the generic `noeta-wasm-serve` component to staple into — the serve twin of
+/// [`resolve_wasm_runner`]'s ladder: `NOETA_WASM_SERVE` → next to this binary → the workspace
+/// build, compiled on demand (interim; a packaged toolchain ships the component).
+fn resolve_serve_component() -> Result<std::path::PathBuf, String> {
+    if let Ok(path) = std::env::var("NOETA_WASM_SERVE") {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join("noeta-wasm-serve.wasm");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    // Interim workspace build. `--locked` is deliberately absent: this is the dev-tree path.
+    let output = std::process::Command::new("cargo")
+        .args([
+            "build",
+            "-p",
+            "noeta-wasm-serve",
+            "--target",
+            "wasm32-wasip2",
+            "--profile",
+            "wasm-release",
+        ])
+        .output()
+        .map_err(|e| format!("cannot run cargo to build the serve component: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "building the serve component failed (is the wasm32-wasip2 target installed? \
+             `rustup target add wasm32-wasip2`):\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let artifact = workspace_target_dir()?
+        .join("wasm32-wasip2")
+        .join("wasm-release")
+        .join("noeta_wasm_serve.wasm");
+    if !artifact.is_file() {
+        return Err(format!(
+            "the serve component was not found at {} after building",
+            artifact.display()
+        ));
+    }
+    Ok(artifact)
+}
+
+/// Locate the `noeta-wasm-runner` wasm32-wasip1 binary to staple into. Priority: an explicit
+/// `NOETA_WASM_RUNNER` (the packaged/hermetic path) → a runner shipped next to this toolchain
+/// binary → the workspace build, compiled on demand with cargo (interim: needs cargo + the
+/// `wasm32-wasip1` target, mirroring `resolve_aot_runtime`'s ladder). Packaging the runner with
+/// a shipped toolchain is the same later distribution decision as the AOT archive's.
+fn resolve_wasm_runner() -> Result<std::path::PathBuf, String> {
+    if let Ok(path) = std::env::var("NOETA_WASM_RUNNER") {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join("noeta-wasm-runner.wasm");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    // Interim workspace build. `--locked` is deliberately absent: this is the dev-tree path.
+    let output = std::process::Command::new("cargo")
+        .args([
+            "build",
+            "-p",
+            "noeta-wasm-runner",
+            "--target",
+            "wasm32-wasip1",
+            "--profile",
+            "wasm-release",
+        ])
+        .output()
+        .map_err(|e| format!("cannot run cargo to build the wasm runner: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "building the wasm runner failed (is the wasm32-wasip1 target installed? \
+             `rustup target add wasm32-wasip1`):\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let artifact = workspace_target_dir()?
+        .join("wasm32-wasip1")
+        .join("wasm-release")
+        .join("noeta-wasm-runner.wasm");
+    if !artifact.is_file() {
+        return Err(format!(
+            "the wasm runner was not found at {} after building",
+            artifact.display()
+        ));
+    }
+    Ok(artifact)
 }
 
 /// Emit `module` as a **native** executable (P-AOT L3.2b(3)) — the final level. Steps:
@@ -3120,7 +3434,7 @@ fn default_native_libs() -> Vec<String> {
 
 /// The workspace's Cargo target directory: `CARGO_TARGET_DIR` if set, else `<workspace root>/target`
 /// found by walking up from the current directory for the `Cargo.toml` that declares `[workspace]`.
-#[cfg(feature = "jit")]
+/// Shared by the `--native` (jit builds) and `--wasm` interim workspace-build ladders.
 fn workspace_target_dir() -> Result<std::path::PathBuf, String> {
     if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
         return Ok(std::path::PathBuf::from(dir));

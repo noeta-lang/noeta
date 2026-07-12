@@ -93,7 +93,7 @@ There is also a **standalone** `impl Trait for T { }` (marker/empty-body only fo
 | `Clone` | A structural clone — a marker like `Display` (value semantics already copy). |
 | `Serialize<Json>` | Synthesizes `to_json()` (on an enum: the variant rendering `json.stringify` produces). |
 
-```noeta ignore
+```noeta check
 @derive(Equatable, Comparable, Display, Clone)
 class Point {
     x: int

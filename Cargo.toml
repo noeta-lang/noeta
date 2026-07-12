@@ -53,6 +53,17 @@ noeta-stdlib = { path = "crates/noeta-stdlib" }
 noeta-native = { path = "crates/noeta-native" }
 # M2 runtime (host-coupled IO: real disk async + real env/args)
 noeta-runtime = { path = "crates/noeta-runtime" }
+# WASI host (P-WASM W1): the real-but-synchronous third `Host` for the wasm32-wasip1 runner —
+# preopened-dir fs and WASI env/args/wall-clock/entropy through plain std; no tokio, no threads.
+noeta-wasi-host = { path = "crates/noeta-wasi-host" }
+# The wasm runner bin (P-WASM W1): VM on a `.noeb` bundle for wasm32-wasip1 — the L2-exe analogue.
+noeta-wasm-runner = { path = "crates/noeta-wasm-runner" }
+# The in-browser toolchain cdylib (P-WASM W2): the noeta.dev playground engine — check/run/fmt
+# over the deterministic sandbox, compiled to wasm32-unknown-unknown behind a hand-rolled ABI.
+noeta-playground = { path = "crates/noeta-playground" }
+# The edge-serve component (P-WASM W4): `http.serve` handlers as wasi:http components for
+# wasmtime-serve-class platforms (wasm32-wasip2).
+noeta-wasm-serve = { path = "crates/noeta-wasm-serve" }
 # M2 reactivity core (signal/computed/effect graph — value-generic, backend-driven)
 noeta-reactive = { path = "crates/noeta-reactive" }
 # M3 CRDT convergence core (p2p/local-first P0): state-based merge algebra — dep-free, value-less,
@@ -89,6 +100,12 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # OS entropy for RealHost's `Entropy` capability (id-entropy U1): UUID v4/v7 random bits must be
 # real entropy on the real host (the sandbox uses its own seeded SplitMix64 stream instead).
 getrandom = "0.3"
+# Dev-only (P-WASM W1.2 tests): build synthetic wasm modules and re-validate `staple_wasm`'s
+# output with a full IR parse. The shipping patcher is a hand-rolled section-level rewrite.
+walrus = "0.26"
+# wasi 0.2 bindings for the edge-serve component (P-WASM W4): the `wasi:http/incoming-handler`
+# export + proxy-world types. Target-gated to wasm32-wasip2 in the consuming crate.
+wasi = "0.14"
 # Timezone-aware calendar datetime for `std.datetime` (the Ring 3 datetime arc): DST-correct
 # arithmetic, IANA tzdb, RFC-3339 + strftime formatting. BurntSushi's library. Optional in
 # noeta-stdlib behind the default-on `ring-datetime` feature, so a `--no-default-features` /
@@ -241,3 +258,14 @@ all = { level = "warn", priority = -1 }
 [profile.release]
 codegen-units = 1
 lto = "thin"
+
+# The wasm runner's artifact profile (P-WASM W1.4): release plus `strip` — the emitted wasm
+# carries a ~220 KiB `name` custom section that only feeds wasmtime's trap backtraces (Noeta
+# tracebacks come from the bundle's own line table), so stripping is free: 2.42 → 2.20 MiB at
+# identical speed. A full size build (opt-level=z + fat LTO + panic=abort) was measured and
+# REJECTED as the default: 1.37 MiB but ~60% slower on the interpreter hot loop (fib(31) warm:
+# 0.51 s → 0.82 s) — edge compute wants the throughput; size-critical deploys can still build
+# that shape themselves and point NOETA_WASM_RUNNER at it.
+[profile.wasm-release]
+inherits = "release"
+strip = true
