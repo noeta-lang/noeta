@@ -69,6 +69,18 @@ fn page(): Html {
 
 There is **no `v-for` / template-directive syntax** — `@html` is lightweight interpolation, not a template compiler, so loops and conditionals are ordinary Noeta expressions (`.map`, `.filter`, `if…then…else`) over `Html` values. Nested `@html` bodies are verbatim text, **not** strings, so a `${…}` hole inside one may contain double quotes (`${if t.done then "done" else "todo"}`) with none of string interpolation's nested-quote limitation.
 
+### Keyed lists — per-row reactivity
+
+A plain `${todos.get().map(row)}` loop is **one** reactive region: any change re-renders the whole list into a single `innerHTML`. For a large list where one item changes, that is a lot of wire traffic. `keyed` makes **each row its own reactive region**, so a change to one row pushes only that row's markup — the diff drops every row that is unchanged:
+
+```noeta ignore
+<ul>${keyed(todos, fn(t) => "${t.id}", row)}</ul>
+```
+
+`keyed(source, key_of, render_row)` takes the **signal itself** (not a snapshot), a stable string key per item, and the row renderer. Each row becomes a persistent `computed` that re-derives *its* item from the signal by key: on any change every row recomputes, but a row whose rendered markup is unchanged produces a value-equal string, so the transport sends nothing for it. Toggling one todo in a 1000-row list pushes exactly one row.
+
+The key **set** is captured when the page first renders. A row that later disappears clears (its region renders empty); an *added* row has no region yet — so **add / remove / reorder still re-renders the parent region**. Per-row *content* is what becomes incremental; structural changes are a future refinement. Use `keyed` for lists whose rows mutate in place (a todo toggling done, a price ticking); a plain `.map` is fine for small or rarely-changing lists.
+
 ### Reactivity: read the signal *inside* the hole
 
 A hole is reactive to exactly the signals its expression reads **when the hole evaluates**. Read the signal *inside* the hole:
@@ -84,7 +96,7 @@ n = todos.get()                            // read happens here, outside any hol
 return @html { <h1>${n.len()} items</h1> } // NOT reactive — the hole captured a value
 ```
 
-`examples/liveview-todos/` is a full example — a loop of nested rows, a computed count, a conditional status line, escaped text, and a "complete all" event. One `signal` update pushes a minimal diff of exactly the holes that changed (the list, the count, the status) and leaves the unchanged total alone.
+`examples/liveview-todos/` is a full example — a **keyed** loop of nested rows, a computed count, a conditional status line, escaped text, and a "complete all" event. Each row is its own reactive region (keyed by `t.id`), so toggling a single todo pushes exactly one row; the count and status update from the same signal read, and the unchanged rows and total are left alone.
 
 ## Events
 
@@ -98,7 +110,7 @@ A hole in **attribute position** (`class="${…}"`, `title="${…}"`) is detecte
 
 ## Current limitations (v1)
 
-- **Nested holes** re-render with their parent region, not independently: a change inside a loop re-renders the whole list (via `innerHTML`), not one row. Per-row keyed reactivity is a planned refinement.
+- **Structural list changes** (add / remove / reorder rows) re-render the parent region rather than patching in place. Per-row *content* is incremental via [`keyed`](#keyed-lists--per-row-reactivity); the row *set* is captured at first render.
 - **Single-worker**: signals are per-isolate, so a LiveView app runs single-worker (`--parallel` documents this).
 
 ## See also

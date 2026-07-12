@@ -1,5 +1,5 @@
 [package]
-name = "noeta/liveview-counter"
+name = "noeta/liveview_counter"
 version = "0.1.0"
 
 [dependencies]

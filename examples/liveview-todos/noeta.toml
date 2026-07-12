@@ -1,5 +1,5 @@
 [package]
-name = "noeta/liveview-todos"
+name = "noeta/liveview_todos"
 version = "0.1.0"
 
 [dependencies]

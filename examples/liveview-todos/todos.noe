@@ -6,17 +6,17 @@
 //   noeta serve examples/liveview-todos/todos.noe   →   open http://localhost:8080
 //
 // Importing `render` brings the `@html` tier declaration into scope.
-use liveview.{render, Html, handle}
+use liveview.{render, Html, handle, keyed}
 use std.reactive.signal
 use std.http.server
 use std.http.{Request, Response}
 
-struct Todo { title: string  done: bool }
+struct Todo { id: int  title: string  done: bool }
 
 todos = signal([
-    Todo { title: "Wire the reactive graph", done: true },
-    Todo { title: "Ship @html templating", done: true },
-    Todo { title: "Write the <docs>", done: false },
+    Todo { id: 1, title: "Wire the reactive graph", done: true },
+    Todo { id: 2, title: "Ship @html templating", done: true },
+    Todo { id: 3, title: "Write the <docs>", done: false },
 ])
 
 // A row is its own `@html` value. A `${…}` hole in *attribute* position (`class="${…}"`) is
@@ -30,11 +30,13 @@ fn remaining(): int {
     return todos.get().filter(fn(t) => !t.done).len()
 }
 
-// Every hole reads the signal *directly*, so its `computed` subscribes and re-renders on change.
+// Every hole reads the signal *directly*, so its `computed` subscribes and re-renders on change. The
+// list uses `keyed` (each `<li>` is its own reactive region, keyed by `t.id`) so toggling one todo
+// pushes only *that* row's markup — the diff drops the rows that did not change.
 fn page(): Html {
     return @html {
         <h1>Todos — ${remaining()} of ${todos.get().len()} left</h1>
-        <ul>${todos.get().map(row)}</ul>
+        <ul>${keyed(todos, fn(t) => "${t.id}", row)}</ul>
         <p>${if remaining() == 0 then "All done! ✨" else "Keep going."}</p>
         <button data-live-click="complete-all">complete all</button>
     }
@@ -42,7 +44,7 @@ fn page(): Html {
 
 fn on_event(name: string): void {
     if name == "complete-all" {
-        todos.update(fn(list) => list.map(fn(t) => Todo { title: t.title, done: true }))
+        todos.update(fn(list) => list.map(fn(t) => Todo { id: t.id, title: t.title, done: true }))
     }
 }
 
