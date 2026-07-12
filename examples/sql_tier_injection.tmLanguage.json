@@ -1,0 +1,56 @@
+{
+  "$comment": "EXAMPLE — the TextMate injection grammar a third-party package would ship to highlight its `@sql { … }` expression-tier bodies as SQL (expr-tiers / text-tiers arcs). This is the extension mechanism for editor highlighting: a package that declares `@tier(sql, text: \"sql\", expr: Query)` ships a grammar of this shape, contributed via the VS Code `grammars` contribution point with `injectTo: [\"source.noeta\"]`. It attaches by textual match (`injectionSelector`), so it needs no change to Noeta's own static grammar — that is why an extension can provide it and the core grammar stays fixed. The body language (`sql` here → `source.sql`) is the tier's declared `text:` language; swap it for `markdown`/`source.yaml`/etc. per tier. Brace counting mirrors the compiler lexer's matching_brace: nested pairs recurse and \\{ \\} \\\\ are literal, so a `{…}` in the SQL never ends the block. `${…}` holes are scoped back to `source.noeta`, so a hole highlights as ordinary Noeta inside the SQL — the same split the compiler makes (statics = SQL text, holes = checked Noeta expressions).",
+  "scopeName": "inline.noeta.sql-tier",
+  "injectionSelector": "L:source.noeta",
+  "patterns": [{ "include": "#sql-tier-block" }],
+  "repository": {
+    "sql-tier-block": {
+      "begin": "(@)(sql)\\b\\s*(\\{)",
+      "end": "\\}",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.decorator.noeta" },
+        "2": { "name": "entity.name.function.decorator.noeta" },
+        "3": { "name": "punctuation.section.tier.begin.noeta" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.section.tier.end.noeta" }
+      },
+      "contentName": "meta.embedded.block.sql",
+      "patterns": [
+        { "include": "#tier-escape" },
+        { "include": "#tier-hole" },
+        { "include": "#tier-brace-pair" },
+        { "include": "source.sql" }
+      ]
+    },
+    "tier-escape": {
+      "$comment": "The text-body escapes \\{ \\} \\\\ plus \\$ (a literal $ that would otherwise open a hole) — matched first so an escaped closer or dollar never triggers a rule below.",
+      "name": "constant.character.escape.noeta",
+      "match": "\\\\[{}$\\\\]"
+    },
+    "tier-hole": {
+      "$comment": "A `${ … }` hole is an ordinary Noeta expression — scope its contents back to source.noeta so it highlights as code, not SQL. Nested braces inside the hole are handled by re-including this grammar's brace pair via source.noeta.",
+      "begin": "(\\$\\{)",
+      "end": "(\\})",
+      "beginCaptures": {
+        "1": { "name": "punctuation.section.embedded.begin.noeta" }
+      },
+      "endCaptures": {
+        "1": { "name": "punctuation.section.embedded.end.noeta" }
+      },
+      "contentName": "meta.embedded.line.noeta",
+      "patterns": [{ "include": "source.noeta" }]
+    },
+    "tier-brace-pair": {
+      "$comment": "A nested balanced brace pair inside the SQL body — recursion is how TextMate counts depth, so a `{…}` in the text does not close the block.",
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        { "include": "#tier-escape" },
+        { "include": "#tier-hole" },
+        { "include": "#tier-brace-pair" },
+        { "include": "source.sql" }
+      ]
+    }
+  }
+}
