@@ -4260,6 +4260,11 @@ fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // The hosted registry renders these same docs in a browser; point there when one is
+    // configured. Always on **stderr** so it never pollutes the `docs.json` piped to stdout.
+    if let Some(web) = registry_web_docs_url(&name, &version) {
+        eprintln!("view online: {web}");
+    }
     match out {
         Some(dir) => match docgen::render_json_to(dir, &docs) {
             Ok(done) => {
@@ -4284,6 +4289,20 @@ fn cmd_doc_package(spec: &str, out: &Option<PathBuf>) -> ExitCode {
             ExitCode::SUCCESS
         }
     }
+}
+
+/// The hosted registry's browser URL for a release's rendered docs, when a hosted registry is
+/// configured (`NOETA_REGISTRY_URL`). `None` for the file-backed local index (no web surface).
+fn registry_web_docs_url(name: &str, version: &semver::Version) -> Option<String> {
+    let base = std::env::var("NOETA_REGISTRY_URL").ok()?;
+    Some(web_docs_url(&base, name, &version.to_string()))
+}
+
+/// Format the registry's browser docs URL: the web UI lives at the registry root (the JSON API is
+/// under `/v1`), and `name` already carries the `company/package` slash, so the path is
+/// `{base}/{name}/{version}/docs` with any trailing slash on `base` trimmed.
+fn web_docs_url(base: &str, name: &str, version: &str) -> String {
+    format!("{}/{name}/{version}/docs", base.trim_end_matches('/'))
 }
 
 fn cmd_doc(
@@ -4879,6 +4898,19 @@ fn exit_code(code: i32) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_docs_url_joins_base_name_version() {
+        // `name` keeps its `company/package` slash; a trailing slash on the base is trimmed.
+        assert_eq!(
+            web_docs_url("https://reg.noeta.dev", "acme/greeter", "0.3.0"),
+            "https://reg.noeta.dev/acme/greeter/0.3.0/docs"
+        );
+        assert_eq!(
+            web_docs_url("https://reg.noeta.dev/", "acme/greeter", "0.3.0"),
+            "https://reg.noeta.dev/acme/greeter/0.3.0/docs"
+        );
+    }
 
     fn toks(src: &str) -> Vec<noeta_lexer::Token> {
         lex(&Source::new(SourceId::FIRST, "<t>", src.to_string())).tokens
