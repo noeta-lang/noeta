@@ -28,17 +28,6 @@ use noeta_ast::{AttrArg, Attribute, Program, Stmt};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
 
-/// The **tier-knob attribute** of an extension-declared tier — the prelude `@attribute` struct
-/// its directive arguments construct (`@bench(iterations: N)` ⇒ `#[Bench(iterations: N)]` stamped
-/// onto each contained fn; a per-fn attribute wins over the block's). `None` for a tier with no
-/// knobs, which therefore accepts no arguments. One schema source: the attribute's registered
-/// fields drive validation (the ordinary construction gate) and the runner's reads alike. A
-/// *program-declared* tier's config attribute lives in the [`TierRegistry`] instead (its
-/// `@tier(…, config: T)` directive).
-pub fn tier_config_attribute(tier: &str) -> Option<&'static str> {
-    noeta_stdlib::registry::find_ext_tier(tier).and_then(|t| t.config)
-}
-
 /// A tier brought into existence by a `@tier(name[, config: T]) fn runner(…)` declaration
 /// (tier-providers T2) — the program-declared counterpart of an extension's [`ExtTier`] entry
 /// (`noeta_native::registry::ExtTier`).
@@ -433,22 +422,6 @@ pub fn dedent_doc(text: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Whether `name` is an **extension-declared** tier (tier-extensions port): the built-in four
-/// live in std's core unit (`noeta_stdlib::tiers`), declared through the same `ExtTier` surface a
-/// third-party extension uses — nothing tier-shaped is hardcoded in the checker anymore. The tier
-/// name-space stays open: extension tiers ∪ the program's `@tier` declarations; a name in neither
-/// is an `E0036` (a typo must not silently vanish).
-pub fn is_extension_tier(name: &str) -> bool {
-    noeta_stdlib::registry::find_ext_tier(name).is_some()
-}
-
-/// Every installed extension's tier names, for diagnostics (the E0036 help list).
-pub fn extension_tier_names() -> Vec<&'static str> {
-    noeta_stdlib::registry::ext_tiers()
-        .map(|t| t.name)
-        .collect()
 }
 
 /// The E0052 an **expression tier's** block raises in *statement* position (expr-tiers arc): the
@@ -1056,11 +1029,18 @@ mod tests {
                 "`{name}` missing from std's declarations"
             );
         }
+        use noeta_stdlib::registry::find_ext_tier;
         for tier in ["test", "bench", "doc", "debug"] {
-            assert!(is_extension_tier(tier), "`{tier}` missing from std's tiers");
+            assert!(
+                find_ext_tier(tier).is_some(),
+                "`{tier}` missing from std's tiers"
+            );
         }
-        assert_eq!(tier_config_attribute("bench"), Some(TIER_ATTR_BENCH));
-        assert_eq!(tier_config_attribute("test"), None);
+        assert_eq!(
+            find_ext_tier("bench").and_then(|t| t.config),
+            Some(TIER_ATTR_BENCH)
+        );
+        assert_eq!(find_ext_tier("test").and_then(|t| t.config), None);
         // The materialization shapes flow from the same declarations.
         let types = extension_attribute_types();
         let skip = types

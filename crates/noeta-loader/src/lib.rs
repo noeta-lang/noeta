@@ -531,6 +531,10 @@ fn link_core(
         .collect();
 
     let mut imported: Vec<Stmt> = Vec::new();
+    // Qualified identities already merged (explicit imports and their transitive same-module
+    // dependencies alike) — the dedup key for the reachability closure, keyed on the dotted identity
+    // no local name can collide with, so a declaration pulled two ways merges exactly once.
+    let mut merged_q: HashSet<String> = HashSet::new();
     let mut errors: Vec<LoadDiagnostic> = Vec::new();
     // Retained (unresolved) imports — std imports and opaque-stub fallbacks — deduped by (path, name)
     // across the entry and every dependency so a shared `use std.…` isn't bound twice.
@@ -554,36 +558,25 @@ fn link_core(
                 Resolution::Resolved(decl) => match origins.get(name.local()) {
                     None => {
                         origins.insert(name.local().to_string(), Origin::Import(path.to_vec()));
-                        // Merge the declaration under its module's qualified identity.
+                        // Merge the imported declaration under its module's qualified identity, then
+                        // drag in its same-module transitive dependencies — every internal helper it
+                        // calls and every module-local type it names (params/returns/fields/bodies,
+                        // and a `@tier` config, now just one edge of the general closure). Without
+                        // this, an exported declaration that references anything non-leaf in its own
+                        // module leaves that reference out of the merged program (E0005/E0004).
                         let mut decl = *decl;
-                        // A `@tier(…, config: T)` runner *references* its config type (tier-
-                        // providers T2): importing the runner pulls `T`'s declaration from the
-                        // same module along with it — the consumer's `@<tier>(knobs)` blocks and
-                        // the checker's E0051 need the attribute struct linked, and the tier
-                        // directive is the reference that makes it reachable. Keyed under its
-                        // qualified identity (a dotted name no local can collide with), so a
-                        // consumer's own explicit `use …​.T` still merges it exactly once.
-                        if let Stmt::Fn(f) = &decl
-                            && let Some(tier) = &f.tier
-                            && let Some((config, _)) = &tier.config
-                            && let Resolution::Resolved(cfg) = resolve(&module_views, path, config)
-                        {
-                            let qualified = format!("{}.{}", path.join("."), config);
-                            if let std::collections::hash_map::Entry::Vacant(slot) =
-                                origins.entry(qualified)
-                            {
-                                slot.insert(Origin::Import(path.to_vec()));
-                                let mut cfg = *cfg;
-                                if let Some(map) = module_maps.get(path) {
-                                    qualify::qualify_stmt(&mut cfg, map);
-                                }
-                                imported.push(cfg);
-                            }
-                        }
                         if let Some(map) = module_maps.get(path) {
                             qualify::qualify_stmt(&mut decl, map);
                         }
                         imported.push(decl);
+                        merge_module_closure(
+                            path,
+                            &name.name,
+                            &module_views,
+                            &module_maps,
+                            &mut merged_q,
+                            imported,
+                        );
                     }
                     // Same declaration re-imported (same namespace) — merge once, ignore the rest.
                     Some(Origin::Import(p)) if p.as_slice() == path => {}
@@ -697,6 +690,71 @@ fn qualifiable_decl_name(stmt: &Stmt) -> Option<&str> {
         Stmt::Enum(decl) => Some(&decl.name),
         Stmt::Fn(decl) => Some(&decl.name),
         _ => None,
+    }
+}
+
+/// Merge `root`'s **same-module transitive dependencies** into `imported` — the cross-module
+/// reachability closure. Importing an exported declaration must drag in every same-module
+/// declaration it references, or the merged program is missing them and fails to compile: an
+/// exported `pub fn` that calls an internal (non-`pub`) helper, or names a module-local type in a
+/// parameter / return / field, would otherwise leave `helper` / that type out.
+///
+/// Starting from the explicitly-imported `root` (already merged by the caller under its local name),
+/// follow every reference that names another top-level declaration of the **same** module — a called
+/// helper, a param/return/field/body type, a `@tier` config — to a fixpoint, merging each reachable
+/// declaration under its **qualified identity** (deduped through `merged_q`, so a declaration reached
+/// two ways — or also explicitly imported — merges exactly once). Visibility does *not* gate an
+/// intra-module reference, so a non-`pub` internal helper is pulled. Cross-module references are
+/// separate `use`s that drive their own imports (a dependency re-drives its own `use`s), so the walk
+/// stays scoped to `path`'s own declarations. The `@tier(…, config: T)` pull is now just one edge of
+/// this closure — `referenced_names` sees the config type like any other reference.
+fn merge_module_closure(
+    path: &[String],
+    root: &str,
+    module_views: &[ModuleView],
+    module_maps: &std::collections::HashMap<Vec<String>, qualify::QMap>,
+    merged_q: &mut HashSet<String>,
+    imported: &mut Vec<Stmt>,
+) {
+    let Some(module) = module_views.iter().find(|m| m.namespace == path) else {
+        return;
+    };
+    // The module's own top-level declaration names — the only targets an intra-module reference can
+    // resolve to (everything else — params, builtins, externs, other modules — is left to its own
+    // resolution path).
+    let own_names: HashSet<&str> = module
+        .stmts
+        .iter()
+        .filter_map(qualifiable_decl_name)
+        .collect();
+    let qualified = |name: &str| format!("{}.{}", path.join("."), name);
+    let find = |name: &str| {
+        module
+            .stmts
+            .iter()
+            .find(|s| qualifiable_decl_name(s) == Some(name))
+    };
+
+    // The root is already merged (under its local name); record its qualified identity so it is not
+    // merged again, and expand its references. A worklist iterated to a fixpoint; `merged_q`
+    // membership makes cycles terminate.
+    merged_q.insert(qualified(root));
+    let mut work: Vec<String> = vec![root.to_string()];
+    while let Some(name) = work.pop() {
+        let Some(decl) = find(&name) else { continue };
+        for referenced in qualify::referenced_names(decl) {
+            if own_names.contains(referenced.as_str()) && merged_q.insert(qualified(&referenced)) {
+                // A fresh same-module declaration: merge it under its qualified identity and expand.
+                if let Some(dep) = find(&referenced) {
+                    let mut dep = dep.clone();
+                    if let Some(map) = module_maps.get(path) {
+                        qualify::qualify_stmt(&mut dep, map);
+                    }
+                    imported.push(dep);
+                    work.push(referenced);
+                }
+            }
+        }
     }
 }
 
@@ -877,6 +935,22 @@ mod tests {
             .stmts
             .iter()
             .any(|s| matches!(s, Stmt::Class(c) if leaf(&c.name) == name))
+    }
+
+    fn has_fn(linked: &Linked, name: &str) -> bool {
+        linked
+            .program
+            .stmts
+            .iter()
+            .any(|s| matches!(s, Stmt::Fn(f) if leaf(&f.name) == name))
+    }
+
+    fn has_struct(linked: &Linked, name: &str) -> bool {
+        linked
+            .program
+            .stmts
+            .iter()
+            .any(|s| matches!(s, Stmt::Struct(d) if leaf(&d.name) == name))
     }
 
     #[test]
@@ -1258,5 +1332,111 @@ mod tests {
 
         // The source map resolves the sibling id to the sibling file.
         assert_eq!(linked.sources.source(SourceId(1)).name(), "models.noe");
+    }
+
+    // --- transitive reachability closure (cross-module linker fix) -----------------------------
+    //
+    // Importing an exported declaration must drag in the same-module declarations it references —
+    // an internal helper it calls (B) or a module-local type it names (C). Before the fix the
+    // linker merged only the explicitly-imported roots plus the one `@tier` config edge, so any
+    // multi-declaration module failed to compile at the consumer.
+
+    /// B (dependency path): an exported `pub fn` calls a **non-`pub`** internal helper. The helper
+    /// must be pulled into the merged program even though visibility would forbid importing it
+    /// directly (an intra-module reference is not gated by `pub`).
+    #[test]
+    fn an_imported_fn_drags_in_its_internal_helper() {
+        let dep = DepPackage {
+            key: "mathx".to_string(),
+            root: "mathx".to_string(),
+            modules: vec![module(
+                "lib.noe",
+                "namespace mathx.lib;\n\
+                 fn helper(n: int): int { return n * 2; }\n\
+                 pub fn twice(n: int): int { return helper(n); }\n",
+            )],
+            dep_renames: Default::default(),
+        };
+        let entry = "use mathx.lib.twice;\necho twice(21);\n";
+        let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
+        assert!(has_fn(&linked, "twice"), "the imported fn is merged");
+        assert!(
+            has_fn(&linked, "helper"),
+            "its internal helper must be dragged in transitively"
+        );
+    }
+
+    /// C (dependency path): an exported `pub fn` names a module-local type in its return (and
+    /// constructs it). The type must be pulled in.
+    #[test]
+    fn an_imported_fn_drags_in_a_module_local_type() {
+        let dep = DepPackage {
+            key: "widgets".to_string(),
+            root: "widgets".to_string(),
+            modules: vec![module(
+                "lib.noe",
+                "namespace widgets.lib;\n\
+                 struct Point {\n  x: int\n  y: int\n}\n\
+                 pub fn origin(): Point { return Point { x: 0, y: 0 }; }\n",
+            )],
+            dep_renames: Default::default(),
+        };
+        let entry = "use widgets.lib.origin;\np = origin();\necho p.x;\n";
+        let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
+        assert!(has_fn(&linked, "origin"), "the imported fn is merged");
+        assert!(
+            has_struct(&linked, "Point"),
+            "the module-local return type must be dragged in transitively"
+        );
+    }
+
+    /// B/C reach transitively: the pulled helper itself references a further internal type, which
+    /// must also be pulled (the closure runs to a fixpoint, not one level deep).
+    #[test]
+    fn the_closure_is_transitive_to_a_fixpoint() {
+        let dep = DepPackage {
+            key: "chain".to_string(),
+            root: "chain".to_string(),
+            modules: vec![module(
+                "lib.noe",
+                "namespace chain.lib;\n\
+                 struct Inner { v: int }\n\
+                 fn wrap(n: int): Inner { return Inner { v: n }; }\n\
+                 pub fn go(n: int): Inner { return wrap(n); }\n",
+            )],
+            dep_renames: Default::default(),
+        };
+        let entry = "use chain.lib.go;\ni = go(3);\necho i.v;\n";
+        let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
+        assert!(has_fn(&linked, "go"));
+        assert!(has_fn(&linked, "wrap"), "one hop away must be pulled");
+        assert!(
+            has_struct(&linked, "Inner"),
+            "two hops away (a type the helper references) must be pulled too"
+        );
+    }
+
+    /// B (plain sibling path): the same reachability holds for same-app sibling modules
+    /// (`link_parsed`), not just package dependencies.
+    #[test]
+    fn a_sibling_imported_fn_drags_in_its_helper_and_type() {
+        let sibling = module(
+            "lib.noe",
+            "namespace app.lib;\n\
+             struct Box { n: int }\n\
+             fn build(n: int): Box { return Box { n: n }; }\n\
+             pub fn make(n: int): Box { return build(n); }\n",
+        );
+        let entry = "use app.lib.make;\nb = make(5);\necho b.n;\n";
+        let linked = link("main.noe", entry, std::slice::from_ref(&sibling)).unwrap();
+        assert!(has_fn(&linked, "make"));
+        assert!(
+            has_fn(&linked, "build"),
+            "the sibling's internal helper is pulled"
+        );
+        assert!(
+            has_struct(&linked, "Box"),
+            "the sibling's local type is pulled"
+        );
     }
 }

@@ -17,7 +17,7 @@
 //! and a non-namespaced file stays byte-identical. Externs (`use std.id.Uuid`) never enter the map
 //! (they resolve to no loaded module), so their references stay bare for the Phase-A extern path.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use noeta_ast::{
     AttrValue, Attribute, ClosureBody, Expr, FieldDecl, FnDecl, ImplBlock, ImplDecl, Param,
@@ -30,378 +30,407 @@ use noeta_ast::{
 /// language-level type (`Iterator`), or a still-bare extern.
 pub type QMap = HashMap<String, String>;
 
-/// Rewrite a bare type name to its qualified identity when the map binds it.
-fn q_name(name: &mut String, map: &QMap) {
-    if let Some(qualified) = map.get(name.as_str()) {
-        *name = qualified.clone();
-    }
-}
+/// A **name visitor**: the single action the AST walk below applies at every position that names a
+/// namespace-qualifiable declaration (a type reference, a `Stmt::Fn`/type declaration's own name, an
+/// object literal's type, an enum path, an `impl` target, a `@tier` config, a pattern's variant
+/// type). The walk is shared by two clients so they can never drift: [`qualify_stmt`] passes a
+/// visitor that *rewrites* the name through a [`QMap`], and [`referenced_names`] passes one that
+/// *collects* it. Both see the exact same positions.
+type NameVisitor<'a> = dyn FnMut(&mut String) + 'a;
 
 /// Rewrite every named type inside a [`TypeRef`], recursively — so `List<User>`, `?User`,
 /// `A | B`, `(A, B)`, and `(A) -> B` all qualify their nominal leaves.
-fn q_typeref(ty: &mut TypeRef, map: &QMap) {
+fn q_typeref(ty: &mut TypeRef, visit: &mut NameVisitor) {
     match ty {
         TypeRef::Named { name, args, .. } => {
-            q_name(name, map);
+            visit(name);
             for a in args {
-                q_typeref(a, map);
+                q_typeref(a, visit);
             }
         }
-        TypeRef::Optional { inner, .. } => q_typeref(inner, map),
-        TypeRef::Union { members, .. } => members.iter_mut().for_each(|m| q_typeref(m, map)),
-        TypeRef::Tuple { elements, .. } => elements.iter_mut().for_each(|e| q_typeref(e, map)),
+        TypeRef::Optional { inner, .. } => q_typeref(inner, visit),
+        TypeRef::Union { members, .. } => members.iter_mut().for_each(|m| q_typeref(m, visit)),
+        TypeRef::Tuple { elements, .. } => elements.iter_mut().for_each(|e| q_typeref(e, visit)),
         TypeRef::Fn { params, ret, .. } => {
-            params.iter_mut().for_each(|p| q_typeref(p, map));
-            q_typeref(ret, map);
+            params.iter_mut().for_each(|p| q_typeref(p, visit));
+            q_typeref(ret, visit);
         }
     }
 }
 
-fn q_opt_typeref(ty: &mut Option<TypeRef>, map: &QMap) {
+fn q_opt_typeref(ty: &mut Option<TypeRef>, visit: &mut NameVisitor) {
     if let Some(t) = ty {
-        q_typeref(t, map);
+        q_typeref(t, visit);
     }
 }
 
-/// Qualify one statement: rewrite a declaration's own name and every type reference it and its
-/// nested expressions/bodies carry.
+/// Qualify one statement in place: rewrite a declaration's own name and every type/value reference
+/// it and its nested expressions/bodies carry, through `map`. A no-op when the map is empty (a
+/// non-namespaced file stays byte-identical).
 pub fn qualify_stmt(stmt: &mut Stmt, map: &QMap) {
     if map.is_empty() {
         return;
     }
+    walk_stmt(stmt, &mut |name| {
+        if let Some(qualified) = map.get(name.as_str()) {
+            *name = qualified.clone();
+        }
+    });
+}
+
+/// Every namespace-qualifiable NAME a statement **references** — the read-only twin of
+/// [`qualify_stmt`], collected through the same walk so the two cannot drift. Includes the
+/// declaration's own name (a harmless superset for the linker, which intersects the result with a
+/// module's declared names and dedups the seed). The linker uses this to walk a module's
+/// same-module reference graph: an exported `fn` that calls an internal helper or names a
+/// module-local type drags those declarations into the merged program (cross-module linker fix).
+pub fn referenced_names(stmt: &Stmt) -> HashSet<String> {
+    let mut names = HashSet::new();
+    // The walk needs `&mut` (it is shared with the rewriter); clone so the source is untouched.
+    let mut scratch = stmt.clone();
+    walk_stmt(&mut scratch, &mut |name| {
+        names.insert(name.clone());
+    });
+    names
+}
+
+/// The shared AST walk: apply `v` at every position that names a qualifiable declaration. Both
+/// [`qualify_stmt`] (rewrite) and [`referenced_names`] (collect) drive it.
+fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
     match stmt {
         Stmt::Echo { value, .. } | Stmt::Yield { value, .. } | Stmt::Expr { expr: value, .. } => {
-            q_expr(value, map)
+            q_expr(value, visit)
         }
         Stmt::Binding { ty, value, .. } => {
-            q_opt_typeref(ty, map);
-            q_expr(value, map);
+            q_opt_typeref(ty, visit);
+            q_expr(value, visit);
         }
-        Stmt::Destructure { value, .. } => q_expr(value, map),
+        Stmt::Destructure { value, .. } => q_expr(value, visit),
         Stmt::Return { value, .. } => {
-            if let Some(v) = value {
-                q_expr(v, map);
+            if let Some(inner) = value {
+                q_expr(inner, visit);
             }
         }
-        Stmt::Concurrent { body, .. } => q_body(body, map),
+        Stmt::Concurrent { body, .. } => q_body(body, visit),
         Stmt::If {
             cond,
             then_body,
             else_body,
             ..
         } => {
-            q_expr(cond, map);
-            q_body(then_body, map);
+            q_expr(cond, visit);
+            q_body(then_body, visit);
             if let Some(b) = else_body {
-                q_body(b, map);
+                q_body(b, visit);
             }
         }
         Stmt::For { iterable, body, .. } => {
             // A `for` binder introduces value names, never type references.
-            q_expr(iterable, map);
-            q_body(body, map);
+            q_expr(iterable, visit);
+            q_body(body, visit);
         }
         Stmt::While { cond, body, .. } => {
-            q_expr(cond, map);
-            q_body(body, map);
+            q_expr(cond, visit);
+            q_body(body, visit);
         }
-        Stmt::TierBlock { items, .. } => q_body(items, map),
+        Stmt::TierBlock { items, .. } => q_body(items, visit),
         Stmt::Fn(decl) => {
             // A **top-level** function's own name qualifies (like a type's); a method's does not —
             // methods resolve through their type, so `q_fn` (shared with methods) never touches the
             // name, and the rewrite lives here on the `Stmt::Fn` arm only.
-            q_name(&mut decl.name, map);
-            // A `@tier(…, config: T)` declaration's config names a type in this module — qualify
-            // it like any type reference, so a consumer's activation stamps (and E0051's
-            // attribute-existence check) resolve the same qualified attribute the struct became.
+            visit(&mut decl.name);
+            // A `@tier(…, config: T)` declaration's config names a type in this module — visit it
+            // like any type reference, so a consumer's activation stamps (and E0051's
+            // attribute-existence check) resolve the same qualified attribute the struct became, and
+            // `referenced_names` drags the config struct into the merged program.
             if let Some(tier) = &mut decl.tier
                 && let Some((config, _)) = &mut tier.config
             {
-                q_name(config, map);
+                visit(config);
             }
-            q_fn(decl, map);
+            q_fn(decl, visit);
         }
         Stmt::Class(decl) => {
-            q_name(&mut decl.name, map);
+            visit(&mut decl.name);
             for a in &mut decl.attrs {
-                q_attr(a, map);
+                q_attr(a, visit);
             }
             for f in &mut decl.fields {
-                q_field(f, map);
+                q_field(f, visit);
             }
             for m in &mut decl.methods {
-                q_fn(m, map);
+                q_fn(m, visit);
             }
             for b in &mut decl.impls {
-                q_impl_block(b, map);
+                q_impl_block(b, visit);
             }
             if let Some(body) = &mut decl.destructor {
-                q_body(body, map);
+                q_body(body, visit);
             }
         }
         Stmt::Struct(decl) => {
-            q_name(&mut decl.name, map);
+            visit(&mut decl.name);
             for a in &mut decl.attrs {
-                q_attr(a, map);
+                q_attr(a, visit);
             }
             for f in &mut decl.fields {
-                q_field(f, map);
+                q_field(f, visit);
             }
             for m in &mut decl.methods {
-                q_fn(m, map);
+                q_fn(m, visit);
             }
             for b in &mut decl.impls {
-                q_impl_block(b, map);
+                q_impl_block(b, visit);
             }
         }
         Stmt::Enum(decl) => {
-            q_name(&mut decl.name, map);
+            visit(&mut decl.name);
             for a in &mut decl.attrs {
-                q_attr(a, map);
+                q_attr(a, visit);
             }
-            q_opt_typeref(&mut decl.backing, map);
-            for v in &mut decl.variants {
-                q_variant(v, map);
+            q_opt_typeref(&mut decl.backing, visit);
+            for variant in &mut decl.variants {
+                q_variant(variant, visit);
             }
             for m in &mut decl.methods {
-                q_fn(m, map);
+                q_fn(m, visit);
             }
             for b in &mut decl.impls {
-                q_impl_block(b, map);
+                q_impl_block(b, visit);
             }
         }
-        Stmt::Impl(decl) => q_impl_decl(decl, map),
+        Stmt::Impl(decl) => q_impl_decl(decl, visit),
         // No type references: control-flow leaves, namespace/use (paths handled by the linker).
         Stmt::Namespace { .. } | Stmt::Use { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
     }
 }
 
-/// Qualify a block of statements in place.
-fn q_body(body: &mut [Stmt], map: &QMap) {
+/// Walk a block of statements.
+fn q_body(body: &mut [Stmt], visit: &mut NameVisitor) {
     for s in body {
-        qualify_stmt(s, map);
+        walk_stmt(s, visit);
     }
 }
 
-fn q_fn(decl: &mut FnDecl, map: &QMap) {
+fn q_fn(decl: &mut FnDecl, visit: &mut NameVisitor) {
     for a in &mut decl.attrs {
-        q_attr(a, map);
+        q_attr(a, visit);
     }
     for p in &mut decl.params {
-        q_param(p, map);
+        q_param(p, visit);
     }
-    q_opt_typeref(&mut decl.ret, map);
-    q_body(&mut decl.body, map);
+    q_opt_typeref(&mut decl.ret, visit);
+    q_body(&mut decl.body, visit);
 }
 
-fn q_param(p: &mut Param, map: &QMap) {
-    q_opt_typeref(&mut p.ty, map);
+fn q_param(p: &mut Param, visit: &mut NameVisitor) {
+    q_opt_typeref(&mut p.ty, visit);
     if let Some(d) = &mut p.default {
-        q_expr(d, map);
+        q_expr(d, visit);
     }
 }
 
-fn q_field(f: &mut FieldDecl, map: &QMap) {
-    q_opt_typeref(&mut f.ty, map);
+fn q_field(f: &mut FieldDecl, visit: &mut NameVisitor) {
+    q_opt_typeref(&mut f.ty, visit);
     if let Some(d) = &mut f.default {
-        q_expr(d, map);
+        q_expr(d, visit);
     }
     for a in &mut f.attrs {
-        q_attr(a, map);
+        q_attr(a, visit);
     }
 }
 
-fn q_variant(v: &mut VariantDecl, map: &QMap) {
-    for field in &mut v.fields {
-        q_param(field, map);
+fn q_variant(variant: &mut VariantDecl, visit: &mut NameVisitor) {
+    for field in &mut variant.fields {
+        q_param(field, visit);
     }
-    if let Some(e) = &mut v.backed_value {
-        q_expr(e, map);
+    if let Some(e) = &mut variant.backed_value {
+        q_expr(e, visit);
     }
-    for a in &mut v.attrs {
-        q_attr(a, map);
+    for a in &mut variant.attrs {
+        q_attr(a, visit);
     }
 }
 
-fn q_impl_block(b: &mut ImplBlock, map: &QMap) {
+fn q_impl_block(b: &mut ImplBlock, visit: &mut NameVisitor) {
     // The trait name is a built-in capability, not a namespaced user type — left as-is.
     for m in &mut b.methods {
-        q_fn(m, map);
+        q_fn(m, visit);
     }
 }
 
-fn q_impl_decl(decl: &mut ImplDecl, map: &QMap) {
-    // The `impl Trait for Target` target names a user type in this module → qualify it.
-    q_name(&mut decl.target, map);
+fn q_impl_decl(decl: &mut ImplDecl, visit: &mut NameVisitor) {
+    // The `impl Trait for Target` target names a user type in this module → visit it.
+    visit(&mut decl.target);
     for m in &mut decl.methods {
-        q_fn(m, map);
+        q_fn(m, visit);
     }
 }
 
-/// Qualify a `#[Attr(...)]` data attribute: its name is a `@attribute` struct, and its literal
+/// Walk a `#[Attr(...)]` data attribute: its name is a `@attribute` struct, and its literal
 /// arguments may themselves name nominal types (a struct/enum/type-ref literal).
-fn q_attr(a: &mut Attribute, map: &QMap) {
-    q_name(&mut a.name, map);
+fn q_attr(a: &mut Attribute, visit: &mut NameVisitor) {
+    visit(&mut a.name);
     for arg in &mut a.args {
-        q_attr_value(&mut arg.value, map);
+        q_attr_value(&mut arg.value, visit);
     }
 }
 
-fn q_attr_value(v: &mut AttrValue, map: &QMap) {
-    match v {
+fn q_attr_value(av: &mut AttrValue, visit: &mut NameVisitor) {
+    match av {
         AttrValue::List(items) | AttrValue::Set(items) => {
-            items.iter_mut().for_each(|i| q_attr_value(i, map))
+            items.iter_mut().for_each(|i| q_attr_value(i, visit))
         }
         AttrValue::Map(entries) => entries
             .iter_mut()
-            .for_each(|(_, val)| q_attr_value(val, map)),
+            .for_each(|(_, val)| q_attr_value(val, visit)),
         AttrValue::Enum {
             enum_name, args, ..
         } => {
-            q_name(enum_name, map);
-            args.iter_mut().for_each(|a| q_attr_value(a, map));
+            visit(enum_name);
+            args.iter_mut().for_each(|a| q_attr_value(a, visit));
         }
         AttrValue::Struct { type_name, fields } => {
-            q_name(type_name, map);
+            visit(type_name);
             fields
                 .iter_mut()
-                .for_each(|(_, val)| q_attr_value(val, map));
+                .for_each(|(_, val)| q_attr_value(val, visit));
         }
-        AttrValue::TypeRef(name) => q_name(name, map),
+        AttrValue::TypeRef(name) => visit(name),
         AttrValue::Str(_) | AttrValue::Int(_) | AttrValue::Float(_) | AttrValue::Bool(_) => {}
     }
 }
 
-/// Qualify every type reference reachable from an expression.
-fn q_expr(e: &mut Expr, map: &QMap) {
+/// Walk every type/value reference reachable from an expression.
+fn q_expr(e: &mut Expr, visit: &mut NameVisitor) {
     match e {
         // A bare identifier that names a type — the receiver of a static call (`User.new(...)`), an
         // enum-path base (`E.Empty`), or a type used as a first-class value — is a `Var` atom at
         // runtime bound under the (now-qualified) type name, so it must qualify too. Only names the
         // map holds (type names) are touched; ordinary bindings pass through.
-        Expr::Ident { name, .. } => q_name(name, map),
+        Expr::Ident { name, .. } => visit(name),
         Expr::Object(lit) => {
-            q_name(&mut lit.type_name, map);
+            visit(&mut lit.type_name);
             for f in &mut lit.fields {
-                q_expr(&mut f.value, map);
+                q_expr(&mut f.value, visit);
             }
             if let Some(s) = &mut lit.spread {
-                q_expr(s, map);
+                q_expr(s, visit);
             }
         }
         Expr::As { expr, ty, .. } => {
-            q_expr(expr, map);
-            q_typeref(ty, map);
+            q_expr(expr, visit);
+            q_typeref(ty, visit);
         }
         Expr::TypeTest { expr, ty, .. } => {
-            q_expr(expr, map);
-            q_typeref(ty, map);
+            q_expr(expr, visit);
+            q_typeref(ty, visit);
         }
-        Expr::AttributesOf { ty, .. } => q_typeref(ty, map),
+        Expr::AttributesOf { ty, .. } => q_typeref(ty, visit),
         Expr::FromBytes { ty, blob, .. } => {
-            q_typeref(ty, map);
-            q_expr(blob, map);
+            q_typeref(ty, visit);
+            q_expr(blob, visit);
         }
         Expr::Channel { elem, capacity, .. } => {
-            q_typeref(elem, map);
-            q_expr(capacity, map);
+            q_typeref(elem, visit);
+            q_expr(capacity, visit);
         }
         Expr::TypedModuleCall { recv, ty, args, .. } => {
-            q_expr(recv, map);
-            q_typeref(ty, map);
-            args.iter_mut().for_each(|a| q_expr(a, map));
+            q_expr(recv, visit);
+            q_typeref(ty, visit);
+            args.iter_mut().for_each(|a| q_expr(a, visit));
         }
-        Expr::Unary { operand, .. } => q_expr(operand, map),
+        Expr::Unary { operand, .. } => q_expr(operand, visit),
         Expr::Binary { lhs, rhs, .. } => {
-            q_expr(lhs, map);
-            q_expr(rhs, map);
+            q_expr(lhs, visit);
+            q_expr(rhs, visit);
         }
         Expr::Call { callee, args, .. } => {
-            q_expr(callee, map);
-            args.iter_mut().for_each(|a| q_expr(a, map));
+            q_expr(callee, visit);
+            args.iter_mut().for_each(|a| q_expr(a, visit));
         }
         Expr::Closure {
             params, ret, body, ..
         } => {
             for p in params {
-                q_param(p, map);
+                q_param(p, visit);
             }
-            q_opt_typeref(ret, map);
+            q_opt_typeref(ret, visit);
             match body {
-                ClosureBody::Expr(e) => q_expr(e, map),
-                ClosureBody::Block(stmts) => q_body(stmts, map),
+                ClosureBody::Expr(e) => q_expr(e, visit),
+                ClosureBody::Block(stmts) => q_body(stmts, visit),
             }
         }
         Expr::Pipeline { left, right, .. } => {
-            q_expr(left, map);
-            q_expr(right, map);
+            q_expr(left, visit);
+            q_expr(right, visit);
         }
         Expr::List { items, .. } | Expr::Tuple { items, .. } => {
-            items.iter_mut().for_each(|i| q_expr(i, map))
+            items.iter_mut().for_each(|i| q_expr(i, visit))
         }
-        Expr::TupleIndex { receiver, .. } => q_expr(receiver, map),
+        Expr::TupleIndex { receiver, .. } => q_expr(receiver, visit),
         Expr::Range { start, end, .. } => {
-            q_expr(start, map);
-            q_expr(end, map);
+            q_expr(start, visit);
+            q_expr(end, visit);
         }
         Expr::Map { entries, .. } => {
             for (k, v) in entries {
-                q_expr(k, map);
-                q_expr(v, map);
+                q_expr(k, visit);
+                q_expr(v, visit);
             }
         }
-        Expr::Member { receiver, .. } => q_expr(receiver, map),
+        Expr::Member { receiver, .. } => q_expr(receiver, visit),
         Expr::Index {
             receiver, index, ..
         } => {
-            q_expr(receiver, map);
-            q_expr(index, map);
+            q_expr(receiver, visit);
+            q_expr(index, visit);
         }
         Expr::Interp { parts, .. } => {
             for part in parts {
                 if let StrPart::Hole(e) = part {
-                    q_expr(e, map);
+                    q_expr(e, visit);
                 }
             }
         }
         Expr::Match {
             scrutinee, arms, ..
         } => {
-            q_expr(scrutinee, map);
+            q_expr(scrutinee, visit);
             for arm in arms {
-                q_pattern(&mut arm.pattern, map);
-                q_expr(&mut arm.body, map);
+                q_pattern(&mut arm.pattern, visit);
+                q_expr(&mut arm.body, visit);
             }
         }
         Expr::Try { expr, .. } | Expr::Await { expr, .. } | Expr::Spawn { future: expr, .. } => {
-            q_expr(expr, map)
+            q_expr(expr, visit)
         }
         Expr::Coalesce {
             value, fallback, ..
         } => {
-            q_expr(value, map);
-            q_expr(fallback, map);
+            q_expr(value, visit);
+            q_expr(fallback, visit);
         }
-        Expr::TypeOf { value, .. } => q_expr(value, map),
+        Expr::TypeOf { value, .. } => q_expr(value, visit),
         Expr::Invoke {
             recv, name, args, ..
         } => {
-            q_expr(recv, map);
-            q_expr(name, map);
-            q_expr(args, map);
+            q_expr(recv, visit);
+            q_expr(name, visit);
+            q_expr(args, visit);
         }
         Expr::FieldSet {
             receiver, value, ..
         } => {
-            q_expr(receiver, map);
-            q_expr(value, map);
+            q_expr(receiver, visit);
+            q_expr(value, visit);
         }
         // An expression-tier block's holes are ordinary expressions — type references inside
         // them (`${User.new()}`) qualify like anywhere else. The tier name is not a type; the
         // handler is resolved by the activation desugar against the already-qualified registry.
         Expr::TierExpr { holes, .. } => {
             for h in holes {
-                q_expr(h, map);
+                q_expr(h, visit);
             }
         }
         // A resolved native-fn reference is synthesized *after* qualification (module/func are
@@ -419,13 +448,13 @@ fn q_expr(e: &mut Expr, map: &QMap) {
         // qualified user enum, so qualify it (a bare `roles_of()` has nothing to qualify).
         Expr::RolesOf { ty, .. } => {
             if let Some(ty) = ty {
-                q_typeref(ty, map);
+                q_typeref(ty, visit);
             }
         }
     }
 }
 
-fn q_pattern(p: &mut Pattern, map: &QMap) {
+fn q_pattern(p: &mut Pattern, visit: &mut NameVisitor) {
     match p {
         Pattern::Variant {
             type_name,
@@ -433,12 +462,12 @@ fn q_pattern(p: &mut Pattern, map: &QMap) {
             ..
         } => {
             if let Some(n) = type_name {
-                q_name(n, map);
+                visit(n);
             }
-            bindings.iter_mut().for_each(|b| q_pattern(b, map));
+            bindings.iter_mut().for_each(|b| q_pattern(b, visit));
         }
-        Pattern::IsType { ty, .. } => q_typeref(ty, map),
-        Pattern::Tuple { elements, .. } => elements.iter_mut().for_each(|e| q_pattern(e, map)),
+        Pattern::IsType { ty, .. } => q_typeref(ty, visit),
+        Pattern::Tuple { elements, .. } => elements.iter_mut().for_each(|e| q_pattern(e, visit)),
         Pattern::Wildcard { .. }
         | Pattern::Binding { .. }
         | Pattern::Int { .. }
