@@ -116,12 +116,20 @@ native handler.
   is extension-provided via a TextMate injection grammar (`injectTo: source.noeta`, holes scoped
   back to Noeta) — `examples/sql_tier_injection.tmLanguage.json`. tree-sitter third-party tiers
   need a generated grammar (static-grammar limitation, documented).
-- **E6b (BLOCKED on tier-providers `ExtTier` merge) — native tier declaration**: `expr`/`text`
-  fields on `ExtTier`, `TierRegistry` ingests `ext_tiers()`, native handlers; std dogfood
-  (`@json` in `std.json`). `ExtTier` is not in main (`52ec2091`) — it lives on the unmerged
-  tier-providers branch (another session, `03f3b147`). Building it here would duplicate/conflict
-  with that arc; wait for its merge, then a thin follow-up. Pure-Noeta expression tiers are fully
-  complete and unaffected — this only gates *Rust-package-declared* tiers.
+- **E6b.1 — ExtTier declaration surface + recognition** ✅ DONE (rebased onto new main
+  `ec23cf9f`, which merged the tier-providers `ExtTier` port): `ExtTier` gains `text`/`expr`/
+  `handler`; std's `doc` declares `text: "markdown"` through the ABI (retiring the hardcoded
+  `text_lang` special-case — the dogfood); the checker resolves language/type/kind through
+  `TierRegistry` (ext OR program) via new `is_expr_tier`/`expr_tier_handler`, so a native tier is
+  recognized like a program one and LSP hover covers it for free.
+- **E6b.2 — native handler dispatch + std dogfood** ⏳ NEXT (design fork). A native expr tier's
+  handler is a Rust fn, but the desugar's `Call(Ident(handler), …)` can't reach a native fn by
+  name (a bare fully-qualified `std.mod.fn` doesn't resolve — needs an import the consumer never
+  writes). Options: (a) **one prelude dispatch fn** `__tier_expr(tier, statics, holes)` that the
+  runtime routes via `find_ext_tier(tier).handler` — least new surface; (b) a **dedicated
+  Rvalue** `TierExprNative`; (c) auto-inject the handler import (fragile). Plus: seed the lexer
+  `TextTiers` set with ext verbatim names (loader lacks a stdlib dep — inject from cli/db), and a
+  native handler receiving `List<() -> dyn>` via `NativeCtx::call`. Recommend (a).
 - **E7 (gated on text-tiers S4/S5) — editor injection for holes**: tree-sitter/TextMate lex
   holes inside expr-tier bodies as Noeta injections within the foreign-language injection.
 
