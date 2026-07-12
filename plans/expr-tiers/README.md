@@ -138,21 +138,28 @@ native handler.
 - **E7 (gated on text-tiers S4/S5) — editor injection for holes**: tree-sitter/TextMate lex
   holes inside expr-tier bodies as Noeta injections within the foreign-language injection.
 
-## LiveView (`@html`) — the flagship client ✅ (single-file)
+## LiveView (`@html`) — the flagship client ✅ (reusable package)
 
-Merged new main (server-hmr's LiveView transport + the IR1–IR5 extension-Registry refactor;
-reconciled — my E6b tier methods and the IR lowerer now resolve ext tiers through the *threaded*
-registry, not the global). With the transport in main, `examples/liveview_html_counter.noe` runs on
-this branch: `@html { … ${expr} … }` compiles each hole to a `computed`, a `view()` exposes them,
-and the diff-push transport pushes only the holes that changed — conformance
-`http_server/liveview_html_tier` pins snapshot→diff→diff (glitch-free) in the sandbox client
-conversation.
+Merged new main in two rounds (server-hmr's LiveView transport + the IR1–IR5 extension-Registry
+refactor, then the **cross-module linker fix** + the dead-tier-free-function cleanup). Reconciled:
+my E6b tier methods and the IR lowerer resolve ext tiers through the *threaded* registry (not the
+global); the dropped `is_extension_tier`/`extension_tier_names` globals are gone; and the linker's
+qualify refactor now visits `tier.expr` in lockstep with `tier.config` (re-applied — main's refactor
+dropped it, which broke E0051's return-match for a namespaced expr tier).
 
-**Reusable-package factoring still BLOCKED** on a *pre-existing* cross-package linking bug —
-a package `pub` fn cannot call an internal helper (`hyp`→`dbl` fails identically on this main); the
-embed/registry refactor did not touch it. So `@html` ships single-file. Native tiers (E6b.2) *do*
-sidestep this for a native handler, but a reactive `@html` composes `std.reactive` most naturally in
-Noeta, so the block is the cross-package linker, not the tier mechanism.
+`@html` now ships as a **reusable package** — the cross-module linker fix (an import drags its
+same-module dependencies into the merged program) unblocked it:
+- `examples/liveview/` — the `liveview` package: `Html`, the `@html` handler, and internal
+  `escape`/`document`/`session` helpers the exported `handle()` calls.
+- `examples/liveview-counter/` — a consumer app (path dep) whose `fetch` delegates to
+  `liveview.handle`; `@html` blocks over signals.
+
+Cross-module runtime verified: the consumer's `@html` block desugars to the package's `render()`,
+which calls the internal `escape()` across the package boundary, and the reactive diff-push flows
+(`{h0:5,h1:10}` → minimal patch on `count.set(9)`). Conformance `http_server/liveview_html_tier`
+(inlined, single-file — conformance has no package deps) pins the transport; `modules/
+expr_tier_cross_module` guards the `tier.expr` qualify fix + the linker dragging a handler's
+internal helper in.
 
 ## Non-goals (v1)
 
