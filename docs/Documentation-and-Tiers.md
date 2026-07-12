@@ -224,6 +224,19 @@ echo @greet { hello ${name}! }     // " hello world! "
 
 Because the declaration is ordinary code, a **pure-Noeta package** can ship `@sql`, `@json`, or `@html` — parsed, checked, typed embedded languages — with no native code and no compiler plugin: consumers `use` the handler's module and write blocks. See `examples/sql_tier.noe` for a small end-to-end DSL.
 
+### Native (Rust-package) expression tiers
+
+A **native** package declares an expression tier the same way it registers modules and types — through the extension ABI (`ExtTier`), naming the body language, the value type, and a **native handler** (a module function). The tier is then available wherever the package is installed, with no import of the handler, and its blocks are checked and typed like any expression. std dogfoods this with **`@json`**: a native handler (`std.template.render`) that interleaves the statics with JSON-quoted holes.
+
+```noeta
+id = "u-7"
+name = "Ada Lovelace"
+row = @json { {"id": ${id}, "name": ${name}} }   // a checked `string`
+echo row                                          // {"id": "u-7", "name": "Ada Lovelace"}
+```
+
+The handler receives the hole thunks as closures and invokes them through the higher-order native capability, so a native tier can be as lazy as a Noeta one. Under the hood both handler kinds are the same thing — a function value the block's desugared call targets — so a native and a program-declared tier are indistinguishable to the checker, both backends, and the LSP.
+
 ### Editor support — language, highlighting, and the LSP
 
 A tier's `text:` **is** the body's language, and it flows to the tooling three ways — the language is declared once, in the tier, and every consumer picks it up:

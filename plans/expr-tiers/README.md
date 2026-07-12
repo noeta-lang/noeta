@@ -122,14 +122,19 @@ native handler.
   `text_lang` special-case — the dogfood); the checker resolves language/type/kind through
   `TierRegistry` (ext OR program) via new `is_expr_tier`/`expr_tier_handler`, so a native tier is
   recognized like a program one and LSP hover covers it for free.
-- **E6b.2 — native handler dispatch + std dogfood** ⏳ NEXT (design fork). A native expr tier's
-  handler is a Rust fn, but the desugar's `Call(Ident(handler), …)` can't reach a native fn by
-  name (a bare fully-qualified `std.mod.fn` doesn't resolve — needs an import the consumer never
-  writes). Options: (a) **one prelude dispatch fn** `__tier_expr(tier, statics, holes)` that the
-  runtime routes via `find_ext_tier(tier).handler` — least new surface; (b) a **dedicated
-  Rvalue** `TierExprNative`; (c) auto-inject the handler import (fragile). Plus: seed the lexer
-  `TextTiers` set with ext verbatim names (loader lacks a stdlib dep — inject from cli/db), and a
-  native handler receiving `List<() -> dyn>` via `NativeCtx::call`. Recommend (a).
+- **E6b.2 — native handler dispatch + std dogfood** ✅ DONE (architecture **(d)** — the sound
+  one: a native handler is a function *value*, so it flows through the identical `Call` path as a
+  Noeta handler; no runtime dispatch, no bifurcated lowering). New primitive `Expr::NativeFnRef {
+  module, func }` — a compiler-synthesized first-class reference to a native module function (the
+  `Const::ModuleFn` a `use std.mod.fn` binding makes, resolved from the declaration without an
+  import); the checker types it via the module fn's signature, IR lowering emits the new
+  `Rvalue::ModuleFn`. The desugar (`ExprTierHandler: Program | Native`) builds an `Ident` callee
+  for a Noeta handler and a `NativeFnRef` for a native one — one `tier_expr_call`, one Call typing,
+  one lowering, both backends agree. Lexer seed: loader/db/cli/conformance seed `TextTiers` with
+  `ext_verbatim_tier_names` (loader/db gained a lean `noeta-stdlib` dep). **Dogfood: std ships
+  `@json`** (`ExtTier` text/expr/handler → native `std.template.render` invoking hole closures via
+  `NativeCtx`); `@json { {"k": ${v}} }` → checked `string`, differential-verified
+  (`tiers/native_expr_tier`), LSP hover covers it (ide test).
 - **E7 (gated on text-tiers S4/S5) — editor injection for holes**: tree-sitter/TextMate lex
   holes inside expr-tier bodies as Noeta injections within the foreign-language injection.
 
