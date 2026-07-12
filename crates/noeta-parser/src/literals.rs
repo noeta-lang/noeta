@@ -6,7 +6,7 @@
 
 use chumsky::prelude::*;
 use noeta_ast::{Expr, StrPart};
-use noeta_lexer::{TokenKind as T, lex};
+use noeta_lexer::{TokenKind as T, lex_in};
 use noeta_span::{Source, SourceId, Span};
 
 // A `${…}` interpolation hole is itself an expression, so `parse_hole` re-enters the grammar.
@@ -414,7 +414,9 @@ pub(crate) fn parse_tier_expr_body(
 /// side-channel ([`Ctx::diags`]).
 fn parse_hole(ctx: Ctx<'_>, text: &str, abs_offset: u32) -> Expr {
     let temp = Source::new(SourceId::FIRST, "<interp>", text);
-    let lexed = lex(&temp);
+    // Re-lex the hole with the file's tier set, so a nested `@html { … }` inside the hole (an
+    // inline loop body) captures its verbatim body just as it would at the top level.
+    let lexed = lex_in(&temp, ctx.text_tiers);
     let toks: Vec<(T, SimpleSpan)> = lexed
         .tokens
         .iter()

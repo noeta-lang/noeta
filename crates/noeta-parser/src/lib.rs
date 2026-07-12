@@ -97,6 +97,11 @@ pub(crate) struct Ctx<'src> {
     /// terminator so a complete statement is newline-ended even when its last token is not one the
     /// lexer treats as statement-ending (e.g. a generic-close `>`).
     soft_terminators: &'src HashSet<u32>,
+    /// The verbatim-body tier set the file was lexed with (`doc` plus any declared/extension text
+    /// or expression tiers). A `${…}` hole is re-lexed on its own text slice ([`parse_hole`]), so
+    /// it needs the same set — otherwise a **nested** `@html { … }` inside a hole (an inline loop
+    /// body, `${xs.map(fn(x) => @html { … })}`) would not capture its body verbatim.
+    text_tiers: &'src noeta_lexer::TextTiers,
 }
 
 impl Ctx<'_> {
@@ -776,6 +781,14 @@ const DEEP_PARSE_STACK: usize = 64 * 1024 * 1024;
 /// (E0032) and, for merely deep input, runs the recursive-descent grammar on a large-stack worker
 /// thread so it cannot overflow the caller's stack.
 pub fn parse(source: &Source, tokens: &[Token]) -> Parsed {
+    parse_in(source, tokens, &noeta_lexer::TextTiers::default())
+}
+
+/// As [`parse`], but with the file's **verbatim-body tier set** (the same set the whole-program
+/// lexer used) so a `${…}` hole's re-lex recognizes a nested tier body — an inline `@html { … }`
+/// loop body inside a hole. The pipeline (loader/db) passes its workspace set; a plain [`parse`]
+/// uses the default (`doc` only), which is correct for a file that uses no nested tier holes.
+pub fn parse_in(source: &Source, tokens: &[Token], text_tiers: &noeta_lexer::TextTiers) -> Parsed {
     let (max_depth, overflow_span) = nesting_depth(tokens);
     if let Some(span) = overflow_span {
         // Stop before invoking the recursive parser: deeper than the stack can safely hold.
@@ -798,13 +811,13 @@ pub fn parse(source: &Source, tokens: &[Token]) -> Parsed {
         std::thread::scope(|scope| {
             std::thread::Builder::new()
                 .stack_size(DEEP_PARSE_STACK)
-                .spawn_scoped(scope, || parse_inner(source, tokens))
+                .spawn_scoped(scope, || parse_inner(source, tokens, text_tiers))
                 .expect("spawn parse worker")
                 .join()
                 .expect("parse worker panicked")
         })
     } else {
-        parse_inner(source, tokens)
+        parse_inner(source, tokens, text_tiers)
     }
 }
 
@@ -831,7 +844,7 @@ fn nesting_depth(tokens: &[Token]) -> (usize, Option<Span>) {
     (max, overflow)
 }
 
-fn parse_inner(source: &Source, tokens: &[Token]) -> Parsed {
+fn parse_inner(source: &Source, tokens: &[Token], text_tiers: &noeta_lexer::TextTiers) -> Parsed {
     let diags = RefCell::new(Vec::new());
     let soft_terminators: HashSet<u32> = noeta_lexer::newline_terminator_offsets(source, tokens)
         .into_iter()
@@ -840,6 +853,7 @@ fn parse_inner(source: &Source, tokens: &[Token]) -> Parsed {
         source,
         diags: &diags,
         soft_terminators: &soft_terminators,
+        text_tiers,
     };
     let len = source.text().len();
     let toks: Vec<(T, SimpleSpan)> = tokens.iter().map(|t| (t.kind, to_simple(t.span))).collect();

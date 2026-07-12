@@ -22,7 +22,6 @@
 use std::path::{Path, PathBuf};
 
 use noeta_diagnostics::Diagnostic;
-use noeta_parser::parse;
 use noeta_span::{Source, SourceId, SourceMap};
 
 mod bundle;
@@ -85,11 +84,16 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
     // a native tier's `@<name> { … }` body captures — the loader/pipeline does this too; the
     // conformance single-file path must match or the differential would lex a native tier's body
     // as code. The lexer's own two-pass covers a program's `@tier(…, text/expr)` declarations.
-    let ext_tiers = noeta_lexer::TextTiers::with(
-        noeta_stdlib::registry::ext_verbatim_tier_names()
-            .into_iter()
-            .map(str::to_string),
-    );
+    let mut tier_names: Vec<String> = noeta_stdlib::registry::ext_verbatim_tier_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let lexed = noeta_lexer::lex_in(&source, &noeta_lexer::TextTiers::with(tier_names.clone()));
+    // Union the file's own `@tier(…, text/expr)` declarations (the lexer's two-pass discovered
+    // them) so a `${…}` hole's re-lex knows *this* file's tiers too — an inline `@t { … }` loop
+    // body inside a hole. Re-lexing is idempotent, so a second pass with the full set is safe.
+    tier_names.extend(lexed.text_tier_decls.iter().cloned());
+    let ext_tiers = noeta_lexer::TextTiers::with(tier_names);
     let lexed = noeta_lexer::lex_in(&source, &ext_tiers);
     let mut diagnostics = lexed.diagnostics.clone();
 
@@ -99,7 +103,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
     if stage == Stage::Lexer {
         exit_code = if diagnostics.is_empty() { 0 } else { 1 };
     } else {
-        let parsed = parse(&source, &lexed.tokens);
+        let parsed = noeta_parser::parse_in(&source, &lexed.tokens, &ext_tiers);
         diagnostics.extend(parsed.diagnostics);
 
         // The type checker (M1.7) is the front-end gate for the eval stage: a program with type
