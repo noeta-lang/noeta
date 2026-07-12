@@ -13,43 +13,125 @@
 namespace liveview;
 
 use std.reactive.{signal, computed, view}
+use std.id
 use std.http.server
 use std.http.{Request, Response, Socket}
 use std.json
 
-// A compiled `@html` template: the static HTML skeleton (holes rendered as `<span data-live="hN">`
-// markers, filled with their initial values for a no-flash first paint) plus the per-hole
-// `computed`s the websocket session exposes and diffs. Holes are held as `dyn` — they *are*
-// `Computed<string>`s, but `view.expose` accepts `dyn` and this keeps the field a built-in.
+// A compiled `@html` template: the static HTML skeleton (holes rendered as `<span data-live="id">`
+// markers, filled with their initial values for a no-flash first paint), the per-hole `computed`s
+// the websocket session exposes and diffs, and the marker `id`s (parallel to `holes`) the session
+// exposes each computed under. Holes are `dyn` — they *are* `Computed<string>`s, but `view.expose`
+// accepts `dyn` and this keeps the field a built-in.
 pub struct Html {
     skeleton: string
     holes: List<dyn>
+    ids: List<string>
 }
 
-// Minimal HTML-text escaping for the server-rendered initial values; the client shim writes updates
-// via `textContent`, which escapes on its own, so this only guards the first paint.
+// A globally-unique marker id per hole — across the top-level template *and* every nested `@html`
+// embedded in a hole. Without uniqueness a nested row's marker would collide with an outer marker,
+// and a patch to one would corrupt the other. A UUID needs no module-level counter (which would not
+// cross the package boundary anyway) and is stable for the render it is assigned in.
+fn fresh_id(): string {
+    return "h${id.uuid()}"
+}
+
+// Minimal HTML-text escaping for a *scalar* hole's rendered value (XSS-safe by default).
 fn escape(s: string): string {
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 }
 
-// The `@html` handler. Holes are `() -> dyn` — a template renders *any* value (like JSX `{x}`),
-// stringified through interpolation — so `${count.get()}` needs no `.to_string()`. Each hole is
-// wrapped in a `computed` so it tracks exactly the signals it reads and recomputes only when they
-// change; the diff transport then pushes only the holes whose rendered value differs.
+// Whether a hole value is itself markup (an `Html` from a nested `@html { … }`, or a `List<Html>`
+// from a loop like `${rows.map(...)}`) — such a hole embeds *raw*; every other value is escaped
+// text. This is the JSX rule: `{child}` composes, `{text}` is escaped.
+fn is_markup(v: dyn): bool {
+    return v is Html || v is List<Html>
+}
+
+// Render one hole value to its HTML string: an `Html`'s skeleton verbatim, a `List<Html>` (a loop)
+// concatenated, else the value escaped as text.
+fn render_value(v: dyn): string {
+    single = v.as<Html>()
+    if single != none {
+        return (single ?? Html { skeleton: "", holes: [] }).skeleton
+    }
+    many = v.as<List<Html>>()
+    if many != none {
+        mut out = ""
+        for child in (many ?? []) {
+            out = out ~ child.skeleton
+        }
+        return out
+    }
+    return escape("${v}")
+}
+
+// The `@html` handler. Holes are `() -> dyn` — a template renders *any* value (like JSX `{x}`) — so
+// `${count.get()}` needs no `.to_string()` and `${rows.map(row)}` composes nested templates. Each
+// hole is wrapped in a `computed` so it tracks exactly the signals it reads and recomputes only when
+// they change; the diff transport then pushes only the holes whose rendered value differs. A markup
+// hole gets a `data-live-html` marker (the client applies patches via `innerHTML`); a text hole a
+// `data-live` marker (`textContent`, escaped).
 @tier(html, text: "html", expr: Html)
 pub fn render(statics: List<string>, holes: List<() -> dyn>): Html {
-    computeds = holes.map(fn(h) => computed(fn() => "${h()}"))
+    computeds = holes.map(fn(h) => computed(fn() => render_value(h())))
     mut skeleton = ""
+    mut ids: List<string> = []
     mut i = 0
     for s in statics {
         skeleton = skeleton ~ s
         if i < computeds.len() {
             c = computeds[i]
-            skeleton = skeleton ~ "<span data-live=\"h${i}\">" ~ escape(c.get()) ~ "</span>"
+            hole = holes[i]
+            hid = fresh_id()
+            ids = ids ~ [hid]
+            marker = if is_markup(hole()) then "data-live-html" else "data-live"
+            skeleton = skeleton ~ "<span ${marker}=\"${hid}\">" ~ c.get() ~ "</span>"
         }
         i = i + 1
     }
-    return Html { skeleton: skeleton, holes: computeds }
+    return Html { skeleton: skeleton, holes: computeds, ids: ids }
+}
+
+// The client runtime — the bundled `server.liveview_js()` shim, extended so a **markup** hole
+// (`data-live-html`) patches via `innerHTML` while a **text** hole (`data-live`) patches via
+// `textContent` (escaped). The wire protocol is unchanged (hole → string); the marker attribute
+// alone decides text-vs-markup, so a reactive loop of `<li>` rows updates in place.
+fn live_js(): string {
+    return `(() => {
+  "use strict";
+  const path = window.NOETA_LIVE_PATH || "/ws";
+  const state = {};
+  let ws = null;
+  const render = (name) => {
+    const value = state[name];
+    const text = typeof value === "string" ? value : JSON.stringify(value);
+    document.querySelectorAll('[data-live="' + name + '"]').forEach((el) => { el.textContent = text; });
+    document.querySelectorAll('[data-live-html="' + name + '"]').forEach((el) => { el.innerHTML = text; });
+  };
+  const apply = (values) => { for (const n of Object.keys(values)) { state[n] = values[n]; render(n); } };
+  const handle = (frame) => {
+    if (frame.type === "snapshot") apply(frame.values);
+    else if (frame.type === "patch") apply(frame.changes);
+    else if (frame.type === "reload") location.reload();
+    else if (frame.type === "error") console.error("noeta live:", frame.message);
+  };
+  const connect = () => {
+    const scheme = location.protocol === "https:" ? "wss://" : "ws://";
+    ws = new WebSocket(scheme + location.host + path);
+    ws.onmessage = (e) => handle(JSON.parse(e.data));
+    ws.onclose = () => setTimeout(connect, 1000);
+  };
+  const send = (name) => { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "event", name })); };
+  document.addEventListener("click", (e) => {
+    const el = e.target.closest("[data-live-click]");
+    if (el) send(el.dataset.liveClick);
+  });
+  window.noetaLive = { state, send };
+  connect();
+})();
+`
 }
 
 // Wrap a rendered template in a full HTML document with the bundled client shim.
@@ -65,7 +147,7 @@ async fn session(sock: Socket, render_page: () -> Html, on_event: (string) -> vo
     v = view()
     mut i = 0
     for c in page.holes {
-        v.expose("h${i}", c)
+        v.expose(page.ids[i], c)
         i = i + 1
     }
     sock.send(v.snapshot())
@@ -104,7 +186,7 @@ pub fn handle(
         return server.websocket(fn(sock) => session(sock, render_page, on_event))
     }
     if req.path() == "/live.js" {
-        return server.response(200, server.liveview_js(), {"content-type": "application/javascript"})
+        return server.response(200, live_js(), {"content-type": "application/javascript"})
     }
     return server.response(200, document(title, render_page()), {"content-type": "text/html"})
 }

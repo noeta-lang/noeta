@@ -1,0 +1,6 @@
+[package]
+name = "noeta/liveview-todos"
+version = "0.1.0"
+
+[dependencies]
+liveview = { path = "../liveview" }

@@ -1,0 +1,52 @@
+// A LiveView todo list — a *complex* @html template: a loop of nested @html rows, conditionals over
+// template branches, computed expressions, and XSS-safe text — all reactive. Clicking "complete
+// all" flips a signal; the server pushes a minimal diff (the list, the "N left" count, the status
+// line) and the browser updates in place.
+//
+//   noeta serve examples/liveview-todos/todos.noe   →   open http://localhost:8080
+//
+// Importing `render` brings the `@html` tier declaration into scope.
+use liveview.{render, Html, handle}
+use std.reactive.signal
+use std.http.server
+use std.http.{Request, Response}
+
+struct Todo { title: string  done: bool }
+
+todos = signal([
+    Todo { title: "Wire the reactive graph", done: true },
+    Todo { title: "Ship @html templating", done: true },
+    Todo { title: "Write the <docs>", done: false },
+])
+
+// A row is its own `@html` value; the dynamic class stays in static position via two branches.
+fn row(t: Todo): Html {
+    if t.done {
+        return @html { <li class="done">[x] ${t.title}</li> }
+    }
+    return @html { <li class="todo">[ ] ${t.title}</li> }
+}
+
+fn remaining(): int {
+    return todos.get().filter(fn(t) => !t.done).len()
+}
+
+// Every hole reads the signal *directly*, so its `computed` subscribes and re-renders on change.
+fn page(): Html {
+    return @html {
+        <h1>Todos — ${remaining()} of ${todos.get().len()} left</h1>
+        <ul>${todos.get().map(row)}</ul>
+        <p>${if remaining() == 0 then "All done! ✨" else "Keep going."}</p>
+        <button data-live-click="complete-all">complete all</button>
+    }
+}
+
+fn on_event(name: string): void {
+    if name == "complete-all" {
+        todos.update(fn(list) => list.map(fn(t) => Todo { title: t.title, done: true }))
+    }
+}
+
+fn fetch(req: Request): Response {
+    return handle(req, "Noeta LiveView todos", page, on_event)
+}
