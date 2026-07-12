@@ -1270,6 +1270,15 @@ struct Vm<'m> {
     /// CLI / debug adapter to render. Written **only after** an abort, so it costs the hot path
     /// nothing; empty for a run that completes.
     abort_trace: Vec<TraceFrame>,
+    /// The extension **registry** this VM resolves native names against (instance-registry IR3):
+    /// module functions, extern types, method bundles, and their dispatch all consult it through
+    /// [`Vm::reg`]. `None` — the default on every ordinary run — falls back to the process-global
+    /// default registry (`noeta_stdlib::registry::default_seeded`), so a plain run is byte-for-byte
+    /// unchanged. An embedding host that assembled its own extension set threads its `Registry` in
+    /// (the embed API / server-hmr F2), and a worker isolate inherits its parent's (a `&'static`
+    /// registry is `Send`). The std-concrete `static_dispatch_ctx*` fast paths deliberately stay on
+    /// the global — std is in every assembled registry, so monomorphizing them costs no correctness.
+    registry: Option<&'static noeta_stdlib::registry::Registry>,
 }
 
 /// The traceback vocabulary is shared with the tree-walker oracle through the backend contract
@@ -2097,7 +2106,11 @@ fn try_classify(v: Value) -> Option<TryOutcome> {
 /// [`Value::type_name`] — the same canonical strings the M0 tree-walker matches on, so both
 /// backends decide a narrowing identically; `Named` (a user struct/class/enum, or the built-in
 /// `Option`/`Result`) matches by shape name; `Dyn` always matches (no-op narrowing).
-fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
+fn narrow_matches(
+    reg: &noeta_stdlib::registry::Registry,
+    v: Value,
+    target: &NarrowTarget,
+) -> bool {
     let kind = match target {
         NarrowTarget::Int => "int",
         NarrowTarget::Float => "float",
@@ -2118,7 +2131,7 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
             // match their (bare) shape name.
             if v.is_extern() {
                 return v.with_extern(|e| {
-                    noeta_stdlib::registry::find_type(e.type_name())
+                    reg.find_type(e.type_name())
                         .map(|t| t.qualified())
                         .as_deref()
                         == Some(name)
@@ -2126,7 +2139,9 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
             }
             return v.shape().is_some_and(|s| &s.name == name);
         }
-        NarrowTarget::AnyOf(members) => return members.iter().any(|m| narrow_matches(v, m)),
+        NarrowTarget::AnyOf(members) => {
+            return members.iter().any(|m| narrow_matches(reg, v, m));
+        }
         // Abstract kind-types match any value of that declaration kind, by the value's shape kind.
         NarrowTarget::AnyEnum => {
             return v.shape().is_some_and(|s| s.kind == ShapeKind::Enum);
@@ -2142,7 +2157,7 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         // match `args` (a `dyn` on either side is a wildcard). An untagged value classifies its args
         // to `dyn`, so `vm_type_repr` yields `dyn` arguments and the check passes head-only.
         NarrowTarget::Generic { head, args } => {
-            return narrow_matches(v, head)
+            return narrow_matches(reg, v, head)
                 && noeta_ast::reflect::narrow_args_match(args, &vm_type_repr(&v));
         }
     };
@@ -2350,7 +2365,19 @@ impl<'m> Vm<'m> {
             debugger: None,
             profiler: None,
             abort_trace: Vec::new(),
+            registry: None,
         }
+    }
+
+    /// The extension registry this VM resolves native names against (instance-registry IR3) — the
+    /// VM twin of `Checker::reg`. Every native dispatch and lookup goes through here so that an
+    /// instance-scoped registry (an embed session's own extension set) takes effect uniformly; an
+    /// unset field falls back to the process-global default, keeping every ordinary run unchanged.
+    /// Returns `&'static` (the registry only ever hands out static extension data), so a caller may
+    /// bind it once and use it past a later `&mut self` borrow.
+    fn reg(&self) -> &'static noeta_stdlib::registry::Registry {
+        self.registry
+            .unwrap_or_else(noeta_stdlib::registry::default_seeded)
     }
 
     /// Build the tier-1 JIT engine and, when `force_jit` is set, eagerly compile every prototype so
@@ -2950,6 +2977,7 @@ impl<'m> Vm<'m> {
 /// completion, then marshals the result back to `Send` [`isolate::Wire`]. An abort inside the isolate
 /// (a panic) comes back as `Err(message)`, which the parent re-raises at the `.await`. The worker tears
 /// down its own globals/channels so its thread-local heap returns to zero residency.
+#[allow(clippy::too_many_arguments)]
 fn run_isolate_worker(
     module: &Arc<Module>,
     factory: &IsolateFactory,
@@ -2957,11 +2985,15 @@ fn run_isolate_worker(
     iso_args: Vec<isolate::IsoArg>,
     wire_globals: Vec<(u32, isolate::Wire)>,
     trace: Option<noeta_stdlib::TraceContext>,
+    registry: Option<&'static noeta_stdlib::registry::Registry>,
     span: Span,
 ) -> Result<isolate::Wire, IsolateFailure> {
     noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
     let (host, executor) = factory();
     let mut wvm = Vm::load(module, host, executor);
+    // Resolve native names against the spawner's registry (instance-registry IR3); `None` falls
+    // back to the process-global default, exactly like the parent.
+    wvm.registry = registry;
     // Inherit the spawner's trace context across the thread boundary (native-otel T5d): the worker
     // has its OWN host (span handles don't transfer), so the W3C context is interned as a remote
     // seed at the worker's root — its spans then continue the spawner's trace, exactly as a
@@ -4539,8 +4571,11 @@ impl<'m> Vm<'m> {
                             let route = match extern_caches[ci] {
                                 Some((key, route)) if key == type_name.as_ptr() => route,
                                 _ => {
-                                    let route =
-                                        crate::methods::resolve_extern_route(type_name, method);
+                                    let route = crate::methods::resolve_extern_route(
+                                        self.reg(),
+                                        type_name,
+                                        method,
+                                    );
                                     extern_caches[ci] = Some((type_name.as_ptr(), route));
                                     route
                                 }
@@ -5541,7 +5576,7 @@ impl<'m> Vm<'m> {
                         none_shape,
                     } => {
                         let v = regs[fbase + *src as usize];
-                        let result = if narrow_matches(v, target) {
+                        let result = if narrow_matches(self.reg(), v, target) {
                             retain(v);
                             let shape = self.shapes[*some_shape as usize];
                             Value::enum_value(shape, vec![v])
@@ -5554,7 +5589,7 @@ impl<'m> Vm<'m> {
                     }
                     Op::IsType { dst, src, target } => {
                         let v = regs[fbase + *src as usize];
-                        let result = Value::bool(narrow_matches(v, target));
+                        let result = Value::bool(narrow_matches(self.reg(), v, target));
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }

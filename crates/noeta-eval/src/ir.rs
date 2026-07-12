@@ -424,7 +424,7 @@ impl Interpreter {
         frame: &mut Frame,
     ) -> Eval<Flow> {
         for arm in arms {
-            if let Some(bindings) = crate::match_pattern(&arm.pattern, &value) {
+            if let Some(bindings) = crate::match_pattern(self.reg(), &arm.pattern, &value) {
                 let child = crate::Scope::child(&self.scope);
                 for (name, bound) in bindings {
                     child.declare(name, bound, false);
@@ -1282,7 +1282,7 @@ impl Interpreter {
             }
             noeta_ir::Rvalue::As { operand, ty, .. } => {
                 let value = self.eval_ir_atom(operand, frame)?;
-                if crate::runtime_matches(&value, ty) {
+                if crate::runtime_matches(self.reg(), &value, ty) {
                     Ok(crate::builtin_enum("Option", "some", vec![value]))
                 } else {
                     Ok(crate::builtin_enum("Option", "none", vec![]))
@@ -1290,7 +1290,7 @@ impl Interpreter {
             }
             noeta_ir::Rvalue::TypeTest { operand, ty, .. } => {
                 let value = self.eval_ir_atom(operand, frame)?;
-                Ok(Value::Bool(crate::runtime_matches(&value, ty)))
+                Ok(Value::Bool(crate::runtime_matches(self.reg(), &value, ty)))
             }
             noeta_ir::Rvalue::TypeOf { operand, span } => {
                 let v = self.eval_ir_atom(operand, frame)?;

@@ -28,10 +28,16 @@ pub(crate) enum ExternRoute {
 }
 
 /// Resolve the route for `method` on the extern type `type_name` — the uncached registry walk a
-/// route-cache miss performs.
+/// route-cache miss performs. The caller passes its VM's registry (instance-registry IR3); the walk
+/// is `#[cold]` (only a route-cache miss reaches it), so the extra argument never touches the hot
+/// per-op path.
 #[cold]
-pub(crate) fn resolve_extern_route(type_name: &str, method: &str) -> ExternRoute {
-    let Some(ext) = noeta_stdlib::registry::find_type(type_name) else {
+pub(crate) fn resolve_extern_route(
+    reg: &noeta_stdlib::registry::Registry,
+    type_name: &str,
+    method: &str,
+) -> ExternRoute {
+    let Some(ext) = reg.find_type(type_name) else {
         return ExternRoute::Plain;
     };
     if let Some((getter, project)) = ext.arena_getter
@@ -384,16 +390,20 @@ impl<'m> Vm<'m> {
         // threaded in), and materialize the `NativeOut` result (the result shape supplied from the
         // function's `RetTy`). Routing is per-function so a partially-migrated module (`vec`/`quat`,
         // whose bulk `*_all` kernels stay per-backend) falls through for its unmigrated functions.
-        if let Some(sig) = noeta_stdlib::registry::find_function(module, func) {
+        // Bound once (instance-registry IR3): `reg` is `&'static`, so it outlives the `&mut self`
+        // borrows below (the host, the executor) and every native lookup routes through this VM's
+        // registry rather than the process-global default.
+        let reg = self.reg();
+        if let Some(sig) = reg.find_function(module, func) {
             // A reflective module (`json`) marshals its arguments deeply (the recursive value tree
             // `json.stringify` introspects); every other module uses the cheap shallow projection.
-            let deep = noeta_stdlib::registry::find_module(module).is_some_and(|m| m.deep_marshal);
+            let deep = reg.find_module(module).is_some_and(|m| m.deep_marshal);
             let nargs: Vec<noeta_stdlib::NativeValue> = if deep {
                 args.iter().map(|a| a.to_native_deep()).collect()
             } else {
                 args.iter().map(|a| marshal_native_arg(*a)).collect()
             };
-            return match noeta_stdlib::registry::dispatch(module, func, &mut *self.host, &nargs) {
+            return match reg.dispatch(module, func, &mut *self.host, &nargs) {
                 // Async WORK (extern-types X5): ticket the descriptor on the executor and hand
                 // back a leaf async-IO future `.await` later resolves — the same shape the old
                 // per-backend `fs.*_async` intercept produced, now reached by ordinary dispatch.
@@ -411,7 +421,7 @@ impl<'m> Vm<'m> {
         // sets are disjoint, so order is behavior-neutral and keeps the common path lean.
         // (The last per-backend intercept — `vec`'s bulk `*_all` kernels — died with the N3.4
         // raw-buffer seam: they are ordinary ctx functions now, reached right here.)
-        if noeta_stdlib::registry::find_ctx_function(module, func).is_some() {
+        if reg.find_ctx_function(module, func).is_some() {
             return self.call_ctx_function(module, func, args, span);
         }
         let error = noeta_stdlib::no_function_error(module, func);
@@ -435,9 +445,11 @@ impl<'m> Vm<'m> {
     ) -> Result<Value, Abort> {
         // ONE heap access + ONE registry lookup resolves everything the routing below needs
         // (H5 perf): the type entry, and — for a declared **gated arena read**
-        // (`ExtType::arena_getter`) — the projected retained id.
+        // (`ExtType::arena_getter`) — the projected retained id. `reg` is bound once (`&'static`,
+        // Copy) so the closures below capture it without holding a borrow of `self` (IR3).
+        let reg = self.reg();
         let (ext, fast_read) = recv.with_extern(|e| {
-            let ext = noeta_stdlib::registry::find_type(e.type_name());
+            let ext = reg.find_type(e.type_name());
             let fast = ext.and_then(|t| {
                 let (getter, project) = t.arena_getter?;
                 (getter == method).then(|| project(e))
@@ -481,8 +493,7 @@ impl<'m> Vm<'m> {
             })
             .collect();
         let host = &mut *self.host;
-        let result = recv
-            .with_extern_mut(|e| noeta_stdlib::registry::dispatch_method(e, method, host, &nargs));
+        let result = recv.with_extern_mut(|e| reg.dispatch_method(e, method, host, &nargs));
         match result {
             Ok(out) => Ok(materialize_native(out)),
             Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
