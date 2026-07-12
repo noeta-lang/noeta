@@ -621,6 +621,55 @@ impl DocumentStore {
             })
     }
 
+    /// The **tier-body descriptor** for an embedded-language block under the cursor (text-tiers /
+    /// expr-tiers arcs): when the cursor is on a `@<name> { … }` block's tier name, report what its
+    /// body is — the declared body language (`text: "sql"` / `doc` → markdown) and, for an
+    /// expression tier, the value type its blocks evaluate to (`expr: T`). Read from the
+    /// [`noeta_check::tiers::TierRegistry`], which unions the program's own `@tier` declarations
+    /// with any an installed extension contributes — so a program-declared tier and a native
+    /// package's tier surface identically. Returns the descriptor line plus the tier-name range.
+    pub fn hover_tier(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<(String, Range)> {
+        let cache = self.workspaces.get(uri)?;
+        let db = &self.db;
+        let entry = cache.entry();
+        let index = LineIndex::new(entry.text(db));
+        let offset = index.offset(position, encoding);
+
+        // The tier at the cursor: the entry file's parse (a bare parse suffices — this is about the
+        // block's *declaration*, not its checked type), scanned for a `@<name> { … }` whose tier
+        // name covers the offset.
+        let ast = noeta_db::ast(db, entry);
+        let (tier, tier_span) = tier_name_at(&ast.0.program, offset, SourceId::FIRST)?;
+
+        // The tier's declaration, from the workspace-merged program's registry (imports + this
+        // file). A built-in `doc` has no declaration but a known language.
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, entry);
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        let registry = noeta_check::tiers::TierRegistry::collect(program);
+
+        let lang = registry.text_lang(&tier);
+        let value = registry.expr_type(&tier);
+        let descriptor = match (value, lang) {
+            (Some(ty), Some(lang)) => {
+                format!("expression tier `@{tier}` — `{lang}` body, evaluates to `{ty}`")
+            }
+            (Some(ty), None) => format!("expression tier `@{tier}` — evaluates to `{ty}`"),
+            (None, Some(lang)) => format!("text tier `@{tier}` — `{lang}` body"),
+            // A code tier (or an unknown one): no embedded-language body to describe.
+            (None, None) => return None,
+        };
+        Some((descriptor, index.range(tier_span, encoding)))
+    }
+
     /// Resolve the definition of the reference at `position` for go-to-definition, as a `(URI,
     /// range)` — the target may be a **different file** (a cross-module reference). Runs over the
     /// merged workspace program, so an imported name resolves to its declaration in the sibling that
@@ -1659,6 +1708,135 @@ fn top_level_fn<'a>(program: &'a noeta_ast::Program, name: &str) -> Option<&'a n
     })
 }
 
+/// The `(name, tier-name span)` of the `@<name> { … }` tier block/expression whose tier name
+/// covers `offset` in file `source`, if any (expr-tiers/text-tiers hover). Walks statement bodies
+/// and the expression positions a `TierExpr` can occupy — a block is usually a binding value,
+/// `echo`, `return`, or call argument.
+fn tier_name_at(
+    program: &noeta_ast::Program,
+    offset: u32,
+    source: SourceId,
+) -> Option<(String, Span)> {
+    fn covers(span: Span, offset: u32, source: SourceId) -> bool {
+        span.source == source && span.start <= offset && offset <= span.end
+    }
+    fn in_stmts(
+        stmts: &[noeta_ast::Stmt],
+        offset: u32,
+        source: SourceId,
+    ) -> Option<(String, Span)> {
+        stmts.iter().find_map(|s| in_stmt(s, offset, source))
+    }
+    fn in_stmt(stmt: &noeta_ast::Stmt, offset: u32, source: SourceId) -> Option<(String, Span)> {
+        use noeta_ast::Stmt;
+        match stmt {
+            Stmt::TierBlock {
+                tier,
+                tier_span,
+                items,
+                ..
+            } => covers(*tier_span, offset, source)
+                .then(|| (tier.clone(), *tier_span))
+                .or_else(|| in_stmts(items, offset, source)),
+            Stmt::Echo { value, .. }
+            | Stmt::Binding { value, .. }
+            | Stmt::Destructure { value, .. }
+            | Stmt::Yield { value, .. }
+            | Stmt::Expr { expr: value, .. } => in_expr(value, offset, source),
+            Stmt::Return { value, .. } => value.as_ref().and_then(|v| in_expr(v, offset, source)),
+            Stmt::Fn(f) => in_stmts(&f.body, offset, source),
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+                ..
+            } => in_expr(cond, offset, source)
+                .or_else(|| in_stmts(then_body, offset, source))
+                .or_else(|| else_body.as_ref().and_then(|b| in_stmts(b, offset, source))),
+            Stmt::For { iterable, body, .. } => {
+                in_expr(iterable, offset, source).or_else(|| in_stmts(body, offset, source))
+            }
+            Stmt::While { cond, body, .. } => {
+                in_expr(cond, offset, source).or_else(|| in_stmts(body, offset, source))
+            }
+            Stmt::Concurrent { body, .. } => in_stmts(body, offset, source),
+            _ => None,
+        }
+    }
+    fn in_expr(expr: &noeta_ast::Expr, offset: u32, source: SourceId) -> Option<(String, Span)> {
+        use noeta_ast::{ClosureBody, Expr};
+        // Only recurse into an expression whose extent covers the cursor — the fast reject.
+        if !covers(expr.span(), offset, source) {
+            return None;
+        }
+        match expr {
+            Expr::TierExpr {
+                tier,
+                tier_span,
+                holes,
+                ..
+            } => covers(*tier_span, offset, source)
+                .then(|| (tier.clone(), *tier_span))
+                .or_else(|| holes.iter().find_map(|h| in_expr(h, offset, source))),
+            Expr::Call { callee, args, .. } => in_expr(callee, offset, source)
+                .or_else(|| args.iter().find_map(|a| in_expr(a, offset, source))),
+            Expr::Binary { lhs, rhs, .. }
+            | Expr::Pipeline {
+                left: lhs,
+                right: rhs,
+                ..
+            }
+            | Expr::Coalesce {
+                value: lhs,
+                fallback: rhs,
+                ..
+            }
+            | Expr::Index {
+                receiver: lhs,
+                index: rhs,
+                ..
+            }
+            | Expr::Range {
+                start: lhs,
+                end: rhs,
+                ..
+            } => in_expr(lhs, offset, source).or_else(|| in_expr(rhs, offset, source)),
+            Expr::Unary { operand, .. } => in_expr(operand, offset, source),
+            Expr::Member { receiver, .. } | Expr::TupleIndex { receiver, .. } => {
+                in_expr(receiver, offset, source)
+            }
+            Expr::List { items, .. } | Expr::Tuple { items, .. } => {
+                items.iter().find_map(|i| in_expr(i, offset, source))
+            }
+            Expr::Map { entries, .. } => entries.iter().find_map(|(k, v)| {
+                in_expr(k, offset, source).or_else(|| in_expr(v, offset, source))
+            }),
+            Expr::Closure { body, .. } => match body {
+                ClosureBody::Expr(e) => in_expr(e, offset, source),
+                ClosureBody::Block(stmts) => in_stmts(stmts, offset, source),
+            },
+            Expr::Match {
+                scrutinee, arms, ..
+            } => in_expr(scrutinee, offset, source)
+                .or_else(|| arms.iter().find_map(|a| in_expr(&a.body, offset, source))),
+            Expr::Object(lit) => lit
+                .fields
+                .iter()
+                .find_map(|f| in_expr(&f.value, offset, source))
+                .or_else(|| lit.spread.as_ref().and_then(|s| in_expr(s, offset, source))),
+            Expr::Try { expr, .. }
+            | Expr::Await { expr, .. }
+            | Expr::Spawn { future: expr, .. }
+            | Expr::As { expr, .. }
+            | Expr::TypeTest { expr, .. }
+            | Expr::TypeOf { value: expr, .. }
+            | Expr::FromBytes { blob: expr, .. } => in_expr(expr, offset, source),
+            _ => None,
+        }
+    }
+    in_stmts(&program.stmts, offset, source)
+}
+
 /// The method named `method` on the type named `type_name`, for signature help on a method call.
 fn type_method<'a>(
     program: &'a noeta_ast::Program,
@@ -1808,6 +1986,45 @@ mod tests {
         assert_eq!(
             store.hover_doc("file:///a.noe", Position::new(2, 10), Encoding::Utf16),
             None
+        );
+    }
+
+    #[test]
+    fn hover_tier_describes_an_expression_block_body() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///a.noe",
+            "@tier(sql, text: \"sql\", expr: Query)\n\
+             fn q(statics: List<string>, holes: List<() -> int>): Query { return Query {} }\n\
+             struct Query {}\n\
+             x = @sql { select 1 }\n"
+                .to_string(),
+        );
+        // On the `@sql` tier name (line 4): the descriptor names the language and value type.
+        let on_block = store.hover_tier("file:///a.noe", Position::new(3, 5), Encoding::Utf16);
+        assert_eq!(
+            on_block.as_ref().map(|(d, _)| d.as_str()),
+            Some("expression tier `@sql` — `sql` body, evaluates to `Query`")
+        );
+        // On the `@tier` declaration keyword (line 1) — not a block use — no descriptor.
+        assert_eq!(
+            store.hover_tier("file:///a.noe", Position::new(0, 2), Encoding::Utf16),
+            None
+        );
+    }
+
+    #[test]
+    fn hover_tier_describes_a_doc_text_block() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///a.noe",
+            "@doc { Some prose. }\nfn f(): int { return 1 }\n".to_string(),
+        );
+        // The built-in `doc` tier's body language is markdown.
+        let on_doc = store.hover_tier("file:///a.noe", Position::new(0, 1), Encoding::Utf16);
+        assert_eq!(
+            on_doc.as_ref().map(|(d, _)| d.as_str()),
+            Some("text tier `@doc` — `markdown` body")
         );
     }
 

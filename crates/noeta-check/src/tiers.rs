@@ -200,9 +200,12 @@ impl TierRegistry {
         }
     }
 
-    /// The body language of `tier` when it is a **text tier** — `"markdown"` for the built-in
-    /// `doc`, the declaration's `text: "<lang>"` for a declared one, `None` for a code tier. Reads
-    /// the first declaration (text tiers are single-provider today).
+    /// The body language of `tier` when it declares one — `"markdown"` for the built-in `doc`,
+    /// the declaration's `text: "<lang>"` for a declared text **or expression** tier, `None`
+    /// otherwise. This is the language editor injection colors the body as and the LSP reports on
+    /// hover; it is decoupled from the tier name (text-tiers design), so `doc` maps to `markdown`
+    /// and an expression tier may tag its bodies `text: "sql"`. Reads the first declaration (text
+    /// and expression tiers are single-provider today).
     pub fn text_lang(&self, tier: &str) -> Option<&str> {
         if tier == "doc" {
             return Some("markdown");
@@ -210,13 +213,22 @@ impl TierRegistry {
         self.declared(tier).and_then(|d| d.text.as_deref())
     }
 
-    /// Every declared text tier's name — what the pipeline feeds the lexer
-    /// (`noeta_lexer::TextTiers::with`) so consumer files capture these bodies verbatim.
+    /// The value type of `tier` when it is an **expression tier** (expr-tiers arc) — the `expr: T`
+    /// its `@<name> { … }` blocks evaluate to — else `None`. Surfaced by the LSP alongside
+    /// [`Self::text_lang`] so hovering an embedded block reports both its language and its type.
+    pub fn expr_type(&self, tier: &str) -> Option<&str> {
+        self.declared(tier).and_then(|d| d.expr.as_deref())
+    }
+
+    /// Every declared **verbatim-body** tier's name — text tiers *and* expression tiers, both of
+    /// whose `@<name> { … }` bodies the lexer captures un-parsed (`noeta_lexer::TextTiers::with`).
+    /// (The live pipeline drives capture off the lexer's own `text_tier_decls` scan, which keys on
+    /// `text:`/`expr:` identically; this registry-side twin must match, so it includes both.)
     pub fn text_tier_names(&self) -> impl Iterator<Item = &str> {
         self.declared
             .values()
             .flatten()
-            .filter(|d| d.text.is_some())
+            .filter(|d| d.text.is_some() || d.expr.is_some())
             .map(|d| d.name.as_str())
     }
 
