@@ -25,7 +25,7 @@ use noeta_span::{SourceId, Span};
 use noeta_stdlib::{Executor, Host};
 use noeta_value::Value;
 
-use crate::{Channel, Vm, release};
+use crate::{Channel, Vm, release, retain};
 
 /// A factory for a fresh host + executor pair — the session builds one at construction and again on
 /// `:reset`, so a reset REPL starts against the same *kind* of environment (a real host, or the
@@ -46,6 +46,9 @@ pub(crate) struct SessionState {
     /// what the pre-H5 `Rc<ReactiveGraph>` field carried, generalized.
     ext_arena: Vec<Option<Value>>,
     ext_arena_free: Vec<u32>,
+    /// Host-held embed handles (server-hmr F3), persisted across [`VmSession::call_by_name`].
+    embed_handles: Vec<Option<Value>>,
+    embed_handles_free: Vec<u32>,
     ext_state: Vec<(&'static str, noeta_stdlib::ExtState)>,
     ext_closed_gates: Vec<&'static str>,
     /// The `Rc`-wrapped derived tables grow by **append** (never rebuild), so an entry-1 aggregate and
@@ -69,6 +72,8 @@ impl SessionState {
             channel_progress: 0,
             ext_arena: Vec::new(),
             ext_arena_free: Vec::new(),
+            embed_handles: Vec::new(),
+            embed_handles_free: Vec::new(),
             ext_state: Vec::new(),
             ext_closed_gates: Vec::new(),
             shapes: Vec::new(),
@@ -135,6 +140,8 @@ impl<'m> Vm<'m> {
         vm.channel_progress = state.channel_progress;
         vm.ext_arena = state.ext_arena;
         vm.ext_arena_free = state.ext_arena_free;
+        vm.embed_handles = state.embed_handles;
+        vm.embed_handles_free = state.embed_handles_free;
         vm.ext_state = state.ext_state;
         vm.ext_closed_gates = state.ext_closed_gates;
         vm.shapes = state.shapes;
@@ -161,6 +168,8 @@ impl<'m> Vm<'m> {
             channel_progress: self.channel_progress,
             ext_arena: self.ext_arena,
             ext_arena_free: self.ext_arena_free,
+            embed_handles: self.embed_handles,
+            embed_handles_free: self.embed_handles_free,
             ext_state: self.ext_state,
             ext_closed_gates: self.ext_closed_gates,
             shapes: self.shapes,
@@ -185,6 +194,34 @@ pub struct SessionOutput {
     /// from a function defined in an *earlier* entry carries a span into that entry's now-gone text;
     /// the CLI's renderer degrades such a frame to name-only.
     pub trace: Vec<TraceFrame>,
+}
+
+/// An opaque, GC-rooted reference to a live language value the embedding host keeps across calls
+/// (server-hmr F3). Minted by [`VmSession::call_retaining`], read via [`VmSession::read_handle`],
+/// freed via [`VmSession::release_handle`]. A plain index — meaningful only until released.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EmbedHandle(u32);
+
+impl EmbedHandle {
+    pub(crate) fn from_index(idx: u32) -> EmbedHandle {
+        EmbedHandle(idx)
+    }
+    pub(crate) fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// One argument to [`VmSession::call_retaining`]: either a value marshalled in, or a handle to a
+/// value the session already holds (passed back without a round-trip through the host).
+#[derive(Debug)]
+pub enum EmbedArg {
+    Value(noeta_stdlib::NativeOut),
+    Handle(EmbedHandle),
+}
+
+enum CallResult {
+    Value(noeta_stdlib::NativeValue),
+    Handle(EmbedHandle),
 }
 
 /// Why a [`VmSession::call_by_name`] returned no value (server-hmr E0).
@@ -451,6 +488,51 @@ impl VmSession {
         name: &str,
         args: Vec<noeta_stdlib::NativeOut>,
     ) -> Result<(noeta_stdlib::NativeValue, SessionOutput), CallError> {
+        let args = args.into_iter().map(EmbedArg::Value).collect();
+        let (result, out) = self.call_internal(name, args, false)?;
+        match result {
+            CallResult::Value(v) => Ok((v, out)),
+            CallResult::Handle(_) => unreachable!("retain_result was false"),
+        }
+    }
+
+    /// Call `name` with a mix of marshalled values and handles, returning the deep result value
+    /// (server-hmr F3): the handle-argument twin of [`Self::call_by_name`].
+    pub fn call_mixed(
+        &mut self,
+        name: &str,
+        args: Vec<EmbedArg>,
+    ) -> Result<(noeta_stdlib::NativeValue, SessionOutput), CallError> {
+        let (result, out) = self.call_internal(name, args, false)?;
+        match result {
+            CallResult::Value(v) => Ok((v, out)),
+            CallResult::Handle(_) => unreachable!("retain_result was false"),
+        }
+    }
+
+    /// Call `name`, **retaining** its result as an embed handle (server-hmr F3) — the host keeps
+    /// the live value across frames without marshalling it out, and passes it back via
+    /// [`EmbedArg::Handle`]. Read a handle's current value with [`Self::read_handle`]; free it with
+    /// [`Self::release_handle`] (a forgotten handle reclaims at teardown). Arguments may mix
+    /// marshalled values and handles.
+    pub fn call_retaining(
+        &mut self,
+        name: &str,
+        args: Vec<EmbedArg>,
+    ) -> Result<(EmbedHandle, SessionOutput), CallError> {
+        let (result, out) = self.call_internal(name, args, true)?;
+        match result {
+            CallResult::Handle(h) => Ok((h, out)),
+            CallResult::Value(_) => unreachable!("retain_result was true"),
+        }
+    }
+
+    fn call_internal(
+        &mut self,
+        name: &str,
+        args: Vec<EmbedArg>,
+        retain_result: bool,
+    ) -> Result<(CallResult, SessionOutput), CallError> {
         let Some(slot) = self.compiler.global_slots().get(name).copied() else {
             return Err(CallError::NoSuchFunction(name.to_string()));
         };
@@ -467,16 +549,27 @@ impl VmSession {
             self.state = Some(vm.into_state());
             return Err(CallError::NoSuchFunction(name.to_string()));
         }
+        // Materialize each argument: a marshalled value is built fresh; a handle's stored value is
+        // read and retained (`+1`) so the callee's frame consumes its own reference and the
+        // host's handle survives.
         let arg_values: Vec<Value> = args
             .into_iter()
-            .map(crate::values::materialize_native)
+            .map(|a| match a {
+                EmbedArg::Value(out) => crate::values::materialize_native(out),
+                EmbedArg::Handle(h) => {
+                    let v = vm.embed_handles[h.0 as usize].expect("a live embed handle");
+                    retain(v);
+                    v
+                }
+            })
             .collect();
         let outcome = vm.call_value(callee, arg_values, Span::new(0, 0));
-        let value = match outcome {
+        let result = match outcome {
+            Ok(v) if retain_result => Some(CallResult::Handle(vm.embed_handle_store(v))),
             Ok(v) => {
                 let native = v.to_native_deep();
                 release(v);
-                Some(native)
+                Some(CallResult::Value(native))
             }
             Err(_) => None,
         };
@@ -487,10 +580,33 @@ impl VmSession {
             trace: std::mem::take(&mut vm.abort_trace),
         };
         self.state = Some(vm.into_state());
-        match value {
-            Some(v) => Ok((v, output)),
+        match result {
+            Some(r) => Ok((r, output)),
             None => Err(CallError::Aborted(Box::new(output))),
         }
+    }
+
+    /// The current value behind an embed handle, as the neutral deep view (F3). Reading does not
+    /// consume the handle.
+    pub fn read_handle(&mut self, handle: EmbedHandle) -> noeta_stdlib::NativeValue {
+        let state = self.state.as_ref().expect("state present between entries");
+        state.embed_handles[handle.0 as usize]
+            .expect("a live embed handle")
+            .to_native_deep()
+    }
+
+    /// Release an embed handle (F3): drop the host's reference, destructor-aware. Its slot is
+    /// reused by a later retain. Releasing a handle twice is a misuse the debug build catches.
+    pub fn release_handle(&mut self, handle: EmbedHandle) {
+        let module = self
+            .compiler
+            .extend(&empty_program())
+            .expect("an empty program compiles");
+        let mut state = self.state.take().expect("state present between entries");
+        state.sync_to(&module);
+        let mut vm = Vm::load_seeded(&module, state);
+        vm.embed_handle_release(handle);
+        self.state = Some(vm.into_state());
     }
 
     /// Run a binding's destructor now and unbind it (`:drop` / `:free`), returning whether a binding

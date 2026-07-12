@@ -162,3 +162,64 @@ fn eval_is_the_debug_console_escape_hatch() {
     s.eval("hp.set(55)").unwrap();
     assert_eq!(s.eval("hp.get()").unwrap(), Some("55".to_string()));
 }
+
+#[test]
+fn handles_keep_a_live_value_across_calls_without_marshalling() {
+    // A game-engine shape: `make_entity` returns an entity the host keeps as a handle; later frames
+    // pass it back and mutate it in place; `read` observes the current state.
+    let mut s = Session::new(
+        "use std.reactive.{signal}\n\
+         fn make_entity(hp: int): dyn { return signal(hp) }\n\
+         fn damage(e: dyn, amount: int): dyn {\n\
+         \x20   e.update(fn(h) { return h - amount })\n\
+         \x20   return e.get()\n\
+         }\n\
+         fn health(e: dyn): dyn { return e.get() }\n",
+    )
+    .unwrap();
+
+    // Keep the entity as a handle (its Signal never crosses the boundary as data).
+    let entity = s.call_keep("make_entity", &[Value::Int(100)]).unwrap();
+
+    // Pass the handle back into calls — no copy, and mutation is visible on the SAME value.
+    assert_eq!(
+        s.call("damage", &[Value::Handle(entity), Value::Int(30)])
+            .unwrap(),
+        Value::Int(70)
+    );
+    assert_eq!(
+        s.call("damage", &[Value::Handle(entity), Value::Int(20)])
+            .unwrap(),
+        Value::Int(50)
+    );
+    // The handle holds the live entity (the Signal itself); its inner health reads through a call.
+    assert_eq!(s.read(entity), Value::Str("<signal>".to_string()));
+    assert_eq!(
+        s.call("health", &[Value::Handle(entity)]).unwrap(),
+        Value::Int(50)
+    );
+
+    // Releasing frees the reference; a second entity reuses the slot.
+    s.release(entity);
+    let e2 = s.call_keep("make_entity", &[Value::Int(5)]).unwrap();
+    assert_eq!(
+        s.call("health", &[Value::Handle(e2)]).unwrap(),
+        Value::Int(5)
+    );
+    s.release(e2);
+}
+
+#[test]
+fn a_handle_result_can_be_a_plain_value_too() {
+    let mut s =
+        Session::new("fn make(): Map<string, int> { return {\"x\": 1, \"y\": 2} }\n").unwrap();
+    let h = s.call_keep("make", &[]).unwrap();
+    assert_eq!(
+        s.read(h),
+        Value::Map(vec![
+            ("x".to_string(), Value::Int(1)),
+            ("y".to_string(), Value::Int(2)),
+        ])
+    );
+    s.release(h);
+}

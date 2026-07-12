@@ -33,9 +33,17 @@
 //!
 //! [`Value`] is a deep-copy bridge: scalars, strings, lists, and string-keyed maps cross the
 //! boundary by value in both directions (a Noeta object comes back as a [`Value::Map`] in
-//! declared field order; a tuple/set as a [`Value::List`]). Opaque handles (keep a live Noeta
-//! value across frames without copying) and zero-copy `@packed` buffers are growth points this
-//! unstable surface expects to grow — see the arc plan.
+//! declared field order; a tuple/set as a [`Value::List`]).
+//!
+//! For values a host keeps **across frames** — a game engine's entity/object references — use
+//! [`Handle`]s instead of marshalling: [`Session::call_keep`] retains the result and returns a
+//! handle, which passes back into later calls as a [`Value::Handle`] with no copy, mutates in
+//! place, and reads via [`Session::read`]. Handles are GC-rooted, so a value the host holds is
+//! never reclaimed under it, and a handle the host forgets reclaims when the session drops.
+//!
+//! A `List<@packed>` entity buffer held as a handle and mutated through script functions covers
+//! the engine's hot path without copying. Direct host-side raw-bytes read/write of a packed
+//! buffer (bypassing script) is the remaining value-bridge growth point on this unstable surface.
 //!
 //! # Hosts and extensions
 //!
@@ -48,7 +56,15 @@
 
 use noeta_compiler::hotswap::{SwapDiff, diff_programs};
 use noeta_stdlib::{NativeOut, NativeValue, Scalar};
-use noeta_vm::{SessionOutput, VmSession};
+use noeta_vm::{EmbedArg, EmbedHandle, SessionOutput, VmSession};
+
+/// An opaque, GC-safe reference to a live Noeta value the host keeps across calls (server-hmr F3)
+/// — a game engine's entity/object reference held between frames, never marshalled out. Mint one
+/// with [`Session::call_keep`], read its current value with [`Session::read`], pass it back as a
+/// [`Value::Handle`] argument (zero copy), and free it with [`Session::release`] (a forgotten
+/// handle reclaims when the session drops).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Handle(EmbedHandle);
 
 /// A value crossing the embed boundary, in either direction. Deep-copied at the seam.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +77,10 @@ pub enum Value {
     List(Vec<Value>),
     /// A string-keyed aggregate: a Noeta map (key order) or object (declared field order).
     Map(Vec<(String, Value)>),
+    /// An opaque handle to a session-held value (server-hmr F3). Passing one as a call argument
+    /// hands the live value back without a copy; it is never produced by a deep read (which
+    /// materializes the value), only carried by the host.
+    Handle(Handle),
 }
 
 impl From<i64> for Value {
@@ -158,6 +178,18 @@ fn to_native_out(value: &Value) -> NativeOut {
                 .map(|(k, v)| (k.clone(), to_native_out(v)))
                 .collect(),
         ),
+        // A handle is a live-value reference, not marshallable data — it crosses as an
+        // `EmbedArg::Handle` (see `to_embed_arg`), never through the value marshal.
+        Value::Handle(_) => unreachable!("a handle argument is routed through `to_embed_arg`"),
+    }
+}
+
+/// An argument to a call: a handle passes the live value back (zero copy), everything else
+/// marshals by value (server-hmr F3).
+fn to_embed_arg(value: &Value) -> EmbedArg {
+    match value {
+        Value::Handle(h) => EmbedArg::Handle(h.0),
+        other => EmbedArg::Value(to_native_out(other)),
     }
 }
 
@@ -329,8 +361,8 @@ impl Session {
     /// — globals, signals, everything — persists across calls; a panic inside the callee returns
     /// [`Error::Panic`] and the session survives.
     pub fn call(&mut self, name: &str, args: &[Value]) -> Result<Value, Error> {
-        let native_args: Vec<NativeOut> = args.iter().map(to_native_out).collect();
-        match self.session.call_by_name(name, native_args) {
+        let embed_args: Vec<EmbedArg> = args.iter().map(to_embed_arg).collect();
+        match self.session.call_mixed(name, embed_args) {
             Ok((value, out)) => {
                 self.stdout.push_str(&out.stdout);
                 Ok(from_native(value))
@@ -338,6 +370,33 @@ impl Session {
             Err(noeta_vm::CallError::NoSuchFunction(name)) => Err(Error::NoSuchFunction(name)),
             Err(noeta_vm::CallError::Aborted(out)) => Err(panic_error(*out)),
         }
+    }
+
+    /// Call `name` and **keep** its result as a [`Handle`] the session holds live across frames
+    /// (server-hmr F3) — no marshalling round-trip. Read its current value with [`Self::read`],
+    /// pass it back as a `Value::Handle` argument, and free it with [`Self::release`].
+    pub fn call_keep(&mut self, name: &str, args: &[Value]) -> Result<Handle, Error> {
+        let embed_args: Vec<EmbedArg> = args.iter().map(to_embed_arg).collect();
+        match self.session.call_retaining(name, embed_args) {
+            Ok((handle, out)) => {
+                self.stdout.push_str(&out.stdout);
+                Ok(Handle(handle))
+            }
+            Err(noeta_vm::CallError::NoSuchFunction(name)) => Err(Error::NoSuchFunction(name)),
+            Err(noeta_vm::CallError::Aborted(out)) => Err(panic_error(*out)),
+        }
+    }
+
+    /// The current value behind a handle, materialized as a [`Value`] (server-hmr F3). Reading
+    /// does not consume the handle.
+    pub fn read(&mut self, handle: Handle) -> Value {
+        from_native(self.session.read_handle(handle.0))
+    }
+
+    /// Free a handle (F3): drop the host's reference, destructor-aware. A handle the host forgets
+    /// is reclaimed when the session drops.
+    pub fn release(&mut self, handle: Handle) {
+        self.session.release_handle(handle.0);
     }
 
     /// Swap `new_source` into the live session — the same core `noeta serve --watch` uses,

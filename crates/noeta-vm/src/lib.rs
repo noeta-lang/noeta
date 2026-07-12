@@ -66,7 +66,7 @@ mod methods;
 mod native_ctx;
 mod scheduler;
 mod session;
-pub use session::{CallError, HostFactory, SessionOutput, VmSession};
+pub use session::{CallError, EmbedArg, EmbedHandle, HostFactory, SessionOutput, VmSession};
 
 /// A debugger observing tier-0 execution (the `noeta dap` server implements it). The VM consults it
 /// **before each instruction**, passing the executing prototype and program counter; the
@@ -1100,6 +1100,13 @@ struct Vm<'m> {
     /// reactive graph's treatment), so residency returns to 0 whatever the program forgot.
     ext_arena: Vec<Option<Value>>,
     ext_arena_free: Vec<u32>,
+    /// **Embed handles** (server-hmr F3): language values an embedding HOST holds across
+    /// [`VmSession::call_by_name`] calls without marshalling them out — a game engine keeping an
+    /// entity/object reference between frames. Each live slot owns one reference; freed slots are
+    /// reused via `embed_handles_free`. Rooted and released exactly like `ext_arena`, so a handle
+    /// the host forgets to release still reclaims at teardown (residency 0).
+    embed_handles: Vec<Option<Value>>,
+    embed_handles_free: Vec<u32>,
     /// Per-run extension Rust state (`NativeCtx::state`, H4): plain data keyed by the
     /// extension's own `'static` key, created on first access, dropped at VM drop. Language
     /// values never live here — they go through the arena above.
@@ -2276,6 +2283,8 @@ impl<'m> Vm<'m> {
             channel_progress: 0,
             ext_arena: Vec::new(),
             ext_arena_free: Vec::new(),
+            embed_handles: Vec::new(),
+            embed_handles_free: Vec::new(),
             ext_state: Vec::new(),
             ext_closed_gates: Vec::new(),
             ctx_table_pool: Vec::new(),
@@ -2823,6 +2832,9 @@ impl<'m> Vm<'m> {
             // roots so the sweep cannot reclaim a value the arena release below would then
             // double-free.
             roots.extend(self.ext_arena.iter().copied().flatten());
+            // Embed handles (server-hmr F3) hold a `+1` each — the same root treatment as the
+            // arena, so a host-held value is not reclaimed out from under the host.
+            roots.extend(self.embed_handles.iter().copied().flatten());
             // Traced futures (native-otel T5c) hold a `+1` each — the same graph treatment.
             roots.extend(self.traced_futures.iter().map(|t| t.future));
             let garbage = collect_trace(&roots);
@@ -2847,6 +2859,15 @@ impl<'m> Vm<'m> {
             self.release_value(value);
         }
         self.ext_arena_free.clear();
+        // Release every value a host still holds a handle to (server-hmr F3): a forgotten handle
+        // reclaims here, destructor-aware, so residency returns to zero.
+        for value in std::mem::take(&mut self.embed_handles)
+            .into_iter()
+            .flatten()
+        {
+            self.release_value(value);
+        }
+        self.embed_handles_free.clear();
         // Release any still-traced futures (native-otel T5c) — an abandoned `with_span`-async
         // future whose span never ended. The reference releases destructor-aware (residency 0);
         // the span simply stays unended (the recorder/exporter only consume ended spans).
@@ -3179,6 +3200,31 @@ impl<'m> Vm<'m> {
             g.gc_free_shallow();
         }
         noeta_value::set_collector_mode(saved_mode);
+    }
+
+    /// Store `value` in the embed-handle table (server-hmr F3), taking ownership of its reference,
+    /// and return the handle. Reuses a freed slot when one is available.
+    pub(crate) fn embed_handle_store(&mut self, value: Value) -> crate::session::EmbedHandle {
+        let idx = match self.embed_handles_free.pop() {
+            Some(idx) => {
+                self.embed_handles[idx as usize] = Some(value);
+                idx
+            }
+            None => {
+                self.embed_handles.push(Some(value));
+                (self.embed_handles.len() - 1) as u32
+            }
+        };
+        crate::session::EmbedHandle::from_index(idx)
+    }
+
+    /// Release an embed handle's value (destructor-aware) and free its slot (server-hmr F3).
+    pub(crate) fn embed_handle_release(&mut self, handle: crate::session::EmbedHandle) {
+        let idx = handle.index();
+        if let Some(value) = self.embed_handles[idx as usize].take() {
+            self.release_value(value);
+            self.embed_handles_free.push(idx);
+        }
     }
 
     fn release_value(&mut self, value: Value) {
