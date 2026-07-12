@@ -1,0 +1,105 @@
+//! Graceful drain + `--host` (server-hmr S0), end to end. `#[ignore]` (real port, real signal):
+//! `cargo test -p noeta-cli --test graceful_drain -- --ignored`.
+
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+fn app() -> &'static str {
+    "use std.http.server\n\
+     use std.http.{Request, Response}\n\
+     use std.task.{sleep}\n\
+     async fn fetch(req: Request): Response {\n\
+     \x20   sleep(400).await\n\
+     \x20   return server.response(200, \"drained ${req.path()}\")\n\
+     }\n"
+}
+
+fn wait_until_up(addr: &str) -> bool {
+    for _ in 0..80 {
+        if TcpStream::connect(addr).is_ok() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+/// A slow request on its own thread: connect, send, block reading the reply into `out`.
+fn slow_request(addr: String) -> std::thread::JoinHandle<Result<String, String>> {
+    std::thread::spawn(move || {
+        let mut s = TcpStream::connect(&addr).map_err(|e| e.to_string())?;
+        s.write_all(b"GET /slow HTTP/1.1\r\nHost: x\r\n\r\n")
+            .map_err(|e| e.to_string())?;
+        let mut resp = String::new();
+        s.read_to_string(&mut resp).map_err(|e| e.to_string())?;
+        Ok(resp)
+    })
+}
+
+#[test]
+#[ignore = "binds a real socket and sends SIGINT; run explicitly"]
+fn sigint_drains_in_flight_requests_and_host_binds_local_only() {
+    let dir = std::env::temp_dir().join(format!("noeta-drain-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let app_path = dir.join("app.noe");
+    std::fs::write(&app_path, app()).unwrap();
+
+    let port = 8481;
+    // --host 127.0.0.1 binds local-only (S0): the loopback connect must work.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_noeta"))
+        .args([
+            "serve",
+            app_path.to_str().unwrap(),
+            "--port",
+            &port.to_string(),
+            "--host",
+            "127.0.0.1",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn `noeta serve`");
+    let addr = format!("127.0.0.1:{port}");
+
+    let outcome = (|| -> Result<(), String> {
+        if !wait_until_up(&addr) {
+            return Err("server did not accept within 4s".to_string());
+        }
+        // Start a slow (400ms) request, give it time to arrive at the handler…
+        let inflight = slow_request(addr.clone());
+        std::thread::sleep(Duration::from_millis(150));
+
+        // …then SIGINT the server mid-request. A graceful drain must still answer it. (Portable
+        // `kill -INT` rather than a `libc` dep just for the test.)
+        Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .map_err(|e| e.to_string())?;
+
+        // The in-flight request completes with its real body (not a dropped connection).
+        let resp = inflight.join().unwrap()?;
+        if !resp.contains("drained /slow") {
+            return Err(format!("in-flight request was not drained: {resp:?}"));
+        }
+        // After the drain, the listener is closed — a new connection is refused.
+        let mut refused = false;
+        for _ in 0..40 {
+            if TcpStream::connect(&addr).is_err() {
+                refused = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if !refused {
+            return Err("the listener did not close after the drain".to_string());
+        }
+        Ok(())
+    })();
+
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome.expect("graceful drain round trip");
+}

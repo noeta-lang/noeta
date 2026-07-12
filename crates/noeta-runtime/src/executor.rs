@@ -67,7 +67,10 @@ impl RealExecutor {
             tasks: tokio::task::JoinSet::new(),
             resolved: HashMap::new(),
             next_io_id: 0,
-            wake: None,
+            // Self-arm the process-wide shutdown wake (server-hmr S0) so a SIGINT can rouse a
+            // blocked serve loop. A driver with its own out-of-band source (the hot-reload
+            // watcher) overrides this via `set_wake`.
+            wake: Some(crate::shutdown_notify()),
         })
     }
 

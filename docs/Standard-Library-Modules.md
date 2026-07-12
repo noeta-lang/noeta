@@ -388,7 +388,7 @@ all on Noeta's own async runtime. A handler that errors becomes a `500`; the ser
 
 | Type / function | Signature | Notes |
 |---|---|---|
-| `server.serve` | `serve(port: int, handler: (Request) -> Response) -> void` | Binds `0.0.0.0:port`; serves until the process stops. |
+| `server.serve` | `serve(port: int, handler: (Request) -> Response, host?: string) -> void` | Binds `host:port` (`host` defaults to `0.0.0.0`); serves until the process stops (Ctrl-C drains gracefully). |
 | `server.response` | `response(status: int, body?: string\|bytes, headers?: Map<string, string>) -> Response` | The reply builder a handler uses. |
 | `Request` methods | `method() -> string`, `path() -> string`, `query(name) -> string?`, `header(name) -> string?` (case-insensitive), `body() -> string`, `body_bytes() -> bytes` | Read the inbound request. |
 | `Response.with_header` | `with_header(name, value) -> Response` | Copy-modify — returns a new response (a `Response` is immutable). |

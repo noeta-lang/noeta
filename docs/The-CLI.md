@@ -99,7 +99,10 @@ hello
 `noeta serve app.noe --port 8080` serves the file's top-level `fn fetch(req: Request): Response`
 handler (see the `http.server` section of [Standard Library Modules](Standard-Library-Modules));
 the app defines the handler and must **not** call `server.serve(...)` itself — the command runs
-the file's top-level setup, then drives the handler on the given port.
+the file's top-level setup, then drives the handler on the given port. `--host` sets the bind
+address (default `0.0.0.0`, all interfaces; pass `--host 127.0.0.1` for local-only). **Ctrl-C**
+drains gracefully: the server stops accepting, finishes the requests already in flight, closes
+the listener, and exits — a second Ctrl-C forces an immediate stop.
 
 `--watch` works on **any** command (`noeta run --watch`, `noeta test --watch`, …): a file watcher
 restarts the command on change — with the startup cache, a restart is a few milliseconds.

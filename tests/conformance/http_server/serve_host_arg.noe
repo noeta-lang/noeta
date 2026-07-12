@@ -1,0 +1,20 @@
+// server.serve with an explicit bind address (server-hmr S0): `serve(port, handler, host)` takes
+// an optional trailing host string. Under the sandbox the address is inert (the fixed request
+// script drives the handler regardless), so this pins that the 3-arg form parses, type-checks,
+// and runs identically to the 2-arg form — the `noeta serve --host` seam threads a real address
+// here on the real host.
+// expect: stdout "GET /"
+// expect: stdout "served on 127.0.0.1"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response}
+
+fn handle(req: Request): Response {
+    if req.path() == "/" {
+        echo "GET /"
+    }
+    return server.response(200, "ok")
+}
+
+server.serve(8080, handle, "127.0.0.1")
+echo "served on 127.0.0.1"

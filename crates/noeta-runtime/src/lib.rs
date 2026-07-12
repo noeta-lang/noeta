@@ -27,6 +27,19 @@ pub use executor::RealExecutor;
 /// without taking their own tokio dependency.
 pub use tokio::sync::Notify;
 
+/// The process-wide **shutdown wake** (server-hmr S0): a [`Notify`] every [`RealExecutor`] arms
+/// itself with at construction, so a blocked executor — an idle server parked on its accept — can
+/// be roused. The CLI's SIGINT handler `notify_one()`s this after setting the serve shutdown flag,
+/// so a graceful drain begins immediately instead of at the next connection. Lazily created; a
+/// program that never serves never notifies it, so the wake stays inert (a never-fired `notified()`
+/// branch in the executor's select).
+pub fn shutdown_notify() -> std::sync::Arc<Notify> {
+    static NOTIFY: std::sync::OnceLock<std::sync::Arc<Notify>> = std::sync::OnceLock::new();
+    NOTIFY
+        .get_or_init(|| std::sync::Arc::new(Notify::new()))
+        .clone()
+}
+
 #[cfg(feature = "telemetry")]
 mod telemetry;
 mod ws;

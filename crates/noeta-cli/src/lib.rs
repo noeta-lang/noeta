@@ -1892,9 +1892,44 @@ fn ext_command_clap(ext: &'static noeta_stdlib::ExtCommand) -> clap::Command {
                 .long(spec.name)
                 .help(spec.help)
                 .value_parser(clap::value_parser!(i64)),
+            noeta_stdlib::ArgKind::Str { .. } => clap::Arg::new(spec.name)
+                .long(spec.name)
+                .help(spec.help)
+                .value_parser(clap::value_parser!(String)),
         });
     }
     cmd
+}
+
+/// Install the SIGINT graceful-drain handler for a serving process (server-hmr S0): the first
+/// Ctrl-C sets the process shutdown flag and wakes any blocked serve loop (which then finishes
+/// in-flight requests and returns); a second Ctrl-C forces an immediate exit. Runs on its own
+/// thread with a tiny tokio runtime so it never contends with the isolate executors.
+fn install_shutdown_handler() {
+    std::thread::spawn(|| {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            // No signal runtime → the process just dies on Ctrl-C, as before. Not fatal.
+            Err(_) => return,
+        };
+        rt.block_on(async {
+            if tokio::signal::ctrl_c().await.is_err() {
+                return;
+            }
+            eprintln!(
+                "\nnoeta serve: draining — finishing in-flight requests (Ctrl-C again to force)"
+            );
+            noeta_stdlib::serve::request_shutdown();
+            noeta_runtime::shutdown_notify().notify_one();
+            // A second Ctrl-C during the drain forces an immediate exit.
+            if tokio::signal::ctrl_c().await.is_ok() {
+                std::process::exit(130);
+            }
+        });
+    });
 }
 
 /// Dispatch a matched extension command: collect its declared args from the clap matches and run
@@ -1903,6 +1938,13 @@ fn ext_command_dispatch(
     ext: &'static noeta_stdlib::ExtCommand,
     matches: &clap::ArgMatches,
 ) -> ExitCode {
+    // Graceful drain (server-hmr S0): a long-lived server honors SIGINT by finishing in-flight
+    // requests and closing the listener rather than dying mid-response. `noeta serve --watch`
+    // (the hot path) is Ctrl-C'd through its wrapper process instead, so only the plain path
+    // installs this.
+    if ext.name == "serve" && std::env::var_os("NOETA_HOT").is_none() {
+        install_shutdown_handler();
+    }
     let mut parsed = noeta_stdlib::ParsedArgs::default();
     for spec in ext.args {
         match spec.kind {
@@ -1919,6 +1961,13 @@ fn ext_command_dispatch(
                     .get_one::<i64>(spec.name)
                     .copied()
                     .unwrap_or(default),
+            ),
+            noeta_stdlib::ArgKind::Str { default } => parsed.push_str(
+                spec.name,
+                matches
+                    .get_one::<String>(spec.name)
+                    .cloned()
+                    .unwrap_or_else(|| default.to_string()),
             ),
         }
     }
@@ -1995,6 +2044,10 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                 .map(|arg| match arg {
                     noeta_stdlib::EntryArg::Int(value) => Expr::Int {
                         value: *value,
+                        span: sp,
+                    },
+                    noeta_stdlib::EntryArg::Str(value) => Expr::Str {
+                        value: value.clone(),
                         span: sp,
                     },
                     // In hot mode (server-hmr W1), late-bind an identifier argument through a

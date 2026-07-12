@@ -17,11 +17,28 @@ use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
     ArgKind, ArgSpec, AttrValue, CtxError, CtxOut, CtxResult, EntryArg, EntryCall, ErrorKind,
     ExtCommand, InstrumentId, InstrumentKind, MetricValue, NativeCtx, NativeValue, NetRequest,
-    NetResponse, Scalar, Slot, SpanId, SpanKind, SpanStatus, StdError, TraceContext, ctx_arity,
-    no_function_error, panic_error,
+    NetResponse, Scalar, Slot, SpanId, SpanKind, SpanStatus, StdError, TraceContext, arity_error,
+    ctx_arity, no_function_error, panic_error,
 };
 
 use crate::net::{REQUEST_TYPE_NAME, Request, request_header, request_path};
+
+/// The process-wide graceful-shutdown flag (server-hmr S0). Every `http.serve` loop in the
+/// process polls it each iteration and begins draining when it is set. Deliberately process-wide:
+/// a SIGINT drains *every* serving isolate at once (the multi-core broadcast S1 wants exactly
+/// this), and it is only ever set by the CLI's signal handler — the sandbox/differential never
+/// touches it, so served fixtures stay deterministic.
+static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Request a graceful drain of every running `http.serve` in this process — the CLI's SIGINT
+/// handler calls this. Idempotent.
+pub fn request_shutdown() {
+    SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn shutdown_requested() -> bool {
+    SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 const REQUEST_SIG: SigType = SigType::Named(REQUEST_TYPE_NAME);
 
@@ -32,12 +49,18 @@ const SOCKET_SIG: SigType = SigType::Named(SOCKET_TYPE_NAME);
 const OPT_STR: SigType = SigType::Option(&SigType::String);
 
 pub const HTTP_CTX_FNS: &[ExtFn] = &[
-    // `serve(port, handler) -> void` — bind an inbound listener and run the accept loop, calling
-    // `handler(request)` per connection. The handler's declared return is `dyn`: a sync handler
-    // yields the `Response`, an async one a `Future<Response>` — both reaped identically.
+    // `serve(port, handler, host?) -> void` — bind an inbound listener and run the accept loop,
+    // calling `handler(request)` per connection. The handler's declared return is `dyn`: a sync
+    // handler yields the `Response`, an async one a `Future<Response>` — both reaped identically.
+    // The optional trailing `host` (server-hmr S0) is the bind address, default `0.0.0.0` (the
+    // `noeta serve --host` seam threads it here).
     ExtFn {
         name: "serve",
-        params: &[SigType::Int, SigType::Fn(&[REQUEST_SIG], &SigType::Dyn)],
+        params: &[
+            SigType::Int,
+            SigType::Fn(&[REQUEST_SIG], &SigType::Dyn),
+            SigType::Optional(&SigType::String),
+        ],
         ret: RetTy::Concrete(SigType::Unit),
     },
     // `websocket(handler) -> Response` (server-hmr L0) — the connection-hijack response: returned
@@ -97,21 +120,31 @@ pub const SERVE_COMMAND: ExtCommand = ExtCommand {
         },
         ArgSpec {
             name: "port",
-            help: "The TCP port to bind, default 8080 (the listener binds all interfaces, `0.0.0.0`)",
+            help: "The TCP port to bind, default 8080",
             kind: ArgKind::Int { default: 8080 },
+        },
+        ArgSpec {
+            name: "host",
+            help: "The bind address, default 0.0.0.0 (all interfaces); e.g. 127.0.0.1 for local-only",
+            kind: ArgKind::Str { default: "0.0.0.0" },
         },
     ],
     run: |ctx, args| {
         let port = args.int("port");
+        let host = args.str("host").to_string();
         ctx.run_file(
             args.path("file"),
             Some(&EntryCall {
                 module: "server",
                 func: "serve",
-                args: vec![EntryArg::Int(port), EntryArg::Ident("fetch")],
+                args: vec![
+                    EntryArg::Int(port),
+                    EntryArg::Ident("fetch"),
+                    EntryArg::Str(host.clone()),
+                ],
             }),
             Some(&format!(
-                "noeta serve: listening on http://0.0.0.0:{port} (Ctrl-C to stop)"
+                "noeta serve: listening on http://{host}:{port} (Ctrl-C to stop)"
             )),
         )
     },
@@ -298,7 +331,11 @@ pub fn http_ctx_dispatch(
 ) -> Result<CtxOut, CtxError> {
     match func {
         "serve" => {
-            ctx_arity(func, args, 2)?;
+            // `serve(port, handler)` or `serve(port, handler, host)` — the trailing host is
+            // optional (server-hmr S0).
+            if args.len() != 2 && args.len() != 3 {
+                return Err(arity_error("http.serve", 2, args.len()).into());
+            }
             let NativeValue::Scalar(Scalar::Int(port)) = ctx.view(args[0])? else {
                 return Err(StdError {
                     kind: ErrorKind::ArgType,
@@ -310,7 +347,22 @@ pub fn http_ctx_dispatch(
                 .into());
             };
             let handler = args[1];
-            let addr = format!("0.0.0.0:{port}");
+            // The optional bind address (server-hmr S0): `0.0.0.0` unless a third argument names
+            // one (the `noeta serve --host` seam threads it as a trailing string).
+            let host = match args.get(2) {
+                Some(&slot) => match ctx.view(slot)? {
+                    NativeValue::Str(h) => h,
+                    other => {
+                        return Err(StdError {
+                            kind: ErrorKind::ArgType,
+                            message: format!("`http.serve` host must be a string, found {other:?}"),
+                        }
+                        .into());
+                    }
+                },
+                None => "0.0.0.0".to_string(),
+            };
+            let addr = format!("{host}:{port}");
             let listener = ctx.host().net_listen(&addr)?;
             // Auto-instrumentation gate: only wrap requests in a SERVER span when telemetry is
             // actually configured, so an unconfigured `noeta serve` does zero span work per request.
@@ -344,6 +396,15 @@ pub fn http_ctx_dispatch(
             // swap landed inside `advance_tasks` and live ws clients must be told to reload.
             let mut hot_gen = ctx.hot_swap_count();
             loop {
+                // Graceful drain (server-hmr S0): a SIGINT sets the process shutdown flag; stop
+                // accepting, cancel the pending accept so the loop isn't blocked waiting for a
+                // connection that will never come, and let in-flight handlers finish below.
+                if !closing && shutdown_requested() {
+                    closing = true;
+                    if let Some(af) = accept_future.take() {
+                        ctx.cancel(af)?;
+                    }
+                }
                 // Keep one accept in flight while the listener is open.
                 if !closing && accept_future.is_none() {
                     let io = ctx.host().net_accept(listener);

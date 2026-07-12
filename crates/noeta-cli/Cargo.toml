@@ -18,6 +18,9 @@ path = "src/main.rs"
 
 [dependencies]
 mimalloc = { version = "0.1", default-features = false }
+# The SIGINT graceful-drain handler (server-hmr S0) awaits `tokio::signal::ctrl_c` on its own
+# tiny runtime; `signal` is the only feature the CLI needs directly.
+tokio = { workspace = true, features = ["signal", "rt"] }
 noeta-span = { workspace = true }
 noeta-ast = { workspace = true }
 noeta-backend = { workspace = true }
