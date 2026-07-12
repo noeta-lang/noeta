@@ -89,6 +89,10 @@ their lang id. A pure-Noeta package can ship all of this today via cross-package
 package can, once the tier-providers `ExtTier` port merges, declare the tier from Rust with a
 native handler.
 
+## Status
+
+✅ **E1–E5 COMPLETE** (branch `expr-tiers`, rebased onto main after text-tiers merged, `4bf10d87`→`52ec2091`). `@tier(name, text: "lang", expr: T)` declares an expression tier; `@name { … }` blocks parse to `Expr::TierExpr`, type as the handler call they desugar to, and lower through the shared `noeta_ast::desugar::tier_expr_call` constructor (Try/Await architecture — node survives parse for fmt, checker types it, IR rewrites it). E0051 (handler signature / `expr:` return match / `config:` exclusion), E0052 (statement-position + non-expr-tier-as-value). 605/605 conformance both backends; `examples/sql_tier.noe` end-to-end. Reconciled with text-tiers S3 (dropped a redundant `doc_span` field in favor of S3's span-slicing; fmt renders `@tier(…)` with the `expr:` key). E6/E7 remain (gated).
+
 ## Slices
 
 - **E1 — parser**: `@ident { … }` primary expression → `Expr::TierExpr`; body splitting
