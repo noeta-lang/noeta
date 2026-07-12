@@ -110,8 +110,18 @@ native handler.
   blocks (expected free — fmt re-emits raw source — but gate it).
 - **E5 — example + docs**: `examples/` DSL (e.g. `@json` in userland), docs page section, the
   `@sql`-shaped conformance story.
-- **E6 (gated on tier-providers merge) — ExtTier port**: `expr`/`text` fields on `ExtTier`,
-  native handlers; std dogfood (`@json` in `std.json`).
+- **E6a — LSP + highlighting language surface** ✅ DONE: `TierRegistry::expr_type` +
+  `text_lang` (covers text *and* expr tiers); LSP `hover_tier` reports an embedded block's
+  declared language + value type, read from the registry (the extension-ready seam). Highlighting
+  is extension-provided via a TextMate injection grammar (`injectTo: source.noeta`, holes scoped
+  back to Noeta) — `examples/sql_tier_injection.tmLanguage.json`. tree-sitter third-party tiers
+  need a generated grammar (static-grammar limitation, documented).
+- **E6b (BLOCKED on tier-providers `ExtTier` merge) — native tier declaration**: `expr`/`text`
+  fields on `ExtTier`, `TierRegistry` ingests `ext_tiers()`, native handlers; std dogfood
+  (`@json` in `std.json`). `ExtTier` is not in main (`52ec2091`) — it lives on the unmerged
+  tier-providers branch (another session, `03f3b147`). Building it here would duplicate/conflict
+  with that arc; wait for its merge, then a thin follow-up. Pure-Noeta expression tiers are fully
+  complete and unaffected — this only gates *Rust-package-declared* tiers.
 - **E7 (gated on text-tiers S4/S5) — editor injection for holes**: tree-sitter/TextMate lex
   holes inside expr-tier bodies as Noeta injections within the foreign-language injection.
 
