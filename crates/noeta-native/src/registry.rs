@@ -686,6 +686,21 @@ pub struct ExtTier {
     /// The knob attribute a `@<tier>(args)` block stamps onto its fns — one of the extension's
     /// [`Extension::attributes`] — or `None` for a knob-less tier (whose directive rejects args).
     pub config: Option<&'static str>,
+    /// The body language ID for a **text** or **expression** tier (text-tiers / expr-tiers arcs):
+    /// its `@<name> { … }` bodies are captured verbatim by the lexer and tagged with this language
+    /// for editor injection and LSP hover (`doc` → `"markdown"`, a native `@json` → `"json"`).
+    /// `None` for a code tier. Decoupled from the tier name.
+    pub text: Option<&'static str>,
+    /// The value type an **expression** tier's blocks evaluate to (expr-tiers arc) — the extension
+    /// counterpart of a program `@tier(…, expr: T)`. When set, `@<name> { … }` is an *expression*
+    /// (verbatim text with `${…}` holes) that desugars to a call of [`Self::handler`]; `None` for a
+    /// code or text tier. Mutually exclusive with `config`.
+    pub expr: Option<&'static str>,
+    /// The **native handler** an expression tier's blocks desugar to (expr-tiers arc): the
+    /// qualified module-function name called with `(statics: List<string>, holes: List<() -> dyn>)`
+    /// yielding [`Self::expr`]. `None` unless `expr` is set (a program-declared expr tier names its
+    /// handler on the `@tier` fn instead).
+    pub handler: Option<&'static str>,
 }
 
 /// A bundle of native modules and types registered into the language. Core implements this once

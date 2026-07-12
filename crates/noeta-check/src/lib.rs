@@ -2403,11 +2403,7 @@ impl Checker {
                 if !self.tier_registry.is_known(tier) {
                     self.diags
                         .push(tiers::unknown_tier_diagnostic(tier, *tier_span));
-                } else if self
-                    .tier_registry
-                    .declared(tier)
-                    .is_some_and(|d| d.expr.is_some())
-                {
+                } else if self.tier_registry.is_expr_tier(tier) {
                     // An expression tier's block in *statement* position (expr-tiers arc): its
                     // value would be silently discarded — and it never activates/strips, so a
                     // bare block would otherwise just vanish. Shared E0052 with activation.
@@ -4061,11 +4057,7 @@ impl Checker {
                 holes,
                 span,
             } => {
-                let handler = self
-                    .tier_registry
-                    .declared(tier)
-                    .filter(|d| d.expr.is_some())
-                    .map(|d| d.runner.clone());
+                let handler = self.tier_registry.expr_tier_handler(tier);
                 match handler {
                     Some(handler) => {
                         let call = noeta_ast::desugar::tier_expr_call(

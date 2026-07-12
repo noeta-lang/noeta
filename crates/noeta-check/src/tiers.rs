@@ -200,24 +200,50 @@ impl TierRegistry {
         }
     }
 
-    /// The body language of `tier` when it declares one — `"markdown"` for the built-in `doc`,
-    /// the declaration's `text: "<lang>"` for a declared text **or expression** tier, `None`
-    /// otherwise. This is the language editor injection colors the body as and the LSP reports on
-    /// hover; it is decoupled from the tier name (text-tiers design), so `doc` maps to `markdown`
-    /// and an expression tier may tag its bodies `text: "sql"`. Reads the first declaration (text
-    /// and expression tiers are single-provider today).
+    /// The body language of `tier` when it declares one — from the extension declaration (`doc` →
+    /// `"markdown"`, a native `@json` → `"json"`) or a program `@tier(…, text: "<lang>")`, `None`
+    /// for a code tier. This is the language editor injection colors the body as and the LSP
+    /// reports on hover; decoupled from the tier name (text-tiers design). Extension declarations
+    /// win (a built-in name is not shadowable). Reads the first program declaration (text and
+    /// expression tiers are single-provider today).
     pub fn text_lang(&self, tier: &str) -> Option<&str> {
-        if tier == "doc" {
-            return Some("markdown");
+        if let Some(lang) = noeta_stdlib::registry::find_ext_tier(tier).and_then(|t| t.text) {
+            return Some(lang);
         }
         self.declared(tier).and_then(|d| d.text.as_deref())
     }
 
     /// The value type of `tier` when it is an **expression tier** (expr-tiers arc) — the `expr: T`
-    /// its `@<name> { … }` blocks evaluate to — else `None`. Surfaced by the LSP alongside
-    /// [`Self::text_lang`] so hovering an embedded block reports both its language and its type.
+    /// its `@<name> { … }` blocks evaluate to — from an extension declaration or a program
+    /// `@tier(…, expr: T)`, else `None`. Surfaced by the LSP alongside [`Self::text_lang`] so
+    /// hovering an embedded block reports both its language and its type.
     pub fn expr_type(&self, tier: &str) -> Option<&str> {
+        if let Some(ty) = noeta_stdlib::registry::find_ext_tier(tier).and_then(|t| t.expr) {
+            return Some(ty);
+        }
         self.declared(tier).and_then(|d| d.expr.as_deref())
+    }
+
+    /// Whether `tier` is an **expression tier** (expr-tiers arc) — extension-declared or
+    /// program-declared. The single predicate the checker's E0052 statement-position guard and
+    /// the CLI's `noeta <tier>` dispatch use, so both cover native and program tiers alike.
+    pub fn is_expr_tier(&self, tier: &str) -> bool {
+        noeta_stdlib::registry::find_ext_tier(tier).is_some_and(|t| t.expr.is_some())
+            || self.declared(tier).is_some_and(|d| d.expr.is_some())
+    }
+
+    /// The handler an **expression tier**'s `@<name> { … }` block desugars to — a program tier's
+    /// `@tier` fn (`DeclaredTier::runner`) or an extension tier's native `handler` — as the call
+    /// target name. `None` if `tier` is not an expression tier (or an extension expr tier omitted
+    /// its handler, a misconfiguration). The single resolution point the checker's typing and IR
+    /// lowering both consult, so native and program expr tiers desugar identically.
+    pub fn expr_tier_handler(&self, tier: &str) -> Option<String> {
+        if let Some(t) = noeta_stdlib::registry::find_ext_tier(tier).filter(|t| t.expr.is_some()) {
+            return t.handler.map(str::to_string);
+        }
+        self.declared(tier)
+            .filter(|d| d.expr.is_some())
+            .map(|d| d.runner.clone())
     }
 
     /// Every declared **verbatim-body** tier's name — text tiers *and* expression tiers, both of
@@ -692,7 +718,7 @@ fn resolve_block(
         let config = registry.config_attribute_for(tier, providers);
         if !registry.is_known(tier) {
             diagnostics.push(unknown_tier_diagnostic(tier, *tier_span));
-        } else if registry.declared(tier).is_some_and(|d| d.expr.is_some()) {
+        } else if registry.is_expr_tier(tier) {
             // An expression tier's block in statement position (E0052) — never activates.
             diagnostics.push(expr_tier_statement_diagnostic(tier, *tier_span));
         } else if config.is_none()

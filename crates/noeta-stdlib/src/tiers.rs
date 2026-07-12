@@ -21,18 +21,34 @@ pub const TIERS: &[ExtTier] = &[
     ExtTier {
         name: "test",
         config: None,
+        text: None,
+        expr: None,
+        handler: None,
     },
     ExtTier {
         name: "bench",
         config: Some("Bench"),
+        text: None,
+        expr: None,
+        handler: None,
     },
+    // `doc` is a **text** tier: its `@doc { … }` bodies are verbatim markdown. Declaring the
+    // language here (rather than a hardcoded `text_lang` special-case) is the dogfood that the
+    // extension text/expression-tier surface drives every consumer — lexer capture, editor
+    // injection, LSP hover.
     ExtTier {
         name: "doc",
         config: None,
+        text: Some("markdown"),
+        expr: None,
+        handler: None,
     },
     ExtTier {
         name: "debug",
         config: None,
+        text: None,
+        expr: None,
+        handler: None,
     },
 ];
 
