@@ -138,6 +138,22 @@ native handler.
 - **E7 (gated on text-tiers S4/S5) — editor injection for holes**: tree-sitter/TextMate lex
   holes inside expr-tier bodies as Noeta injections within the foreign-language injection.
 
+## LiveView (`@html`) — the flagship client ✅ (single-file)
+
+Merged new main (server-hmr's LiveView transport + the IR1–IR5 extension-Registry refactor;
+reconciled — my E6b tier methods and the IR lowerer now resolve ext tiers through the *threaded*
+registry, not the global). With the transport in main, `examples/liveview_html_counter.noe` runs on
+this branch: `@html { … ${expr} … }` compiles each hole to a `computed`, a `view()` exposes them,
+and the diff-push transport pushes only the holes that changed — conformance
+`http_server/liveview_html_tier` pins snapshot→diff→diff (glitch-free) in the sandbox client
+conversation.
+
+**Reusable-package factoring still BLOCKED** on a *pre-existing* cross-package linking bug —
+a package `pub` fn cannot call an internal helper (`hyp`→`dbl` fails identically on this main); the
+embed/registry refactor did not touch it. So `@html` ships single-file. Native tiers (E6b.2) *do*
+sidestep this for a native handler, but a reactive `@html` composes `std.reactive` most naturally in
+Noeta, so the block is the cross-package linker, not the tier mechanism.
+
 ## Non-goals (v1)
 
 - Generic handlers (`fn(…, holes: List<() -> T>): Template<T>`) — concrete types only.
