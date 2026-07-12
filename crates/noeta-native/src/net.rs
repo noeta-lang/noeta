@@ -247,3 +247,102 @@ impl crate::ExternIo for ReplyIo {
         Ok(crate::NativeOut::Unit)
     }
 }
+
+// ------------------------------------------------------------------ websocket hijack (L0)
+
+/// The websocket handshake GUID (RFC 6455 §4.2.2): `Sec-WebSocket-Accept` is
+/// `base64(sha1(key + GUID))`. Here so both hosts (and tests) share one constant.
+pub const WS_ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/// One inbound websocket message crossing the hijack seam — TEXT frames only at this slice
+/// (LiveView's diff-push and the HMR events are JSON text; binary is an additive variant later).
+/// `None` from a recv means the peer closed (or the sandbox conversation is exhausted).
+///
+/// The upgrade/recv/send/close descriptor family below mirrors the accept/reply pair exactly:
+/// deterministic `run_sync` through the Host (the sandbox's scripted conversation), a real host
+/// overriding the builders with genuinely async bodies.
+#[derive(Debug)]
+pub struct WsUpgradeIo {
+    /// The connection switching from one-reply-and-close to a persistent message stream.
+    pub conn: u64,
+    /// The client's `Sec-WebSocket-Key` — `Some` until the one run consumes it.
+    pub key: Option<String>,
+}
+
+impl crate::ExternIo for WsUpgradeIo {
+    fn run_sync(
+        &mut self,
+        host: &mut dyn crate::Host,
+    ) -> Result<crate::NativeOut, crate::StdError> {
+        let key = self
+            .key
+            .take()
+            .expect("an upgrade descriptor is run exactly once");
+        host.net_ws_upgrade_now(self.conn, &key)?;
+        Ok(crate::NativeOut::Unit)
+    }
+}
+
+/// The default websocket receive descriptor: resolves synchronously through the Host (the sandbox
+/// pops its scripted conversation). `RealHost` overrides [`crate::Network::net_ws_recv`] with a
+/// genuine async frame read. Resolves to `?string` (`None` = closed).
+#[derive(Debug)]
+pub struct WsRecvIo {
+    pub conn: u64,
+}
+
+impl crate::ExternIo for WsRecvIo {
+    fn run_sync(
+        &mut self,
+        host: &mut dyn crate::Host,
+    ) -> Result<crate::NativeOut, crate::StdError> {
+        Ok(ws_recv_outcome(host.net_ws_recv_next(self.conn)?))
+    }
+}
+
+/// Materialize a recv result as the language-facing `?string`.
+pub fn ws_recv_outcome(next: Option<String>) -> crate::NativeOut {
+    match next {
+        Some(text) => crate::NativeOut::Some(Box::new(crate::NativeOut::Str(text))),
+        None => crate::NativeOut::None,
+    }
+}
+
+/// The default websocket send descriptor: writes through the Host at spawn (the sandbox records
+/// the frame in its transcript). One-shot.
+#[derive(Debug)]
+pub struct WsSendIo {
+    pub conn: u64,
+    /// The text frame to write — `Some` until the one run consumes it.
+    pub text: Option<String>,
+}
+
+impl crate::ExternIo for WsSendIo {
+    fn run_sync(
+        &mut self,
+        host: &mut dyn crate::Host,
+    ) -> Result<crate::NativeOut, crate::StdError> {
+        let text = self
+            .text
+            .take()
+            .expect("a send descriptor is run exactly once");
+        host.net_ws_send_now(self.conn, &text)?;
+        Ok(crate::NativeOut::Unit)
+    }
+}
+
+/// The default websocket close descriptor.
+#[derive(Debug)]
+pub struct WsCloseIo {
+    pub conn: u64,
+}
+
+impl crate::ExternIo for WsCloseIo {
+    fn run_sync(
+        &mut self,
+        host: &mut dyn crate::Host,
+    ) -> Result<crate::NativeOut, crate::StdError> {
+        host.net_ws_close_now(self.conn)?;
+        Ok(crate::NativeOut::Unit)
+    }
+}

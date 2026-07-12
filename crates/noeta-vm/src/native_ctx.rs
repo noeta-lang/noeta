@@ -307,6 +307,13 @@ impl NativeCtx for VmCtx<'_, '_> {
     }
 
     fn advance_tasks(&mut self) -> CtxResult<bool> {
+        // The hot-reload safepoint (server-hmr W1): every ctx-driven loop (the HTTP serve loop)
+        // ticks the scheduler each iteration, so a pending swap lands here — before the poll, so
+        // the next accepted request already dispatches into the new bodies. One `Option` branch
+        // on every run that isn't `serve --watch`.
+        if self.vm.hot_mailbox.is_some() {
+            self.vm.apply_pending_hotswap();
+        }
         self.vm
             .poll_all_scopes_round(self.span)
             .map_err(|Abort| CtxError::Abort)
@@ -638,6 +645,19 @@ impl NativeCtx for VmCtx<'_, '_> {
         });
         Ok(true)
     }
+
+    fn hot_swap_count(&mut self) -> u64 {
+        // Per-VM (server-hmr F5): each worker reports its OWN applied-swap generation, so its
+        // serve loop pushes `reload` to its OWN clients when it applies a broadcast swap.
+        self.vm.applied_swaps as u64
+    }
+
+    fn take_hot_error(&mut self) -> Option<String> {
+        self.vm
+            .hot_mailbox
+            .as_ref()
+            .and_then(|m| m.error.lock().ok().and_then(|mut e| e.take()))
+    }
 }
 
 impl<'m> Vm<'m> {
@@ -652,6 +672,10 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
+        // Bound before the closures so they capture the registry (`&'static`, Copy), not `self`
+        // (instance-registry IR3). The `static_dispatch_ctx_method` fast path stays on the global —
+        // std is in every assembled registry — and only the dyn-table fallback consults `reg`.
+        let reg = self.reg();
         self.ctx_receiver_call(
             recv,
             args,
@@ -663,14 +687,10 @@ impl<'m> Vm<'m> {
                 noeta_stdlib::registry::static_dispatch_ctx_method(
                     type_name, method, ctx, 0, arg_slots,
                 )
-                .unwrap_or_else(|| {
-                    noeta_stdlib::registry::dispatch_ctx_method(
-                        type_name, method, ctx, 0, arg_slots,
-                    )
-                })
+                .unwrap_or_else(|| reg.dispatch_ctx_method(type_name, method, ctx, 0, arg_slots))
             },
             || {
-                noeta_stdlib::registry::find_type_ctx_method(type_name, method)
+                reg.find_type_ctx_method(type_name, method)
                     .map(|f| f.ret)
                     .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit))
             },
@@ -689,18 +709,16 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
+        // Bound before the closures so they capture the registry, not `self` (IR3).
+        let reg = self.reg();
         self.ctx_receiver_call(
             recv,
             args,
             span,
             &format!("{module}::{bundle}.{method}"),
-            |ctx, arg_slots| {
-                noeta_stdlib::registry::dispatch_bundle_method(
-                    module, bundle, method, ctx, 0, arg_slots,
-                )
-            },
+            |ctx, arg_slots| reg.dispatch_bundle_method(module, bundle, method, ctx, 0, arg_slots),
             || {
-                noeta_stdlib::registry::find_bundle(module, bundle)
+                reg.find_bundle(module, bundle)
                     .and_then(|b| b.method(method))
                     .map(|m| m.sig.ret)
                     .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit))
@@ -790,6 +808,25 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Hot-swap pre-run (server-hmr H1): before a swap fragment that re-runs the top level,
+    /// dispose the previous epoch's effects (the re-run re-creates the ones that still exist)
+    /// and the reactive nodes held by the globals the fragment is about to re-bind (their
+    /// replacements arrive when the fragment runs; preserved subscribers re-subscribe on their
+    /// next run). Drives the same shared stdlib disposal code user-level `.dispose()` runs,
+    /// through an ephemeral ctx; a program that never touched reactivity no-ops.
+    pub(crate) fn hotswap_prepare(&mut self, rebound_slots: &[u32]) {
+        let handles: Vec<Value> = rebound_slots
+            .iter()
+            .filter_map(|&s| self.globals.get(s as usize).copied())
+            .filter(|v| !v.is_unbound())
+            .collect();
+        let span = Span::empty_at_in(noeta_span::SourceId::FIRST, 0);
+        let mut ctx = VmCtx::new(self, &handles, span);
+        noeta_stdlib::reactive::hotswap_dispose_effects(&mut ctx);
+        let slots: Vec<Slot> = (0..handles.len() as Slot).collect();
+        noeta_stdlib::reactive::hotswap_dispose_handles(&mut ctx, &slots);
+    }
+
     /// Call a registered **higher-order** native function (higher-order-abi H0): wrap the VM in a
     /// [`VmCtx`], run the shared ctx dispatch, and unwrap the result. The twin of the plain
     /// registry arm in `call_native_module`; the tree-walker mirrors this shape (the dispatch
@@ -801,14 +838,15 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
+        // Bound before `ctx` takes `&mut self` (IR3): `reg` is `&'static`, so it survives the
+        // borrow and the fallback dispatch routes through this VM's registry.
+        let reg = self.reg();
         let mut ctx = VmCtx::new(self, args, span);
         let arg_slots: Vec<Slot> = (0..args.len() as Slot).collect();
         // Compiled-in extensions dispatch through the monomorphized route (H5 perf).
         let outcome =
             noeta_stdlib::registry::static_dispatch_ctx(module, func, &mut ctx, &arg_slots)
-                .unwrap_or_else(|| {
-                    noeta_stdlib::registry::dispatch_ctx(module, func, &mut ctx, &arg_slots)
-                });
+                .unwrap_or_else(|| reg.dispatch_ctx(module, func, &mut ctx, &arg_slots));
         match outcome {
             Ok(CtxOut::Slot(slot)) => {
                 let result = ctx.take(slot);
@@ -840,7 +878,8 @@ impl<'m> Vm<'m> {
             }
             Ok(CtxOut::Out(out)) => {
                 drop(ctx);
-                let ret = noeta_stdlib::registry::find_ctx_function(module, func)
+                let ret = reg
+                    .find_ctx_function(module, func)
                     .map(|f| f.ret)
                     .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit));
                 Ok(materialize_ext(out, ret, args))

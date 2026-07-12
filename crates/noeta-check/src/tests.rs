@@ -1444,7 +1444,9 @@ fn e0023_is_fixed_by_an_annotation_or_a_mut_accumulator() {
 #[test]
 fn e0023_does_not_fire_in_expression_position_or_on_typed_values() {
     // Empty collections in expression position are fine — only a *binding* commits to a type.
-    assert!(codes("echo [];\necho len([]);\necho [].first();\n").is_empty());
+    // (`.len()` is the method form; the free `len([])` was never valid — it left the prelude in
+    // P1.2 and is now caught at check time by the F1 unknown-name gate.)
+    assert!(codes("echo [];\necho [].len();\necho [].first();\n").is_empty());
     // A non-empty literal infers its elements; a typed value carries its type — neither is E0023.
     assert!(codes("xs = [1, 2, 3];\nm = {\"a\": 1};\n").is_empty());
 }
@@ -2221,4 +2223,99 @@ fn an_erroring_entry_is_transactional_and_commits_nothing() {
     );
     // `fixed2` was never committed: binding it fresh (not E0006-reassigning) is clean.
     assert!(entry_codes(&mut session, 1, "fixed2 = 3\nfixed2 = 4\n") == vec!["E0006"]);
+}
+
+// ----- F1: unknown-name gate (a genuinely undefined name is a static E0005) -----
+
+#[test]
+fn unknown_names_are_caught_at_check_time_in_a_file() {
+    // A call to an undefined function, and a bare reference to an undefined value, are both
+    // static errors now — the gap that let a typo swap into a hot-reloaded server and fail at
+    // request time instead of showing the diagnostic.
+    assert_eq!(codes("x = nonexistent_fn()\n"), vec!["E0005"]);
+    assert_eq!(codes("y = undefined_name\n"), vec!["E0005"]);
+    assert_eq!(codes("echo also_missing()\n"), vec!["E0005"]);
+    // Inside a closure body too.
+    assert_eq!(codes("f = fn() => gone()\necho \"ok\"\n"), vec!["E0005"]);
+}
+
+#[test]
+fn legitimate_forward_and_nested_references_stay_clean() {
+    // Top-level fns forward-reference each other (two-pass collect).
+    assert!(codes("fn a(): int { return b() }\nfn b(): int { return 1 }\necho a()\n").is_empty());
+    // A fn body forward-references a top-level global declared later (globals are hoisted).
+    assert!(codes("fn use_g(): int { return g }\ng = 10\necho use_g()\n").is_empty());
+    // A nested fn calls a sibling / itself / an enclosing global.
+    assert!(
+        codes(
+            "fn outer(): int {\n  \
+               fn inner(): int { return 2 }\n  \
+               return inner() + inner()\n\
+             }\n\
+             echo outer()\n"
+        )
+        .is_empty()
+    );
+    // A local closure value is callable without being flagged.
+    assert!(codes("f = fn(x: int): int => x + 1\necho f(5)\n").is_empty());
+    // A `concurrent {}` binding leaks to the enclosing scope (transparent scope).
+    assert!(
+        codes(
+            "use std.task.{sleep}\n\
+             async fn run(): int {\n  \
+               concurrent { w = 7 }\n  \
+               return w\n\
+             }\n\
+             echo run().await\n"
+        )
+        .is_empty()
+    );
+    // The prelude and built-in enums are always known.
+    assert!(codes("panic(\"x\")\n").is_empty());
+    assert!(codes("echo Ordering.Less\n").is_empty());
+}
+
+#[test]
+fn a_repl_session_defers_unknown_names_to_a_later_entry() {
+    // A session is the ONE place an unknown name stays deferred — a later entry may define it.
+    let mut session = super::SessionChecker::new();
+    assert!(entry_codes(&mut session, 0, "echo later()\n").is_empty());
+    assert!(entry_codes(&mut session, 1, "fn later(): int { return 3 }\n").is_empty());
+    assert!(entry_codes(&mut session, 2, "echo later()\n").is_empty());
+}
+
+#[test]
+fn the_checker_resolves_native_names_against_the_injected_registry() {
+    // Instance-registry F2 (IR2): a checker given an explicit `Registry` resolves every native
+    // name against *that* registry, not the process-global default. Proven differentially — the
+    // same std-using program is clean against a registry that has `std`, and unresolved against
+    // one that does not.
+    use noeta_stdlib::registry::Registry;
+
+    // `math.sqrt` takes a `float`; calling it with a `string` is a type error (E0007) — but ONLY
+    // if the checker can see `sqrt`'s signature, which it reads from the registry. This makes the
+    // registry the sole cause of the diagnostic, so its presence/absence is a clean injection probe.
+    let src = "use std.{math};\necho math.sqrt(\"x\");\n";
+    let source = Source::new(SourceId::FIRST, "test.noe", src);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(parsed.diagnostics.is_empty(), "program must parse cleanly");
+    let has_e0007 =
+        |c: &super::Checked| c.diagnostics.iter().any(|d| d.code.to_string() == "E0007");
+
+    // Against the default (std installed), the checker knows `sqrt(float)` and flags the string.
+    let with_std = noeta_stdlib::registry::default_seeded();
+    assert!(
+        has_e0007(&super::check_all_with_registry(&parsed.program, with_std)),
+        "the checker must read `sqrt`'s signature from a registry that has std"
+    );
+
+    // Against an EMPTY registry, `std.math` never resolves, so there is no signature to check the
+    // argument against and the E0007 disappears — the checker consulted the injected registry, not
+    // a global default (which, being installed, would still know `sqrt`).
+    let empty: &'static Registry = Box::leak(Box::new(Registry::new(vec![])));
+    assert!(
+        !has_e0007(&super::check_all_with_registry(&parsed.program, empty)),
+        "an empty registry leaves `math.sqrt` unresolved, so no signature-mismatch can fire"
+    );
 }

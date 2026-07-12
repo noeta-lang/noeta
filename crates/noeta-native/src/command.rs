@@ -18,6 +18,8 @@ pub enum ArgKind {
     Path,
     /// An optional integer flag with a default (`--port 8080`).
     Int { default: i64 },
+    /// An optional string flag with a default (`--host 0.0.0.0`, server-hmr S0).
+    Str { default: &'static str },
 }
 
 /// One argument a command declares; the CLI builds the real parser (help text, validation)
@@ -34,6 +36,7 @@ pub struct ArgSpec {
 pub struct ParsedArgs {
     paths: Vec<(&'static str, PathBuf)>,
     ints: Vec<(&'static str, i64)>,
+    strs: Vec<(&'static str, String)>,
 }
 
 impl ParsedArgs {
@@ -42,6 +45,18 @@ impl ParsedArgs {
     }
     pub fn push_int(&mut self, name: &'static str, value: i64) {
         self.ints.push((name, value));
+    }
+    pub fn push_str(&mut self, name: &'static str, value: String) {
+        self.strs.push((name, value));
+    }
+    /// The declared [`ArgKind::Str`] argument `name` (defaulted by the CLI when absent).
+    pub fn str(&self, name: &str) -> &str {
+        &self
+            .strs
+            .iter()
+            .find(|(n, _)| *n == name)
+            .expect("a declared string argument is always parsed")
+            .1
     }
     /// The declared [`ArgKind::Path`] argument `name` (the CLI guarantees presence).
     pub fn path(&self, name: &str) -> &Path {
@@ -67,6 +82,8 @@ impl ParsedArgs {
 pub enum EntryArg {
     /// An integer literal (`http.serve(8080, …)`).
     Int(i64),
+    /// A string literal (`http.serve(8080, fetch, "127.0.0.1")`, server-hmr S0).
+    Str(String),
     /// A top-level identifier the loaded program defines (`fetch`) — a missing one surfaces as
     /// an ordinary check error against the program, exactly as if the user wrote the call.
     Ident(&'static str),
@@ -90,6 +107,28 @@ pub struct EntryCall {
 /// process exit code (0 ok, 1 program error, 2 unreadable file).
 pub trait CommandCtx {
     fn run_file(&mut self, file: &Path, entry: Option<&EntryCall>, banner: Option<&str>) -> u8;
+
+    /// Serve `file`'s handler across `workers` worker isolates on `host:port` (server-hmr S1
+    /// multi-core). The driver binds the listener once and gives each worker a cloned fd; the
+    /// kernel load-balances connections. Default: fall back to a single-worker
+    /// [`run_file`](CommandCtx::run_file) — a driver that has not implemented multi-core still
+    /// serves, just on one core. Returns the process exit code.
+    fn serve_parallel(&mut self, file: &Path, port: i64, host: &str, workers: usize) -> u8 {
+        let _ = workers;
+        self.run_file(
+            file,
+            Some(&EntryCall {
+                module: "server",
+                func: "serve",
+                args: vec![
+                    EntryArg::Int(port),
+                    EntryArg::Ident("fetch"),
+                    EntryArg::Str(host.to_string()),
+                ],
+            }),
+            None,
+        )
+    }
 }
 
 /// A CLI subcommand contributed by an extension.

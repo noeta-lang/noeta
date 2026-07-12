@@ -29,6 +29,7 @@
 
 pub mod callgraph;
 pub mod completion;
+pub mod impact;
 pub mod inlay;
 pub mod offsets;
 pub mod resolve;

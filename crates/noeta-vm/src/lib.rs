@@ -66,7 +66,7 @@ mod methods;
 mod native_ctx;
 mod scheduler;
 mod session;
-pub use session::{HostFactory, SessionOutput, VmSession};
+pub use session::{CallError, EmbedArg, EmbedHandle, HostFactory, SessionOutput, VmSession};
 
 /// A debugger observing tier-0 execution (the `noeta dap` server implements it). The VM consults it
 /// **before each instruction**, passing the executing prototype and program counter; the
@@ -133,6 +133,37 @@ impl Debugger for EvalBudget {
         }
         DebugAction::Continue
     }
+}
+
+/// The hot-reload mailbox (server-hmr W1): a watcher thread — which owns parsing, checking
+/// (transactional gate), and diffing — deposits a ready-to-apply [`SwapPlan`]; the run thread
+/// takes it at the next scheduler tick and applies it to the live program. A deposit replaces an
+/// unconsumed predecessor (the depositor is responsible for diffing against the last *consumed*
+/// version — see the CLI's hot-serve driver).
+///
+/// [`SwapPlan`]: noeta_compiler::hotswap::SwapPlan
+pub type HotSwapMailbox = Arc<HotChannel>;
+
+/// The hot-reload channel shared by the watcher thread, the VM, and (through the [`NativeCtx`]
+/// accessors) the serve loop (server-hmr L3).
+///
+/// - `plan` — the swap mailbox (see [`HotSwapMailbox`]).
+/// - `error` — the last **rejected** edit's rendered diagnostics: the watcher deposits on a red
+///   check (replacing an older error; a green deposit clears it), the serve loop takes it and
+///   pushes an `error` frame to live LiveView clients for the browser overlay.
+/// - `swaps` — the swap **generation**: incremented after each successfully applied swap, so the
+///   serve loop can detect "a swap landed since my last iteration" and push `reload` to clients.
+///
+/// [`NativeCtx`]: noeta_stdlib::NativeCtx
+#[derive(Debug, Default)]
+pub struct HotChannel {
+    /// The **append-only queue** of swap plans, generation = index (server-hmr F5). A single
+    /// depositor (the watcher) pushes; every consuming VM drains the tail it has not yet applied,
+    /// so a swap **broadcasts** to every worker isolate (`serve --parallel --watch`) rather than
+    /// being taken by one. Each plan is diffed against the previous *deposited* version, so
+    /// applying them in order keeps each worker's session in lockstep.
+    pub plans: std::sync::Mutex<Vec<noeta_compiler::hotswap::SwapPlan>>,
+    pub error: std::sync::Mutex<Option<String>>,
 }
 
 /// What the VM does after consulting the [`Debugger`] for an instruction.
@@ -436,6 +467,73 @@ impl VmBackend {
             arena: &arena,
             memo: HashMap::new(),
         });
+        let result = run_and_teardown(&mut vm, mode);
+        let trace = std::mem::take(&mut vm.abort_trace);
+        (result, trace)
+    }
+
+    /// Run a module with **in-process hot reload armed** (server-hmr W1): the debug-session
+    /// machinery (live [`SessionCompiler`] + module arena — the same stable-prefix swap the debug
+    /// console uses) plus a [`HotSwapMailbox`] the run thread polls at every scheduler tick. This
+    /// is `noeta serve --watch`'s hot mode: the CLI's watcher thread deposits [`SwapPlan`]s and the
+    /// serving program absorbs them between polls without restarting. JIT stays unarmed (the
+    /// debug-path contract `install_fragment` asserts; H3 lifts this).
+    ///
+    /// [`SessionCompiler`]: noeta_compiler::SessionCompiler
+    /// [`SwapPlan`]: noeta_compiler::hotswap::SwapPlan
+    pub fn run_module_hot(
+        &self,
+        module: &Module,
+        session: noeta_compiler::SessionCompiler,
+        host: Box<dyn noeta_stdlib::Host>,
+        executor: Box<dyn noeta_stdlib::Executor>,
+        mailbox: HotSwapMailbox,
+    ) -> (RunResult, Vec<TraceFrame>) {
+        let mode = noeta_value::CollectorMode::Trace;
+        noeta_value::set_collector_mode(mode);
+        let arena = typed_arena::Arena::new();
+        let mut vm = Vm::load(module, host, executor);
+        vm.debug_session = Some(DebugSession {
+            compiler: session,
+            arena: &arena,
+            memo: HashMap::new(),
+        });
+        vm.hot_mailbox = Some(mailbox);
+        // Hot serving runs tier-1 like any production serve (server-hmr H3): the hot-counter
+        // service compiles off-thread, and a swap retires + re-arms it (`install_fragment`).
+        #[cfg(feature = "jit")]
+        vm.init_jit_service(Arc::new(module.clone()));
+        let result = run_and_teardown(&mut vm, mode);
+        let trace = std::mem::take(&mut vm.abort_trace);
+        (result, trace)
+    }
+
+    /// [`VmBackend::run_module_hot`] with the **synchronous force-JIT engine** — the H3 oracle
+    /// entry: every prototype (the in-flight `main` included) executes tier-1 from the first
+    /// dispatch, so a swap deposited in `mailbox` deterministically exercises retire→re-arm
+    /// under live native frames (the off-thread service would race the program's runtime). A
+    /// dropped — rather than graveyard-parked — engine fails this by unwinding into freed pages.
+    #[cfg(feature = "jit")]
+    pub fn run_module_hot_forced_jit(
+        &self,
+        module: &Module,
+        session: noeta_compiler::SessionCompiler,
+        host: Box<dyn noeta_stdlib::Host>,
+        executor: Box<dyn noeta_stdlib::Executor>,
+        mailbox: HotSwapMailbox,
+    ) -> (RunResult, Vec<TraceFrame>) {
+        let mode = noeta_value::CollectorMode::Trace;
+        noeta_value::set_collector_mode(mode);
+        let arena = typed_arena::Arena::new();
+        let mut vm = Vm::load(module, host, executor);
+        vm.debug_session = Some(DebugSession {
+            compiler: session,
+            arena: &arena,
+            memo: HashMap::new(),
+        });
+        vm.hot_mailbox = Some(mailbox);
+        vm.force_jit = true;
+        vm.init_jit();
         let result = run_and_teardown(&mut vm, mode);
         let trace = std::mem::take(&mut vm.abort_trace);
         (result, trace)
@@ -895,6 +993,18 @@ struct Vm<'m> {
     module: &'m Module,
     /// See [`DebugSession`]; `None` on every non-debug run.
     debug_session: Option<DebugSession<'m>>,
+    /// The hot-reload mailbox (server-hmr W1); `None` on every run but `noeta serve --watch`'s
+    /// in-process hot mode. A watcher thread deposits ready-to-apply [`SwapPlan`]s; the VM applies
+    /// the pending one at the scheduler tick ([`Vm::apply_pending_hotswap`] via `advance_tasks`) —
+    /// a safepoint every ctx-driven loop (the HTTP serve loop) passes through each iteration.
+    ///
+    /// [`SwapPlan`]: noeta_compiler::hotswap::SwapPlan
+    hot_mailbox: Option<HotSwapMailbox>,
+    /// How many swap plans this VM has applied from its [`HotChannel`] queue (server-hmr F5): the
+    /// generation index it drains from, and — via [`NativeCtx::hot_swap_count`] — how the serve
+    /// loop detects its own swaps to push `reload` to *its* clients. Per-VM, so N workers each
+    /// track their own progress against the shared broadcast queue.
+    applied_swaps: usize,
     /// Set while a **hover** fragment runs (tooling-unification T6): a hover must stay
     /// side-effect-free, so the dispatch loop refuses any frame push beyond the fragment wrapper's
     /// own frame — the one chokepoint every way of running user code (a call, an object's `Index`
@@ -999,6 +1109,13 @@ struct Vm<'m> {
     /// reactive graph's treatment), so residency returns to 0 whatever the program forgot.
     ext_arena: Vec<Option<Value>>,
     ext_arena_free: Vec<u32>,
+    /// **Embed handles** (server-hmr F3): language values an embedding HOST holds across
+    /// [`VmSession::call_by_name`] calls without marshalling them out — a game engine keeping an
+    /// entity/object reference between frames. Each live slot owns one reference; freed slots are
+    /// reused via `embed_handles_free`. Rooted and released exactly like `ext_arena`, so a handle
+    /// the host forgets to release still reclaims at teardown (residency 0).
+    embed_handles: Vec<Option<Value>>,
+    embed_handles_free: Vec<u32>,
     /// Per-run extension Rust state (`NativeCtx::state`, H4): plain data keyed by the
     /// extension's own `'static` key, created on first access, dropped at VM drop. Language
     /// values never live here — they go through the arena above.
@@ -1081,6 +1198,19 @@ struct Vm<'m> {
     /// exclusive with the synchronous `jit` engine (which the `force_jit` oracle keeps).
     #[cfg(feature = "jit")]
     jit_service: Option<jit_service::JitService>,
+    /// Tier-1 engines **retired by a hot swap** (server-hmr H3). Their executable pages must
+    /// outlive any in-flight native frame (a frame beneath the long-running serve dispatch can
+    /// be native code), so a swap never drops an engine — it parks it here, clears the mirror
+    /// tables (no NEW dispatch can enter retired code), and re-arms fresh against the swapped
+    /// module. Dropped with the `Vm`, after the run's machine stack has fully unwound. Bounded
+    /// per-swap growth, like the arena modules — the documented retention model.
+    #[cfg(feature = "jit")]
+    jit_graveyard: Vec<noeta_jit::Jit>,
+    /// The service twin of [`Vm::jit_graveyard`]: a retired service handle keeps its compile
+    /// thread parked (blocked on an empty request channel) and its pages alive; the `Drop` at
+    /// `Vm` teardown stops and joins it.
+    #[cfg(feature = "jit")]
+    jit_service_graveyard: Vec<jit_service::JitService>,
     /// P-AOT L3.2b: native entries were **bound ahead of time** (from a linked dispatch table),
     /// not JIT-compiled — so `self.jit`/`jit_service` are both `None` yet the mirror tables carry
     /// real native entry points. This makes the frame-entry dispatch consult those pre-installed
@@ -1140,6 +1270,15 @@ struct Vm<'m> {
     /// CLI / debug adapter to render. Written **only after** an abort, so it costs the hot path
     /// nothing; empty for a run that completes.
     abort_trace: Vec<TraceFrame>,
+    /// The extension **registry** this VM resolves native names against (instance-registry IR3):
+    /// module functions, extern types, method bundles, and their dispatch all consult it through
+    /// [`Vm::reg`]. `None` — the default on every ordinary run — falls back to the process-global
+    /// default registry (`noeta_stdlib::registry::default_seeded`), so a plain run is byte-for-byte
+    /// unchanged. An embedding host that assembled its own extension set threads its `Registry` in
+    /// (the embed API / server-hmr F2), and a worker isolate inherits its parent's (a `&'static`
+    /// registry is `Send`). The std-concrete `static_dispatch_ctx*` fast paths deliberately stay on
+    /// the global — std is in every assembled registry, so monomorphizing them costs no correctness.
+    registry: Option<&'static noeta_stdlib::registry::Registry>,
 }
 
 /// The traceback vocabulary is shared with the tree-walker oracle through the backend contract
@@ -1967,7 +2106,7 @@ fn try_classify(v: Value) -> Option<TryOutcome> {
 /// [`Value::type_name`] — the same canonical strings the M0 tree-walker matches on, so both
 /// backends decide a narrowing identically; `Named` (a user struct/class/enum, or the built-in
 /// `Option`/`Result`) matches by shape name; `Dyn` always matches (no-op narrowing).
-fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
+fn narrow_matches(reg: &noeta_stdlib::registry::Registry, v: Value, target: &NarrowTarget) -> bool {
     let kind = match target {
         NarrowTarget::Int => "int",
         NarrowTarget::Float => "float",
@@ -1988,7 +2127,7 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
             // match their (bare) shape name.
             if v.is_extern() {
                 return v.with_extern(|e| {
-                    noeta_stdlib::registry::find_type(e.type_name())
+                    reg.find_type(e.type_name())
                         .map(|t| t.qualified())
                         .as_deref()
                         == Some(name)
@@ -1996,7 +2135,9 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
             }
             return v.shape().is_some_and(|s| &s.name == name);
         }
-        NarrowTarget::AnyOf(members) => return members.iter().any(|m| narrow_matches(v, m)),
+        NarrowTarget::AnyOf(members) => {
+            return members.iter().any(|m| narrow_matches(reg, v, m));
+        }
         // Abstract kind-types match any value of that declaration kind, by the value's shape kind.
         NarrowTarget::AnyEnum => {
             return v.shape().is_some_and(|s| s.kind == ShapeKind::Enum);
@@ -2012,7 +2153,7 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         // match `args` (a `dyn` on either side is a wildcard). An untagged value classifies its args
         // to `dyn`, so `vm_type_repr` yields `dyn` arguments and the check passes head-only.
         NarrowTarget::Generic { head, args } => {
-            return narrow_matches(v, head)
+            return narrow_matches(reg, v, head)
                 && noeta_ast::reflect::narrow_args_match(args, &vm_type_repr(&v));
         }
     };
@@ -2138,6 +2279,8 @@ impl<'m> Vm<'m> {
         Vm {
             module,
             debug_session: None,
+            hot_mailbox: None,
+            applied_swaps: 0,
             pure_eval: false,
             shapes,
             packed_schemas,
@@ -2161,6 +2304,8 @@ impl<'m> Vm<'m> {
             channel_progress: 0,
             ext_arena: Vec::new(),
             ext_arena_free: Vec::new(),
+            embed_handles: Vec::new(),
+            embed_handles_free: Vec::new(),
             ext_state: Vec::new(),
             ext_closed_gates: Vec::new(),
             ctx_table_pool: Vec::new(),
@@ -2191,6 +2336,10 @@ impl<'m> Vm<'m> {
             jit_frame_template: None,
             #[cfg(feature = "jit")]
             jit_service: None,
+            #[cfg(feature = "jit")]
+            jit_graveyard: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_service_graveyard: Vec::new(),
             #[cfg(feature = "jit-rt")]
             aot: false,
             #[cfg(feature = "jit-rt")]
@@ -2212,7 +2361,19 @@ impl<'m> Vm<'m> {
             debugger: None,
             profiler: None,
             abort_trace: Vec::new(),
+            registry: None,
         }
+    }
+
+    /// The extension registry this VM resolves native names against (instance-registry IR3) — the
+    /// VM twin of `Checker::reg`. Every native dispatch and lookup goes through here so that an
+    /// instance-scoped registry (an embed session's own extension set) takes effect uniformly; an
+    /// unset field falls back to the process-global default, keeping every ordinary run unchanged.
+    /// Returns `&'static` (the registry only ever hands out static extension data), so a caller may
+    /// bind it once and use it past a later `&mut self` borrow.
+    fn reg(&self) -> &'static noeta_stdlib::registry::Registry {
+        self.registry
+            .unwrap_or_else(noeta_stdlib::registry::default_seeded)
     }
 
     /// Build the tier-1 JIT engine and, when `force_jit` is set, eagerly compile every prototype so
@@ -2638,6 +2799,39 @@ fn run_and_teardown(vm: &mut Vm, mode: noeta_value::CollectorMode) -> RunResult 
     vm.teardown(mode)
 }
 
+thread_local! {
+    /// The count of **live session heap-owners** on this thread. A [`VmSession`]'s persistent
+    /// `SessionState` holds live heap objects for the whole session, and the value heap is
+    /// *thread-local* — so two embed sessions on one thread share one heap's live-object registry.
+    ///
+    /// [`Vm::teardown`]'s backup mark-sweep reclaims everything unreachable from the tearing-down
+    /// VM's roots; with a sibling session still alive, that set wrongly includes the sibling's live
+    /// objects, and the sibling's own later teardown then double-frees them (heap corruption). So a
+    /// session's teardown runs the destructive sweeps ONLY when it is the **last** owner on the
+    /// thread — an earlier session's cycle garbage is reclaimed by the final owner's empty-root sweep
+    /// instead (deferred, never double-freed). Plain runs register nothing (count stays 0), so their
+    /// teardown is unchanged. Per-thread, so one-session-per-thread (the concurrent model) sweeps
+    /// normally on each thread.
+    static SESSION_HEAP_OWNERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Register a live session heap-owner on this thread (a [`VmSession`] began holding persistent state).
+pub(crate) fn session_owner_enter() {
+    SESSION_HEAP_OWNERS.with(|c| c.set(c.get() + 1));
+}
+
+/// Retire a session heap-owner (its `SessionState` is being torn down). Called *before* the owner's
+/// [`Vm::teardown`], so the remaining count that gates the sweep reflects only the *siblings*.
+pub(crate) fn session_owner_exit() {
+    SESSION_HEAP_OWNERS.with(|c| c.set(c.get().saturating_sub(1)));
+}
+
+/// Whether the VM tearing down now is the last heap-owner on its thread — i.e. no *other* live
+/// session's objects sit in the shared registry that a destructive sweep would wrongly reclaim.
+fn is_last_heap_owner() -> bool {
+    SESSION_HEAP_OWNERS.with(|c| c.get()) == 0
+}
+
 impl<'m> Vm<'m> {
     /// Run the module's entry chunk (proto 0 = `main`) to completion and release the frame-local state
     /// it leaves behind — the returned top value, any open `concurrent` scopes, and the JIT
@@ -2692,7 +2886,13 @@ impl<'m> Vm<'m> {
         // is unwound, so the globals are the whole root set) and sweeps everything unreachable; the
         // **trial-deletion** path instead reaps its buffered candidates *after* teardown, once every frame
         // and global release has had a chance to buffer the cycle's roots.
-        if mode == noeta_value::CollectorMode::Trace {
+        // The two trace sweeps below reclaim everything unreachable from *this* VM's roots — sound
+        // only when no sibling session's live objects share the thread's heap registry. When another
+        // session is still alive (`!is_last_heap_owner`), skip them: this session's own cycle garbage
+        // is instead reaped by the final owner's empty-root sweep (deferred, never double-freed). The
+        // refcount releases below still run — they only touch this session's own graph.
+        let sweep = is_last_heap_owner();
+        if sweep && mode == noeta_value::CollectorMode::Trace {
             let mut roots: Vec<Value> = self
                 .globals
                 .iter()
@@ -2704,6 +2904,9 @@ impl<'m> Vm<'m> {
             // roots so the sweep cannot reclaim a value the arena release below would then
             // double-free.
             roots.extend(self.ext_arena.iter().copied().flatten());
+            // Embed handles (server-hmr F3) hold a `+1` each — the same root treatment as the
+            // arena, so a host-held value is not reclaimed out from under the host.
+            roots.extend(self.embed_handles.iter().copied().flatten());
             // Traced futures (native-otel T5c) hold a `+1` each — the same graph treatment.
             roots.extend(self.traced_futures.iter().map(|t| t.future));
             let garbage = collect_trace(&roots);
@@ -2728,6 +2931,15 @@ impl<'m> Vm<'m> {
             self.release_value(value);
         }
         self.ext_arena_free.clear();
+        // Release every value a host still holds a handle to (server-hmr F3): a forgotten handle
+        // reclaims here, destructor-aware, so residency returns to zero.
+        for value in std::mem::take(&mut self.embed_handles)
+            .into_iter()
+            .flatten()
+        {
+            self.release_value(value);
+        }
+        self.embed_handles_free.clear();
         // Release any still-traced futures (native-otel T5c) — an abandoned `with_span`-async
         // future whose span never ended. The reference releases destructor-aware (residency 0);
         // the span simply stays unended (the recorder/exporter only consume ended spans).
@@ -2748,11 +2960,11 @@ impl<'m> Vm<'m> {
         // still-live object is unreachable garbage; trace-collect from an empty root set to reclaim it,
         // running each member's `destruct` exactly once. (The pre-teardown trace above only catches
         // cycles already unreachable mid-run.)
-        if mode == noeta_value::CollectorMode::Trace {
+        if sweep && mode == noeta_value::CollectorMode::Trace {
             let garbage = collect_trace(&[]);
             self.reclaim_cycle_garbage(garbage);
         }
-        if mode == noeta_value::CollectorMode::TrialDeletion {
+        if sweep && mode == noeta_value::CollectorMode::TrialDeletion {
             let garbage = noeta_gc::collect_trial_deletion();
             self.reclaim_cycle_garbage(garbage);
         }
@@ -2800,6 +3012,7 @@ impl<'m> Vm<'m> {
 /// completion, then marshals the result back to `Send` [`isolate::Wire`]. An abort inside the isolate
 /// (a panic) comes back as `Err(message)`, which the parent re-raises at the `.await`. The worker tears
 /// down its own globals/channels so its thread-local heap returns to zero residency.
+#[allow(clippy::too_many_arguments)]
 fn run_isolate_worker(
     module: &Arc<Module>,
     factory: &IsolateFactory,
@@ -2807,11 +3020,15 @@ fn run_isolate_worker(
     iso_args: Vec<isolate::IsoArg>,
     wire_globals: Vec<(u32, isolate::Wire)>,
     trace: Option<noeta_stdlib::TraceContext>,
+    registry: Option<&'static noeta_stdlib::registry::Registry>,
     span: Span,
 ) -> Result<isolate::Wire, IsolateFailure> {
     noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
     let (host, executor) = factory();
     let mut wvm = Vm::load(module, host, executor);
+    // Resolve native names against the spawner's registry (instance-registry IR3); `None` falls
+    // back to the process-global default, exactly like the parent.
+    wvm.registry = registry;
     // Inherit the spawner's trace context across the thread boundary (native-otel T5d): the worker
     // has its OWN host (span handles don't transfer), so the W3C context is interned as a remote
     // seed at the worker's root — its spans then continue the spawner's trace, exactly as a
@@ -3060,6 +3277,31 @@ impl<'m> Vm<'m> {
             g.gc_free_shallow();
         }
         noeta_value::set_collector_mode(saved_mode);
+    }
+
+    /// Store `value` in the embed-handle table (server-hmr F3), taking ownership of its reference,
+    /// and return the handle. Reuses a freed slot when one is available.
+    pub(crate) fn embed_handle_store(&mut self, value: Value) -> crate::session::EmbedHandle {
+        let idx = match self.embed_handles_free.pop() {
+            Some(idx) => {
+                self.embed_handles[idx as usize] = Some(value);
+                idx
+            }
+            None => {
+                self.embed_handles.push(Some(value));
+                (self.embed_handles.len() - 1) as u32
+            }
+        };
+        crate::session::EmbedHandle::from_index(idx)
+    }
+
+    /// Release an embed handle's value (destructor-aware) and free its slot (server-hmr F3).
+    pub(crate) fn embed_handle_release(&mut self, handle: crate::session::EmbedHandle) {
+        let idx = handle.index();
+        if let Some(value) = self.embed_handles[idx as usize].take() {
+            self.release_value(value);
+            self.embed_handles_free.push(idx);
+        }
     }
 
     fn release_value(&mut self, value: Value) {
@@ -4364,8 +4606,11 @@ impl<'m> Vm<'m> {
                             let route = match extern_caches[ci] {
                                 Some((key, route)) if key == type_name.as_ptr() => route,
                                 _ => {
-                                    let route =
-                                        crate::methods::resolve_extern_route(type_name, method);
+                                    let route = crate::methods::resolve_extern_route(
+                                        self.reg(),
+                                        type_name,
+                                        method,
+                                    );
                                     extern_caches[ci] = Some((type_name.as_ptr(), route));
                                     route
                                 }
@@ -5366,7 +5611,7 @@ impl<'m> Vm<'m> {
                         none_shape,
                     } => {
                         let v = regs[fbase + *src as usize];
-                        let result = if narrow_matches(v, target) {
+                        let result = if narrow_matches(self.reg(), v, target) {
                             retain(v);
                             let shape = self.shapes[*some_shape as usize];
                             Value::enum_value(shape, vec![v])
@@ -5379,7 +5624,7 @@ impl<'m> Vm<'m> {
                     }
                     Op::IsType { dst, src, target } => {
                         let v = regs[fbase + *src as usize];
-                        let result = Value::bool(narrow_matches(v, target));
+                        let result = Value::bool(narrow_matches(self.reg(), v, target));
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
@@ -6262,12 +6507,110 @@ impl<'m> Vm<'m> {
     ///
     /// Returns the relocated entry's proto index; the caller runs it via [`Vm::run_thunk`]. Debug
     /// runs keep the JIT unarmed (asserted): tier-1 mirror tables never see a swapped module.
+    /// Apply a pending hot-swap plan, if one is waiting in the mailbox (server-hmr W1). Called at
+    /// the scheduler tick (`advance_tasks` — every ctx-driven loop's per-iteration safepoint), so
+    /// a `noeta serve --watch` process absorbs edits between polls. Mirrors
+    /// [`VmSession::hot_swap`]'s semantics on the live VM: on a re-running swap, dispose the
+    /// previous effect epoch and the reactive nodes the re-run re-binds ([`Vm::hotswap_prepare`]),
+    /// then install the fragment ([`Vm::install_fragment`] — the debug console's stable-prefix
+    /// module swap) and run its entry under the console's evaluation budget. In-flight frames keep
+    /// executing old code (stable-prefix invariant); every slot-routed call dispatches to the new
+    /// bodies from now on.
+    ///
+    /// Failures are reported to stderr and leave the program serving its previous version — the
+    /// watcher thread already gated on parse/check, so a failure here is compile-internal (or the
+    /// fragment's own top-level code erroring at run time, e.g. a re-run initializer panicking).
+    fn apply_pending_hotswap(&mut self) {
+        let Some(mailbox) = &self.hot_mailbox else {
+            return;
+        };
+        // Drain the broadcast queue from this VM's own generation (server-hmr F5): clone the
+        // plans it has not applied yet (the lock is held only for the clone, never across the
+        // apply), then apply each in order. N workers each drain the same queue independently.
+        let pending: Vec<noeta_compiler::hotswap::SwapPlan> = match mailbox.plans.try_lock() {
+            Ok(plans) if plans.len() > self.applied_swaps => plans[self.applied_swaps..].to_vec(),
+            _ => return,
+        };
+        for plan in pending {
+            self.apply_one_swap(plan);
+            // Count the generation as applied even if the fragment errored at run time (the
+            // watcher already gated parse/check): a re-attempt would re-run the same fragment.
+            self.applied_swaps += 1;
+        }
+    }
+
+    /// Apply a single swap plan to the live session (server-hmr W1/H1; the per-plan body the F5
+    /// queue drain calls). Failures report to stderr and keep the previous version serving.
+    fn apply_one_swap(&mut self, plan: noeta_compiler::hotswap::SwapPlan) {
+        // Slots the re-run overwrites — resolved against the session compiler BEFORE the fragment
+        // extends it, so only pre-existing bindings (the ones with old nodes) are collected.
+        let rebound: Vec<u32> = if plan.rerun_top_level {
+            let Some(session) = self.debug_session.as_ref() else {
+                eprintln!("[hot] no live session — swap skipped");
+                return;
+            };
+            plan.fragment
+                .stmts
+                .iter()
+                .flat_map(session::binding_targets)
+                .filter_map(|name| session.compiler.global_slots().get(name).copied())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if plan.rerun_top_level {
+            self.hotswap_prepare(&rebound);
+        }
+        let entry = match self.install_fragment(&plan.fragment) {
+            Ok(entry) => entry,
+            Err(msg) => {
+                eprintln!("[hot] swap failed to compile: {msg} — still serving the old version");
+                return;
+            }
+        };
+        // Run the fragment's entry under the console's budget (a runaway re-run initializer must
+        // not wedge the server); the budget debugger swap is the same dance the console does.
+        let tripped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saved = self.debugger.take();
+        self.debugger = Some(Box::new(EvalBudget {
+            steps: 0,
+            deadline: std::time::Instant::now()
+                + std::time::Duration::from_millis(DEBUG_EVAL_TIMEOUT_MS),
+            tripped: Arc::clone(&tripped),
+        }));
+        let outcome = self.run_thunk(entry, &[]);
+        self.debugger = saved;
+        match outcome {
+            Ok(v) => {
+                release(v);
+                let what = if plan.changed.is_empty() {
+                    plan.added.join(", ")
+                } else {
+                    plan.changed.join(", ")
+                };
+                eprintln!(
+                    "[hot] swapped{}{}",
+                    if what.is_empty() { "" } else { ": " },
+                    what
+                );
+                // The serve loop detects this via `NativeCtx::hot_swap_count` (this VM's
+                // `applied_swaps`, bumped by the drain) and pushes `reload` to its live clients
+                // (server-hmr L3).
+            }
+            Err(Abort) => {
+                let msg = self.last_diag_message();
+                eprintln!("[hot] swap fragment aborted: {msg} — the program keeps running");
+            }
+        }
+    }
+
     fn install_fragment(&mut self, fragment: &Program) -> Result<u32, String> {
+        // Tier-1 across a swap (server-hmr H3): retire the armed engine (pages parked in the
+        // graveyard so in-flight native frames stay executable), install the fragment against a
+        // clean tier-0 world, then re-arm fresh against the swapped module and let tiering
+        // re-warm. Unarmed runs (the debug console, hover, the differential) skip both halves.
         #[cfg(feature = "jit")]
-        assert!(
-            self.jit.is_none() && self.jit_service.is_none(),
-            "debug fragments require the JIT unarmed"
-        );
+        let rearm = self.hotswap_retire_tier1();
         let Some(session) = self.debug_session.as_mut() else {
             return Err("this run has no debug session (fragments need a session launch)".into());
         };
@@ -6336,7 +6679,55 @@ impl<'m> Vm<'m> {
 
         // (3) Swap to the arena'd snapshot; the dispatch loop picks it up at the next frame transfer.
         self.module = arena.alloc(extended);
+        #[cfg(feature = "jit")]
+        if rearm {
+            self.hotswap_rearm_tier1();
+        }
         Ok(entry_idx)
+    }
+
+    /// Retire the armed tier-1 engine ahead of a module swap (server-hmr H3). The engine (or the
+    /// off-thread service) moves to the graveyard — its executable pages must outlive any native
+    /// frame still on the machine stack beneath the swap safepoint — and every mirror entry is
+    /// cleared, so no *new* dispatch enters retired code; everything falls back to the
+    /// interpreter (whose dispatch reads the live, post-swap tables) until re-warmed. Counters
+    /// and request state reset with them. Returns whether tier 1 was armed (the caller re-arms
+    /// after the module is swapped).
+    #[cfg(feature = "jit")]
+    fn hotswap_retire_tier1(&mut self) -> bool {
+        let was_armed = self.jit.is_some() || self.jit_service.is_some();
+        if let Some(engine) = self.jit.take() {
+            self.jit_graveyard.push(engine);
+        }
+        if let Some(service) = self.jit_service.take() {
+            // Parked, not shut down: shutdown joins the thread and frees the pages. Stale ready
+            // responses die with the handle at teardown — `jit_pending` resets below, so the
+            // drain never looks for them.
+            self.jit_service_graveyard.push(service);
+        }
+        self.jit_entries.iter_mut().for_each(|e| *e = None);
+        self.jit_fast.iter_mut().for_each(|f| *f = None);
+        self.jit_counters.iter_mut().for_each(|c| *c = 0);
+        self.jit_declined.iter_mut().for_each(|d| *d = false);
+        self.jit_requested.iter_mut().for_each(|r| *r = false);
+        self.jit_osr_pending.iter_mut().for_each(|o| *o = false);
+        self.jit_pending = 0;
+        // `jit_cache_pins` stay: retired code's call-site caches still guard on those closures'
+        // bits, and in-flight old frames may consult them. Released at teardown, as always.
+        was_armed
+    }
+
+    /// Re-arm tier 1 against the freshly swapped module (server-hmr H3): the `force_jit` oracle
+    /// re-creates the synchronous engine (eager-compiling every proto of the NEW module, added
+    /// ones included); production re-spawns the off-thread service around a clone of the new
+    /// module — hot-counter promotion re-warms exactly what the program still runs.
+    #[cfg(feature = "jit")]
+    fn hotswap_rearm_tier1(&mut self) {
+        if self.force_jit {
+            self.init_jit();
+        } else {
+            self.init_jit_service(Arc::new(self.module.clone()));
+        }
     }
 
     /// Evaluate a debug-console **fragment** against a paused frame by *compiling* it — the T5

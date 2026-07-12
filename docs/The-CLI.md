@@ -132,30 +132,71 @@ noeta check [PATH]
 
 Parses and type-checks without running or building — the CI/pre-commit gate (the `cargo check` / `tsc --noEmit` primitive). `PATH` defaults to the current directory, walked recursively for `.noe` files (resolving and deduping shared modules); a single file checks just that file with its sibling modules linked in. `--format json` emits a single machine-readable report on stdout for CI/editors/the MCP server; the default renders diagnostics for a terminal. Exits non-zero if any error-severity diagnostic is found (warnings print but do not fail).
 
-## `noeta serve`
+## `noeta serve` and `--watch`
 
-```
-noeta serve <FILE> [--port <PORT>]
-```
+`noeta serve app.noe --port 8080` serves the file's top-level `fn fetch(req: Request): Response`
+handler (see the `http.server` section of [Standard Library Modules](Standard-Library-Modules));
+the app defines the handler and must **not** call `server.serve(...)` itself — the command runs
+the file's top-level setup, then drives the handler on the given port. `--host` sets the bind
+address (default `0.0.0.0`, all interfaces; pass `--host 127.0.0.1` for local-only). **Ctrl-C**
+drains gracefully: the server stops accepting, finishes the requests already in flight, closes
+the listener, and exits — a second Ctrl-C forces an immediate stop.
 
-Runs a program as an HTTP server: executes the file's top-level setup, then calls
-`server.serve(<port>, fetch)` for it — the exact call the program could write itself, so `noeta
-serve` is pure ergonomics over [`std.http.server`](Standard-Library-Modules). The program supplies
-two things: `use std.http.server` and a top-level handler named `fetch`:
+`--parallel N` serves across **N worker isolates** for true multi-core throughput: the listener
+is bound once and each worker inherits a cloned handle to it, so the kernel load-balances
+connections across cores (no `SO_REUSEPORT`, no extra dependency). All workers share the process
+and drain together on Ctrl-C. `--parallel --watch` hot-reloads across the whole fleet — a swap
+**broadcasts** to every worker's live session, so all cores serve the new code without a restart.
+(Reactive/LiveView state is per-worker: signals and WebSocket subscribers live in the worker that
+handled the connection, so a LiveView app still runs best single-worker — the sticky-routing
+question is a separate follow-on.)
 
-```noeta check
-use std.http.server
-use std.http.{Request, Response}
+`--watch` works on **any** command (`noeta run --watch`, `noeta test --watch`, …): a file watcher
+restarts the command on change — with the startup cache, a restart is a few milliseconds.
 
-fn fetch(req: Request): Response {
-    return server.response(200, "hello from ${req.path()}")
-}
-```
+For the tier runners the watch is **impact-filtered**: `noeta test --watch` (and `bench`) diffs
+each save against the previous run, walks the reverse call graph from the changed definitions,
+and reruns only the impacted tier fns (via the runners' repeatable `--name` filter) — edit a leaf
+function and exactly its caller-tests rerun; an inert edit (formatting between declarations, a
+comment) runs nothing. Edits the engine cannot attribute — a signature/layout change, a changed
+top-level statement (fixtures live there), another file, red code — degrade to a full rerun *with
+the reason printed*. The closure is static, so code reached only through dynamic dispatch is
+matched best-effort (method calls on untyped receivers over-approximate by name); run without the
+filter occasionally if you lean on reflection-driven dispatch.
 
-(sync or `async` — both are handled identically). Default port `8080`, bound on all interfaces
-(`0.0.0.0`); a single cooperatively-concurrent worker; runs until Ctrl-C. A missing `fetch` or
-import surfaces as an ordinary check error. The same unchanged program also deploys to the edge
-as a `wasi:http` component — see [WebAssembly & the Edge](WebAssembly-and-the-Edge).
+`noeta serve --watch` upgrades from restarts to **in-process hot reload**. On each save of the
+entry file the watcher parses, type-checks (**transactionally** — red code never swaps; the old
+version keeps serving and the diagnostics go to the terminal *and* to connected LiveView clients
+as an error overlay), diffs against the running version, and swaps the changed definitions into
+the live server. The state rule is the language behavior to know:
+
+- **Reactive state survives edits** — an unchanged `signal(...)`/`cell`/`synced_signal` binding
+  keeps its value across the swap; effects are disposed and re-created by the new version.
+- **Plain state re-initializes** — ordinary top-level bindings are re-run from the new source.
+  State that must survive belongs in a signal.
+
+Connected LiveView clients (the bundled `server.liveview_js()` shim) are told over their own
+websocket: a landed swap pushes `{"type":"reload"}` and closes the socket — the page reloads and
+its fresh session snapshots the *preserved* signal state, so the browser view carries the same
+counter through the edit; a rejected edit pushes `{"type":"error",…}`, which the shim renders as
+a full-screen diagnostics overlay, cleared by the next good frame. Swaps apply immediately even
+when the server is idle (the watcher wakes the blocked executor).
+
+Changes the live process cannot absorb — a type-layout or signature change, an edit to another
+project file, a namespaced entry — fall back to a **full restart**, automatically, with the
+reason printed (`[hot] restart needed: the layout of type \`P\` changed`). After a restart, an
+open browser page reconnects and re-syncs state but keeps its old markup until refreshed (the
+reload push needs a live server to send it).
+
+**The retention model.** A hot-swapping process deliberately retains superseded artifacts for
+soundness: old code versions (in-flight requests finish on the code they started on), replaced
+reactive nodes an alias might still read, and — when the JIT is armed — retired native code that
+a live frame may still return into. Growth is **bounded per swap** and reclaimed when the process
+exits; an edit marathon costs memory proportional to the number of swaps, never correctness. The
+dev server hot-swaps at tier 1 (the JIT re-warms after each swap); `--no-jit` is unnecessary.
+
+The same unchanged `fetch` program also deploys to the edge as a `wasi:http` component — see
+[WebAssembly & the Edge](WebAssembly-and-the-Edge).
 
 ---
 

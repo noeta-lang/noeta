@@ -24,6 +24,8 @@ noeta-pm = { workspace = true }
 # (the dangling `.` otherwise drops the statement, so the receiver never gets a type).
 noeta-parser = { workspace = true }
 noeta-check = { workspace = true }
+# The impact engine (server-hmr W3) attributes edits with the hot-swap differ.
+noeta-compiler = { workspace = true }
 noeta-stdlib = { workspace = true }
 noeta-fmt = { workspace = true }
 # For the `Setter` trait — the salsa-generated `set_text` on `SourceProgram` needs it in scope.

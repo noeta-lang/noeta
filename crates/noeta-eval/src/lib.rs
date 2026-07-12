@@ -1192,9 +1192,23 @@ struct Interpreter {
     /// aborts do not overwrite it), so unwinding and swallowed destructor aborts can never leave a
     /// stale trace.
     abort_trace: Vec<noeta_backend::TraceFrame>,
+    /// The extension **registry** this interpreter resolves native names against (instance-registry
+    /// IR3) — the tree-walker twin of the VM's `registry` field. `None` (the default on every
+    /// ordinary run) falls back to the process-global default registry through [`Interpreter::reg`],
+    /// so the differential is unchanged; an embedding host that assembled its own extension set
+    /// threads its `Registry` in, and both backends then resolve the same names by construction.
+    registry: Option<&'static noeta_stdlib::registry::Registry>,
 }
 
 impl Interpreter {
+    /// The extension registry this interpreter resolves native names against (instance-registry
+    /// IR3) — the tree-walker twin of `Vm::reg`. Falls back to the process-global default when
+    /// unset, keeping every ordinary run (and the differential) unchanged. Returns `&'static`.
+    fn reg(&self) -> &'static noeta_stdlib::registry::Registry {
+        self.registry
+            .unwrap_or_else(noeta_stdlib::registry::default_seeded)
+    }
+
     fn new() -> Interpreter {
         Interpreter::with_host(Box::new(noeta_stdlib::SandboxHost::new()))
     }
@@ -1265,6 +1279,7 @@ impl Interpreter {
             type_of_sites: std::collections::HashMap::new(),
             call_sites: Vec::new(),
             abort_trace: Vec::new(),
+            registry: None,
         }
     }
 
@@ -1599,18 +1614,19 @@ impl Interpreter {
         // `use std.{json, ...}` binds each recognized name to its Ring 2 native module; a selective
         // member import (`use std.math.sqrt`) binds each member to a `(module, func)` module-function
         // value; other imports (and unrecognized `std` names) fall back to the opaque-stub binding.
-        let rooted = !path.is_empty() && noeta_stdlib::registry::is_extension_root(&path[0]);
+        let reg = self.reg();
+        let rooted = !path.is_empty() && reg.is_extension_root(&path[0]);
         let selective_module = (path.len() >= 2 && rooted)
             .then(|| path.join("."))
-            .filter(|m| noeta_stdlib::registry::find_module(m).is_some());
+            .filter(|m| reg.find_module(m).is_some());
         for imported in names {
             // A plain (`use std.{json}`) or nested (`use std.http.client`) module import: the module
             // *value* carries the root-qualified identity; the bound name stays the last segment.
             let qualified = format!("{}.{}", path.join("."), imported.name);
-            let value = if rooted && noeta_stdlib::registry::find_module(&qualified).is_some() {
+            let value = if rooted && reg.find_module(&qualified).is_some() {
                 Value::NativeModule(qualified)
             } else if let Some(module) = &selective_module
-                && noeta_stdlib::registry::is_module_function(module, &imported.name)
+                && reg.is_module_function(module, &imported.name)
             {
                 Value::ModuleFn(module.clone(), imported.name.clone())
             } else {
@@ -2719,16 +2735,19 @@ impl Interpreter {
         // function's `RetTy`). Routing is per-function so a partially-migrated module (`vec`, whose
         // bulk `*_all` kernels stay per-backend) falls through for its unmigrated functions.
         let name = module;
-        if let Some(sig) = noeta_stdlib::registry::find_function(name, func) {
+        // Bound once (instance-registry IR3): `reg` is `&'static`, so it outlives the `&mut self`
+        // host borrow below and every native lookup routes through this interpreter's registry.
+        let reg = self.reg();
+        if let Some(sig) = reg.find_function(name, func) {
             // A reflective module (`json`) marshals its arguments deeply (the recursive value tree
             // `json.stringify` introspects); every other module uses the cheap shallow projection.
-            let deep = noeta_stdlib::registry::find_module(name).is_some_and(|m| m.deep_marshal);
+            let deep = reg.find_module(name).is_some_and(|m| m.deep_marshal);
             let nargs: Vec<noeta_stdlib::NativeValue> = if deep {
                 args.iter().map(value_to_native_deep).collect()
             } else {
                 args.iter().map(marshal_native_arg).collect()
             };
-            return match noeta_stdlib::registry::dispatch(name, func, &mut *self.host, &nargs) {
+            return match reg.dispatch(name, func, &mut *self.host, &nargs) {
                 // Async WORK (extern-types X5): ticket the descriptor on the executor and hand
                 // back the leaf async-IO future — mirrors the VM.
                 Ok(noeta_stdlib::NativeOut::Spawn(spawn)) => {
@@ -2745,7 +2764,7 @@ impl Interpreter {
         // sets are disjoint, so order is behavior-neutral and keeps the common path lean.
         // (The last per-backend intercept — `vec`'s bulk `*_all` kernels — died with the N3.4
         // raw-buffer seam: they are ordinary ctx functions now, reached right here.)
-        if noeta_stdlib::registry::find_ctx_function(module, func).is_some() {
+        if reg.find_ctx_function(module, func).is_some() {
             return self.call_ctx_function(module, func, args, span);
         }
         let error = noeta_stdlib::no_function_error(name, func);
@@ -2767,14 +2786,16 @@ impl Interpreter {
         // they call closures back and reach the retained arena, which the plain by-value
         // dispatch below cannot. Name sets are disjoint, so routing is per-method.
         let type_name = cell.borrow().type_name();
-        if noeta_stdlib::registry::find_type_ctx_method(type_name, name).is_some() {
+        // Bound once (IR3): `&'static`, so it survives the `&mut self` host borrow below.
+        let reg = self.reg();
+        if reg.find_type_ctx_method(type_name, name).is_some() {
             let recv = Value::Extern(Rc::clone(cell));
             return self.call_ctx_type_method(type_name, recv, name, args, span);
         }
         // A type declaring `deep_marshal` (the metrics instruments' `*_with(_, attrs)`) projects a
         // container argument to a full `NativeValue` tree; every other type uses the shallow
         // projection — mirrors the VM's `call_extern_method`.
-        let deep = noeta_stdlib::registry::find_type(type_name).is_some_and(|t| t.deep_marshal);
+        let deep = reg.find_type(type_name).is_some_and(|t| t.deep_marshal);
         let nargs: Vec<noeta_stdlib::NativeValue> = if deep {
             args.iter().map(value_to_native_deep).collect()
         } else {
@@ -2782,12 +2803,7 @@ impl Interpreter {
         };
         // `cell` is an independent `Rc`, so borrowing it and `self.host` at once is fine (the
         // FileHandle discipline).
-        let result = noeta_stdlib::registry::dispatch_method(
-            &mut **cell.borrow_mut(),
-            name,
-            &mut *self.host,
-            &nargs,
-        );
+        let result = reg.dispatch_method(&mut **cell.borrow_mut(), name, &mut *self.host, &nargs);
         match result {
             Ok(out) => Ok(materialize_native(out)),
             Err(error) => Err(self.runtime_error(std_error_code(error.kind), span, error.message)),
@@ -4546,10 +4562,10 @@ fn attr_value_to_eval(
 /// erased, so only the **head constructor** is tested — `List<int>` checks "is a list", trusting
 /// the element type from the annotation. Keyed on the same canonical kind names the VM uses
 /// (`Value::type_name` and the enum/object shape name), so both backends decide identically.
-fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
+fn runtime_matches(reg: &noeta_stdlib::registry::Registry, value: &Value, ty: &TypeRef) -> bool {
     match ty {
         // A union target matches if the value matches any member (`x.as<int | string>()`).
-        TypeRef::Union { members, .. } => members.iter().any(|m| runtime_matches(value, m)),
+        TypeRef::Union { members, .. } => members.iter().any(|m| runtime_matches(reg, value, m)),
         // `?T` is `Option<T>`: matches any `Option` value (its payload is not re-checked).
         TypeRef::Optional { .. } => {
             matches!(value, Value::Enum(e) if e.enum_name == "Option")
@@ -4594,7 +4610,7 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
                     // an imported native type lowers to — so it never matches a same-short-named
                     // user type (mirrors the VM's `narrow_matches`).
                     Value::Extern(e) => {
-                        noeta_stdlib::registry::find_type(e.borrow().type_name())
+                        reg.find_type(e.borrow().type_name())
                             .map(|t| t.qualified())
                             .as_deref()
                             == Some(other)
@@ -5143,7 +5159,11 @@ fn try_branch(value: &Value) -> Option<TryBranch> {
 
 /// Try to match `pattern` against `value`. Returns the bindings it introduces on
 /// success, or `None` if the pattern does not match.
-fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)>> {
+fn match_pattern(
+    reg: &noeta_stdlib::registry::Registry,
+    pattern: &Pattern,
+    value: &Value,
+) -> Option<Vec<(String, Value)>> {
     match pattern {
         Pattern::Wildcard { .. } => Some(Vec::new()),
         Pattern::Binding { name, .. } => Some(vec![(name.clone(), value.clone())]),
@@ -5184,13 +5204,13 @@ fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)
             }
             let mut all = Vec::new();
             for (sub, data) in bindings.iter().zip(&enum_value.data) {
-                all.extend(match_pattern(sub, data)?);
+                all.extend(match_pattern(reg, sub, data)?);
             }
             Some(all)
         }
         // `is T` matches on the head constructor (same erased test as `x.as<T>()`), binding
         // nothing — the narrowed value is referred to by the scrutinee's own name.
-        Pattern::IsType { ty, .. } => runtime_matches(value, ty).then(Vec::new),
+        Pattern::IsType { ty, .. } => runtime_matches(reg, value, ty).then(Vec::new),
         // A tuple pattern `(p, q, …)` matches a tuple of the same arity, destructuring each position
         // against its sub-pattern (object-model slice 4b); refutable on kind, arity, and elements.
         Pattern::Tuple { elements, .. } => {
@@ -5202,7 +5222,7 @@ fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)
             }
             let mut all = Vec::new();
             for (sub, item) in elements.iter().zip(items.iter()) {
-                all.extend(match_pattern(sub, item)?);
+                all.extend(match_pattern(reg, sub, item)?);
             }
             Some(all)
         }

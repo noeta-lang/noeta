@@ -161,6 +161,18 @@ const HTTP_TYPES: &[ExtType] = &[
         key_capable: false, // an inbound request is not a map key
         ..ExtType::DEFAULTS
     },
+    // The websocket session handle (server-hmr L0) — its methods reach the `Network` hijack seam
+    // (send/recv/close ride the executor), so they live in the ctx table.
+    ExtType {
+        name: crate::serve::SOCKET_TYPE_NAME,
+        namespace: "std.http",
+        ctx_methods: crate::serve::SOCKET_CTX_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::serve::socket_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        key_capable: false, // identifies a host resource
+        ..ExtType::DEFAULTS
+    },
 ];
 
 /// The `p2p` unit's extern types: the CRDT value types (p2p P0) plus `SyncedSignal<T>` (p2p P2).
@@ -322,6 +334,17 @@ const CORE_TYPES: &[ExtType] = &[
         }),
         ..ExtType::DEFAULTS
     },
+    // `View` (server-hmr L1) — the diff-push flush subscriber: named bindings onto
+    // Signal/Computed/SyncedSignal handles, `snapshot()`/`diff()` render the wire frames.
+    ExtType {
+        name: crate::reactive::VIEW_TYPE_NAME,
+        namespace: "std.reactive",
+        ctx_methods: crate::reactive::VIEW_CTX_METHODS,
+        ctx_dispatch: Some(|method, ctx, recv, args| {
+            crate::reactive::view_ctx_method_dispatch(method, ctx, recv, args)
+        }),
+        ..ExtType::DEFAULTS
+    },
 ];
 
 /// The `FileHandle` instance methods (extern-types X3) — the signatures the checker's
@@ -442,6 +465,17 @@ fn ensure() {
     noeta_native::registry::install_default(std_units);
 }
 
+/// The process-global default [`Registry`] as a first-class handle — the seeded-and-unwrapped form
+/// the instance-registry threading (server-hmr F2) hands to a checker/backend that was **not**
+/// given an explicit per-session registry. Ensures the std units are installed (like every facade
+/// lookup), so the returned reference is always live. A host wanting a *different* extension set per
+/// session builds its own [`Registry`] and threads that instead of calling this.
+pub fn default_seeded() -> &'static noeta_native::registry::Registry {
+    ensure();
+    noeta_native::registry::default_registry()
+        .expect("the default registry is seeded by `ensure()` immediately above")
+}
+
 /// Assemble the registry for a toolchain binary: the std units plus a composed shim's `extra`
 /// extension units (package-manager Phase 3). Called by `noeta_cli::run_cli` at entry, before
 /// anything can look a name up. With no extras this is exactly the lazy default; with extras it
@@ -454,6 +488,20 @@ pub fn install_with_extras(extra: &[&'static (dyn Extension + Sync)]) {
         units.extend_from_slice(extra);
         noeta_native::registry::install(units);
     }
+}
+
+/// Assemble a **standalone** registry — the std units plus `extra` — **without** touching the
+/// process-global default (instance-registry IR5). This is the per-session assembly seam: an
+/// embedding host that wants a session with its own extension set builds one here and threads it
+/// through the checker / compiler / VM, so two sessions with different extension sets can coexist in
+/// one process. (The uniqueness sweep in [`noeta_native::registry::Registry::new`] still applies —
+/// a duplicate module identity across `extra` and std panics, as at install time.)
+pub fn assemble_with_extras(
+    extra: &[&'static (dyn Extension + Sync)],
+) -> noeta_native::registry::Registry {
+    let mut units = std_units();
+    units.extend_from_slice(extra);
+    noeta_native::registry::Registry::new(units)
 }
 
 /// All registered extensions.
@@ -3228,6 +3276,9 @@ pub fn static_dispatch_ctx_method<C: crate::NativeCtx + ?Sized>(
         crate::reactive::EFFECT_TYPE_NAME => Some(crate::reactive::effect_ctx_method_dispatch(
             method, ctx, recv, args,
         )),
+        crate::reactive::VIEW_TYPE_NAME => Some(crate::reactive::view_ctx_method_dispatch(
+            method, ctx, recv, args,
+        )),
         crate::synced::SYNCED_SIGNAL_TYPE_NAME => Some(crate::synced::synced_ctx_method_dispatch(
             method, ctx, recv, args,
         )),
@@ -3533,6 +3584,7 @@ mod tests {
             ("Signal", "std.reactive.Signal"),
             ("Computed", "std.reactive.Computed"),
             ("Effect", "std.reactive.Effect"),
+            ("View", "std.reactive.View"),
             ("SyncedSignal", "std.synced.SyncedSignal"),
             ("GCounter", "std.crdt.GCounter"),
             ("PnCounter", "std.crdt.PnCounter"),

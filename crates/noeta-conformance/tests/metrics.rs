@@ -149,7 +149,7 @@ fn histogram_buckets_observations() {
 /// M3 — server auto-instrumentation: every accepted request records the
 /// `http.server.request.duration` histogram (one series per method/route/status) and balances
 /// `http.server.active_requests` (net zero after all requests complete). The sandbox drives its
-/// fixed five-request script, so the collected metrics are deterministic and byte-identical across
+/// fixed six-request script, so the collected metrics are deterministic and byte-identical across
 /// backends. The metrics twin of the SERVER-span auto-instrumentation.
 #[test]
 fn server_serve_auto_instruments_request_metrics() {
@@ -167,9 +167,10 @@ fn server_serve_auto_instruments_request_metrics() {
     let MetricPoints::Histogram(points) = &duration.points else {
         panic!("request duration is a histogram");
     };
-    // The scripted requests: GET /, GET /health, POST /echo, GET /users/42, DELETE /users/42 — five
+    // The scripted requests: GET /, GET /health, POST /echo, GET /users/42, DELETE /users/42, and
+    // GET /ws (answered as a plain 200 here — the handler never upgrades it, server-hmr L0) — six
     // distinct (method, route, status) series, each observed once.
-    assert_eq!(points.len(), 5, "one series per distinct request");
+    assert_eq!(points.len(), 6, "one series per distinct request");
     assert!(
         points.iter().all(|p| p.count == 1),
         "each request observed once"

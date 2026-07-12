@@ -751,20 +751,297 @@ use std::sync::OnceLock;
 /// A binary's assembled extension units. `OnceLock` because assembly happens exactly once, at
 /// process start, before any lookup — and because a `static` slice can't be extended at runtime
 /// (the pre-N3.0 registry was a hardwired `static REGISTRY: &[&StdExtension-family]`).
-static INSTALLED: OnceLock<Vec<&'static (dyn Extension + Sync)>> = OnceLock::new();
+/// An **extension registry** — an assembled set of `&'static` extension units and the lookup
+/// surface over them (module/function/type/tier/attribute resolution and dispatch). Every unit is
+/// `'static`, so a registry is a cheap selector over static data: its methods return `&'static`
+/// references that outlive the registry itself, which is what lets an instance-scoped registry
+/// (an embed session's own extension set) hand out the same `'static` references the whole type
+/// system already assumes (interned shapes, extern-type tables, function signatures).
+///
+/// The process-global [`install`]/[`install_default`] seed a single **default** registry that the
+/// free-function facade below reads — the path every existing call site (backends, checker, LSP)
+/// uses. A host that wants a *different* extension set per session builds its own `Registry` and
+/// threads it explicitly (server-hmr F2 / the embed API).
+pub struct Registry {
+    units: Vec<&'static (dyn Extension + Sync)>,
+}
 
-/// Install the binary's complete extension-unit list — callable **once**, before any lookup.
+impl std::fmt::Debug for Registry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The units are trait objects (no `Debug`); summarize by name, which is what matters.
+        f.debug_struct("Registry")
+            .field(
+                "units",
+                &self.units.iter().map(|e| e.name()).collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+impl Registry {
+    /// Assemble a registry from its complete unit list, validating uniqueness (a violation is a
+    /// `panic` — a mis-assembled binary must not start; see [`Registry::validate`]).
+    pub fn new(units: Vec<&'static (dyn Extension + Sync)>) -> Registry {
+        validate(&units);
+        Registry { units }
+    }
+
+    /// All units in this registry.
+    pub fn extensions(&self) -> &[&'static (dyn Extension + Sync)] {
+        &self.units
+    }
+
+    /// Find a registered module by its identity string — a **root-qualified path** (`"std.math"`,
+    /// nested `"std.http.client"`) or a bare module name (`"math"`).
+    pub fn find_module(&self, name: &str) -> Option<&'static ExtModule> {
+        if let Some((root, module)) = name.split_once('.')
+            && self.is_extension_root(root)
+        {
+            return self
+                .units
+                .iter()
+                .filter(|e| e.root() == root)
+                .flat_map(|e| e.modules())
+                .find(|m| m.name == module);
+        }
+        self.units
+            .iter()
+            .flat_map(|e| e.modules())
+            .find(|m| m.name == name)
+    }
+
+    /// The native-dependency **ring** a module identity resolves to, or `None` for always-on core.
+    pub fn ring_of(&self, module: &str) -> Option<&'static str> {
+        self.find_module(module).and_then(|m| m.ring)
+    }
+
+    /// Whether `root` is the namespace root of some registered extension.
+    pub fn is_extension_root(&self, root: &str) -> bool {
+        self.units.iter().any(|e| e.root() == root)
+    }
+
+    /// Find a registered module by its **fully qualified path** — `["std", "math"]`.
+    pub fn find_module_qualified(&self, path: &[String]) -> Option<&'static ExtModule> {
+        let (root, rest) = path.split_first()?;
+        if rest.is_empty() {
+            return None;
+        }
+        let module_name = rest.join(".");
+        self.units
+            .iter()
+            .filter(|e| e.root() == root.as_str())
+            .flat_map(|e| e.modules())
+            .find(|m| m.name == module_name.as_str())
+    }
+
+    /// Find a registered function's signature.
+    pub fn find_function(&self, module: &str, func: &str) -> Option<&'static ExtFn> {
+        self.find_module(module)?
+            .functions
+            .iter()
+            .find(|f| f.name == func)
+    }
+
+    /// Find a registered **higher-order** function's signature (higher-order-abi H0).
+    pub fn find_ctx_function(&self, module: &str, func: &str) -> Option<&'static ExtFn> {
+        self.find_module(module)?
+            .ctx_functions
+            .iter()
+            .find(|f| f.name == func)
+    }
+
+    /// A function's signature from **either** table — what the checker and name resolution consult.
+    pub fn find_function_sig(&self, module: &str, func: &str) -> Option<&'static ExtFn> {
+        self.find_function(module, func)
+            .or_else(|| self.find_ctx_function(module, func))
+    }
+
+    /// Whether `<module>.<func>` names a callable module function — the single predicate the checker
+    /// and both backends share to decide what a selective member import (`use std.<mod>.<fn>`)
+    /// binds, so all three agree by construction.
+    pub fn is_module_function(&self, module: &str, func: &str) -> bool {
+        self.find_function_sig(module, func).is_some()
+    }
+
+    /// Dispatch a registered higher-order function through the module's [`crate::CtxDispatch`].
+    pub fn dispatch_ctx(
+        &self,
+        module: &str,
+        func: &str,
+        ctx: &mut dyn crate::NativeCtx,
+        args: &[crate::Slot],
+    ) -> Result<crate::CtxOut, crate::CtxError> {
+        match self.find_module(module).and_then(|m| m.ctx_dispatch) {
+            Some(d) => d(func, ctx, args),
+            None => Err(crate::no_function_error(module, func).into()),
+        }
+    }
+
+    /// Every extension-contributed CLI subcommand (higher-order-abi H6).
+    pub fn commands(&self) -> impl Iterator<Item = &'static crate::ExtCommand> + '_ {
+        self.units.iter().flat_map(|e| e.commands())
+    }
+
+    /// Find a registered method bundle by its owning module and surface name (kernel-methods K0).
+    pub fn find_bundle(&self, module: &str, bundle: &str) -> Option<&'static ExtBundle> {
+        self.find_module(module)?
+            .bundles
+            .iter()
+            .find(|b| b.name == bundle)
+    }
+
+    /// Route a bound bundle-method call to its bundle's shared ctx dispatch (kernel-methods K0).
+    pub fn dispatch_bundle_method(
+        &self,
+        module: &str,
+        bundle: &str,
+        method: &str,
+        ctx: &mut dyn crate::NativeCtx,
+        recv: crate::Slot,
+        args: &[crate::Slot],
+    ) -> Result<crate::CtxOut, crate::CtxError> {
+        match self.find_bundle(module, bundle) {
+            Some(b) => (b.ctx_dispatch)(method, ctx, recv, args),
+            None => Err(StdError {
+                kind: crate::ErrorKind::UnknownName,
+                message: format!("no bundle `{bundle}` in module `{module}`"),
+            }
+            .into()),
+        }
+    }
+
+    /// Every installed extension's declared dev-tiers, in install order.
+    pub fn ext_tiers(&self) -> impl Iterator<Item = &'static ExtTier> + '_ {
+        self.units.iter().flat_map(|e| e.tiers().iter())
+    }
+
+    /// The installed extension tier named `name`, if any.
+    pub fn find_ext_tier(&self, name: &str) -> Option<&'static ExtTier> {
+        self.ext_tiers().find(|t| t.name == name)
+    }
+
+    /// Every installed extension's declared prelude attributes, in install order.
+    pub fn ext_attributes(&self) -> impl Iterator<Item = &'static ExtAttribute> + '_ {
+        self.units.iter().flat_map(|e| e.attributes().iter())
+    }
+
+    /// The installed extension attribute named `name`, if any.
+    pub fn find_ext_attribute(&self, name: &str) -> Option<&'static ExtAttribute> {
+        self.ext_attributes().find(|a| a.name == name)
+    }
+
+    /// Find a registered extern type by its short display name (extern-types X1).
+    pub fn find_type(&self, name: &str) -> Option<&'static ExtType> {
+        self.units
+            .iter()
+            .flat_map(|e| e.types())
+            .find(|t| t.name == name)
+    }
+
+    /// Find a registered extern type by its **qualified identity** (`std.id.Uuid`).
+    pub fn find_type_qualified(&self, qualified: &str) -> Option<&'static ExtType> {
+        self.units
+            .iter()
+            .flat_map(|e| e.types())
+            .find(|t| t.qualified() == qualified)
+    }
+
+    /// Resolve an extern type from **either** a qualified identity or a bare short name.
+    pub fn resolve_type(&self, name: &str) -> Option<&'static ExtType> {
+        self.find_type_qualified(name)
+            .or_else(|| self.find_type(name))
+    }
+
+    /// Find a registered extern type's method signature.
+    pub fn find_type_method(&self, type_name: &str, method: &str) -> Option<&'static ExtFn> {
+        self.resolve_type(type_name)?
+            .methods
+            .iter()
+            .find(|m| m.name == method)
+    }
+
+    /// Find a registered extern type's **higher-order** method signature (higher-order-abi H4).
+    pub fn find_type_ctx_method(&self, type_name: &str, method: &str) -> Option<&'static ExtFn> {
+        self.resolve_type(type_name)?
+            .ctx_methods
+            .iter()
+            .find(|m| m.name == method)
+    }
+
+    /// A type method's signature from **either** table — what the checker consults.
+    pub fn find_type_method_sig(&self, type_name: &str, method: &str) -> Option<&'static ExtFn> {
+        self.find_type_method(type_name, method)
+            .or_else(|| self.find_type_ctx_method(type_name, method))
+    }
+
+    /// Route a **higher-order** method call to its type's ctx dispatch (higher-order-abi H4).
+    pub fn dispatch_ctx_method(
+        &self,
+        type_name: &str,
+        method: &str,
+        ctx: &mut dyn crate::NativeCtx,
+        recv: crate::Slot,
+        args: &[crate::Slot],
+    ) -> Result<crate::CtxOut, crate::CtxError> {
+        match self.resolve_type(type_name).and_then(|t| t.ctx_dispatch) {
+            Some(d) => d(method, ctx, recv, args),
+            None => Err(crate::no_method_error(type_name, method).into()),
+        }
+    }
+
+    /// Dispatch a method on an extern receiver through its registered [`ExtType`].
+    pub fn dispatch_method(
+        &self,
+        recv: &mut dyn crate::ExternValue,
+        method: &str,
+        host: &mut dyn Host,
+        args: &[crate::NativeValue],
+    ) -> Result<crate::NativeOut, StdError> {
+        let type_name = recv.type_name();
+        let Some(ext) = self.resolve_type(type_name) else {
+            return Err(StdError {
+                kind: crate::ErrorKind::UnknownName,
+                message: format!("`{type_name}` is not a registered type"),
+            });
+        };
+        (ext.dispatch)(recv, method, host, args)
+    }
+
+    /// Dispatch a registered module function.
+    pub fn dispatch(
+        &self,
+        module: &str,
+        func: &str,
+        host: &mut dyn Host,
+        args: &[crate::NativeValue],
+    ) -> Result<crate::NativeOut, StdError> {
+        match self.find_module(module) {
+            Some(m) => (m.dispatch)(func, host, args),
+            None => Err(crate::no_function_error(module, func)),
+        }
+    }
+}
+
+/// The process-global **default** registry — what the free-function facade below reads, seeded
+/// once by [`install`]/[`install_default`]. Instance-scoped callers hold their own [`Registry`].
+static DEFAULT: OnceLock<Registry> = OnceLock::new();
+
+/// The default registry, or `None` before it is seeded (callers outside the std facade own their
+/// seeding).
+pub fn default_registry() -> Option<&'static Registry> {
+    DEFAULT.get()
+}
+
+/// Install the binary's complete extension-unit list into the **default** registry — callable
+/// **once**, before any lookup.
 ///
-/// Uniqueness rules (a violation is a `panic`, not an `Err` — a mis-assembled binary must not
-/// start): extension **names** are unique (`"std.http"`), and **qualified module identities**
-/// (`root() + "." + module.name`) are unique across units. Roots are deliberately shared — the six
-/// std units all root `"std"`.
+/// Uniqueness rules (a violation is a `panic`): extension **names** are unique, and **qualified
+/// module identities** are unique across units. Roots are deliberately shared.
 ///
-/// Panics if something was already installed (including the lazy std default — install before the
-/// first lookup, or the assembly raced a lookup and the binary is misbuilt).
+/// Panics if something was already installed (including the lazy std default).
 pub fn install(units: Vec<&'static (dyn Extension + Sync)>) {
-    validate(&units);
-    if INSTALLED.set(units).is_err() {
+    let registry = Registry::new(units);
+    if DEFAULT.set(registry).is_err() {
         panic!(
             "extension registry already installed — `install` must run once, before any lookup \
              (a lookup through the std facade lazily installs the default units)"
@@ -772,18 +1049,14 @@ pub fn install(units: Vec<&'static (dyn Extension + Sync)>) {
     }
 }
 
-/// Install `provider()`'s units only if nothing is installed yet — the lazy-default seam the
-/// `noeta-stdlib::registry` facade uses so existing call sites (backends, checker, tests) never
-/// observe an empty registry, while an explicit earlier [`install`] (the composed shim) wins.
+/// Install `provider()`'s units into the default registry only if nothing is installed yet — the
+/// lazy-default seam the `noeta-stdlib::registry` facade uses so existing call sites never observe
+/// an empty registry, while an explicit earlier [`install`] wins.
 pub fn install_default(provider: fn() -> Vec<&'static (dyn Extension + Sync)>) {
-    INSTALLED.get_or_init(|| {
-        let units = provider();
-        validate(&units);
-        units
-    });
+    DEFAULT.get_or_init(|| Registry::new(provider()));
 }
 
-/// The uniqueness sweep behind [`install`]/[`install_default`] — O(n²) over a handful of units.
+/// The uniqueness sweep behind [`Registry::new`] — O(n²) over a handful of units.
 fn validate(units: &[&'static (dyn Extension + Sync)]) {
     for (i, unit) in units.iter().enumerate() {
         for other in &units[i + 1..] {
@@ -810,9 +1083,6 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) {
             pair[0]
         );
     }
-    // Method bundles (kernel-methods K0): bundle names unique within their module, method names
-    // unique within their bundle (regardless of receiver kind — one name meaning different things
-    // on `T` vs `List<T>` would be a comprehension hazard).
     for module in units.iter().flat_map(|e| e.modules()) {
         for (i, bundle) in module.bundles.iter().enumerate() {
             for other in &module.bundles[i + 1..] {
@@ -838,128 +1108,69 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) {
     }
 }
 
-/// All installed extension units (empty before [`install`]/[`install_default`] — callers outside
-/// the std facade own their seeding).
+// ----- the free-function facade over the default registry (every existing call site) -----
+// Each delegates to `default_registry()`; an empty/unseeded default yields the same "not found"
+// answers the pre-F2 global did. These stay so the ~60 call sites across the checker, backends,
+// LSP, and CLI are untouched until each is threaded to an explicit registry.
+
+/// All installed extension units in the default registry (empty before install).
 pub fn extensions() -> &'static [&'static (dyn Extension + Sync)] {
-    INSTALLED.get().map_or(&[], |v| v.as_slice())
+    default_registry().map_or(&[], |r| r.extensions())
 }
 
-/// Find a registered module by its identity string — a **root-qualified path** (`"std.math"`,
-/// nested `"std.http.client"`) or a bare module name (`"math"`, from tests / legacy literal calls).
-/// A leading segment that names a registered extension root selects that root and matches the
-/// remainder against the module name; otherwise the whole string is matched as a bare name.
 pub fn find_module(name: &str) -> Option<&'static ExtModule> {
-    if let Some((root, module)) = name.split_once('.')
-        && is_extension_root(root)
-    {
-        return extensions()
-            .iter()
-            .filter(|e| e.root() == root)
-            .flat_map(|e| e.modules())
-            .find(|m| m.name == module);
-    }
-    extensions()
-        .iter()
-        .flat_map(|e| e.modules())
-        .find(|m| m.name == name)
+    default_registry().and_then(|r| r.find_module(name))
 }
 
-/// The registered module name of a (possibly root-qualified) module identity — the identity with
-/// its extension root stripped: `"std.vec"` → `"vec"`, `"std.http.client"` → `"http.client"`, bare
-/// `"vec"` → `"vec"`. This is the `ExtModule::name` the identity resolves to.
+/// The registered module name of a (possibly root-qualified) module identity.
 pub fn module_name(module: &str) -> &str {
     module.split_once('.').map_or(module, |(_root, name)| name)
 }
 
-/// The native-dependency **ring** a module identity resolves to, or `None` for always-on core
-/// (package-manager P1.0). The registry-backed source of truth for the AOT footprint scan's
-/// Cargo-feature selection. An unrecognized identity is `None` (conservative: never strips a ring
-/// for a module the registry doesn't own).
 pub fn ring_of(module: &str) -> Option<&'static str> {
-    find_module(module).and_then(|m| m.ring)
+    default_registry().and_then(|r| r.ring_of(module))
 }
 
-/// Whether `root` is the namespace root of some registered extension (`"std"`, a composed
-/// package's root). A `use <root>.…` import binds a native module iff this holds.
 pub fn is_extension_root(root: &str) -> bool {
-    extensions().iter().any(|e| e.root() == root)
+    default_registry().is_some_and(|r| r.is_extension_root(root))
 }
 
-/// Find a registered module by its **fully qualified path** — `["std", "math"]`, or nested
-/// `["std", "http", "client"]`. The first segment selects the extension by [root]; the remainder,
-/// dot-joined, matches the module's registered name. Two extensions with distinct roots never
-/// collide (`std.http` ≠ `guzzle.http`).
-///
-/// [root]: Extension::root
 pub fn find_module_qualified(path: &[String]) -> Option<&'static ExtModule> {
-    let (root, rest) = path.split_first()?;
-    if rest.is_empty() {
-        return None;
-    }
-    let module_name = rest.join(".");
-    extensions()
-        .iter()
-        .filter(|e| e.root() == root.as_str())
-        .flat_map(|e| e.modules())
-        .find(|m| m.name == module_name.as_str())
+    default_registry().and_then(|r| r.find_module_qualified(path))
 }
 
-/// Find a registered function's signature.
 pub fn find_function(module: &str, func: &str) -> Option<&'static ExtFn> {
-    find_module(module)?
-        .functions
-        .iter()
-        .find(|f| f.name == func)
+    default_registry().and_then(|r| r.find_function(module, func))
 }
 
-/// Find a registered **higher-order** function's signature (higher-order-abi H0) — the ctx-table
-/// twin of [`find_function`]. The backends route a matched name through the `NativeCtx` seam.
 pub fn find_ctx_function(module: &str, func: &str) -> Option<&'static ExtFn> {
-    find_module(module)?
-        .ctx_functions
-        .iter()
-        .find(|f| f.name == func)
+    default_registry().and_then(|r| r.find_ctx_function(module, func))
 }
 
-/// A function's signature from **either** table — what the checker and name resolution consult
-/// (they don't care how a call dispatches, only that the name exists and what it types as).
 pub fn find_function_sig(module: &str, func: &str) -> Option<&'static ExtFn> {
-    find_function(module, func).or_else(|| find_ctx_function(module, func))
+    default_registry().and_then(|r| r.find_function_sig(module, func))
 }
 
-/// Dispatch a registered higher-order function through the module's [`crate::CtxDispatch`]
-/// (higher-order-abi H0). Mirrors [`dispatch`] for the ctx table.
 pub fn dispatch_ctx(
     module: &str,
     func: &str,
     ctx: &mut dyn crate::NativeCtx,
     args: &[crate::Slot],
 ) -> Result<crate::CtxOut, crate::CtxError> {
-    match find_module(module).and_then(|m| m.ctx_dispatch) {
-        Some(d) => d(func, ctx, args),
+    match default_registry() {
+        Some(r) => r.dispatch_ctx(module, func, ctx, args),
         None => Err(crate::no_function_error(module, func).into()),
     }
 }
 
-/// Every extension-contributed CLI subcommand (higher-order-abi H6), for the CLI's dynamic
-/// wiring and its unmatched-name dispatch.
 pub fn commands() -> impl Iterator<Item = &'static crate::ExtCommand> {
-    extensions().iter().flat_map(|e| e.commands())
+    default_registry().into_iter().flat_map(|r| r.commands())
 }
 
-/// Find a registered method bundle by its owning module (root-qualified or bare, like
-/// [`find_module`]) and its surface name — the impl-site resolution of
-/// `impl <module>.<Bundle> for T {}` (kernel-methods K0).
 pub fn find_bundle(module: &str, bundle: &str) -> Option<&'static ExtBundle> {
-    find_module(module)?
-        .bundles
-        .iter()
-        .find(|b| b.name == bundle)
+    default_registry().and_then(|r| r.find_bundle(module, bundle))
 }
 
-/// Route a bound bundle-method call to its bundle's shared ctx dispatch (kernel-methods K0) —
-/// the bundle twin of [`dispatch_ctx_method`]; the bound receiver (a value of the bound type for
-/// an `Element` method, the `List<T>` for a `Bulk` one) rides as slot 0.
 pub fn dispatch_bundle_method(
     module: &str,
     bundle: &str,
@@ -968,8 +1179,8 @@ pub fn dispatch_bundle_method(
     recv: crate::Slot,
     args: &[crate::Slot],
 ) -> Result<crate::CtxOut, crate::CtxError> {
-    match find_bundle(module, bundle) {
-        Some(b) => (b.ctx_dispatch)(method, ctx, recv, args),
+    match default_registry() {
+        Some(r) => r.dispatch_bundle_method(module, bundle, method, ctx, recv, args),
         None => Err(StdError {
             kind: crate::ErrorKind::UnknownName,
             message: format!("no bundle `{bundle}` in module `{module}`"),
@@ -978,78 +1189,48 @@ pub fn dispatch_bundle_method(
     }
 }
 
-/// Find a registered extern type by its short display name (extern-types X1). Ambiguous once two
-/// namespaces own the same short name — [`find_type_qualified`] is the identity-preserving lookup.
-/// Every installed extension's declared dev-tiers, in install order.
 pub fn ext_tiers() -> impl Iterator<Item = &'static ExtTier> {
-    extensions().iter().flat_map(|e| e.tiers().iter())
+    default_registry().into_iter().flat_map(|r| r.ext_tiers())
 }
 
-/// The installed extension tier named `name`, if any.
 pub fn find_ext_tier(name: &str) -> Option<&'static ExtTier> {
-    ext_tiers().find(|t| t.name == name)
+    default_registry().and_then(|r| r.find_ext_tier(name))
 }
 
-/// Every installed extension's declared prelude attributes, in install order.
 pub fn ext_attributes() -> impl Iterator<Item = &'static ExtAttribute> {
-    extensions().iter().flat_map(|e| e.attributes().iter())
+    default_registry()
+        .into_iter()
+        .flat_map(|r| r.ext_attributes())
 }
 
-/// The installed extension attribute named `name`, if any.
 pub fn find_ext_attribute(name: &str) -> Option<&'static ExtAttribute> {
-    ext_attributes().find(|a| a.name == name)
+    default_registry().and_then(|r| r.find_ext_attribute(name))
 }
 
 pub fn find_type(name: &str) -> Option<&'static ExtType> {
-    extensions()
-        .iter()
-        .flat_map(|e| e.types())
-        .find(|t| t.name == name)
+    default_registry().and_then(|r| r.find_type(name))
 }
 
-/// Find a registered extern type by its **qualified identity** (`std.id.Uuid` = `namespace.name`)
-/// — the unambiguous lookup that lets a native `std.metrics.Counter` coexist with any other
-/// `Counter` (extern-type namespacing).
 pub fn find_type_qualified(qualified: &str) -> Option<&'static ExtType> {
-    extensions()
-        .iter()
-        .flat_map(|e| e.types())
-        .find(|t| t.qualified() == qualified)
+    default_registry().and_then(|r| r.find_type_qualified(qualified))
 }
 
-/// Resolve an extern type from **either** a qualified identity (`std.id.Uuid`, what the checker
-/// keys on) or a bare short name (`Uuid`, what a runtime value's `type_name()` still returns in
-/// Phase A). The single lookup every method-resolution/dispatch site routes through, so the
-/// checker and both backends agree whichever spelling they hold.
 pub fn resolve_type(name: &str) -> Option<&'static ExtType> {
-    find_type_qualified(name).or_else(|| find_type(name))
+    default_registry().and_then(|r| r.resolve_type(name))
 }
 
-/// Find a registered extern type's method signature.
 pub fn find_type_method(type_name: &str, method: &str) -> Option<&'static ExtFn> {
-    resolve_type(type_name)?
-        .methods
-        .iter()
-        .find(|m| m.name == method)
+    default_registry().and_then(|r| r.find_type_method(type_name, method))
 }
 
-/// Find a registered extern type's **higher-order** method signature (higher-order-abi H4) —
-/// methods that dispatch through the ctx seam ([`ExtType::ctx_dispatch`]).
 pub fn find_type_ctx_method(type_name: &str, method: &str) -> Option<&'static ExtFn> {
-    resolve_type(type_name)?
-        .ctx_methods
-        .iter()
-        .find(|m| m.name == method)
+    default_registry().and_then(|r| r.find_type_ctx_method(type_name, method))
 }
 
-/// A type method's signature from **either** table — what the checker consults (it doesn't care
-/// how a call dispatches). The type-method twin of [`find_function_sig`].
 pub fn find_type_method_sig(type_name: &str, method: &str) -> Option<&'static ExtFn> {
-    find_type_method(type_name, method).or_else(|| find_type_ctx_method(type_name, method))
+    default_registry().and_then(|r| r.find_type_method_sig(type_name, method))
 }
 
-/// Route a **higher-order** method call to its type's ctx dispatch (higher-order-abi H4) — the
-/// type-method twin of [`dispatch_ctx`].
 pub fn dispatch_ctx_method(
     type_name: &str,
     method: &str,
@@ -1057,14 +1238,12 @@ pub fn dispatch_ctx_method(
     recv: crate::Slot,
     args: &[crate::Slot],
 ) -> Result<crate::CtxOut, crate::CtxError> {
-    match resolve_type(type_name).and_then(|t| t.ctx_dispatch) {
-        Some(d) => d(method, ctx, recv, args),
+    match default_registry() {
+        Some(r) => r.dispatch_ctx_method(type_name, method, ctx, recv, args),
         None => Err(crate::no_method_error(type_name, method).into()),
     }
 }
 
-/// Dispatch a method on an extern receiver through its registered [`ExtType`]. Returns the
-/// canonical "no such method" error for an unknown method, mirroring [`dispatch`] for modules.
 pub fn dispatch_method(
     recv: &mut dyn crate::ExternValue,
     method: &str,
@@ -1072,26 +1251,23 @@ pub fn dispatch_method(
     args: &[crate::NativeValue],
 ) -> Result<crate::NativeOut, StdError> {
     let type_name = recv.type_name();
-    let Some(ext) = resolve_type(type_name) else {
-        return Err(StdError {
+    match default_registry() {
+        Some(r) => r.dispatch_method(recv, method, host, args),
+        None => Err(StdError {
             kind: crate::ErrorKind::UnknownName,
             message: format!("`{type_name}` is not a registered type"),
-        });
-    };
-    (ext.dispatch)(recv, method, host, args)
+        }),
+    }
 }
 
-/// Dispatch a registered module function. Returns the canonical "no such function" error if the
-/// module is unknown (the backends only ever dispatch a name they bound, so that is unreachable
-/// in practice).
 pub fn dispatch(
     module: &str,
     func: &str,
     host: &mut dyn Host,
     args: &[crate::NativeValue],
 ) -> Result<crate::NativeOut, StdError> {
-    match find_module(module) {
-        Some(m) => (m.dispatch)(func, host, args),
+    match default_registry() {
+        Some(r) => r.dispatch(module, func, host, args),
         None => Err(crate::no_function_error(module, func)),
     }
 }

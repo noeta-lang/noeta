@@ -188,7 +188,7 @@ pub struct Sites {
 /// the single-pass entry point the hot paths (the CLI, the conformance/differential harnesses,
 /// the `noeta-db` `bytecode` query) use so the checker runs exactly once per program.
 pub fn check_all(program: &Program) -> Checked {
-    check_all_impl(program, false)
+    check_all_impl(program, false, None)
 }
 
 /// Like [`check_all`], but additionally records every expression's inferred type into
@@ -196,12 +196,30 @@ pub fn check_all(program: &Program) -> Checked {
 /// (`noeta-db`'s `checked_ide` query) calls this; the compile path uses [`check_all`] and never
 /// builds the index. Diagnostics are identical either way — recording types is a pure side-channel.
 pub fn check_all_with_types(program: &Program) -> Checked {
-    check_all_impl(program, true)
+    check_all_impl(program, true, None)
 }
 
-fn check_all_impl(program: &Program, record_expr_types: bool) -> Checked {
+/// [`check_all`] against an explicit per-session extension [`Registry`] (instance-registry F2)
+/// instead of the process-global default: the checker resolves every native module/function/extern
+/// type/bundle against `registry`, so an embedding host that assembled its own extension set gets a
+/// check that sees exactly those extensions — the same set its paired VM will run against. Passing
+/// the process-global default here is identical to [`check_all`]. The registry is `&'static`
+/// because a [`Registry`]'s lookups already return `&'static` data.
+pub fn check_all_with_registry(
+    program: &Program,
+    registry: &'static noeta_stdlib::registry::Registry,
+) -> Checked {
+    check_all_impl(program, false, Some(registry))
+}
+
+fn check_all_impl(
+    program: &Program,
+    record_expr_types: bool,
+    registry: Option<&'static noeta_stdlib::registry::Registry>,
+) -> Checked {
     let mut checker = Checker {
         record_expr_types,
+        registry,
         ..Checker::default()
     };
     checker.register_prelude();
@@ -238,6 +256,11 @@ pub fn check_all_session(program: &Program) -> (Checked, SessionChecker) {
         bundle_bindings: checker.bundle_bindings_public(),
         packed_layouts: checker.packed_layouts_public(),
     };
+    // The whole-program check above ran strict (file mode) — unknown names in a debugged program
+    // are real errors. But the returned session, over which console fragments and later entries
+    // are checked, defers unknown names (F1): a fragment may reference a name a *later* fragment
+    // defines, and frame locals a fragment reads are seeded per-evaluation, not in this env.
+    checker.session_mode = true;
     (checked, SessionChecker { checker, env })
 }
 
@@ -287,7 +310,25 @@ impl std::fmt::Debug for SessionChecker {
 impl SessionChecker {
     /// A fresh session: prelude registered, empty registries, an empty persistent global scope.
     pub fn new() -> SessionChecker {
-        let mut checker = Checker::default();
+        Self::with_registry_opt(None)
+    }
+
+    /// A fresh session bound to an explicit per-session extension [`Registry`] (instance-registry
+    /// F2): every native name the session's entries reference resolves against `registry` rather
+    /// than the process-global default — the session-mode counterpart of [`check_all_with_registry`],
+    /// so an embedding host's REPL/debug console sees exactly the host's extension set.
+    pub fn with_registry(registry: &'static noeta_stdlib::registry::Registry) -> SessionChecker {
+        Self::with_registry_opt(Some(registry))
+    }
+
+    fn with_registry_opt(
+        registry: Option<&'static noeta_stdlib::registry::Registry>,
+    ) -> SessionChecker {
+        let mut checker = Checker {
+            session_mode: true,
+            registry,
+            ..Checker::default()
+        };
         checker.register_prelude();
         SessionChecker {
             checker,
@@ -615,6 +656,10 @@ fn lookup(env: &Env, name: &str) -> Option<Type> {
         .find_map(|frame| frame.get(name).map(|b| b.ty.clone()))
 }
 
+/// The reserved prelude names (`Ok`/`Err`/`some`/`none`/`panic`/`assert`) — always resolvable,
+/// so the unknown-name gate never flags them (see [`Checker::is_known_name`]).
+const RESERVED_PRELUDE: &[&str] = &["Ok", "Err", "some", "none", "panic", "assert"];
+
 /// A representative `Type` for a built-in type *name* used as a method-handle receiver
 /// (`list.len`, `string.upper`), with unknown element/value types as `dyn`. `None` for a name that
 /// is not a handle-able built-in type. Built-in types carry only instance methods (no associated
@@ -807,6 +852,18 @@ struct Checker {
     /// [`SiteMaps::expr_types`] for the IDE hover path. Off by default so the compile path is
     /// unaffected; enabled by [`check_all_with_types`].
     record_expr_types: bool,
+    /// A REPL / debug-console session (set only by [`SessionChecker`]). Relaxes the unknown-name
+    /// gate (F1): a name undefined *this* entry may be defined in a *later* one, so an unresolved
+    /// reference stays deferred to the runtime rather than being a static `E0005` — the
+    /// cross-entry forward reference the prompt relies on. A whole-file check (the default, and
+    /// the hot-reload transactional gate) has no future entry, so an unknown name is an error.
+    session_mode: bool,
+    /// Every top-level value binding's name, collected in the pre-pass (F1). Top-level globals are
+    /// **hoisted** — a function body may reference one declared textually later — so the
+    /// unknown-name gate treats them all as known regardless of order. (A top-level *direct*
+    /// reference to a not-yet-bound global still fails at runtime; this gate does not try to catch
+    /// that ordering case, only genuine typos.)
+    global_binding_names: HashSet<String>,
     /// Declared type → its kind (`Enum`/`Struct`/`Class`). Drives the abstract kind-type
     /// membership rule (`Named(n) <: Enum` iff `n` is an enum) — the registry-dependent piece the
     /// pure lattice cannot decide, consulted by [`Checker::assignable`].
@@ -948,6 +1005,15 @@ struct Checker {
     /// drop-insertion pass reads it to mark a `DropVar`'s `relevant` bit, which Phase 4 uses to skip
     /// the destructor check for a value whose type can run no destructor.
     relevance: DestructorRelevance,
+    /// The **extension registry** this checker resolves native modules, functions, extern types,
+    /// tiers, and attributes against (instance-registry F2). `None` — the default — routes every
+    /// lookup through the process-global default registry (via [`Checker::reg`]), so an ordinary
+    /// whole-program check is unchanged. An embedding host that assembled a *per-session* extension
+    /// set threads its own [`Registry`] here, and this checker then sees exactly those extensions —
+    /// the same set its paired VM runs against. `&'static` because a [`Registry`]'s lookups already
+    /// return `&'static` (its units are static); the handle is `Copy`, so `Clone` (the transactional
+    /// session snapshot) stays cheap.
+    registry: Option<&'static noeta_stdlib::registry::Registry>,
     diags: Vec<Diagnostic>,
 }
 
@@ -977,6 +1043,16 @@ pub struct DestructorRelevance {
 }
 
 impl Checker {
+    /// The extension [`Registry`] this checker resolves native names against (instance-registry F2):
+    /// the per-session registry when one was threaded in ([`Checker::registry`]), otherwise the
+    /// process-global default. `&'static` because a registry's lookups already yield `&'static`
+    /// data. Every stdlib/extern/tier lookup in the checker goes through here, so pointing a session
+    /// at a different extension set is a single field — no lookup site knows which registry it holds.
+    fn reg(&self) -> &'static noeta_stdlib::registry::Registry {
+        self.registry
+            .unwrap_or_else(noeta_stdlib::registry::default_seeded)
+    }
+
     /// Record an error diagnostic, returning `&mut` to the just-pushed diagnostic so a help line can
     /// be chained onto it in place (`self.error(code, span, msg).help("…")`). The single place the
     /// checker constructs an error — every diagnostic site funnels through here rather than repeating
@@ -1029,7 +1105,7 @@ impl Checker {
     fn imported_extern(&self, name: &str) -> Option<&'static noeta_stdlib::registry::ExtType> {
         self.extern_types
             .get(name)
-            .and_then(|q| noeta_stdlib::registry::find_type_qualified(q))
+            .and_then(|q| self.reg().find_type_qualified(q))
     }
 
     /// Reject declaring a type whose name a `use std.<ns>.<Type> [as Alias]` in this file already
@@ -1048,7 +1124,6 @@ impl Checker {
     }
 
     fn check_reserved_name(&mut self, name: &str, span: Span) {
-        const RESERVED_PRELUDE: &[&str] = &["Ok", "Err", "some", "none", "panic", "assert"];
         if RESERVED_PRELUDE.contains(&name) {
             self.diags.push(
                 Diagnostic::error(
@@ -1146,7 +1221,7 @@ impl Checker {
     /// path; only registry-declared (intrinsic) traits appear here, so it cannot let a user type
     /// masquerade as one.
     fn seed_extern_type_traits(&mut self) {
-        for ext in noeta_stdlib::registry::extensions() {
+        for ext in self.reg().extensions() {
             for ty in ext.types() {
                 if !ty.traits.is_empty() {
                     // Keyed by the **qualified identity** (`std.crdt.GCounter`) the checker stores in
@@ -1168,8 +1243,7 @@ impl Checker {
     /// and `#[Skip("flaky")]` construct); the materialization default flows into the reflection
     /// artifact at compile time.
     fn register_extension_attributes(&mut self) {
-        use noeta_stdlib::registry as ext;
-        for attr in ext::ext_attributes() {
+        for attr in self.reg().ext_attributes() {
             let fields: Vec<(String, Type)> = attr
                 .fields
                 .iter()
@@ -1451,28 +1525,26 @@ impl Checker {
             let Stmt::Use { path, names, .. } = stmt else {
                 continue;
             };
-            let rooted = !path.is_empty() && noeta_stdlib::registry::is_extension_root(&path[0]);
+            let rooted = !path.is_empty() && self.reg().is_extension_root(&path[0]);
             let prefix = path.join(".");
             // A selective member import `use <root>.<mod>.<fn>` — a rooted path whose prefix is a
             // known module. Each name binds as a bare function alias against the module identity.
             let selective = (path.len() >= 2 && rooted)
                 .then(|| prefix.clone())
-                .filter(|m| stdlib::is_std_module(m));
+                .filter(|m| stdlib::is_std_module(self.reg(), m));
             for name in names {
                 let local = name.local().to_string();
                 // A plain (`use std.{json}`) or nested (`use std.http.client`) module import.
                 let qualified = format!("{prefix}.{}", name.name);
-                if rooted && stdlib::is_std_module(&qualified) {
+                if rooted && stdlib::is_std_module(self.reg(), &qualified) {
                     self.modules.insert(local, qualified);
-                } else if rooted
-                    && let Some(ext) = noeta_stdlib::registry::find_type_qualified(&qualified)
-                {
+                } else if rooted && let Some(ext) = self.reg().find_type_qualified(&qualified) {
                     // An **extern-type** import (`use std.id.Uuid`, `use std.metrics.Counter as C`):
                     // the leaf names a registered type in this namespace. Bind the local name (alias
                     // or short) to its qualified identity — the resolver keys annotations on this.
                     self.extern_types.insert(local, ext.qualified());
                 } else if let Some(module) = &selective {
-                    if noeta_stdlib::registry::is_module_function(module, &name.name) {
+                    if self.reg().is_module_function(module, &name.name) {
                         self.imported_fns
                             .insert(local, (module.clone(), name.name.clone()));
                     } else {
@@ -1492,6 +1564,21 @@ impl Checker {
     /// Pass 1: register every top-level declaration so forward references resolve before any
     /// body is checked. Mirrors the compiler's "register types first" pass.
     fn collect(&mut self, program: &Program) {
+        // Hoist top-level value-binding names (F1): a function body may reference a global
+        // declared textually later, so they are all "known" to the unknown-name gate.
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::Binding { name, .. } => {
+                    self.global_binding_names.insert(name.clone());
+                }
+                Stmt::Destructure { targets, .. } => {
+                    for (name, _) in targets {
+                        self.global_binding_names.insert(name.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
         for stmt in &program.stmts {
             match stmt {
                 Stmt::Struct(r) => {
@@ -1910,7 +1997,7 @@ impl Checker {
     ) -> Option<(String, &'static noeta_stdlib::ExtBundle)> {
         let (module_ref, bundle_name) = trait_name.rsplit_once('.')?;
         let qualified = self.modules.get(module_ref)?;
-        let bundle = noeta_stdlib::registry::find_bundle(qualified, bundle_name)?;
+        let bundle = self.reg().find_bundle(qualified, bundle_name)?;
         Some((qualified.clone(), bundle))
     }
 
@@ -1975,10 +2062,41 @@ impl Checker {
 
     fn check_block(&mut self, stmts: &[Stmt], env: &mut Env) {
         env.push(HashMap::new());
+        self.bind_nested_fns(stmts, env);
         for stmt in stmts {
             self.check_stmt(stmt, env);
         }
         env.pop();
+    }
+
+    /// Pre-register a block's **nested `fn` declarations** into the current scope frame (F1): a
+    /// nested function is not in [`Self::functions`] (top-level only), so a sibling, forward, or
+    /// recursive call to one must resolve here — otherwise the unknown-name gate would flag it.
+    /// Bound as its (erased) `Fn` type so a bare reference is precise too; the call's own argument
+    /// checking stays deferred (a nested-fn call routes through the prelude fallback), unchanged.
+    fn bind_nested_fns(&self, stmts: &[Stmt], env: &mut Env) {
+        for stmt in stmts {
+            if let Stmt::Fn(decl) = stmt {
+                let params = decl
+                    .params
+                    .iter()
+                    .map(|p| param_type(p, &self.extern_types))
+                    .collect();
+                let ret = decl
+                    .ret
+                    .as_ref()
+                    .map(|t| from_ref_q(t, &self.extern_types))
+                    .unwrap_or(Type::Unknown);
+                bind(
+                    env,
+                    &decl.name,
+                    Type::Fn {
+                        params,
+                        ret: Box::new(ret),
+                    },
+                );
+            }
+        }
     }
 
     /// Check a closure body (arrow or block) and return the closure's return type. `expected` is the
@@ -2349,8 +2467,16 @@ impl Checker {
                     );
                 }
                 // Inside the scope, `spawn` is legal; check the body with the depth raised.
+                // `concurrent { }` is a **transparent** scope at runtime — a binding made inside it
+                // (`w = race([a, b])`) leaks to the enclosing function, exactly like an `if` body's
+                // bindings do not but a concurrent block's do. So check the body *in the current
+                // frame* rather than pushing one (F1: the unknown-name gate would otherwise flag a
+                // later reference to such a binding, which the tolerated-unknown behavior masked).
                 self.concurrent_depth += 1;
-                self.check_block(body, env);
+                self.bind_nested_fns(body, env);
+                for stmt in body {
+                    self.check_stmt(stmt, env);
+                }
                 self.concurrent_depth -= 1;
             }
             Stmt::Break { span } | Stmt::Continue { span } => {
@@ -2402,7 +2528,7 @@ impl Checker {
             } => {
                 if !self.tier_registry.is_known(tier) {
                     self.diags
-                        .push(tiers::unknown_tier_diagnostic(tier, *tier_span));
+                        .push(tiers::unknown_tier_diagnostic(self.reg(), tier, *tier_span));
                 } else if self.tier_registry.is_expr_tier(tier) {
                     // An expression tier's block in *statement* position (expr-tiers arc): its
                     // value would be silently discarded — and it never activates/strips, so a
@@ -2527,6 +2653,7 @@ impl Checker {
             self.check_reserved_name(&p.name, p.name_span);
             bind(env, &p.name, param_type(p, &self.extern_types));
         }
+        self.bind_nested_fns(&decl.body, env);
         for stmt in &decl.body {
             self.check_stmt(stmt, env);
         }
@@ -3401,7 +3528,12 @@ impl Checker {
                     }
                 }
                 noeta_stdlib::BundleReceiver::Bulk => {
-                    if stdlib::method_return(&Type::List(Box::new(Type::Dyn)), m.sig.name).is_some()
+                    if stdlib::method_return(
+                        self.reg(),
+                        &Type::List(Box::new(Type::Dyn)),
+                        m.sig.name,
+                    )
+                    .is_some()
                     {
                         conflicts.push(format!("`{}` is a built-in list method", m.sig.name));
                     }
@@ -4134,6 +4266,15 @@ impl Checker {
                                 "member access is explicit — the field is `self.{name}`"
                             )),
                         );
+                    } else if !self.session_mode && !self.is_known_name(name, env) {
+                        // A bare reference to a name that resolves to nothing — a genuinely
+                        // undefined value (F1), the same static `E0005` as an unknown callee. A
+                        // session defers (a later entry may define it).
+                        self.diags.push(Diagnostic::error(
+                            DiagnosticCode::UnknownName,
+                            *span,
+                            format!("cannot find `{name}` in this scope"),
+                        ));
                     }
                     Type::Unknown
                 }
@@ -5237,6 +5378,25 @@ impl Checker {
         }
     }
 
+    /// Whether `name` resolves to **something the checker knows** — a local binding, a top-level
+    /// or selectively-imported function, a bound module, a user type or enum, or a reserved
+    /// prelude name. The unknown-name gate (F1) uses its negation: a name that is none of these
+    /// is genuinely undefined, a static `E0005` rather than a deferral to the runtime `E0005`.
+    fn is_known_name(&self, name: &str, env: &Env) -> bool {
+        lookup(env, name).is_some()
+            || self.functions.contains_key(name)
+            || self.imported_fns.contains_key(name)
+            || self.modules.contains_key(name)
+            || self.types.contains(name)
+            || self.enums.contains_key(name)
+            || RESERVED_PRELUDE.contains(&name)
+            // Built-in namable types/enums (`Ordering`, `Type`, `Semantic`, iterator types, …)
+            // are legitimate bare references — `Ordering.Less` names the prelude enum's variant.
+            || PRELUDE_TYPES.contains(&name)
+            // A hoisted top-level global (a fn body may reference one declared later).
+            || self.global_binding_names.contains(name)
+    }
+
     fn synth_call(
         &mut self,
         callee: &Expr,
@@ -5276,13 +5436,14 @@ impl Checker {
             // that no import bound it. This is what lets a native and a Noeta handler share one
             // `Call` typing path.
             Expr::NativeFnRef { module, func, .. } => {
-                if let Some(params) = stdlib::module_params(module, func, args) {
-                    let required = stdlib::module_required(module, func).unwrap_or(params.len());
+                if let Some(params) = stdlib::module_params(self.reg(), module, func, args) {
+                    let required =
+                        stdlib::module_required(self.reg(), module, func).unwrap_or(params.len());
                     self.finalize_closure_args(&params, args, arg_exprs, env);
                     self.check_args(&params, required, args, arg_exprs, span, func);
                 }
                 self.check_module_bounds(module, func, args, span);
-                stdlib::module_return(module, func, args).unwrap_or(Type::Unknown)
+                stdlib::module_return(self.reg(), module, func, args).unwrap_or(Type::Unknown)
             }
             // A plain `name(args)` call: a user function, else a prelude free function.
             Expr::Ident { name, .. } => {
@@ -5315,14 +5476,15 @@ impl Checker {
                 if let Some((module, func)) = self.imported_fns.get(name).cloned()
                     && lookup(env, name).is_none()
                 {
-                    if let Some(params) = stdlib::module_params(&module, &func, args) {
-                        let required =
-                            stdlib::module_required(&module, &func).unwrap_or(params.len());
+                    if let Some(params) = stdlib::module_params(self.reg(), &module, &func, args) {
+                        let required = stdlib::module_required(self.reg(), &module, &func)
+                            .unwrap_or(params.len());
                         self.finalize_closure_args(&params, args, arg_exprs, env);
                         self.check_args(&params, required, args, arg_exprs, span, &func);
                     }
                     self.check_module_bounds(&module, &func, args, span);
-                    return stdlib::module_return(&module, &func, args).unwrap_or(Type::Unknown);
+                    return stdlib::module_return(self.reg(), &module, &func, args)
+                        .unwrap_or(Type::Unknown);
                 }
                 // Prelude functions are polymorphic/variadic — their result is typed, but their
                 // arguments are not arity-checked here. (The packed-result note the free `map`
@@ -5330,7 +5492,23 @@ impl Checker {
                 // the free form left the prelude, P1.2.) Closure arguments synthesize standalone
                 // first, so a payload-typed result (`some(fn…)`) sees the real closure type.
                 self.finalize_closure_args(&[], args, arg_exprs, env);
-                stdlib::prelude_return(name, args).unwrap_or(Type::Unknown)
+                if let Some(t) = stdlib::prelude_return(name, args) {
+                    return t;
+                }
+                // Not a user fn, import, or prelude free function. A local (a closure value) or a
+                // module/type name called here stays deferred to the runtime (a local closure's
+                // args are not statically checked, unchanged); a name that resolves to *nothing*
+                // is a genuinely undefined callee — a static `E0005` (F1), so a typo is caught at
+                // check time instead of failing at runtime. A session defers (a later entry may
+                // define it).
+                if !self.session_mode && !self.is_known_name(name, env) {
+                    self.diags.push(Diagnostic::error(
+                        DiagnosticCode::UnknownName,
+                        span,
+                        format!("cannot find `{name}` in this scope"),
+                    ));
+                }
+                Type::Unknown
             }
             Expr::Member { receiver, name, .. } => {
                 // `Enum.try_from(s)` → `?Enum` / `Enum.from(s)` → `Enum` — the built-in string→case
@@ -5364,13 +5542,15 @@ impl Checker {
                     && let Some(qm) = self.modules.get(m)
                 {
                     let qm = qm.clone();
-                    if let Some(params) = stdlib::module_params(&qm, name, args) {
-                        let required = stdlib::module_required(&qm, name).unwrap_or(params.len());
+                    if let Some(params) = stdlib::module_params(self.reg(), &qm, name, args) {
+                        let required =
+                            stdlib::module_required(self.reg(), &qm, name).unwrap_or(params.len());
                         self.finalize_closure_args(&params, args, arg_exprs, env);
                         self.check_args(&params, required, args, arg_exprs, span, name);
                     }
                     self.check_module_bounds(&qm, name, args, span);
-                    return stdlib::module_return(&qm, name, args).unwrap_or(Type::Unknown);
+                    return stdlib::module_return(self.reg(), &qm, name, args)
+                        .unwrap_or(Type::Unknown);
                 }
                 // `Type.assoc(args)` — an associated function / static call on a known user type
                 // (`Box.new(1)`). Resolve to the type's method signature so the result is precisely
@@ -5444,7 +5624,8 @@ impl Checker {
                 // deferred closure argument finalizes against them here — its parameters adopt the
                 // element type, its body infers a real return, and the `map` refinements below see
                 // a precise `Fn` instead of a context-free one.
-                let builtin_params = stdlib::method_params(&recv, name).unwrap_or_default();
+                let builtin_params =
+                    stdlib::method_params(self.reg(), &recv, name).unwrap_or_default();
                 self.finalize_closure_args(&builtin_params, args, arg_exprs, env);
                 self.check_method_args(&recv, name, args, arg_exprs, span);
                 // A bit intrinsic on a fixed-width receiver (Tier W5) must act within the width, not
@@ -5625,8 +5806,8 @@ impl Checker {
         arg_exprs: &[Expr],
         span: Span,
     ) {
-        if let Some(params) = stdlib::method_params(recv, name) {
-            let required = stdlib::method_required(recv, name).unwrap_or(params.len());
+        if let Some(params) = stdlib::method_params(self.reg(), recv, name) {
+            let required = stdlib::method_required(self.reg(), recv, name).unwrap_or(params.len());
             self.check_args(&params, required, args, arg_exprs, span, name);
         } else if let Type::Named(n, _) = recv
             && let Some(sig) = self.methods.get(&(n.clone(), name.to_string()))
@@ -5781,7 +5962,10 @@ impl Checker {
     /// `@attribute` struct; and the runner must be `fn(roots: List<TierRoot>): void` — the
     /// signature dispatch calls with the activated roots.
     fn check_tier_decls(&mut self, program: &Program) {
-        self.tier_registry = tiers::TierRegistry::collect(program);
+        // Resolve the extension-tier half of the name-space against THIS checker's registry
+        // (instance-registry IR4), so an embed session whose own extension declares a `@tier`
+        // validates its `@<tier>` blocks correctly. Defaults to the process-global registry.
+        self.tier_registry = tiers::TierRegistry::collect_with_registry(program, self.reg());
         let mut seen: HashMap<(String, String), Span> = HashMap::new();
         for stmt in &program.stmts {
             let Stmt::Fn(f) = stmt else { continue };
@@ -6295,7 +6479,7 @@ impl Checker {
     /// type must satisfy the named trait or it is `E0025`. An undetermined var yields nothing
     /// (gradual). This is the registry-call twin of the user-generic bound check.
     fn check_module_bounds(&mut self, module: &str, func: &str, args: &[Type], span: Span) {
-        for (concrete, bound) in stdlib::module_var_bounds(module, func, args) {
+        for (concrete, bound) in stdlib::module_var_bounds(self.reg(), module, func, args) {
             let Some(t) = BuiltinTrait::from_name(bound) else {
                 continue;
             };
@@ -6351,15 +6535,20 @@ impl Checker {
                 .filter(|m| m.receiver == receiver_kind)
                 .map(|m| ((b.module.clone(), b.bundle.name.to_string()), m))
         })?;
-        let params = stdlib::bundle_method_params(&method.sig, args);
+        let params = stdlib::bundle_method_params(self.reg(), &method.sig, args);
         let required = noeta_stdlib::SigType::required_count(method.sig.params);
         self.check_args(&params, required, args, &[], span, name);
         self.sites.bundle_call_sites.insert(call_span, route);
-        Some(stdlib::bundle_method_return(&method.sig, recv, args))
+        Some(stdlib::bundle_method_return(
+            self.reg(),
+            &method.sig,
+            recv,
+            args,
+        ))
     }
 
     fn method_call_return(&self, recv: &Type, name: &str) -> Type {
-        if let Some(t) = stdlib::method_return(recv, name) {
+        if let Some(t) = stdlib::method_return(self.reg(), recv, name) {
             return t;
         }
         if let Type::Named(n, _) = recv
@@ -6462,10 +6651,10 @@ impl Checker {
         if let Expr::Ident { name: tn, .. } = receiver
             && lookup(env, tn).is_none()
             && let Some(recv_ty) = builtin_receiver_type(tn)
-            && let Some(ret) = stdlib::method_return(&recv_ty, name)
+            && let Some(ret) = stdlib::method_return(self.reg(), &recv_ty, name)
         {
             let mut params = vec![recv_ty.clone()];
-            params.extend(stdlib::method_params(&recv_ty, name).unwrap_or_default());
+            params.extend(stdlib::method_params(self.reg(), &recv_ty, name).unwrap_or_default());
             self.sites
                 .handle_sites
                 .insert(member_span, (tn.clone(), name.to_string(), false));
@@ -6550,9 +6739,9 @@ impl Checker {
             };
         }
         if !matches!(recv, Type::Unknown | Type::Dyn)
-            && let Some(ret) = stdlib::method_return(&recv, name)
+            && let Some(ret) = stdlib::method_return(self.reg(), &recv, name)
         {
-            let params = stdlib::method_params(&recv, name).unwrap_or_default();
+            let params = stdlib::method_params(self.reg(), &recv, name).unwrap_or_default();
             self.sites.bound_handle_sites.insert(member_span);
             return Type::Fn {
                 params,

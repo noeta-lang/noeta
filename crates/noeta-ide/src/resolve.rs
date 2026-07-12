@@ -629,13 +629,21 @@ impl Resolver {
             Stmt::Struct(decl) => self.walk_methods(&decl.methods),
             Stmt::Class(decl) => self.walk_methods(&decl.methods),
             Stmt::Enum(decl) => self.walk_methods(&decl.methods),
-            // Control-flow leaves and module/tier statements bind and reference nothing.
+            // A tier block's items (server-hmr W3) resolve like top-level statements: a `@test`
+            // fn's body references program declarations, and both the editor (goto/refs inside a
+            // test body) and the impact engine (which tests call a changed fn) need the edges. A
+            // `@doc` text tier carries no items, so this is naturally a no-op for it.
+            Stmt::TierBlock { items, .. } => {
+                for item in items {
+                    self.walk_stmt(item);
+                }
+            }
+            // Control-flow leaves and module statements bind and reference nothing.
             Stmt::Impl(_)
             | Stmt::Namespace { .. }
             | Stmt::Use { .. }
             | Stmt::Break { .. }
-            | Stmt::Continue { .. }
-            | Stmt::TierBlock { .. } => {}
+            | Stmt::Continue { .. } => {}
         }
     }
 

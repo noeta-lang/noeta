@@ -566,6 +566,11 @@ impl<'m> Vm<'m> {
         // root seed, so the isolate's spans continue this trace — real-path parity with the
         // cooperative task inheritance (T5a).
         let trace = self.outbound_trace_context();
+        // The worker inherits this VM's registry across the thread boundary (instance-registry
+        // IR3): a `&'static Registry` is `Send`, so a session with its own extension set resolves
+        // native names identically on its isolates. `None` (the default) keeps the worker on the
+        // process-global default, exactly as the parent.
+        let registry = self.registry;
         let (tx, rx) = std::sync::mpsc::channel();
         let thread_handle = std::thread::spawn(move || {
             let msg = run_isolate_worker(
@@ -575,6 +580,7 @@ impl<'m> Vm<'m> {
                 iso_args,
                 wire_globals,
                 trace,
+                registry,
                 span,
             );
             let _ = tx.send(msg);

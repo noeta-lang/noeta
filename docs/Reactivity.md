@@ -117,6 +117,31 @@ effect(fn() { n.set(n.get() + 1) })   // reads n and writes n — never settles
 
 Every reactive node belongs to the program's implicit scope; all of them are reclaimed when the program ends. For finer control, an `effect` is **disposable** via `.dispose()`, which severs its subscriptions so it stops rerunning. Signals and computeds are not independently disposable — a computed has no side effect to stop, and both are freed with the scope. (Nested reactive scopes, where an effect owns and disposes child effects it creates, are a later addition.)
 
+## Views — pushing state to a client
+
+A `view()` is a named window onto reactive state, built for pushing changes over a wire (the LiveView pattern — see the `http.server` section of [Standard Library Modules](Standard-Library-Modules)). `expose(name, handle)` binds a name to a `Signal`, `Computed`, or `SyncedSignal`; `snapshot()` renders the full state as a JSON frame (and baselines the view); `diff()` renders a frame of **only the bindings whose value changed since** — or `none` when nothing observably changed:
+
+```noeta
+use std.reactive.{signal, computed, view}
+
+count = signal(2)
+double = computed(fn() { return count.get() * 2 })
+
+v = view()
+v.expose("count", count)
+v.expose("double", double)
+
+echo v.snapshot()        // {"type":"snapshot","values":{"count":2,"double":4}}
+count.set(3)
+echo v.diff() ?? "none"  // {"type":"patch","changes":{"count":3,"double":6}}
+count.set(3)
+echo v.diff() ?? "none"  // none — same value, nothing to push
+```
+
+Minimality is enforced twice: the flush records exactly which nodes changed (the set signal plus computeds it transitively dirtied), so `diff()` never inspects untouched bindings; and each candidate's fresh value is compared against the last one pushed, so a write of an equal value — or a recompute that lands on the same result — pushes nothing. Frames are deterministic (name-sorted keys, the `json.stringify` encoding), so a scripted client conversation pins them byte-exactly in tests. The change tracking is pay-for-use: until the first `view()` exists, a hot `set` loop records nothing.
+
+Typically each websocket session creates its own view and sends `snapshot()` on connect and `diff()` after handling each client event — the bundled browser shim (`server.liveview_js()`) applies those frames to the DOM. See the LiveView section of [Standard Library Modules](Standard-Library-Modules) and `examples/liveview_counter.noe`.
+
 ## What's next
 
-This is the reactive **core**. One layer that consumes it has landed: **CRDT-synced signals** — reactive state several peers edit concurrently, converging without coordination — see [Local-First & P2P](Local-First-and-P2P). The others (WebSocket minimal-diff push / LiveView-style UI, reactive persistence, hot-module reload) are deferred to when their prerequisites (the bundled HTTP/WS server, the DB layer) land. The core already exposes which computeds changed in a flush, the hook the diff layer will build on.
+This is the reactive **core**. Two layers that consume it have landed: **CRDT-synced signals** — reactive state several peers edit concurrently, converging without coordination (see [Local-First & P2P](Local-First-and-P2P)) — and the **view/diff push protocol** above, which carries signal changes to a browser over the bundled WebSocket server. Reactive persistence and hot-module-reload polish (signals survive code edits under `noeta serve --watch`) continue to build on the same graph.

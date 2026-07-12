@@ -25,7 +25,7 @@ use noeta_span::{SourceId, Span};
 use noeta_stdlib::{Executor, Host};
 use noeta_value::Value;
 
-use crate::{Channel, Vm, release};
+use crate::{Channel, Vm, release, retain};
 
 /// A factory for a fresh host + executor pair — the session builds one at construction and again on
 /// `:reset`, so a reset REPL starts against the same *kind* of environment (a real host, or the
@@ -46,6 +46,9 @@ pub(crate) struct SessionState {
     /// what the pre-H5 `Rc<ReactiveGraph>` field carried, generalized.
     ext_arena: Vec<Option<Value>>,
     ext_arena_free: Vec<u32>,
+    /// Host-held embed handles (server-hmr F3), persisted across [`VmSession::call_by_name`].
+    embed_handles: Vec<Option<Value>>,
+    embed_handles_free: Vec<u32>,
     ext_state: Vec<(&'static str, noeta_stdlib::ExtState)>,
     ext_closed_gates: Vec<&'static str>,
     /// The `Rc`-wrapped derived tables grow by **append** (never rebuild), so an entry-1 aggregate and
@@ -57,6 +60,11 @@ pub(crate) struct SessionState {
     type_reprs: Vec<Rc<noeta_ast::reflect::TypeRepr>>,
     host: Box<dyn Host>,
     executor: Box<dyn Executor>,
+    /// The extension registry every entry's `Vm` resolves native names against (instance-registry
+    /// IR5), round-tripped through the session so every entry — the launch run, each REPL/eval
+    /// fragment, each hot-swap — shares it. `None` (the default) falls back to the process-global
+    /// default in `Vm::reg`; an embed session that assembled its own extension set installs it here.
+    registry: Option<&'static noeta_stdlib::registry::Registry>,
 }
 
 impl SessionState {
@@ -69,6 +77,8 @@ impl SessionState {
             channel_progress: 0,
             ext_arena: Vec::new(),
             ext_arena_free: Vec::new(),
+            embed_handles: Vec::new(),
+            embed_handles_free: Vec::new(),
             ext_state: Vec::new(),
             ext_closed_gates: Vec::new(),
             shapes: Vec::new(),
@@ -76,6 +86,7 @@ impl SessionState {
             type_reprs: Vec::new(),
             host,
             executor,
+            registry: None,
         }
     }
 
@@ -129,12 +140,15 @@ impl<'m> Vm<'m> {
     /// interactive prompt, and it keeps `load_seeded` in lockstep with `load`'s field init).
     fn load_seeded(module: &'m Module, state: SessionState) -> Vm<'m> {
         let mut vm = Vm::load(module, state.host, state.executor);
+        vm.registry = state.registry;
         vm.globals = state.globals;
         vm.global_order = state.global_order;
         vm.channels = state.channels;
         vm.channel_progress = state.channel_progress;
         vm.ext_arena = state.ext_arena;
         vm.ext_arena_free = state.ext_arena_free;
+        vm.embed_handles = state.embed_handles;
+        vm.embed_handles_free = state.embed_handles_free;
         vm.ext_state = state.ext_state;
         vm.ext_closed_gates = state.ext_closed_gates;
         vm.shapes = state.shapes;
@@ -161,6 +175,8 @@ impl<'m> Vm<'m> {
             channel_progress: self.channel_progress,
             ext_arena: self.ext_arena,
             ext_arena_free: self.ext_arena_free,
+            embed_handles: self.embed_handles,
+            embed_handles_free: self.embed_handles_free,
             ext_state: self.ext_state,
             ext_closed_gates: self.ext_closed_gates,
             shapes: self.shapes,
@@ -168,6 +184,7 @@ impl<'m> Vm<'m> {
             type_reprs: self.type_reprs,
             host: self.host,
             executor: self.executor,
+            registry: self.registry,
         }
     }
 }
@@ -185,6 +202,44 @@ pub struct SessionOutput {
     /// from a function defined in an *earlier* entry carries a span into that entry's now-gone text;
     /// the CLI's renderer degrades such a frame to name-only.
     pub trace: Vec<TraceFrame>,
+}
+
+/// An opaque, GC-rooted reference to a live language value the embedding host keeps across calls
+/// (server-hmr F3). Minted by [`VmSession::call_retaining`], read via [`VmSession::read_handle`],
+/// freed via [`VmSession::release_handle`]. A plain index — meaningful only until released.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EmbedHandle(u32);
+
+impl EmbedHandle {
+    pub(crate) fn from_index(idx: u32) -> EmbedHandle {
+        EmbedHandle(idx)
+    }
+    pub(crate) fn index(self) -> u32 {
+        self.0
+    }
+}
+
+/// One argument to [`VmSession::call_retaining`]: either a value marshalled in, or a handle to a
+/// value the session already holds (passed back without a round-trip through the host).
+#[derive(Debug)]
+pub enum EmbedArg {
+    Value(noeta_stdlib::NativeOut),
+    Handle(EmbedHandle),
+}
+
+enum CallResult {
+    Value(noeta_stdlib::NativeValue),
+    Handle(EmbedHandle),
+}
+
+/// Why a [`VmSession::call_by_name`] returned no value (server-hmr E0).
+#[derive(Debug)]
+pub enum CallError {
+    /// No top-level binding of this name exists in the session.
+    NoSuchFunction(String),
+    /// The call aborted (a panic, or the binding was not callable): stdout-so-far, the
+    /// diagnostics, and the traceback ride in the output. The session survives.
+    Aborted(Box<SessionOutput>),
 }
 
 /// A persistent REPL session on the bytecode VM. Owns the incremental [`SessionCompiler`] and the
@@ -211,6 +266,9 @@ impl VmSession {
     /// called once now and again on [`VmSession::reset`].
     pub fn new(factory: HostFactory) -> VmSession {
         let (host, executor) = factory();
+        // Register a live session heap-owner on this thread (bugfix): so a *sibling* session's
+        // teardown does not mark this session's live objects as garbage. Retired in `teardown`.
+        crate::session_owner_enter();
         VmSession {
             compiler: SessionCompiler::new(),
             factory,
@@ -233,8 +291,26 @@ impl VmSession {
         compiler: SessionCompiler,
         factory: HostFactory,
     ) -> (VmSession, SessionOutput) {
+        VmSession::adopted_with_registry(module, compiler, factory, None)
+    }
+
+    /// As [`VmSession::adopted`], but resolving native names against an explicit `registry`
+    /// (instance-registry IR5) — the seam an embedding host with its own assembled extension set
+    /// threads in so **every** entry of the session (the launch run and each later fragment /
+    /// hot-swap) dispatches against *its* extensions. The registry rides in the persistent
+    /// [`SessionState`], so it survives the state's round-trip through every entry. `None` keeps the
+    /// session on the process-global default — exactly what [`VmSession::adopted`] passes.
+    pub fn adopted_with_registry(
+        module: &Module,
+        compiler: SessionCompiler,
+        factory: HostFactory,
+        registry: Option<&'static noeta_stdlib::registry::Registry>,
+    ) -> (VmSession, SessionOutput) {
+        // Register a live session heap-owner on this thread (bugfix) — see `VmSession::new`.
+        crate::session_owner_enter();
         let (host, executor) = factory();
         let mut state = SessionState::fresh(host, executor);
+        state.registry = registry;
         state.sync_to(module);
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
         let mut vm = Vm::load_seeded(module, state);
@@ -288,6 +364,57 @@ impl VmSession {
         })
     }
 
+    /// Apply a hot-swap plan (server-hmr H0/H1): re-evaluate the plan's fragment — added/changed
+    /// `use` imports, changed/added `fn` declarations, method-level type re-declarations, and (on
+    /// a re-running swap) the new top-level statements — as one session entry. Running the
+    /// fragment *is* the swap: each `fn` declaration stores a fresh closure into its **existing**
+    /// global slot, so every live `Op::CallGlobal` site (old and new code alike) dispatches to the
+    /// new body from now on; a re-declared type re-registers its methods against the same
+    /// content-interned shape, so existing instances flow into the new bodies.
+    ///
+    /// A **re-running** swap (`plan.rerun_top_level`) implements the HMR state rule — *reactive
+    /// state survives edits; plain state re-initializes*: the plan withholds unchanged reactive
+    /// anchors (their live nodes survive untouched in their global slots), and before the
+    /// fragment runs, the previous epoch's effects are disposed (the re-run re-creates them) and
+    /// the reactive nodes held by re-bound globals are disposed (their replacements arrive with
+    /// the re-run). Top-level side effects (an `echo`, a write) DO re-run — their output lands in
+    /// the returned [`SessionOutput`] for the driver to surface.
+    ///
+    /// The caller owns the two gates the plan's existence implies (see
+    /// [`noeta_compiler::hotswap::diff_programs`]): the NEW program checked green (transactional —
+    /// never swap red code), and the differ found no blockers. The fragment itself compiles
+    /// checkerless (conservative codegen — always sound; the session's accumulated checker state
+    /// describes v1, not v2, so precise site-keyed codegen would be built on the wrong universe).
+    ///
+    /// A function *value* captured before the swap (`mut h = f`) keeps the old body by design —
+    /// closures hold their proto directly; only slot-routed calls rebind.
+    pub fn hot_swap(&mut self, plan: &noeta_compiler::hotswap::SwapPlan) -> SessionOutput {
+        // Slots the fragment's binding statements will overwrite — resolved BEFORE the fragment
+        // compiles, so only names that already exist (v1 bindings being replaced) are collected;
+        // genuinely new bindings have no old node to dispose.
+        let rebound: Vec<u32> = if plan.rerun_top_level {
+            plan.fragment
+                .stmts
+                .iter()
+                .flat_map(binding_targets)
+                .filter_map(|name| self.compiler.global_slots().get(name).copied())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let prepare = plan.rerun_top_level;
+        self.run_capturing_with(
+            &plan.fragment,
+            None,
+            |vm| {
+                if prepare {
+                    vm.hotswap_prepare(&rebound);
+                }
+            },
+            |_| None,
+        )
+    }
+
     /// `:type <expr>` — evaluate `program`'s trailing expression and report its **runtime** type. The
     /// REPL runs no checker across entries, so the type is read from the produced value (like the
     /// language's `type_of`), which means the expression is evaluated and any side effects run. Uses
@@ -311,6 +438,19 @@ impl VmSession {
         sites: Option<&noeta_compiler::Sites>,
         describe: impl FnOnce(Value) -> Option<String>,
     ) -> SessionOutput {
+        self.run_capturing_with(program, sites, |_| {}, describe)
+    }
+
+    /// [`VmSession::run_capturing`] with a pre-run hook, invoked on the seeded ephemeral `Vm`
+    /// after the entry compiled but before it runs — the hot-swap disposal window
+    /// ([`VmSession::hot_swap`]).
+    fn run_capturing_with(
+        &mut self,
+        program: &Program,
+        sites: Option<&noeta_compiler::Sites>,
+        pre_run: impl FnOnce(&mut Vm),
+        describe: impl FnOnce(Value) -> Option<String>,
+    ) -> SessionOutput {
         // A trailing bare expression is rewritten to `mut <sentinel> = expr;` so the IR path captures
         // its value in a global slot we read back below — pure AST surgery, backend-agnostic.
         let (lowerable, captures_value) = rewrite_trailing_expr(program);
@@ -329,6 +469,7 @@ impl VmSession {
         state.sync_to(&module);
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
         let mut vm = Vm::load_seeded(&module, state);
+        pre_run(&mut vm);
         vm.run_top();
 
         let value = if captures_value {
@@ -360,6 +501,141 @@ impl VmSession {
             value,
             trace,
         }
+    }
+
+    /// Call a top-level function **by name** (the embed seam, server-hmr E0): arguments arrive as
+    /// neutral [`NativeOut`]s (materialized into fresh values the callee's frame consumes), the
+    /// result returns as the neutral deep [`NativeValue`] view — no fragment compilation per
+    /// call, so a host loop (a game engine's `update(dt)`) pays lookup + call, not a compile.
+    /// Anything the callee printed rides in the returned [`SessionOutput`]; a panic inside it
+    /// comes back as [`CallError::Aborted`] with the traceback, the session intact.
+    ///
+    /// [`NativeOut`]: noeta_stdlib::NativeOut
+    /// [`NativeValue`]: noeta_stdlib::NativeValue
+    pub fn call_by_name(
+        &mut self,
+        name: &str,
+        args: Vec<noeta_stdlib::NativeOut>,
+    ) -> Result<(noeta_stdlib::NativeValue, SessionOutput), CallError> {
+        let args = args.into_iter().map(EmbedArg::Value).collect();
+        let (result, out) = self.call_internal(name, args, false)?;
+        match result {
+            CallResult::Value(v) => Ok((v, out)),
+            CallResult::Handle(_) => unreachable!("retain_result was false"),
+        }
+    }
+
+    /// Call `name` with a mix of marshalled values and handles, returning the deep result value
+    /// (server-hmr F3): the handle-argument twin of [`Self::call_by_name`].
+    pub fn call_mixed(
+        &mut self,
+        name: &str,
+        args: Vec<EmbedArg>,
+    ) -> Result<(noeta_stdlib::NativeValue, SessionOutput), CallError> {
+        let (result, out) = self.call_internal(name, args, false)?;
+        match result {
+            CallResult::Value(v) => Ok((v, out)),
+            CallResult::Handle(_) => unreachable!("retain_result was false"),
+        }
+    }
+
+    /// Call `name`, **retaining** its result as an embed handle (server-hmr F3) — the host keeps
+    /// the live value across frames without marshalling it out, and passes it back via
+    /// [`EmbedArg::Handle`]. Read a handle's current value with [`Self::read_handle`]; free it with
+    /// [`Self::release_handle`] (a forgotten handle reclaims at teardown). Arguments may mix
+    /// marshalled values and handles.
+    pub fn call_retaining(
+        &mut self,
+        name: &str,
+        args: Vec<EmbedArg>,
+    ) -> Result<(EmbedHandle, SessionOutput), CallError> {
+        let (result, out) = self.call_internal(name, args, true)?;
+        match result {
+            CallResult::Handle(h) => Ok((h, out)),
+            CallResult::Value(_) => unreachable!("retain_result was true"),
+        }
+    }
+
+    fn call_internal(
+        &mut self,
+        name: &str,
+        args: Vec<EmbedArg>,
+        retain_result: bool,
+    ) -> Result<(CallResult, SessionOutput), CallError> {
+        let Some(slot) = self.compiler.global_slots().get(name).copied() else {
+            return Err(CallError::NoSuchFunction(name.to_string()));
+        };
+        let module = self
+            .compiler
+            .extend(&empty_program())
+            .expect("an empty program compiles");
+        let mut state = self.state.take().expect("state present between entries");
+        state.sync_to(&module);
+        noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+        let mut vm = Vm::load_seeded(&module, state);
+        let callee = vm.globals[slot as usize];
+        if callee.is_unbound() {
+            self.state = Some(vm.into_state());
+            return Err(CallError::NoSuchFunction(name.to_string()));
+        }
+        // Materialize each argument: a marshalled value is built fresh; a handle's stored value is
+        // read and retained (`+1`) so the callee's frame consumes its own reference and the
+        // host's handle survives.
+        let arg_values: Vec<Value> = args
+            .into_iter()
+            .map(|a| match a {
+                EmbedArg::Value(out) => crate::values::materialize_native(out),
+                EmbedArg::Handle(h) => {
+                    let v = vm.embed_handles[h.0 as usize].expect("a live embed handle");
+                    retain(v);
+                    v
+                }
+            })
+            .collect();
+        let outcome = vm.call_value(callee, arg_values, Span::new(0, 0));
+        let result = match outcome {
+            Ok(v) if retain_result => Some(CallResult::Handle(vm.embed_handle_store(v))),
+            Ok(v) => {
+                let native = v.to_native_deep();
+                release(v);
+                Some(CallResult::Value(native))
+            }
+            Err(_) => None,
+        };
+        let output = SessionOutput {
+            stdout: std::mem::take(&mut vm.stdout),
+            diagnostics: std::mem::take(&mut vm.diagnostics),
+            value: None,
+            trace: std::mem::take(&mut vm.abort_trace),
+        };
+        self.state = Some(vm.into_state());
+        match result {
+            Some(r) => Ok((r, output)),
+            None => Err(CallError::Aborted(Box::new(output))),
+        }
+    }
+
+    /// The current value behind an embed handle, as the neutral deep view (F3). Reading does not
+    /// consume the handle.
+    pub fn read_handle(&mut self, handle: EmbedHandle) -> noeta_stdlib::NativeValue {
+        let state = self.state.as_ref().expect("state present between entries");
+        state.embed_handles[handle.0 as usize]
+            .expect("a live embed handle")
+            .to_native_deep()
+    }
+
+    /// Release an embed handle (F3): drop the host's reference, destructor-aware. Its slot is
+    /// reused by a later retain. Releasing a handle twice is a misuse the debug build catches.
+    pub fn release_handle(&mut self, handle: EmbedHandle) {
+        let module = self
+            .compiler
+            .extend(&empty_program())
+            .expect("an empty program compiles");
+        let mut state = self.state.take().expect("state present between entries");
+        state.sync_to(&module);
+        let mut vm = Vm::load_seeded(&module, state);
+        vm.embed_handle_release(handle);
+        self.state = Some(vm.into_state());
     }
 
     /// Run a binding's destructor now and unbind it (`:drop` / `:free`), returning whether a binding
@@ -428,6 +704,8 @@ impl VmSession {
         let (host, executor) = (self.factory)();
         self.compiler = SessionCompiler::new();
         self.state = Some(SessionState::fresh(host, executor));
+        // The teardown above retired the old owner; the fresh state is a new one (bugfix).
+        crate::session_owner_enter();
     }
 
     /// Tear the session's runtime down, bringing heap residency to zero (destructors fire on the live
@@ -437,6 +715,11 @@ impl VmSession {
         let Some(mut state) = self.state.take() else {
             return;
         };
+        // Retire this session's heap-owner *before* `Vm::teardown` (bugfix): so the remaining count
+        // the sweep gates on reflects only the SIBLING sessions still alive on this thread. If a
+        // sibling is alive, the sweep is skipped (its live objects must survive); this session's own
+        // cycle garbage is reaped by the last owner's teardown instead — never double-freed.
+        crate::session_owner_exit();
         // Snapshot a module with the accumulated types so each global's destructor resolves during
         // teardown, then run the VM's end-of-program teardown on it (globals destroyed in reverse
         // binding order, cycles reaped, channels drained, reactive graph cleared).
@@ -498,6 +781,16 @@ fn rewrite_trailing_expr(program: &Program) -> (Program, bool) {
             )
         }
         _ => (program.clone(), false),
+    }
+}
+
+/// The binding names a top-level statement (re)binds — the globals a re-running swap overwrites.
+/// Shared with the live-VM hot path ([`Vm::apply_pending_hotswap`]).
+pub(crate) fn binding_targets(stmt: &Stmt) -> Vec<&str> {
+    match stmt {
+        Stmt::Binding { name, .. } => vec![name.as_str()],
+        Stmt::Destructure { targets, .. } => targets.iter().map(|(n, _)| n.as_str()).collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -607,6 +900,48 @@ mod tests {
             noeta_value::live_count(),
             before,
             "teardown returns residency to the pre-session baseline"
+        );
+    }
+
+    /// Two sessions LIVE on ONE thread share the thread-local value heap. The backup mark-sweep in
+    /// [`Vm::teardown`] reclaims everything unreachable from the tearing-down VM's roots — so under
+    /// the bug it freed the *sibling* session's live objects (a cross-session double-free / heap
+    /// corruption at the sibling's own teardown). The fix runs the destructive sweeps only for the
+    /// LAST owner on the thread. This pins: (a) tearing `a` down while `b` is alive does not corrupt
+    /// `b` (it still runs), and (b) residency returns to the baseline once the last owner tears down
+    /// (an earlier session's cycle garbage is reaped then, never double-freed).
+    #[test]
+    fn two_sessions_sharing_a_thread_tear_down_without_cross_session_free() {
+        let before = noeta_value::live_count();
+        let mut a = sandbox_session();
+        let mut b = sandbox_session();
+        // Each session binds a native-module value AND a heap global (a list) into its persistent
+        // state — the live objects a sibling's sweep wrongly reclaimed under the bug.
+        assert_eq!(
+            eval(
+                &mut a,
+                "use std.{math}\nmut xs = [\"a\"]\necho math.abs(-5);"
+            ),
+            "5\n"
+        );
+        assert_eq!(
+            eval(
+                &mut b,
+                "use std.{math}\nmut ys = [\"b\"]\necho math.abs(-9);"
+            ),
+            "9\n"
+        );
+        // `a` is NOT the last owner (b alive), so its teardown must SKIP the destructive sweep — not
+        // free b's live `math`/`ys`. Under the bug this corrupted the heap.
+        a.teardown();
+        // b's objects survived a's teardown — it still resolves and dispatches its native module.
+        assert_eq!(eval(&mut b, "echo math.abs(-3);"), "3\n");
+        // b is the last owner: its teardown reaps everything (including a's deferred cycle garbage).
+        b.teardown();
+        assert_eq!(
+            noeta_value::live_count(),
+            before,
+            "residency returns to baseline once the last session on the thread tears down"
         );
     }
 

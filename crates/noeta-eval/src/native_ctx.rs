@@ -535,6 +535,10 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
+        // Bound before the closures so they capture the registry, not `self` (instance-registry
+        // IR3) — the tree-walker twin of the VM's binding. The `static_dispatch_ctx_method` fast
+        // path stays on the global; only the dyn-table fallback consults `reg`.
+        let reg = self.reg();
         self.ctx_receiver_call(
             recv,
             args,
@@ -546,14 +550,10 @@ impl Interpreter {
                 noeta_stdlib::registry::static_dispatch_ctx_method(
                     type_name, method, ctx, 0, arg_slots,
                 )
-                .unwrap_or_else(|| {
-                    noeta_stdlib::registry::dispatch_ctx_method(
-                        type_name, method, ctx, 0, arg_slots,
-                    )
-                })
+                .unwrap_or_else(|| reg.dispatch_ctx_method(type_name, method, ctx, 0, arg_slots))
             },
             || {
-                noeta_stdlib::registry::find_type_ctx_method(type_name, method)
+                reg.find_type_ctx_method(type_name, method)
                     .map(|f| f.ret)
                     .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit))
             },
@@ -571,18 +571,16 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
+        // Bound before the closures so they capture the registry, not `self` (IR3).
+        let reg = self.reg();
         self.ctx_receiver_call(
             recv,
             args,
             span,
             &format!("{module}::{bundle}.{method}"),
-            |ctx, arg_slots| {
-                noeta_stdlib::registry::dispatch_bundle_method(
-                    module, bundle, method, ctx, 0, arg_slots,
-                )
-            },
+            |ctx, arg_slots| reg.dispatch_bundle_method(module, bundle, method, ctx, 0, arg_slots),
             || {
-                noeta_stdlib::registry::find_bundle(module, bundle)
+                reg.find_bundle(module, bundle)
                     .and_then(|b| b.method(method))
                     .map(|m| m.sig.ret)
                     .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit))
@@ -660,13 +658,14 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
+        // Bound before `ctx` takes `&mut self` (IR3): `reg` is `&'static`, so it survives the
+        // borrow and the fallback dispatch routes through this interpreter's registry.
+        let reg = self.reg();
         let mut ctx = EvalCtx::new(self, args, span);
         let arg_slots: Vec<Slot> = (0..args.len() as Slot).collect();
         let outcome =
             noeta_stdlib::registry::static_dispatch_ctx(module, func, &mut ctx, &arg_slots)
-                .unwrap_or_else(|| {
-                    noeta_stdlib::registry::dispatch_ctx(module, func, &mut ctx, &arg_slots)
-                });
+                .unwrap_or_else(|| reg.dispatch_ctx(module, func, &mut ctx, &arg_slots));
         match outcome {
             Ok(CtxOut::Slot(slot)) => {
                 let result = ctx.take(slot);
@@ -699,7 +698,8 @@ impl Interpreter {
             }
             Ok(CtxOut::Out(out)) => {
                 drop(ctx);
-                let ret = noeta_stdlib::registry::find_ctx_function(module, func)
+                let ret = reg
+                    .find_ctx_function(module, func)
                     .map(|f| f.ret)
                     .unwrap_or(noeta_stdlib::RetTy::Concrete(noeta_stdlib::SigType::Unit));
                 Ok(materialize_ext(out, ret, args))

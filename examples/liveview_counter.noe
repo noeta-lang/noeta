@@ -1,0 +1,71 @@
+// LiveView counter — the server-hmr showcase app: server-side reactive state, pushed to the
+// browser as minimal diffs over a websocket, rendered by the bundled ~50-line client shim.
+//
+//   noeta serve examples/liveview_counter.noe
+//   # then open http://localhost:8080
+//
+// Run it with --watch and edit `double`'s formula or the page: the server hot-swaps, `count`
+// survives (reactive state is the preserved unit), and the browser reconnects to fresh state.
+use std.http.server
+use std.http.{Request, Response, Socket}
+use std.reactive.{signal, computed, view}
+use std.json
+
+count = signal(0)
+double = computed(fn() {
+    return count.get() * 2
+})
+
+fn page(): string {
+    return `
+        <!doctype html>
+        <html><head><meta charset="utf-8"><title>Noeta LiveView</title></head><body>
+        <h1>Noeta LiveView counter</h1>
+        <p>count: <b data-live="count">…</b> &nbsp; double: <b data-live="double">…</b></p>
+        <p><button data-live-click="increment">+1</button>
+        <button data-live-click="reset">reset</button></p>
+        <script src="/live.js"></script>
+        </body></html>
+    `
+}
+
+async fn session(sock: Socket): bool {
+    v = view()
+    v.expose("count", count)
+    v.expose("double", double)
+    sock.send(v.snapshot())
+    mut going = true
+    while going {
+        msg = sock.recv().await
+        if msg == none {
+            going = false
+        } else {
+            evt = json.parse(msg ?? "{}")
+            if evt["type"] == "event" {
+                if evt["name"] == "increment" {
+                    count.update(fn(n) {
+                        return n + 1
+                    })
+                }
+                if evt["name"] == "reset" {
+                    count.set(0)
+                }
+            }
+            patch = v.diff() ?? ""
+            if patch != "" {
+                sock.send(patch)
+            }
+        }
+    }
+    return true
+}
+
+fn fetch(req: Request): Response {
+    if req.path() == "/ws" {
+        return server.websocket(session)
+    }
+    if req.path() == "/live.js" {
+        return server.response(200, server.liveview_js(), {"content-type": "application/javascript"})
+    }
+    return server.response(200, page(), {"content-type": "text/html"})
+}

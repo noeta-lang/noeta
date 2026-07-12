@@ -1,0 +1,28 @@
+[package]
+name = "noeta-embed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# The embedding API (server-hmr E0): a host process — a game engine's scripting layer being the
+# canonical consumer — drives a live Noeta session from its own loop: load, call by name, hot-swap
+# on file change. DELIBERATELY UNSTABLE (0.x): the surface adapts to growing needs until a real
+# engine integration has exercised it; no ABI freeze, breaking changes allowed between minors.
+
+[dependencies]
+noeta-vm = { workspace = true }
+noeta-compiler = { workspace = true }
+noeta-check = { workspace = true }
+noeta-parser = { workspace = true }
+noeta-lexer = { workspace = true }
+noeta-span = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-ast = { workspace = true }
+noeta-stdlib = { workspace = true }
+noeta-native = { workspace = true }
+noeta-runtime = { workspace = true }
+
+[lints]
+workspace = true
