@@ -148,7 +148,15 @@ pub fn lower_with_sites(
     program: &AstProgram,
     sites: LoweringSites,
 ) -> Result<Program, Unsupported> {
-    lower_with_sites_opts(program, sites, false)
+    // Resolve native names against the process-global default registry (instance-registry IR5) —
+    // the reference/REPL/conformance paths that call this are single-registry. An embedding host
+    // with its own extension set lowers through `lower_with_sites_opts` with its registry.
+    lower_with_sites_opts(
+        program,
+        sites,
+        false,
+        noeta_stdlib::registry::default_seeded(),
+    )
 }
 
 /// As [`lower_with_sites`], but with `real_isolates` selecting the isolate lowering (isolates I.4b):
@@ -161,13 +169,18 @@ pub fn lower_with_sites_opts(
     program: &AstProgram,
     sites: LoweringSites,
     real_isolates: bool,
+    // The extension registry native-type import narrowing resolves against (instance-registry IR5):
+    // `collect_type_aliases` reads it so `is`/`as`/`type_of` on an imported extern type lower to the
+    // right qualified identity. The production/CLI path passes the process-global default; an
+    // embed session threads its own assembled set, so a session's compile honors its extensions.
+    registry: &'static noeta_stdlib::registry::Registry,
 ) -> Result<Program, Unsupported> {
     let mut lowerer = Lowerer {
         temps: 0,
         sites,
         real_isolates,
         synth_step_name: None,
-        type_aliases: collect_type_aliases(program),
+        type_aliases: collect_type_aliases(program, registry),
     };
     let top = lowerer.lower_body(&program.stmts)?;
     Ok(Program {
@@ -212,7 +225,10 @@ struct Lowerer<'a> {
 /// Build the narrowing-identity map (see [`Lowerer::type_aliases`]) from a program's `use`
 /// statements. A native-type import resolves to its qualified identity via the registry; a renamed
 /// user-type import resolves to its leaf name.
-fn collect_type_aliases(program: &AstProgram) -> HashMap<String, String> {
+fn collect_type_aliases(
+    program: &AstProgram,
+    registry: &'static noeta_stdlib::registry::Registry,
+) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for stmt in &program.stmts {
         let AstStmt::Use { path, names, .. } = stmt else {
@@ -222,7 +238,7 @@ fn collect_type_aliases(program: &AstProgram) -> HashMap<String, String> {
         for n in names {
             let local = n.alias.clone().unwrap_or_else(|| n.name.clone());
             let qualified = format!("{prefix}.{}", n.name);
-            if let Some(ext) = noeta_stdlib::registry::find_type_qualified(&qualified) {
+            if let Some(ext) = registry.find_type_qualified(&qualified) {
                 // A native type: narrows against its qualified identity, whichever local name it
                 // was bound to.
                 map.insert(local, ext.qualified());

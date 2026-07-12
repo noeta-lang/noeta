@@ -50,9 +50,12 @@
 //! [`Session::new`] runs on the deterministic sandbox host (in-memory fs, logical clock, seeded
 //! randomness) — right for tests and for engines that expose their world through their own
 //! extension instead. [`Session::builder`] swaps in the real host (real disk/env/network) or a
-//! custom [`Host`](noeta_stdlib::Host) implementation. Native extensions register
-//! **per process** via [`install_extensions`] (the registry is process-global; instance-scoped
-//! registries are a known growth point).
+//! custom [`Host`](noeta_stdlib::Host) implementation. Native extensions register either **per
+//! process** via [`install_extensions`] (the shared default registry — right for a host with one
+//! fixed extension set) or **per session** via [`Builder::with_extensions`] (instance-registry IR5):
+//! a session with its own assembled registry resolves native names — from type-check through runtime
+//! dispatch — against *its* extensions, so two sessions in one process can run different sets. A
+//! session's value heap is thread-local, so concurrent sessions run one-per-thread (like isolates).
 
 use noeta_compiler::hotswap::{SwapDiff, diff_programs};
 use noeta_stdlib::{NativeOut, NativeValue, Scalar};
@@ -287,9 +290,27 @@ pub enum HostKind {
 }
 
 /// Configures a [`Session`] before load.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Builder {
     host: HostKind,
+    /// This session's **own** extension units (instance-registry IR5). Empty ⇒ the session resolves
+    /// native names against the process-global default (the same registry [`install_extensions`]
+    /// seeds); non-empty ⇒ [`Builder::load`] assembles a private registry (std + these units) and
+    /// threads it through the checker, the compiler, and the VM — so two sessions in one process can
+    /// run different extension sets. See [`Builder::with_extensions`].
+    extensions: Vec<&'static (dyn noeta_native::Extension + Sync)>,
+}
+
+impl std::fmt::Debug for Builder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Builder")
+            .field("host", &self.host)
+            .field(
+                "extensions",
+                &self.extensions.iter().map(|e| e.name()).collect::<Vec<_>>(),
+            )
+            .finish()
+    }
 }
 
 impl Builder {
@@ -299,16 +320,53 @@ impl Builder {
         self
     }
 
+    /// Give **this session** its own extension set (instance-registry IR5), instead of the
+    /// process-global one [`install_extensions`] seeds. The session's registry is `std` ∪ `units`,
+    /// assembled privately and threaded through its checker, compiler, and VM — so a host can run two
+    /// sessions with *different* extensions in the same process (a sandboxed plugin vs. a trusted
+    /// one, an old vs. a new API surface). Repeated calls accumulate. Uniqueness still holds: a
+    /// duplicate module identity across `units` (or vs. std) panics at [`Builder::load`], as at
+    /// process-global install.
+    pub fn with_extensions(
+        mut self,
+        units: Vec<&'static (dyn noeta_native::Extension + Sync)>,
+    ) -> Builder {
+        self.extensions.extend(units);
+        self
+    }
+
     /// Load `source` and run its top level; the session is live afterwards.
     pub fn load(self, source: &str) -> Result<Session, Error> {
         let program = parse(source)?;
-        let checked = noeta_check::check_all(&program);
+        // A session with its own extension set assembles a private registry (leaked to `'static`,
+        // matching the `'static` extension-data model the whole pipeline assumes) and threads it
+        // through every stage; otherwise it rides the process-global default (`None`). IR5.
+        let registry: Option<&'static noeta_stdlib::registry::Registry> = if self.extensions.is_empty()
+        {
+            None
+        } else {
+            Some(Box::leak(Box::new(
+                noeta_stdlib::registry::assemble_with_extras(&self.extensions),
+            )))
+        };
+        let checked = match registry {
+            Some(reg) => noeta_check::check_all_with_registry(&program, reg),
+            None => noeta_check::check_all(&program),
+        };
         if !checked.diagnostics.is_empty() {
             return Err(Error::Check(render_all(source, &checked.diagnostics)));
         }
-        let (module, compiler) =
-            noeta_compiler::compile_with_sites_session(&program, checked.sites, false, false)
-                .map_err(|u| Error::Check(vec![u.reason]))?;
+        let (module, compiler) = match registry {
+            Some(reg) => noeta_compiler::compile_with_sites_session_with_registry(
+                &program,
+                checked.sites,
+                false,
+                false,
+                reg,
+            ),
+            None => noeta_compiler::compile_with_sites_session(&program, checked.sites, false, false),
+        }
+        .map_err(|u| Error::Check(vec![u.reason]))?;
         let host = self.host;
         let factory: noeta_vm::HostFactory = Box::new(move || match host {
             HostKind::Sandbox => (
@@ -323,7 +381,8 @@ impl Builder {
                 (Box::new(real_host), Box::new(executor))
             }
         });
-        let (session, out) = VmSession::adopted(&module, compiler, factory);
+        let (session, out) =
+            VmSession::adopted_with_registry(&module, compiler, factory, registry);
         if !out.trace.is_empty() {
             return Err(panic_error(out));
         }

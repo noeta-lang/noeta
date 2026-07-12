@@ -60,6 +60,11 @@ pub(crate) struct SessionState {
     type_reprs: Vec<Rc<noeta_ast::reflect::TypeRepr>>,
     host: Box<dyn Host>,
     executor: Box<dyn Executor>,
+    /// The extension registry every entry's `Vm` resolves native names against (instance-registry
+    /// IR5), round-tripped through the session so every entry — the launch run, each REPL/eval
+    /// fragment, each hot-swap — shares it. `None` (the default) falls back to the process-global
+    /// default in `Vm::reg`; an embed session that assembled its own extension set installs it here.
+    registry: Option<&'static noeta_stdlib::registry::Registry>,
 }
 
 impl SessionState {
@@ -81,6 +86,7 @@ impl SessionState {
             type_reprs: Vec::new(),
             host,
             executor,
+            registry: None,
         }
     }
 
@@ -134,6 +140,7 @@ impl<'m> Vm<'m> {
     /// interactive prompt, and it keeps `load_seeded` in lockstep with `load`'s field init).
     fn load_seeded(module: &'m Module, state: SessionState) -> Vm<'m> {
         let mut vm = Vm::load(module, state.host, state.executor);
+        vm.registry = state.registry;
         vm.globals = state.globals;
         vm.global_order = state.global_order;
         vm.channels = state.channels;
@@ -177,6 +184,7 @@ impl<'m> Vm<'m> {
             type_reprs: self.type_reprs,
             host: self.host,
             executor: self.executor,
+            registry: self.registry,
         }
     }
 }
@@ -280,8 +288,24 @@ impl VmSession {
         compiler: SessionCompiler,
         factory: HostFactory,
     ) -> (VmSession, SessionOutput) {
+        VmSession::adopted_with_registry(module, compiler, factory, None)
+    }
+
+    /// As [`VmSession::adopted`], but resolving native names against an explicit `registry`
+    /// (instance-registry IR5) — the seam an embedding host with its own assembled extension set
+    /// threads in so **every** entry of the session (the launch run and each later fragment /
+    /// hot-swap) dispatches against *its* extensions. The registry rides in the persistent
+    /// [`SessionState`], so it survives the state's round-trip through every entry. `None` keeps the
+    /// session on the process-global default — exactly what [`VmSession::adopted`] passes.
+    pub fn adopted_with_registry(
+        module: &Module,
+        compiler: SessionCompiler,
+        factory: HostFactory,
+        registry: Option<&'static noeta_stdlib::registry::Registry>,
+    ) -> (VmSession, SessionOutput) {
         let (host, executor) = factory();
         let mut state = SessionState::fresh(host, executor);
+        state.registry = registry;
         state.sync_to(module);
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
         let mut vm = Vm::load_seeded(module, state);

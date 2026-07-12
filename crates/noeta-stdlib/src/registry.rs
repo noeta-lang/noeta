@@ -490,6 +490,20 @@ pub fn install_with_extras(extra: &[&'static (dyn Extension + Sync)]) {
     }
 }
 
+/// Assemble a **standalone** registry — the std units plus `extra` — **without** touching the
+/// process-global default (instance-registry IR5). This is the per-session assembly seam: an
+/// embedding host that wants a session with its own extension set builds one here and threads it
+/// through the checker / compiler / VM, so two sessions with different extension sets can coexist in
+/// one process. (The uniqueness sweep in [`noeta_native::registry::Registry::new`] still applies —
+/// a duplicate module identity across `extra` and std panics, as at install time.)
+pub fn assemble_with_extras(
+    extra: &[&'static (dyn Extension + Sync)],
+) -> noeta_native::registry::Registry {
+    let mut units = std_units();
+    units.extend_from_slice(extra);
+    noeta_native::registry::Registry::new(units)
+}
+
 /// All registered extensions.
 pub fn extensions() -> &'static [&'static (dyn Extension + Sync)] {
     ensure();

@@ -101,10 +101,14 @@ fn qualified_module(path: &[String], name: &str) -> String {
 /// Whether `use <path>.{name}` imports a native module (`use std.{json}`, nested `use std.http.client`)
 /// rather than a sibling-module declaration. Such names are bound as global values, not opaque types.
 /// The module's identity is the full root-qualified path (so `std.http` ≠ a third-party `guzzle.http`).
-fn is_native_module(path: &[String], name: &str) -> bool {
+fn is_native_module(
+    reg: &noeta_stdlib::registry::Registry,
+    path: &[String],
+    name: &str,
+) -> bool {
     !path.is_empty()
-        && noeta_stdlib::registry::is_extension_root(&path[0])
-        && noeta_stdlib::registry::find_module(&qualified_module(path, name)).is_some()
+        && reg.is_extension_root(&path[0])
+        && reg.find_module(&qualified_module(path, name)).is_some()
 }
 
 /// For a selective member import `use <root>.<mod>.<name>` — a two-segment path under an extension
@@ -112,10 +116,13 @@ fn is_native_module(path: &[String], name: &str) -> bool {
 /// (`"std.math"`). Each imported `<name>` then binds as a bare global holding a [`Const::ModuleFn`],
 /// called through the same `call_native_module` path as `<mod>.<name>(...)`. `None` for a plain or
 /// nested module import, or a non-extension path.
-fn selective_import_module(path: &[String]) -> Option<String> {
+fn selective_import_module(
+    reg: &noeta_stdlib::registry::Registry,
+    path: &[String],
+) -> Option<String> {
     if path.len() >= 2
-        && noeta_stdlib::registry::is_extension_root(&path[0])
-        && noeta_stdlib::registry::find_module(&path.join(".")).is_some()
+        && reg.is_extension_root(&path[0])
+        && reg.find_module(&path.join(".")).is_some()
     {
         Some(path.join("."))
     } else {
@@ -175,6 +182,8 @@ pub fn compile_with_sites(
         destruct_reachable,
         real_isolates,
         debug,
+        // The CLI/salsa/differential compile path is single-registry — the process-global default.
+        noeta_stdlib::registry::default_seeded(),
     )
 }
 
@@ -189,6 +198,7 @@ fn compile_inner(
     destruct_reachable: Vec<String>,
     real_isolates: bool,
     debug: bool,
+    registry: &'static noeta_stdlib::registry::Registry,
 ) -> Result<Module, Unsupported> {
     let mut reflection = noeta_ast::reflect::build(program);
     // Embed the installed extensions' attribute shapes (tier-extensions port): `attributes_of`
@@ -196,7 +206,7 @@ fn compile_inner(
     // registry now, not the AST.
     noeta_check::extend_reflection(&mut reflection);
     let (module, map_packed_sites) =
-        compile_to_mc(program, sites, relevance, real_isolates, debug)?;
+        compile_to_mc(program, sites, relevance, real_isolates, debug, registry)?;
     Ok(Module {
         protos: module.protos,
         shapes: module.shapes,
@@ -231,6 +241,28 @@ pub fn compile_with_sites_session(
     real_isolates: bool,
     debug: bool,
 ) -> Result<(Module, SessionCompiler), Unsupported> {
+    // The default (CLI/REPL/dap) session compile is single-registry — the process-global default.
+    compile_with_sites_session_with_registry(
+        program,
+        sites,
+        real_isolates,
+        debug,
+        noeta_stdlib::registry::default_seeded(),
+    )
+}
+
+/// As [`compile_with_sites_session`], but resolving native names against an explicit `registry`
+/// (instance-registry IR5) — the seam an embedding host with its own assembled extension set uses so
+/// its session's compile binds `use` imports and narrowing targets against *its* extensions, not the
+/// process-global default. The default entry point above passes `default_seeded()`, so every CLI /
+/// REPL / debug-adapter caller is unchanged.
+pub fn compile_with_sites_session_with_registry(
+    program: &Program,
+    sites: noeta_check::Sites,
+    real_isolates: bool,
+    debug: bool,
+    registry: &'static noeta_stdlib::registry::Registry,
+) -> Result<(Module, SessionCompiler), Unsupported> {
     let relevance = Some(passes_relevance(&sites.destructor_relevance));
     let destruct_reachable: Vec<String> = sites
         .destructor_relevance
@@ -243,7 +275,8 @@ pub fn compile_with_sites_session(
     // materializes `#[Skip]`/`#[Bench]`/… from the artifact, and their declarations live in the
     // registry now, not the AST.
     noeta_check::extend_reflection(&mut reflection);
-    let (mc, map_packed_sites) = compile_to_mc(program, sites, relevance, real_isolates, debug)?;
+    let (mc, map_packed_sites) =
+        compile_to_mc(program, sites, relevance, real_isolates, debug, registry)?;
     let session = SessionCompiler {
         mc,
         // The launch compile's own map-packed pairs join the session accumulation: a program
@@ -270,6 +303,10 @@ fn compile_to_mc(
     // Whether to emit per-prototype debug info + pin named locals through coalescing (see the public
     // `compile_with_sites` doc). Threaded onto `ModuleCompiler` and read at `into_chunk`/`declare_local`.
     debug: bool,
+    // The extension registry `use`-import lowering and native-type narrowing resolve against
+    // (instance-registry IR5). The production/CLI path passes the process-global default; an embed
+    // session threads its own assembled set. Stored on the `ModuleCompiler` and passed to lowering.
+    registry: &'static noeta_stdlib::registry::Registry,
 ) -> Result<(ModuleCompiler, Vec<(Span, u32)>), Unsupported> {
     let noeta_check::Sites {
         type_of_sites,
@@ -310,6 +347,7 @@ fn compile_to_mc(
             bundle_call_sites: &bundle_call_sites,
         },
         real_isolates,
+        registry,
     )
     .map_err(|u| Unsupported {
         reason: format!("not yet lowered to the Core IR: {}", u.feature),
@@ -342,6 +380,7 @@ fn compile_to_mc(
         global_names: Vec::new(),
         global_slots: HashMap::new(),
         debug,
+        registry,
     };
     // Type registration reads the surface declarations (shapes, derives, the method/destructor
     // proto table) the IR carries verbatim; bodies are lowered from the IR.
@@ -441,6 +480,9 @@ impl SessionCompiler {
             global_names: Vec::new(),
             global_slots: HashMap::new(),
             debug: false,
+            // A fresh REPL session resolves native names against the process-global default; an
+            // embed session that assembled its own set installs it explicitly (instance-registry IR5).
+            registry: noeta_stdlib::registry::default_seeded(),
         };
         SessionCompiler {
             mc,
@@ -500,6 +542,9 @@ impl SessionCompiler {
                 },
                 // The REPL keeps cooperative isolates, exactly like the checkerless path.
                 false,
+                // The session's own registry (instance-registry IR5) — the default for a REPL
+                // session, an embed session's own set when it installed one.
+                self.mc.registry,
             ),
         }
         .map_err(|u| Unsupported {
@@ -743,6 +788,12 @@ struct ModuleCompiler {
     /// production/differential compile leaves this `false`, so no debug info is produced and
     /// coalescing is unconstrained (goldens/benchmarks are untouched).
     debug: bool,
+    /// The extension registry name resolution consults during compilation (instance-registry IR5):
+    /// `use` import lowering — `is_native_module` / `selective_import_module` / the module-function
+    /// binding — resolves against it, so a session compiling with its own extension set binds
+    /// imports to *its* registry. The production/CLI path holds the process-global default; an embed
+    /// session threads its own assembled set. Returns `&'static`, so it outlives any borrow.
+    registry: &'static noeta_stdlib::registry::Registry,
 }
 
 impl ModuleCompiler {
@@ -796,9 +847,9 @@ impl ModuleCompiler {
                 noeta_ast::Stmt::Use { path, names, .. } => {
                     // A plain module import (`use std.{math}`) binds the module name; a selective
                     // member import (`use std.math.sqrt`) binds each member as a bare global.
-                    let selective = selective_import_module(path).is_some();
+                    let selective = selective_import_module(self.registry, path).is_some();
                     for imported in names {
-                        if is_native_module(path, &imported.name) || selective {
+                        if is_native_module(self.registry, path, &imported.name) || selective {
                             self.module_globals.insert(imported.name.clone(), false);
                         }
                     }
@@ -969,9 +1020,9 @@ impl ModuleCompiler {
                     // A `use std.{json}` native module — or a selective member import
                     // (`use std.math.sqrt`) — resolves as a global value bound at the `use` site,
                     // not an opaque type, so neither is registered here.
-                    let selective = selective_import_module(path).is_some();
+                    let selective = selective_import_module(self.registry, path).is_some();
                     for imported in names {
-                        if is_native_module(path, &imported.name) || selective {
+                        if is_native_module(self.registry, path, &imported.name) || selective {
                             continue;
                         }
                         self.types.insert(imported.name.clone(), TypeInfo::Opaque);
@@ -1905,9 +1956,9 @@ impl<'m> FnCompiler<'m> {
             Decl::Fn { name, func, .. } => self.declare_fn(name, func),
             Decl::Class(_) | Decl::Enum(_) | Decl::Struct(_) => Ok(()),
             Decl::Use { path, names, .. } => {
-                let selective = selective_import_module(path);
+                let selective = selective_import_module(self.module.registry, path);
                 for imported in names {
-                    if is_native_module(path, &imported.name) {
+                    if is_native_module(self.module.registry, path, &imported.name) {
                         // The bound global keeps the imported name (the last segment); the module
                         // *value* carries the root-qualified identity so its member calls dispatch
                         // to the right module (`std.http.client` ≠ a third-party `guzzle.http.client`).
@@ -1918,7 +1969,7 @@ impl<'m> FnCompiler<'m> {
                         let global = self.module.intern_global(&imported.name);
                         self.code.push(Op::StoreGlobal { global, src: value });
                     } else if let Some(module) = &selective
-                        && noeta_stdlib::registry::is_module_function(module, &imported.name)
+                        && self.module.registry.is_module_function(module, &imported.name)
                     {
                         // `use std.math.sqrt` — bind `sqrt` to a `(std.math, sqrt)` module-function
                         // value. An unknown member is left unbound (the checker reports it); a bare
