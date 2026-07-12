@@ -139,14 +139,18 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             // methods resolve through their type, so `q_fn` (shared with methods) never touches the
             // name, and the rewrite lives here on the `Stmt::Fn` arm only.
             visit(&mut decl.name);
-            // A `@tier(…, config: T)` declaration's config names a type in this module — visit it
-            // like any type reference, so a consumer's activation stamps (and E0051's
-            // attribute-existence check) resolve the same qualified attribute the struct became, and
-            // `referenced_names` drags the config struct into the merged program.
-            if let Some(tier) = &mut decl.tier
-                && let Some((config, _)) = &mut tier.config
-            {
-                visit(config);
+            // A `@tier(…, config: T)` / `@tier(…, expr: T)` declaration's type names a type in this
+            // module — visit it like any type reference, so it qualifies in lockstep with the
+            // handler's return (`q_fn` below): else E0051's expr-tier return-match compares `T`
+            // against `mod.T` and rejects a valid handler. Visiting also lets `referenced_names`
+            // drag the type's declaration into the merged program (cross-module linker fix).
+            if let Some(tier) = &mut decl.tier {
+                if let Some((config, _)) = &mut tier.config {
+                    visit(config);
+                }
+                if let Some((expr, _)) = &mut tier.expr {
+                    visit(expr);
+                }
             }
             q_fn(decl, visit);
         }

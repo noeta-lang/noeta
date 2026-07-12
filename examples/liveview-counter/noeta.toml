@@ -1,0 +1,6 @@
+[package]
+name = "noeta/liveview-counter"
+version = "0.1.0"
+
+[dependencies]
+liveview = { path = "../liveview" }

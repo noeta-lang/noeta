@@ -1,0 +1,14 @@
+// An `@html { … }` expression-tier block whose tier is declared in a *sibling* module (expr-tiers
+// ∘ namespaced-types): importing the handler `render` brings its `@tier(html, …)` declaration into
+// scope, so the block resolves and desugars to `Tmpl.render(statics, holes)`. Verifies the tier's
+// `expr:` type qualifies in lockstep with the handler's return type, and that the handler's
+// internal `wrap` helper is dragged into the merged program.
+// expect: stdout "greeting:  hi [Ada]! "
+// expect: exit 0
+namespace App;
+
+use Tmpl.{render, Html};
+
+who = "Ada"
+doc = @html { hi ${who}! }
+echo "greeting: ${doc.text}"
