@@ -3319,6 +3319,17 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
+            // A native module-fn reference as a value (expr-tiers arc): load the same
+            // `Const::ModuleFn` a `use std.mod.fn` binding produces — a `Call` on it then dispatches
+            // to the native function, exactly like a call to an imported module fn.
+            Rvalue::ModuleFn { module, func, .. } => {
+                let k = self.add_const(Const::ModuleFn {
+                    module: module.clone(),
+                    func: func.clone(),
+                });
+                self.code.push(Op::LoadConst { dst, k });
+                Ok(())
+            }
             // A method-bundle call (kernel-methods K2): route baked by the checker; the receiver
             // and args are borrowed registers, exactly the ctx-method convention.
             Rvalue::BundleMethod {

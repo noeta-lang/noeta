@@ -480,6 +480,18 @@ pub fn find_ext_tier(name: &str) -> Option<&'static noeta_native::registry::ExtT
     noeta_native::registry::find_ext_tier(name)
 }
 
+/// Every installed extension's **verbatim-body** tier names — the text tiers (`doc` → markdown)
+/// and expression tiers whose `@<name> { … }` bodies the lexer must capture un-parsed. The
+/// front-end pipeline seeds `noeta_lexer::TextTiers` with these so a native tier's bodies capture
+/// even though no `.noe` file declares them (a program `@tier(…, text/expr)` is discovered by the
+/// lexer's own token scan instead).
+pub fn ext_verbatim_tier_names() -> Vec<&'static str> {
+    ext_tiers()
+        .filter(|t| t.text.is_some() || t.expr.is_some())
+        .map(|t| t.name)
+        .collect()
+}
+
 /// See [`noeta_native::registry::ext_attributes`].
 pub fn ext_attributes() -> impl Iterator<Item = &'static noeta_native::registry::ExtAttribute> {
     ensure();
@@ -3042,6 +3054,17 @@ const CORE_MODULES: &[ExtModule] = &[
         ctx_functions: crate::reactive::REACTIVE_CTX_FNS,
         ctx_dispatch: Some(|func, ctx, args| {
             crate::reactive::reactive_ctx_dispatch(func, ctx, args)
+        }),
+        ..ExtModule::DEFAULTS
+    },
+    // `template` (expr-tiers arc) — the native handler for the `@json` expression tier: takes the
+    // block's statics and hole closures, returns the rendered string. The dogfood proving a native
+    // package can ship an expression tier with a native handler.
+    ExtModule {
+        name: "template",
+        ctx_functions: crate::template::TEMPLATE_CTX_FNS,
+        ctx_dispatch: Some(|func, ctx, args| {
+            crate::template::template_ctx_dispatch(func, ctx, args)
         }),
         ..ExtModule::DEFAULTS
     },

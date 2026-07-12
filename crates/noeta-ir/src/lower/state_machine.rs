@@ -1035,6 +1035,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         // closures); leaves have no sub-expressions; `Await` is handled above.
         Expr::Closure { .. }
         | Expr::TierExpr { .. }
+        | Expr::NativeFnRef { .. }
         | Expr::Await { .. }
         | Expr::Str { .. }
         | Expr::Int { .. }

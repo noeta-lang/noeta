@@ -988,6 +988,19 @@ pub enum Expr {
         holes: Vec<Expr>,
         span: Span,
     },
+    /// A **resolved reference to a native module function** as a first-class value (expr-tiers
+    /// arc): `NativeFnRef { module: "std.json", func: "render" }` is the `Const::ModuleFn` value a
+    /// `use std.json.render` binding would produce, but resolved by the compiler from a declaration
+    /// rather than a user import. Compiler-synthesized only (never parsed): the expression-tier
+    /// desugar uses it as the callee for a **native** tier's handler, so a native handler and a
+    /// Noeta handler flow through the identical `Call` typing and lowering — the callee is just a
+    /// function value either way. The checker types it via the module function's signature; IR
+    /// lowering emits [`Rvalue::ModuleFn`].
+    NativeFnRef {
+        module: String,
+        func: String,
+        span: Span,
+    },
 }
 
 /// An all-fields object literal. `spread` (`..expr`) supplies values for fields not named
@@ -1187,7 +1200,8 @@ impl Expr {
             | Expr::Invoke { span, .. }
             | Expr::TypeTest { span, .. }
             | Expr::FieldSet { span, .. }
-            | Expr::TierExpr { span, .. } => *span,
+            | Expr::TierExpr { span, .. }
+            | Expr::NativeFnRef { span, .. } => *span,
             Expr::Object(lit) => lit.span,
         }
     }
@@ -1284,6 +1298,8 @@ impl Expr {
                 receiver, value, ..
             } => receiver.mentions(name) || value.mentions(name),
             Expr::TierExpr { holes, .. } => any(holes),
+            // A resolved native-fn reference names no source binding.
+            Expr::NativeFnRef { .. } => false,
         }
     }
 
@@ -1311,7 +1327,9 @@ impl Expr {
             | Expr::Closure { .. }
             // An expression-tier block's holes desugar to zero-param closures (separate
             // callables), so an `.await` inside a hole is never this level's.
-            | Expr::TierExpr { .. } => false,
+            | Expr::TierExpr { .. }
+            // A resolved native-fn reference is a leaf value.
+            | Expr::NativeFnRef { .. } => false,
             Expr::Unary { operand, .. } => operand.has_await(),
             Expr::Binary { lhs, rhs, .. }
             | Expr::Pipeline {

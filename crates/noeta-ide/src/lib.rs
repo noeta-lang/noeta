@@ -640,10 +640,11 @@ impl DocumentStore {
         let index = LineIndex::new(entry.text(db));
         let offset = index.offset(position, encoding);
 
-        // The tier at the cursor: the entry file's parse (a bare parse suffices — this is about the
-        // block's *declaration*, not its checked type), scanned for a `@<name> { … }` whose tier
-        // name covers the offset.
-        let ast = noeta_db::ast(db, entry);
+        // The tier at the cursor: the entry file's parse, scanned for a `@<name> { … }` whose tier
+        // name covers the offset. Uses the **workspace-aware** parse (`ast_in`), so a native
+        // tier's `@json { … }` body is captured verbatim (the ext-tier lexer seed) and shows up as
+        // a `TierExpr` rather than being mis-lexed as code.
+        let ast = noeta_db::ast_in(db, cache.workspace, entry);
         let (tier, tier_span) = tier_name_at(&ast.0.program, offset, SourceId::FIRST)?;
 
         // The tier's declaration, from the workspace-merged program's registry (imports + this
@@ -2025,6 +2026,23 @@ mod tests {
         assert_eq!(
             on_doc.as_ref().map(|(d, _)| d.as_str()),
             Some("text tier `@doc` — `markdown` body")
+        );
+    }
+
+    #[test]
+    fn hover_tier_describes_a_native_expression_tier() {
+        // std's `@json` is a *native* (extension-declared) expression tier — no program `@tier`
+        // declares it. Hover reads it through the same registry surface as a program tier, so it
+        // reports the declared `json` body language and the `string` value type.
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///a.noe",
+            "n = \"x\"\ndoc = @json { {\"k\": ${n}} }\necho doc\n".to_string(),
+        );
+        let on_json = store.hover_tier("file:///a.noe", Position::new(1, 8), Encoding::Utf16);
+        assert_eq!(
+            on_json.as_ref().map(|(d, _)| d.as_str()),
+            Some("expression tier `@json` — `json` body, evaluates to `string`")
         );
     }
 

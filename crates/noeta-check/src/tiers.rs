@@ -233,17 +233,19 @@ impl TierRegistry {
     }
 
     /// The handler an **expression tier**'s `@<name> { … }` block desugars to — a program tier's
-    /// `@tier` fn (`DeclaredTier::runner`) or an extension tier's native `handler` — as the call
-    /// target name. `None` if `tier` is not an expression tier (or an extension expr tier omitted
-    /// its handler, a misconfiguration). The single resolution point the checker's typing and IR
-    /// lowering both consult, so native and program expr tiers desugar identically.
-    pub fn expr_tier_handler(&self, tier: &str) -> Option<String> {
+    /// `@tier` fn (`DeclaredTier::runner`, a named Noeta function) or an extension tier's native
+    /// module function (`ExtTier::handler`). `None` if `tier` is not an expression tier (or an
+    /// extension expr tier omitted its handler, a misconfiguration). The single resolution point
+    /// the checker's typing and IR lowering both consult, so native and program expr tiers desugar
+    /// through the identical `Call` path.
+    pub fn expr_tier_handler(&self, tier: &str) -> Option<noeta_ast::desugar::ExprTierHandler> {
+        use noeta_ast::desugar::ExprTierHandler;
         if let Some(t) = noeta_stdlib::registry::find_ext_tier(tier).filter(|t| t.expr.is_some()) {
-            return t.handler.map(str::to_string);
+            return t.handler.map(ExprTierHandler::from_native_path);
         }
         self.declared(tier)
             .filter(|d| d.expr.is_some())
-            .map(|d| d.runner.clone())
+            .map(|d| ExprTierHandler::Program(d.runner.clone()))
     }
 
     /// Every declared **verbatim-body** tier's name — text tiers *and* expression tiers, both of

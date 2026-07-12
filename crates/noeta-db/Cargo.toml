@@ -16,6 +16,8 @@ noeta-bytecode = { workspace = true }
 noeta-compiler = { workspace = true }
 noeta-check = { workspace = true }
 noeta-native = { workspace = true }
+# For the installed extensions' verbatim-body tier names (seeding workspace-wide lexing).
+noeta-stdlib = { path = "../noeta-stdlib", default-features = false }
 noeta-loader = { workspace = true }
 salsa = { workspace = true }
 

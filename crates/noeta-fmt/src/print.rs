@@ -1290,6 +1290,9 @@ impl Printer<'_> {
                     .unwrap_or_default()
                     .to_string(),
             ),
+            // Compiler-synthesized only (the parser never produces it, so the formatter — which
+            // runs on parsed source — never reaches this); emit the qualified name defensively.
+            Expr::NativeFnRef { module, func, .. } => Doc::text(format!("{module}.{func}")),
             Expr::Str { value, .. } => Doc::text(format!("\"{}\"", escape(value))),
             Expr::Int { value, .. } => Doc::text(value.to_string()),
             Expr::Float { value, .. } => Doc::text(format_float(*value)),

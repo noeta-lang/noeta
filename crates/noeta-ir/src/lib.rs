@@ -503,6 +503,17 @@ pub enum Rvalue {
         recipe: Option<noeta_native::TypeRecipe>,
         span: Span,
     },
+    /// A **native module function as a first-class value** (expr-tiers arc) — the same value a
+    /// `use std.math.sqrt` binding holds (`Const::ModuleFn`), but produced from a compiler
+    /// [`noeta_ast::Expr::NativeFnRef`] rather than a user import. The expression-tier desugar
+    /// emits this as a native handler's call callee, so the handler call lowers through the
+    /// ordinary `Call` path with a function value, exactly like a Noeta handler. The backend loads
+    /// the module-function const; a `Call` on the result dispatches to the native function.
+    ModuleFn {
+        module: String,
+        func: String,
+        span: Span,
+    },
 }
 
 /// A statement in an IR [`Block`]. The `let`/`eval`/`bind`/`echo`/`return` forms are

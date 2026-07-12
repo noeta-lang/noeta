@@ -715,6 +715,8 @@ impl Resolver {
                     self.walk_expr(hole);
                 }
             }
+            // Compiler-synthesized, never in parsed source the IDE walks.
+            Expr::NativeFnRef { .. } => {}
             Expr::Match {
                 scrutinee, arms, ..
             } => {

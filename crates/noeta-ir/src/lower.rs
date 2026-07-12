@@ -812,6 +812,17 @@ impl Lowerer<'_> {
     /// directly to an atom with no `let`.
     fn lower_expr(&mut self, expr: &Expr, out: &mut Vec<Stmt>) -> Result<Atom, Unsupported> {
         match expr {
+            // A resolved native module-function reference (expr-tiers arc) → the first-class
+            // module-function value, emitted as its own rvalue (the backend loads the const).
+            Expr::NativeFnRef { module, func, span } => Ok(self.emit(
+                out,
+                Rvalue::ModuleFn {
+                    module: module.clone(),
+                    func: func.clone(),
+                    span: *span,
+                },
+                *span,
+            )),
             Expr::Str { value, .. } => Ok(Atom::Const(Const::Str(value.clone()))),
             Expr::Int { value, .. } => Ok(Atom::Const(Const::Int(*value))),
             // A fixed-width integer literal (Tier W) is **erased to an ordinary `int` const**: the
@@ -1259,7 +1270,21 @@ impl Lowerer<'_> {
                 holes,
                 span,
             } => {
-                let call = match self.expr_tiers.get(tier).cloned() {
+                // Resolve the handler: a native (extension) tier's module function first (the
+                // registry is authoritative and a built-in name is not shadowable), else a
+                // program `@tier` fn. Both build the identical `Call`, differing only in the
+                // callee — the native one a resolved `NativeFnRef`, no user import needed.
+                let handler = noeta_stdlib::registry::find_ext_tier(tier)
+                    .filter(|t| t.expr.is_some())
+                    .and_then(|t| t.handler)
+                    .map(noeta_ast::desugar::ExprTierHandler::from_native_path)
+                    .or_else(|| {
+                        self.expr_tiers
+                            .get(tier)
+                            .cloned()
+                            .map(noeta_ast::desugar::ExprTierHandler::Program)
+                    });
+                let call = match handler {
                     Some(handler) => noeta_ast::desugar::tier_expr_call(
                         &handler, *tier_span, statics, holes, *span,
                     ),

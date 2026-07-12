@@ -60,6 +60,7 @@ pub mod registry;
 pub mod serve;
 pub mod synced;
 pub mod task;
+pub mod template;
 pub mod tiers;
 pub mod tracing;
 pub mod vec3;

@@ -410,6 +410,7 @@ impl Printer<'_> {
                 let args: Vec<String> = args.iter().map(atom).collect();
                 format!("{module}.{func}::<T>({})", args.join(", "))
             }
+            Rvalue::ModuleFn { module, func, .. } => format!("fn {module}.{func}"),
         }
     }
 }

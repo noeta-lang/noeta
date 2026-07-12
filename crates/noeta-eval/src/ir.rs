@@ -848,6 +848,12 @@ impl Interpreter {
     fn eval_ir_rvalue(&mut self, rvalue: &noeta_ir::Rvalue, frame: &mut Frame) -> Eval<Value> {
         match rvalue {
             noeta_ir::Rvalue::Use(atom) => self.eval_ir_atom(atom, frame),
+            // A native module-fn reference as a value (expr-tiers arc) — the same `Value::ModuleFn`
+            // an imported `use std.mod.fn` binding holds, so a `Call` on it dispatches to the native
+            // function identically. Mirrors the VM's `Const::ModuleFn`.
+            noeta_ir::Rvalue::ModuleFn { module, func, .. } => {
+                Ok(Value::ModuleFn(module.clone(), func.clone()))
+            }
             noeta_ir::Rvalue::Unary { op, operand, span } => {
                 let value = self.eval_ir_atom(operand, frame)?;
                 self.eval_unary(*op, value, *span)

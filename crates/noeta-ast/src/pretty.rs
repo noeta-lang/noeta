@@ -849,6 +849,13 @@ impl Pretty for Expr {
                 }
                 out.push(')');
             }
+            Expr::NativeFnRef {
+                module,
+                func,
+                span: s,
+            } => {
+                out.push_str(&format!("(native-fn {module}.{func} {})", span(*s)));
+            }
             Expr::Invoke {
                 recv,
                 name,

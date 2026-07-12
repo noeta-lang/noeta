@@ -404,6 +404,9 @@ fn q_expr(e: &mut Expr, map: &QMap) {
                 q_expr(h, map);
             }
         }
+        // A resolved native-fn reference is synthesized *after* qualification (module/func are
+        // already canonical), so it is a leaf here.
+        Expr::NativeFnRef { .. } => {}
         // Leaves with no nested expression or type reference.
         Expr::Str { .. }
         | Expr::Int { .. }

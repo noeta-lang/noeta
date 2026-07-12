@@ -265,6 +265,8 @@ impl Walker<'_> {
                     self.expr(hole);
                 }
             }
+            // Compiler-synthesized, never in parsed source the IDE walks.
+            Expr::NativeFnRef { .. } => {}
             Expr::Match {
                 scrutinee, arms, ..
             } => {

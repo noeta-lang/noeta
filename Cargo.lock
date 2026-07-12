@@ -4057,6 +4057,7 @@ dependencies = [
  "noeta-native",
  "noeta-parser",
  "noeta-span",
+ "noeta-stdlib",
  "salsa",
 ]
 
@@ -4199,6 +4200,7 @@ dependencies = [
  "noeta-lexer",
  "noeta-parser",
  "noeta-span",
+ "noeta-stdlib",
 ]
 
 [[package]]

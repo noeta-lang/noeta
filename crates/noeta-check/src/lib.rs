@@ -4022,6 +4022,13 @@ impl Checker {
 
     fn synth_inner(&mut self, expr: &Expr, env: &mut Env) -> Type {
         match expr {
+            // A resolved native-fn reference as a *value* — a loose `Fn` type, like a
+            // selectively-imported module function referenced bare (the precise per-call signature
+            // is applied in the `Call` callee arm). The desugar only ever uses it as a callee.
+            Expr::NativeFnRef { .. } => Type::Fn {
+                params: Vec::new(),
+                ret: Box::new(Type::Dyn),
+            },
             Expr::Str { .. } => Type::String,
             Expr::Int { .. } => Type::Int,
             Expr::Float { .. } => Type::Float,
@@ -5263,6 +5270,20 @@ impl Checker {
     ) -> Type {
         let span = callee.span();
         match callee {
+            // A **resolved native module-function** callee (expr-tiers arc): the expression-tier
+            // desugar builds this for a native handler, so `handler(statics, holes)` types exactly
+            // like the bare `use std.math.sqrt` call below — same params/return tables — no matter
+            // that no import bound it. This is what lets a native and a Noeta handler share one
+            // `Call` typing path.
+            Expr::NativeFnRef { module, func, .. } => {
+                if let Some(params) = stdlib::module_params(module, func, args) {
+                    let required = stdlib::module_required(module, func).unwrap_or(params.len());
+                    self.finalize_closure_args(&params, args, arg_exprs, env);
+                    self.check_args(&params, required, args, arg_exprs, span, func);
+                }
+                self.check_module_bounds(module, func, args, span);
+                stdlib::module_return(module, func, args).unwrap_or(Type::Unknown)
+            }
             // A plain `name(args)` call: a user function, else a prelude free function.
             Expr::Ident { name, .. } => {
                 if let Some(sig) = self.functions.get(name) {
@@ -7567,7 +7588,7 @@ fn conditional_await_span(e: &Expr) -> Option<Span> {
         }
         // A closure is a separate callable — its awaits are not this level's. An expression-tier
         // block's holes desugar to closures, so the same applies.
-        Expr::Closure { .. } | Expr::TierExpr { .. } => None,
+        Expr::Closure { .. } | Expr::TierExpr { .. } | Expr::NativeFnRef { .. } => None,
         // Unconditional compounds: recurse into every child (evaluation order does not matter here —
         // any conditional await anywhere disqualifies).
         Expr::Await { expr, .. }

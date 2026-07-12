@@ -22,7 +22,6 @@
 use std::path::{Path, PathBuf};
 
 use noeta_diagnostics::Diagnostic;
-use noeta_lexer::lex;
 use noeta_parser::parse;
 use noeta_span::{Source, SourceId, SourceMap};
 
@@ -82,7 +81,16 @@ struct Outcome {
 fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
     let source = Source::new(SourceId::FIRST, name, text);
 
-    let lexed = lex(&source);
+    // Seed the lexer with the installed extensions' verbatim-body tiers (`doc`, native `@json`) so
+    // a native tier's `@<name> { … }` body captures — the loader/pipeline does this too; the
+    // conformance single-file path must match or the differential would lex a native tier's body
+    // as code. The lexer's own two-pass covers a program's `@tier(…, text/expr)` declarations.
+    let ext_tiers = noeta_lexer::TextTiers::with(
+        noeta_stdlib::registry::ext_verbatim_tier_names()
+            .into_iter()
+            .map(str::to_string),
+    );
+    let lexed = noeta_lexer::lex_in(&source, &ext_tiers);
     let mut diagnostics = lexed.diagnostics.clone();
 
     let mut stdout = String::new();

@@ -364,6 +364,13 @@ pub fn workspace_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> Vec<Stri
         .chain(ws.dep_modules(db).iter().map(|dm| dm.src(db)))
         .flat_map(|src| tokens(db, src).0.text_tier_decls.iter().cloned())
         .collect();
+    // Plus the installed extensions' verbatim-body tiers (`doc`, native `@json`/`@sql`) — no
+    // member file declares these, so the LSP/pipeline must seed them like the loader does.
+    names.extend(
+        noeta_stdlib::registry::ext_verbatim_tier_names()
+            .into_iter()
+            .map(str::to_string),
+    );
     names.sort();
     names.dedup();
     names

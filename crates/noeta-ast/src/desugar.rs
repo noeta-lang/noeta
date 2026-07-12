@@ -20,6 +20,35 @@
 use crate::{ClosureBody, Expr, Program, Stmt};
 use noeta_span::Span;
 
+/// The resolved handler an expression tier's block desugars to. A **program**-declared tier's
+/// handler is a (qualified) Noeta function referenced by name; a **native** (extension) tier's is
+/// a module function referenced directly. The desugar builds the matching callee for each, so both
+/// flow through the identical `Call` typing and lowering — the callee is a function value either
+/// way (the native one via [`Expr::NativeFnRef`], resolved without a user import).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExprTierHandler {
+    /// A Noeta function by (link-qualified) name.
+    Program(String),
+    /// A native module function `(module, func)`.
+    Native { module: String, func: String },
+}
+
+impl ExprTierHandler {
+    /// Resolve an extension tier's `handler` string (`"std.json.render"`) into its module/func
+    /// split, or a program tier's runner name — the shape [`tier_expr_call`] builds a callee from.
+    pub fn from_native_path(path: &str) -> ExprTierHandler {
+        match path.rsplit_once('.') {
+            Some((module, func)) => ExprTierHandler::Native {
+                module: module.to_string(),
+                func: func.to_string(),
+            },
+            // A bare name (no module) is treated as a program fn — a misdeclared native handler is
+            // a checker concern, not this constructor's.
+            None => ExprTierHandler::Program(path.to_string()),
+        }
+    }
+}
+
 /// The program's declared **expression-tier handlers**: tier name → handler fn name, collected
 /// from top-level `@tier(…, expr: T)` fns. On a linked program the handler names are qualified
 /// identities (the linker qualified every top-level fn), so cross-package blocks resolve.
@@ -41,7 +70,7 @@ pub fn expr_tier_handlers(program: &Program) -> std::collections::HashMap<String
 /// handler and a bad-call diagnostic points at the tier name); each closure carries its hole's
 /// real span, so hole-type errors land inside the block.
 pub fn tier_expr_call(
-    handler: &str,
+    handler: &ExprTierHandler,
     tier_span: Span,
     statics: &[String],
     holes: &[Expr],
@@ -69,11 +98,21 @@ pub fn tier_expr_call(
             .collect(),
         span,
     };
-    Expr::Call {
-        callee: Box::new(Expr::Ident {
-            name: handler.to_string(),
+    // A program handler is an ordinary named-function callee; a native handler is a resolved
+    // module-function reference — both are function *values*, so the `Call` is identical.
+    let callee = match handler {
+        ExprTierHandler::Program(name) => Expr::Ident {
+            name: name.clone(),
             span: tier_span,
-        }),
+        },
+        ExprTierHandler::Native { module, func } => Expr::NativeFnRef {
+            module: module.clone(),
+            func: func.clone(),
+            span: tier_span,
+        },
+    };
+    Expr::Call {
+        callee: Box::new(callee),
         args: vec![statics_list, holes_list],
         span,
     }

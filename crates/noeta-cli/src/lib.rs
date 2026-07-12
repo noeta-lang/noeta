@@ -1402,6 +1402,12 @@ fn fmt_text_tiers(dir: &std::path::Path, entry: &std::path::Path) -> noeta_lexer
             }
         }
     }
+    // Plus the installed extensions' verbatim-body tiers (no `.noe` file declares a native one).
+    names.extend(
+        noeta_stdlib::registry::ext_verbatim_tier_names()
+            .into_iter()
+            .map(str::to_string),
+    );
     noeta_lexer::TextTiers::with(names)
 }
 

@@ -12,6 +12,9 @@ noeta-diagnostics = { workspace = true }
 noeta-ast = { workspace = true }
 noeta-lexer = { workspace = true }
 noeta-parser = { workspace = true }
+# For the installed extensions' verbatim-body tier names (seeding the whole-program lex). Kept
+# default-features off (the datetime ring is irrelevant to the front-end), mirroring noeta-ir.
+noeta-stdlib = { path = "../noeta-stdlib", default-features = false }
 
 [lints]
 workspace = true

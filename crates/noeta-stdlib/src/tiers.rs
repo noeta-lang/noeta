@@ -50,6 +50,17 @@ pub const TIERS: &[ExtTier] = &[
         expr: None,
         handler: None,
     },
+    // `@json { … ${s} … }` — a native **expression** tier (expr-tiers arc): its blocks are `string`
+    // values (JSON text with safely-quoted holes), desugared to `std.template.render`. The dogfood
+    // that a native package declares an expression tier — body language, value type, and a native
+    // handler — through the same `ExtTier` surface a program `@tier(…, text/expr)` uses.
+    ExtTier {
+        name: "json",
+        config: None,
+        text: Some("json"),
+        expr: Some("string"),
+        handler: Some("std.template.render"),
+    },
 ];
 
 /// The prelude attributes the built-in tiers own: the test runner's metadata quartet

@@ -404,10 +404,18 @@ pub fn link_with_deps(
 /// declaring text tiers pay the second pass.
 fn lex_program(sources: &[Source]) -> Vec<noeta_lexer::Lexed> {
     let lexeds: Vec<_> = sources.iter().map(lex).collect();
-    let declared: Vec<String> = lexeds
+    // Verbatim-body tiers come from two sources: a program's own `@tier(…, text/expr)` (found by
+    // the lexer's per-file token scan) and the installed extensions' declarations (`doc`, and any
+    // native `@json`/`@sql` — no `.noe` file declares these).
+    let mut declared: Vec<String> = lexeds
         .iter()
         .flat_map(|l| l.text_tier_decls.iter().cloned())
         .collect();
+    declared.extend(
+        noeta_stdlib::registry::ext_verbatim_tier_names()
+            .into_iter()
+            .map(str::to_string),
+    );
     let default = noeta_lexer::TextTiers::default();
     if declared.iter().all(|name| default.contains(name)) {
         return lexeds;
