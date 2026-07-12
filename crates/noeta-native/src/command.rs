@@ -107,6 +107,28 @@ pub struct EntryCall {
 /// process exit code (0 ok, 1 program error, 2 unreadable file).
 pub trait CommandCtx {
     fn run_file(&mut self, file: &Path, entry: Option<&EntryCall>, banner: Option<&str>) -> u8;
+
+    /// Serve `file`'s handler across `workers` worker isolates on `host:port` (server-hmr S1
+    /// multi-core). The driver binds the listener once and gives each worker a cloned fd; the
+    /// kernel load-balances connections. Default: fall back to a single-worker
+    /// [`run_file`](CommandCtx::run_file) — a driver that has not implemented multi-core still
+    /// serves, just on one core. Returns the process exit code.
+    fn serve_parallel(&mut self, file: &Path, port: i64, host: &str, workers: usize) -> u8 {
+        let _ = workers;
+        self.run_file(
+            file,
+            Some(&EntryCall {
+                module: "server",
+                func: "serve",
+                args: vec![
+                    EntryArg::Int(port),
+                    EntryArg::Ident("fetch"),
+                    EntryArg::Str(host.to_string()),
+                ],
+            }),
+            None,
+        )
+    }
 }
 
 /// A CLI subcommand contributed by an extension.

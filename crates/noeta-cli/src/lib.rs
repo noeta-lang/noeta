@@ -1923,7 +1923,11 @@ fn install_shutdown_handler() {
                 "\nnoeta serve: draining — finishing in-flight requests (Ctrl-C again to force)"
             );
             noeta_stdlib::serve::request_shutdown();
-            noeta_runtime::shutdown_notify().notify_one();
+            // Wake every blocked worker (server-hmr S1: `notify_waiters` rouses all currently
+            // parked accepts at once) plus one stored permit for a worker racing into its wait.
+            let wake = noeta_runtime::shutdown_notify();
+            wake.notify_waiters();
+            wake.notify_one();
             // A second Ctrl-C during the drain forces an immediate exit.
             if tokio::signal::ctrl_c().await.is_ok() {
                 std::process::exit(130);
@@ -2104,6 +2108,186 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         ))
         .unwrap_or(1)
     }
+
+    fn serve_parallel(
+        &mut self,
+        file: &std::path::Path,
+        port: i64,
+        host: &str,
+        workers: usize,
+    ) -> u8 {
+        serve_parallel_impl(file, port, host, workers)
+    }
+}
+
+/// Multi-core `noeta serve --parallel N` (server-hmr S1): bind the listener ONCE, then run the
+/// serve program in `workers` OS-thread isolates, each with a real host adopting a `try_clone`d
+/// dup of the listening socket. Intra-process fds are shared across threads, so the kernel
+/// load-balances `accept()` across the workers with no `SO_REUSEPORT`/`socket2` and no new dep.
+/// The process-wide shutdown flag (S0) drains every worker on SIGINT.
+fn serve_parallel_impl(file: &std::path::Path, port: i64, host: &str, workers: usize) -> u8 {
+    use noeta_ast::{Expr, Stmt};
+    use noeta_span::Span;
+
+    if compose::maybe_delegate(file).is_some() {
+        return 1;
+    }
+    let deps = match graph::resolve_graph(file) {
+        Ok(graph) => graph.packages,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return 2;
+        }
+    };
+    let mut linked = match noeta_loader::load_with_deps(file, &deps) {
+        Err(err) => {
+            eprintln!("lang: cannot read {}: {err}", file.display());
+            return 2;
+        }
+        Ok(Err(load_diagnostics)) => {
+            let mut stderr = io::stderr();
+            for ld in &load_diagnostics {
+                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+            }
+            return 1;
+        }
+        Ok(Ok(linked)) => linked,
+    };
+
+    // The same synthesized entry the single-worker path uses: `server.serve(port, fetch, host)`.
+    let sp = Span::empty_at(0);
+    let call = Expr::Call {
+        callee: Box::new(Expr::Member {
+            receiver: Box::new(Expr::Ident {
+                name: "server".to_string(),
+                span: sp,
+            }),
+            name: "serve".to_string(),
+            name_span: sp,
+            span: sp,
+        }),
+        args: vec![
+            Expr::Int {
+                value: port,
+                span: sp,
+            },
+            Expr::Ident {
+                name: "fetch".to_string(),
+                span: sp,
+            },
+            Expr::Str {
+                value: host.to_string(),
+                span: sp,
+            },
+        ],
+        span: sp,
+    };
+    linked.program.stmts.push(Stmt::Expr {
+        expr: call,
+        span: sp,
+    });
+
+    let checked = noeta_check::check_all(&linked.program);
+    if !checked.diagnostics.is_empty() {
+        emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+        return 1;
+    }
+    let module = match compile_real(&linked.program, &checked) {
+        Ok(m) => std::sync::Arc::new(m),
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return 1;
+        }
+    };
+
+    // Bind the listening socket once; each worker inherits a cloned fd.
+    let addr = format!("{host}:{port}");
+    let base = match std::net::TcpListener::bind(&addr) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("lang: cannot bind `{addr}`: {e}");
+            return 1;
+        }
+    };
+    eprintln!("noeta serve: listening on http://{addr} across {workers} workers (Ctrl-C to stop)");
+
+    let args: Vec<String> = std::env::args().collect();
+    let app_id = p2p_app_namespace(&args);
+    let mut handles = Vec::with_capacity(workers);
+    for worker in 0..workers {
+        let listener = match base.try_clone() {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("lang: cannot clone the listener for worker {worker}: {e}");
+                return 1;
+            }
+        };
+        let module = std::sync::Arc::clone(&module);
+        let args = args.clone();
+        let app_id = app_id.clone();
+        handles.push(std::thread::spawn(move || {
+            run_worker(module, listener, args, app_id)
+        }));
+    }
+    // Every worker drains and returns on shutdown; a non-zero worker exit propagates.
+    let mut code = 0u8;
+    for handle in handles {
+        match handle.join() {
+            Ok(worker_code) => code = code.max(worker_code),
+            Err(_) => code = code.max(1),
+        }
+    }
+    code
+}
+
+/// One `--parallel` worker (server-hmr S1): a real host seeded with the pre-bound listener plus a
+/// wall-clock executor, running the compiled serve module to completion (it returns when the
+/// graceful-drain flag closes the accept loop).
+fn run_worker(
+    module: std::sync::Arc<noeta_bytecode::Module>,
+    listener: std::net::TcpListener,
+    args: Vec<String>,
+    app_id: Option<String>,
+) -> u8 {
+    let host: Box<dyn noeta_stdlib::Host> = match noeta_runtime::RealHost::new() {
+        Ok(h) => Box::new(
+            h.with_args(args.clone())
+                .with_p2p_app(app_id.clone())
+                .with_prebound_listener(listener),
+        ),
+        Err(e) => {
+            eprintln!("lang: cannot start a worker runtime: {e}");
+            return 1;
+        }
+    };
+    let executor: Box<dyn noeta_stdlib::Executor> = match noeta_runtime::RealExecutor::new() {
+        Ok(ex) => Box::new(ex),
+        Err(e) => {
+            eprintln!("lang: cannot start a worker executor: {e}");
+            return 1;
+        }
+    };
+    let app_id_for_factory = app_id.clone();
+    let factory: noeta_vm::IsolateFactory = std::sync::Arc::new(move || {
+        let host: Box<dyn noeta_stdlib::Host> = Box::new(
+            noeta_runtime::RealHost::new()
+                .expect("cannot start a nested isolate's runtime")
+                .with_args(args.clone())
+                .with_p2p_app(app_id_for_factory.clone()),
+        );
+        let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
+            noeta_runtime::RealExecutor::new().expect("cannot start a nested isolate's executor"),
+        );
+        (host, executor)
+    });
+    let (result, trace, _) = VmBackend::new()
+        .run_module_with_host_and_executor_parallel(module, host, executor, factory, false);
+    print!("{}", result.stdout);
+    let _ = io::stdout().flush();
+    if trace.len() >= 2 {
+        eprintln!("[worker] aborted");
+    }
+    u8::try_from(result.exit_code).unwrap_or(1)
 }
 
 /// Run an entry-call program with **in-process hot reload** (server-hmr W1) — `noeta serve

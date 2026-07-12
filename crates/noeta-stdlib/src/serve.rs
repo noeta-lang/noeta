@@ -128,10 +128,22 @@ pub const SERVE_COMMAND: ExtCommand = ExtCommand {
             help: "The bind address, default 0.0.0.0 (all interfaces); e.g. 127.0.0.1 for local-only",
             kind: ArgKind::Str { default: "0.0.0.0" },
         },
+        ArgSpec {
+            name: "parallel",
+            help: "Number of worker isolates to serve across (default 1); N>1 uses multiple CPU cores",
+            kind: ArgKind::Int { default: 1 },
+        },
     ],
     run: |ctx, args| {
         let port = args.int("port");
         let host = args.str("host").to_string();
+        let parallel = args.int("parallel").max(1);
+        // Multi-core (server-hmr S1): the driver binds the listener once and runs the serve
+        // program in N worker isolates sharing `try_clone`d fds. Delegated to the CLI because it
+        // owns real-host/thread construction; the single-worker path stays the plain run below.
+        if parallel > 1 {
+            return ctx.serve_parallel(args.path("file"), port, &host, parallel as usize);
+        }
         ctx.run_file(
             args.path("file"),
             Some(&EntryCall {

@@ -409,7 +409,7 @@ server.serve(8080, fetch)
 **`noeta serve`.** Rather than call `server.serve` yourself, run `noeta serve app.noe --port 8080`:
 the file defines a top-level `fn fetch(req: Request): Response` (and `use std.http.server`), and the
 command runs its top-level setup, then serves that handler until interrupted (Ctrl-C). It is the
-ergonomic entry point over an explicit `server.serve(...)` call — the same mechanism underneath.
+ergonomic entry point over an explicit `server.serve(...)` call — the same mechanism underneath. `--host` sets the bind address and `--parallel N` serves across N worker isolates (multi-core); Ctrl-C drains in-flight requests gracefully.
 
 **Routers and middleware are ordinary code.** Because a handler is a first-class `(Request) ->
 Response`, a router is just a handler that dispatches on `req.path()`, and middleware is a function

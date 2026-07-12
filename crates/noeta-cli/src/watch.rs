@@ -84,7 +84,11 @@ fn watch_loop(args: &[OsString]) -> ExitCode {
     // edits into the live process, and exiting with [`HOT_RESTART_CODE`] when only a full restart
     // can absorb a change — the wrapper then restarts immediately and otherwise stays out of the
     // way (double-watching would restart the server on the very edits the child just swapped).
-    let hot = args.first().is_some_and(|a| a == "serve");
+    // EXCEPT with `--parallel` (server-hmr S1): in-process swap-broadcast across N worker isolates
+    // is a future refinement, so a multi-core watch falls back to the generic restart-on-change
+    // path (the whole worker fleet restarts on edit — correct, just not a live swap).
+    let parallel = args.iter().any(|a| a == "--parallel");
+    let hot = args.first().is_some_and(|a| a == "serve") && !parallel;
     // Impact-filtered tier watch (server-hmr W3): a `test`/`bench` rerun narrows to the
     // declarations the edit impacted (the runners' `--name` filter), computed by the
     // runner-agnostic engine (`noeta_ide::impact`) from the previous run's source.

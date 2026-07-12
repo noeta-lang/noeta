@@ -106,6 +106,12 @@ pub struct RealHost {
     servers: HashMap<u64, Arc<ServerState>>,
     /// Monotonic id source for `servers`.
     next_listener: u64,
+    /// A **pre-bound** listener a multi-core worker inherits (server-hmr S1): `noeta serve
+    /// --parallel N` binds the socket once and hands each worker a `try_clone`d fd, so
+    /// `net_listen(addr)` returns this dup instead of binding again (a second bind on the same
+    /// address fails without `SO_REUSEPORT`). The kernel load-balances `accept()` across the
+    /// workers' shared listening socket. `None` for an ordinary single-worker host.
+    prebound: Option<std::net::TcpListener>,
     /// Open inbound connections awaiting a reply, keyed by conn id. Shared (`Arc`) into every accept
     /// descriptor (which inserts an accepted stream) and reply descriptor (which removes and writes
     /// it), both running on the executor's runtime.
@@ -238,6 +244,7 @@ impl RealHost {
             http: reqwest::Client::new(),
             servers: HashMap::new(),
             next_listener: 0,
+            prebound: None,
             conns: Arc::new(Mutex::new(HashMap::new())),
             next_conn: Arc::new(AtomicU64::new(0)),
             ws_conns: Arc::new(Mutex::new(HashMap::new())),
@@ -252,6 +259,14 @@ impl RealHost {
             p2p_node: None,
             p2p_app_id: None,
         })
+    }
+
+    /// Seed a **pre-bound listener** (server-hmr S1): the multi-core `noeta serve --parallel`
+    /// driver binds once and gives each worker a `try_clone`d socket, so the worker's
+    /// `net_listen` adopts this fd rather than binding the address a second time.
+    pub fn with_prebound_listener(mut self, listener: std::net::TcpListener) -> RealHost {
+        self.prebound = Some(listener);
+        self
     }
 
     /// Set the p2p application namespace ([`Self::p2p_app_id`]) — the running program's package
@@ -528,8 +543,13 @@ impl Network for RealHost {
     /// tokio listener is attached lazily on the executor runtime at first accept. The socket is set
     /// non-blocking (required by `TcpListener::from_std`), and `SO_REUSEADDR` is the std default.
     fn net_listen(&mut self, addr: &str) -> Result<u64, StdError> {
-        let listener = std::net::TcpListener::bind(addr)
-            .map_err(|e| io_error(format!("cannot bind `{addr}`: {e}")))?;
+        // A multi-core worker (server-hmr S1) adopts the pre-bound, `try_clone`d listener instead
+        // of binding — the socket is already listening on `addr`, and a second bind would fail.
+        let listener = match self.prebound.take() {
+            Some(prebound) => prebound,
+            None => std::net::TcpListener::bind(addr)
+                .map_err(|e| io_error(format!("cannot bind `{addr}`: {e}")))?,
+        };
         listener
             .set_nonblocking(true)
             .map_err(|e| io_error(format!("cannot configure `{addr}`: {e}")))?;

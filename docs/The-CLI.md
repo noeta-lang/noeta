@@ -104,6 +104,13 @@ address (default `0.0.0.0`, all interfaces; pass `--host 127.0.0.1` for local-on
 drains gracefully: the server stops accepting, finishes the requests already in flight, closes
 the listener, and exits — a second Ctrl-C forces an immediate stop.
 
+`--parallel N` serves across **N worker isolates** for true multi-core throughput: the listener
+is bound once and each worker inherits a cloned handle to it, so the kernel load-balances
+connections across cores (no `SO_REUSEPORT`, no extra dependency). All workers share the process
+and drain together on Ctrl-C. In-process hot reload does not yet span the fleet, so
+`--parallel --watch` falls back to a full restart of all workers on each edit (single-worker
+`--watch` keeps the live in-process swap).
+
 `--watch` works on **any** command (`noeta run --watch`, `noeta test --watch`, …): a file watcher
 restarts the command on change — with the startup cache, a restart is a few milliseconds.
 
