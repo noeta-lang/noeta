@@ -81,8 +81,7 @@ pub mod tiers;
 
 pub use tiers::{
     Activated, DeclaredTier, DocTarget, ResolvedProvider, TextBlock, TierFn, activate_tiers,
-    activate_tiers_with, dedent_doc, extend_reflection, is_extension_tier, resolve_docs,
-    resolve_texts, tier_config_attribute,
+    activate_tiers_with, dedent_doc, extend_reflection, resolve_docs, resolve_texts,
 };
 
 /// The full output of one checker run: the diagnostics **and** the resolved-type map both
