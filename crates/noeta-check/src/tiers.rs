@@ -66,12 +66,28 @@ pub struct DeclaredTier {
 /// (linked) program — imported packages' declarations included, since linking merges their
 /// modules. The one lookup activation, the checker's in-place `TierBlock` arm, and the CLI's
 /// runner dispatch all resolve against.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct TierRegistry {
     /// Declarations keyed by tier name. Several packages may declare the same tier name (each a
     /// distinct **provider**, told apart by [`DeclaredTier::root`]); a target's `tiers` map picks
     /// which one is live. In declaration order per name.
     declared: std::collections::HashMap<String, Vec<DeclaredTier>>,
+    /// The extension registry the **extension-tier** half of the name-space resolves against
+    /// (instance-registry IR4): `None` (the default) uses the process-global default registry — the
+    /// single-registry CLI/IDE/MCP path — while an embed session whose own extension declares a
+    /// `@tier` threads its assembled set via [`TierRegistry::collect_with_registry`]. Read through
+    /// [`TierRegistry::reg`]; `Option` so `#[derive(Default)]` (a `&'static` has no default) holds.
+    registry: Option<&'static noeta_stdlib::registry::Registry>,
+}
+
+impl PartialEq for TierRegistry {
+    /// Equality is over the program-declared tiers only — the `registry` is ambient resolution
+    /// context (a `&'static` selector), not part of a name-space's value identity, and `Registry`
+    /// is not `PartialEq`. Two registries with the same declarations compare equal regardless of
+    /// which extension set backs their extension-tier half.
+    fn eq(&self, other: &TierRegistry) -> bool {
+        self.declared == other.declared
+    }
 }
 
 /// Who provides a tier under a given provider selection — the extension declaration (native
@@ -96,6 +112,24 @@ impl TierRegistry {
     /// name (the checker reports same-provider duplicates as E0051; collection keeps everything so
     /// provider selection stays total).
     pub fn collect(program: &Program) -> TierRegistry {
+        TierRegistry::collect_with_registry_opt(program, None)
+    }
+
+    /// As [`TierRegistry::collect`], but resolving the **extension-tier** half of the name-space
+    /// against an explicit `registry` (instance-registry IR4) — so an embed session whose own
+    /// extension declares a `@tier` validates its `@<tier>` blocks against *its* registry, not the
+    /// process-global default. The checker builds its `tier_registry` this way from its own registry.
+    pub fn collect_with_registry(
+        program: &Program,
+        registry: &'static noeta_stdlib::registry::Registry,
+    ) -> TierRegistry {
+        TierRegistry::collect_with_registry_opt(program, Some(registry))
+    }
+
+    fn collect_with_registry_opt(
+        program: &Program,
+        registry: Option<&'static noeta_stdlib::registry::Registry>,
+    ) -> TierRegistry {
         let mut declared: std::collections::HashMap<String, Vec<DeclaredTier>> =
             std::collections::HashMap::new();
         for stmt in &program.stmts {
@@ -115,12 +149,19 @@ impl TierRegistry {
                     });
             }
         }
-        TierRegistry { declared }
+        TierRegistry { declared, registry }
+    }
+
+    /// The extension registry this name-space's extension tiers resolve against — the threaded one,
+    /// or the process-global default (instance-registry IR4).
+    fn reg(&self) -> &'static noeta_stdlib::registry::Registry {
+        self.registry
+            .unwrap_or_else(noeta_stdlib::registry::default_seeded)
     }
 
     /// Whether `tier` names a known tier — extension-declared or program-declared.
     pub fn is_known(&self, tier: &str) -> bool {
-        is_extension_tier(tier) || self.declared.contains_key(tier)
+        self.reg().find_ext_tier(tier).is_some() || self.declared.contains_key(tier)
     }
 
     /// The **default-provider** declaration for `tier`: the first program/package declaration —
@@ -148,7 +189,7 @@ impl TierRegistry {
     ) -> Result<ResolvedProvider<'a>, String> {
         match providers.get(tier).map(String::as_str) {
             Some("std") => {
-                if is_extension_tier(tier) {
+                if self.reg().find_ext_tier(tier).is_some() {
                     Ok(ResolvedProvider::Extension)
                 } else {
                     Err(format!(
@@ -167,7 +208,7 @@ impl TierRegistry {
                     )
                 }),
             None => {
-                if is_extension_tier(tier) {
+                if self.reg().find_ext_tier(tier).is_some() {
                     Ok(ResolvedProvider::Extension)
                 } else if let Some(d) = self.declared(tier) {
                     Ok(ResolvedProvider::Declared(d))
@@ -187,7 +228,11 @@ impl TierRegistry {
         providers: &std::collections::BTreeMap<String, String>,
     ) -> Option<String> {
         match self.resolve_provider(tier, providers) {
-            Ok(ResolvedProvider::Extension) => tier_config_attribute(tier).map(str::to_string),
+            Ok(ResolvedProvider::Extension) => self
+                .reg()
+                .find_ext_tier(tier)
+                .and_then(|t| t.config)
+                .map(str::to_string),
             Ok(ResolvedProvider::Declared(d)) => d.config.clone(),
             Err(_) => self.config_attribute(tier).map(str::to_string),
         }
@@ -217,7 +262,9 @@ impl TierRegistry {
     /// declaration's for an extension tier, the first `@tier` directive's `config:` for a
     /// program-declared one.
     pub fn config_attribute<'a>(&'a self, tier: &str) -> Option<&'a str> {
-        tier_config_attribute(tier)
+        self.reg()
+            .find_ext_tier(tier)
+            .and_then(|t| t.config)
             .or_else(|| self.declared(tier).and_then(|d| d.config.as_deref()))
     }
 
@@ -357,8 +404,14 @@ pub fn extension_tier_names() -> Vec<&'static str> {
 
 /// The `E0036 UnknownTier` diagnostic for a `@<tier>` whose name no extension declares and the
 /// program does not declare. Shared by [`activate_tiers`] and the checker's in-place `TierBlock`
-/// arm so the two never diverge.
-pub fn unknown_tier_diagnostic(tier: &str, span: Span) -> Diagnostic {
+/// arm so the two never diverge. The help lists the tiers of `reg` (instance-registry IR4) — the
+/// session's registry, or the process-global default — so the suggestion matches what *this*
+/// name-space actually knows.
+pub fn unknown_tier_diagnostic(
+    reg: &noeta_stdlib::registry::Registry,
+    tier: &str,
+    span: Span,
+) -> Diagnostic {
     Diagnostic::error(
         DiagnosticCode::UnknownTier,
         span,
@@ -366,9 +419,8 @@ pub fn unknown_tier_diagnostic(tier: &str, span: Span) -> Diagnostic {
     )
     .with_help(format!(
         "the available tiers are {} — or declare one with `@tier`",
-        extension_tier_names()
-            .iter()
-            .map(|t| format!("`@{t}`"))
+        reg.ext_tiers()
+            .map(|t| format!("`@{}`", t.name))
             .collect::<Vec<_>>()
             .join(", ")
     ))
@@ -657,7 +709,7 @@ fn resolve_block(
 
         let config = registry.config_attribute_for(tier, providers);
         if !registry.is_known(tier) {
-            diagnostics.push(unknown_tier_diagnostic(tier, *tier_span));
+            diagnostics.push(unknown_tier_diagnostic(registry.reg(), tier, *tier_span));
         } else if config.is_none()
             && let Some(d) = knobless_args_diagnostic_for(tier, args)
         {

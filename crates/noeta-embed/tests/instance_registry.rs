@@ -15,7 +15,9 @@
 //! *its* registry.
 
 use noeta_embed::{Error, Session, Value};
-use noeta_native::registry::{ExtFn, ExtModule, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType};
+use noeta_native::registry::{
+    ExtFn, ExtModule, ExtTier, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType,
+};
 use noeta_native::{ErrorKind, Host, StdError};
 
 // --- A minimal native extension: `plugin.demo.answer(): int` → 42 --------------------------------
@@ -52,6 +54,14 @@ impl Extension for PluginExtension {
             functions: DEMO_FNS,
             dispatch: demo_dispatch,
             ..ExtModule::DEFAULTS
+        }]
+    }
+    /// A custom dev-tier the plugin contributes (instance-registry IR4). A consumer's `@audit { … }`
+    /// block is a known tier only for a session whose registry holds this extension.
+    fn tiers(&self) -> &'static [ExtTier] {
+        &[ExtTier {
+            name: "audit",
+            config: None,
         }]
     }
 }
@@ -176,4 +186,30 @@ fn two_sessions_one_process_run_disjoint_extension_sets() {
     // B resolves `other` (7) but its registry cannot dispatch `plugin`.
     assert_eq!(b_own, Value::Int(7));
     assert_eq!(b_cross.as_deref(), Some("cannot find `demo` in this scope"));
+}
+
+// A program that uses the plugin's custom `@audit` dev-tier. The tier name is known only to a
+// registry that holds `PLUGIN`; an unknown tier is a checker error (E0036), not an opaque stub —
+// so this proves the *checker's* tier-name-space is registry-scoped (instance-registry IR4).
+const USES_AUDIT_TIER: &str = "@audit {\n  fn probe(): int { return 1; }\n}\n";
+
+#[test]
+fn the_checker_scopes_the_tier_namespace_to_the_session_registry() {
+    // The plugin session's registry declares `@audit`, so the block checks clean.
+    assert!(
+        Session::builder()
+            .with_extensions(vec![&PLUGIN])
+            .load(USES_AUDIT_TIER)
+            .is_ok(),
+        "the plugin session must accept its own `@audit` tier"
+    );
+
+    // The default session's registry (std only) does not know `@audit` — E0036 at check time.
+    match Session::new(USES_AUDIT_TIER) {
+        Err(Error::Check(diags)) => assert!(
+            diags.iter().any(|d| d.contains("audit")),
+            "expected an unknown-tier error mentioning `audit`, got {diags:?}"
+        ),
+        other => panic!("the default session must reject the unknown `@audit` tier, got {other:?}"),
+    }
 }

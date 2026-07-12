@@ -2530,7 +2530,7 @@ impl Checker {
             } => {
                 if !self.tier_registry.is_known(tier) {
                     self.diags
-                        .push(tiers::unknown_tier_diagnostic(tier, *tier_span));
+                        .push(tiers::unknown_tier_diagnostic(self.reg(), tier, *tier_span));
                 } else if let Some(d) = self.tier_registry.knobless_args_diagnostic(tier, args) {
                     // Args on a knob-less tier (`@test(x)`) — E0037.
                     self.diags.push(d);
@@ -5884,7 +5884,10 @@ impl Checker {
     /// `@attribute` struct; and the runner must be `fn(roots: List<TierRoot>): void` — the
     /// signature dispatch calls with the activated roots.
     fn check_tier_decls(&mut self, program: &Program) {
-        self.tier_registry = tiers::TierRegistry::collect(program);
+        // Resolve the extension-tier half of the name-space against THIS checker's registry
+        // (instance-registry IR4), so an embed session whose own extension declares a `@tier`
+        // validates its `@<tier>` blocks correctly. Defaults to the process-global registry.
+        self.tier_registry = tiers::TierRegistry::collect_with_registry(program, self.reg());
         let mut seen: HashMap<(String, String), Span> = HashMap::new();
         for stmt in &program.stmts {
             let Stmt::Fn(f) = stmt else { continue };
