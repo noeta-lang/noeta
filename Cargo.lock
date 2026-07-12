@@ -4081,6 +4081,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-embed"
+version = "0.1.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-check",
+ "noeta-compiler",
+ "noeta-diagnostics",
+ "noeta-lexer",
+ "noeta-native",
+ "noeta-parser",
+ "noeta-runtime",
+ "noeta-span",
+ "noeta-stdlib",
+ "noeta-vm",
+]
+
+[[package]]
 name = "noeta-eval"
 version = "0.1.0"
 dependencies = [

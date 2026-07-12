@@ -187,6 +187,16 @@ pub struct SessionOutput {
     pub trace: Vec<TraceFrame>,
 }
 
+/// Why a [`VmSession::call_by_name`] returned no value (server-hmr E0).
+#[derive(Debug)]
+pub enum CallError {
+    /// No top-level binding of this name exists in the session.
+    NoSuchFunction(String),
+    /// The call aborted (a panic, or the binding was not callable): stdout-so-far, the
+    /// diagnostics, and the traceback ride in the output. The session survives.
+    Aborted(Box<SessionOutput>),
+}
+
 /// A persistent REPL session on the bytecode VM. Owns the incremental [`SessionCompiler`] and the
 /// [`SessionState`]; each [`VmSession::eval`] compiles one entry against the accumulated tables and
 /// runs it against the persistent globals.
@@ -424,6 +434,62 @@ impl VmSession {
             diagnostics,
             value,
             trace,
+        }
+    }
+
+    /// Call a top-level function **by name** (the embed seam, server-hmr E0): arguments arrive as
+    /// neutral [`NativeOut`]s (materialized into fresh values the callee's frame consumes), the
+    /// result returns as the neutral deep [`NativeValue`] view — no fragment compilation per
+    /// call, so a host loop (a game engine's `update(dt)`) pays lookup + call, not a compile.
+    /// Anything the callee printed rides in the returned [`SessionOutput`]; a panic inside it
+    /// comes back as [`CallError::Aborted`] with the traceback, the session intact.
+    ///
+    /// [`NativeOut`]: noeta_stdlib::NativeOut
+    /// [`NativeValue`]: noeta_stdlib::NativeValue
+    pub fn call_by_name(
+        &mut self,
+        name: &str,
+        args: Vec<noeta_stdlib::NativeOut>,
+    ) -> Result<(noeta_stdlib::NativeValue, SessionOutput), CallError> {
+        let Some(slot) = self.compiler.global_slots().get(name).copied() else {
+            return Err(CallError::NoSuchFunction(name.to_string()));
+        };
+        let module = self
+            .compiler
+            .extend(&empty_program())
+            .expect("an empty program compiles");
+        let mut state = self.state.take().expect("state present between entries");
+        state.sync_to(&module);
+        noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
+        let mut vm = Vm::load_seeded(&module, state);
+        let callee = vm.globals[slot as usize];
+        if callee.is_unbound() {
+            self.state = Some(vm.into_state());
+            return Err(CallError::NoSuchFunction(name.to_string()));
+        }
+        let arg_values: Vec<Value> = args
+            .into_iter()
+            .map(crate::values::materialize_native)
+            .collect();
+        let outcome = vm.call_value(callee, arg_values, Span::new(0, 0));
+        let value = match outcome {
+            Ok(v) => {
+                let native = v.to_native_deep();
+                release(v);
+                Some(native)
+            }
+            Err(_) => None,
+        };
+        let output = SessionOutput {
+            stdout: std::mem::take(&mut vm.stdout),
+            diagnostics: std::mem::take(&mut vm.diagnostics),
+            value: None,
+            trace: std::mem::take(&mut vm.abort_trace),
+        };
+        self.state = Some(vm.into_state());
+        match value {
+            Some(v) => Ok((v, output)),
+            None => Err(CallError::Aborted(Box::new(output))),
         }
     }
 

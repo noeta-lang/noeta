@@ -66,7 +66,7 @@ mod methods;
 mod native_ctx;
 mod scheduler;
 mod session;
-pub use session::{HostFactory, SessionOutput, VmSession};
+pub use session::{CallError, HostFactory, SessionOutput, VmSession};
 
 /// A debugger observing tier-0 execution (the `noeta dap` server implements it). The VM consults it
 /// **before each instruction**, passing the executing prototype and program counter; the
