@@ -266,6 +266,9 @@ impl VmSession {
     /// called once now and again on [`VmSession::reset`].
     pub fn new(factory: HostFactory) -> VmSession {
         let (host, executor) = factory();
+        // Register a live session heap-owner on this thread (bugfix): so a *sibling* session's
+        // teardown does not mark this session's live objects as garbage. Retired in `teardown`.
+        crate::session_owner_enter();
         VmSession {
             compiler: SessionCompiler::new(),
             factory,
@@ -303,6 +306,8 @@ impl VmSession {
         factory: HostFactory,
         registry: Option<&'static noeta_stdlib::registry::Registry>,
     ) -> (VmSession, SessionOutput) {
+        // Register a live session heap-owner on this thread (bugfix) — see `VmSession::new`.
+        crate::session_owner_enter();
         let (host, executor) = factory();
         let mut state = SessionState::fresh(host, executor);
         state.registry = registry;
@@ -699,6 +704,8 @@ impl VmSession {
         let (host, executor) = (self.factory)();
         self.compiler = SessionCompiler::new();
         self.state = Some(SessionState::fresh(host, executor));
+        // The teardown above retired the old owner; the fresh state is a new one (bugfix).
+        crate::session_owner_enter();
     }
 
     /// Tear the session's runtime down, bringing heap residency to zero (destructors fire on the live
@@ -708,6 +715,11 @@ impl VmSession {
         let Some(mut state) = self.state.take() else {
             return;
         };
+        // Retire this session's heap-owner *before* `Vm::teardown` (bugfix): so the remaining count
+        // the sweep gates on reflects only the SIBLING sessions still alive on this thread. If a
+        // sibling is alive, the sweep is skipped (its live objects must survive); this session's own
+        // cycle garbage is reaped by the last owner's teardown instead — never double-freed.
+        crate::session_owner_exit();
         // Snapshot a module with the accumulated types so each global's destructor resolves during
         // teardown, then run the VM's end-of-program teardown on it (globals destroyed in reverse
         // binding order, cycles reaped, channels drained, reactive graph cleared).
@@ -888,6 +900,36 @@ mod tests {
             noeta_value::live_count(),
             before,
             "teardown returns residency to the pre-session baseline"
+        );
+    }
+
+    /// Two sessions LIVE on ONE thread share the thread-local value heap. The backup mark-sweep in
+    /// [`Vm::teardown`] reclaims everything unreachable from the tearing-down VM's roots — so under
+    /// the bug it freed the *sibling* session's live objects (a cross-session double-free / heap
+    /// corruption at the sibling's own teardown). The fix runs the destructive sweeps only for the
+    /// LAST owner on the thread. This pins: (a) tearing `a` down while `b` is alive does not corrupt
+    /// `b` (it still runs), and (b) residency returns to the baseline once the last owner tears down
+    /// (an earlier session's cycle garbage is reaped then, never double-freed).
+    #[test]
+    fn two_sessions_sharing_a_thread_tear_down_without_cross_session_free() {
+        let before = noeta_value::live_count();
+        let mut a = sandbox_session();
+        let mut b = sandbox_session();
+        // Each session binds a native-module value AND a heap global (a list) into its persistent
+        // state — the live objects a sibling's sweep wrongly reclaimed under the bug.
+        assert_eq!(eval(&mut a, "use std.{math}\nmut xs = [\"a\"]\necho math.abs(-5);"), "5\n");
+        assert_eq!(eval(&mut b, "use std.{math}\nmut ys = [\"b\"]\necho math.abs(-9);"), "9\n");
+        // `a` is NOT the last owner (b alive), so its teardown must SKIP the destructive sweep — not
+        // free b's live `math`/`ys`. Under the bug this corrupted the heap.
+        a.teardown();
+        // b's objects survived a's teardown — it still resolves and dispatches its native module.
+        assert_eq!(eval(&mut b, "echo math.abs(-3);"), "3\n");
+        // b is the last owner: its teardown reaps everything (including a's deferred cycle garbage).
+        b.teardown();
+        assert_eq!(
+            noeta_value::live_count(),
+            before,
+            "residency returns to baseline once the last session on the thread tears down"
         );
     }
 

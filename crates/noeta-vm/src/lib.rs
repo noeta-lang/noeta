@@ -2803,6 +2803,39 @@ fn run_and_teardown(vm: &mut Vm, mode: noeta_value::CollectorMode) -> RunResult 
     vm.teardown(mode)
 }
 
+thread_local! {
+    /// The count of **live session heap-owners** on this thread. A [`VmSession`]'s persistent
+    /// `SessionState` holds live heap objects for the whole session, and the value heap is
+    /// *thread-local* — so two embed sessions on one thread share one heap's live-object registry.
+    ///
+    /// [`Vm::teardown`]'s backup mark-sweep reclaims everything unreachable from the tearing-down
+    /// VM's roots; with a sibling session still alive, that set wrongly includes the sibling's live
+    /// objects, and the sibling's own later teardown then double-frees them (heap corruption). So a
+    /// session's teardown runs the destructive sweeps ONLY when it is the **last** owner on the
+    /// thread — an earlier session's cycle garbage is reclaimed by the final owner's empty-root sweep
+    /// instead (deferred, never double-freed). Plain runs register nothing (count stays 0), so their
+    /// teardown is unchanged. Per-thread, so one-session-per-thread (the concurrent model) sweeps
+    /// normally on each thread.
+    static SESSION_HEAP_OWNERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Register a live session heap-owner on this thread (a [`VmSession`] began holding persistent state).
+pub(crate) fn session_owner_enter() {
+    SESSION_HEAP_OWNERS.with(|c| c.set(c.get() + 1));
+}
+
+/// Retire a session heap-owner (its `SessionState` is being torn down). Called *before* the owner's
+/// [`Vm::teardown`], so the remaining count that gates the sweep reflects only the *siblings*.
+pub(crate) fn session_owner_exit() {
+    SESSION_HEAP_OWNERS.with(|c| c.set(c.get().saturating_sub(1)));
+}
+
+/// Whether the VM tearing down now is the last heap-owner on its thread — i.e. no *other* live
+/// session's objects sit in the shared registry that a destructive sweep would wrongly reclaim.
+fn is_last_heap_owner() -> bool {
+    SESSION_HEAP_OWNERS.with(|c| c.get()) == 0
+}
+
 impl<'m> Vm<'m> {
     /// Run the module's entry chunk (proto 0 = `main`) to completion and release the frame-local state
     /// it leaves behind — the returned top value, any open `concurrent` scopes, and the JIT
@@ -2857,7 +2890,13 @@ impl<'m> Vm<'m> {
         // is unwound, so the globals are the whole root set) and sweeps everything unreachable; the
         // **trial-deletion** path instead reaps its buffered candidates *after* teardown, once every frame
         // and global release has had a chance to buffer the cycle's roots.
-        if mode == noeta_value::CollectorMode::Trace {
+        // The two trace sweeps below reclaim everything unreachable from *this* VM's roots — sound
+        // only when no sibling session's live objects share the thread's heap registry. When another
+        // session is still alive (`!is_last_heap_owner`), skip them: this session's own cycle garbage
+        // is instead reaped by the final owner's empty-root sweep (deferred, never double-freed). The
+        // refcount releases below still run — they only touch this session's own graph.
+        let sweep = is_last_heap_owner();
+        if sweep && mode == noeta_value::CollectorMode::Trace {
             let mut roots: Vec<Value> = self
                 .globals
                 .iter()
@@ -2925,11 +2964,11 @@ impl<'m> Vm<'m> {
         // still-live object is unreachable garbage; trace-collect from an empty root set to reclaim it,
         // running each member's `destruct` exactly once. (The pre-teardown trace above only catches
         // cycles already unreachable mid-run.)
-        if mode == noeta_value::CollectorMode::Trace {
+        if sweep && mode == noeta_value::CollectorMode::Trace {
             let garbage = collect_trace(&[]);
             self.reclaim_cycle_garbage(garbage);
         }
-        if mode == noeta_value::CollectorMode::TrialDeletion {
+        if sweep && mode == noeta_value::CollectorMode::TrialDeletion {
             let garbage = noeta_gc::collect_trial_deletion();
             self.reclaim_cycle_garbage(garbage);
         }
