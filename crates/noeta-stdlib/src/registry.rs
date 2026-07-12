@@ -465,6 +465,17 @@ fn ensure() {
     noeta_native::registry::install_default(std_units);
 }
 
+/// The process-global default [`Registry`] as a first-class handle — the seeded-and-unwrapped form
+/// the instance-registry threading (server-hmr F2) hands to a checker/backend that was **not**
+/// given an explicit per-session registry. Ensures the std units are installed (like every facade
+/// lookup), so the returned reference is always live. A host wanting a *different* extension set per
+/// session builds its own [`Registry`] and threads that instead of calling this.
+pub fn default_seeded() -> &'static noeta_native::registry::Registry {
+    ensure();
+    noeta_native::registry::default_registry()
+        .expect("the default registry is seeded by `ensure()` immediately above")
+}
+
 /// Assemble the registry for a toolchain binary: the std units plus a composed shim's `extra`
 /// extension units (package-manager Phase 3). Called by `noeta_cli::run_cli` at entry, before
 /// anything can look a name up. With no extras this is exactly the lazy default; with extras it

@@ -2283,3 +2283,39 @@ fn a_repl_session_defers_unknown_names_to_a_later_entry() {
     assert!(entry_codes(&mut session, 1, "fn later(): int { return 3 }\n").is_empty());
     assert!(entry_codes(&mut session, 2, "echo later()\n").is_empty());
 }
+
+#[test]
+fn the_checker_resolves_native_names_against_the_injected_registry() {
+    // Instance-registry F2 (IR2): a checker given an explicit `Registry` resolves every native
+    // name against *that* registry, not the process-global default. Proven differentially — the
+    // same std-using program is clean against a registry that has `std`, and unresolved against
+    // one that does not.
+    use noeta_stdlib::registry::Registry;
+
+    // `math.sqrt` takes a `float`; calling it with a `string` is a type error (E0007) — but ONLY
+    // if the checker can see `sqrt`'s signature, which it reads from the registry. This makes the
+    // registry the sole cause of the diagnostic, so its presence/absence is a clean injection probe.
+    let src = "use std.{math};\necho math.sqrt(\"x\");\n";
+    let source = Source::new(SourceId::FIRST, "test.noe", src);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(parsed.diagnostics.is_empty(), "program must parse cleanly");
+    let has_e0007 =
+        |c: &super::Checked| c.diagnostics.iter().any(|d| d.code.to_string() == "E0007");
+
+    // Against the default (std installed), the checker knows `sqrt(float)` and flags the string.
+    let with_std = noeta_stdlib::registry::default_seeded();
+    assert!(
+        has_e0007(&super::check_all_with_registry(&parsed.program, with_std)),
+        "the checker must read `sqrt`'s signature from a registry that has std"
+    );
+
+    // Against an EMPTY registry, `std.math` never resolves, so there is no signature to check the
+    // argument against and the E0007 disappears — the checker consulted the injected registry, not
+    // a global default (which, being installed, would still know `sqrt`).
+    let empty: &'static Registry = Box::leak(Box::new(Registry::new(vec![])));
+    assert!(
+        !has_e0007(&super::check_all_with_registry(&parsed.program, empty)),
+        "an empty registry leaves `math.sqrt` unresolved, so no signature-mismatch can fire"
+    );
+}

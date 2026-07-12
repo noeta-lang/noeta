@@ -841,6 +841,13 @@ impl Registry {
             .or_else(|| self.find_ctx_function(module, func))
     }
 
+    /// Whether `<module>.<func>` names a callable module function — the single predicate the checker
+    /// and both backends share to decide what a selective member import (`use std.<mod>.<fn>`)
+    /// binds, so all three agree by construction.
+    pub fn is_module_function(&self, module: &str, func: &str) -> bool {
+        self.find_function_sig(module, func).is_some()
+    }
+
     /// Dispatch a registered higher-order function through the module's [`crate::CtxDispatch`].
     pub fn dispatch_ctx(
         &self,
