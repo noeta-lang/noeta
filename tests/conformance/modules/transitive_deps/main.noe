@@ -1,0 +1,15 @@
+// Importing an exported declaration drags in its same-module dependencies (cross-module linker
+// reachability closure): `twice` pulls the non-pub helper `scale` it calls, and `origin` pulls the
+// module-local `Point` it returns plus the `build` helper it calls (transitively). Before the
+// closure, the merged program was missing `scale`/`build`/`Point` and failed to compile.
+// expect: stdout "84"
+// expect: stdout "9"
+// expect: exit 0
+namespace App.Main;
+
+use App.Lib.twice;
+use App.Lib.origin;
+
+echo twice(42);
+p = origin();
+echo p.total;
