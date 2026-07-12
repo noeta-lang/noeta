@@ -43,15 +43,17 @@ A hole `${expr}` is an ordinary Noeta expression, checked in scope. What its **v
 - **A scalar** (`string`/`int`/`bool`/…) renders as **escaped text** — XSS-safe by default. `${user_input}` can never inject markup.
 - **An `Html`** (a nested `@html { … }`) or a **`List<Html>`** (a loop, e.g. `${rows.map(row)}`) is embedded as **raw markup**. This is the JSX rule: `{child}` composes, `{text}` is escaped.
 
-So loops and composition are just expressions over `Html` values:
+So a **loop is `.map` producing a `List<Html>`** — the JSX/React model, not a `v-for` directive. The loop body can be written **inline**, since a `${…}` hole may itself contain a nested `@html { … }`:
+
+```noeta ignore
+<ul>${items.map(fn(t) => @html { <li>${t.title}</li> })}</ul>
+```
+
+or factored into a named function when the row is non-trivial (e.g. a conditional over two templates — see "attribute holes" below):
 
 ```noeta ignore
 fn row(t: Todo): Html {
-    // A row is its own @html value. `${t.title}` is escaped; the class stays
-    // static by branching over two templates (see "attribute holes" below).
-    if t.done {
-        return @html { <li class="done">[x] ${t.title}</li> }
-    }
+    if t.done { return @html { <li class="done">[x] ${t.title}</li> } }
     return @html { <li class="todo">[ ] ${t.title}</li> }
 }
 
@@ -64,7 +66,7 @@ fn page(): Html {
 }
 ```
 
-Nested `@html` bodies are verbatim text, **not** strings — so a `${…}` hole inside one may contain double quotes (`${if t.done then "done" else "todo"}`) with none of string interpolation's nested-quote limitation.
+There is **no `v-for` / template-directive syntax** — `@html` is lightweight interpolation, not a template compiler, so loops and conditionals are ordinary Noeta expressions (`.map`, `.filter`, `if…then…else`) over `Html` values. Nested `@html` bodies are verbatim text, **not** strings, so a `${…}` hole inside one may contain double quotes (`${if t.done then "done" else "todo"}`) with none of string interpolation's nested-quote limitation.
 
 ### Reactivity: read the signal *inside* the hole
 
