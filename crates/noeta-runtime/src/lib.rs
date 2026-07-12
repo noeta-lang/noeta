@@ -23,9 +23,26 @@
 
 pub mod executor;
 pub use executor::RealExecutor;
+/// Re-exported for drivers that arm [`RealExecutor::set_wake`] (the CLI's hot-reload watcher)
+/// without taking their own tokio dependency.
+pub use tokio::sync::Notify;
+
+/// The process-wide **shutdown wake** (server-hmr S0): a [`Notify`] every [`RealExecutor`] arms
+/// itself with at construction, so a blocked executor — an idle server parked on its accept — can
+/// be roused. The CLI's SIGINT handler `notify_one()`s this after setting the serve shutdown flag,
+/// so a graceful drain begins immediately instead of at the next connection. Lazily created; a
+/// program that never serves never notifies it, so the wake stays inert (a never-fired `notified()`
+/// branch in the executor's select).
+pub fn shutdown_notify() -> std::sync::Arc<Notify> {
+    static NOTIFY: std::sync::OnceLock<std::sync::Arc<Notify>> = std::sync::OnceLock::new();
+    NOTIFY
+        .get_or_init(|| std::sync::Arc::new(Notify::new()))
+        .clone()
+}
 
 #[cfg(feature = "telemetry")]
 mod telemetry;
+mod ws;
 // Real p2p transport (p2p P3) — only compiled under the `ring-p2p` ring, which pulls the heavy
 // p2panda/iroh dependency tree. Off by default; `RealHost` keeps the loopback broker.
 #[cfg(feature = "ring-p2p")]
@@ -89,6 +106,12 @@ pub struct RealHost {
     servers: HashMap<u64, Arc<ServerState>>,
     /// Monotonic id source for `servers`.
     next_listener: u64,
+    /// A **pre-bound** listener a multi-core worker inherits (server-hmr S1): `noeta serve
+    /// --parallel N` binds the socket once and hands each worker a `try_clone`d fd, so
+    /// `net_listen(addr)` returns this dup instead of binding again (a second bind on the same
+    /// address fails without `SO_REUSEPORT`). The kernel load-balances `accept()` across the
+    /// workers' shared listening socket. `None` for an ordinary single-worker host.
+    prebound: Option<std::net::TcpListener>,
     /// Open inbound connections awaiting a reply, keyed by conn id. Shared (`Arc`) into every accept
     /// descriptor (which inserts an accepted stream) and reply descriptor (which removes and writes
     /// it), both running on the executor's runtime.
@@ -96,6 +119,10 @@ pub struct RealHost {
     /// Monotonic, thread-safe id source for `conns` (accept futures run concurrently on the
     /// executor).
     next_conn: Arc<AtomicU64>,
+    /// Upgraded websocket connections (server-hmr L0b): the split halves behind async locks,
+    /// shared into every ws descriptor. A conn moves here from `conns` at upgrade and leaves on
+    /// close/peer-EOF.
+    ws_conns: ws::WsConns,
     /// The program's argument vector reported through `args.all()` (M2.2). Defaults to the real
     /// process argv (`std::env::args()`), which is exactly what a shipped `noeta build --exe` binary
     /// wants when invoked directly. `noeta run app.noe -- a b c` overrides it via
@@ -217,8 +244,10 @@ impl RealHost {
             http: reqwest::Client::new(),
             servers: HashMap::new(),
             next_listener: 0,
+            prebound: None,
             conns: Arc::new(Mutex::new(HashMap::new())),
             next_conn: Arc::new(AtomicU64::new(0)),
+            ws_conns: Arc::new(Mutex::new(HashMap::new())),
             args: std::env::args().collect(),
             env_overlay: HashMap::new(),
             procs: HashMap::new(),
@@ -230,6 +259,14 @@ impl RealHost {
             p2p_node: None,
             p2p_app_id: None,
         })
+    }
+
+    /// Seed a **pre-bound listener** (server-hmr S1): the multi-core `noeta serve --parallel`
+    /// driver binds once and gives each worker a `try_clone`d socket, so the worker's
+    /// `net_listen` adopts this fd rather than binding the address a second time.
+    pub fn with_prebound_listener(mut self, listener: std::net::TcpListener) -> RealHost {
+        self.prebound = Some(listener);
+        self
     }
 
     /// Set the p2p application namespace ([`Self::p2p_app_id`]) — the running program's package
@@ -506,8 +543,13 @@ impl Network for RealHost {
     /// tokio listener is attached lazily on the executor runtime at first accept. The socket is set
     /// non-blocking (required by `TcpListener::from_std`), and `SO_REUSEADDR` is the std default.
     fn net_listen(&mut self, addr: &str) -> Result<u64, StdError> {
-        let listener = std::net::TcpListener::bind(addr)
-            .map_err(|e| io_error(format!("cannot bind `{addr}`: {e}")))?;
+        // A multi-core worker (server-hmr S1) adopts the pre-bound, `try_clone`d listener instead
+        // of binding — the socket is already listening on `addr`, and a second bind would fail.
+        let listener = match self.prebound.take() {
+            Some(prebound) => prebound,
+            None => std::net::TcpListener::bind(addr)
+                .map_err(|e| io_error(format!("cannot bind `{addr}`: {e}")))?,
+        };
         listener
             .set_nonblocking(true)
             .map_err(|e| io_error(format!("cannot configure `{addr}`: {e}")))?;
@@ -553,6 +595,56 @@ impl Network for RealHost {
     /// The real host always overrides [`Network::net_reply`] with the async descriptor.
     fn net_reply_now(&mut self, _conn: u64, _response: NetResponse) -> Result<(), StdError> {
         unreachable!("RealHost replies via the async net_reply descriptor, never the sync fallback")
+    }
+
+    // --- Websocket hijack (server-hmr L0b): the async descriptors; the sync fallbacks are never
+    // reached (same contract as accept/reply above).
+
+    fn net_ws_upgrade(&self, conn: u64, key: String) -> Box<dyn ExternIo> {
+        Box::new(ws::RealWsUpgradeIo {
+            conns: self.conns.clone(),
+            ws_conns: self.ws_conns.clone(),
+            conn,
+            key: Some(key),
+        })
+    }
+
+    fn net_ws_recv(&self, conn: u64) -> Box<dyn ExternIo> {
+        Box::new(ws::RealWsRecvIo {
+            ws_conns: self.ws_conns.clone(),
+            conn,
+        })
+    }
+
+    fn net_ws_send(&self, conn: u64, text: String) -> Box<dyn ExternIo> {
+        Box::new(ws::RealWsSendIo {
+            ws_conns: self.ws_conns.clone(),
+            conn,
+            text: Some(text),
+        })
+    }
+
+    fn net_ws_close(&self, conn: u64) -> Box<dyn ExternIo> {
+        Box::new(ws::RealWsCloseIo {
+            ws_conns: self.ws_conns.clone(),
+            conn,
+        })
+    }
+
+    fn net_ws_upgrade_now(&mut self, _conn: u64, _key: &str) -> Result<(), StdError> {
+        unreachable!("RealHost upgrades via the async descriptor, never the sync fallback")
+    }
+
+    fn net_ws_recv_next(&mut self, _conn: u64) -> Result<Option<String>, StdError> {
+        unreachable!("RealHost receives via the async descriptor, never the sync fallback")
+    }
+
+    fn net_ws_send_now(&mut self, _conn: u64, _text: &str) -> Result<(), StdError> {
+        unreachable!("RealHost sends via the async descriptor, never the sync fallback")
+    }
+
+    fn net_ws_close_now(&mut self, _conn: u64) -> Result<(), StdError> {
+        unreachable!("RealHost closes via the async descriptor, never the sync fallback")
     }
 }
 

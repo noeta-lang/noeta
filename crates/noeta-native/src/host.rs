@@ -12,7 +12,7 @@
 //! seam returns) live here in the ABI crate; the concrete `SandboxHost` and its sandbox constants
 //! stay in `noeta-stdlib` next to the modules whose bytes it owns.
 
-use crate::StdError;
+use crate::{ErrorKind, StdError};
 
 /// How a read handle's bytes are delivered, decided by the host at `fs.open` time and handed to
 /// `FileHandle::open_read`. Keeping this choice in one neutral enum is what lets the same handle
@@ -166,6 +166,76 @@ pub trait Network {
             conn,
             response: Some(response),
         })
+    }
+
+    // --- Websocket hijack (server-hmr L0): an accepted connection upgrades from
+    // one-reply-and-close to a persistent bidirectional TEXT-message stream — the transport under
+    // LiveView's diff-push and the HMR client events. Determinism mirrors the request script: the
+    // sandbox drives a fixed per-connection client conversation and records sends; the real host
+    // overrides the descriptor builders with a genuine RFC 6455 handshake + frame codec. The
+    // `*_now` defaults error, so a host that never serves websockets (WASI, browser) stays
+    // compiling and a program reaching the surface gets an honest capability error.
+
+    /// Switch `conn` to websocket mode, `key` being the client's `Sec-WebSocket-Key` (the sandbox
+    /// arms its scripted conversation and ignores the key; the real host writes the 101 response).
+    fn net_ws_upgrade_now(&mut self, _conn: u64, _key: &str) -> Result<(), StdError> {
+        Err(StdError {
+            kind: ErrorKind::Io,
+            message: "this host does not serve websockets".to_string(),
+        })
+    }
+
+    /// The next inbound text message on `conn` for the default recv descriptor — `None` once the
+    /// peer closed (sandbox: the scripted conversation is exhausted).
+    fn net_ws_recv_next(&mut self, _conn: u64) -> Result<Option<String>, StdError> {
+        Err(StdError {
+            kind: ErrorKind::Io,
+            message: "this host does not serve websockets".to_string(),
+        })
+    }
+
+    /// Write a text frame on `conn` for the default send descriptor (sandbox: recorded).
+    fn net_ws_send_now(&mut self, _conn: u64, _text: &str) -> Result<(), StdError> {
+        Err(StdError {
+            kind: ErrorKind::Io,
+            message: "this host does not serve websockets".to_string(),
+        })
+    }
+
+    /// Close `conn`'s websocket (sandbox: drops the conversation state).
+    fn net_ws_close_now(&mut self, _conn: u64) -> Result<(), StdError> {
+        Err(StdError {
+            kind: ErrorKind::Io,
+            message: "this host does not serve websockets".to_string(),
+        })
+    }
+
+    /// Build the upgrade descriptor. Default resolves through [`Self::net_ws_upgrade_now`].
+    fn net_ws_upgrade(&self, conn: u64, key: String) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::net::WsUpgradeIo {
+            conn,
+            key: Some(key),
+        })
+    }
+
+    /// Build the recv descriptor — resolves to `?string`, `None` = closed. Default via
+    /// [`Self::net_ws_recv_next`]; `RealHost` overrides with an async frame read.
+    fn net_ws_recv(&self, conn: u64) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::net::WsRecvIo { conn })
+    }
+
+    /// Build the send descriptor. Default via [`Self::net_ws_send_now`]; `RealHost` overrides
+    /// with an async frame write.
+    fn net_ws_send(&self, conn: u64, text: String) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::net::WsSendIo {
+            conn,
+            text: Some(text),
+        })
+    }
+
+    /// Build the close descriptor. Default via [`Self::net_ws_close_now`].
+    fn net_ws_close(&self, conn: u64) -> Box<dyn crate::ExternIo> {
+        Box::new(crate::net::WsCloseIo { conn })
     }
 }
 

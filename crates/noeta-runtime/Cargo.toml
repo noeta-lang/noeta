@@ -14,6 +14,9 @@ rust-version.workspace = true
 noeta-stdlib = { path = "../noeta-stdlib", default-features = false }
 compact_str = { workspace = true }
 tokio = { workspace = true }
+# Websocket handshake (server-hmr L0b): Sec-WebSocket-Accept = base64(sha1(key + GUID)).
+sha1 = { workspace = true }
+base64 = { workspace = true }
 getrandom = { workspace = true }
 gethostname = { workspace = true }
 # The outbound HTTP client (the `Network::net_fetch`/`net_spawn` capability on `RealHost`). Optional

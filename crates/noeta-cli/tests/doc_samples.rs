@@ -8,9 +8,11 @@
 //! A fenced block's info string selects how it is checked:
 //!
 //! * ```` ```noeta ```` — a complete program; it **must** run to a zero exit (`noeta run` succeeds).
-//! * ```` ```noeta check ```` — a complete program the gate cannot *execute* (a server binds a real
-//!   socket and runs until Ctrl-C) but that **must** still type-check (`noeta check` succeeds) — so
-//!   a renamed API or type error in the sample fails CI even though it never runs.
+//! * ```` ```noeta check ```` — a sample the gate cannot *execute* (a server binds a real socket
+//!   and runs until Ctrl-C) or a page fragment referencing names defined elsewhere, but that
+//!   **must** still type-check. Checked in **session mode** (like a REPL entry): a genuine type
+//!   error — a renamed API, a wrong operand, bad arity — fails CI, while an unresolved *external*
+//!   name is tolerated (F1), so a snippet need not restate its whole context.
 //! * ```` ```noeta ignore ```` — an illustrative fragment (references a type defined elsewhere on the
 //!   page, or shows declaration syntax in isolation). Not verified at all, exactly like a Rust
 //!   `ignore` doctest. Keep these to a minimum; prefer a runnable block, or `check` if it at least
@@ -78,19 +80,36 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
     if sample.tag == "ignore" {
         return Ok(());
     }
+    // A `check`-tagged sample type-checks without executing (it would bind sockets / never exit,
+    // or it is a page fragment referencing names defined elsewhere). A doc fragment is a
+    // REPL-like snippet, so it is checked in **session mode** — parse + type-check, with unknown
+    // external names deferred (F1) rather than a hard error. A genuine type error (arity, a
+    // wrong operand) is still caught. `run`/untagged samples must be complete programs and run.
+    if sample.tag == "check" {
+        let source =
+            noeta_span::Source::new(noeta_span::SourceId::FIRST, "sample.noe", &sample.code);
+        let lexed = noeta_lexer::lex(&source);
+        let parsed = noeta_parser::parse(&source, &lexed.tokens);
+        let mut diags = lexed.diagnostics.clone();
+        diags.extend(parsed.diagnostics);
+        diags.extend(noeta_check::SessionChecker::new().check_entry(&parsed.program));
+        return if diags.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{}:{} (tag \"check\") was expected to type-check cleanly but did not — {}",
+                sample.file, sample.line, diags[0].message
+            ))
+        };
+    }
+
     let dir = std::env::temp_dir().join(format!("noeta_doc_sample_{idx}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create sample dir");
     let path = dir.join("main.noe");
     std::fs::write(&path, &sample.code).expect("write sample");
 
-    // `check`-tagged samples type-check without executing (they would bind sockets / never
-    // exit); everything else runs for real.
-    let verb = if sample.tag == "check" {
-        "check"
-    } else {
-        "run"
-    };
+    let verb = "run";
     let output = Command::cargo_bin("noeta")
         .expect("the `noeta` binary builds")
         // Hermetic startup cache — don't touch the developer's real ~/.cache/noeta during tests.

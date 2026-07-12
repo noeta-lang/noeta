@@ -434,6 +434,25 @@ mod tests {
     }
 
     #[test]
+    fn multiline_backtick_templates_are_preserved_verbatim() {
+        // A multiline `` `…` `` template keeps its layout (F4) — the dedent + newlines would
+        // otherwise collapse into an escaped `\n`-laden double-quoted one-liner. Single-line
+        // backticks still canonicalize to `"…"` (lossless), matching the one-quote-form policy.
+        let src = "fn page(): string {\n    return `\n        <html>\n        <body>${x}</body>\n        </html>\n    `\n}\n";
+        let out = fmt(src).unwrap();
+        assert!(out.contains("return `\n"), "backticks preserved: {out}");
+        assert!(
+            out.contains("<body>${x}</body>"),
+            "interpolation intact: {out}"
+        );
+        assert!(!out.contains("\\n"), "not collapsed into escapes: {out}");
+        // Idempotent.
+        assert_eq!(fmt(&out).unwrap(), out);
+        // A single-line backtick canonicalizes to a double-quoted literal.
+        assert_eq!(fmt("x = `hi ${n}`\n").unwrap(), "x = \"hi ${n}\"\n");
+    }
+
+    #[test]
     fn wrap_breaks_long_sequences_but_not_short_ones() {
         // Fits → flat.
         assert_eq!(

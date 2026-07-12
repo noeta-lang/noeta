@@ -388,4 +388,23 @@ pub trait NativeCtx {
     /// `async fn` bodies — are, on both backends identically): the caller then falls back to
     /// ending the span itself.
     fn trace_future(&mut self, future: Slot, span: u64) -> CtxResult<bool>;
+
+    // --- hot reload (server-hmr L3): how a long-running orchestrating dispatch observes the
+    // hot-swap channel. Defaults are the "not in hot mode" answers, so only the backend that
+    // actually carries a swap mailbox (the VM under `noeta serve --watch`) overrides — the
+    // tree-walker and every ordinary run see a constant 0/None and the loops stay inert.
+
+    /// The swap **generation**: how many hot swaps have been applied to this run. A dispatch
+    /// loop that snapshots this each iteration detects "a swap landed since" and can notify its
+    /// clients (the serve loop pushes `reload` frames to live websockets).
+    fn hot_swap_count(&mut self) -> u64 {
+        0
+    }
+
+    /// Take the last **rejected** edit's rendered diagnostics (a red check under `--watch`),
+    /// if one is pending. Consuming — each error is delivered once (the serve loop forwards it
+    /// to live clients as an `error` frame for the browser overlay).
+    fn take_hot_error(&mut self) -> Option<String> {
+        None
+    }
 }

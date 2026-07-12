@@ -18,6 +18,9 @@ path = "src/main.rs"
 
 [dependencies]
 mimalloc = { version = "0.1", default-features = false }
+# The SIGINT graceful-drain handler (server-hmr S0) awaits `tokio::signal::ctrl_c` on its own
+# tiny runtime; `signal` is the only feature the CLI needs directly.
+tokio = { workspace = true, features = ["signal", "rt"] }
 noeta-span = { workspace = true }
 noeta-ast = { workspace = true }
 noeta-backend = { workspace = true }
@@ -31,6 +34,7 @@ noeta-bundle = { workspace = true }
 noeta-cache = { workspace = true }
 noeta-check = { workspace = true }
 noeta-loader = { workspace = true }
+# Also the impact engine (server-hmr W3): `noeta test/bench --watch` reruns only impacted decls.
 noeta-ide = { workspace = true }
 noeta-runtime = { workspace = true }
 noeta-stdlib = { workspace = true }
@@ -42,6 +46,8 @@ noeta-pm = { workspace = true, features = ["registry-http", "provenance", "keyle
 noeta-mcp = { workspace = true }
 sha2 = { workspace = true }
 clap = { workspace = true }
+# `--watch` restart-on-change dev loop (server-hmr W0).
+notify = { workspace = true }
 toml = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true }

@@ -1,0 +1,23 @@
+// server.liveview_js (server-hmr L2) — the bundled browser client for the view/diff push
+// protocol is available in-language as a pure string, so an app serves it from a route with no
+// asset pipeline. Pins the conventions the docs promise (frame types, data-live binding markers,
+// the programmatic handle) without pinning the full source — the shim may evolve, its protocol
+// surface may not drift silently.
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: exit 0
+use std.http.server
+
+js = server.liveview_js()
+echo js.contains("\"snapshot\"")
+echo js.contains("\"patch\"")
+echo js.contains("data-live")
+echo js.contains("data-live-click")
+echo js.contains("noetaLive")
+echo js.contains("\"reload\"")
+echo js.contains("noeta-live-overlay")

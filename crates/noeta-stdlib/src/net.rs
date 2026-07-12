@@ -11,7 +11,7 @@
 
 pub use noeta_native::net::{
     NetFetchIo, NetRequest, NetResponse, REQUEST_TYPE_NAME, RESPONSE_TYPE_NAME, Request,
-    accept_outcome, query_value, request_header, request_path,
+    WS_ACCEPT_GUID, accept_outcome, query_value, request_header, request_path, ws_recv_outcome,
 };
 
 use serde_json::json;
@@ -27,6 +27,10 @@ use serde_json::json;
 ///   3. `POST /echo`  body `hello`  header `content-type: text/plain`  — a body + a header
 ///   4. `GET /users/42?active=true`            — a path segment + a query string
 ///   5. `DELETE /users/42`                     — a non-GET/POST verb
+///   6. `GET /ws`  headers `upgrade: websocket`, `sec-websocket-key: <fixed>`  — a websocket
+///      upgrade request (server-hmr L0). A handler that upgrades it is driven by the fixed
+///      client conversation ([`sandbox_ws_client_frames`]); one that responds normally treats
+///      it as any other GET.
 pub fn sandbox_request_script() -> Vec<NetRequest> {
     let req = |method: &str, path: &str, body: &str, headers: Vec<(&str, &str)>| NetRequest {
         method: method.to_string(),
@@ -48,7 +52,28 @@ pub fn sandbox_request_script() -> Vec<NetRequest> {
         ),
         req("GET", "/users/42?active=true", "", vec![]),
         req("DELETE", "/users/42", "", vec![]),
+        req(
+            "GET",
+            "/ws",
+            "",
+            vec![
+                ("connection", "Upgrade"),
+                ("upgrade", "websocket"),
+                ("sec-websocket-version", "13"),
+                // A fixed, valid 16-byte base64 key so the accept-key derivation is exercised
+                // deterministically end to end.
+                ("sec-websocket-key", "c2FuZGJveC13cy1rZXkhIQ=="),
+            ],
+        ),
     ]
+}
+
+/// The sandbox's fixed **websocket client conversation** (server-hmr L0) — the frames "the peer"
+/// sends on any upgraded connection, then a clean close (recv yields `None`). The ws analog of
+/// the request script: finite and documented, so an upgraded handler's behavior pins exactly and
+/// the serve loop terminates in-oracle.
+pub fn sandbox_ws_client_frames() -> Vec<String> {
+    vec!["first frame".to_string(), "second frame".to_string()]
 }
 
 /// A response with a single `content-type` header (the responder's shorthand).

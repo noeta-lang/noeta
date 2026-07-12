@@ -60,6 +60,7 @@ use noeta_ir::{
 };
 
 mod freevars;
+pub mod hotswap;
 mod regalloc;
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 // Re-exported so the VM session API can name the checker's compile-input bundle through its
@@ -4637,10 +4638,16 @@ mod tests {
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
         let from_module = compile(&parsed.program).expect("compiles").reflection;
-        let from_builder = noeta_ast::reflect::build(&parsed.program);
+        // `compile` embeds the installed extensions' attribute shapes (`#[Skip]`/`#[Bench]`/…,
+        // now registry-declared) via `extend_reflection`, so the parity comparison applies the
+        // same embedding to the raw builder output.
+        let mut from_builder = noeta_ast::reflect::build(&parsed.program);
+        noeta_check::extend_reflection(&mut from_builder);
         assert_eq!(from_module, from_builder);
         // Deterministic: the same AST always yields the same artifact.
-        assert_eq!(from_builder, noeta_ast::reflect::build(&parsed.program));
+        let mut again = noeta_ast::reflect::build(&parsed.program);
+        noeta_check::extend_reflection(&mut again);
+        assert_eq!(from_builder, again);
     }
 
     #[test]

@@ -35,14 +35,15 @@ use std::cmp::Ordering;
 
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
-    ArenaGetter, CtxError, CtxOut, ErrorKind, ExtState, ExternValue, NativeCtx, Retained, Slot,
-    StdError, ctx_arity, no_function_error,
+    ArenaGetter, AttrValue, CtxError, CtxOut, ErrorKind, ExtState, ExternValue, NativeCtx,
+    Retained, Slot, SpanKind, SpanStatus, StdError, ctx_arity, no_function_error,
 };
 use noeta_reactive::{MAX_FLUSH_STEPS, NodeId, ReactiveGraph};
 
 pub const SIGNAL_TYPE_NAME: &str = "Signal";
 pub const COMPUTED_TYPE_NAME: &str = "Computed";
 pub const EFFECT_TYPE_NAME: &str = "Effect";
+pub const VIEW_TYPE_NAME: &str = "View";
 
 const VAR_A: SigType = SigType::Var(0);
 
@@ -64,6 +65,13 @@ pub const REACTIVE_CTX_FNS: &[ExtFn] = &[
         name: "effect",
         params: &[SigType::Fn(&[], &SigType::Dyn)],
         ret: RetTy::Concrete(SigType::Named(EFFECT_TYPE_NAME)),
+    },
+    // `view() -> View` — a named window onto reactive state for the diff-push transport
+    // (server-hmr L1); see [`view_ctx_method_dispatch`] for the protocol.
+    ExtFn {
+        name: "view",
+        params: &[],
+        ret: RetTy::Concrete(SigType::Named(VIEW_TYPE_NAME)),
     },
 ];
 
@@ -97,6 +105,31 @@ pub const EFFECT_CTX_METHODS: &[ExtFn] = &[ExtFn {
     ret: RetTy::Concrete(SigType::Unit),
 }];
 
+const OPT_STR: SigType = SigType::Option(&SigType::String);
+
+pub const VIEW_CTX_METHODS: &[ExtFn] = &[
+    // `expose(name, handle)` — bind `name` to a `Signal` or `Computed` (anything else is a
+    // runtime error). Re-exposing a name replaces its binding (the hot-swap re-run path).
+    ExtFn {
+        name: "expose",
+        params: &[SigType::String, SigType::Dyn],
+        ret: RetTy::Concrete(SigType::Unit),
+    },
+    // `snapshot() -> string` — the full-state frame; also the baseline diffs are minimal against.
+    ExtFn {
+        name: "snapshot",
+        params: &[],
+        ret: RetTy::Concrete(SigType::String),
+    },
+    // `diff() -> ?string` — a patch frame of bindings whose value changed since the last
+    // snapshot/diff, or `none` when nothing (observably) changed.
+    ExtFn {
+        name: "diff",
+        params: &[],
+        ret: RetTy::Concrete(OPT_STR),
+    },
+];
+
 pub const SIGNAL_ARENA_GETTER: ArenaGetter = ("get", |e| signal_box(e).cell);
 pub const COMPUTED_ARENA_GETTER: ArenaGetter = ("get", |e| computed_box(e).memo);
 
@@ -109,6 +142,22 @@ pub const COMPUTED_ARENA_GETTER: ArenaGetter = ("get", |e| computed_box(e).memo)
 pub(crate) struct ReactiveExt {
     pub(crate) graph: ReactiveGraph<Retained>,
     gates_open: std::cell::Cell<bool>,
+    /// Every live effect `(node, body)` in creation order — the hot-swap epoch registry
+    /// (server-hmr H1). A swap that re-runs the top level disposes all of them first
+    /// ([`hotswap_dispose_effects`]) and lets the re-run re-create them; a user-level
+    /// `.dispose()` prunes its entry so the swap never double-releases a body cell.
+    effects: std::cell::RefCell<Vec<(NodeId, Retained)>>,
+    /// Every `view()` created this run (server-hmr L1) — the diff-push subscribers. Views are
+    /// never removed (they live with the run, like the graph); a swap's top-level re-run builds
+    /// fresh ones and the old, unreferenced entries just stop being polled. Borrowed **mutably
+    /// only in short, non-reentrant windows** — never across a body run.
+    views: std::cell::RefCell<Vec<ViewState>>,
+    /// Reused drain buffer for [`distribute_changes`] — a hot set→flush loop allocates nothing.
+    changed_scratch: std::cell::RefCell<Vec<NodeId>>,
+    /// Whether the opt-in flush telemetry is on (server-hmr L4 / native-otel T5e): resolved once
+    /// per run on first use — `tel_enabled()` AND `NOETA_TRACE_REACTIVE` truthy — then a plain
+    /// bool read on the hot path. `None` until the first flush asks.
+    trace: std::cell::Cell<Option<bool>>,
 }
 
 pub(crate) const STATE_KEY: &str = "std.reactive";
@@ -119,6 +168,10 @@ pub(crate) fn state_of<C: NativeCtx + ?Sized>(ctx: &mut C) -> ExtState {
             graph: ReactiveGraph::new(),
             // The backend's gates start open — mirror that.
             gates_open: std::cell::Cell::new(true),
+            effects: std::cell::RefCell::new(Vec::new()),
+            views: std::cell::RefCell::new(Vec::new()),
+            changed_scratch: std::cell::RefCell::new(Vec::new()),
+            trace: std::cell::Cell::new(None),
         })
     })
 }
@@ -144,11 +197,27 @@ pub(crate) fn drive_flush<C: NativeCtx + ?Sized>(
     ctx: &mut C,
     ext: &ReactiveExt,
 ) -> Result<(), CtxError> {
+    // Opt-in flush telemetry (server-hmr L4 / native-otel T5e): a span only when the flag is on
+    // AND the flush will actually run something — a no-op flush (a `set` with no subscribers)
+    // emits nothing. The span is pushed as the active context so spans the effect bodies create
+    // nest under it, connecting reactive propagation into the request/session trace.
+    let span = if reactive_tracing(ctx, ext) && ext.graph.pending_effects() > 0 {
+        let parent = crate::tracing::current_parent(ctx);
+        let id = ctx
+            .host()
+            .tel_span_start("reactive.flush", SpanKind::Internal, parent);
+        crate::tracing::push_active(ctx, id);
+        Some(id)
+    } else {
+        None
+    };
+    let mut effects_run: i64 = 0;
     let mut aborted: Option<CtxError> = None;
     let overflowed = ext
         .graph
         .flush(&mut |body: Retained| -> Retained {
             if aborted.is_none() {
+                effects_run += 1;
                 sync_gates(ctx, ext);
                 if let Err(e) = ctx.run_thunk(body) {
                     aborted = Some(e);
@@ -158,6 +227,26 @@ pub(crate) fn drive_flush<C: NativeCtx + ?Sized>(
         })
         .is_err();
     sync_gates(ctx, ext);
+    // The flush subscriber (server-hmr L1): every change path funnels through here (a top-level
+    // `set`/`update`/effect-creation/synced-merge drives a flush even when no effect is queued;
+    // a set *inside* a flush lands in the graph's change log and is drained by this outer call),
+    // so distributing once per flush marks every view binding whose node changed.
+    let changed = distribute_changes(ext);
+    if let Some(id) = span {
+        crate::tracing::pop_active(ctx, id);
+        let host = ctx.host();
+        host.tel_span_set_attr(id, "reactive.effects", AttrValue::Int(effects_run));
+        host.tel_span_set_attr(id, "reactive.changed", AttrValue::Int(changed as i64));
+        if aborted.is_some() {
+            host.tel_span_set_status(id, SpanStatus::Error("effect body aborted".into()));
+        } else if overflowed {
+            host.tel_span_set_status(
+                id,
+                SpanStatus::Error("reactive update did not converge".into()),
+            );
+        }
+        host.tel_span_end(id);
+    }
     if let Some(e) = aborted {
         return Err(e);
     }
@@ -172,6 +261,396 @@ pub(crate) fn drive_flush<C: NativeCtx + ?Sized>(
         .into());
     }
     Ok(())
+}
+
+/// Resolve (once per run, then a plain bool read) the opt-in flush-telemetry flag (server-hmr
+/// L4): spans are emitted only when telemetry is active AND `NOETA_TRACE_REACTIVE` is `1`/`true`
+/// — per-flush tracing is far too noisy for default-on, and the flush is a perf-gated hot path,
+/// so the off state must cost one cached-bool branch.
+fn reactive_tracing<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) -> bool {
+    if let Some(on) = ext.trace.get() {
+        return on;
+    }
+    let host = ctx.host();
+    let on = host.tel_enabled()
+        && host
+            .env_get("NOETA_TRACE_REACTIVE")
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    ext.trace.set(Some(on));
+    on
+}
+
+/// Hot-swap hook (server-hmr H1): dispose **every live effect** and release its body cell — the
+/// swap's re-run of the (new) top level re-creates the ones that still exist. Exactly the
+/// user-level `.dispose()` per effect, driven off the epoch registry. A program that never touched
+/// reactivity gets an empty state and this is a no-op.
+pub fn hotswap_dispose_effects<C: NativeCtx + ?Sized>(ctx: &mut C) {
+    let state = state_of(ctx);
+    let ext = state.borrow();
+    let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
+    let drained: Vec<(NodeId, Retained)> = ext.effects.borrow_mut().drain(..).collect();
+    for (node, body) in drained {
+        ext.graph.dispose(node);
+        ctx.release_retained(body);
+    }
+    sync_gates(ctx, ext);
+}
+
+/// Hot-swap hook (server-hmr H1): the given slots hold globals a swap fragment is about to
+/// re-bind. Any that carry a `Signal`/`Computed` handle gets its graph node disposed, so the
+/// replaced node stops participating in flushes (a preserved subscriber re-subscribes to the
+/// replacement on its next run — dependency edges are rebuilt per run). The content/memo arena
+/// cells are deliberately **not** released: an alias captured elsewhere may still read them;
+/// they reclaim at teardown (bounded by replaced bindings per swap). Effects are not handled
+/// here — the epoch registry ([`hotswap_dispose_effects`]) owns them.
+pub fn hotswap_dispose_handles<C: NativeCtx + ?Sized>(ctx: &mut C, handles: &[Slot]) {
+    let mut nodes: Vec<NodeId> = Vec::new();
+    for &handle in handles {
+        let _ = ctx.with_extern(handle, &mut |e| {
+            if let Some(s) = e.as_any().downcast_ref::<SignalBox>() {
+                nodes.push(s.node);
+            } else if let Some(c) = e.as_any().downcast_ref::<ComputedBox>() {
+                nodes.push(c.node);
+            }
+        });
+    }
+    if nodes.is_empty() {
+        return;
+    }
+    let state = state_of(ctx);
+    let ext = state.borrow();
+    let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
+    for node in nodes {
+        ext.graph.dispose(node);
+    }
+    sync_gates(ctx, ext);
+}
+
+// ----- views: the diff-push transport's flush subscriber (server-hmr L1) -----
+//
+// A `View` is a set of named bindings onto `Signal`/`Computed` (and `SyncedSignal`) handles plus
+// per-binding dirt and a serialized baseline. The graph's change log (drained once per flush by
+// [`distribute_changes`]) marks candidate bindings dirty; `diff()` serializes only the dirty ones
+// and drops any whose JSON equals the baseline — so a `set` to an equal value, or a recompute
+// that lands on the same result, pushes nothing. The wire protocol (shared with the L3 HMR
+// events, one channel two event kinds):
+//
+//   snapshot:  {"type":"snapshot","values":{"count":0,"double":0}}
+//   patch:     {"type":"patch","changes":{"count":1}}
+//
+// Entries are sorted by binding name and serialized by the exact `json.stringify` walk, so frames
+// are deterministic and differential-pinned.
+
+/// One named binding in a view: the graph node to watch and where its value lives.
+struct ViewBinding {
+    name: String,
+    node: NodeId,
+    source: ViewSource,
+    /// The serialization last pushed for this binding (set at expose/snapshot, updated by each
+    /// emitting diff) — the baseline that makes a patch minimal by *value*, not just by node.
+    last: String,
+}
+
+/// Where a binding's current value is read from: a signal's content cell, or a computed's
+/// body+memo (a dirty memo recomputes on read, exactly like `.get()`).
+enum ViewSource {
+    Signal { cell: Retained },
+    Computed { body: Retained, memo: Retained },
+}
+
+/// One `view()`'s state: bindings in expose order plus the dirty set the flush subscriber fills.
+#[derive(Default)]
+struct ViewState {
+    bindings: Vec<ViewBinding>,
+    dirty: std::collections::BTreeSet<usize>,
+}
+
+/// Drain the graph's change log and mark every matching binding dirty, in every view. Runs once
+/// per [`drive_flush`]; alloc-free in the steady state (the drain buffer is reused, and with no
+/// views the log is empty because observation is only switched on by `view()`). Returns the
+/// number of distinct changed nodes (the `reactive.changed` span attribute, server-hmr L4).
+fn distribute_changes(ext: &ReactiveExt) -> usize {
+    let mut changed = ext.changed_scratch.borrow_mut();
+    changed.clear();
+    ext.graph.drain_changed_into(&mut changed);
+    if changed.is_empty() {
+        return 0;
+    }
+    changed.sort_unstable();
+    changed.dedup();
+    let mut views = ext.views.borrow_mut();
+    for view in views.iter_mut() {
+        for (idx, binding) in view.bindings.iter().enumerate() {
+            if changed.binary_search(&binding.node).is_ok() {
+                view.dirty.insert(idx);
+            }
+        }
+    }
+    changed.len()
+}
+
+/// Serialize a binding's *current* value as JSON — the shared `json.stringify` walk, so both
+/// backends produce identical bytes. A dirty computed recomputes first (the `.get()` semantics);
+/// a node a hot swap disposed returns `None` (the binding is silently skipped — its replacement
+/// was exposed by the swap's re-run). Must be called with **no view borrow held**: a computed
+/// body re-enters the backend.
+fn binding_value_json<C: NativeCtx + ?Sized>(
+    ctx: &mut C,
+    ext: &ReactiveExt,
+    node: NodeId,
+    source: &ViewSource,
+) -> Result<Option<String>, CtxError> {
+    if !ext.graph.is_live(node) {
+        return Ok(None);
+    }
+    let slot = match *source {
+        ViewSource::Signal { cell } => ctx.retained_get(cell)?,
+        ViewSource::Computed { memo, .. } => {
+            // Mirror `computed.get`: recompute-if-dirty into the stable memo cell (the graph
+            // hands the body cell to the callback, exactly like the method dispatch).
+            let mut aborted: Option<CtxError> = None;
+            ext.graph.read(node, &mut |body: Retained| -> Retained {
+                if aborted.is_none() {
+                    sync_gates(ctx, ext);
+                    if let Err(e) = ctx.call_thunk_into(body, memo) {
+                        aborted = Some(e);
+                    }
+                }
+                memo
+            });
+            sync_gates(ctx, ext);
+            if let Some(e) = aborted {
+                return Err(e);
+            }
+            ctx.retained_get(memo)?
+        }
+    };
+    let value = ctx.view(slot)?;
+    ctx.free(slot);
+    Ok(Some(crate::json::stringify(&value)))
+}
+
+/// Render a frame: `{"type":<kind>,<field>:{"name":<json>,…}}` with entries sorted by name.
+fn view_frame(
+    kind: &str,
+    field: &str,
+    entries: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let body: Vec<String> = entries
+        .iter()
+        .map(|(name, json)| format!("{}:{}", crate::json::json_string(name), json))
+        .collect();
+    format!("{{\"type\":\"{kind}\",\"{field}\":{{{}}}}}", body.join(","))
+}
+
+pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
+    method: &str,
+    ctx: &mut C,
+    recv: Slot,
+    args: &[Slot],
+) -> Result<CtxOut, CtxError> {
+    let id = {
+        let mut id = None;
+        ctx.with_extern(recv, &mut |e| id = Some(view_box(e).id))?;
+        id.expect("a View receiver wraps a ViewBox")
+    };
+    let state = state_of(ctx);
+    let ext = state.borrow();
+    let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
+    match method {
+        "expose" => {
+            ctx_arity(method, args, 2)?;
+            let noeta_native::registry::NativeValue::Str(name) = ctx.view(args[0])? else {
+                return Err(StdError {
+                    kind: ErrorKind::ArgType,
+                    message: "view.expose: the binding name must be a string".to_string(),
+                }
+                .into());
+            };
+            // Accept any handle that is a node over the shared graph: Signal, Computed, or
+            // SyncedSignal (a synced signal IS a signal node — LiveView over synced state).
+            let mut found: Option<(NodeId, ViewSource)> = None;
+            let _ = ctx.with_extern(args[1], &mut |e| {
+                if let Some(s) = e.as_any().downcast_ref::<SignalBox>() {
+                    found = Some((s.node, ViewSource::Signal { cell: s.cell }));
+                } else if let Some(c) = e.as_any().downcast_ref::<ComputedBox>() {
+                    found = Some((
+                        c.node,
+                        ViewSource::Computed {
+                            body: c.body,
+                            memo: c.memo,
+                        },
+                    ));
+                } else if let Some(s) = e.as_any().downcast_ref::<crate::synced::SyncedSignalBox>()
+                {
+                    found = Some((s.node, ViewSource::Signal { cell: s.cell }));
+                }
+            });
+            let Some((node, source)) = found else {
+                return Err(StdError {
+                    kind: ErrorKind::ArgType,
+                    message: format!(
+                        "view.expose: `{name}` must be bound to a Signal, Computed, or \
+                         SyncedSignal handle"
+                    ),
+                }
+                .into());
+            };
+            // Baseline now (may recompute a dirty computed — no view borrow is held yet).
+            let Some(json) = binding_value_json(ctx, ext, node, &source)? else {
+                return Err(StdError {
+                    kind: ErrorKind::ArgType,
+                    message: format!("view.expose: `{name}` is bound to a disposed handle"),
+                }
+                .into());
+            };
+            let mut views = ext.views.borrow_mut();
+            let view = &mut views[id];
+            let binding = ViewBinding {
+                name: name.clone(),
+                node,
+                source,
+                last: json,
+            };
+            if let Some(idx) = view.bindings.iter().position(|b| b.name == name) {
+                // Re-exposing a name replaces the binding and resets its baseline — the hot-swap
+                // re-run path (a preserved signal re-exposed is a no-op change-wise).
+                view.bindings[idx] = binding;
+                view.dirty.remove(&idx);
+            } else {
+                view.bindings.push(binding);
+            }
+            Ok(CtxOut::Out(NativeOut::Unit))
+        }
+        "snapshot" => {
+            ctx_arity(method, args, 0)?;
+            // Take the work list under a transient borrow (serialization re-enters the backend).
+            let work: Vec<(usize, String, NodeId)> = {
+                let views = ext.views.borrow();
+                views[id]
+                    .bindings
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| (i, b.name.clone(), b.node))
+                    .collect()
+            };
+            let mut entries = std::collections::BTreeMap::new();
+            let mut fresh: Vec<(usize, String)> = Vec::new();
+            for (idx, name, node) in work {
+                let source = {
+                    let views = ext.views.borrow();
+                    view_source_copy(&views[id].bindings[idx].source)
+                };
+                if let Some(json) = binding_value_json(ctx, ext, node, &source)? {
+                    entries.insert(name, json.clone());
+                    fresh.push((idx, json));
+                }
+            }
+            let mut views = ext.views.borrow_mut();
+            let view = &mut views[id];
+            for (idx, json) in fresh {
+                view.bindings[idx].last = json;
+                view.dirty.remove(&idx);
+            }
+            Ok(CtxOut::Out(NativeOut::Str(view_frame(
+                "snapshot", "values", &entries,
+            ))))
+        }
+        "diff" => {
+            ctx_arity(method, args, 0)?;
+            let work: Vec<(usize, String, NodeId, ViewSource, String)> = {
+                let views = ext.views.borrow();
+                let view = &views[id];
+                view.dirty
+                    .iter()
+                    .map(|&idx| {
+                        let b = &view.bindings[idx];
+                        (
+                            idx,
+                            b.name.clone(),
+                            b.node,
+                            view_source_copy(&b.source),
+                            b.last.clone(),
+                        )
+                    })
+                    .collect()
+            };
+            // Opt-in diff telemetry (server-hmr L4): a span only when there is dirt to inspect,
+            // active while serializing (a recompute's own spans nest under it). Aborts are
+            // captured, not propagated mid-span, so the context stack cannot be left imbalanced.
+            let dirty_count = work.len() as i64;
+            let span = if !work.is_empty() && reactive_tracing(ctx, ext) {
+                let parent = crate::tracing::current_parent(ctx);
+                let id = ctx
+                    .host()
+                    .tel_span_start("view.diff", SpanKind::Internal, parent);
+                crate::tracing::push_active(ctx, id);
+                Some(id)
+            } else {
+                None
+            };
+            let mut entries = std::collections::BTreeMap::new();
+            let mut fresh: Vec<(usize, Option<String>)> = Vec::new();
+            let mut failure: Option<CtxError> = None;
+            for (idx, name, node, source, last) in work {
+                match binding_value_json(ctx, ext, node, &source) {
+                    Ok(Some(json)) if json != last => {
+                        entries.insert(name, json.clone());
+                        fresh.push((idx, Some(json)));
+                    }
+                    // Equal to the baseline (a no-op set / a recompute landing on the same
+                    // value), or the node was disposed — either way, nothing to push.
+                    Ok(_) => fresh.push((idx, None)),
+                    Err(e) => {
+                        failure = Some(e);
+                        break;
+                    }
+                }
+            }
+            if let Some(id) = span {
+                crate::tracing::pop_active(ctx, id);
+                let host = ctx.host();
+                host.tel_span_set_attr(id, "view.dirty", AttrValue::Int(dirty_count));
+                host.tel_span_set_attr(id, "view.pushed", AttrValue::Int(entries.len() as i64));
+                if failure.is_some() {
+                    host.tel_span_set_status(
+                        id,
+                        SpanStatus::Error("binding serialization aborted".into()),
+                    );
+                }
+                host.tel_span_end(id);
+            }
+            if let Some(e) = failure {
+                return Err(e);
+            }
+            let mut views = ext.views.borrow_mut();
+            let view = &mut views[id];
+            for (idx, json) in fresh {
+                if let Some(json) = json {
+                    view.bindings[idx].last = json;
+                }
+                // Exactly the taken indices — dirt added by a reentrant set during our own
+                // serialization stays for the next diff.
+                view.dirty.remove(&idx);
+            }
+            if entries.is_empty() {
+                return Ok(CtxOut::Out(NativeOut::None));
+            }
+            Ok(CtxOut::Out(NativeOut::Some(Box::new(NativeOut::Str(
+                view_frame("patch", "changes", &entries),
+            )))))
+        }
+        _ => Err(noeta_native::no_method_error(VIEW_TYPE_NAME, method).into()),
+    }
+}
+
+/// Copy a source's ids out (both variants are plain `Retained` ids) so no view borrow is held
+/// while serializing.
+fn view_source_copy(source: &ViewSource) -> ViewSource {
+    match *source {
+        ViewSource::Signal { cell } => ViewSource::Signal { cell },
+        ViewSource::Computed { body, memo } => ViewSource::Computed { body, memo },
+    }
 }
 
 pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
@@ -216,6 +695,7 @@ pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
             let ext = state.borrow();
             let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
             let node = ext.graph.effect(body);
+            ext.effects.borrow_mut().push((node, body));
             // Run it once now (subscribing it to the signals it reads) — unless we are already
             // inside a flush, which will drain it (no nested flush; reactivity S4).
             if !ext.graph.is_flushing() {
@@ -223,6 +703,23 @@ pub fn reactive_ctx_dispatch<C: NativeCtx + ?Sized>(
             }
             Ok(CtxOut::Out(NativeOut::Extern(
                 noeta_native::ExternBox::new(EffectBox { node, body }),
+            )))
+        }
+        "view" => {
+            ctx_arity(func, args, 0)?;
+            let state = state_of(ctx);
+            let ext = state.borrow();
+            let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
+            // The first view switches the graph's change log on; until then a hot `set` loop
+            // records nothing (the L1 hook is pay-for-use).
+            ext.graph.set_observed(true);
+            let id = {
+                let mut views = ext.views.borrow_mut();
+                views.push(ViewState::default());
+                views.len() - 1
+            };
+            Ok(CtxOut::Out(NativeOut::Extern(
+                noeta_native::ExternBox::new(ViewBox { id }),
             )))
         }
         _ => Err(no_function_error("reactive", func).into()),
@@ -362,6 +859,8 @@ pub fn effect_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             let ext = state.borrow();
             let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
             ext.graph.dispose(node);
+            // Prune the hot-swap epoch registry so a later swap never double-releases this body.
+            ext.effects.borrow_mut().retain(|(n, _)| *n != node);
             sync_gates(ctx, ext);
             // The node held only ids; the body's arena cell is ours to release (its closure —
             // and whatever it captured — drops at its last reference, destructor-aware).
@@ -415,6 +914,7 @@ reactive_box!(ComputedBox, COMPUTED_TYPE_NAME, "<computed>", {
     node: NodeId, body: Retained, memo: Retained
 });
 reactive_box!(EffectBox, EFFECT_TYPE_NAME, "<effect>", { node: NodeId, body: Retained });
+reactive_box!(ViewBox, VIEW_TYPE_NAME, "<view>", { id: usize });
 
 fn signal_box(e: &dyn ExternValue) -> &SignalBox {
     e.as_any()
@@ -430,4 +930,9 @@ fn effect_box(e: &dyn ExternValue) -> &EffectBox {
     e.as_any()
         .downcast_ref()
         .expect("an Effect receiver wraps an EffectBox")
+}
+fn view_box(e: &dyn ExternValue) -> &ViewBox {
+    e.as_any()
+        .downcast_ref()
+        .expect("a View receiver wraps a ViewBox")
 }

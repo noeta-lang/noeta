@@ -1,0 +1,39 @@
+// view/diff — the LiveView wire protocol (server-hmr L1). A `view()` names reactive state;
+// `snapshot()` renders the full-state frame and sets the baseline; `diff()` renders a patch frame
+// of ONLY the bindings whose value actually changed since — the flush subscriber marks candidates
+// (the set signal + its transitively-dirtied computeds), and a value-equal result is dropped, so
+// the frames are minimal twice over. Pins: (1) exact frame bytes with name-sorted keys, (2) an
+// unchanged `parity` computed stays out of the patch even though its dependency changed, (3) a
+// no-op diff is `none`, (4) a set to the SAME value pushes nothing.
+// expect: stdout "{"type":"snapshot","values":{"count":2,"double":4,"parity":0}}"
+// expect: stdout "{"type":"patch","changes":{"count":4,"double":8}}"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "{"type":"patch","changes":{"count":5,"double":10,"parity":1}}"
+// expect: exit 0
+use std.reactive.{signal, computed, view}
+
+count = signal(2)
+double = computed(fn() { return count.get() * 2 })
+parity = computed(fn() { return count.get() % 2 })
+
+v = view()
+v.expose("count", count)
+v.expose("double", double)
+v.expose("parity", parity)
+
+echo v.snapshot()
+
+count.set(4)
+echo v.diff() ?? "none"
+
+// Nothing changed since the last diff.
+echo v.diff() ?? "none"
+
+// A set to the same value dirties the graph but the values are equal — nothing to push.
+count.set(4)
+echo v.diff() ?? "none"
+
+// An odd value finally moves `parity` too.
+count.set(5)
+echo v.diff() ?? "none"

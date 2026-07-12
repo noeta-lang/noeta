@@ -7,6 +7,7 @@
 // expect: stdout "POST /echo hello"
 // expect: stdout "GET /users/42"
 // expect: stdout "DELETE /users/42"
+// expect: stdout "GET /ws"
 // expect: stdout "served"
 // expect: exit 0
 use std.http.server

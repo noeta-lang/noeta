@@ -1,0 +1,50 @@
+// LiveView diff-push over websockets (server-hmr L1 ∘ L0): a session exposes reactive state
+// through a `view`, sends the full snapshot on connect, then pushes a minimal patch frame per
+// client event — signal set → flush marks the view dirty → `diff()` renders exactly what changed.
+// Driven by the sandbox's fixed two-frame client conversation, so the pushed frames pin exactly;
+// plain requests keep flowing through the same fetch handler alongside the live socket.
+// expect: stdout "sent {"type":"snapshot","values":{"count":0,"double":0}}"
+// expect: stdout "sent {"type":"patch","changes":{"count":1,"double":2}}"
+// expect: stdout "sent {"type":"patch","changes":{"count":2,"double":4}}"
+// expect: stdout "live session over"
+// expect: stdout "served"
+// expect: exit 0
+use std.http.server
+use std.http.{Request, Response, Socket}
+use std.reactive.{signal, computed, view}
+
+count = signal(0)
+double = computed(fn() { return count.get() * 2 })
+
+async fn session(sock: Socket): bool {
+    v = view()
+    v.expose("count", count)
+    v.expose("double", double)
+    snap = v.snapshot()
+    sock.send(snap)
+    echo "sent ${snap}"
+    mut going = true
+    while going {
+        msg = sock.recv().await
+        if msg == none {
+            going = false
+        } else {
+            count.set(count.get() + 1)
+            patch = v.diff() ?? "{}"
+            sock.send(patch)
+            echo "sent ${patch}"
+        }
+    }
+    echo "live session over"
+    return true
+}
+
+fn fetch(req: Request): Response {
+    if req.path() == "/ws" {
+        return server.websocket(session)
+    }
+    return server.response(200, "ok")
+}
+
+server.serve(8080, fetch)
+echo "served"

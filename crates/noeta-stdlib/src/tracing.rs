@@ -275,17 +275,17 @@ pub fn span_method_dispatch(
 // task inherits a snapshot of its spawner's, so tracing scope follows *execution* — two
 // interleaved tasks' `with_span`s no longer see (or corrupt) each other's parents.
 
-fn push_active<C: NativeCtx + ?Sized>(ctx: &mut C, id: SpanId) {
+pub(crate) fn push_active<C: NativeCtx + ?Sized>(ctx: &mut C, id: SpanId) {
     ctx.context_push(id);
 }
 
 /// Pop `id` if it is the current top (defensive against a re-entrant push imbalance).
-fn pop_active<C: NativeCtx + ?Sized>(ctx: &mut C, id: SpanId) {
+pub(crate) fn pop_active<C: NativeCtx + ?Sized>(ctx: &mut C, id: SpanId) {
     ctx.context_pop(id);
 }
 
 /// The W3C context of the current active span — a new span's implicit parent.
-fn current_parent<C: NativeCtx + ?Sized>(ctx: &mut C) -> Option<TraceContext> {
+pub(crate) fn current_parent<C: NativeCtx + ?Sized>(ctx: &mut C) -> Option<TraceContext> {
     let top = ctx.context_top()?;
     Some(ctx.host().tel_span_context(top))
 }

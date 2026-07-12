@@ -307,6 +307,13 @@ impl NativeCtx for VmCtx<'_, '_> {
     }
 
     fn advance_tasks(&mut self) -> CtxResult<bool> {
+        // The hot-reload safepoint (server-hmr W1): every ctx-driven loop (the HTTP serve loop)
+        // ticks the scheduler each iteration, so a pending swap lands here — before the poll, so
+        // the next accepted request already dispatches into the new bodies. One `Option` branch
+        // on every run that isn't `serve --watch`.
+        if self.vm.hot_mailbox.is_some() {
+            self.vm.apply_pending_hotswap();
+        }
         self.vm
             .poll_all_scopes_round(self.span)
             .map_err(|Abort| CtxError::Abort)
@@ -638,6 +645,19 @@ impl NativeCtx for VmCtx<'_, '_> {
         });
         Ok(true)
     }
+
+    fn hot_swap_count(&mut self) -> u64 {
+        // Per-VM (server-hmr F5): each worker reports its OWN applied-swap generation, so its
+        // serve loop pushes `reload` to its OWN clients when it applies a broadcast swap.
+        self.vm.applied_swaps as u64
+    }
+
+    fn take_hot_error(&mut self) -> Option<String> {
+        self.vm
+            .hot_mailbox
+            .as_ref()
+            .and_then(|m| m.error.lock().ok().and_then(|mut e| e.take()))
+    }
 }
 
 impl<'m> Vm<'m> {
@@ -788,6 +808,25 @@ impl<'m> Vm<'m> {
             }
             Err(CtxError::Abort) => Err(Abort),
         }
+    }
+
+    /// Hot-swap pre-run (server-hmr H1): before a swap fragment that re-runs the top level,
+    /// dispose the previous epoch's effects (the re-run re-creates the ones that still exist)
+    /// and the reactive nodes held by the globals the fragment is about to re-bind (their
+    /// replacements arrive when the fragment runs; preserved subscribers re-subscribe on their
+    /// next run). Drives the same shared stdlib disposal code user-level `.dispose()` runs,
+    /// through an ephemeral ctx; a program that never touched reactivity no-ops.
+    pub(crate) fn hotswap_prepare(&mut self, rebound_slots: &[u32]) {
+        let handles: Vec<Value> = rebound_slots
+            .iter()
+            .filter_map(|&s| self.globals.get(s as usize).copied())
+            .filter(|v| !v.is_unbound())
+            .collect();
+        let span = Span::empty_at_in(noeta_span::SourceId::FIRST, 0);
+        let mut ctx = VmCtx::new(self, &handles, span);
+        noeta_stdlib::reactive::hotswap_dispose_effects(&mut ctx);
+        let slots: Vec<Slot> = (0..handles.len() as Slot).collect();
+        noeta_stdlib::reactive::hotswap_dispose_handles(&mut ctx, &slots);
     }
 
     /// Call a registered **higher-order** native function (higher-order-abi H0): wrap the VM in a
