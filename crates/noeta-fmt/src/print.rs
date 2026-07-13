@@ -19,7 +19,7 @@ use std::cell::Cell;
 use noeta_lexer::{Comment, TokenKind};
 use noeta_span::{Source, SourceId, Span};
 
-use crate::doc::{Doc, render};
+use crate::doc::{Doc, render, render_protected};
 use crate::{ArrowStyle, FmtConfig, FmtError, ParenStyle, SemicolonStyle, trivia};
 
 const INDENT: isize = 4; // 4 spaces — the house style.
@@ -85,14 +85,31 @@ pub fn print_program(
         tier_formatters,
     };
     let doc = p.stmt_seq(&program.stmts, program.span.start, program.span.end)?;
-    let rendered = render(&doc, config.line_width);
+    let (rendered, protected) = render_protected(&doc, config.line_width);
 
     // Strip trailing whitespace from every line (a blank line between indented items would otherwise
-    // carry the indent), and end the file with exactly one newline.
+    // carry the indent), and end the file with exactly one newline. Whitespace inside a `RawText`
+    // region (a verbatim tier body — a `@doc` Markdown line break, an `@html` `<pre>`) is *content*,
+    // not layout, so it is left intact: the trim stops at the first protected byte.
+    let is_protected = |byte: usize| protected.iter().any(|r| r.start <= byte && byte < r.end);
     let mut out = String::with_capacity(rendered.len());
-    for line in rendered.lines() {
-        out.push_str(line.trim_end());
-        out.push('\n');
+    let mut pos = 0;
+    for line in rendered.split_inclusive('\n') {
+        let has_nl = line.ends_with('\n');
+        let content = if has_nl { &line[..line.len() - 1] } else { line };
+        let mut end = content.len();
+        for (idx, ch) in content.char_indices().rev() {
+            if ch.is_whitespace() && !is_protected(pos + idx) {
+                end = idx;
+            } else {
+                break;
+            }
+        }
+        out.push_str(&content[..end]);
+        if has_nl {
+            out.push('\n');
+        }
+        pos += line.len();
     }
     let trimmed = out.trim_end_matches('\n');
     out.truncate(trimmed.len());

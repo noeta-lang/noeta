@@ -523,6 +523,18 @@ mod tests {
     }
 
     #[test]
+    fn significant_trailing_whitespace_in_a_verbatim_body_survives_the_trim() {
+        // The whole-file trailing-whitespace trim must leave *content* alone: two trailing spaces on
+        // an `@doc` line is a Markdown hard line break, significant, and must survive — even though a
+        // trailing space produced by *layout* (an indented blank line) is still stripped.
+        let src = "@doc {\nfirst  \nsecond\n}\nfn f(): void {\n\n    echo 1\n}\n";
+        let out = fmt(src).unwrap();
+        assert!(out.contains("first  \n"), "markdown line break was trimmed:\n{out:?}");
+        // The blank line inside `f` is layout — it carries no trailing indentation.
+        assert!(!out.contains("    \n"), "an indented blank line was not trimmed:\n{out:?}");
+    }
+
+    #[test]
     fn multiline_backtick_templates_are_preserved_verbatim() {
         // A multiline `` `…` `` template keeps its layout (F4) — the dedent + newlines would
         // otherwise collapse into an escaped `\n`-laden double-quoted one-liner. Single-line

@@ -138,8 +138,18 @@ fn width_of(s: &str) -> isize {
 
 /// Render `doc` within a `width`-column budget.
 pub fn render(doc: &Doc, width: usize) -> String {
+    render_protected(doc, width).0
+}
+
+/// Like [`render`], but also returns the byte ranges of the output that came from [`Doc::RawText`] —
+/// verbatim, possibly whitespace-significant content (a tier body, a multiline template/comment).
+/// The whole-file trailing-whitespace trim uses these to leave such content untouched: a trailing
+/// space produced by *layout* (an indented blank line) is safe to strip, but one inside `RawText` —
+/// a Markdown line break in `@doc`, significant space in an `@html` `<pre>` — is content and is kept.
+pub fn render_protected(doc: &Doc, width: usize) -> (String, Vec<std::ops::Range<usize>>) {
     let width = width as isize;
     let mut out = String::new();
+    let mut protected: Vec<std::ops::Range<usize>> = Vec::new();
     let mut col: isize = 0;
     // The work stack of (indent, mode, doc), processed top-down.
     let mut stack: Vec<(isize, Mode, &Doc)> = vec![(0, Mode::Break, doc)];
@@ -152,7 +162,9 @@ pub fn render(doc: &Doc, width: usize) -> String {
                 col += width_of(s);
             }
             Doc::RawText(s) => {
+                let start = out.len();
                 out.push_str(s);
+                protected.push(start..out.len());
                 // Column tracks the tail after the last newline (interior lines are not re-indented).
                 col = match s.rfind('\n') {
                     Some(nl) => width_of(&s[nl + 1..]),
@@ -193,7 +205,7 @@ pub fn render(doc: &Doc, width: usize) -> String {
             }
         }
     }
-    out
+    (out, protected)
 }
 
 /// Emit a newline followed by `indent` spaces; return the new column.
