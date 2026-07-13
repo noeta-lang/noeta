@@ -296,6 +296,40 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
     }
 }
 
+/// Run `f` on a worker thread with a large stack, returning its result.
+///
+/// Executing a whole program through the recursive Core-IR interpreter (and checking it through the
+/// recursive-descent checker) uses *runtime* stack proportional to the program's call depth. A
+/// realistic case — e.g. the `@html` LiveView test composes an async server, a websocket session,
+/// and reactive-graph propagation — can exceed a small caller stack (libtest gives each `#[test]` a
+/// ~2 MiB thread) in an unoptimized debug build, aborting the whole process on overflow. Running a
+/// corpus sweep inside this helper makes the interpreter's depth, not whatever stack the harness
+/// happens to provide, the binding constraint — mirroring the parser's own deep-nesting worker
+/// (`noeta_parser::parse_in`).
+///
+/// The sweep runs *entirely* within the one worker thread — including any thread-local instrumentation
+/// the caller sets up around it (e.g. `noeta_eval::drop_audit`), which would be invisible if the
+/// execution ran on a different thread than the `begin`/`end` calls. So callers wrap their whole
+/// test body, not the individual runner. A scoped thread lets `f` borrow its inputs directly; only
+/// the owned result crosses the join.
+pub fn on_deep_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    // Matches `noeta_parser::DEEP_PARSE_STACK` — comfortably above any single case's needs.
+    const DEEP_STACK: usize = 64 * 1024 * 1024;
+    std::thread::scope(|scope| {
+        match std::thread::Builder::new()
+            .stack_size(DEEP_STACK)
+            .spawn_scoped(scope, f)
+            .expect("spawn conformance worker")
+            .join()
+        {
+            Ok(value) => value,
+            // Re-raise the worker's panic on the caller's thread with its original payload, so an
+            // assertion failure inside a wrapped test surfaces its real message (not a generic one).
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    })
+}
+
 /// Discover and run every case under `root`, optionally narrowed to a single entry file.
 /// Returns a [`Report`] that can be rendered as text or JSON.
 pub fn run_corpus(root: &Path, only: Option<&Path>, stage: Stage) -> Report {
