@@ -18,8 +18,10 @@ fn page(): Html {
     return @html {
         <h1>Noeta LiveView counter</h1>
         <p>count: <b>${count.get()}</b> &nbsp; doubled: <b>${count.get() * 2}</b></p>
-        <p><button data-live-click="inc">+1</button>
-        <button data-live-click="reset">reset</button></p>
+        <p>
+          <button data-live-click="inc">+1</button>
+          <button data-live-click="reset">reset</button>
+        </p>
     }
 }
 

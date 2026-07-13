@@ -3995,6 +3995,7 @@ dependencies = [
  "noeta-dap",
  "noeta-diagnostics",
  "noeta-fmt",
+ "noeta-html",
  "noeta-ide",
  "noeta-lexer",
  "noeta-loader",
@@ -4178,6 +4179,13 @@ version = "0.1.0"
 dependencies = [
  "noeta-object",
  "noeta-value",
+]
+
+[[package]]
+name = "noeta-html"
+version = "0.1.0"
+dependencies = [
+ "noeta-native",
 ]
 
 [[package]]

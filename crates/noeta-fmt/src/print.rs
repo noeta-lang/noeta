@@ -1813,7 +1813,7 @@ impl Printer<'_> {
         span: Span,
     ) -> Result<Doc, FmtError> {
         if let Some(formatter) = self.tier_formatters.get(tier)
-            && let Some(doc) = self.tier_body_formatted(*formatter, tier, statics, holes)?
+            && let Some(doc) = self.tier_body_formatted(*formatter, tier, statics, holes, span)?
         {
             return Ok(doc);
         }
@@ -1843,6 +1843,7 @@ impl Printer<'_> {
         tier: &str,
         statics: &[String],
         holes: &[Expr],
+        span: Span,
     ) -> Result<Option<Doc>, FmtError> {
         let joined = statics.join("\u{0}");
         let Some(reflowed) = formatter(&joined) else {
@@ -1866,7 +1867,31 @@ impl Printer<'_> {
                 body.push('}');
             }
         }
-        Ok(Some(Doc::raw_text(format!("@{tier} {{ {body} }}"))))
+        // A single-line body stays inline (`@<tier> { … }`); a multi-line reflow is laid out as a
+        // block — the body indented one level under the tier's own line, the closing brace back at
+        // it — so the foreign markup nests under `@<tier> {` instead of sitting at column 0.
+        if body.contains('\n') {
+            let indent = self.line_indent(span.start);
+            let inner = body
+                .lines()
+                .map(|line| format!("{indent}{}{line}", " ".repeat(INDENT as usize)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Ok(Some(Doc::raw_text(format!("@{tier} {{\n{inner}\n{indent}}}"))))
+        } else {
+            Ok(Some(Doc::raw_text(format!("@{tier} {{ {body} }}"))))
+        }
+    }
+
+    /// The leading indentation (spaces/tabs) of the source line containing byte `offset` — used to
+    /// re-indent a multi-line reflowed tier body under its `@<tier> {`.
+    fn line_indent(&self, offset: u32) -> String {
+        let upto = &self.source[..offset as usize];
+        let line_start = upto.rfind('\n').map_or(0, |p| p + 1);
+        self.source[line_start..offset as usize]
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect()
     }
 
     /// Format a tier-body hole's expression to a single **inline** string: source-directed line

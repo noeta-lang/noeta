@@ -454,7 +454,14 @@ pub fn run_cli(
     extra: &'static [&'static (dyn noeta_stdlib::Extension + Sync)],
     trusted_command_roots: &[&str],
 ) -> ExitCode {
-    noeta_stdlib::registry::install_with_extras(extra);
+    // First-party toolchain extensions that ship with every binary (stock or composed), in their own
+    // namespaces — currently the HTML body formatter (`noeta-html`), which reflows `@html` bodies
+    // under `noeta fmt`. Prepended to the caller's `extra` (a composed app's dependency units) so
+    // both are installed alongside std before any lookup.
+    let mut units: Vec<&'static (dyn noeta_stdlib::Extension + Sync)> =
+        vec![&noeta_html::HTML_EXTENSION];
+    units.extend_from_slice(extra);
+    noeta_stdlib::registry::install_with_extras(&units);
     // Phase 4: a dependency's `ExtCommand`s reach the CLI only if the root app command-trusts its
     // package (`[trust].commands`, whose namespace roots the composer baked in here). std's own
     // commands (root `"std"`) are always available. The stock binary passes an empty list — it has
@@ -1481,7 +1488,6 @@ fn fmt_tier_formatters(
             }
         }
     }
-    drop(scan);
     // Native tiers: an installed `ExtTier { name, text }` whose language has a registered formatter.
     for t in noeta_stdlib::registry::ext_tiers() {
         if let Some(lang) = t.text
