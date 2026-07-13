@@ -698,7 +698,14 @@ impl Printer<'_> {
         for p in params {
             docs.push(self.param(p)?);
         }
-        Ok(self.delimited("(", docs, ")", false))
+        // Source-directed: keep a signature the author broke across lines broken. A parameter is a
+        // simple `name: Type`, so — unlike a list, whose element may itself span lines — a newline
+        // anywhere across the parameters reliably means the author expanded the list.
+        let broke = match (params.first(), params.last()) {
+            (Some(first), Some(last)) => self.broke_between(first.span.start, last.span.end),
+            _ => false,
+        };
+        Ok(self.delimited("(", docs, ")", false, broke))
     }
 
     fn param(&self, param: &Param) -> Result<Doc, FmtError> {
@@ -1390,7 +1397,7 @@ impl Printer<'_> {
                 ])
             }
             Expr::Call { callee, args, .. } => {
-                Doc::concat([self.receiver(callee)?, self.arg_list(args)?])
+                Doc::concat([self.receiver(callee)?, self.arg_list(args, callee.span().end)?])
             }
             Expr::Member { receiver, name, .. } => {
                 Doc::concat([self.receiver(receiver)?, Doc::text(format!(".{name}"))])
@@ -1406,26 +1413,35 @@ impl Printer<'_> {
                 self.expr(index)?,
                 Doc::text("]"),
             ]),
-            Expr::List { items, .. } => {
+            Expr::List { items, span } => {
                 let mut ds = Vec::new();
                 for i in items {
                     ds.push(self.expr(i)?);
                 }
-                self.delimited("[", ds, "]", false)
+                let broke = items
+                    .first()
+                    .is_some_and(|f| self.seq_broke(span.start, f.span().start));
+                self.delimited("[", ds, "]", false, broke)
             }
-            Expr::Tuple { items, .. } => {
+            Expr::Tuple { items, span } => {
                 let mut ds = Vec::new();
                 for i in items {
                     ds.push(self.expr(i)?);
                 }
-                self.delimited("(", ds, ")", false)
+                let broke = items
+                    .first()
+                    .is_some_and(|f| self.seq_broke(span.start, f.span().start));
+                self.delimited("(", ds, ")", false, broke)
             }
-            Expr::Map { entries, .. } => {
+            Expr::Map { entries, span } => {
                 let mut ds = Vec::new();
                 for (k, v) in entries {
                     ds.push(Doc::concat([self.expr(k)?, Doc::text(": "), self.expr(v)?]));
                 }
-                self.delimited("{", ds, "}", false)
+                let broke = entries
+                    .first()
+                    .is_some_and(|(k, _)| self.seq_broke(span.start, k.span().start));
+                self.delimited("{", ds, "}", false, broke)
             }
             Expr::Range {
                 start,
@@ -1510,7 +1526,7 @@ impl Printer<'_> {
                 Doc::text(format!(".{func}::<")),
                 self.type_ref(ty)?,
                 Doc::text(">"),
-                self.arg_list(args)?,
+                self.arg_list(args, ty.span().end)?,
             ]),
             Expr::RolesOf { ty: Some(ty), .. } => Doc::concat([
                 Doc::text("roles_of::<"),
@@ -1542,13 +1558,13 @@ impl Printer<'_> {
         })
     }
 
-    /// A comma-delimited `open … close` sequence. With `wrap = false` (default) it lays out flat —
-    /// `[a, b, c]`, or `{ a, b }` when `spaced` — reproducing the pre-wrap output byte-for-byte. With
-    /// `wrap = true` it becomes a width-driven [`Doc::group`]: flat if it fits [`FmtConfig::line_width`],
-    /// otherwise one element per line, indented, with the delimiters on their own lines and a
-    /// **trailing comma** (the parser accepts one uniformly). The trailing comma is an
-    /// [`Doc::if_break`], so it appears only when the group breaks, never inline.
-    fn delimited(&self, open: &str, elems: Vec<Doc>, close: &str, spaced: bool) -> Doc {
+    /// A comma-delimited `open … close` sequence. The default (`wrap = false`) is **source-directed**:
+    /// if the author broke the sequence across lines (`broke`), it stays broken — one element per
+    /// line, indented, with a **trailing comma** (the parser accepts one uniformly); if they wrote it
+    /// inline, it stays flat — `[a, b, c]`, or `{ a, b }` when `spaced`. With `wrap = true` it becomes
+    /// a width-driven [`Doc::group`] instead (flat if it fits [`FmtConfig::line_width`], else broken
+    /// with an [`Doc::if_break`] trailing comma), ignoring the author's line breaks.
+    fn delimited(&self, open: &str, elems: Vec<Doc>, close: &str, spaced: bool, broke: bool) -> Doc {
         if elems.is_empty() {
             return Doc::text(format!("{open}{close}"));
         }
@@ -1566,6 +1582,20 @@ impl Printer<'_> {
                 Doc::text(close),
             ])
             .group()
+        } else if broke {
+            // Source-directed: the author broke this sequence, so keep it broken — one element per
+            // line with a trailing comma. Idempotent (the output still has newlines between elements).
+            Doc::concat([
+                Doc::text(open),
+                Doc::concat([
+                    Doc::hardline(),
+                    Doc::join(elems, Doc::concat([Doc::text(","), Doc::hardline()])),
+                    Doc::text(","),
+                ])
+                .nest(INDENT),
+                Doc::hardline(),
+                Doc::text(close),
+            ])
         } else {
             let inner = Doc::join(elems, Doc::text(", "));
             if spaced {
@@ -1582,12 +1612,25 @@ impl Printer<'_> {
         }
     }
 
-    fn arg_list(&self, args: &[Expr]) -> Result<Doc, FmtError> {
+    /// Whether the author broke a delimited sequence across lines — detected by a newline between the
+    /// opening delimiter (byte `open_ref`, e.g. the `[` or the `{` after a type name) and the first
+    /// element (byte `first`). This is the source-directed signal [`Self::delimited`] keys off: the
+    /// common "each element on its own line" layout always breaks right after the delimiter.
+    fn seq_broke(&self, open_ref: u32, first: u32) -> bool {
+        self.broke_between(open_ref, first)
+    }
+
+    /// A call's `(arg, …)` list. `open_ref` is the byte just before the `(` (the callee's end), so a
+    /// source-directed break — the author put the args on their own lines — is detected and kept.
+    fn arg_list(&self, args: &[Expr], open_ref: u32) -> Result<Doc, FmtError> {
         let mut ds = Vec::new();
         for a in args {
             ds.push(self.expr(a)?);
         }
-        Ok(self.delimited("(", ds, ")", false))
+        let broke = args
+            .first()
+            .is_some_and(|f| self.seq_broke(open_ref, f.span().start));
+        Ok(self.delimited("(", ds, ")", false, broke))
     }
 
     /// Preserve a **multiline backtick template** verbatim (F4). All string kinds decode to
@@ -1765,9 +1808,17 @@ impl Printer<'_> {
         if ds.is_empty() {
             return Ok(Doc::text(format!("{} {{}}", obj.type_name)));
         }
+        // The `{` sits just after the type name; a break before the first field (or spread) means the
+        // author wrote the literal across lines, so keep it broken.
+        let first = obj
+            .fields
+            .first()
+            .map(|f| f.span.start)
+            .or_else(|| obj.spread.as_ref().map(|s| s.span().start));
+        let broke = first.is_some_and(|f| self.seq_broke(obj.type_name_span.end, f));
         Ok(Doc::concat([
             Doc::text(format!("{} ", obj.type_name)),
-            self.delimited("{", ds, "}", true),
+            self.delimited("{", ds, "}", true, broke),
         ]))
     }
 
