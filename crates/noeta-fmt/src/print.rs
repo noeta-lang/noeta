@@ -1448,7 +1448,10 @@ impl Printer<'_> {
                 scrutinee,
                 arms,
                 span,
-            } => self.match_expr(scrutinee, arms, *span)?,
+            } => match self.if_then_else_form(scrutinee, arms, *span)? {
+                Some(doc) => doc,
+                None => self.match_expr(scrutinee, arms, *span)?,
+            },
             Expr::Object(obj) => self.object(obj)?,
             Expr::Try { expr, .. } => Doc::concat([self.receiver(expr)?, Doc::text("?")]),
             Expr::Await { expr, .. } => Doc::concat([self.receiver(expr)?, Doc::text(".await")]),
@@ -1651,6 +1654,61 @@ impl Printer<'_> {
             }
         }
         Ok(Doc::concat(parts))
+    }
+
+    /// If this `match` node was produced by the parser desugaring an `if…then…else` conditional
+    /// *expression*, reconstruct and format it back to `if cond then a else b` — so `noeta fmt`
+    /// round-trips the surface form the author wrote instead of the `match` it lowers to. Two facts
+    /// make this reliable: fmt only ever runs on freshly parsed source (never a synthesized AST), and
+    /// the desugar reuses the conditional's span, so the node's source begins at the `if` keyword iff
+    /// the author wrote `if…then…else` (a literal `match` begins at `match`). The arm shape confirms
+    /// it: `true`/`false` for a plain condition, or `is T`/`_` for a `cond is T` test (which prints
+    /// back as `cond is T`). Returns `None` for a literal `match`; the caller then formats normally.
+    fn if_then_else_form(
+        &self,
+        scrutinee: &Expr,
+        arms: &[MatchArm],
+        span: Span,
+    ) -> Result<Option<Doc>, FmtError> {
+        if arms.len() != 2 || !self.source_starts_with_if(span) {
+            return Ok(None);
+        }
+        let cond = match (&arms[0].pattern, &arms[1].pattern) {
+            (
+                Pattern::Bool { value: true, .. },
+                Pattern::Bool { value: false, .. },
+            ) => self.restricted_head(scrutinee, false)?,
+            (Pattern::IsType { ty, .. }, Pattern::Wildcard { .. }) => Doc::concat([
+                self.restricted_head(scrutinee, false)?,
+                Doc::text(" is "),
+                self.type_ref(ty)?,
+            ]),
+            // The `if` keyword but not a desugar-shaped match — leave it to the normal `match` path.
+            _ => return Ok(None),
+        };
+        Ok(Some(Doc::concat([
+            Doc::text("if "),
+            cond,
+            Doc::text(" then "),
+            self.expr(&arms[0].body)?,
+            Doc::text(" else "),
+            self.expr(&arms[1].body)?,
+        ])))
+    }
+
+    /// Whether the source at `span.start` begins with the `if` keyword as a whole token — so an
+    /// identifier like `iffy` is not mistaken for it. Used to tell a desugared conditional from a
+    /// literal `match` (both are `Expr::Match`), relying on fmt seeing only freshly parsed source.
+    fn source_starts_with_if(&self, span: Span) -> bool {
+        self.source
+            .get(span.start as usize..)
+            .and_then(|rest| rest.strip_prefix("if"))
+            .is_some_and(|after| {
+                after
+                    .chars()
+                    .next()
+                    .map_or(true, |c| !c.is_alphanumeric() && c != '_')
+            })
     }
 
     fn match_expr(&self, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Result<Doc, FmtError> {
