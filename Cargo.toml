@@ -52,6 +52,7 @@ noeta-stdlib = { path = "crates/noeta-stdlib" }
 # the batteries (crypto/uuid/json) don't ride the ABI. noeta-stdlib re-exports it (core/std-style).
 noeta-native = { path = "crates/noeta-native" }
 noeta-html = { path = "crates/noeta-html" }
+noeta-css = { path = "crates/noeta-css" }
 # M2 runtime (host-coupled IO: real disk async + real env/args)
 noeta-runtime = { path = "crates/noeta-runtime" }
 # WASI host (P-WASM W1): the real-but-synchronous third `Host` for the wasm32-wasip1 runner —

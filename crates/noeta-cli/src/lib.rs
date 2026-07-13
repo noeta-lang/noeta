@@ -455,11 +455,11 @@ pub fn run_cli(
     trusted_command_roots: &[&str],
 ) -> ExitCode {
     // First-party toolchain extensions that ship with every binary (stock or composed), in their own
-    // namespaces — currently the HTML body formatter (`noeta-html`), which reflows `@html` bodies
-    // under `noeta fmt`. Prepended to the caller's `extra` (a composed app's dependency units) so
-    // both are installed alongside std before any lookup.
+    // namespaces — the HTML body formatter (`noeta-html`) which reflows `@html` bodies under
+    // `noeta fmt`, and the CSS formatter (`noeta-css`) it delegates `<style>` blocks to. Prepended to
+    // the caller's `extra` (a composed app's dependency units) so all are installed before any lookup.
     let mut units: Vec<&'static (dyn noeta_stdlib::Extension + Sync)> =
-        vec![&noeta_html::HTML_EXTENSION];
+        vec![&noeta_html::HTML_EXTENSION, &noeta_css::CSS_EXTENSION];
     units.extend_from_slice(extra);
     noeta_stdlib::registry::install_with_extras(&units);
     // Phase 4: a dependency's `ExtCommand`s reach the CLI only if the root app command-trusts its
