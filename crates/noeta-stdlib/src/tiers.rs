@@ -24,6 +24,7 @@ pub const TIERS: &[ExtTier] = &[
         text: None,
         expr: None,
         handler: None,
+        format_body: None,
     },
     ExtTier {
         name: "bench",
@@ -31,6 +32,7 @@ pub const TIERS: &[ExtTier] = &[
         text: None,
         expr: None,
         handler: None,
+        format_body: None,
     },
     // `doc` is a **text** tier: its `@doc { … }` bodies are verbatim markdown. Declaring the
     // language here (rather than a hardcoded `text_lang` special-case) is the dogfood that the
@@ -42,6 +44,7 @@ pub const TIERS: &[ExtTier] = &[
         text: Some("markdown"),
         expr: None,
         handler: None,
+        format_body: None,
     },
     ExtTier {
         name: "debug",
@@ -49,6 +52,7 @@ pub const TIERS: &[ExtTier] = &[
         text: None,
         expr: None,
         handler: None,
+        format_body: None,
     },
     // `@json { … ${s} … }` — a native **expression** tier (expr-tiers arc): its blocks are `string`
     // values (JSON text with safely-quoted holes), desugared to `std.template.render`. The dogfood
@@ -60,8 +64,86 @@ pub const TIERS: &[ExtTier] = &[
         text: Some("json"),
         expr: Some("string"),
         handler: Some("std.template.render"),
+        format_body: Some(json_reindent),
     },
 ];
+
+/// A minimal JSON re-indenter — the body formatter for the `@json` tier (extension-driven tier-body
+/// formatting). `body` is the tier's foreign JSON text with each `${…}` hole already collapsed to a
+/// single NUL (`\0`) placeholder by `noeta fmt`; this returns the same JSON laid out canonically
+/// (two-space indent, one element per line, `key: value` spacing) with the NULs preserved in order.
+/// It is a depth-driven reflow, not a validating parser: it tracks string state so braces/commas
+/// inside strings are literal, treats a `\0` hole as an atom, and declines (`None`, → verbatim) only
+/// if the delimiters are unbalanced. Idempotent — its own output re-indents to itself.
+fn json_reindent(body: &str) -> Option<String> {
+    let mut out = String::with_capacity(body.len());
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    let indent = |out: &mut String, depth: usize| {
+        out.push('\n');
+        for _ in 0..depth {
+            out.push_str("  ");
+        }
+    };
+    let chars: Vec<char> = body.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            c if c.is_whitespace() => {} // collapse insignificant whitespace
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
+            '{' | '[' => {
+                out.push(c);
+                // Peek past whitespace for an immediate close → keep `{}`/`[]` compact.
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                let empty = chars.get(j) == Some(&'}') || chars.get(j) == Some(&']');
+                if !empty {
+                    depth += 1;
+                    indent(&mut out, depth);
+                }
+            }
+            '}' | ']' => {
+                // Balance: an unexpected close means this is not JSON we understand — decline.
+                let was_empty = out.ends_with('{') || out.ends_with('[');
+                if !was_empty {
+                    depth = depth.checked_sub(1)?;
+                    indent(&mut out, depth);
+                }
+                out.push(c);
+            }
+            ',' => {
+                out.push(c);
+                indent(&mut out, depth);
+            }
+            ':' => out.push_str(": "),
+            _ => out.push(c), // ordinary token char (incl. the `\0` hole atom)
+        }
+        i += 1;
+    }
+    if depth != 0 || in_string {
+        return None;
+    }
+    Some(out.trim().to_string())
+}
 
 /// The prelude attributes the built-in tiers own: the test runner's metadata quartet
 /// (`Skip`/`Name`/`Group`/`Data`), `bench`'s knob (`Bench { iterations }`), and the doc tier's

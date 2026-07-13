@@ -210,6 +210,34 @@ pub fn format_source_in(
     config: &FmtConfig,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Result<String, FmtError> {
+    format_source_in_with_formatters(name, text, config, text_tiers, &TierBodyFormatters::new())
+}
+
+/// A native body formatter for `noeta fmt`: given a tier body's foreign text with each `${…}` hole
+/// as a single NUL (`\0`) placeholder, it returns the reflowed foreign text (NULs preserved, in
+/// order) or `None` to decline. See [`noeta_native::registry::ExtTier::format_body`]. `noeta fmt`
+/// owns the Noeta side (hole substitution + tier-body escaping); a formatter is pure foreign reflow.
+pub type TierBodyFormatter = fn(&str) -> Option<String>;
+
+/// Tier name → its registered body formatter (extension-driven tier-body formatting). The CLI builds
+/// this from the session's extension registry; other front-ends (LSP, tests) pass an empty set, so
+/// every tier body stays strictly verbatim.
+pub type TierBodyFormatters = std::collections::HashMap<String, TierBodyFormatter>;
+
+/// [`format_source_in`] plus **extension-supplied tier-body formatters**: a tier whose extension
+/// registered a `format_body` has its `@<tier> { … }` body reflowed by that formatter (the foreign
+/// text only — the `${…}` holes are still formatted by fmt and reinserted). Because reflowing a body
+/// changes its static strings — which fmt cannot prove value-preserving in the foreign language — the
+/// safety gate is **relaxed for formatted tiers**: it still enforces that the output re-parses and
+/// that everything *except* those tiers' static text is unchanged (holes, structure, every other
+/// node), and idempotency still holds. A tier with no formatter keeps the full strict gate.
+pub fn format_source_in_with_formatters(
+    name: &str,
+    text: &str,
+    config: &FmtConfig,
+    text_tiers: &noeta_lexer::TextTiers,
+    formatters: &TierBodyFormatters,
+) -> Result<String, FmtError> {
     let source = Source::new(SourceId(0), name, text);
 
     // Lex with trivia so comments are available to the printer (reattached in F4). The token stream
@@ -217,14 +245,20 @@ pub fn format_source_in(
     let lexed = noeta_lexer::lex_with_trivia_in(&source, text_tiers);
     let program = parse_checked(&source, &lexed)?;
 
-    let out = print::print_program(&program, text, &lexed.comments, config, text_tiers)?;
+    let out =
+        print::print_program(&program, text, &lexed.comments, config, text_tiers, formatters)?;
 
     // Safety gate: the formatted text must parse, and parse to the same program modulo spans.
     let formatted = Source::new(SourceId(0), name, out.as_str());
     let reparsed = parse_clean(&formatted, text_tiers).map_err(|_| {
         FmtError::Safety("formatted output does not re-parse (printer bug)".to_string())
     })?;
-    if !safety::ast_equal_modulo_spans(&program, &reparsed) {
+    // Strict first; if a body formatter reflowed a tier body, the strict gate trips on the changed
+    // statics, so fall back to the relaxed gate that ignores tier-body static text (but nothing else).
+    let equal = safety::ast_equal_modulo_spans(&program, &reparsed)
+        || (!formatters.is_empty()
+            && safety::ast_equal_ignoring_tier_statics(&program, &reparsed));
+    if !equal {
         return Err(FmtError::Safety(
             "formatted output parses to a different AST (printer bug)".to_string(),
         ));
@@ -409,6 +443,61 @@ mod tests {
                 ..FmtConfig::default()
             },
         )
+    }
+
+    // A stand-in extension body formatter: uppercases the foreign text, leaving the `\0` hole
+    // placeholders untouched (uppercasing NUL is a no-op) — so it reflows the body and preserves
+    // every hole, exactly the contract fmt relies on.
+    fn upper_body(body: &str) -> Option<String> {
+        Some(body.to_uppercase())
+    }
+
+    fn fmt_with_sql_formatter(text: &str) -> Result<String, FmtError> {
+        let tiers = noeta_lexer::TextTiers::with(vec!["sql".to_string()]);
+        let mut formatters = TierBodyFormatters::new();
+        formatters.insert("sql".to_string(), upper_body as TierBodyFormatter);
+        format_source_in_with_formatters("t.noe", text, &FmtConfig::default(), &tiers, &formatters)
+    }
+
+    const SQL_TIER: &str = "@tier(sql, text: \"sql\", expr: string)\n\
+        fn q(statics: List<string>, holes: List<() -> dyn>): string { return \"\" }\n";
+
+    #[test]
+    fn registered_tier_formatter_reflows_body_and_keeps_holes() {
+        // The formatter reflows the foreign text (here: uppercases it); fmt reinserts each `${…}`
+        // hole (formatted inline) and re-applies tier escaping. The relaxed safety gate accepts the
+        // changed statics because the holes and everything else are unchanged.
+        let out = fmt_with_sql_formatter(&format!("{SQL_TIER}r = @sql {{ select ${{ x }} from t }}\n"))
+            .expect("formats");
+        // Body uppercased by the formatter; the hole reinserted, formatted inline (`${ x }` → `${x}`).
+        assert!(
+            out.contains("@sql { SELECT ${x} FROM T }"),
+            "body not reflowed / hole not preserved:\n{out}"
+        );
+    }
+
+    #[test]
+    fn tier_formatter_output_is_idempotent() {
+        let once = fmt_with_sql_formatter(&format!("{SQL_TIER}r = @sql {{ select ${{x}} from t }}\n"))
+            .expect("first");
+        let twice = fmt_with_sql_formatter(&once).expect("second");
+        assert_eq!(once, twice, "tier-body formatting is not idempotent");
+    }
+
+    #[test]
+    fn unformatted_tier_stays_verbatim_under_strict_gate() {
+        // No formatter registered for `sql` ⇒ the body is byte-for-byte verbatim (only the hole is
+        // reformatted), and the full strict safety gate still applies.
+        let out = format_source_in(
+            "t.noe",
+            &format!("{SQL_TIER}r = @sql {{ select ${{ x }} from T }}\n"),
+            &FmtConfig::default(),
+            &noeta_lexer::TextTiers::with(vec!["sql".to_string()]),
+        )
+        .expect("formats");
+        // Verbatim body: the foreign text (and the `${ x }` spacing) is byte-preserved; only the
+        // hole *expression* is reformatted, and it has none here.
+        assert!(out.contains("@sql { select ${ x } from T }"), "got:\n{out}");
     }
 
     #[test]

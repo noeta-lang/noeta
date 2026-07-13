@@ -73,6 +73,7 @@ pub fn print_program(
     comments: &[Comment],
     config: &FmtConfig,
     text_tiers: &noeta_lexer::TextTiers,
+    tier_formatters: &crate::TierBodyFormatters,
 ) -> Result<String, FmtError> {
     let p = Printer {
         source,
@@ -81,6 +82,7 @@ pub fn print_program(
         code_tokens: code_tokens(source, text_tiers),
         config,
         force_flat: Cell::new(false),
+        tier_formatters,
     };
     let doc = p.stmt_seq(&program.stmts, program.span.start, program.span.end)?;
     let rendered = render(&doc, config.line_width);
@@ -115,6 +117,9 @@ pub fn print_stmt(
         .iter()
         .take_while(|c| c.span.start < stmt.span().start)
         .count();
+    // Statement/range formatting (LSP on-type) does not reflow tier bodies — a partial edit has no
+    // registry context — so it runs with no body formatters (verbatim tiers).
+    let no_formatters = crate::TierBodyFormatters::new();
     let p = Printer {
         source,
         comments,
@@ -122,6 +127,7 @@ pub fn print_stmt(
         code_tokens: code_tokens(source, text_tiers),
         config,
         force_flat: Cell::new(false),
+        tier_formatters: &no_formatters,
     };
     let doc = p.stmt(stmt)?;
     let rendered = render(&doc, config.line_width);
@@ -152,6 +158,9 @@ struct Printer<'a> {
     /// body's `${…}` hole **inline**: a hole sits mid-foreign-text (often inside an HTML attribute or
     /// a JSON value), where a multi-line expansion would be wrong. See [`Printer::hole_inline`].
     force_flat: Cell<bool>,
+    /// Tier name → its extension-registered body formatter (empty for the LSP/stmt paths). A tier
+    /// present here has its `@<tier> { … }` body reflowed by the formatter; absent ⇒ verbatim.
+    tier_formatters: &'a crate::TierBodyFormatters,
 }
 
 /// The `(start, kind)` of every non-`;` token in `source`, in order — the lookup behind
@@ -1329,8 +1338,12 @@ impl Printer<'_> {
             // inside a tier body). Reflowing the foreign text itself is a separate, formatter-gated
             // step (a registered tier body formatter); with none, the body stays exactly as written.
             Expr::TierExpr {
-                statics, holes, span, ..
-            } => self.tier_body(statics, holes, *span)?,
+                tier,
+                statics,
+                holes,
+                span,
+                ..
+            } => self.tier_body(tier, statics, holes, *span)?,
             // Compiler-synthesized only (the parser never produces it, so the formatter — which
             // runs on parsed source — never reaches this); emit the qualified name defensively.
             Expr::NativeFnRef { module, func, .. } => Doc::text(format!("{module}.{func}")),
@@ -1784,15 +1797,26 @@ impl Printer<'_> {
                 after
                     .chars()
                     .next()
-                    .map_or(true, |c| !c.is_alphanumeric() && c != '_')
+                    .is_none_or(|c| !c.is_alphanumeric() && c != '_')
             })
     }
 
-    /// Reconstruct an expression-tier body (`@html { … ${hole} … }`): the foreign static text is
-    /// copied **verbatim from source** (byte-for-byte, escapes intact — value-preserving), and each
-    /// `${…}` hole's Noeta expression is reformatted inline. Reflowing the foreign text itself is a
-    /// separate, formatter-gated concern; here fmt only touches what it owns — the holes.
-    fn tier_body(&self, _statics: &[String], holes: &[Expr], span: Span) -> Result<Doc, FmtError> {
+    /// Reconstruct an expression-tier body (`@html { … ${hole} … }`). If the tier's extension
+    /// registered a body formatter, the foreign text is reflowed by it ([`Printer::tier_body_formatted`]);
+    /// otherwise the foreign static text is copied **verbatim from source** (byte-for-byte, escapes
+    /// intact — value-preserving) and only the `${…}` holes are reformatted inline.
+    fn tier_body(
+        &self,
+        tier: &str,
+        statics: &[String],
+        holes: &[Expr],
+        span: Span,
+    ) -> Result<Doc, FmtError> {
+        if let Some(formatter) = self.tier_formatters.get(tier)
+            && let Some(doc) = self.tier_body_formatted(*formatter, tier, statics, holes)?
+        {
+            return Ok(doc);
+        }
         let slice = |a: u32, b: u32| self.source.get(a as usize..b as usize).unwrap_or_default();
         let mut out = String::new();
         let mut cursor = span.start;
@@ -1805,6 +1829,44 @@ impl Printer<'_> {
         }
         out.push_str(slice(cursor, span.end));
         Ok(Doc::raw_text(out))
+    }
+
+    /// Run an extension's body formatter over a tier body. The decoded foreign statics are joined with
+    /// a NUL (`\0`) per hole and handed to `formatter`; on `Some(reflowed)` fmt owns the Noeta side —
+    /// it re-applies tier-body escaping (`\ { } $`) to the reflowed foreign text and substitutes each
+    /// `\0` back with its inline-formatted hole — and wraps the result as `@<tier> { … }`. Returns
+    /// `None` (→ the verbatim path) if the formatter declines or does not return exactly one NUL per
+    /// hole (a misbehaving formatter must never corrupt the program).
+    fn tier_body_formatted(
+        &self,
+        formatter: crate::TierBodyFormatter,
+        tier: &str,
+        statics: &[String],
+        holes: &[Expr],
+    ) -> Result<Option<Doc>, FmtError> {
+        let joined = statics.join("\u{0}");
+        let Some(reflowed) = formatter(&joined) else {
+            return Ok(None);
+        };
+        // Trim the formatter's result before wrapping it in `@<tier> { … }`: the wrapper adds one
+        // space on each side, which re-enters the body's statics on re-parse; trimming here keeps
+        // that from accumulating, so the round-trip is idempotent regardless of how (or whether) the
+        // formatter trims. A `\0` hole marker is not whitespace, so a leading/trailing hole survives.
+        let reflowed = reflowed.trim();
+        let segments: Vec<&str> = reflowed.split('\u{0}').collect();
+        if segments.len() != holes.len() + 1 {
+            return Ok(None); // formatter dropped or added a hole marker — decline defensively
+        }
+        let mut body = String::new();
+        for (i, seg) in segments.iter().enumerate() {
+            body.push_str(&encode_tier_static(seg));
+            if let Some(hole) = holes.get(i) {
+                body.push_str("${");
+                body.push_str(&self.hole_inline(hole)?);
+                body.push('}');
+            }
+        }
+        Ok(Some(Doc::raw_text(format!("@{tier} {{ {body} }}"))))
     }
 
     /// Format a tier-body hole's expression to a single **inline** string: source-directed line
@@ -2052,6 +2114,17 @@ fn pattern_width_ref(doc: &Doc) -> usize {
 /// are `\\ \" \n \t` and `\$` (the last neutralizes a literal `${`, which would otherwise re-lex as
 /// interpolation). A bare `$`, `{`, or `}` needs no escape. (`\r` has no escape; the rare literal CR
 /// passes through — a valid string body byte.)
+/// Escape a reflowed tier-body **static** segment for emission inside `@<tier> { … }`: the four
+/// characters the expression-tier lexer treats specially — `\`, `{`, `}`, `$` — each get a leading
+/// backslash so they decode back to themselves (and so a literal `{`/`$` is never mistaken for a tier
+/// brace or a `${…}` hole). Backslash is escaped first so the escapes just added are not re-escaped.
+fn encode_tier_static(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('{', "\\{")
+        .replace('}', "\\}")
+        .replace('$', "\\$")
+}
+
 fn escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut chars = value.chars().peekable();

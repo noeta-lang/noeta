@@ -19,6 +19,27 @@ pub fn ast_equal_modulo_spans(a: &Program, b: &Program) -> bool {
         == strip_spans(&canonical_imports(b).to_pretty_string())
 }
 
+/// As [`ast_equal_modulo_spans`], but also ignoring the **static text of tier bodies** — the relaxed
+/// gate for extension-driven tier-body formatting. A body formatter reflows a tier's foreign text, so
+/// its `statics` change; fmt cannot prove that reflow value-preserving in the foreign language (only
+/// the formatter's author can), so this drops every `(static "…")` line from the compared pretty
+/// forms. Everything else — the tier name, the `${…}` holes between the statics, and every node
+/// outside tier bodies — is still compared exactly, so a real formatting bug is still caught.
+pub fn ast_equal_ignoring_tier_statics(a: &Program, b: &Program) -> bool {
+    let norm = |p: &Program| strip_tier_statics(&strip_spans(&canonical_imports(p).to_pretty_string()));
+    norm(a) == norm(b)
+}
+
+/// Drop every `(static "…")` line — the [`Pretty`] rendering of a tier body's static segment (one
+/// per line; the debug-quoted string never spans lines). The interleaved hole lines are kept.
+fn strip_tier_statics(pretty: &str) -> String {
+    pretty
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("(static \""))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// A clone of `program` with import order canonicalized: every contiguous run of `use` statements is
 /// sorted, and the names inside each `use A.{…}` are sorted. Deterministic, so applying it to both
 /// compared programs makes the comparison invariant to import ordering.

@@ -1338,6 +1338,13 @@ fn cmd_fmt(
     let mut tier_sets: std::collections::HashMap<PathBuf, noeta_lexer::TextTiers> =
         std::collections::HashMap::new();
 
+    // Extension-registered tier-body formatters (e.g. std's `@json`): a tier here has its body
+    // reflowed; every other tier stays verbatim. Built once — the installed extension set is fixed.
+    let tier_formatters: noeta_fmt::TierBodyFormatters = noeta_stdlib::registry::ext_tier_body_formatters()
+        .into_iter()
+        .map(|(name, f)| (name.to_string(), f))
+        .collect();
+
     for file in &files {
         let dir = file.parent().unwrap_or_else(|| std::path::Path::new("."));
         let config = match manifest::resolve_fmt_config(dir) {
@@ -1360,8 +1367,13 @@ fn cmd_fmt(
             .or_insert_with(|| fmt_text_tiers(dir, file))
             .clone();
 
-        match noeta_fmt::format_source_in(&file.to_string_lossy(), &original, &config, &text_tiers)
-        {
+        match noeta_fmt::format_source_in_with_formatters(
+            &file.to_string_lossy(),
+            &original,
+            &config,
+            &text_tiers,
+            &tier_formatters,
+        ) {
             Ok(formatted) => {
                 if formatted == original {
                     continue; // already canonical — no write, no churn

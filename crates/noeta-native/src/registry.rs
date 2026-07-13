@@ -680,7 +680,7 @@ pub struct ExtAttribute {
 /// the checker validates against is the installed extensions' tiers ∪ the program's own `@tier`
 /// declarations. The built-ins' runners stay native (`noeta test`/`bench`/`doc` and `--tier
 /// debug`); only the declaration lives here.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub struct ExtTier {
     pub name: &'static str,
     /// The knob attribute a `@<tier>(args)` block stamps onto its fns — one of the extension's
@@ -701,6 +701,31 @@ pub struct ExtTier {
     /// yielding [`Self::expr`]. `None` unless `expr` is set (a program-declared expr tier names its
     /// handler on the `@tier` fn instead).
     pub handler: Option<&'static str>,
+    /// An optional **body formatter** for `noeta fmt` (extension-driven tier-body formatting): given
+    /// the tier body's foreign text with each `${…}` hole represented as a single NUL (`\0`)
+    /// placeholder, it returns the reflowed foreign text (holes still as `\0`, in order), or `None`
+    /// to decline (fmt then leaves the body verbatim). fmt owns everything Noeta: it substitutes the
+    /// (separately, inline-formatted) holes back for the `\0`s and re-applies tier-body escaping — so
+    /// a formatter is pure foreign-language reflow and never needs to know Noeta's syntax. Supplying
+    /// one is the extension's assertion that reflowing its body preserves the value in that language
+    /// (the relaxation `noeta fmt` cannot prove itself); a tier without one stays byte-for-byte
+    /// verbatim.
+    pub format_body: Option<fn(&str) -> Option<String>>,
+}
+
+impl PartialEq for ExtTier {
+    /// Compares the **declarative** fields. `format_body` is a function pointer whose address is not a
+    /// meaningful identity (it can differ across codegen units or collide after merging), so only its
+    /// presence is compared — two tiers are equal when they declare the same thing and agree on
+    /// whether they carry a body formatter.
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.config == other.config
+            && self.text == other.text
+            && self.expr == other.expr
+            && self.handler == other.handler
+            && self.format_body.is_some() == other.format_body.is_some()
+    }
 }
 
 /// A bundle of native modules and types registered into the language. Core implements this once

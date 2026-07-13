@@ -65,6 +65,7 @@ impl Extension for PluginExtension {
             text: None,
             expr: None,
             handler: None,
+            format_body: None,
         }]
     }
 }
