@@ -27,7 +27,6 @@ use std::path::Path;
 use noeta_ast::{Program, Stmt, UseName};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_lexer::lex;
-use noeta_parser::parse;
 use noeta_span::{Source, SourceId, SourceMap};
 
 /// A loaded, linked program ready to type-check and run.
@@ -267,9 +266,9 @@ pub fn link(
             raw.text.as_str(),
         ));
     }
-    let lexeds = lex_program(&sources);
+    let (lexeds, text_tiers) = lex_program(&sources);
 
-    let entry_parsed = parse(&entry, &lexeds[0].tokens);
+    let entry_parsed = noeta_parser::parse_in(&entry, &lexeds[0].tokens, &text_tiers);
     let entry_diags: Vec<Diagnostic> = lexeds[0]
         .diagnostics
         .iter()
@@ -293,7 +292,7 @@ pub fn link(
     // line up with the `SourceId`s the parser stamped onto spans (entry = 0, sibling i = i + 1).
     let mut module_programs: Vec<Program> = Vec::new();
     for (source, lexed) in sources.iter().zip(&lexeds).skip(1) {
-        if let Some(program) = parse_clean(source, lexed) {
+        if let Some(program) = parse_clean(source, lexed, &text_tiers) {
             module_programs.push(program);
         }
     }
@@ -346,9 +345,9 @@ pub fn link_with_deps(
             next_id += 1;
         }
     }
-    let lexeds = lex_program(&sources);
+    let (lexeds, text_tiers) = lex_program(&sources);
 
-    let entry_parsed = parse(&entry, &lexeds[0].tokens);
+    let entry_parsed = noeta_parser::parse_in(&entry, &lexeds[0].tokens, &text_tiers);
     let entry_diags: Vec<Diagnostic> = lexeds[0]
         .diagnostics
         .iter()
@@ -368,7 +367,7 @@ pub fn link_with_deps(
     // Parse the siblings (pure decl-sources).
     let mut sibling_programs: Vec<Program> = Vec::new();
     for (source, lexed) in sources[1..sibling_end].iter().zip(&lexeds[1..sibling_end]) {
-        if let Some(program) = parse_clean(source, lexed) {
+        if let Some(program) = parse_clean(source, lexed, &text_tiers) {
             sibling_programs.push(program);
         }
     }
@@ -379,7 +378,8 @@ pub fn link_with_deps(
     let mut dep_idx = sibling_end;
     for dep in deps {
         for _ in &dep.modules {
-            if let Some(mut program) = parse_clean(&sources[dep_idx], &lexeds[dep_idx]) {
+            if let Some(mut program) = parse_clean(&sources[dep_idx], &lexeds[dep_idx], &text_tiers)
+            {
                 reroot_program(&mut program, &dep.root, &dep.key, &dep.dep_renames);
                 dep_programs.push(program);
             }
@@ -402,29 +402,42 @@ pub fn link_with_deps(
 /// all declarations is applied and every file re-lexes with it — so a tier declared in one file
 /// (or one dependency package) captures `@x { … }` bodies verbatim in every other. Only programs
 /// declaring text tiers pay the second pass.
-fn lex_program(sources: &[Source]) -> Vec<noeta_lexer::Lexed> {
+fn lex_program(sources: &[Source]) -> (Vec<noeta_lexer::Lexed>, noeta_lexer::TextTiers) {
     let lexeds: Vec<_> = sources.iter().map(lex).collect();
-    let declared: Vec<String> = lexeds
+    // Verbatim-body tiers come from two sources: a program's own `@tier(…, text/expr)` (found by
+    // the lexer's per-file token scan) and the installed extensions' declarations (`doc`, and any
+    // native `@json`/`@sql` — no `.noe` file declares these).
+    let mut declared: Vec<String> = lexeds
         .iter()
         .flat_map(|l| l.text_tier_decls.iter().cloned())
         .collect();
+    declared.extend(
+        noeta_stdlib::registry::ext_verbatim_tier_names()
+            .into_iter()
+            .map(str::to_string),
+    );
+    let set = noeta_lexer::TextTiers::with(declared.clone());
     let default = noeta_lexer::TextTiers::default();
     if declared.iter().all(|name| default.contains(name)) {
-        return lexeds;
+        return (lexeds, set);
     }
-    let set = noeta_lexer::TextTiers::with(declared);
-    sources
+    let relexed = sources
         .iter()
         .map(|source| noeta_lexer::lex_in(source, &set))
-        .collect()
+        .collect();
+    (relexed, set)
 }
 
 /// Parse an already-lexed source, yielding its [`Program`] only if both lex and parse are clean
 /// (a module that fails cannot be resolved against and is skipped). The shared helper behind
 /// [`link`]'s sibling loop and [`link_with_deps`].
-fn parse_clean(source: &Source, lexed: &noeta_lexer::Lexed) -> Option<Program> {
+fn parse_clean(
+    source: &Source,
+    lexed: &noeta_lexer::Lexed,
+    text_tiers: &noeta_lexer::TextTiers,
+) -> Option<Program> {
     (lexed.diagnostics.is_empty())
-        .then(|| parse(source, &lexed.tokens))
+        .then(|| noeta_parser::parse_in(source, &lexed.tokens, text_tiers))
         .filter(|parsed| parsed.diagnostics.is_empty())
         .map(|parsed| parsed.program)
 }
@@ -714,7 +727,11 @@ fn merge_module_closure(
     // The module's own top-level declaration names — the only targets an intra-module reference can
     // resolve to (everything else — params, builtins, externs, other modules — is left to its own
     // resolution path).
-    let own_names: HashSet<&str> = module.stmts.iter().filter_map(qualifiable_decl_name).collect();
+    let own_names: HashSet<&str> = module
+        .stmts
+        .iter()
+        .filter_map(qualifiable_decl_name)
+        .collect();
     let qualified = |name: &str| format!("{}.{}", path.join("."), name);
     let find = |name: &str| {
         module
@@ -1418,7 +1435,13 @@ mod tests {
         let entry = "use app.lib.make;\nb = make(5);\necho b.n;\n";
         let linked = link("main.noe", entry, std::slice::from_ref(&sibling)).unwrap();
         assert!(has_fn(&linked, "make"));
-        assert!(has_fn(&linked, "build"), "the sibling's internal helper is pulled");
-        assert!(has_struct(&linked, "Box"), "the sibling's local type is pulled");
+        assert!(
+            has_fn(&linked, "build"),
+            "the sibling's internal helper is pulled"
+        );
+        assert!(
+            has_struct(&linked, "Box"),
+            "the sibling's local type is pulled"
+        );
     }
 }

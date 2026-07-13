@@ -616,11 +616,12 @@ impl LanguageServer for Backend {
         let position_params = params.text_document_position_params;
         let uri = position_params.text_document.uri;
         let position = ide_position(position_params.position);
-        let (found, doc) = {
+        let (found, doc, tier) = {
             let store = self.store.lock().expect("document store poisoned");
             (
                 store.hover_type(uri.as_str(), position, self.encoding()),
                 store.hover_doc(uri.as_str(), position, self.encoding()),
+                store.hover_tier(uri.as_str(), position, self.encoding()),
             )
         };
         let markdown = |value: String| {
@@ -629,6 +630,16 @@ impl LanguageServer for Backend {
                 value,
             })
         };
+        // Hovering an embedded-language block's tier name (`@sql { … }`) describes its body — the
+        // declared language and, for an expression tier, its value type — read from the tier
+        // registry (program + extension declarations alike). Takes precedence over the type hover
+        // because the cursor is on the tier name, not a typed sub-expression.
+        if let Some((descriptor, range)) = tier {
+            return Ok(Some(Hover {
+                contents: markdown(descriptor),
+                range: Some(wire_range(range)),
+            }));
+        }
         Ok(match (found, doc) {
             // `TypeRepr` displays as its Noeta surface spelling (`impl Display` in
             // `noeta_ast::reflect`) — the same rendering the debugger's Variables view uses.

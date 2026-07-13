@@ -41,7 +41,13 @@ pub struct DeclaredTier {
     /// arc): its blocks hold verbatim text (lexer-captured, un-parsed) tagged with this language
     /// for tooling. `None` for a code tier. Mutually exclusive with `config` (E0051).
     pub text: Option<String>,
+    /// The block-value type from `expr: T`, when the tier is an **expression tier** (expr-tiers
+    /// arc): its `@<name> { … }` blocks are expressions, desugared during activation to a call of
+    /// the handler (`runner` doubles as the handler name). Mutually exclusive with `config`
+    /// (E0051); no runner semantics (`noeta <tier>` rejects it, blocks never activate/strip).
+    pub expr: Option<String>,
     /// The runner fn's (possibly link-qualified) name — what dispatch invokes with the roots.
+    /// For an expression tier this is the **handler** the desugar calls instead.
     pub runner: String,
     /// The declaring **package root** — the runner's first qualified segment (`fuzzkit` for
     /// `fuzzkit.tiers.run_fuzz`), or `""` for an entry-local declaration. This is the provider
@@ -132,6 +138,7 @@ impl TierRegistry {
                         name: t.name.clone(),
                         config: t.config.as_ref().map(|(n, _)| n.clone()),
                         text: t.text.as_ref().map(|(lang, _)| lang.clone()),
+                        expr: t.expr.as_ref().map(|(ty, _)| ty.clone()),
                         runner: f.name.clone(),
                         root: runner_root(&f.name),
                         span: t.span,
@@ -227,23 +234,65 @@ impl TierRegistry {
         }
     }
 
-    /// The body language of `tier` when it is a **text tier** — `"markdown"` for the built-in
-    /// `doc`, the declaration's `text: "<lang>"` for a declared one, `None` for a code tier. Reads
-    /// the first declaration (text tiers are single-provider today).
+    /// The body language of `tier` when it declares one — from the extension declaration (`doc` →
+    /// `"markdown"`, a native `@json` → `"json"`) or a program `@tier(…, text: "<lang>")`, `None`
+    /// for a code tier. This is the language editor injection colors the body as and the LSP
+    /// reports on hover; decoupled from the tier name (text-tiers design). Extension declarations
+    /// win (a built-in name is not shadowable). Reads the first program declaration (text and
+    /// expression tiers are single-provider today).
     pub fn text_lang(&self, tier: &str) -> Option<&str> {
-        if tier == "doc" {
-            return Some("markdown");
+        if let Some(lang) = self.reg().find_ext_tier(tier).and_then(|t| t.text) {
+            return Some(lang);
         }
         self.declared(tier).and_then(|d| d.text.as_deref())
     }
 
-    /// Every declared text tier's name — what the pipeline feeds the lexer
-    /// (`noeta_lexer::TextTiers::with`) so consumer files capture these bodies verbatim.
+    /// The value type of `tier` when it is an **expression tier** (expr-tiers arc) — the `expr: T`
+    /// its `@<name> { … }` blocks evaluate to — from an extension declaration or a program
+    /// `@tier(…, expr: T)`, else `None`. Surfaced by the LSP alongside [`Self::text_lang`] so
+    /// hovering an embedded block reports both its language and its type.
+    pub fn expr_type(&self, tier: &str) -> Option<&str> {
+        if let Some(ty) = self.reg().find_ext_tier(tier).and_then(|t| t.expr) {
+            return Some(ty);
+        }
+        self.declared(tier).and_then(|d| d.expr.as_deref())
+    }
+
+    /// Whether `tier` is an **expression tier** (expr-tiers arc) — extension-declared or
+    /// program-declared. The single predicate the checker's E0052 statement-position guard and
+    /// the CLI's `noeta <tier>` dispatch use, so both cover native and program tiers alike.
+    pub fn is_expr_tier(&self, tier: &str) -> bool {
+        self.reg()
+            .find_ext_tier(tier)
+            .is_some_and(|t| t.expr.is_some())
+            || self.declared(tier).is_some_and(|d| d.expr.is_some())
+    }
+
+    /// The handler an **expression tier**'s `@<name> { … }` block desugars to — a program tier's
+    /// `@tier` fn (`DeclaredTier::runner`, a named Noeta function) or an extension tier's native
+    /// module function (`ExtTier::handler`). `None` if `tier` is not an expression tier (or an
+    /// extension expr tier omitted its handler, a misconfiguration). The single resolution point
+    /// the checker's typing and IR lowering both consult, so native and program expr tiers desugar
+    /// through the identical `Call` path.
+    pub fn expr_tier_handler(&self, tier: &str) -> Option<noeta_ast::desugar::ExprTierHandler> {
+        use noeta_ast::desugar::ExprTierHandler;
+        if let Some(t) = self.reg().find_ext_tier(tier).filter(|t| t.expr.is_some()) {
+            return t.handler.map(ExprTierHandler::from_native_path);
+        }
+        self.declared(tier)
+            .filter(|d| d.expr.is_some())
+            .map(|d| ExprTierHandler::Program(d.runner.clone()))
+    }
+
+    /// Every declared **verbatim-body** tier's name — text tiers *and* expression tiers, both of
+    /// whose `@<name> { … }` bodies the lexer captures un-parsed (`noeta_lexer::TextTiers::with`).
+    /// (The live pipeline drives capture off the lexer's own `text_tier_decls` scan, which keys on
+    /// `text:`/`expr:` identically; this registry-side twin must match, so it includes both.)
     pub fn text_tier_names(&self) -> impl Iterator<Item = &str> {
         self.declared
             .values()
             .flatten()
-            .filter(|d| d.text.is_some())
+            .filter(|d| d.text.is_some() || d.expr.is_some())
             .map(|d| d.name.as_str())
     }
 
@@ -373,6 +422,21 @@ pub fn dedent_doc(text: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The E0052 an **expression tier's** block raises in *statement* position (expr-tiers arc): the
+/// block is a value and never activates/strips, so a bare statement would silently discard it.
+/// Shared by the checker's in-place arm and activation, so the two never drift.
+pub fn expr_tier_statement_diagnostic(tier: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        DiagnosticCode::InvalidTierExpression,
+        span,
+        format!("`@{tier}` is an expression tier — its block is a value; assign or return it"),
+    )
+    .with_help(format!(
+        "write `x = @{tier} {{ … }}` (or use it in any expression position); a bare statement \
+         block would discard the value"
+    ))
 }
 
 /// The `E0036 UnknownTier` diagnostic for a `@<tier>` whose name no extension declares and the
@@ -683,6 +747,9 @@ fn resolve_block(
         let config = registry.config_attribute_for(tier, providers);
         if !registry.is_known(tier) {
             diagnostics.push(unknown_tier_diagnostic(registry.reg(), tier, *tier_span));
+        } else if registry.is_expr_tier(tier) {
+            // An expression tier's block in statement position (E0052) — never activates.
+            diagnostics.push(expr_tier_statement_diagnostic(tier, *tier_span));
         } else if config.is_none()
             && let Some(d) = knobless_args_diagnostic_for(tier, args)
         {

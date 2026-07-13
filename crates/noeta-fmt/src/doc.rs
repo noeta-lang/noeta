@@ -137,9 +137,39 @@ fn width_of(s: &str) -> isize {
 }
 
 /// Render `doc` within a `width`-column budget.
+/// How a level of indentation is written: `width` columns as spaces, or one tab per level.
+#[derive(Clone, Copy)]
+pub struct IndentStyle {
+    pub width: usize,
+    pub tabs: bool,
+}
+
+impl Default for IndentStyle {
+    fn default() -> Self {
+        IndentStyle {
+            width: 4,
+            tabs: false,
+        }
+    }
+}
+
 pub fn render(doc: &Doc, width: usize) -> String {
+    render_protected(doc, width, IndentStyle::default()).0
+}
+
+/// Like [`render`], but also returns the byte ranges of the output that came from [`Doc::RawText`] —
+/// verbatim, possibly whitespace-significant content (a tier body, a multiline template/comment).
+/// The whole-file trailing-whitespace trim uses these to leave such content untouched: a trailing
+/// space produced by *layout* (an indented blank line) is safe to strip, but one inside `RawText` —
+/// a Markdown line break in `@doc`, significant space in an `@html` `<pre>` — is content and is kept.
+pub fn render_protected(
+    doc: &Doc,
+    width: usize,
+    indent_style: IndentStyle,
+) -> (String, Vec<std::ops::Range<usize>>) {
     let width = width as isize;
     let mut out = String::new();
+    let mut protected: Vec<std::ops::Range<usize>> = Vec::new();
     let mut col: isize = 0;
     // The work stack of (indent, mode, doc), processed top-down.
     let mut stack: Vec<(isize, Mode, &Doc)> = vec![(0, Mode::Break, doc)];
@@ -152,7 +182,9 @@ pub fn render(doc: &Doc, width: usize) -> String {
                 col += width_of(s);
             }
             Doc::RawText(s) => {
+                let start = out.len();
                 out.push_str(s);
+                protected.push(start..out.len());
                 // Column tracks the tail after the last newline (interior lines are not re-indented).
                 col = match s.rfind('\n') {
                     Some(nl) => width_of(&s[nl + 1..]),
@@ -170,13 +202,13 @@ pub fn render(doc: &Doc, width: usize) -> String {
                     out.push(' ');
                     col += 1;
                 }
-                Mode::Break => col = new_line(&mut out, indent),
+                Mode::Break => col = new_line(&mut out, indent, indent_style),
             },
             Doc::SoftLine => match mode {
                 Mode::Flat => {}
-                Mode::Break => col = new_line(&mut out, indent),
+                Mode::Break => col = new_line(&mut out, indent, indent_style),
             },
-            Doc::HardLine => col = new_line(&mut out, indent),
+            Doc::HardLine => col = new_line(&mut out, indent, indent_style),
             Doc::Group(d) => {
                 // Flat if the flattened group (plus the rest of this line) fits; else broken.
                 let mode = if fits(width - col, indent, d, &stack) {
@@ -193,14 +225,22 @@ pub fn render(doc: &Doc, width: usize) -> String {
             }
         }
     }
-    out
+    (out, protected)
 }
 
-/// Emit a newline followed by `indent` spaces; return the new column.
-fn new_line(out: &mut String, indent: isize) -> isize {
+/// Emit a newline followed by `indent` columns of indentation — as spaces, or one tab per level when
+/// `style.tabs`. Returns the new column. (A trailing `\r` for CRLF, if any, is applied once at the
+/// end of formatting, not here.)
+fn new_line(out: &mut String, indent: isize, style: IndentStyle) -> isize {
     out.push('\n');
-    for _ in 0..indent {
-        out.push(' ');
+    if style.tabs && style.width > 0 {
+        for _ in 0..(indent as usize / style.width) {
+            out.push('\t');
+        }
+    } else {
+        for _ in 0..indent {
+            out.push(' ');
+        }
     }
     indent
 }

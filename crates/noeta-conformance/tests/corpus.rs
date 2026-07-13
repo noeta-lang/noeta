@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
-use noeta_conformance::{Stage, run_corpus, run_differential, run_ir_corpus, run_leak_check};
+use noeta_conformance::{
+    Stage, on_deep_stack, run_corpus, run_differential, run_ir_corpus, run_leak_check,
+};
 
 fn corpus_root() -> PathBuf {
     // crates/noeta-conformance → workspace root → tests/conformance
@@ -28,23 +30,27 @@ fn demo_example_and_corpus_case_stay_in_sync() {
 
 #[test]
 fn conformance_corpus_passes() {
-    let root = corpus_root();
-    assert!(
-        root.is_dir(),
-        "conformance corpus not found at {}",
-        root.display()
-    );
+    // Run on a large-stack worker: a realistic case (async server + reactive diff) can out-recurse
+    // libtest's ~2 MiB test thread in debug. See `noeta_conformance::on_deep_stack`.
+    on_deep_stack(|| {
+        let root = corpus_root();
+        assert!(
+            root.is_dir(),
+            "conformance corpus not found at {}",
+            root.display()
+        );
 
-    let report = run_corpus(&root, None, Stage::Eval);
-    assert!(
-        !report.cases.is_empty(),
-        "the conformance corpus is empty — at least the walking-skeleton case should exist"
-    );
-    assert!(
-        report.all_passed(),
-        "conformance failures:\n{}",
-        report.to_human()
-    );
+        let report = run_corpus(&root, None, Stage::Eval);
+        assert!(
+            !report.cases.is_empty(),
+            "the conformance corpus is empty — at least the walking-skeleton case should exist"
+        );
+        assert!(
+            report.all_passed(),
+            "conformance failures:\n{}",
+            report.to_human()
+        );
+    });
 }
 
 /// The leak oracle's **known debt**: `(backend, program)` pairs tolerated as leaking at clean exit
@@ -71,25 +77,27 @@ fn leak_oracle_residency_is_zero_except_known_cycles() {
     // shows up as a positive per-program residual. The only tolerated residuals are the cyclic
     // ones in `KNOWN_LEAKS` (Phase-6 debt); any other leak — or any change to the known set —
     // fails the gate.
-    let report = run_leak_check(&corpus_root(), None);
-    eprintln!("{}", report.to_human());
+    on_deep_stack(|| {
+        let report = run_leak_check(&corpus_root(), None);
+        eprintln!("{}", report.to_human());
 
-    let mut found: Vec<(&str, &str)> = report
-        .leaks
-        .iter()
-        .map(|l| (l.backend, l.name.as_str()))
-        .collect();
-    found.sort_unstable();
-    let mut expected: Vec<(&str, &str)> = KNOWN_LEAKS.to_vec();
-    expected.sort_unstable();
+        let mut found: Vec<(&str, &str)> = report
+            .leaks
+            .iter()
+            .map(|l| (l.backend, l.name.as_str()))
+            .collect();
+        found.sort_unstable();
+        let mut expected: Vec<(&str, &str)> = KNOWN_LEAKS.to_vec();
+        expected.sort_unstable();
 
-    assert_eq!(
-        found,
-        expected,
-        "the leak-oracle set changed.\n  - a NEW pair ⇒ a real leak to fix or a regression\n  \
-         - a MISSING pair ⇒ a debt was fixed; remove it from KNOWN_LEAKS\nfull report:\n{}",
-        report.to_human()
-    );
+        assert_eq!(
+            found,
+            expected,
+            "the leak-oracle set changed.\n  - a NEW pair ⇒ a real leak to fix or a regression\n  \
+             - a MISSING pair ⇒ a debt was fixed; remove it from KNOWN_LEAKS\nfull report:\n{}",
+            report.to_human()
+        );
+    });
 }
 
 #[test]
@@ -104,19 +112,21 @@ fn ir_lowering_is_total_over_the_corpus() {
     // matched the AST tree-walker byte-for-byte. Phase 4 promoted the IR interpreter to the
     // reference; the AST walker can no longer reproduce its last-use destruction, so the equality
     // assertion was retired (the live cross-check is now the differential). See `ir_corpus.rs`.
-    let report = run_ir_corpus(&corpus_root(), None);
-    eprintln!("{}", report.to_human());
-    assert!(
-        report.ran > 0,
-        "the IR-corpus sweep ran no programs:\n{}",
-        report.to_human()
-    );
-    assert_eq!(
-        report.skipped,
-        0,
-        "the Core-IR lowering must cover 100% of the comparable corpus; got:\n{}",
-        report.to_human()
-    );
+    on_deep_stack(|| {
+        let report = run_ir_corpus(&corpus_root(), None);
+        eprintln!("{}", report.to_human());
+        assert!(
+            report.ran > 0,
+            "the IR-corpus sweep ran no programs:\n{}",
+            report.to_human()
+        );
+        assert_eq!(
+            report.skipped,
+            0,
+            "the Core-IR lowering must cover 100% of the comparable corpus; got:\n{}",
+            report.to_human()
+        );
+    });
 }
 
 #[test]
@@ -127,19 +137,24 @@ fn no_local_is_read_after_its_drop() {
     // executes every lowered program via the reference) with the audit active, and assert it
     // observed zero use-after-drop violations — the static drop placement is sound against
     // ground-truth execution, independent of the liveness reasoning that placed the drops.
-    noeta_eval::drop_audit::begin();
-    let report = run_ir_corpus(&corpus_root(), None);
-    let violations = noeta_eval::drop_audit::end();
-    // Guard against a vacuous pass: the sweep must actually have run programs through the IR path.
-    assert!(
-        report.ran > 0,
-        "the IR-corpus sweep ran no programs — the audit would be vacuous"
-    );
-    assert_eq!(
-        violations, 0,
-        "use-after-drop: a DropVar fired before its binding's last dynamic read in {} of {} programs",
-        violations, report.ran
-    );
+    // The whole audit runs inside the worker: `drop_audit` state is thread-local, so `begin`/`end`
+    // must be on the *same* thread that executes the programs — otherwise the audit would observe no
+    // drops and pass vacuously (the `report.ran > 0` guard cannot catch a cross-thread disconnect).
+    on_deep_stack(|| {
+        noeta_eval::drop_audit::begin();
+        let report = run_ir_corpus(&corpus_root(), None);
+        let violations = noeta_eval::drop_audit::end();
+        // Guard against a vacuous pass: the sweep must actually have run programs through the IR path.
+        assert!(
+            report.ran > 0,
+            "the IR-corpus sweep ran no programs — the audit would be vacuous"
+        );
+        assert_eq!(
+            violations, 0,
+            "use-after-drop: a DropVar fired before its binding's last dynamic read in {} of {} programs",
+            violations, report.ran
+        );
+    });
 }
 
 #[test]
@@ -147,24 +162,26 @@ fn differential_backends_agree() {
     // The differential oracle: every program the M1 VM can compile must produce a byte-for-
     // byte identical `RunResult` to the M0 tree-walker. Programs outside the VM's current
     // subset are skipped (not failed); this is the climbing coverage gate for Thrust A.
-    let report = run_differential(&corpus_root(), None);
-    // Print coverage so the agent loop can watch it climb slice by slice.
-    eprintln!("{}", report.to_human());
-    assert!(
-        report.ok(),
-        "the VM diverged from the tree-walker:\n{}",
-        report.to_human()
-    );
-    // M1.0 established the spine on the smallest subset; each slice raised this floor until
-    // M1.5 reached the **Thrust-A gate**: the VM compiles 100% of the comparable corpus
-    // (every parse-clean case) — match/`?`/`??`/constructors completing the feature surface.
-    // The tree-walker is now frozen as the pure oracle; this floor must never regress.
-    assert_eq!(
-        report.skipped,
-        0,
-        "the VM must compile 100% of the comparable corpus (Thrust-A gate); got:\n{}",
-        report.to_human()
-    );
+    on_deep_stack(|| {
+        let report = run_differential(&corpus_root(), None);
+        // Print coverage so the agent loop can watch it climb slice by slice.
+        eprintln!("{}", report.to_human());
+        assert!(
+            report.ok(),
+            "the VM diverged from the tree-walker:\n{}",
+            report.to_human()
+        );
+        // M1.0 established the spine on the smallest subset; each slice raised this floor until
+        // M1.5 reached the **Thrust-A gate**: the VM compiles 100% of the comparable corpus
+        // (every parse-clean case) — match/`?`/`??`/constructors completing the feature surface.
+        // The tree-walker is now frozen as the pure oracle; this floor must never regress.
+        assert_eq!(
+            report.skipped,
+            0,
+            "the VM must compile 100% of the comparable corpus (Thrust-A gate); got:\n{}",
+            report.to_human()
+        );
+    });
 }
 
 /// The bundle gate (P-AOT L1.0 + L1.3): every module the VM compiles must survive a
@@ -173,19 +190,21 @@ fn differential_backends_agree() {
 /// preconditions for shipping a `.noeb` bundle instead of source.
 #[test]
 fn bundle_modules_round_trip_and_run_identically() {
-    let report = noeta_conformance::run_bundle_roundtrip(&corpus_root(), None);
-    eprintln!("{}", report.to_human());
-    assert!(
-        report.ok(),
-        "a compiled module did not survive bundling:\n{}",
-        report.to_human()
-    );
-    assert_eq!(
-        report.failures.len(),
-        0,
-        "every compiled module must serialize losslessly; got:\n{}",
-        report.to_human()
-    );
+    on_deep_stack(|| {
+        let report = noeta_conformance::run_bundle_roundtrip(&corpus_root(), None);
+        eprintln!("{}", report.to_human());
+        assert!(
+            report.ok(),
+            "a compiled module did not survive bundling:\n{}",
+            report.to_human()
+        );
+        assert_eq!(
+            report.failures.len(),
+            0,
+            "every compiled module must serialize losslessly; got:\n{}",
+            report.to_human()
+        );
+    });
 }
 
 /// The JIT differential gate (milestone P-JIT): every program the VM compiles must produce a
@@ -195,24 +214,26 @@ fn bundle_modules_round_trip_and_run_identically() {
 #[cfg(feature = "jit")]
 #[test]
 fn jit_differential_tiers_agree() {
-    let report = noeta_conformance::run_jit_differential(&corpus_root(), None);
-    eprintln!("{}", report.to_human());
-    assert!(
-        report.ok(),
-        "tier 1 diverged from tier 0 (or leaked under JIT):\n{}",
-        report.to_human()
-    );
-    // Every parse-clean program the VM supports must run through the JIT (J0 forces this); the
-    // interpreter's own gate already fixes `skipped == 0`, so tier 1 covers the same 100%.
-    assert_eq!(
-        report.skipped,
-        0,
-        "the JIT oracle must cover 100% of the comparable corpus; got:\n{}",
-        report.to_human()
-    );
-    assert!(
-        report.native_protos > 0,
-        "expected the corpus to compile prototypes to native code (J1); got:\n{}",
-        report.to_human()
-    );
+    on_deep_stack(|| {
+        let report = noeta_conformance::run_jit_differential(&corpus_root(), None);
+        eprintln!("{}", report.to_human());
+        assert!(
+            report.ok(),
+            "tier 1 diverged from tier 0 (or leaked under JIT):\n{}",
+            report.to_human()
+        );
+        // Every parse-clean program the VM supports must run through the JIT (J0 forces this); the
+        // interpreter's own gate already fixes `skipped == 0`, so tier 1 covers the same 100%.
+        assert_eq!(
+            report.skipped,
+            0,
+            "the JIT oracle must cover 100% of the comparable corpus; got:\n{}",
+            report.to_human()
+        );
+        assert!(
+            report.native_protos > 0,
+            "expected the corpus to compile prototypes to native code (J1); got:\n{}",
+            report.to_human()
+        );
+    });
 }

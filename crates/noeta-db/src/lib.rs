@@ -178,7 +178,16 @@ pub fn tokens(db: &dyn salsa::Database, src: SourceProgram) -> Tokens {
 pub fn ast(db: &dyn salsa::Database, src: SourceProgram) -> Ast {
     let source = source_of(db, src);
     let toks = tokens(db, src);
-    Ast(noeta_parser::parse(&source, &toks.0.tokens))
+    // The file's own verbatim-body tiers plus the installed extensions', so a `${…}` hole with a
+    // nested `@html { … }` (an inline loop body) re-lexes its body verbatim.
+    let mut names = toks.0.text_tier_decls.clone();
+    names.extend(
+        noeta_stdlib::registry::ext_verbatim_tier_names()
+            .into_iter()
+            .map(str::to_string),
+    );
+    let set = noeta_lexer::TextTiers::with(names);
+    Ast(noeta_parser::parse_in(&source, &toks.0.tokens, &set))
 }
 
 /// Type-check the AST and return the checker's diagnostics. Depends on [`ast`]. The pipeline's
@@ -364,6 +373,13 @@ pub fn workspace_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> Vec<Stri
         .chain(ws.dep_modules(db).iter().map(|dm| dm.src(db)))
         .flat_map(|src| tokens(db, src).0.text_tier_decls.iter().cloned())
         .collect();
+    // Plus the installed extensions' verbatim-body tiers (`doc`, native `@json`/`@sql`) — no
+    // member file declares these, so the LSP/pipeline must seed them like the loader does.
+    names.extend(
+        noeta_stdlib::registry::ext_verbatim_tier_names()
+            .into_iter()
+            .map(str::to_string),
+    );
     names.sort();
     names.dedup();
     names
@@ -385,7 +401,10 @@ pub fn tokens_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) ->
 pub fn ast_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) -> Ast {
     let source = source_of(db, src);
     let toks = tokens_in(db, ws, src);
-    Ast(noeta_parser::parse(&source, &toks.0.tokens))
+    // The whole workspace's verbatim-body tier set — the same one `tokens_in` lexed with — so a
+    // nested tier body inside a `${…}` hole re-lexes correctly (an inline `@html { … }` loop).
+    let set = noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned());
+    Ast(noeta_parser::parse_in(&source, &toks.0.tokens, &set))
 }
 
 /// queries remain independent. The merge means both backends run the linked program unchanged, so

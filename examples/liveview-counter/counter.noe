@@ -1,0 +1,39 @@
+// A LiveView counter built on the `liveview` package — reactive HTML templating over a websocket.
+// The dynamic text is reactive automatically: `${count.get()}` is an `@html` hole the package turns
+// into a `computed`, and a click pushes a minimal diff of just the holes that changed.
+//
+//   noeta serve examples/liveview-counter/counter.noe
+//   # then open http://localhost:8080 and click +1 — count and its double update in place
+//
+// Importing `render` (the `@html` handler) brings its `@tier(html, …)` declaration into scope, so
+// `@html { … }` resolves here.
+use liveview.{render, Html, handle}
+use std.reactive.signal
+use std.http.server
+use std.http.{Request, Response}
+
+count = signal(0)
+
+fn page(): Html {
+    return @html {
+        <h1>Noeta LiveView counter</h1>
+        <p>count: <b>${count.get()}</b> &nbsp; doubled: <b>${count.get() * 2}</b></p>
+        <p>
+          <button data-live-click="inc">+1</button>
+          <button data-live-click="reset">reset</button>
+        </p>
+    }
+}
+
+fn on_event(name: string): void {
+    if name == "inc" {
+        count.update(fn(n) => n + 1)
+    }
+    if name == "reset" {
+        count.set(0)
+    }
+}
+
+fn fetch(req: Request): Response {
+    return handle(req, "Noeta LiveView counter", page, on_event)
+}

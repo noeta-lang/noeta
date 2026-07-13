@@ -1031,8 +1031,11 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
             hoist_in_expr(receiver, pre, ctr);
             hoist_in_expr(value, pre, ctr);
         }
-        // A closure is a separate callable; leaves have no sub-expressions; `Await` is handled above.
+        // A closure is a separate callable (an expression-tier block's holes desugar to
+        // closures); leaves have no sub-expressions; `Await` is handled above.
         Expr::Closure { .. }
+        | Expr::TierExpr { .. }
+        | Expr::NativeFnRef { .. }
         | Expr::Await { .. }
         | Expr::Str { .. }
         | Expr::Int { .. }

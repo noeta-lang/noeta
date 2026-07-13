@@ -72,9 +72,10 @@ fn sig_to_type_bound(
             Box::new(sig_to_type_bound(reg, k, bindings)),
             Box::new(sig_to_type_bound(reg, v, bindings)),
         ),
-        SigType::Future(t) => {
-            Type::Named(FUTURE.to_string(), vec![sig_to_type_bound(reg, t, bindings)])
-        }
+        SigType::Future(t) => Type::Named(
+            FUTURE.to_string(),
+            vec![sig_to_type_bound(reg, t, bindings)],
+        ),
         // A registered extern type carries its **qualified identity** (`std.id.Uuid`), so a native
         // type never collides with a user type of the same short name. `Iterator`/`Future`/… (the
         // language-level `SigType::Future`/etc.) stay bare — they are not registry types.
@@ -242,11 +243,7 @@ fn opt(t: Type) -> Type {
 /// The return type of a method call on a **built-in** receiver kind (`receiver.name(args)`), or
 /// `None` if `name` is not a known built-in method on that kind. User-defined method returns are
 /// resolved by the checker itself (it owns the class→method table).
-pub(super) fn method_return(
-    reg: &registry::Registry,
-    receiver: &Type,
-    name: &str,
-) -> Option<Type> {
+pub(super) fn method_return(reg: &registry::Registry, receiver: &Type, name: &str) -> Option<Type> {
     // `compare` is defined on every value (Comparable) and yields the prelude `Ordering` enum.
     if name == "compare" {
         return Some(Type::Named("Ordering".to_string(), vec![]));
@@ -530,11 +527,7 @@ pub(super) fn method_params(
 /// trailing-optional param (http arc H4). Runs alongside [`module_params`] so the arity gate
 /// admits `http.get(url)` as well as `http.get(url, headers)` (and, since N3.4, `fs.list()` as
 /// well as `fs.list(dir)`).
-pub(super) fn module_required(
-    reg: &registry::Registry,
-    module: &str,
-    name: &str,
-) -> Option<usize> {
+pub(super) fn module_required(reg: &registry::Registry, module: &str, name: &str) -> Option<usize> {
     reg.find_function_sig(module, name)
         .map(|f| registry::SigType::required_count(f.params))
 }
@@ -860,7 +853,10 @@ mod tests {
     fn var_binds_through_list_of_futures_and_substitutes_into_return() {
         let args = [list(fut(Type::Int))];
         let bindings = bind_params(ALL_PARAMS, &args);
-        assert_eq!(sig_to_type_bound(&reg(), &ALL_RET, &bindings), list(Type::Int));
+        assert_eq!(
+            sig_to_type_bound(&reg(), &ALL_RET, &bindings),
+            list(Type::Int)
+        );
         // The substituted param is the concrete expectation the argument check enforces.
         assert_eq!(
             sig_to_type_bound(&reg(), &ALL_PARAMS[0], &bindings),
@@ -884,7 +880,10 @@ mod tests {
             func(vec![Type::String], fut(Type::Bool))
         );
         // B still binds from the closure's actual return: the result type stays useful.
-        assert_eq!(sig_to_type_bound(&reg(), &MB_RET, &bindings), list(Type::Bool));
+        assert_eq!(
+            sig_to_type_bound(&reg(), &MB_RET, &bindings),
+            list(Type::Bool)
+        );
     }
 
     #[test]
@@ -895,7 +894,10 @@ mod tests {
             func(vec![Type::Int], fut(Type::String)),
         ];
         let bindings = bind_params(MB_PARAMS, &args);
-        assert_eq!(sig_to_type_bound(&reg(), &MB_RET, &bindings), list(Type::String));
+        assert_eq!(
+            sig_to_type_bound(&reg(), &MB_RET, &bindings),
+            list(Type::String)
+        );
     }
 
     #[test]
@@ -904,7 +906,10 @@ mod tests {
         // variable undetermined: the return is a hole, and so is the substituted param position.
         for args in [&[][..], &[Type::Bytes][..]] {
             let bindings = bind_params(ALL_PARAMS, args);
-            assert_eq!(sig_to_type_bound(&reg(), &ALL_RET, &bindings), list(Type::Unknown));
+            assert_eq!(
+                sig_to_type_bound(&reg(), &ALL_RET, &bindings),
+                list(Type::Unknown)
+            );
         }
     }
 

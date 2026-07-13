@@ -1,0 +1,24 @@
+// A nested expression-tier block **inside a `${…}` hole** (expr-tiers arc): the hole sub-parser
+// re-lexes with the file's tier set, so `${xs.map(fn(x) => @t { … })}` — an inline loop whose body
+// is itself a `@t` template — captures the inner body verbatim just like a top-level block. Both
+// backends agree (the hole desugars to a `map` over closures that each build a nested `@t` value).
+// expect: stdout "rows: <a><b><c>"
+// expect: exit 0
+@tier(t, text: "text", expr: string)
+fn render(statics: List<string>, holes: List<() -> string>): string {
+    mut out = ""
+    mut i = 0
+    for s in statics {
+        out = out ~ s
+        if i < holes.len() {
+            h = holes[i]
+            out = out ~ h()
+        }
+        i = i + 1
+    }
+    return out
+}
+
+xs = ["a", "b", "c"]
+doc = @t {rows: ${xs.map(fn(x) => @t {<${x}>}).join("")}}
+echo doc

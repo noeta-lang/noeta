@@ -22,8 +22,6 @@
 use std::path::{Path, PathBuf};
 
 use noeta_diagnostics::Diagnostic;
-use noeta_lexer::lex;
-use noeta_parser::parse;
 use noeta_span::{Source, SourceId, SourceMap};
 
 mod bundle;
@@ -82,7 +80,21 @@ struct Outcome {
 fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
     let source = Source::new(SourceId::FIRST, name, text);
 
-    let lexed = lex(&source);
+    // Seed the lexer with the installed extensions' verbatim-body tiers (`doc`, native `@json`) so
+    // a native tier's `@<name> { … }` body captures — the loader/pipeline does this too; the
+    // conformance single-file path must match or the differential would lex a native tier's body
+    // as code. The lexer's own two-pass covers a program's `@tier(…, text/expr)` declarations.
+    let mut tier_names: Vec<String> = noeta_stdlib::registry::ext_verbatim_tier_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let lexed = noeta_lexer::lex_in(&source, &noeta_lexer::TextTiers::with(tier_names.clone()));
+    // Union the file's own `@tier(…, text/expr)` declarations (the lexer's two-pass discovered
+    // them) so a `${…}` hole's re-lex knows *this* file's tiers too — an inline `@t { … }` loop
+    // body inside a hole. Re-lexing is idempotent, so a second pass with the full set is safe.
+    tier_names.extend(lexed.text_tier_decls.iter().cloned());
+    let ext_tiers = noeta_lexer::TextTiers::with(tier_names);
+    let lexed = noeta_lexer::lex_in(&source, &ext_tiers);
     let mut diagnostics = lexed.diagnostics.clone();
 
     let mut stdout = String::new();
@@ -91,7 +103,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
     if stage == Stage::Lexer {
         exit_code = if diagnostics.is_empty() { 0 } else { 1 };
     } else {
-        let parsed = parse(&source, &lexed.tokens);
+        let parsed = noeta_parser::parse_in(&source, &lexed.tokens, &ext_tiers);
         diagnostics.extend(parsed.diagnostics);
 
         // The type checker (M1.7) is the front-end gate for the eval stage: a program with type
@@ -282,6 +294,40 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
         stdout: result.stdout,
         exit_code: result.exit_code,
     }
+}
+
+/// Run `f` on a worker thread with a large stack, returning its result.
+///
+/// Executing a whole program through the recursive Core-IR interpreter (and checking it through the
+/// recursive-descent checker) uses *runtime* stack proportional to the program's call depth. A
+/// realistic case — e.g. the `@html` LiveView test composes an async server, a websocket session,
+/// and reactive-graph propagation — can exceed a small caller stack (libtest gives each `#[test]` a
+/// ~2 MiB thread) in an unoptimized debug build, aborting the whole process on overflow. Running a
+/// corpus sweep inside this helper makes the interpreter's depth, not whatever stack the harness
+/// happens to provide, the binding constraint — mirroring the parser's own deep-nesting worker
+/// (`noeta_parser::parse_in`).
+///
+/// The sweep runs *entirely* within the one worker thread — including any thread-local instrumentation
+/// the caller sets up around it (e.g. `noeta_eval::drop_audit`), which would be invisible if the
+/// execution ran on a different thread than the `begin`/`end` calls. So callers wrap their whole
+/// test body, not the individual runner. A scoped thread lets `f` borrow its inputs directly; only
+/// the owned result crosses the join.
+pub fn on_deep_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    // Matches `noeta_parser::DEEP_PARSE_STACK` — comfortably above any single case's needs.
+    const DEEP_STACK: usize = 64 * 1024 * 1024;
+    std::thread::scope(|scope| {
+        match std::thread::Builder::new()
+            .stack_size(DEEP_STACK)
+            .spawn_scoped(scope, f)
+            .expect("spawn conformance worker")
+            .join()
+        {
+            Ok(value) => value,
+            // Re-raise the worker's panic on the caller's thread with its original payload, so an
+            // assertion failure inside a wrapped test surfaces its real message (not a generic one).
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    })
 }
 
 /// Discover and run every case under `root`, optionally narrowed to a single entry file.

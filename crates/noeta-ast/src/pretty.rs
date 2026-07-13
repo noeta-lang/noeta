@@ -252,8 +252,9 @@ impl Pretty for Stmt {
 impl Pretty for FnDecl {
     fn pretty(&self, out: &mut String, level: usize) {
         indent(out, level);
-        // A `@tier(…)` declaration rides on its runner fn — render it so structural comparisons
-        // (e.g. the formatter's safety gate) see it: dropping the directive is a program change.
+        // A `@tier(…)` declaration rides on its runner/handler fn — render it so structural
+        // comparisons (e.g. the formatter's safety gate) see it: dropping the directive is a
+        // program change. The `expr:` field (expr-tiers arc) is part of that identity.
         let tier = match &self.tier {
             Some(t) => {
                 let config = match &t.config {
@@ -264,7 +265,11 @@ impl Pretty for FnDecl {
                     Some((lang, _)) => format!(", text: {lang:?}"),
                     None => String::new(),
                 };
-                format!("@tier({}{config}{text}) ", t.name)
+                let expr = match &t.expr {
+                    Some((ty, _)) => format!(", expr: {ty}"),
+                    None => String::new(),
+                };
+                format!("@tier({}{config}{text}{expr}) ", t.name)
             }
             None => String::new(),
         };
@@ -824,6 +829,32 @@ impl Pretty for Expr {
                 out.push('\n');
                 value.pretty(out, level + 1);
                 out.push(')');
+            }
+            Expr::TierExpr {
+                tier,
+                statics,
+                holes,
+                span: s,
+                ..
+            } => {
+                out.push_str(&format!("(tier-expr {tier} {}", span(*s)));
+                for (i, static_) in statics.iter().enumerate() {
+                    out.push('\n');
+                    indent(out, level + 1);
+                    out.push_str(&format!("(static {static_:?})"));
+                    if let Some(hole) = holes.get(i) {
+                        out.push('\n');
+                        hole.pretty(out, level + 1);
+                    }
+                }
+                out.push(')');
+            }
+            Expr::NativeFnRef {
+                module,
+                func,
+                span: s,
+            } => {
+                out.push_str(&format!("(native-fn {module}.{func} {})", span(*s)));
             }
             Expr::Invoke {
                 recv,

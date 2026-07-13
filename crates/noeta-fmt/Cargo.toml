@@ -13,6 +13,7 @@ noeta-lexer = { workspace = true }
 noeta-parser = { workspace = true }
 noeta-ast = { workspace = true }
 toml = { workspace = true }
+ec4rs = { workspace = true }
 
 [dev-dependencies]
 noeta-lexer = { workspace = true }

@@ -101,11 +101,7 @@ fn qualified_module(path: &[String], name: &str) -> String {
 /// Whether `use <path>.{name}` imports a native module (`use std.{json}`, nested `use std.http.client`)
 /// rather than a sibling-module declaration. Such names are bound as global values, not opaque types.
 /// The module's identity is the full root-qualified path (so `std.http` ≠ a third-party `guzzle.http`).
-fn is_native_module(
-    reg: &noeta_stdlib::registry::Registry,
-    path: &[String],
-    name: &str,
-) -> bool {
+fn is_native_module(reg: &noeta_stdlib::registry::Registry, path: &[String], name: &str) -> bool {
     !path.is_empty()
         && reg.is_extension_root(&path[0])
         && reg.find_module(&qualified_module(path, name)).is_some()
@@ -1969,7 +1965,10 @@ impl<'m> FnCompiler<'m> {
                         let global = self.module.intern_global(&imported.name);
                         self.code.push(Op::StoreGlobal { global, src: value });
                     } else if let Some(module) = &selective
-                        && self.module.registry.is_module_function(module, &imported.name)
+                        && self
+                            .module
+                            .registry
+                            .is_module_function(module, &imported.name)
                     {
                         // `use std.math.sqrt` — bind `sqrt` to a `(std.math, sqrt)` module-function
                         // value. An unknown member is left unbound (the checker reports it); a bare
@@ -3369,6 +3368,17 @@ impl<'m> FnCompiler<'m> {
                     recipe: recipe.clone().map(Box::new),
                     span: *span,
                 });
+                Ok(())
+            }
+            // A native module-fn reference as a value (expr-tiers arc): load the same
+            // `Const::ModuleFn` a `use std.mod.fn` binding produces — a `Call` on it then dispatches
+            // to the native function, exactly like a call to an imported module fn.
+            Rvalue::ModuleFn { module, func, .. } => {
+                let k = self.add_const(Const::ModuleFn {
+                    module: module.clone(),
+                    func: func.clone(),
+                });
+                self.code.push(Op::LoadConst { dst, k });
                 Ok(())
             }
             // A method-bundle call (kernel-methods K2): route baked by the checker; the receiver

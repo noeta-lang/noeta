@@ -62,6 +62,9 @@ impl Extension for PluginExtension {
         &[ExtTier {
             name: "audit",
             config: None,
+            text: None,
+            expr: None,
+            handler: None,
         }]
     }
 }

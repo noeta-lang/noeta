@@ -341,14 +341,14 @@ impl Builder {
         // A session with its own extension set assembles a private registry (leaked to `'static`,
         // matching the `'static` extension-data model the whole pipeline assumes) and threads it
         // through every stage; otherwise it rides the process-global default (`None`). IR5.
-        let registry: Option<&'static noeta_stdlib::registry::Registry> = if self.extensions.is_empty()
-        {
-            None
-        } else {
-            Some(Box::leak(Box::new(
-                noeta_stdlib::registry::assemble_with_extras(&self.extensions),
-            )))
-        };
+        let registry: Option<&'static noeta_stdlib::registry::Registry> =
+            if self.extensions.is_empty() {
+                None
+            } else {
+                Some(Box::leak(Box::new(
+                    noeta_stdlib::registry::assemble_with_extras(&self.extensions),
+                )))
+            };
         let checked = match registry {
             Some(reg) => noeta_check::check_all_with_registry(&program, reg),
             None => noeta_check::check_all(&program),
@@ -364,7 +364,9 @@ impl Builder {
                 false,
                 reg,
             ),
-            None => noeta_compiler::compile_with_sites_session(&program, checked.sites, false, false),
+            None => {
+                noeta_compiler::compile_with_sites_session(&program, checked.sites, false, false)
+            }
         }
         .map_err(|u| Error::Check(vec![u.reason]))?;
         let host = self.host;
@@ -381,8 +383,7 @@ impl Builder {
                 (Box::new(real_host), Box::new(executor))
             }
         });
-        let (session, out) =
-            VmSession::adopted_with_registry(&module, compiler, factory, registry);
+        let (session, out) = VmSession::adopted_with_registry(&module, compiler, factory, registry);
         if !out.trace.is_empty() {
             return Err(panic_error(out));
         }

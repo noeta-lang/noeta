@@ -1,0 +1,38 @@
+// An embedded-SQL DSL in pure Noeta (expression tiers): `@sql { … ${param} … }` evaluates to a
+// typed `Query` — statement text with `?` placeholders plus the parameter list — so a parameter
+// is never string-spliced into the SQL (injection-safe by construction), and a hole that isn't a
+// `string | int` is a compile-time type error pointing into the block.
+//
+//   noeta run examples/sql_tier.noe
+//
+// The whole DSL is this file: no native code, no compiler plugin. A package shipping the struct,
+// the handler, and its `@tier` declaration gives every consumer the `@sql` syntax via `use`.
+
+struct Query {
+    text: string
+    params: List<string>
+}
+
+@tier(sql, text: "sql", expr: Query)
+fn parse_sql(statics: List<string>, holes: List<() -> string | int>): Query {
+    mut text = ""
+    mut params: List<string> = []
+    mut i = 0
+    for s in statics {
+        text = text ~ s
+        if i < holes.len() {
+            text = text ~ "?"
+            h = holes[i]
+            params = params ~ ["${h()}"]
+        }
+        i = i + 1
+    }
+    return Query { text: text, params: params }
+}
+
+user_id = 42
+status = "active"
+
+q = @sql { select * from users where id = ${user_id} and status = ${status} }
+echo q.text
+echo q.params

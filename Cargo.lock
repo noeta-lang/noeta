@@ -1154,7 +1154,7 @@ dependencies = [
  "clap",
  "criterion-plot",
  "is-terminal",
- "itertools",
+ "itertools 0.10.5",
  "num-traits",
  "once_cell",
  "oorandom",
@@ -1173,7 +1173,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b50826342786a51a89e2da3a28f1c32b06e387201bc2d19791f622c673706b1"
 dependencies = [
  "cast",
- "itertools",
+ "itertools 0.10.5",
 ]
 
 [[package]]
@@ -1657,6 +1657,12 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
+
+[[package]]
+name = "ec4rs"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b31a881d38439026e3d5dd938ab20328d36e23caca8fd5981c42e4b677f5842"
 
 [[package]]
 name = "ecdsa"
@@ -3228,6 +3234,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3631,6 +3646,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "malva"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed54a855fc80dddeb3518c03d04a2bb06954955297ee514429935149e58eaa75"
+dependencies = [
+ "aho-corasick",
+ "itertools 0.14.0",
+ "memchr",
+ "raffia",
+ "tiny_pretty",
+]
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3992,9 +4020,11 @@ dependencies = [
  "noeta-cache",
  "noeta-check",
  "noeta-compiler",
+ "noeta-css",
  "noeta-dap",
  "noeta-diagnostics",
  "noeta-fmt",
+ "noeta-html",
  "noeta-ide",
  "noeta-lexer",
  "noeta-loader",
@@ -4076,6 +4106,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-css"
+version = "0.1.0"
+dependencies = [
+ "malva",
+ "noeta-native",
+]
+
+[[package]]
 name = "noeta-dap"
 version = "0.1.0"
 dependencies = [
@@ -4109,6 +4147,7 @@ dependencies = [
  "noeta-native",
  "noeta-parser",
  "noeta-span",
+ "noeta-stdlib",
  "salsa",
 ]
 
@@ -4163,6 +4202,7 @@ dependencies = [
 name = "noeta-fmt"
 version = "0.1.0"
 dependencies = [
+ "ec4rs",
  "noeta-ast",
  "noeta-diagnostics",
  "noeta-lexer",
@@ -4177,6 +4217,13 @@ version = "0.1.0"
 dependencies = [
  "noeta-object",
  "noeta-value",
+]
+
+[[package]]
+name = "noeta-html"
+version = "0.1.0"
+dependencies = [
+ "noeta-native",
 ]
 
 [[package]]
@@ -4269,6 +4316,7 @@ dependencies = [
  "noeta-lexer",
  "noeta-parser",
  "noeta-span",
+ "noeta-stdlib",
 ]
 
 [[package]]
@@ -5640,6 +5688,27 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
+]
+
+[[package]]
+name = "raffia"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a589c5611a5f7713bf0c13e949c4c791a359ff517a9f27552475b470e8873229"
+dependencies = [
+ "raffia_macro",
+ "smallvec",
+]
+
+[[package]]
+name = "raffia_macro"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ac21f5e4bc6b29ea5d5e691a9aa08b2b9fd8891f48a99157b9f02d8a48e1318"
+dependencies = [
+ "heck",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -7356,6 +7425,12 @@ dependencies = [
  "num-conv",
  "time-core",
 ]
+
+[[package]]
+name = "tiny_pretty"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c6f118a569adc26e8a9a377130f181a461770225e588c73a00c8636b8680b6c"
 
 [[package]]
 name = "tinystr"

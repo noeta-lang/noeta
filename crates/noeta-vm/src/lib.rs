@@ -2106,11 +2106,7 @@ fn try_classify(v: Value) -> Option<TryOutcome> {
 /// [`Value::type_name`] — the same canonical strings the M0 tree-walker matches on, so both
 /// backends decide a narrowing identically; `Named` (a user struct/class/enum, or the built-in
 /// `Option`/`Result`) matches by shape name; `Dyn` always matches (no-op narrowing).
-fn narrow_matches(
-    reg: &noeta_stdlib::registry::Registry,
-    v: Value,
-    target: &NarrowTarget,
-) -> bool {
+fn narrow_matches(reg: &noeta_stdlib::registry::Registry, v: Value, target: &NarrowTarget) -> bool {
     let kind = match target {
         NarrowTarget::Int => "int",
         NarrowTarget::Float => "float",

@@ -181,6 +181,10 @@ pub fn lower_with_sites_opts(
         real_isolates,
         synth_step_name: None,
         type_aliases: collect_type_aliases(program, registry),
+        expr_tiers: noeta_ast::desugar::expr_tier_handlers(program)
+            .into_iter()
+            .collect(),
+        registry,
     };
     let top = lowerer.lower_body(&program.stmts)?;
     Ok(Program {
@@ -220,6 +224,15 @@ struct Lowerer<'a> {
     ///
     /// A plain (non-aliased) *user* import needs no entry — its local name is already the tag.
     type_aliases: HashMap<String, String>,
+    /// The program's declared expression-tier handlers (tier name → handler fn name), so an
+    /// [`Expr::TierExpr`] lowers as the handler call it means — the same
+    /// [`noeta_ast::desugar::tier_expr_call`] construction the checker typed. The checker gated
+    /// unknown/non-expr tiers (E0052), so a miss here is `Unsupported`, never a panic.
+    expr_tiers: HashMap<String, String>,
+    /// The extension registry a **native** expression tier's handler resolves against
+    /// (instance-registry IR5): an `@json` block's `ExtTier::handler` is looked up here, so an
+    /// embed session's own extension-declared expression tier lowers against *its* registry.
+    registry: &'static noeta_stdlib::registry::Registry,
 }
 
 /// Build the narrowing-identity map (see [`Lowerer::type_aliases`]) from a program's `use`
@@ -820,6 +833,17 @@ impl Lowerer<'_> {
     /// directly to an atom with no `let`.
     fn lower_expr(&mut self, expr: &Expr, out: &mut Vec<Stmt>) -> Result<Atom, Unsupported> {
         match expr {
+            // A resolved native module-function reference (expr-tiers arc) → the first-class
+            // module-function value, emitted as its own rvalue (the backend loads the const).
+            Expr::NativeFnRef { module, func, span } => Ok(self.emit(
+                out,
+                Rvalue::ModuleFn {
+                    module: module.clone(),
+                    func: func.clone(),
+                    span: *span,
+                },
+                *span,
+            )),
             Expr::Str { value, .. } => Ok(Atom::Const(Const::Str(value.clone()))),
             Expr::Int { value, .. } => Ok(Atom::Const(Const::Int(*value))),
             // A fixed-width integer literal (Tier W) is **erased to an ordinary `int` const**: the
@@ -1254,6 +1278,54 @@ impl Lowerer<'_> {
                     },
                     *span,
                 ))
+            }
+            // An expression-tier block lowers as the handler call it means — the same
+            // [`noeta_ast::desugar::tier_expr_call`] construction the checker typed, so the two
+            // can never drift. A tier with no expr declaration is checker-rejected (E0052), but
+            // lowering is total over the parsed language: an unchecked pipeline gets a
+            // deterministic runtime panic, exactly like other checker-gated constructs.
+            Expr::TierExpr {
+                tier,
+                tier_span,
+                statics,
+                holes,
+                span,
+            } => {
+                // Resolve the handler: a native (extension) tier's module function first (the
+                // registry is authoritative and a built-in name is not shadowable), else a
+                // program `@tier` fn. Both build the identical `Call`, differing only in the
+                // callee — the native one a resolved `NativeFnRef`, no user import needed.
+                let handler = self
+                    .registry
+                    .find_ext_tier(tier)
+                    .filter(|t| t.expr.is_some())
+                    .and_then(|t| t.handler)
+                    .map(noeta_ast::desugar::ExprTierHandler::from_native_path)
+                    .or_else(|| {
+                        self.expr_tiers
+                            .get(tier)
+                            .cloned()
+                            .map(noeta_ast::desugar::ExprTierHandler::Program)
+                    });
+                let call = match handler {
+                    Some(handler) => noeta_ast::desugar::tier_expr_call(
+                        &handler, *tier_span, statics, holes, *span,
+                    ),
+                    None => Expr::Call {
+                        callee: Box::new(Expr::Ident {
+                            name: "panic".to_string(),
+                            span: *tier_span,
+                        }),
+                        args: vec![Expr::Str {
+                            value: format!(
+                                "`@{tier}` is not an expression tier — its blocks are not values"
+                            ),
+                            span: *span,
+                        }],
+                        span: *span,
+                    },
+                };
+                self.lower_expr(&call, out)
             }
             Expr::Match {
                 scrutinee,

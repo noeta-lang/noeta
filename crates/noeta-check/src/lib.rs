@@ -1537,9 +1537,7 @@ impl Checker {
                 let qualified = format!("{prefix}.{}", name.name);
                 if rooted && stdlib::is_std_module(self.reg(), &qualified) {
                     self.modules.insert(local, qualified);
-                } else if rooted
-                    && let Some(ext) = self.reg().find_type_qualified(&qualified)
-                {
+                } else if rooted && let Some(ext) = self.reg().find_type_qualified(&qualified) {
                     // An **extern-type** import (`use std.id.Uuid`, `use std.metrics.Counter as C`):
                     // the leaf names a registered type in this namespace. Bind the local name (alias
                     // or short) to its qualified identity — the resolver keys annotations on this.
@@ -2530,6 +2528,12 @@ impl Checker {
                 if !self.tier_registry.is_known(tier) {
                     self.diags
                         .push(tiers::unknown_tier_diagnostic(self.reg(), tier, *tier_span));
+                } else if self.tier_registry.is_expr_tier(tier) {
+                    // An expression tier's block in *statement* position (expr-tiers arc): its
+                    // value would be silently discarded — and it never activates/strips, so a
+                    // bare block would otherwise just vanish. Shared E0052 with activation.
+                    self.diags
+                        .push(tiers::expr_tier_statement_diagnostic(tier, *tier_span));
                 } else if let Some(d) = self.tier_registry.knobless_args_diagnostic(tier, args) {
                     // Args on a knob-less tier (`@test(x)`) — E0037.
                     self.diags.push(d);
@@ -3523,7 +3527,12 @@ impl Checker {
                     }
                 }
                 noeta_stdlib::BundleReceiver::Bulk => {
-                    if stdlib::method_return(self.reg(), &Type::List(Box::new(Type::Dyn)), m.sig.name).is_some()
+                    if stdlib::method_return(
+                        self.reg(),
+                        &Type::List(Box::new(Type::Dyn)),
+                        m.sig.name,
+                    )
+                    .is_some()
                     {
                         conflicts.push(format!("`{}` is a built-in list method", m.sig.name));
                     }
@@ -4144,6 +4153,13 @@ impl Checker {
 
     fn synth_inner(&mut self, expr: &Expr, env: &mut Env) -> Type {
         match expr {
+            // A resolved native-fn reference as a *value* — a loose `Fn` type, like a
+            // selectively-imported module function referenced bare (the precise per-call signature
+            // is applied in the `Call` callee arm). The desugar only ever uses it as a callee.
+            Expr::NativeFnRef { .. } => Type::Fn {
+                params: Vec::new(),
+                ret: Box::new(Type::Dyn),
+            },
             Expr::Str { .. } => Type::String,
             Expr::Int { .. } => Type::Int,
             Expr::Float { .. } => Type::Float,
@@ -4163,6 +4179,49 @@ impl Checker {
                     }
                 }
                 Type::String
+            }
+            // An expression-tier block types as the handler call it desugars to (`Try`/`Await`
+            // architecture: the node is kept, the checker types it, IR lowering rewrites it
+            // through the same [`noeta_ast::desugar`] constructor). Checking the constructed
+            // call is the whole typing rule: each hole closure checks against the handler's
+            // `List<() -> U>` — so a hole-type error lands on the hole's real span — and the
+            // block's type is the handler's declared return. A block whose tier is not
+            // `expr:`-declared (`x = @doc { … }`) is E0052; its holes still synth for IDE
+            // coverage inside the body.
+            Expr::TierExpr {
+                tier,
+                tier_span,
+                statics,
+                holes,
+                span,
+            } => {
+                let handler = self.tier_registry.expr_tier_handler(tier);
+                match handler {
+                    Some(handler) => {
+                        let call = noeta_ast::desugar::tier_expr_call(
+                            &handler, *tier_span, statics, holes, *span,
+                        );
+                        self.synth(&call, env)
+                    }
+                    None => {
+                        for hole in holes {
+                            self.synth(hole, env);
+                        }
+                        self.error(
+                            DiagnosticCode::InvalidTierExpression,
+                            *tier_span,
+                            format!(
+                                "`@{tier}` is not an expression tier — its blocks are not values"
+                            ),
+                        )
+                        .help(
+                            "only a tier declared `@tier(name, …, expr: Type)` yields a value \
+                             from `@name { … }`; a text tier's blocks are runner input, not \
+                             expressions",
+                        );
+                        Type::Unknown
+                    }
+                }
             }
             Expr::Ident { name, span } => match lookup(env, name)
                 // A bare user-function reference is a first-class value of its **full** signature
@@ -5370,6 +5429,21 @@ impl Checker {
     ) -> Type {
         let span = callee.span();
         match callee {
+            // A **resolved native module-function** callee (expr-tiers arc): the expression-tier
+            // desugar builds this for a native handler, so `handler(statics, holes)` types exactly
+            // like the bare `use std.math.sqrt` call below — same params/return tables — no matter
+            // that no import bound it. This is what lets a native and a Noeta handler share one
+            // `Call` typing path.
+            Expr::NativeFnRef { module, func, .. } => {
+                if let Some(params) = stdlib::module_params(self.reg(), module, func, args) {
+                    let required =
+                        stdlib::module_required(self.reg(), module, func).unwrap_or(params.len());
+                    self.finalize_closure_args(&params, args, arg_exprs, env);
+                    self.check_args(&params, required, args, arg_exprs, span, func);
+                }
+                self.check_module_bounds(module, func, args, span);
+                stdlib::module_return(self.reg(), module, func, args).unwrap_or(Type::Unknown)
+            }
             // A plain `name(args)` call: a user function, else a prelude free function.
             Expr::Ident { name, .. } => {
                 if let Some(sig) = self.functions.get(name) {
@@ -5402,13 +5476,14 @@ impl Checker {
                     && lookup(env, name).is_none()
                 {
                     if let Some(params) = stdlib::module_params(self.reg(), &module, &func, args) {
-                        let required =
-                            stdlib::module_required(self.reg(), &module, &func).unwrap_or(params.len());
+                        let required = stdlib::module_required(self.reg(), &module, &func)
+                            .unwrap_or(params.len());
                         self.finalize_closure_args(&params, args, arg_exprs, env);
                         self.check_args(&params, required, args, arg_exprs, span, &func);
                     }
                     self.check_module_bounds(&module, &func, args, span);
-                    return stdlib::module_return(self.reg(), &module, &func, args).unwrap_or(Type::Unknown);
+                    return stdlib::module_return(self.reg(), &module, &func, args)
+                        .unwrap_or(Type::Unknown);
                 }
                 // Prelude functions are polymorphic/variadic — their result is typed, but their
                 // arguments are not arity-checked here. (The packed-result note the free `map`
@@ -5467,12 +5542,14 @@ impl Checker {
                 {
                     let qm = qm.clone();
                     if let Some(params) = stdlib::module_params(self.reg(), &qm, name, args) {
-                        let required = stdlib::module_required(self.reg(), &qm, name).unwrap_or(params.len());
+                        let required =
+                            stdlib::module_required(self.reg(), &qm, name).unwrap_or(params.len());
                         self.finalize_closure_args(&params, args, arg_exprs, env);
                         self.check_args(&params, required, args, arg_exprs, span, name);
                     }
                     self.check_module_bounds(&qm, name, args, span);
-                    return stdlib::module_return(self.reg(), &qm, name, args).unwrap_or(Type::Unknown);
+                    return stdlib::module_return(self.reg(), &qm, name, args)
+                        .unwrap_or(Type::Unknown);
                 }
                 // `Type.assoc(args)` — an associated function / static call on a known user type
                 // (`Box.new(1)`). Resolve to the type's method signature so the result is precisely
@@ -5546,7 +5623,8 @@ impl Checker {
                 // deferred closure argument finalizes against them here — its parameters adopt the
                 // element type, its body infers a real return, and the `map` refinements below see
                 // a precise `Fn` instead of a context-free one.
-                let builtin_params = stdlib::method_params(self.reg(), &recv, name).unwrap_or_default();
+                let builtin_params =
+                    stdlib::method_params(self.reg(), &recv, name).unwrap_or_default();
                 self.finalize_closure_args(&builtin_params, args, arg_exprs, env);
                 self.check_method_args(&recv, name, args, arg_exprs, span);
                 // A bit intrinsic on a fixed-width receiver (Tier W5) must act within the width, not
@@ -5953,6 +6031,68 @@ impl Checker {
                     "the ID tags the verbatim bodies for tooling (editor highlighting, \
                      extraction); use a lowercase language name like \"markdown\", \"xml\", \"sql\"",
                 );
+            }
+            // An **expression tier** (expr-tiers arc): `expr: T` makes the decorated fn the
+            // tier's *handler* — `fn(statics: List<string>, holes: List<() -> U>): T` — not a
+            // runner. Its own rules, then skip the runner-signature branch entirely.
+            if let Some((expr_ty, expr_span)) = &decl.expr {
+                if decl.config.is_some() {
+                    self.error(
+                        DiagnosticCode::InvalidTierDeclaration,
+                        *expr_span,
+                        format!(
+                            "tier `{}` declares both `config:` and `expr:` — an expression tier \
+                             has no knobs",
+                            decl.name
+                        ),
+                    )
+                    .help(
+                        "an `expr: Type` tier's `@<name> { … }` blocks are expressions (no fns \
+                         inside to configure); drop one of the two",
+                    );
+                }
+                let statics_ok = matches!(
+                    f.params.first().and_then(|p| p.ty.as_ref()),
+                    Some(TypeRef::Named { name, args, .. })
+                        if name == "List"
+                            && matches!(
+                                args.as_slice(),
+                                [TypeRef::Named { name: el, args: el_args, .. }]
+                                    if el == "string" && el_args.is_empty()
+                            )
+                );
+                // The hole type `U` is the handler's choice — only the thunk shape is fixed.
+                let holes_ok = matches!(
+                    f.params.get(1).and_then(|p| p.ty.as_ref()),
+                    Some(TypeRef::Named { name, args, .. })
+                        if name == "List"
+                            && matches!(
+                                args.as_slice(),
+                                [TypeRef::Fn { params, .. }] if params.is_empty()
+                            )
+                );
+                let ret_ok = matches!(
+                    f.ret.as_ref(),
+                    Some(TypeRef::Named { name, args, .. }) if name == expr_ty && args.is_empty()
+                );
+                if f.params.len() != 2 || !statics_ok || !holes_ok || !ret_ok {
+                    self.error(
+                        DiagnosticCode::InvalidTierDeclaration,
+                        f.name_span,
+                        format!(
+                            "tier `{}`'s handler must be `fn(statics: List<string>, holes: \
+                             List<() -> U>): {expr_ty}`",
+                            decl.name
+                        ),
+                    )
+                    .help(
+                        "an expression tier's `@<name> { … }` block desugars to \
+                         `handler(statics, holes)`: the body's literal segments (always holes + \
+                         1) and one zero-param closure per `${…}` hole, typed against the `U` \
+                         you choose; the return type must match the declared `expr:`",
+                    );
+                }
+                continue;
             }
             // The runner signature: exactly one `List<TierRoot>` parameter (`List<TierText>` for
             // a text tier — its roots are verbatim bodies, not fns), returning `void`.
@@ -6398,7 +6538,12 @@ impl Checker {
         let required = noeta_stdlib::SigType::required_count(method.sig.params);
         self.check_args(&params, required, args, &[], span, name);
         self.sites.bundle_call_sites.insert(call_span, route);
-        Some(stdlib::bundle_method_return(self.reg(), &method.sig, recv, args))
+        Some(stdlib::bundle_method_return(
+            self.reg(),
+            &method.sig,
+            recv,
+            args,
+        ))
     }
 
     fn method_call_return(&self, recv: &Type, name: &str) -> Type {
@@ -7629,8 +7774,9 @@ fn conditional_await_span(e: &Expr) -> Option<Span> {
         } => {
             conditional_await_span(scrutinee).or_else(|| arms.iter().find_map(|a| guarded(&a.body)))
         }
-        // A closure is a separate callable — its awaits are not this level's.
-        Expr::Closure { .. } => None,
+        // A closure is a separate callable — its awaits are not this level's. An expression-tier
+        // block's holes desugar to closures, so the same applies.
+        Expr::Closure { .. } | Expr::TierExpr { .. } | Expr::NativeFnRef { .. } => None,
         // Unconditional compounds: recurse into every child (evaluation order does not matter here —
         // any conditional await anywhere disqualifies).
         Expr::Await { expr, .. }

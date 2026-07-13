@@ -917,8 +917,20 @@ mod tests {
         let mut b = sandbox_session();
         // Each session binds a native-module value AND a heap global (a list) into its persistent
         // state — the live objects a sibling's sweep wrongly reclaimed under the bug.
-        assert_eq!(eval(&mut a, "use std.{math}\nmut xs = [\"a\"]\necho math.abs(-5);"), "5\n");
-        assert_eq!(eval(&mut b, "use std.{math}\nmut ys = [\"b\"]\necho math.abs(-9);"), "9\n");
+        assert_eq!(
+            eval(
+                &mut a,
+                "use std.{math}\nmut xs = [\"a\"]\necho math.abs(-5);"
+            ),
+            "5\n"
+        );
+        assert_eq!(
+            eval(
+                &mut b,
+                "use std.{math}\nmut ys = [\"b\"]\necho math.abs(-9);"
+            ),
+            "9\n"
+        );
         // `a` is NOT the last owner (b alive), so its teardown must SKIP the destructive sweep — not
         // free b's live `math`/`ys`. Under the bug this corrupted the heap.
         a.teardown();

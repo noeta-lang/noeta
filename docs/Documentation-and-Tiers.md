@@ -189,6 +189,64 @@ bench = "fuzzkit"
 
 ---
 
+## Expression tiers — embedded languages as values
+
+A tier declared with **`expr: Type`** turns its blocks into *expressions*: the body is verbatim foreign-language text with **`${…}` holes**, and each block evaluates to a typed value by calling the decorated fn — the tier's **handler** — with the body's pieces:
+
+```noeta
+@tier(greet, text: "text", expr: string)
+fn render(statics: List<string>, holes: List<() -> string>): string {
+    mut out = ""
+    mut i = 0
+    for s in statics {
+        out = out ~ s
+        if i < holes.len() {
+            h = holes[i]
+            out = out ~ h()
+        }
+        i = i + 1
+    }
+    return out
+}
+
+name = "world"
+echo @greet { hello ${name}! }     // " hello world! "
+```
+
+`@greet { hello ${name}! }` desugars to `render(["hello ", "! "], [fn() => name])` — an ordinary call, which is where all the guarantees come from:
+
+- **Holes are real expressions.** They parse with the full grammar, close over the enclosing scope, and type-check against the handler's declared hole type `U` — a mismatched `${…}` is an ordinary type error pointing *inside* the block. `${…}` follows string interpolation's contract exactly (same `\$` escape for a literal `$`; the text escapes `\{ \} \\` from text tiers also apply).
+- **Statics always number holes + 1** (empty where holes touch), so the handler can interleave deterministically.
+- **Holes are thunks.** Each desugars to a zero-param closure, so *whether and when* a hole evaluates is the handler's choice: call each once for an eager DSL, skip unused fragments, or wrap them in `computed`s for a reactive template.
+- **The block's type is the handler's return type**, which must match the declared `expr:` (E0051 otherwise, like any broken tier declaration). The handler signature is fixed: `fn(statics: List<string>, holes: List<() -> U>): T` for your choice of `U`.
+
+`text: "<lang>"` is optional on an expression tier but recommended — the language ID drives editor highlighting of the body. An expression tier has no runner semantics: its blocks never activate or strip, `noeta <tier>` rejects it, and a block in *statement* position (its value silently discarded) is **E0052** — assign or return it.
+
+Because the declaration is ordinary code, a **pure-Noeta package** can ship `@sql`, `@json`, or `@html` — parsed, checked, typed embedded languages — with no native code and no compiler plugin: consumers `use` the handler's module and write blocks. See `examples/sql_tier.noe` for a small end-to-end DSL.
+
+### Native (Rust-package) expression tiers
+
+A **native** package declares an expression tier the same way it registers modules and types — through the extension ABI (`ExtTier`), naming the body language, the value type, and a **native handler** (a module function). The tier is then available wherever the package is installed, with no import of the handler, and its blocks are checked and typed like any expression. std dogfoods this with **`@json`**: a native handler (`std.template.render`) that interleaves the statics with JSON-quoted holes.
+
+```noeta
+id = "u-7"
+name = "Ada Lovelace"
+row = @json { {"id": ${id}, "name": ${name}} }   // a checked `string`
+echo row                                          // {"id": "u-7", "name": "Ada Lovelace"}
+```
+
+The handler receives the hole thunks as closures and invokes them through the higher-order native capability, so a native tier can be as lazy as a Noeta one. Under the hood both handler kinds are the same thing — a function value the block's desugared call targets — so a native and a program-declared tier are indistinguishable to the checker, both backends, and the LSP.
+
+### Editor support — language, highlighting, and the LSP
+
+A tier's `text:` **is** the body's language, and it flows to the tooling three ways — the language is declared once, in the tier, and every consumer picks it up:
+
+- **The LSP reports it.** Hovering an embedded block's tier name (`@sql { … }`) shows `expression tier @sql — sql body, evaluates to Query` — the declared language and the value type, read from the tier registry. The registry unions the program's own `@tier` declarations with any an installed extension contributes, so a program-declared tier and a native package's tier hover identically. (The block itself already hovers as its value type, `Query`, like any expression.)
+- **Highlighting is extension-provided (VS Code / TextMate).** A package ships a TextMate injection grammar that colors its body as the foreign language, contributed with `injectTo: ["source.noeta"]`. It attaches by textual match (`injectionSelector: L:source.noeta`), so it needs no change to Noeta's own grammar — that is why an extension can provide it. `${…}` holes are scoped back to `source.noeta`, so they highlight as ordinary Noeta inside the foreign text — the same split the compiler makes (statics = foreign language, holes = checked Noeta). See `examples/sql_tier_injection.tmLanguage.json` for the shape.
+- **tree-sitter** highlighting of third-party tiers needs a per-project generated grammar (a *static* grammar cannot read the declaration set to know which `@name` opens a verbatim body). The built-in `@doc` → markdown injection ships; a generalized generator is future work.
+
+---
+
 ## Related: the decorator directives
 
 The `@<tier>` blocks above are distinct from the four **decorator directives** — `@derive`, `@attribute`, `@role`, `@semantic` — which annotate *declarations* rather than gate content. Those are language features, covered in [Attributes & Reflection](Attributes-and-Reflection).

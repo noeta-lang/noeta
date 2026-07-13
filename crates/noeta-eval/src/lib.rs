@@ -4562,11 +4562,7 @@ fn attr_value_to_eval(
 /// erased, so only the **head constructor** is tested — `List<int>` checks "is a list", trusting
 /// the element type from the annotation. Keyed on the same canonical kind names the VM uses
 /// (`Value::type_name` and the enum/object shape name), so both backends decide identically.
-fn runtime_matches(
-    reg: &noeta_stdlib::registry::Registry,
-    value: &Value,
-    ty: &TypeRef,
-) -> bool {
+fn runtime_matches(reg: &noeta_stdlib::registry::Registry, value: &Value, ty: &TypeRef) -> bool {
     match ty {
         // A union target matches if the value matches any member (`x.as<int | string>()`).
         TypeRef::Union { members, .. } => members.iter().any(|m| runtime_matches(reg, value, m)),

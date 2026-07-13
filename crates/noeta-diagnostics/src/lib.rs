@@ -216,6 +216,11 @@ pub enum DiagnosticCode {
     /// struct, or the runner's signature is not `fn(roots: List<TierRoot>): void`. Rejected at the
     /// declaration so a broken tier never reaches a consumer's `@<name> { … }` block.
     InvalidTierDeclaration,
+    /// An expression-tier block is misused (expr-tiers arc): a `@<name> { … }` block in expression
+    /// position names a tier that is not declared `expr:` (`x = @doc { … }` — its blocks are not
+    /// values), or an expression tier's block stands in statement position (its value would be
+    /// silently discarded — assign or return it).
+    InvalidTierExpression,
 }
 
 impl DiagnosticCode {
@@ -273,6 +278,7 @@ impl DiagnosticCode {
         DiagnosticCode::ReservedTypeName,
         DiagnosticCode::UnderivableTrait,
         DiagnosticCode::InvalidTierDeclaration,
+        DiagnosticCode::InvalidTierExpression,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -330,6 +336,7 @@ impl DiagnosticCode {
             DiagnosticCode::ReservedTypeName => "E0049",
             DiagnosticCode::UnderivableTrait => "E0050",
             DiagnosticCode::InvalidTierDeclaration => "E0051",
+            DiagnosticCode::InvalidTierExpression => "E0052",
         }
     }
 

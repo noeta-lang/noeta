@@ -38,6 +38,8 @@ noeta-loader = { workspace = true }
 noeta-ide = { workspace = true }
 noeta-runtime = { workspace = true }
 noeta-stdlib = { workspace = true }
+noeta-html = { workspace = true }
+noeta-css = { workspace = true }
 noeta-lsp = { workspace = true }
 noeta-dap = { workspace = true }
 noeta-prof = { workspace = true }

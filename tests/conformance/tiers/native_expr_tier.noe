@@ -1,0 +1,13 @@
+// A **native** expression tier (expr-tiers arc E6b): `@json` is declared by std through the
+// extension `ExtTier` surface — no `.noe` file declares it and nothing is imported — with a
+// *native* handler (`std.template.render`). A `@json { … ${s} … }` block desugars to that handler
+// call through the identical path a program (Noeta-fn) handler uses: the callee is just a resolved
+// native function value (`NativeFnRef` → `Const::ModuleFn`). The handler interleaves the verbatim
+// statics with the JSON-quoted string holes. Both backends agree by construction (the differential
+// oracle) — the reference interpreter and the VM share the module-function value and dispatch.
+// expect: stdout " {"id": "u-7", "name": "Ada Lovelace"} "
+// expect: exit 0
+id = "u-7"
+name = "Ada Lovelace"
+doc = @json { {"id": ${id}, "name": ${name}} }
+echo doc

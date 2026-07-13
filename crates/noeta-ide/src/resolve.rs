@@ -717,6 +717,14 @@ impl Resolver {
                     }
                 }
             }
+            // An expression-tier block's holes are ordinary expressions (its statics are text).
+            Expr::TierExpr { holes, .. } => {
+                for hole in holes {
+                    self.walk_expr(hole);
+                }
+            }
+            // Compiler-synthesized, never in parsed source the IDE walks.
+            Expr::NativeFnRef { .. } => {}
             Expr::Match {
                 scrutinee, arms, ..
             } => {

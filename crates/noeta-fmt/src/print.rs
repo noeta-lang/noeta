@@ -19,10 +19,9 @@ use std::cell::Cell;
 use noeta_lexer::{Comment, TokenKind};
 use noeta_span::{Source, SourceId, Span};
 
-use crate::doc::{Doc, render};
+use crate::doc::{Doc, render, render_protected};
 use crate::{ArrowStyle, FmtConfig, FmtError, ParenStyle, SemicolonStyle, trivia};
 
-const INDENT: isize = 4; // 4 spaces — the house style.
 
 /// A struct/class body member, unified so comments interleave across them in source order.
 enum Member<'a> {
@@ -73,6 +72,8 @@ pub fn print_program(
     comments: &[Comment],
     config: &FmtConfig,
     text_tiers: &noeta_lexer::TextTiers,
+    tier_formatters: &crate::TierBodyFormatters,
+    lang_formatters: &crate::TierBodyFormatters,
 ) -> Result<String, FmtError> {
     let p = Printer {
         source,
@@ -80,20 +81,47 @@ pub fn print_program(
         cursor: Cell::new(0),
         code_tokens: code_tokens(source, text_tiers),
         config,
+        force_flat: Cell::new(false),
+        tier_formatters,
+        lang_formatters,
     };
     let doc = p.stmt_seq(&program.stmts, program.span.start, program.span.end)?;
-    let rendered = render(&doc, config.line_width);
+    let indent_style = crate::doc::IndentStyle {
+        width: config.indent_width,
+        tabs: config.use_tabs,
+    };
+    let (rendered, protected) = render_protected(&doc, config.line_width, indent_style);
 
     // Strip trailing whitespace from every line (a blank line between indented items would otherwise
-    // carry the indent), and end the file with exactly one newline.
+    // carry the indent), and end the file with exactly one newline. Whitespace inside a `RawText`
+    // region (a verbatim tier body — a `@doc` Markdown line break, an `@html` `<pre>`) is *content*,
+    // not layout, so it is left intact: the trim stops at the first protected byte. `trim_trailing`
+    // and `final_newline` are `.editorconfig`-configurable.
+    let is_protected = |byte: usize| protected.iter().any(|r| r.start <= byte && byte < r.end);
     let mut out = String::with_capacity(rendered.len());
-    for line in rendered.lines() {
-        out.push_str(line.trim_end());
-        out.push('\n');
+    let mut pos = 0;
+    for line in rendered.split_inclusive('\n') {
+        let has_nl = line.ends_with('\n');
+        let content = if has_nl { &line[..line.len() - 1] } else { line };
+        let mut end = content.len();
+        if config.trim_trailing {
+            for (idx, ch) in content.char_indices().rev() {
+                if ch.is_whitespace() && !is_protected(pos + idx) {
+                    end = idx;
+                } else {
+                    break;
+                }
+            }
+        }
+        out.push_str(&content[..end]);
+        if has_nl {
+            out.push('\n');
+        }
+        pos += line.len();
     }
     let trimmed = out.trim_end_matches('\n');
     out.truncate(trimmed.len());
-    if !out.is_empty() {
+    if config.final_newline && !out.is_empty() {
         out.push('\n');
     }
     Ok(out)
@@ -114,15 +142,29 @@ pub fn print_stmt(
         .iter()
         .take_while(|c| c.span.start < stmt.span().start)
         .count();
+    // Statement/range formatting (LSP on-type) does not reflow tier bodies — a partial edit has no
+    // registry context — so it runs with no body formatters (verbatim tiers).
+    let no_formatters = crate::TierBodyFormatters::new();
     let p = Printer {
         source,
         comments,
         cursor: Cell::new(cursor),
         code_tokens: code_tokens(source, text_tiers),
         config,
+        force_flat: Cell::new(false),
+        tier_formatters: &no_formatters,
+        lang_formatters: &no_formatters,
     };
     let doc = p.stmt(stmt)?;
-    let rendered = render(&doc, config.line_width);
+    let rendered = render_protected(
+        &doc,
+        config.line_width,
+        crate::doc::IndentStyle {
+            width: config.indent_width,
+            tabs: config.use_tabs,
+        },
+    )
+    .0;
     let mut out = String::with_capacity(rendered.len());
     for (i, line) in rendered.lines().enumerate() {
         if i > 0 {
@@ -145,6 +187,17 @@ struct Printer<'a> {
     /// newline the formatter puts there terminates it (so a trailing `;` is redundant).
     code_tokens: Vec<(u32, TokenKind)>,
     config: &'a FmtConfig,
+    /// While set, source-directed line breaks are suppressed — collections, argument lists, and
+    /// parameter lists lay out flat regardless of how the author broke them. Used to format a tier
+    /// body's `${…}` hole **inline**: a hole sits mid-foreign-text (often inside an HTML attribute or
+    /// a JSON value), where a multi-line expansion would be wrong. See [`Printer::hole_inline`].
+    force_flat: Cell<bool>,
+    /// Tier name → its extension-registered body formatter (empty for the LSP/stmt paths). A tier
+    /// present here has its `@<tier> { … }` body reflowed by the formatter; absent ⇒ verbatim.
+    tier_formatters: &'a crate::TierBodyFormatters,
+    /// Language → formatter, for a formatter's `sub`-delegation of an embedded language (e.g. a
+    /// `<style>` block to the `"css"` formatter). Empty when no formatters are in play.
+    lang_formatters: &'a crate::TierBodyFormatters,
 }
 
 /// The `(start, kind)` of every non-`;` token in `source`, in order — the lookup behind
@@ -299,7 +352,7 @@ impl Printer<'_> {
         let inner = self.stmt_seq(body, open, close)?;
         Ok(Doc::concat([
             Doc::text("{"),
-            Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+            Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
             Doc::hardline(),
             Doc::text("}"),
         ]))
@@ -607,6 +660,18 @@ impl Printer<'_> {
         }
     }
 
+    /// The byte position of the first `else` keyword token in `[lo, hi)` — the divider between an
+    /// `if`'s then-block and else-block. Searching from `lo` past the then-body skips any `else` that
+    /// belongs to a nested conditional inside it. `None` if there is none in range.
+    fn else_between(&self, lo: u32, hi: u32) -> Option<u32> {
+        let i = self.code_tokens.partition_point(|(start, _)| *start < lo);
+        self.code_tokens[i..]
+            .iter()
+            .take_while(|(start, _)| *start < hi)
+            .find(|(_, kind)| *kind == TokenKind::ElseKw)
+            .map(|(start, _)| *start)
+    }
+
     /// The kind of the first non-`;` token that starts at or after `offset` — the token that follows a
     /// statement whose span ends there (its own tokens start before `offset`). `None` past the last
     /// token.
@@ -624,14 +689,29 @@ impl Printer<'_> {
         else_body: Option<&[Stmt]>,
         span: Span,
     ) -> Result<Doc, FmtError> {
+        // With an `else`, the then-block must end at the `else` keyword, not at the whole `if`'s
+        // `span.end`: otherwise the then-block's dangling-comment scan (`take_before(region_end)`)
+        // greedily swallows the else-branch's *leading* comment. Find the `else` token dividing the
+        // two blocks (the first one past the then-body, so a nested `else` inside it is skipped).
+        let then_lower = then_body
+            .last()
+            .map_or(cond.span().end, |s| s.span().end);
+        let else_kw = else_body
+            .is_some()
+            .then(|| self.else_between(then_lower, span.end))
+            .flatten();
+        let then_close = else_kw.unwrap_or(span.end);
         let mut parts = vec![
             Doc::text("if "),
             self.restricted_head(cond, true)?,
             Doc::text(" "),
-            self.block(then_body, cond.span().end, span.end)?,
+            self.block(then_body, cond.span().end, then_close)?,
         ];
         if let Some(else_body) = else_body {
             parts.push(Doc::text(" else "));
+            // The else-block's region starts at the `else` keyword (so its leading comment attaches
+            // here, and blank-line detection measures from the right place).
+            let else_start = else_kw.unwrap_or(then_close);
             // `else if` — the else body is a single nested `If`; print it inline (no extra braces).
             if let [
                 Stmt::If {
@@ -644,7 +724,7 @@ impl Printer<'_> {
             {
                 parts.push(self.if_stmt(cond, then_body, else_body.as_deref(), *span)?);
             } else {
-                parts.push(self.block(else_body, span.start, span.end)?);
+                parts.push(self.block(else_body, else_start, span.end)?);
             }
         }
         Ok(Doc::concat(parts))
@@ -653,21 +733,27 @@ impl Printer<'_> {
     // ---- declarations ------------------------------------------------------------------------
 
     fn fn_decl(&self, decl: &FnDecl) -> Result<Doc, FmtError> {
-        let mut parts = self.attrs(&decl.attrs)?;
-        // A `@tier(…)` declaration rides on its runner fn (tier-providers T2) — re-emit it on its
-        // own line above the header, exactly as written (name, then `config:`/`text:`).
+        // A `@tier(…)` declaration rides on its runner/handler fn (tier-providers T2, expr-tiers
+        // arc) — re-emit it on its own line above the header (canonical key order: config, text,
+        // expr), *before* the fn's own attrs so the pair re-parses (the `@tier` declaration form
+        // is `@tier(…)` then the fn, whose leading `#[…]` attrs bind to it). Dropping the
+        // directive would silently un-declare the tier and stop every consumer block lexing.
+        let mut parts = Vec::new();
         if let Some(t) = &decl.tier {
-            let mut directive = format!("@tier({}", t.name);
+            let mut args = vec![t.name.clone()];
             if let Some((config, _)) = &t.config {
-                directive.push_str(&format!(", config: {config}"));
+                args.push(format!("config: {config}"));
             }
             if let Some((lang, _)) = &t.text {
-                directive.push_str(&format!(", text: {lang:?}"));
+                args.push(format!("text: {lang:?}"));
             }
-            directive.push(')');
-            parts.push(Doc::text(directive));
+            if let Some((ty, _)) = &t.expr {
+                args.push(format!("expr: {ty}"));
+            }
+            parts.push(Doc::text(format!("@tier({})", args.join(", "))));
             parts.push(Doc::hardline());
         }
+        parts.extend(self.attrs(&decl.attrs)?);
         if decl.is_public {
             parts.push(Doc::text("pub "));
         }
@@ -692,7 +778,15 @@ impl Printer<'_> {
         for p in params {
             docs.push(self.param(p)?);
         }
-        Ok(self.delimited("(", docs, ")", false))
+        // Source-directed: keep a signature the author broke across lines broken. A parameter is a
+        // simple `name: Type`, so — unlike a list, whose element may itself span lines — a newline
+        // anywhere across the parameters reliably means the author expanded the list.
+        let broke = !self.force_flat.get()
+            && match (params.first(), params.last()) {
+                (Some(first), Some(last)) => self.broke_between(first.span.start, last.span.end),
+                _ => false,
+            };
+        Ok(self.delimited("(", docs, ")", false, broke))
     }
 
     fn param(&self, param: &Param) -> Result<Doc, FmtError> {
@@ -824,7 +918,7 @@ impl Printer<'_> {
         )?;
         Ok(Doc::concat([
             Doc::text("{"),
-            Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+            Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
             Doc::hardline(),
             Doc::text("}"),
         ]))
@@ -863,7 +957,7 @@ impl Printer<'_> {
             let inner = Doc::join(ms, Doc::concat([Doc::hardline(), Doc::hardline()]));
             Doc::concat([
                 Doc::text("{"),
-                Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+                Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
                 Doc::hardline(),
                 Doc::text("}"),
             ])
@@ -883,7 +977,7 @@ impl Printer<'_> {
             let inner = Doc::join(ms, Doc::concat([Doc::hardline(), Doc::hardline()]));
             Doc::concat([
                 Doc::text("{"),
-                Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+                Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
                 Doc::hardline(),
                 Doc::text("}"),
             ])
@@ -944,7 +1038,7 @@ impl Printer<'_> {
             )?;
             Doc::concat([
                 Doc::text("{"),
-                Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+                Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
                 Doc::hardline(),
                 Doc::text("}"),
             ])
@@ -1274,6 +1368,22 @@ impl Printer<'_> {
 
     fn expr(&self, expr: &Expr) -> Result<Doc, FmtError> {
         Ok(match expr {
+            // An expression-tier block `@sql { … ${hole} … }`. The foreign-language text between holes
+            // is emitted **verbatim from source** (escapes intact — the AST's `statics` are unescaped
+            // and must never be re-emitted), so the tier value is byte-for-byte preserved. Each `${…}`
+            // hole is Noeta, so it is reformatted **inline** (the one value-preserving thing fmt owns
+            // inside a tier body). Reflowing the foreign text itself is a separate, formatter-gated
+            // step (a registered tier body formatter); with none, the body stays exactly as written.
+            Expr::TierExpr {
+                tier,
+                statics,
+                holes,
+                span,
+                ..
+            } => self.tier_body(tier, statics, holes, *span)?,
+            // Compiler-synthesized only (the parser never produces it, so the formatter — which
+            // runs on parsed source — never reaches this); emit the qualified name defensively.
+            Expr::NativeFnRef { module, func, .. } => Doc::text(format!("{module}.{func}")),
             Expr::Str { value, span } => self
                 .backtick_verbatim(*span)
                 .unwrap_or_else(|| Doc::text(format!("\"{}\"", escape(value)))),
@@ -1331,7 +1441,7 @@ impl Printer<'_> {
                 // Source-directed: preserve a break the author put around the operator.
                 let sep = if self.broke_between(lhs.span().end, rhs.span().start) {
                     Doc::concat([Doc::hardline(), Doc::text(format!("{} ", op.symbol()))])
-                        .nest(INDENT)
+                        .nest(self.indent_step())
                 } else {
                     Doc::text(format!(" {} ", op.symbol()))
                 };
@@ -1353,14 +1463,14 @@ impl Printer<'_> {
                 }
                 Doc::concat([
                     self.operand(head, 1, false)?,
-                    Doc::concat(tail).nest(INDENT),
+                    Doc::concat(tail).nest(self.indent_step()),
                 ])
                 .group()
             }
             Expr::Pipeline { left, right, .. } => {
                 // Source-directed: break at the operator only where the author did.
                 let sep = if self.broke_between(left.span().end, right.span().start) {
-                    Doc::concat([Doc::hardline(), Doc::text("|> ")]).nest(INDENT)
+                    Doc::concat([Doc::hardline(), Doc::text("|> ")]).nest(self.indent_step())
                 } else {
                     Doc::text(" |> ")
                 };
@@ -1371,7 +1481,7 @@ impl Printer<'_> {
                 ])
             }
             Expr::Call { callee, args, .. } => {
-                Doc::concat([self.receiver(callee)?, self.arg_list(args)?])
+                Doc::concat([self.receiver(callee)?, self.arg_list(args, callee.span().end)?])
             }
             Expr::Member { receiver, name, .. } => {
                 Doc::concat([self.receiver(receiver)?, Doc::text(format!(".{name}"))])
@@ -1387,26 +1497,35 @@ impl Printer<'_> {
                 self.expr(index)?,
                 Doc::text("]"),
             ]),
-            Expr::List { items, .. } => {
+            Expr::List { items, span } => {
                 let mut ds = Vec::new();
                 for i in items {
                     ds.push(self.expr(i)?);
                 }
-                self.delimited("[", ds, "]", false)
+                let broke = items
+                    .first()
+                    .is_some_and(|f| self.seq_broke(span.start, f.span().start));
+                self.delimited("[", ds, "]", false, broke)
             }
-            Expr::Tuple { items, .. } => {
+            Expr::Tuple { items, span } => {
                 let mut ds = Vec::new();
                 for i in items {
                     ds.push(self.expr(i)?);
                 }
-                self.delimited("(", ds, ")", false)
+                let broke = items
+                    .first()
+                    .is_some_and(|f| self.seq_broke(span.start, f.span().start));
+                self.delimited("(", ds, ")", false, broke)
             }
-            Expr::Map { entries, .. } => {
+            Expr::Map { entries, span } => {
                 let mut ds = Vec::new();
                 for (k, v) in entries {
                     ds.push(Doc::concat([self.expr(k)?, Doc::text(": "), self.expr(v)?]));
                 }
-                self.delimited("{", ds, "}", false)
+                let broke = entries
+                    .first()
+                    .is_some_and(|(k, _)| self.seq_broke(span.start, k.span().start));
+                self.delimited("{", ds, "}", false, broke)
             }
             Expr::Range {
                 start,
@@ -1429,7 +1548,10 @@ impl Printer<'_> {
                 scrutinee,
                 arms,
                 span,
-            } => self.match_expr(scrutinee, arms, *span)?,
+            } => match self.if_then_else_form(scrutinee, arms, *span)? {
+                Some(doc) => doc,
+                None => self.match_expr(scrutinee, arms, *span)?,
+            },
             Expr::Object(obj) => self.object(obj)?,
             Expr::Try { expr, .. } => Doc::concat([self.receiver(expr)?, Doc::text("?")]),
             Expr::Await { expr, .. } => Doc::concat([self.receiver(expr)?, Doc::text(".await")]),
@@ -1488,7 +1610,7 @@ impl Printer<'_> {
                 Doc::text(format!(".{func}::<")),
                 self.type_ref(ty)?,
                 Doc::text(">"),
-                self.arg_list(args)?,
+                self.arg_list(args, ty.span().end)?,
             ]),
             Expr::RolesOf { ty: Some(ty), .. } => Doc::concat([
                 Doc::text("roles_of::<"),
@@ -1520,13 +1642,13 @@ impl Printer<'_> {
         })
     }
 
-    /// A comma-delimited `open … close` sequence. With `wrap = false` (default) it lays out flat —
-    /// `[a, b, c]`, or `{ a, b }` when `spaced` — reproducing the pre-wrap output byte-for-byte. With
-    /// `wrap = true` it becomes a width-driven [`Doc::group`]: flat if it fits [`FmtConfig::line_width`],
-    /// otherwise one element per line, indented, with the delimiters on their own lines and a
-    /// **trailing comma** (the parser accepts one uniformly). The trailing comma is an
-    /// [`Doc::if_break`], so it appears only when the group breaks, never inline.
-    fn delimited(&self, open: &str, elems: Vec<Doc>, close: &str, spaced: bool) -> Doc {
+    /// A comma-delimited `open … close` sequence. The default (`wrap = false`) is **source-directed**:
+    /// if the author broke the sequence across lines (`broke`), it stays broken — one element per
+    /// line, indented, with a **trailing comma** (the parser accepts one uniformly); if they wrote it
+    /// inline, it stays flat — `[a, b, c]`, or `{ a, b }` when `spaced`. With `wrap = true` it becomes
+    /// a width-driven [`Doc::group`] instead (flat if it fits [`FmtConfig::line_width`], else broken
+    /// with an [`Doc::if_break`] trailing comma), ignoring the author's line breaks.
+    fn delimited(&self, open: &str, elems: Vec<Doc>, close: &str, spaced: bool, broke: bool) -> Doc {
         if elems.is_empty() {
             return Doc::text(format!("{open}{close}"));
         }
@@ -1539,11 +1661,25 @@ impl Printer<'_> {
                     Doc::join(elems, Doc::concat([Doc::text(","), Doc::line()])),
                     Doc::text(",").if_break(),
                 ])
-                .nest(INDENT),
+                .nest(self.indent_step()),
                 boundary,
                 Doc::text(close),
             ])
             .group()
+        } else if broke {
+            // Source-directed: the author broke this sequence, so keep it broken — one element per
+            // line with a trailing comma. Idempotent (the output still has newlines between elements).
+            Doc::concat([
+                Doc::text(open),
+                Doc::concat([
+                    Doc::hardline(),
+                    Doc::join(elems, Doc::concat([Doc::text(","), Doc::hardline()])),
+                    Doc::text(","),
+                ])
+                .nest(self.indent_step()),
+                Doc::hardline(),
+                Doc::text(close),
+            ])
         } else {
             let inner = Doc::join(elems, Doc::text(", "));
             if spaced {
@@ -1560,12 +1696,25 @@ impl Printer<'_> {
         }
     }
 
-    fn arg_list(&self, args: &[Expr]) -> Result<Doc, FmtError> {
+    /// Whether the author broke a delimited sequence across lines — detected by a newline between the
+    /// opening delimiter (byte `open_ref`, e.g. the `[` or the `{` after a type name) and the first
+    /// element (byte `first`). This is the source-directed signal [`Self::delimited`] keys off: the
+    /// common "each element on its own line" layout always breaks right after the delimiter.
+    fn seq_broke(&self, open_ref: u32, first: u32) -> bool {
+        !self.force_flat.get() && self.broke_between(open_ref, first)
+    }
+
+    /// A call's `(arg, …)` list. `open_ref` is the byte just before the `(` (the callee's end), so a
+    /// source-directed break — the author put the args on their own lines — is detected and kept.
+    fn arg_list(&self, args: &[Expr], open_ref: u32) -> Result<Doc, FmtError> {
         let mut ds = Vec::new();
         for a in args {
             ds.push(self.expr(a)?);
         }
-        Ok(self.delimited("(", ds, ")", false))
+        let broke = args
+            .first()
+            .is_some_and(|f| self.seq_broke(open_ref, f.span().start));
+        Ok(self.delimited("(", ds, ")", false, broke))
     }
 
     /// Preserve a **multiline backtick template** verbatim (F4). All string kinds decode to
@@ -1634,6 +1783,189 @@ impl Printer<'_> {
         Ok(Doc::concat(parts))
     }
 
+    /// If this `match` node was produced by the parser desugaring an `if…then…else` conditional
+    /// *expression*, reconstruct and format it back to `if cond then a else b` — so `noeta fmt`
+    /// round-trips the surface form the author wrote instead of the `match` it lowers to. Two facts
+    /// make this reliable: fmt only ever runs on freshly parsed source (never a synthesized AST), and
+    /// the desugar reuses the conditional's span, so the node's source begins at the `if` keyword iff
+    /// the author wrote `if…then…else` (a literal `match` begins at `match`). The arm shape confirms
+    /// it: `true`/`false` for a plain condition, or `is T`/`_` for a `cond is T` test (which prints
+    /// back as `cond is T`). Returns `None` for a literal `match`; the caller then formats normally.
+    fn if_then_else_form(
+        &self,
+        scrutinee: &Expr,
+        arms: &[MatchArm],
+        span: Span,
+    ) -> Result<Option<Doc>, FmtError> {
+        if arms.len() != 2 || !self.source_starts_with_if(span) {
+            return Ok(None);
+        }
+        let cond = match (&arms[0].pattern, &arms[1].pattern) {
+            (
+                Pattern::Bool { value: true, .. },
+                Pattern::Bool { value: false, .. },
+            ) => self.restricted_head(scrutinee, false)?,
+            (Pattern::IsType { ty, .. }, Pattern::Wildcard { .. }) => Doc::concat([
+                self.restricted_head(scrutinee, false)?,
+                Doc::text(" is "),
+                self.type_ref(ty)?,
+            ]),
+            // The `if` keyword but not a desugar-shaped match — leave it to the normal `match` path.
+            _ => return Ok(None),
+        };
+        Ok(Some(Doc::concat([
+            Doc::text("if "),
+            cond,
+            Doc::text(" then "),
+            self.expr(&arms[0].body)?,
+            Doc::text(" else "),
+            self.expr(&arms[1].body)?,
+        ])))
+    }
+
+    /// Whether the source at `span.start` begins with the `if` keyword as a whole token — so an
+    /// identifier like `iffy` is not mistaken for it. Used to tell a desugared conditional from a
+    /// literal `match` (both are `Expr::Match`), relying on fmt seeing only freshly parsed source.
+    fn source_starts_with_if(&self, span: Span) -> bool {
+        self.source
+            .get(span.start as usize..)
+            .and_then(|rest| rest.strip_prefix("if"))
+            .is_some_and(|after| {
+                after
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+            })
+    }
+
+    /// Reconstruct an expression-tier body (`@html { … ${hole} … }`). If the tier's extension
+    /// registered a body formatter, the foreign text is reflowed by it ([`Printer::tier_body_formatted`]);
+    /// otherwise the foreign static text is copied **verbatim from source** (byte-for-byte, escapes
+    /// intact — value-preserving) and only the `${…}` holes are reformatted inline.
+    fn tier_body(
+        &self,
+        tier: &str,
+        statics: &[String],
+        holes: &[Expr],
+        span: Span,
+    ) -> Result<Doc, FmtError> {
+        if let Some(formatter) = self.tier_formatters.get(tier)
+            && let Some(doc) = self.tier_body_formatted(*formatter, tier, statics, holes, span)?
+        {
+            return Ok(doc);
+        }
+        let slice = |a: u32, b: u32| self.source.get(a as usize..b as usize).unwrap_or_default();
+        let mut out = String::new();
+        let mut cursor = span.start;
+        for hole in holes {
+            let hspan = hole.span();
+            // Verbatim foreign text (including the opening `${`) up to the hole's expression.
+            out.push_str(slice(cursor, hspan.start));
+            out.push_str(&self.hole_inline(hole)?);
+            cursor = hspan.end;
+        }
+        out.push_str(slice(cursor, span.end));
+        Ok(Doc::raw_text(out))
+    }
+
+    /// Run an extension's body formatter over a tier body. The decoded foreign statics are joined with
+    /// a NUL (`\0`) per hole and handed to `formatter`; on `Some(reflowed)` fmt owns the Noeta side —
+    /// it re-applies tier-body escaping (`\ { } $`) to the reflowed foreign text and substitutes each
+    /// `\0` back with its inline-formatted hole — and wraps the result as `@<tier> { … }`. Returns
+    /// `None` (→ the verbatim path) if the formatter declines or does not return exactly one NUL per
+    /// hole (a misbehaving formatter must never corrupt the program).
+    fn tier_body_formatted(
+        &self,
+        formatter: crate::TierBodyFormatter,
+        tier: &str,
+        statics: &[String],
+        holes: &[Expr],
+        span: Span,
+    ) -> Result<Option<Doc>, FmtError> {
+        let joined = statics.join("\u{0}");
+        // The body's top level sits one indent level under the tier's own line; the formatter owns
+        // its layout from there (so it can leave whitespace-significant content unindented).
+        let tier_indent = self.line_indent(span.start);
+        let base = format!("{tier_indent}{}", self.indent_unit());
+        // Delegation callback: a formatter can reflow an embedded sub-language (a `<style>`/`<script>`)
+        // with that language's registered formatter, recursing so it can delegate further still.
+        let langs = self.lang_formatters;
+        let sub = move |language: &str, body: &str, indent: &str| {
+            crate::sub_format(langs, language, body, indent)
+        };
+        let Some(reflowed) = formatter(&joined, &base, &sub) else {
+            return Ok(None);
+        };
+        let segments: Vec<&str> = reflowed.split('\u{0}').collect();
+        if segments.len() != holes.len() + 1 {
+            return Ok(None); // formatter dropped or added a hole marker — decline defensively
+        }
+        let mut body = String::new();
+        for (i, seg) in segments.iter().enumerate() {
+            body.push_str(&encode_tier_static(seg));
+            if let Some(hole) = holes.get(i) {
+                body.push_str("${");
+                body.push_str(&self.hole_inline(hole)?);
+                body.push('}');
+            }
+        }
+        // A single-line body stays inline (`@<tier> { … }` — strip the base indent the formatter
+        // applied); a multi-line reflow is a block, its already-indented lines placed between the
+        // tier's braces with the closing brace back at the tier's own indentation.
+        if body.contains('\n') {
+            Ok(Some(Doc::raw_text(format!("@{tier} {{\n{body}\n{tier_indent}}}"))))
+        } else {
+            Ok(Some(Doc::raw_text(format!("@{tier} {{ {} }}", body.trim()))))
+        }
+    }
+
+    /// Columns per indentation level (the `Doc` nesting step), from the configured `indent_width`.
+    fn indent_step(&self) -> isize {
+        self.config.indent_width as isize
+    }
+
+    /// One level of indentation as text — a tab, or `indent_width` spaces — for places that build an
+    /// indent string directly (a reflowed tier body's base) rather than through the `Doc` nesting.
+    fn indent_unit(&self) -> String {
+        if self.config.use_tabs {
+            "\t".to_string()
+        } else {
+            " ".repeat(self.config.indent_width)
+        }
+    }
+
+    /// The leading indentation (spaces/tabs) of the source line containing byte `offset` — used to
+    /// re-indent a multi-line reflowed tier body under its `@<tier> {`.
+    fn line_indent(&self, offset: u32) -> String {
+        let upto = &self.source[..offset as usize];
+        let line_start = upto.rfind('\n').map_or(0, |p| p + 1);
+        self.source[line_start..offset as usize]
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect()
+    }
+
+    /// Format a tier-body hole's expression to a single **inline** string: source-directed line
+    /// breaks are suppressed ([`Printer::force_flat`]) so a hole sitting inside an HTML attribute or a
+    /// JSON value never expands across lines. A hole whose source carries a comment is emitted
+    /// verbatim — fmt's expression printer does not interleave comments, so reformatting would drop
+    /// it (a conservative check on the raw slice; a `//`/`/*` inside a string only forgoes reflow).
+    fn hole_inline(&self, hole: &Expr) -> Result<String, FmtError> {
+        let hspan = hole.span();
+        let raw = self
+            .source
+            .get(hspan.start as usize..hspan.end as usize)
+            .unwrap_or_default();
+        if raw.contains("//") || raw.contains("/*") {
+            return Ok(raw.to_string());
+        }
+        let prev = self.force_flat.replace(true);
+        let doc = self.expr(hole);
+        self.force_flat.set(prev);
+        // A big finite width so groups lay out flat without risking arithmetic overflow in the renderer.
+        Ok(render(&doc?, 1_000_000))
+    }
+
     fn match_expr(&self, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Result<Doc, FmtError> {
         let head = Doc::concat([Doc::text("match "), self.restricted_head(scrutinee, false)?]);
         if arms.is_empty() {
@@ -1668,7 +2000,7 @@ impl Printer<'_> {
         Ok(Doc::concat([
             head,
             Doc::text(" {"),
-            Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+            Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
             Doc::hardline(),
             Doc::text("}"),
         ]))
@@ -1688,9 +2020,17 @@ impl Printer<'_> {
         if ds.is_empty() {
             return Ok(Doc::text(format!("{} {{}}", obj.type_name)));
         }
+        // The `{` sits just after the type name; a break before the first field (or spread) means the
+        // author wrote the literal across lines, so keep it broken.
+        let first = obj
+            .fields
+            .first()
+            .map(|f| f.span.start)
+            .or_else(|| obj.spread.as_ref().map(|s| s.span().start));
+        let broke = first.is_some_and(|f| self.seq_broke(obj.type_name_span.end, f));
         Ok(Doc::concat([
             Doc::text(format!("{} ", obj.type_name)),
-            self.delimited("{", ds, "}", true),
+            self.delimited("{", ds, "}", true, broke),
         ]))
     }
 
@@ -1850,6 +2190,17 @@ fn pattern_width_ref(doc: &Doc) -> usize {
 /// are `\\ \" \n \t` and `\$` (the last neutralizes a literal `${`, which would otherwise re-lex as
 /// interpolation). A bare `$`, `{`, or `}` needs no escape. (`\r` has no escape; the rare literal CR
 /// passes through — a valid string body byte.)
+/// Escape a reflowed tier-body **static** segment for emission inside `@<tier> { … }`: the four
+/// characters the expression-tier lexer treats specially — `\`, `{`, `}`, `$` — each get a leading
+/// backslash so they decode back to themselves (and so a literal `{`/`$` is never mistaken for a tier
+/// brace or a `${…}` hole). Backslash is escaped first so the escapes just added are not re-escaped.
+fn encode_tier_static(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('{', "\\{")
+        .replace('}', "\\}")
+        .replace('$', "\\$")
+}
+
 fn escape(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut chars = value.chars().peekable();

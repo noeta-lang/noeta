@@ -151,6 +151,19 @@ pub struct FmtConfig {
     /// Trailing-`;` policy for statements. [`SemicolonStyle::Remove`] (default) strips redundant
     /// terminators; `Add` appends one to every simple statement; `Preserve` keeps the author's.
     pub semicolons: SemicolonStyle,
+    /// Columns per indentation level (`.editorconfig` `indent_size`). Default 4.
+    pub indent_width: usize,
+    /// Indent with a tab per level rather than [`indent_width`](Self::indent_width) spaces
+    /// (`.editorconfig` `indent_style = tab`). Default `false` (spaces).
+    pub use_tabs: bool,
+    /// End the file with exactly one newline (`.editorconfig` `insert_final_newline`). Default `true`.
+    pub final_newline: bool,
+    /// Strip trailing whitespace from every line — except content inside a verbatim tier body, which
+    /// is always preserved (`.editorconfig` `trim_trailing_whitespace`). Default `true`.
+    pub trim_trailing: bool,
+    // NOTE: `.editorconfig`'s `end_of_line` is intentionally not honored — converting a file to CRLF
+    // would change the byte content of multi-line string literals and tier bodies, which the re-parse
+    // safety gate compares, so it would (correctly) reject its own output. LF only.
 }
 
 impl Default for FmtConfig {
@@ -162,6 +175,10 @@ impl Default for FmtConfig {
             sort_imports: false,
             parens: ParenStyle::default(),
             semicolons: SemicolonStyle::default(),
+            indent_width: 4,
+            use_tabs: false,
+            final_newline: true,
+            trim_trailing: true,
         }
     }
 }
@@ -210,6 +227,56 @@ pub fn format_source_in(
     config: &FmtConfig,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Result<String, FmtError> {
+    format_source_in_with_formatters(
+        name,
+        text,
+        config,
+        text_tiers,
+        &TierBodyFormatters::new(),
+        &TierBodyFormatters::new(),
+    )
+}
+
+/// A native body formatter for `noeta fmt`: `(body, indent, sub) -> Option<reflowed>`. `body` is the
+/// tier body's foreign text with each `${…}` hole a single NUL (`\0`); `indent` is the base column;
+/// `sub(language, body, indent)` delegates an embedded sub-language (a `<style>`/`<script>`) to its
+/// own registered formatter, or `None` if none. See [`noeta_native::registry::BodyFormatter`]. `fmt`
+/// owns the Noeta side (hole substitution + escaping); a formatter is pure foreign reflow.
+pub type TierBodyFormatter = fn(&str, &str, &dyn Fn(&str, &str, &str) -> Option<String>) -> Option<String>;
+
+/// Name → its registered body formatter. Used two ways: **tier**-keyed (a tier body's own formatter,
+/// resolved from its `text:` language by the CLI) and **language**-keyed (for `sub`-delegation, e.g.
+/// `"css"` → the CSS formatter). Other front-ends (LSP, tests) pass empty sets, so every body stays
+/// strictly verbatim.
+pub type TierBodyFormatters = std::collections::HashMap<String, TierBodyFormatter>;
+
+/// Format `body` (written in `language`) with that language's registered formatter, recursing so the
+/// formatter can itself delegate further. `None` if no formatter is registered for `language`.
+fn sub_format(
+    langs: &TierBodyFormatters,
+    language: &str,
+    body: &str,
+    indent: &str,
+) -> Option<String> {
+    let formatter = langs.get(language)?;
+    formatter(body, indent, &|l, b, i| sub_format(langs, l, b, i))
+}
+
+/// [`format_source_in`] plus **extension-supplied tier-body formatters**: a tier whose extension
+/// registered a `format_body` has its `@<tier> { … }` body reflowed by that formatter (the foreign
+/// text only — the `${…}` holes are still formatted by fmt and reinserted). Because reflowing a body
+/// changes its static strings — which fmt cannot prove value-preserving in the foreign language — the
+/// safety gate is **relaxed for formatted tiers**: it still enforces that the output re-parses and
+/// that everything *except* those tiers' static text is unchanged (holes, structure, every other
+/// node), and idempotency still holds. A tier with no formatter keeps the full strict gate.
+pub fn format_source_in_with_formatters(
+    name: &str,
+    text: &str,
+    config: &FmtConfig,
+    text_tiers: &noeta_lexer::TextTiers,
+    formatters: &TierBodyFormatters,
+    lang_formatters: &TierBodyFormatters,
+) -> Result<String, FmtError> {
     let source = Source::new(SourceId(0), name, text);
 
     // Lex with trivia so comments are available to the printer (reattached in F4). The token stream
@@ -217,14 +284,27 @@ pub fn format_source_in(
     let lexed = noeta_lexer::lex_with_trivia_in(&source, text_tiers);
     let program = parse_checked(&source, &lexed)?;
 
-    let out = print::print_program(&program, text, &lexed.comments, config, text_tiers)?;
+    let out = print::print_program(
+        &program,
+        text,
+        &lexed.comments,
+        config,
+        text_tiers,
+        formatters,
+        lang_formatters,
+    )?;
 
     // Safety gate: the formatted text must parse, and parse to the same program modulo spans.
     let formatted = Source::new(SourceId(0), name, out.as_str());
     let reparsed = parse_clean(&formatted, text_tiers).map_err(|_| {
         FmtError::Safety("formatted output does not re-parse (printer bug)".to_string())
     })?;
-    if !safety::ast_equal_modulo_spans(&program, &reparsed) {
+    // Strict first; if a body formatter reflowed a tier body, the strict gate trips on the changed
+    // statics, so fall back to the relaxed gate that ignores tier-body static text (but nothing else).
+    let equal = safety::ast_equal_modulo_spans(&program, &reparsed)
+        || (!formatters.is_empty()
+            && safety::ast_equal_ignoring_tier_statics(&program, &reparsed));
+    if !equal {
         return Err(FmtError::Safety(
             "formatted output parses to a different AST (printer bug)".to_string(),
         ));
@@ -411,6 +491,72 @@ mod tests {
         )
     }
 
+    // A stand-in extension body formatter: uppercases the foreign text, leaving the `\0` hole
+    // placeholders untouched (uppercasing NUL is a no-op) — so it reflows the body and preserves
+    // every hole, exactly the contract fmt relies on. It ignores `indent` (single-line output).
+    fn upper_body(
+        body: &str,
+        _indent: &str,
+        _sub: &dyn Fn(&str, &str, &str) -> Option<String>,
+    ) -> Option<String> {
+        Some(body.to_uppercase())
+    }
+
+    fn fmt_with_sql_formatter(text: &str) -> Result<String, FmtError> {
+        let tiers = noeta_lexer::TextTiers::with(vec!["sql".to_string()]);
+        let mut formatters = TierBodyFormatters::new();
+        formatters.insert("sql".to_string(), upper_body as TierBodyFormatter);
+        format_source_in_with_formatters(
+            "t.noe",
+            text,
+            &FmtConfig::default(),
+            &tiers,
+            &formatters,
+            &TierBodyFormatters::new(),
+        )
+    }
+
+    const SQL_TIER: &str = "@tier(sql, text: \"sql\", expr: string)\n\
+        fn q(statics: List<string>, holes: List<() -> dyn>): string { return \"\" }\n";
+
+    #[test]
+    fn registered_tier_formatter_reflows_body_and_keeps_holes() {
+        // The formatter reflows the foreign text (here: uppercases it); fmt reinserts each `${…}`
+        // hole (formatted inline) and re-applies tier escaping. The relaxed safety gate accepts the
+        // changed statics because the holes and everything else are unchanged.
+        let out = fmt_with_sql_formatter(&format!("{SQL_TIER}r = @sql {{ select ${{ x }} from t }}\n"))
+            .expect("formats");
+        // Body uppercased by the formatter; the hole reinserted, formatted inline (`${ x }` → `${x}`).
+        assert!(
+            out.contains("@sql { SELECT ${x} FROM T }"),
+            "body not reflowed / hole not preserved:\n{out}"
+        );
+    }
+
+    #[test]
+    fn tier_formatter_output_is_idempotent() {
+        let once = fmt_with_sql_formatter(&format!("{SQL_TIER}r = @sql {{ select ${{x}} from t }}\n"))
+            .expect("first");
+        let twice = fmt_with_sql_formatter(&once).expect("second");
+        assert_eq!(once, twice, "tier-body formatting is not idempotent");
+    }
+
+    #[test]
+    fn unformatted_tier_stays_verbatim_under_strict_gate() {
+        // No formatter registered for `sql` ⇒ the body is byte-for-byte verbatim (only the hole is
+        // reformatted), and the full strict safety gate still applies.
+        let out = format_source_in(
+            "t.noe",
+            &format!("{SQL_TIER}r = @sql {{ select ${{ x }} from T }}\n"),
+            &FmtConfig::default(),
+            &noeta_lexer::TextTiers::with(vec!["sql".to_string()]),
+        )
+        .expect("formats");
+        // Verbatim body: the foreign text (and the `${ x }` spacing) is byte-preserved; only the
+        // hole *expression* is reformatted, and it has none here.
+        assert!(out.contains("@sql { select ${ x } from T }"), "got:\n{out}");
+    }
+
     #[test]
     fn text_tier_bodies_are_preserved_verbatim() {
         // Text-tiers arc: a `@doc`/declared-text-tier body is raw prose — the formatter must keep
@@ -431,6 +577,55 @@ mod tests {
         )
         .unwrap();
         assert!(out.contains("\n  <a  b=\"c\"/>\n"), "got:\n{out}");
+    }
+
+    #[test]
+    fn indentation_width_tabs_and_final_newline_are_configurable() {
+        let src = "fn f(): int {\nreturn 1\n}\n";
+        let two = format_source(
+            "t.noe",
+            src,
+            &FmtConfig {
+                indent_width: 2,
+                ..FmtConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(two.contains("\n  return 1"), "2-space indent:\n{two:?}");
+
+        let tabs = format_source(
+            "t.noe",
+            src,
+            &FmtConfig {
+                use_tabs: true,
+                ..FmtConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(tabs.contains("\n\treturn 1"), "tab indent:\n{tabs:?}");
+
+        let no_nl = format_source(
+            "t.noe",
+            src,
+            &FmtConfig {
+                final_newline: false,
+                ..FmtConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(!no_nl.ends_with('\n'), "final newline not suppressed:\n{no_nl:?}");
+    }
+
+    #[test]
+    fn significant_trailing_whitespace_in_a_verbatim_body_survives_the_trim() {
+        // The whole-file trailing-whitespace trim must leave *content* alone: two trailing spaces on
+        // an `@doc` line is a Markdown hard line break, significant, and must survive — even though a
+        // trailing space produced by *layout* (an indented blank line) is still stripped.
+        let src = "@doc {\nfirst  \nsecond\n}\nfn f(): void {\n\n    echo 1\n}\n";
+        let out = fmt(src).unwrap();
+        assert!(out.contains("first  \n"), "markdown line break was trimmed:\n{out:?}");
+        // The blank line inside `f` is layout — it carries no trailing indentation.
+        assert!(!out.contains("    \n"), "an indented blank line was not trimmed:\n{out:?}");
     }
 
     #[test]

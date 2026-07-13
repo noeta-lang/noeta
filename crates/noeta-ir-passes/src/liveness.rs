@@ -600,7 +600,11 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         }
         // `module.func::<T>(args)` reads each argument atom (`json.parse::<T>(s)`).
         Rvalue::TypedModuleCall { args, .. } => args.iter().for_each(&mut *f),
-        Rvalue::Closure { .. } | Rvalue::AttributesOf { .. } | Rvalue::RolesOf { .. } => {}
+        Rvalue::Closure { .. }
+        | Rvalue::AttributesOf { .. }
+        | Rvalue::RolesOf { .. }
+        // A native module-fn reference has no operand atoms (module/func are static strings).
+        | Rvalue::ModuleFn { .. } => {}
     }
 }
 

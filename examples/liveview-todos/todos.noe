@@ -1,0 +1,57 @@
+// A LiveView todo list — a *complex* @html template: a loop of nested @html rows, conditionals over
+// template branches, computed expressions, and XSS-safe text — all reactive. Clicking "complete
+// all" flips a signal; the server pushes a minimal diff (the list, the "N left" count, the status
+// line) and the browser updates in place.
+//
+//   noeta serve examples/liveview-todos/todos.noe   →   open http://localhost:8080
+//
+// Importing `render` brings the `@html` tier declaration into scope.
+use liveview.{render, Html, handle, keyed}
+use std.reactive.signal
+use std.http.server
+use std.http.{Request, Response}
+
+struct Todo {
+    id: int
+    title: string
+    done: bool
+}
+
+todos = signal([
+    Todo { id: 1, title: "Wire the reactive graph", done: true },
+    Todo { id: 2, title: "Ship @html templating", done: true },
+    Todo { id: 3, title: "Write the <docs>", done: false },
+])
+
+// A row is its own `@html` value. A `${…}` hole in *attribute* position (`class="${…}"`) is
+// inlined and escaped; a hole in *text* position gets a reactive span.
+fn row(t: Todo): Html {
+    box = if t.done then "[x]" else "[ ]"
+    return @html { <li class="${if t.done then "done" else "todo"}">${box} ${t.title}</li> }
+}
+
+fn remaining(): int {
+    return todos.get().filter(fn(t) => !t.done).len()
+}
+
+// Every hole reads the signal *directly*, so its `computed` subscribes and re-renders on change. The
+// list uses `keyed` (each `<li>` is its own reactive region, keyed by `t.id`) so toggling one todo
+// pushes only *that* row's markup — the diff drops the rows that did not change.
+fn page(): Html {
+    return @html {
+        <h1>Todos — ${remaining()} of ${todos.get().len()} left</h1>
+        <ul>${keyed(todos, fn(t) => "${t.id}", row)}</ul>
+        <p>${if remaining() == 0 then "All done! ✨" else "Keep going."}</p>
+        <button data-live-click="complete-all">complete all</button>
+    }
+}
+
+fn on_event(name: string): void {
+    if name == "complete-all" {
+        todos.update(fn(list) => list.map(fn(t) => Todo { id: t.id, title: t.title, done: true }))
+    }
+}
+
+fn fetch(req: Request): Response {
+    return handle(req, "Noeta LiveView todos", page, on_event)
+}

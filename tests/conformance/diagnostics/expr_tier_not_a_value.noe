@@ -1,0 +1,6 @@
+// A text tier's block used as a value is E0052: only a tier declared `expr: T` yields one.
+// `@doc` bodies are runner/tooling input, not expressions.
+// expect: error E0052 at 5:6
+// expect: exit 1
+x = @doc { some prose }
+echo x
