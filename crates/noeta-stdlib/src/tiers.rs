@@ -12,8 +12,14 @@
 //! the two spellings together so they cannot drift.
 
 use noeta_native::registry::{
-    AttrFieldDefault, AttrFieldType, ExtAttrField, ExtAttribute, ExtTier,
+    AttrFieldDefault, AttrFieldType, BodyFormatter, ExtAttrField, ExtAttribute, ExtTier,
 };
+
+/// std's **tier-body formatters** keyed by body language (extension-driven tier-body formatting).
+/// std ships one: a JSON re-indenter for the `"json"` language, which its `@json` tier declares —
+/// so `noeta fmt` reflows `@json { … }` bodies. Keyed by language, so any other tier declaring
+/// `text: "json"` would get it too.
+pub const BODY_FORMATTERS: &[BodyFormatter] = &[("json", json_reindent)];
 
 /// The built-in dev-tiers. `bench` carries its knob attribute; the rest are knob-less (`test`'s
 /// metadata attributes attach per-fn, not through directive args, so they are not a `config`).
@@ -24,7 +30,6 @@ pub const TIERS: &[ExtTier] = &[
         text: None,
         expr: None,
         handler: None,
-        format_body: None,
     },
     ExtTier {
         name: "bench",
@@ -32,7 +37,6 @@ pub const TIERS: &[ExtTier] = &[
         text: None,
         expr: None,
         handler: None,
-        format_body: None,
     },
     // `doc` is a **text** tier: its `@doc { … }` bodies are verbatim markdown. Declaring the
     // language here (rather than a hardcoded `text_lang` special-case) is the dogfood that the
@@ -44,7 +48,6 @@ pub const TIERS: &[ExtTier] = &[
         text: Some("markdown"),
         expr: None,
         handler: None,
-        format_body: None,
     },
     ExtTier {
         name: "debug",
@@ -52,7 +55,6 @@ pub const TIERS: &[ExtTier] = &[
         text: None,
         expr: None,
         handler: None,
-        format_body: None,
     },
     // `@json { … ${s} … }` — a native **expression** tier (expr-tiers arc): its blocks are `string`
     // values (JSON text with safely-quoted holes), desugared to `std.template.render`. The dogfood
@@ -64,7 +66,6 @@ pub const TIERS: &[ExtTier] = &[
         text: Some("json"),
         expr: Some("string"),
         handler: Some("std.template.render"),
-        format_body: Some(json_reindent),
     },
 ];
 

@@ -75,6 +75,9 @@ impl Extension for CoreExtension {
     fn attributes(&self) -> &'static [noeta_native::registry::ExtAttribute] {
         crate::tiers::ATTRIBUTES
     }
+    fn body_formatters(&self) -> &'static [noeta_native::registry::BodyFormatter] {
+        crate::tiers::BODY_FORMATTERS
+    }
 }
 std_unit!(
     CryptoExtension,
@@ -540,18 +543,14 @@ pub fn ext_verbatim_tier_names() -> Vec<&'static str> {
         .collect()
 }
 
-/// Every installed extension's **tier body formatters** as `(tier name, formatter)` pairs — the
-/// tiers whose extension supplied a `format_body` for `noeta fmt` to reflow their `@<name> { … }`
-/// bodies (extension-driven tier-body formatting). The `noeta fmt` front-end builds its formatter
-/// map from these; a tier absent here stays verbatim.
-pub fn ext_tier_body_formatters() -> Vec<(&'static str, TierBodyFormatter)> {
-    ext_tiers()
-        .filter_map(|t| t.format_body.map(|f| (t.name, f)))
-        .collect()
+/// Every installed extension's **tier-body formatters** as `(language, formatter)` pairs — the
+/// languages an extension supplied a `noeta fmt` reflow for (extension-driven tier-body formatting,
+/// keyed by body language). The `noeta fmt` front-end maps a tier's declared `text:` language to one
+/// of these; a language absent here stays verbatim. See [`noeta_native::registry::BodyFormatter`].
+pub fn ext_body_formatters() -> Vec<noeta_native::registry::BodyFormatter> {
+    ensure();
+    noeta_native::registry::ext_body_formatters().copied().collect()
 }
-
-/// A native tier-body formatter (see [`noeta_native::registry::ExtTier::format_body`]).
-pub type TierBodyFormatter = fn(&str) -> Option<String>;
 
 /// See [`noeta_native::registry::ext_attributes`].
 pub fn ext_attributes() -> impl Iterator<Item = &'static noeta_native::registry::ExtAttribute> {

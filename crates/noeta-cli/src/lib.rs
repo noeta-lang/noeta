@@ -1338,12 +1338,14 @@ fn cmd_fmt(
     let mut tier_sets: std::collections::HashMap<PathBuf, noeta_lexer::TextTiers> =
         std::collections::HashMap::new();
 
-    // Extension-registered tier-body formatters (e.g. std's `@json`): a tier here has its body
-    // reflowed; every other tier stays verbatim. Built once — the installed extension set is fixed.
-    let tier_formatters: noeta_fmt::TierBodyFormatters = noeta_stdlib::registry::ext_tier_body_formatters()
-        .into_iter()
-        .map(|(name, f)| (name.to_string(), f))
-        .collect();
+    // Extension-registered body formatters, keyed by body **language** (e.g. std's `"json"`). A tier
+    // — native or program-declared — whose `text:` language is here has its body reflowed; every
+    // other tier stays verbatim. The language set is fixed (the installed extensions); the tier →
+    // language resolution is per project, so the tier → formatter map is cached per directory.
+    let lang_formatters: std::collections::HashMap<&'static str, noeta_fmt::TierBodyFormatter> =
+        noeta_stdlib::registry::ext_body_formatters().into_iter().collect();
+    let mut formatter_sets: std::collections::HashMap<PathBuf, noeta_fmt::TierBodyFormatters> =
+        std::collections::HashMap::new();
 
     for file in &files {
         let dir = file.parent().unwrap_or_else(|| std::path::Path::new("."));
@@ -1365,6 +1367,10 @@ fn cmd_fmt(
         let text_tiers = tier_sets
             .entry(dir.to_path_buf())
             .or_insert_with(|| fmt_text_tiers(dir, file))
+            .clone();
+        let tier_formatters = formatter_sets
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| fmt_tier_formatters(dir, file, &lang_formatters))
             .clone();
 
         match noeta_fmt::format_source_in_with_formatters(
@@ -1436,6 +1442,55 @@ fn fmt_text_tiers(dir: &std::path::Path, entry: &std::path::Path) -> noeta_lexer
             .map(str::to_string),
     );
     noeta_lexer::TextTiers::with(names)
+}
+
+/// The `tier name → body formatter` map for formatting files in `dir` (extension-driven tier-body
+/// formatting). A tier — a program `@tier(name, …, text: "lang")` in the directory's siblings or a
+/// dependency module, or an installed native `ExtTier { name, text }` — is mapped to the formatter
+/// registered for its `text:` language, if any. So `@html` (a program tier declaring `text: "html"`)
+/// gets a first-party HTML formatter, while its reactive handler stays in Noeta. Mirrors
+/// [`fmt_text_tiers`]'s scan so the same tiers are seen.
+fn fmt_tier_formatters(
+    dir: &std::path::Path,
+    entry: &std::path::Path,
+    lang_formatters: &std::collections::HashMap<&'static str, noeta_fmt::TierBodyFormatter>,
+) -> noeta_fmt::TierBodyFormatters {
+    let mut map = noeta_fmt::TierBodyFormatters::new();
+    let mut scan = |name: &str, text: &str| {
+        let source = Source::new(SourceId(0), name, text);
+        for (tier, lang) in noeta_lexer::declared_tier_languages(&source) {
+            if let Some(&f) = lang_formatters.get(lang.as_str()) {
+                map.insert(tier, f);
+            }
+        }
+    };
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "noe")
+                && let Ok(text) = std::fs::read_to_string(&path)
+            {
+                scan(&path.to_string_lossy(), &text);
+            }
+        }
+    }
+    if let Ok(graph) = graph::resolve_graph(entry) {
+        for dep in &graph.packages {
+            for module in &dep.modules {
+                scan(&module.name, &module.text);
+            }
+        }
+    }
+    drop(scan);
+    // Native tiers: an installed `ExtTier { name, text }` whose language has a registered formatter.
+    for t in noeta_stdlib::registry::ext_tiers() {
+        if let Some(lang) = t.text
+            && let Some(&f) = lang_formatters.get(lang)
+        {
+            map.insert(t.name.to_string(), f);
+        }
+    }
+    map
 }
 
 /// Recursively collect every `.noe` file under `dir` (skipping dot-directories like `.git`).

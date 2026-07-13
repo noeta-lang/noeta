@@ -680,7 +680,7 @@ pub struct ExtAttribute {
 /// the checker validates against is the installed extensions' tiers ∪ the program's own `@tier`
 /// declarations. The built-ins' runners stay native (`noeta test`/`bench`/`doc` and `--tier
 /// debug`); only the declaration lives here.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ExtTier {
     pub name: &'static str,
     /// The knob attribute a `@<tier>(args)` block stamps onto its fns — one of the extension's
@@ -701,32 +701,19 @@ pub struct ExtTier {
     /// yielding [`Self::expr`]. `None` unless `expr` is set (a program-declared expr tier names its
     /// handler on the `@tier` fn instead).
     pub handler: Option<&'static str>,
-    /// An optional **body formatter** for `noeta fmt` (extension-driven tier-body formatting): given
-    /// the tier body's foreign text with each `${…}` hole represented as a single NUL (`\0`)
-    /// placeholder, it returns the reflowed foreign text (holes still as `\0`, in order), or `None`
-    /// to decline (fmt then leaves the body verbatim). fmt owns everything Noeta: it substitutes the
-    /// (separately, inline-formatted) holes back for the `\0`s and re-applies tier-body escaping — so
-    /// a formatter is pure foreign-language reflow and never needs to know Noeta's syntax. Supplying
-    /// one is the extension's assertion that reflowing its body preserves the value in that language
-    /// (the relaxation `noeta fmt` cannot prove itself); a tier without one stays byte-for-byte
-    /// verbatim.
-    pub format_body: Option<fn(&str) -> Option<String>>,
 }
 
-impl PartialEq for ExtTier {
-    /// Compares the **declarative** fields. `format_body` is a function pointer whose address is not a
-    /// meaningful identity (it can differ across codegen units or collide after merging), so only its
-    /// presence is compared — two tiers are equal when they declare the same thing and agree on
-    /// whether they carry a body formatter.
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-            && self.config == other.config
-            && self.text == other.text
-            && self.expr == other.expr
-            && self.handler == other.handler
-            && self.format_body.is_some() == other.format_body.is_some()
-    }
-}
+/// A native **tier-body formatter** for `noeta fmt`, keyed by body **language** (extension-driven
+/// tier-body formatting). Given the body's foreign text with each `${…}` hole represented as a single
+/// NUL (`\0`) placeholder, it returns the reflowed foreign text (holes still `\0`, in order), or
+/// `None` to decline. fmt owns everything Noeta — it substitutes the (separately, inline-formatted)
+/// holes back for the `\0`s and re-applies tier-body escaping — so a formatter is pure
+/// foreign-language reflow and never needs to know Noeta's syntax. It is keyed by *language*, not
+/// tier, so any tier (native `ExtTier` or a program `@tier(…, text: "…")`) that declares the language
+/// gets it; registering one is the extension's assertion that reflowing that language preserves the
+/// value (the relaxation `noeta fmt` cannot prove itself). A language with no formatter stays
+/// byte-for-byte verbatim.
+pub type BodyFormatter = (&'static str, fn(&str) -> Option<String>);
 
 /// A bundle of native modules and types registered into the language. Core implements this once
 /// as `StdExtension` (in `noeta-stdlib`); a third-party crate implements it to contribute its own
@@ -757,6 +744,13 @@ pub trait Extension: Sync {
     }
     /// The extension's declared prelude attributes (tier knobs and metadata). Default empty.
     fn attributes(&self) -> &'static [ExtAttribute] {
+        &[]
+    }
+    /// The extension's **tier-body formatters** for `noeta fmt`, keyed by body language (extension-
+    /// driven tier-body formatting — see [`BodyFormatter`]). Default empty: an extension that ships a
+    /// tier does not have to make its body reflowable, and one may exist purely to format a language
+    /// used by *another* extension's tier (e.g. a first-party HTML formatter for a program `@html`).
+    fn body_formatters(&self) -> &'static [BodyFormatter] {
         &[]
     }
 }
@@ -948,6 +942,11 @@ impl Registry {
     /// Every installed extension's declared prelude attributes, in install order.
     pub fn ext_attributes(&self) -> impl Iterator<Item = &'static ExtAttribute> + '_ {
         self.units.iter().flat_map(|e| e.attributes().iter())
+    }
+
+    /// Every installed extension's tier-body formatters `(language, fn)`, in install order.
+    pub fn ext_body_formatters(&self) -> impl Iterator<Item = &'static BodyFormatter> + '_ {
+        self.units.iter().flat_map(|e| e.body_formatters().iter())
     }
 
     /// The installed extension attribute named `name`, if any.
@@ -1220,6 +1219,12 @@ pub fn ext_tiers() -> impl Iterator<Item = &'static ExtTier> {
 
 pub fn find_ext_tier(name: &str) -> Option<&'static ExtTier> {
     default_registry().and_then(|r| r.find_ext_tier(name))
+}
+
+pub fn ext_body_formatters() -> impl Iterator<Item = &'static BodyFormatter> {
+    default_registry()
+        .into_iter()
+        .flat_map(|r| r.ext_body_formatters())
 }
 
 pub fn ext_attributes() -> impl Iterator<Item = &'static ExtAttribute> {

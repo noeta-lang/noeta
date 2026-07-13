@@ -844,6 +844,63 @@ fn declared_text_tiers(text: &str, tokens: &[Token]) -> Vec<String> {
     names
 }
 
+/// The `(tier name, body language)` of every `@tier(name, …, text: "lang", …)` declaration in
+/// `source` — the program-tier analogue of an extension's `ExtTier { name, text }`. `noeta fmt` uses
+/// it to resolve a program tier's body language and thence its registered formatter. Only tiers with
+/// an explicit `text:` string are returned (an `expr:`-only tier declares no body-language name).
+pub fn declared_tier_languages(source: &Source) -> Vec<(String, String)> {
+    let lexed = lex(source);
+    let text = source.text();
+    let tokens = &lexed.tokens;
+    let ident = |t: &Token| -> Option<&str> {
+        (t.kind == TokenKind::Ident).then(|| &text[t.span.start as usize..t.span.end as usize])
+    };
+    let mut out = Vec::new();
+    for (i, window) in tokens.windows(4).enumerate() {
+        let [at, kw, open, name_tok] = window else {
+            unreachable!()
+        };
+        if !(at.kind == TokenKind::At
+            && ident(kw) == Some("tier")
+            && open.kind == TokenKind::LParen)
+        {
+            continue;
+        }
+        let Some(name) = ident(name_tok) else {
+            continue;
+        };
+        let mut depth = 1u32;
+        let mut rest = tokens[i + 4..].iter().peekable();
+        while let Some(tok) = rest.next() {
+            match tok.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                TokenKind::Ident
+                    if depth == 1
+                        && ident(tok) == Some("text")
+                        && rest.peek().is_some_and(|t| t.kind == TokenKind::Colon) =>
+                {
+                    rest.next(); // the `:`
+                    if let Some(str_tok) = rest.next()
+                        && str_tok.kind == TokenKind::StringLit
+                    {
+                        let raw = &text[str_tok.span.start as usize..str_tok.span.end as usize];
+                        out.push((name.to_string(), raw.trim_matches('"').to_string()));
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 /// Find the `}` that closes a text-tier body whose opening `{` ends at `open_end`, returning its
 /// byte offset. Braces nest (a `{` in the body must be matched by a `}` before the block closes),
 /// so a balanced code snippet inside prose is fine; an unbalanced `}` is treated as the closer and
