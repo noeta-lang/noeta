@@ -71,18 +71,20 @@ pub const TIERS: &[ExtTier] = &[
 
 /// A minimal JSON re-indenter — the body formatter for the `@json` tier (extension-driven tier-body
 /// formatting). `body` is the tier's foreign JSON text with each `${…}` hole already collapsed to a
-/// single NUL (`\0`) placeholder by `noeta fmt`; this returns the same JSON laid out canonically
-/// (two-space indent, one element per line, `key: value` spacing) with the NULs preserved in order.
-/// It is a depth-driven reflow, not a validating parser: it tracks string state so braces/commas
-/// inside strings are literal, treats a `\0` hole as an atom, and declines (`None`, → verbatim) only
-/// if the delimiters are unbalanced. Idempotent — its own output re-indents to itself.
-fn json_reindent(body: &str) -> Option<String> {
+/// single NUL (`\0`) placeholder by `noeta fmt`, and `base` is the indentation of the body's top
+/// level in the formatted file; this returns the JSON laid out canonically (two-space nesting, one
+/// element per line, `key: value` spacing) at that base, with the NULs preserved in order. It is a
+/// depth-driven reflow, not a validating parser: it tracks string state so braces/commas inside
+/// strings are literal, treats a `\0` hole as an atom, and declines (`None`, → verbatim) only if the
+/// delimiters are unbalanced. Idempotent — its own output re-indents to itself.
+fn json_reindent(body: &str, base: &str) -> Option<String> {
     let mut out = String::with_capacity(body.len());
     let mut depth: usize = 0;
     let mut in_string = false;
     let mut escaped = false;
     let indent = |out: &mut String, depth: usize| {
         out.push('\n');
+        out.push_str(base);
         for _ in 0..depth {
             out.push_str("  ");
         }
@@ -143,7 +145,8 @@ fn json_reindent(body: &str) -> Option<String> {
     if depth != 0 || in_string {
         return None;
     }
-    Some(out.trim().to_string())
+    // The first line carries no newline, so prepend `base` to it; internal lines already have it.
+    Some(format!("{base}{}", out.trim()))
 }
 
 /// The prelude attributes the built-in tiers own: the test runner's metadata quartet

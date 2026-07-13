@@ -704,16 +704,20 @@ pub struct ExtTier {
 }
 
 /// A native **tier-body formatter** for `noeta fmt`, keyed by body **language** (extension-driven
-/// tier-body formatting). Given the body's foreign text with each `${…}` hole represented as a single
-/// NUL (`\0`) placeholder, it returns the reflowed foreign text (holes still `\0`, in order), or
-/// `None` to decline. fmt owns everything Noeta — it substitutes the (separately, inline-formatted)
-/// holes back for the `\0`s and re-applies tier-body escaping — so a formatter is pure
-/// foreign-language reflow and never needs to know Noeta's syntax. It is keyed by *language*, not
-/// tier, so any tier (native `ExtTier` or a program `@tier(…, text: "…")`) that declares the language
-/// gets it; registering one is the extension's assertion that reflowing that language preserves the
-/// value (the relaxation `noeta fmt` cannot prove itself). A language with no formatter stays
-/// byte-for-byte verbatim.
-pub type BodyFormatter = (&'static str, fn(&str) -> Option<String>);
+/// tier-body formatting). It is `(body, indent) -> Option<reflowed>`:
+/// - `body` is the foreign text with each `${…}` hole represented as a single NUL (`\0`) placeholder;
+/// - `indent` is the whitespace to lay the body's top level at (its column in the formatted file), so
+///   the formatter owns its own indentation — which lets it indent structure while leaving
+///   whitespace-significant content (`<pre>`, `<textarea>`) byte-for-byte untouched;
+/// - it returns the reflowed foreign text (holes still `\0`, in order), or `None` to decline.
+///
+/// fmt owns everything Noeta — it substitutes the (separately, inline-formatted) holes back for the
+/// `\0`s and re-applies tier-body escaping — so a formatter is pure foreign-language reflow and never
+/// needs to know Noeta's syntax. Keyed by *language*, not tier, so any tier (native `ExtTier` or a
+/// program `@tier(…, text: "…")`) declaring the language gets it; registering one is the extension's
+/// assertion that reflowing that language preserves the value (the relaxation `noeta fmt` cannot
+/// prove). A language with no formatter stays byte-for-byte verbatim.
+pub type BodyFormatter = (&'static str, fn(&str, &str) -> Option<String>);
 
 /// A bundle of native modules and types registered into the language. Core implements this once
 /// as `StdExtension` (in `noeta-stdlib`); a third-party crate implements it to contribute its own

@@ -1846,14 +1846,13 @@ impl Printer<'_> {
         span: Span,
     ) -> Result<Option<Doc>, FmtError> {
         let joined = statics.join("\u{0}");
-        let Some(reflowed) = formatter(&joined) else {
+        // The body's top level sits one indent level under the tier's own line; the formatter owns
+        // its layout from there (so it can leave whitespace-significant content unindented).
+        let tier_indent = self.line_indent(span.start);
+        let base = format!("{tier_indent}{}", " ".repeat(INDENT as usize));
+        let Some(reflowed) = formatter(&joined, &base) else {
             return Ok(None);
         };
-        // Trim the formatter's result before wrapping it in `@<tier> { … }`: the wrapper adds one
-        // space on each side, which re-enters the body's statics on re-parse; trimming here keeps
-        // that from accumulating, so the round-trip is idempotent regardless of how (or whether) the
-        // formatter trims. A `\0` hole marker is not whitespace, so a leading/trailing hole survives.
-        let reflowed = reflowed.trim();
         let segments: Vec<&str> = reflowed.split('\u{0}').collect();
         if segments.len() != holes.len() + 1 {
             return Ok(None); // formatter dropped or added a hole marker — decline defensively
@@ -1867,19 +1866,13 @@ impl Printer<'_> {
                 body.push('}');
             }
         }
-        // A single-line body stays inline (`@<tier> { … }`); a multi-line reflow is laid out as a
-        // block — the body indented one level under the tier's own line, the closing brace back at
-        // it — so the foreign markup nests under `@<tier> {` instead of sitting at column 0.
+        // A single-line body stays inline (`@<tier> { … }` — strip the base indent the formatter
+        // applied); a multi-line reflow is a block, its already-indented lines placed between the
+        // tier's braces with the closing brace back at the tier's own indentation.
         if body.contains('\n') {
-            let indent = self.line_indent(span.start);
-            let inner = body
-                .lines()
-                .map(|line| format!("{indent}{}{line}", " ".repeat(INDENT as usize)))
-                .collect::<Vec<_>>()
-                .join("\n");
-            Ok(Some(Doc::raw_text(format!("@{tier} {{\n{inner}\n{indent}}}"))))
+            Ok(Some(Doc::raw_text(format!("@{tier} {{\n{body}\n{tier_indent}}}"))))
         } else {
-            Ok(Some(Doc::raw_text(format!("@{tier} {{ {body} }}"))))
+            Ok(Some(Doc::raw_text(format!("@{tier} {{ {} }}", body.trim()))))
         }
     }
 

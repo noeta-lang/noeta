@@ -217,7 +217,7 @@ pub fn format_source_in(
 /// as a single NUL (`\0`) placeholder, it returns the reflowed foreign text (NULs preserved, in
 /// order) or `None` to decline. See [`noeta_native::registry::ExtTier::format_body`]. `noeta fmt`
 /// owns the Noeta side (hole substitution + tier-body escaping); a formatter is pure foreign reflow.
-pub type TierBodyFormatter = fn(&str) -> Option<String>;
+pub type TierBodyFormatter = fn(&str, &str) -> Option<String>;
 
 /// Tier name → its registered body formatter (extension-driven tier-body formatting). The CLI builds
 /// this from the session's extension registry; other front-ends (LSP, tests) pass an empty set, so
@@ -447,8 +447,8 @@ mod tests {
 
     // A stand-in extension body formatter: uppercases the foreign text, leaving the `\0` hole
     // placeholders untouched (uppercasing NUL is a no-op) — so it reflows the body and preserves
-    // every hole, exactly the contract fmt relies on.
-    fn upper_body(body: &str) -> Option<String> {
+    // every hole, exactly the contract fmt relies on. It ignores `indent` (single-line output).
+    fn upper_body(body: &str, _indent: &str) -> Option<String> {
         Some(body.to_uppercase())
     }
 
