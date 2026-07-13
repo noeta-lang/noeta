@@ -73,6 +73,7 @@ pub fn print_program(
     config: &FmtConfig,
     text_tiers: &noeta_lexer::TextTiers,
     tier_formatters: &crate::TierBodyFormatters,
+    lang_formatters: &crate::TierBodyFormatters,
 ) -> Result<String, FmtError> {
     let p = Printer {
         source,
@@ -82,6 +83,7 @@ pub fn print_program(
         config,
         force_flat: Cell::new(false),
         tier_formatters,
+        lang_formatters,
     };
     let doc = p.stmt_seq(&program.stmts, program.span.start, program.span.end)?;
     let indent_style = crate::doc::IndentStyle {
@@ -151,6 +153,7 @@ pub fn print_stmt(
         config,
         force_flat: Cell::new(false),
         tier_formatters: &no_formatters,
+        lang_formatters: &no_formatters,
     };
     let doc = p.stmt(stmt)?;
     let rendered = render_protected(
@@ -192,6 +195,9 @@ struct Printer<'a> {
     /// Tier name → its extension-registered body formatter (empty for the LSP/stmt paths). A tier
     /// present here has its `@<tier> { … }` body reflowed by the formatter; absent ⇒ verbatim.
     tier_formatters: &'a crate::TierBodyFormatters,
+    /// Language → formatter, for a formatter's `sub`-delegation of an embedded language (e.g. a
+    /// `<style>` block to the `"css"` formatter). Empty when no formatters are in play.
+    lang_formatters: &'a crate::TierBodyFormatters,
 }
 
 /// The `(start, kind)` of every non-`;` token in `source`, in order — the lookup behind
@@ -1881,7 +1887,13 @@ impl Printer<'_> {
         // its layout from there (so it can leave whitespace-significant content unindented).
         let tier_indent = self.line_indent(span.start);
         let base = format!("{tier_indent}{}", self.indent_unit());
-        let Some(reflowed) = formatter(&joined, &base) else {
+        // Delegation callback: a formatter can reflow an embedded sub-language (a `<style>`/`<script>`)
+        // with that language's registered formatter, recursing so it can delegate further still.
+        let langs = self.lang_formatters;
+        let sub = move |language: &str, body: &str, indent: &str| {
+            crate::sub_format(langs, language, body, indent)
+        };
+        let Some(reflowed) = formatter(&joined, &base, &sub) else {
             return Ok(None);
         };
         let segments: Vec<&str> = reflowed.split('\u{0}').collect();

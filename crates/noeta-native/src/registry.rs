@@ -704,11 +704,16 @@ pub struct ExtTier {
 }
 
 /// A native **tier-body formatter** for `noeta fmt`, keyed by body **language** (extension-driven
-/// tier-body formatting). It is `(body, indent) -> Option<reflowed>`:
+/// tier-body formatting). It is `(body, indent, sub) -> Option<reflowed>`:
 /// - `body` is the foreign text with each `${…}` hole represented as a single NUL (`\0`) placeholder;
 /// - `indent` is the whitespace to lay the body's top level at (its column in the formatted file), so
 ///   the formatter owns its own indentation — which lets it indent structure while leaving
 ///   whitespace-significant content (`<pre>`, `<textarea>`) byte-for-byte untouched;
+/// - `sub` is a delegation callback `(language, body, indent) -> Option<reflowed>`: a formatter uses
+///   it to format an **embedded sub-language** with that language's registered formatter — an HTML
+///   formatter hands `<style>`/`<script>` bodies to `sub("css", …)`/`sub("javascript", …)`, getting
+///   `None` when none is registered (→ leave that region verbatim). A plain `&dyn Fn` (not a bespoke
+///   trait) so this ABI stays decoupled from the formatter crate;
 /// - it returns the reflowed foreign text (holes still `\0`, in order), or `None` to decline.
 ///
 /// fmt owns everything Noeta — it substitutes the (separately, inline-formatted) holes back for the
@@ -717,7 +722,8 @@ pub struct ExtTier {
 /// program `@tier(…, text: "…")`) declaring the language gets it; registering one is the extension's
 /// assertion that reflowing that language preserves the value (the relaxation `noeta fmt` cannot
 /// prove). A language with no formatter stays byte-for-byte verbatim.
-pub type BodyFormatter = (&'static str, fn(&str, &str) -> Option<String>);
+pub type SubFormat<'a> = dyn Fn(&str, &str, &str) -> Option<String> + 'a;
+pub type BodyFormatter = (&'static str, fn(&str, &str, &SubFormat) -> Option<String>);
 
 /// A bundle of native modules and types registered into the language. Core implements this once
 /// as `StdExtension` (in `noeta-stdlib`); a third-party crate implements it to contribute its own

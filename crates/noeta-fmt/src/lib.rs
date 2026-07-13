@@ -227,19 +227,40 @@ pub fn format_source_in(
     config: &FmtConfig,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Result<String, FmtError> {
-    format_source_in_with_formatters(name, text, config, text_tiers, &TierBodyFormatters::new())
+    format_source_in_with_formatters(
+        name,
+        text,
+        config,
+        text_tiers,
+        &TierBodyFormatters::new(),
+        &TierBodyFormatters::new(),
+    )
 }
 
-/// A native body formatter for `noeta fmt`: given a tier body's foreign text with each `${…}` hole
-/// as a single NUL (`\0`) placeholder, it returns the reflowed foreign text (NULs preserved, in
-/// order) or `None` to decline. See [`noeta_native::registry::ExtTier::format_body`]. `noeta fmt`
-/// owns the Noeta side (hole substitution + tier-body escaping); a formatter is pure foreign reflow.
-pub type TierBodyFormatter = fn(&str, &str) -> Option<String>;
+/// A native body formatter for `noeta fmt`: `(body, indent, sub) -> Option<reflowed>`. `body` is the
+/// tier body's foreign text with each `${…}` hole a single NUL (`\0`); `indent` is the base column;
+/// `sub(language, body, indent)` delegates an embedded sub-language (a `<style>`/`<script>`) to its
+/// own registered formatter, or `None` if none. See [`noeta_native::registry::BodyFormatter`]. `fmt`
+/// owns the Noeta side (hole substitution + escaping); a formatter is pure foreign reflow.
+pub type TierBodyFormatter = fn(&str, &str, &dyn Fn(&str, &str, &str) -> Option<String>) -> Option<String>;
 
-/// Tier name → its registered body formatter (extension-driven tier-body formatting). The CLI builds
-/// this from the session's extension registry; other front-ends (LSP, tests) pass an empty set, so
-/// every tier body stays strictly verbatim.
+/// Name → its registered body formatter. Used two ways: **tier**-keyed (a tier body's own formatter,
+/// resolved from its `text:` language by the CLI) and **language**-keyed (for `sub`-delegation, e.g.
+/// `"css"` → the CSS formatter). Other front-ends (LSP, tests) pass empty sets, so every body stays
+/// strictly verbatim.
 pub type TierBodyFormatters = std::collections::HashMap<String, TierBodyFormatter>;
+
+/// Format `body` (written in `language`) with that language's registered formatter, recursing so the
+/// formatter can itself delegate further. `None` if no formatter is registered for `language`.
+fn sub_format(
+    langs: &TierBodyFormatters,
+    language: &str,
+    body: &str,
+    indent: &str,
+) -> Option<String> {
+    let formatter = langs.get(language)?;
+    formatter(body, indent, &|l, b, i| sub_format(langs, l, b, i))
+}
 
 /// [`format_source_in`] plus **extension-supplied tier-body formatters**: a tier whose extension
 /// registered a `format_body` has its `@<tier> { … }` body reflowed by that formatter (the foreign
@@ -254,6 +275,7 @@ pub fn format_source_in_with_formatters(
     config: &FmtConfig,
     text_tiers: &noeta_lexer::TextTiers,
     formatters: &TierBodyFormatters,
+    lang_formatters: &TierBodyFormatters,
 ) -> Result<String, FmtError> {
     let source = Source::new(SourceId(0), name, text);
 
@@ -262,8 +284,15 @@ pub fn format_source_in_with_formatters(
     let lexed = noeta_lexer::lex_with_trivia_in(&source, text_tiers);
     let program = parse_checked(&source, &lexed)?;
 
-    let out =
-        print::print_program(&program, text, &lexed.comments, config, text_tiers, formatters)?;
+    let out = print::print_program(
+        &program,
+        text,
+        &lexed.comments,
+        config,
+        text_tiers,
+        formatters,
+        lang_formatters,
+    )?;
 
     // Safety gate: the formatted text must parse, and parse to the same program modulo spans.
     let formatted = Source::new(SourceId(0), name, out.as_str());
@@ -465,7 +494,11 @@ mod tests {
     // A stand-in extension body formatter: uppercases the foreign text, leaving the `\0` hole
     // placeholders untouched (uppercasing NUL is a no-op) — so it reflows the body and preserves
     // every hole, exactly the contract fmt relies on. It ignores `indent` (single-line output).
-    fn upper_body(body: &str, _indent: &str) -> Option<String> {
+    fn upper_body(
+        body: &str,
+        _indent: &str,
+        _sub: &dyn Fn(&str, &str, &str) -> Option<String>,
+    ) -> Option<String> {
         Some(body.to_uppercase())
     }
 
@@ -473,7 +506,14 @@ mod tests {
         let tiers = noeta_lexer::TextTiers::with(vec!["sql".to_string()]);
         let mut formatters = TierBodyFormatters::new();
         formatters.insert("sql".to_string(), upper_body as TierBodyFormatter);
-        format_source_in_with_formatters("t.noe", text, &FmtConfig::default(), &tiers, &formatters)
+        format_source_in_with_formatters(
+            "t.noe",
+            text,
+            &FmtConfig::default(),
+            &tiers,
+            &formatters,
+            &TierBodyFormatters::new(),
+        )
     }
 
     const SQL_TIER: &str = "@tier(sql, text: \"sql\", expr: string)\n\

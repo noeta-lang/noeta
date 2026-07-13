@@ -77,7 +77,11 @@ pub const TIERS: &[ExtTier] = &[
 /// depth-driven reflow, not a validating parser: it tracks string state so braces/commas inside
 /// strings are literal, treats a `\0` hole as an atom, and declines (`None`, → verbatim) only if the
 /// delimiters are unbalanced. Idempotent — its own output re-indents to itself.
-fn json_reindent(body: &str, base: &str) -> Option<String> {
+fn json_reindent(
+    body: &str,
+    base: &str,
+    _sub: &dyn Fn(&str, &str, &str) -> Option<String>,
+) -> Option<String> {
     let mut out = String::with_capacity(body.len());
     let mut depth: usize = 0;
     let mut in_string = false;

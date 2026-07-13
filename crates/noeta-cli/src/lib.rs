@@ -1349,8 +1349,15 @@ fn cmd_fmt(
     // — native or program-declared — whose `text:` language is here has its body reflowed; every
     // other tier stays verbatim. The language set is fixed (the installed extensions); the tier →
     // language resolution is per project, so the tier → formatter map is cached per directory.
-    let lang_formatters: std::collections::HashMap<&'static str, noeta_fmt::TierBodyFormatter> =
-        noeta_stdlib::registry::ext_body_formatters().into_iter().collect();
+    // Built with explicit inserts (not `collect`): the formatter fn type is higher-ranked over
+    // lifetimes, which `FromIterator` cannot infer through here.
+    let mut lang_formatters: std::collections::HashMap<&'static str, noeta_fmt::TierBodyFormatter> =
+        std::collections::HashMap::new();
+    let mut sub_formatters = noeta_fmt::TierBodyFormatters::new();
+    for (language, formatter) in noeta_stdlib::registry::ext_body_formatters() {
+        lang_formatters.insert(language, formatter);
+        sub_formatters.insert(language.to_string(), formatter);
+    }
     let mut formatter_sets: std::collections::HashMap<PathBuf, noeta_fmt::TierBodyFormatters> =
         std::collections::HashMap::new();
 
@@ -1386,6 +1393,7 @@ fn cmd_fmt(
             &config,
             &text_tiers,
             &tier_formatters,
+            &sub_formatters,
         ) {
             Ok(formatted) => {
                 if formatted == original {

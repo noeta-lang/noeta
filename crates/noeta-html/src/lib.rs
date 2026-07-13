@@ -88,9 +88,11 @@ enum Tok {
     },
     /// A closing `</…>` tag.
     Close { name: String, raw: String },
-    /// A raw-text element captured whole: its open tag, verbatim inner content (holes still `\0`), and
-    /// its close tag — none of which is reflowed.
+    /// A raw-text element captured whole: its lowercased name, open tag, verbatim inner content
+    /// (holes still `\0`), and close tag — none of which is reflowed by the HTML pass (though a
+    /// `<style>`/`<script>` body may be delegated to a CSS/JS formatter).
     Raw {
+        name: String,
         open: String,
         content: String,
         close: String,
@@ -189,6 +191,7 @@ fn tokenize(body: &str) -> Option<Vec<Tok>> {
                     let close: String = chars[close_start..=close_end].iter().collect();
                     i = close_end + 1;
                     toks.push(Tok::Raw {
+                        name,
                         open: raw,
                         content,
                         close,
@@ -242,7 +245,11 @@ fn collapse_ws(text: &str) -> String {
 /// Inline elements, text, and `\0` holes flow inline. Raw-text elements (`<pre>`, `<textarea>`,
 /// `<script>`, `<style>`) keep their content byte-for-byte, unindented and uncollapsed. Idempotent;
 /// declines (`None` → verbatim) on unterminated or unclosed markup.
-pub fn html_reindent(body: &str, base: &str) -> Option<String> {
+pub fn html_reindent(
+    body: &str,
+    base: &str,
+    sub: &dyn Fn(&str, &str, &str) -> Option<String>,
+) -> Option<String> {
     let toks = tokenize(body)?;
     // Pass 1: a relative layout (2-space nesting, column 0), with raw regions bracketed by control
     // markers. Trailing spaces are trimmed at each break, so only raw content can hold them.
@@ -292,6 +299,7 @@ pub fn html_reindent(body: &str, base: &str) -> Option<String> {
                 }
             }
             Tok::Raw {
+                name,
                 open,
                 content,
                 close,
@@ -303,10 +311,40 @@ pub fn html_reindent(body: &str, base: &str) -> Option<String> {
                     br(&mut buf, depth);
                 }
                 buf.push_str(&open);
-                buf.push(RAW_OPEN);
-                buf.push_str(&content); // byte-for-byte
-                buf.push_str(&close);
-                buf.push(RAW_CLOSE);
+                // A `<style>`/`<script>` whose content has no `${…}` hole is delegated to the
+                // registered `"css"`/`"javascript"` formatter — the content laid out at one level
+                // under the tag. If none is registered (or it declines, or a hole is present), the
+                // content stays byte-for-byte verbatim.
+                let language = match name.as_str() {
+                    "style" => Some("css"),
+                    "script" => Some("javascript"),
+                    _ => None,
+                };
+                let delegated = language
+                    .filter(|_| !content.contains('\u{0}') && !content.trim().is_empty())
+                    .and_then(|lang| {
+                        // One level deeper than the tag, which sits at `base` + its nesting depth.
+                        let inner = format!("{base}{}", "  ".repeat(depth + 1));
+                        sub(lang, content.trim(), &inner)
+                    });
+                match delegated {
+                    Some(formatted) => {
+                        // The formatted sub-language (already indented at `base + one level`) sits on
+                        // its own lines in a raw region; the close tag returns to the tag's own depth.
+                        buf.push(RAW_OPEN);
+                        buf.push('\n');
+                        buf.push_str(&formatted);
+                        buf.push(RAW_CLOSE);
+                        br(&mut buf, depth);
+                        buf.push_str(&close);
+                    }
+                    None => {
+                        buf.push(RAW_OPEN);
+                        buf.push_str(&content); // byte-for-byte
+                        buf.push_str(&close);
+                        buf.push(RAW_CLOSE);
+                    }
+                }
             }
             Tok::Text(t) => buf.push_str(&collapse_ws(&t)),
             Tok::Hole => buf.push('\u{0}'),
@@ -344,8 +382,23 @@ pub fn html_reindent(body: &str, base: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Reindent with no sub-formatters registered (so `<style>`/`<script>` stay verbatim).
     fn fmt(html: &str) -> String {
-        html_reindent(html, "").expect("well-formed")
+        html_reindent(html, "", &|_, _, _| None).expect("well-formed")
+    }
+
+    /// A sub-formatter stub that "formats" CSS by uppercasing it (indented at `indent`), to prove
+    /// delegation without depending on a real CSS formatter.
+    fn fmt_with_css(html: &str) -> String {
+        let sub = |lang: &str, body: &str, indent: &str| {
+            (lang == "css").then(|| {
+                body.lines()
+                    .map(|l| format!("{indent}{}", l.trim().to_uppercase()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        };
+        html_reindent(html, "", &sub).expect("well-formed")
     }
 
     #[test]
@@ -359,15 +412,31 @@ mod tests {
 
     #[test]
     fn base_indent_is_applied_to_every_structural_line() {
-        let out = html_reindent("<ul><li>a</li></ul>", "    ").expect("ok");
+        let out = html_reindent("<ul><li>a</li></ul>", "    ", &|_, _, _| None).expect("ok");
         assert_eq!(out, "    <ul>\n      <li>a</li>\n    </ul>");
+    }
+
+    #[test]
+    fn style_body_is_delegated_to_the_css_formatter() {
+        // With a "css" sub-formatter, a `<style>` body is reflowed by it (here: uppercased, indented
+        // one level under `<style>`); the `<style>`/`</style>` tags keep HTML block layout.
+        let out = fmt_with_css("<div><style>a{color:red}</style></div>");
+        assert_eq!(out, "<div>\n  <style>\n    A{COLOR:RED}\n  </style>\n</div>");
+    }
+
+    #[test]
+    fn style_with_a_hole_stays_verbatim() {
+        // A `${…}` hole (NUL) in the body means it can't be handed to a plain CSS formatter, so it is
+        // left byte-for-byte even when a "css" formatter is registered.
+        let out = fmt_with_css("<style>a{color:\u{0}}</style>");
+        assert_eq!(out, "<style>a{color:\u{0}}</style>");
     }
 
     #[test]
     fn pre_content_is_verbatim_uncollapsed_and_unindented() {
         // The whitespace inside <pre> is significant: it survives byte-for-byte, gets no base indent,
         // and is not collapsed — even though the <pre> tag itself is indented as a block.
-        let out = html_reindent("<div><pre>  keep\n    these   spaces\n</pre></div>", "").expect("ok");
+        let out = html_reindent("<div><pre>  keep\n    these   spaces\n</pre></div>", "", &|_, _, _| None).expect("ok");
         assert_eq!(out, "<div>\n  <pre>  keep\n    these   spaces\n</pre>\n</div>");
     }
 
@@ -392,8 +461,8 @@ mod tests {
 
     #[test]
     fn unterminated_tag_declines() {
-        assert!(html_reindent("<div class=\"x", "").is_none());
-        assert!(html_reindent("<pre>never closed", "").is_none());
-        assert!(html_reindent("<div>oops", "").is_some());
+        assert!(html_reindent("<div class=\"x", "", &|_, _, _| None).is_none());
+        assert!(html_reindent("<pre>never closed", "", &|_, _, _| None).is_none());
+        assert!(html_reindent("<div>oops", "", &|_, _, _| None).is_some());
     }
 }
