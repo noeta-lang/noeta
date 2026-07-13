@@ -607,6 +607,18 @@ impl Printer<'_> {
         }
     }
 
+    /// The byte position of the first `else` keyword token in `[lo, hi)` — the divider between an
+    /// `if`'s then-block and else-block. Searching from `lo` past the then-body skips any `else` that
+    /// belongs to a nested conditional inside it. `None` if there is none in range.
+    fn else_between(&self, lo: u32, hi: u32) -> Option<u32> {
+        let i = self.code_tokens.partition_point(|(start, _)| *start < lo);
+        self.code_tokens[i..]
+            .iter()
+            .take_while(|(start, _)| *start < hi)
+            .find(|(_, kind)| *kind == TokenKind::ElseKw)
+            .map(|(start, _)| *start)
+    }
+
     /// The kind of the first non-`;` token that starts at or after `offset` — the token that follows a
     /// statement whose span ends there (its own tokens start before `offset`). `None` past the last
     /// token.
@@ -624,14 +636,29 @@ impl Printer<'_> {
         else_body: Option<&[Stmt]>,
         span: Span,
     ) -> Result<Doc, FmtError> {
+        // With an `else`, the then-block must end at the `else` keyword, not at the whole `if`'s
+        // `span.end`: otherwise the then-block's dangling-comment scan (`take_before(region_end)`)
+        // greedily swallows the else-branch's *leading* comment. Find the `else` token dividing the
+        // two blocks (the first one past the then-body, so a nested `else` inside it is skipped).
+        let then_lower = then_body
+            .last()
+            .map_or(cond.span().end, |s| s.span().end);
+        let else_kw = else_body
+            .is_some()
+            .then(|| self.else_between(then_lower, span.end))
+            .flatten();
+        let then_close = else_kw.unwrap_or(span.end);
         let mut parts = vec![
             Doc::text("if "),
             self.restricted_head(cond, true)?,
             Doc::text(" "),
-            self.block(then_body, cond.span().end, span.end)?,
+            self.block(then_body, cond.span().end, then_close)?,
         ];
         if let Some(else_body) = else_body {
             parts.push(Doc::text(" else "));
+            // The else-block's region starts at the `else` keyword (so its leading comment attaches
+            // here, and blank-line detection measures from the right place).
+            let else_start = else_kw.unwrap_or(then_close);
             // `else if` — the else body is a single nested `If`; print it inline (no extra braces).
             if let [
                 Stmt::If {
@@ -644,7 +671,7 @@ impl Printer<'_> {
             {
                 parts.push(self.if_stmt(cond, then_body, else_body.as_deref(), *span)?);
             } else {
-                parts.push(self.block(else_body, span.start, span.end)?);
+                parts.push(self.block(else_body, else_start, span.end)?);
             }
         }
         Ok(Doc::concat(parts))
