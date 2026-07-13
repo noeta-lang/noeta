@@ -151,6 +151,19 @@ pub struct FmtConfig {
     /// Trailing-`;` policy for statements. [`SemicolonStyle::Remove`] (default) strips redundant
     /// terminators; `Add` appends one to every simple statement; `Preserve` keeps the author's.
     pub semicolons: SemicolonStyle,
+    /// Columns per indentation level (`.editorconfig` `indent_size`). Default 4.
+    pub indent_width: usize,
+    /// Indent with a tab per level rather than [`indent_width`](Self::indent_width) spaces
+    /// (`.editorconfig` `indent_style = tab`). Default `false` (spaces).
+    pub use_tabs: bool,
+    /// End the file with exactly one newline (`.editorconfig` `insert_final_newline`). Default `true`.
+    pub final_newline: bool,
+    /// Strip trailing whitespace from every line — except content inside a verbatim tier body, which
+    /// is always preserved (`.editorconfig` `trim_trailing_whitespace`). Default `true`.
+    pub trim_trailing: bool,
+    // NOTE: `.editorconfig`'s `end_of_line` is intentionally not honored — converting a file to CRLF
+    // would change the byte content of multi-line string literals and tier bodies, which the re-parse
+    // safety gate compares, so it would (correctly) reject its own output. LF only.
 }
 
 impl Default for FmtConfig {
@@ -162,6 +175,10 @@ impl Default for FmtConfig {
             sort_imports: false,
             parens: ParenStyle::default(),
             semicolons: SemicolonStyle::default(),
+            indent_width: 4,
+            use_tabs: false,
+            final_newline: true,
+            trim_trailing: true,
         }
     }
 }
@@ -520,6 +537,43 @@ mod tests {
         )
         .unwrap();
         assert!(out.contains("\n  <a  b=\"c\"/>\n"), "got:\n{out}");
+    }
+
+    #[test]
+    fn indentation_width_tabs_and_final_newline_are_configurable() {
+        let src = "fn f(): int {\nreturn 1\n}\n";
+        let two = format_source(
+            "t.noe",
+            src,
+            &FmtConfig {
+                indent_width: 2,
+                ..FmtConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(two.contains("\n  return 1"), "2-space indent:\n{two:?}");
+
+        let tabs = format_source(
+            "t.noe",
+            src,
+            &FmtConfig {
+                use_tabs: true,
+                ..FmtConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(tabs.contains("\n\treturn 1"), "tab indent:\n{tabs:?}");
+
+        let no_nl = format_source(
+            "t.noe",
+            src,
+            &FmtConfig {
+                final_newline: false,
+                ..FmtConfig::default()
+            },
+        )
+        .unwrap();
+        assert!(!no_nl.ends_with('\n'), "final newline not suppressed:\n{no_nl:?}");
     }
 
     #[test]

@@ -1356,7 +1356,7 @@ fn cmd_fmt(
 
     for file in &files {
         let dir = file.parent().unwrap_or_else(|| std::path::Path::new("."));
-        let config = match manifest::resolve_fmt_config(dir) {
+        let config = match manifest::resolve_fmt_config(file) {
             Ok(config) => apply_fmt_overrides(config, parens, semicolons),
             Err(err) => {
                 eprintln!("noeta fmt: {err}");
@@ -1544,7 +1544,8 @@ fn cmd_fmt_stdin(
         }
     };
     let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let config = match manifest::resolve_fmt_config(&dir) {
+    // Stdin has no path; use a representative `*.noe` name in cwd so `.editorconfig` globs apply.
+    let config = match manifest::resolve_fmt_config(&dir.join("stdin.noe")) {
         Ok(config) => apply_fmt_overrides(config, parens, semicolons),
         Err(err) => {
             eprintln!("noeta fmt: {err}");

@@ -22,7 +22,6 @@ use noeta_span::{Source, SourceId, Span};
 use crate::doc::{Doc, render, render_protected};
 use crate::{ArrowStyle, FmtConfig, FmtError, ParenStyle, SemicolonStyle, trivia};
 
-const INDENT: isize = 4; // 4 spaces — the house style.
 
 /// A struct/class body member, unified so comments interleave across them in source order.
 enum Member<'a> {
@@ -85,12 +84,17 @@ pub fn print_program(
         tier_formatters,
     };
     let doc = p.stmt_seq(&program.stmts, program.span.start, program.span.end)?;
-    let (rendered, protected) = render_protected(&doc, config.line_width);
+    let indent_style = crate::doc::IndentStyle {
+        width: config.indent_width,
+        tabs: config.use_tabs,
+    };
+    let (rendered, protected) = render_protected(&doc, config.line_width, indent_style);
 
     // Strip trailing whitespace from every line (a blank line between indented items would otherwise
     // carry the indent), and end the file with exactly one newline. Whitespace inside a `RawText`
     // region (a verbatim tier body — a `@doc` Markdown line break, an `@html` `<pre>`) is *content*,
-    // not layout, so it is left intact: the trim stops at the first protected byte.
+    // not layout, so it is left intact: the trim stops at the first protected byte. `trim_trailing`
+    // and `final_newline` are `.editorconfig`-configurable.
     let is_protected = |byte: usize| protected.iter().any(|r| r.start <= byte && byte < r.end);
     let mut out = String::with_capacity(rendered.len());
     let mut pos = 0;
@@ -98,11 +102,13 @@ pub fn print_program(
         let has_nl = line.ends_with('\n');
         let content = if has_nl { &line[..line.len() - 1] } else { line };
         let mut end = content.len();
-        for (idx, ch) in content.char_indices().rev() {
-            if ch.is_whitespace() && !is_protected(pos + idx) {
-                end = idx;
-            } else {
-                break;
+        if config.trim_trailing {
+            for (idx, ch) in content.char_indices().rev() {
+                if ch.is_whitespace() && !is_protected(pos + idx) {
+                    end = idx;
+                } else {
+                    break;
+                }
             }
         }
         out.push_str(&content[..end]);
@@ -113,7 +119,7 @@ pub fn print_program(
     }
     let trimmed = out.trim_end_matches('\n');
     out.truncate(trimmed.len());
-    if !out.is_empty() {
+    if config.final_newline && !out.is_empty() {
         out.push('\n');
     }
     Ok(out)
@@ -147,7 +153,15 @@ pub fn print_stmt(
         tier_formatters: &no_formatters,
     };
     let doc = p.stmt(stmt)?;
-    let rendered = render(&doc, config.line_width);
+    let rendered = render_protected(
+        &doc,
+        config.line_width,
+        crate::doc::IndentStyle {
+            width: config.indent_width,
+            tabs: config.use_tabs,
+        },
+    )
+    .0;
     let mut out = String::with_capacity(rendered.len());
     for (i, line) in rendered.lines().enumerate() {
         if i > 0 {
@@ -332,7 +346,7 @@ impl Printer<'_> {
         let inner = self.stmt_seq(body, open, close)?;
         Ok(Doc::concat([
             Doc::text("{"),
-            Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+            Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
             Doc::hardline(),
             Doc::text("}"),
         ]))
@@ -898,7 +912,7 @@ impl Printer<'_> {
         )?;
         Ok(Doc::concat([
             Doc::text("{"),
-            Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+            Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
             Doc::hardline(),
             Doc::text("}"),
         ]))
@@ -937,7 +951,7 @@ impl Printer<'_> {
             let inner = Doc::join(ms, Doc::concat([Doc::hardline(), Doc::hardline()]));
             Doc::concat([
                 Doc::text("{"),
-                Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+                Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
                 Doc::hardline(),
                 Doc::text("}"),
             ])
@@ -957,7 +971,7 @@ impl Printer<'_> {
             let inner = Doc::join(ms, Doc::concat([Doc::hardline(), Doc::hardline()]));
             Doc::concat([
                 Doc::text("{"),
-                Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+                Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
                 Doc::hardline(),
                 Doc::text("}"),
             ])
@@ -1018,7 +1032,7 @@ impl Printer<'_> {
             )?;
             Doc::concat([
                 Doc::text("{"),
-                Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+                Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
                 Doc::hardline(),
                 Doc::text("}"),
             ])
@@ -1421,7 +1435,7 @@ impl Printer<'_> {
                 // Source-directed: preserve a break the author put around the operator.
                 let sep = if self.broke_between(lhs.span().end, rhs.span().start) {
                     Doc::concat([Doc::hardline(), Doc::text(format!("{} ", op.symbol()))])
-                        .nest(INDENT)
+                        .nest(self.indent_step())
                 } else {
                     Doc::text(format!(" {} ", op.symbol()))
                 };
@@ -1443,14 +1457,14 @@ impl Printer<'_> {
                 }
                 Doc::concat([
                     self.operand(head, 1, false)?,
-                    Doc::concat(tail).nest(INDENT),
+                    Doc::concat(tail).nest(self.indent_step()),
                 ])
                 .group()
             }
             Expr::Pipeline { left, right, .. } => {
                 // Source-directed: break at the operator only where the author did.
                 let sep = if self.broke_between(left.span().end, right.span().start) {
-                    Doc::concat([Doc::hardline(), Doc::text("|> ")]).nest(INDENT)
+                    Doc::concat([Doc::hardline(), Doc::text("|> ")]).nest(self.indent_step())
                 } else {
                     Doc::text(" |> ")
                 };
@@ -1641,7 +1655,7 @@ impl Printer<'_> {
                     Doc::join(elems, Doc::concat([Doc::text(","), Doc::line()])),
                     Doc::text(",").if_break(),
                 ])
-                .nest(INDENT),
+                .nest(self.indent_step()),
                 boundary,
                 Doc::text(close),
             ])
@@ -1656,7 +1670,7 @@ impl Printer<'_> {
                     Doc::join(elems, Doc::concat([Doc::text(","), Doc::hardline()])),
                     Doc::text(","),
                 ])
-                .nest(INDENT),
+                .nest(self.indent_step()),
                 Doc::hardline(),
                 Doc::text(close),
             ])
@@ -1866,7 +1880,7 @@ impl Printer<'_> {
         // The body's top level sits one indent level under the tier's own line; the formatter owns
         // its layout from there (so it can leave whitespace-significant content unindented).
         let tier_indent = self.line_indent(span.start);
-        let base = format!("{tier_indent}{}", " ".repeat(INDENT as usize));
+        let base = format!("{tier_indent}{}", self.indent_unit());
         let Some(reflowed) = formatter(&joined, &base) else {
             return Ok(None);
         };
@@ -1890,6 +1904,21 @@ impl Printer<'_> {
             Ok(Some(Doc::raw_text(format!("@{tier} {{\n{body}\n{tier_indent}}}"))))
         } else {
             Ok(Some(Doc::raw_text(format!("@{tier} {{ {} }}", body.trim()))))
+        }
+    }
+
+    /// Columns per indentation level (the `Doc` nesting step), from the configured `indent_width`.
+    fn indent_step(&self) -> isize {
+        self.config.indent_width as isize
+    }
+
+    /// One level of indentation as text — a tab, or `indent_width` spaces — for places that build an
+    /// indent string directly (a reflowed tier body's base) rather than through the `Doc` nesting.
+    fn indent_unit(&self) -> String {
+        if self.config.use_tabs {
+            "\t".to_string()
+        } else {
+            " ".repeat(self.config.indent_width)
         }
     }
 
@@ -1959,7 +1988,7 @@ impl Printer<'_> {
         Ok(Doc::concat([
             head,
             Doc::text(" {"),
-            Doc::concat([Doc::hardline(), inner]).nest(INDENT),
+            Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
             Doc::hardline(),
             Doc::text("}"),
         ]))

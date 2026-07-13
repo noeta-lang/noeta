@@ -319,15 +319,23 @@ pub fn cargo_package_name(crate_dir: &Path) -> Result<String, String> {
 /// `[fmt]` table yields [`FmtConfig::default`] (so `noeta fmt` works with zero configuration).
 /// Returns `Err` only when a present `[fmt]` table is malformed (wrong types / unknown arrow style),
 /// so a typo surfaces rather than being silently ignored.
-pub fn resolve_fmt_config(start_dir: &Path) -> Result<FmtConfig, String> {
-    let Some(path) = find(start_dir) else {
-        return Ok(FmtConfig::default());
-    };
-    let text = std::fs::read_to_string(&path)
-        .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
-    // The `[fmt]` grammar lives in `noeta-fmt` (shared with the LSP formatter); the CLI adds the
-    // manifest path to any error.
-    FmtConfig::from_toml(&text).map_err(|err| format!("invalid `{}`: {err}", path.display()))
+pub fn resolve_fmt_config(file: &Path) -> Result<FmtConfig, String> {
+    // Precedence: built-in defaults, then `.editorconfig` (walked up from the file), then the
+    // manifest's `[fmt]` table — so an explicit `noeta.toml` setting wins over `.editorconfig`, which
+    // wins over the defaults. (CLI flags, applied by the caller, win over all.)
+    let mut config = FmtConfig::default();
+    config.overlay_editorconfig(file);
+    let dir = file.parent().unwrap_or_else(|| Path::new("."));
+    if let Some(path) = find(dir) {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
+        // The `[fmt]` grammar lives in `noeta-fmt` (shared with the LSP formatter); the CLI adds the
+        // manifest path to any error.
+        config
+            .overlay_toml(&text)
+            .map_err(|err| format!("invalid `{}`: {err}", path.display()))?;
+    }
+    Ok(config)
 }
 
 impl Manifest {
