@@ -80,6 +80,7 @@ pub fn print_program(
         cursor: Cell::new(0),
         code_tokens: code_tokens(source, text_tiers),
         config,
+        force_flat: Cell::new(false),
     };
     let doc = p.stmt_seq(&program.stmts, program.span.start, program.span.end)?;
     let rendered = render(&doc, config.line_width);
@@ -120,6 +121,7 @@ pub fn print_stmt(
         cursor: Cell::new(cursor),
         code_tokens: code_tokens(source, text_tiers),
         config,
+        force_flat: Cell::new(false),
     };
     let doc = p.stmt(stmt)?;
     let rendered = render(&doc, config.line_width);
@@ -145,6 +147,11 @@ struct Printer<'a> {
     /// newline the formatter puts there terminates it (so a trailing `;` is redundant).
     code_tokens: Vec<(u32, TokenKind)>,
     config: &'a FmtConfig,
+    /// While set, source-directed line breaks are suppressed — collections, argument lists, and
+    /// parameter lists lay out flat regardless of how the author broke them. Used to format a tier
+    /// body's `${…}` hole **inline**: a hole sits mid-foreign-text (often inside an HTML attribute or
+    /// a JSON value), where a multi-line expansion would be wrong. See [`Printer::hole_inline`].
+    force_flat: Cell<bool>,
 }
 
 /// The `(start, kind)` of every non-`;` token in `source`, in order — the lookup behind
@@ -728,10 +735,11 @@ impl Printer<'_> {
         // Source-directed: keep a signature the author broke across lines broken. A parameter is a
         // simple `name: Type`, so — unlike a list, whose element may itself span lines — a newline
         // anywhere across the parameters reliably means the author expanded the list.
-        let broke = match (params.first(), params.last()) {
-            (Some(first), Some(last)) => self.broke_between(first.span.start, last.span.end),
-            _ => false,
-        };
+        let broke = !self.force_flat.get()
+            && match (params.first(), params.last()) {
+                (Some(first), Some(last)) => self.broke_between(first.span.start, last.span.end),
+                _ => false,
+            };
         Ok(self.delimited("(", docs, ")", false, broke))
     }
 
@@ -1314,16 +1322,15 @@ impl Printer<'_> {
 
     fn expr(&self, expr: &Expr) -> Result<Doc, FmtError> {
         Ok(match expr {
-            // An expression-tier block `@sql { … ${hole} … }` re-emits **verbatim from source**:
-            // the body is foreign-language text (escapes intact — the AST's `statics` are
-            // unescaped and must never be re-emitted), and holes are the author's expressions in
-            // the author's layout. Idempotent by construction.
-            Expr::TierExpr { span, .. } => Doc::raw_text(
-                self.source
-                    .get(span.start as usize..span.end as usize)
-                    .unwrap_or_default()
-                    .to_string(),
-            ),
+            // An expression-tier block `@sql { … ${hole} … }`. The foreign-language text between holes
+            // is emitted **verbatim from source** (escapes intact — the AST's `statics` are unescaped
+            // and must never be re-emitted), so the tier value is byte-for-byte preserved. Each `${…}`
+            // hole is Noeta, so it is reformatted **inline** (the one value-preserving thing fmt owns
+            // inside a tier body). Reflowing the foreign text itself is a separate, formatter-gated
+            // step (a registered tier body formatter); with none, the body stays exactly as written.
+            Expr::TierExpr {
+                statics, holes, span, ..
+            } => self.tier_body(statics, holes, *span)?,
             // Compiler-synthesized only (the parser never produces it, so the formatter — which
             // runs on parsed source — never reaches this); emit the qualified name defensively.
             Expr::NativeFnRef { module, func, .. } => Doc::text(format!("{module}.{func}")),
@@ -1644,7 +1651,7 @@ impl Printer<'_> {
     /// element (byte `first`). This is the source-directed signal [`Self::delimited`] keys off: the
     /// common "each element on its own line" layout always breaks right after the delimiter.
     fn seq_broke(&self, open_ref: u32, first: u32) -> bool {
-        self.broke_between(open_ref, first)
+        !self.force_flat.get() && self.broke_between(open_ref, first)
     }
 
     /// A call's `(arg, …)` list. `open_ref` is the byte just before the `(` (the callee's end), so a
@@ -1779,6 +1786,46 @@ impl Printer<'_> {
                     .next()
                     .map_or(true, |c| !c.is_alphanumeric() && c != '_')
             })
+    }
+
+    /// Reconstruct an expression-tier body (`@html { … ${hole} … }`): the foreign static text is
+    /// copied **verbatim from source** (byte-for-byte, escapes intact — value-preserving), and each
+    /// `${…}` hole's Noeta expression is reformatted inline. Reflowing the foreign text itself is a
+    /// separate, formatter-gated concern; here fmt only touches what it owns — the holes.
+    fn tier_body(&self, _statics: &[String], holes: &[Expr], span: Span) -> Result<Doc, FmtError> {
+        let slice = |a: u32, b: u32| self.source.get(a as usize..b as usize).unwrap_or_default();
+        let mut out = String::new();
+        let mut cursor = span.start;
+        for hole in holes {
+            let hspan = hole.span();
+            // Verbatim foreign text (including the opening `${`) up to the hole's expression.
+            out.push_str(slice(cursor, hspan.start));
+            out.push_str(&self.hole_inline(hole)?);
+            cursor = hspan.end;
+        }
+        out.push_str(slice(cursor, span.end));
+        Ok(Doc::raw_text(out))
+    }
+
+    /// Format a tier-body hole's expression to a single **inline** string: source-directed line
+    /// breaks are suppressed ([`Printer::force_flat`]) so a hole sitting inside an HTML attribute or a
+    /// JSON value never expands across lines. A hole whose source carries a comment is emitted
+    /// verbatim — fmt's expression printer does not interleave comments, so reformatting would drop
+    /// it (a conservative check on the raw slice; a `//`/`/*` inside a string only forgoes reflow).
+    fn hole_inline(&self, hole: &Expr) -> Result<String, FmtError> {
+        let hspan = hole.span();
+        let raw = self
+            .source
+            .get(hspan.start as usize..hspan.end as usize)
+            .unwrap_or_default();
+        if raw.contains("//") || raw.contains("/*") {
+            return Ok(raw.to_string());
+        }
+        let prev = self.force_flat.replace(true);
+        let doc = self.expr(hole);
+        self.force_flat.set(prev);
+        // A big finite width so groups lay out flat without risking arithmetic overflow in the renderer.
+        Ok(render(&doc?, 1_000_000))
     }
 
     fn match_expr(&self, scrutinee: &Expr, arms: &[MatchArm], span: Span) -> Result<Doc, FmtError> {
