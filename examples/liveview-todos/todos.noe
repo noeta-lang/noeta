@@ -11,7 +11,11 @@ use std.reactive.signal
 use std.http.server
 use std.http.{Request, Response}
 
-struct Todo { id: int  title: string  done: bool }
+struct Todo {
+    id: int
+    title: string
+    done: bool
+}
 
 todos = signal([
     Todo { id: 1, title: "Wire the reactive graph", done: true },

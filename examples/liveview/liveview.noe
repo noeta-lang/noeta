@@ -10,7 +10,7 @@
 // A consumer depends on this package, imports `render` (which brings the `@html` tier declaration
 // into scope) and `handle`, and writes ordinary HTML with `${…}` holes over signals. See
 // `examples/liveview-counter/`.
-namespace liveview;
+namespace liveview
 
 use std.reactive.{signal, computed, view, Signal, Computed}
 use std.http.server
@@ -79,7 +79,7 @@ fn render_value(v: dyn): string {
     if many != none {
         mut out = ""
         mut idx = 0
-        for child in (many ?? []) {
+        for child in many ?? [] {
             out = out ~ prefix_markers(child.skeleton, "c${idx}")
             idx = idx + 1
         }
