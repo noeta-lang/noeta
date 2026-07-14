@@ -5,6 +5,7 @@
 ; ---------------------------------------------------------------- comments
 (line_comment) @comment
 (block_comment) @comment
+(shebang) @comment
 
 ; ------------------------------------------------------------------ literals
 (integer_literal) @number

@@ -10,3 +10,6 @@ node_modules/
 *.wasm
 *.so
 *.dylib
+
+# Downloaded tree-sitter CLI binary (from tree-sitter-cli install).
+/tree-sitter
