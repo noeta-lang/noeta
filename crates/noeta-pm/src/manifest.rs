@@ -672,6 +672,16 @@ fn parse_dependency_map(deps: &toml::Table) -> Result<BTreeMap<String, Dependenc
                  `use {key}.…`)"
             ));
         }
+        // The key is the local import root: binding a dependency under a built-in root
+        // (`std`/`noeta`/`core`) would make `use std.…` resolve to that package instead of the
+        // compiler's built-in — an import-layer shadowing vector (namespace-protection #2/#3).
+        // Refuse it here so even a hand-edited manifest can't capture a core import root.
+        if crate::reserved::is_builtin(key) {
+            return Err(format!(
+                "dependency key `{key}` is a built-in import root (`use {key}.…` is the compiler's \
+                 own `{key}` namespace) and cannot be bound to a dependency — choose another key"
+            ));
+        }
         out.insert(key.clone(), parse_dependency(key, value)?);
     }
     Ok(out)
@@ -1005,6 +1015,18 @@ mod tests {
     fn a_dependency_key_must_be_an_identifier() {
         // The key is the local import root (`use bad-key.…` is not a valid path).
         assert!(Manifest::parse("[dependencies]\n\"bad-key\" = \"^1\"\n").is_err());
+    }
+
+    #[test]
+    fn a_dependency_key_cannot_capture_a_builtin_import_root() {
+        // namespace-protection #2/#3: binding a dep under `std`/`noeta`/`core` would shadow the
+        // compiler's built-in namespace at the import layer — refused even by hand-editing.
+        for key in ["std", "noeta", "core"] {
+            let err = Manifest::parse(&format!("[dependencies]\n{key} = \"^1\"\n")).unwrap_err();
+            assert!(err.contains("built-in import root"), "{key}: {err}");
+        }
+        // A near-miss that is *not* reserved is accepted (the guard is exact, not a prefix match).
+        assert!(Manifest::parse("[dependencies]\nstdx = \"^1\"\n").is_ok());
     }
 
     #[test]

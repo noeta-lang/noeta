@@ -37,7 +37,7 @@ use noeta_vm::{SessionOutput, VmBackend, VmSession};
 
 // The package manager (package-manager P2) now lives in the `noeta-pm` library so `noeta-lsp` and
 // `noeta-db` resolve dependencies through the same code; the CLI names its modules unqualified.
-use noeta_pm::{graph, lock, manifest, registry};
+use noeta_pm::{graph, lock, manifest, registry, reserved};
 // The L2 compile pipeline (source → runnable module) and the execution core live in `noeta-runner`
 // so the CLI and the standalone lean runtime share one implementation (dev-deps D3c). The CLI's
 // `run`/`dump`/`build`/`test` paths call these by the same names they used when defined here.
@@ -377,7 +377,10 @@ enum Command {
     /// the lockfile is updated (a git source is fetched now, so a typo'd URL/tag fails fast).
     Add {
         /// The import root you will `use` the dependency under (an identifier): `use <key>.…`.
-        key: String,
+        /// Optional: when omitted it is derived from the package's own root segment — the `package`
+        /// half of a `--package company/pkg`, or the `[package]` name of a `--path` dependency.
+        /// (A `--git` source with no derivable identity still needs an explicit key.)
+        key: Option<String>,
         /// A local path dependency (relative to the manifest).
         #[arg(long)]
         path: Option<PathBuf>,
@@ -390,6 +393,11 @@ enum Command {
         /// A registry SemVer requirement, e.g. `^1.2` (registry resolution lands in P2.5).
         #[arg(long)]
         version: Option<String>,
+        /// The registry package identity `company/package` for a `--version` dependency, decoupled
+        /// from the import-root key (like Cargo's `foo = { package = "real" }`). Required for a
+        /// registry dependency to resolve; also the source of a derived key when `key` is omitted.
+        #[arg(long)]
+        package: Option<String>,
     },
     /// Re-resolve dependencies and rewrite `noeta.lock` (package-manager P2.4): a git tag is
     /// re-fetched at the remote and re-pinned to its current commit SHA, so `update` picks up a
@@ -660,12 +668,14 @@ pub fn run_cli(
             git,
             tag,
             version,
+            package,
         } => cmd_add(
-            &key,
+            key.as_deref(),
             path.as_deref(),
             git.as_deref(),
             tag.as_deref(),
             version.as_deref(),
+            package.as_deref(),
         ),
         Command::Update => cmd_update(),
         Command::Publish {
@@ -681,15 +691,42 @@ pub fn run_cli(
     }
 }
 
-/// `noeta add <key> --path/--git+--tag/--version` — add a dependency to the nearest `noeta.toml`,
-/// then resolve so `noeta.lock` reflects it (package-manager P2.4d).
+/// `noeta add [key] --path/--git+--tag/--version [--package company/pkg]` — add a dependency to the
+/// nearest `noeta.toml`, then resolve so `noeta.lock` reflects it (package-manager P2.4d).
+///
+/// The import-root `key` may be omitted: it is then **derived** from the package's own root segment
+/// (the `package` half of `--package`, or a `--path` dep's `[package]` name). When a key *is* given
+/// but differs from the package's declared root, `add` warns — that binding is legitimate (like
+/// Cargo's rename) but means `use <key>.…`, not `use <root>.…`. A key that would capture a built-in
+/// import root (`std`/`noeta`/`core`) is refused: it would shadow the compiler's own namespace.
 fn cmd_add(
-    key: &str,
+    key: Option<&str>,
     path: Option<&std::path::Path>,
     git: Option<&str>,
     tag: Option<&str>,
     version: Option<&str>,
+    package: Option<&str>,
 ) -> ExitCode {
+    // `--package` names a registry identity, so it applies only to a `--version` dependency.
+    if package.is_some() && version.is_none() {
+        eprintln!(
+            "lang: `--package` names a registry identity (`company/package`) — it applies only to a \
+             `--version` dependency"
+        );
+        return ExitCode::from(2);
+    }
+    // Parse `--package` up front so a malformed identity fails before touching the manifest.
+    let package_name = match package {
+        Some(s) => match manifest::PackageName::parse(s) {
+            Ok(p) => Some(p),
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+
     // Exactly one source form.
     let value_toml = match (path, git, version) {
         (Some(p), None, None) => format!("{{ path = {} }}", toml_string(&p.display().to_string())),
@@ -706,7 +743,16 @@ fn cmd_add(
                 toml_string(tag)
             )
         }
-        (None, None, Some(req)) => toml_string(req),
+        (None, None, Some(req)) => match &package_name {
+            // A registry dependency resolves only with its identity, so fold `--package` into the
+            // table form; without it, keep the bare shorthand (it errors at resolve, pointing here).
+            Some(p) => format!(
+                "{{ version = {}, package = {} }}",
+                toml_string(req),
+                toml_string(&format!("{}/{}", p.company, p.package))
+            ),
+            None => toml_string(req),
+        },
         (None, None, None) => {
             eprintln!("lang: give a source — `--path`, `--git` (+ `--tag`), or `--version`");
             return ExitCode::from(2);
@@ -725,19 +771,79 @@ fn cmd_add(
         Ok(p) => p,
         Err(code) => return code,
     };
-    if let Err(err) = manifest::add_dependency(&manifest_path, key, &value_toml) {
+    let manifest_dir = manifest_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+
+    // The package's declared **root segment**, computed cheaply where the identity is known without
+    // fetching: `--package`'s `package` half, or a `--path` dep's `[package]` name. `None` for a
+    // `--git` (or bare `--version`) source, whose identity isn't known until it is materialized.
+    let derived_root: Option<String> = if let Some(p) = &package_name {
+        Some(p.package.clone())
+    } else if let Some(rel) = path {
+        let dep_manifest = manifest_dir.join(rel).join(manifest::MANIFEST_NAME);
+        manifest::current_package(&dep_manifest)
+            .ok()
+            .and_then(|(identity, _)| identity.split('/').nth(1).map(str::to_string))
+    } else {
+        None
+    };
+
+    // The import-root key: the one given, else the derived root, else an error (a `--git` source with
+    // no explicit key can't derive one).
+    let binding_key = match key {
+        Some(k) => k.to_string(),
+        None => match &derived_root {
+            Some(root) => {
+                println!("using import root `{root}` (derived from the package name)");
+                root.clone()
+            }
+            None => {
+                eprintln!(
+                    "lang: give an import-root key — `noeta add <key> …` (it can't be derived for \
+                     this source; pass `--package company/pkg` for a registry dependency, or name \
+                     the key explicitly)"
+                );
+                return ExitCode::from(2);
+            }
+        },
+    };
+
+    // A key that captures a built-in import root would shadow the compiler's own namespace — refuse
+    // it with a direct message (the manifest parser enforces the same invariant defensively).
+    if reserved::is_builtin(&binding_key) {
+        eprintln!(
+            "lang: `{binding_key}` is a built-in import root (the compiler's own `{binding_key}` \
+             namespace) and cannot be bound to a dependency — choose another key"
+        );
+        return ExitCode::from(2);
+    }
+
+    if let Err(err) = manifest::add_dependency(&manifest_path, &binding_key, &value_toml) {
         eprintln!("lang: {err}");
         return ExitCode::from(1);
     }
     // Resolve so the new dependency is fetched and the lock is refreshed; a bad URL/tag/path fails
     // here (the manifest edit already succeeded — the entry stays so the user can fix it).
     match graph::resolve_graph(&manifest_path) {
-        Ok(_) => {
-            println!("added `{key}` to {}", manifest_path.display());
+        Ok(resolved) => {
+            println!("added `{binding_key}` to {}", manifest_path.display());
+            // Now that the package is materialized, its *declared* root is authoritative (this also
+            // covers `--git`, whose root wasn't known before). If the chosen key differs, the binding
+            // is a deliberate rename — surface it so `use <key>.…` isn't a surprise.
+            if let Some(dep) = resolved.packages.iter().find(|p| p.key == binding_key)
+                && dep.root != binding_key
+            {
+                eprintln!(
+                    "warning: `{binding_key}` binds a package whose own module root is `{root}` — \
+                     imports resolve as `{binding_key}.…`, not `{root}.…`",
+                    root = dep.root
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("lang: added `{key}`, but resolving it failed: {err}");
+            eprintln!("lang: added `{binding_key}`, but resolving it failed: {err}");
             ExitCode::from(1)
         }
     }

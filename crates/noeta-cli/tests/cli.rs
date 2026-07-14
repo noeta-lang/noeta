@@ -4288,7 +4288,10 @@ fn noeta_add_edits_the_manifest_and_resolves() {
         .args(["add", "hi", "--path", "../lib"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("added `hi`"));
+        .stdout(predicate::str::contains("added `hi`"))
+        // The key `hi` differs from the package's own module root `lib` — a legitimate rename, but
+        // `add` warns so `use hi.…` (not `use lib.…`) isn't a surprise (namespace-protection #3).
+        .stderr(predicate::str::contains("module root is `lib`"));
 
     let manifest = std::fs::read_to_string(app.join("noeta.toml")).unwrap();
     assert!(
@@ -4308,6 +4311,87 @@ fn noeta_add_edits_the_manifest_and_resolves() {
         .assert()
         .success()
         .stdout("42\n");
+}
+
+#[test]
+fn noeta_add_derives_the_import_root() {
+    // namespace-protection #3: with no key given, `add` derives the import root from the dependency's
+    // own `[package]` name — and because the derived key then *matches* the package's root, there is
+    // no mismatch warning.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_add_derive");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("widgets");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        lib.join("m.noe"),
+        "namespace widgets.core;\npub fn v(): int { return 1; }\n",
+    )
+    .unwrap();
+
+    // No positional key — derived from `acme/widgets` → `widgets`.
+    lang()
+        .current_dir(&app)
+        .args(["add", "--path", "../widgets"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("using import root `widgets`")
+                .and(predicate::str::contains("added `widgets`")),
+        )
+        // Derived key == the package root, so there is no rename warning.
+        .stderr(predicate::str::contains("module root is").not());
+
+    let manifest = std::fs::read_to_string(app.join("noeta.toml")).unwrap();
+    assert!(
+        manifest.contains("widgets = { path = \"../widgets\" }"),
+        "derived key used as the dep key: {manifest}"
+    );
+}
+
+#[test]
+fn noeta_add_refuses_a_builtin_import_root() {
+    // namespace-protection #2/#3: binding a dependency under `std` would shadow the compiler's own
+    // `use std.…` namespace — refused before the manifest is touched.
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_add_reserved");
+    let _ = std::fs::remove_dir_all(&base);
+    let app = base.join("app");
+    let lib = base.join("lib");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&lib).unwrap();
+    let manifest = "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n";
+    std::fs::write(app.join("noeta.toml"), manifest).unwrap();
+    std::fs::write(
+        lib.join("noeta.toml"),
+        "[package]\nname = \"acme/lib\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(lib.join("m.noe"), "namespace lib.core;\n").unwrap();
+
+    lang()
+        .current_dir(&app)
+        .args(["add", "std", "--path", "../lib"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("built-in import root"));
+    // The manifest is untouched — the guard runs before the edit.
+    assert_eq!(
+        std::fs::read_to_string(app.join("noeta.toml")).unwrap(),
+        manifest,
+        "a refused add must not modify the manifest"
+    );
 }
 
 #[test]
