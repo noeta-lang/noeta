@@ -171,6 +171,48 @@ mod tests {
     }
 
     #[test]
+    fn every_docs_key_names_a_real_function_or_method() {
+        // Prose lives in `ExtModule::docs`/`ExtType::docs` tables keyed by name — co-located with
+        // the signature tables but not compile-checked against them. This guard fails CI if a
+        // rename or typo leaves a doc entry keyed to a name no function/method has, which would
+        // otherwise silently orphan the prose (the symbol quietly drops back to signature-only).
+        use std::collections::HashSet;
+        for ext in registry::extensions() {
+            for m in ext.modules() {
+                let names: HashSet<&str> = m
+                    .functions
+                    .iter()
+                    .chain(m.ctx_functions.iter())
+                    .map(|f| f.name)
+                    .collect();
+                for (key, _) in m.docs {
+                    assert!(
+                        names.contains(key),
+                        "module `{}.{}` docs key `{key}` names no function",
+                        ext.root(),
+                        m.name
+                    );
+                }
+            }
+            for t in ext.types() {
+                let names: HashSet<&str> = t
+                    .methods
+                    .iter()
+                    .chain(t.ctx_methods.iter())
+                    .map(|f| f.name)
+                    .collect();
+                for (key, _) in t.docs {
+                    assert!(
+                        names.contains(key),
+                        "type `{}` docs key `{key}` names no method",
+                        t.qualified()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn modules_are_sorted_and_lookups_resolve() {
         let mods = modules();
         assert!(mods.windows(2).all(|w| w[0].qualified <= w[1].qualified));
