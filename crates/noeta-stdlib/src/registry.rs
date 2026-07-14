@@ -2553,6 +2553,569 @@ const MATH_DOCS: &[(&str, &str)] = &[
         "atan2",
         "The angle in radians between the positive x-axis and the point `(x, y)`, in `[-π, π]`.",
     ),
+    (
+        "asin",
+        "The arcsine of `x` (which must be in `[-1, 1]`), in radians.",
+    ),
+    (
+        "acos",
+        "The arccosine of `x` (which must be in `[-1, 1]`), in radians.",
+    ),
+    (
+        "atan",
+        "The arctangent of `x`, in radians — see `atan2` for the two-argument form.",
+    ),
+    ("sinh", "The hyperbolic sine of `x`."),
+    ("cosh", "The hyperbolic cosine of `x`."),
+    ("tanh", "The hyperbolic tangent of `x`."),
+];
+
+/// Prose for the remaining `std.*` modules (docs-browser Arc 2 A3 backfill). Each table is keyed by
+/// function name and wired into its module below via `docs: <MODULE>_DOCS`; a function absent from
+/// its table renders signature-only. Kept next to the module tables so prose and signatures evolve
+/// together.
+const ARGS_DOCS: &[(&str, &str)] = &[(
+    "all",
+    "Every command-line argument passed to the program, in order (excluding the interpreter and the \
+     script path).",
+)];
+
+const CELL_DOCS: &[(&str, &str)] = &[(
+    "new",
+    "Create a mutable `Cell<T>` holding `value` — a single-slot interior-mutable container. Read \
+     with `.get()`, replace with `.set(v)`.",
+)];
+
+const RANDOM_DOCS: &[(&str, &str)] = &[
+    (
+        "float",
+        "A random `float` uniformly distributed in `[0, 1)`.",
+    ),
+    (
+        "int",
+        "A random `int` uniformly in `[low, high)` — `low` inclusive, `high` exclusive.",
+    ),
+    (
+        "seed",
+        "Seed the generator so subsequent draws are reproducible; the same seed yields the same \
+         sequence.",
+    ),
+];
+
+const TIME_DOCS: &[(&str, &str)] = &[
+    (
+        "monotonic",
+        "A monotonic clock reading in nanoseconds — meaningful only for measuring elapsed time, \
+         never as wall-clock.",
+    ),
+    (
+        "sleep",
+        "Block the current thread for `ms` milliseconds (synchronous — prefer `task.sleep` in async \
+         code).",
+    ),
+];
+
+const ENV_DOCS: &[(&str, &str)] = &[
+    (
+        "get",
+        "The value of environment variable `name`, or an empty string if it is unset.",
+    ),
+    (
+        "keys",
+        "The names of every environment variable currently set.",
+    ),
+    (
+        "load",
+        "Load a `.env` file (the given path, or `.env` by default) into a key→value map, also \
+         setting the variables in the process environment.",
+    ),
+    (
+        "parse",
+        "Parse `.env`-format text into a key→value map without touching the process environment.",
+    ),
+    (
+        "set",
+        "Set environment variable `name` to `value` for this process.",
+    ),
+];
+
+const OS_DOCS: &[(&str, &str)] = &[
+    (
+        "arch",
+        "The CPU architecture the program runs on (`\"x86_64\"`, `\"aarch64\"`, …).",
+    ),
+    ("cpus", "The number of logical CPUs available."),
+    ("cwd", "The process's current working directory."),
+    (
+        "exec",
+        "Run `program` with `args` to completion, returning its exit status, stdout, and stderr as \
+         an `ExecResult`.",
+    ),
+    (
+        "exec_async",
+        "Async `exec` — runs off the executor, yielding a `Future<ExecResult>`.",
+    ),
+    (
+        "exit",
+        "Exit the process immediately with the given status code (default 0).",
+    ),
+    ("hostname", "The machine's hostname."),
+    ("pid", "The process id of the current process."),
+    (
+        "platform",
+        "The operating system the program runs on (`\"linux\"`, `\"macos\"`, `\"windows\"`).",
+    ),
+    (
+        "shell_quote",
+        "Quote `s` so it is safe to embed as a single argument in a POSIX shell command.",
+    ),
+    (
+        "spawn",
+        "Start `program` with `args` as a child `Process` and return immediately — for streaming \
+         its I/O or awaiting it later.",
+    ),
+];
+
+const FS_DOCS: &[(&str, &str)] = &[
+    ("read", "Read the whole file at `path` as a UTF-8 string."),
+    ("read_async", "Async `read` — yields a `Future<string>`."),
+    (
+        "read_bytes",
+        "Read the whole file at `path` as raw `bytes`.",
+    ),
+    (
+        "read_lines",
+        "Read the file at `path` and split it into a list of lines (newlines removed).",
+    ),
+    (
+        "write",
+        "Write `contents` to `path`, replacing any existing file.",
+    ),
+    ("write_async", "Async `write` — yields a `Future<void>`."),
+    (
+        "write_bytes",
+        "Write raw `bytes` to `path`, replacing any existing file.",
+    ),
+    (
+        "append",
+        "Append `contents` to the file at `path`, creating it if absent.",
+    ),
+    ("append_async", "Async `append`."),
+    ("exists", "Whether a file or directory exists at `path`."),
+    ("exists_async", "Async `exists`."),
+    ("is_dir", "Whether `path` exists and is a directory."),
+    (
+        "list",
+        "The entry names of a directory (the given path, or the current directory).",
+    ),
+    ("list_async", "Async `list`."),
+    (
+        "mkdir",
+        "Create the directory at `path`, including any missing parent directories.",
+    ),
+    (
+        "open",
+        "Open the file at `path` in mode `\"r\"`/`\"w\"`/`\"a\"`, returning a `FileHandle` cursor for \
+         streaming reads/writes.",
+    ),
+    (
+        "remove",
+        "Delete the file at `path`; returns `true` if it existed.",
+    ),
+    ("remove_async", "Async `remove`."),
+];
+
+const JSON_DOCS: &[(&str, &str)] = &[
+    (
+        "parse",
+        "Parse a JSON string into a dynamic value — a `dyn` map/list/scalar tree.",
+    ),
+    ("stringify", "Serialize a value to a JSON string."),
+];
+
+const LOG_DOCS: &[(&str, &str)] = &[
+    ("debug", "Emit a debug-level log record with `message`."),
+    ("info", "Emit an info-level log record with `message`."),
+    ("warn", "Emit a warning-level log record with `message`."),
+    ("error", "Emit an error-level log record with `message`."),
+    (
+        "debug_with",
+        "Emit a debug-level record with `message` and structured key→value `fields`.",
+    ),
+    (
+        "info_with",
+        "Emit an info-level record with `message` and structured `fields`.",
+    ),
+    (
+        "warn_with",
+        "Emit a warning-level record with `message` and structured `fields`.",
+    ),
+    (
+        "error_with",
+        "Emit an error-level record with `message` and structured `fields`.",
+    ),
+    (
+        "log",
+        "Emit a log record at an arbitrary `level` with `message`.",
+    ),
+    (
+        "log_with",
+        "Emit a log record at an arbitrary `level` with `message` and structured `fields`.",
+    ),
+];
+
+const CRYPTO_DOCS: &[(&str, &str)] = &[
+    (
+        "sha256",
+        "The SHA-256 digest of the input (`string` or `bytes`) as raw `bytes`.",
+    ),
+    ("sha512", "The SHA-512 digest of the input as raw `bytes`."),
+    (
+        "sha1",
+        "The SHA-1 digest as `bytes`. **Weak** — avoid for new security uses.",
+    ),
+    (
+        "md5",
+        "The MD5 digest as `bytes`. **Insecure** — for checksums/compatibility only, never security.",
+    ),
+    (
+        "sha256_hasher",
+        "A streaming SHA-256 `Hasher` — `.update(data)` incrementally, then `.digest()`.",
+    ),
+    (
+        "sha512_hasher",
+        "A streaming SHA-512 `Hasher` (see `sha256_hasher`).",
+    ),
+    (
+        "hmac_sha256",
+        "The HMAC-SHA-256 of `message` under `key`, as `bytes`.",
+    ),
+    (
+        "hmac_sha512",
+        "The HMAC-SHA-512 of `message` under `key`, as `bytes`.",
+    ),
+    (
+        "hmac_sha256_verify",
+        "Verify that `tag` is the HMAC-SHA-256 of `message` under `key`, in constant time.",
+    ),
+    (
+        "hmac_sha512_verify",
+        "Verify that `tag` is the HMAC-SHA-512 of `message` under `key`, in constant time.",
+    ),
+    (
+        "bcrypt_hash",
+        "Hash `password` with bcrypt at the given `cost` (work factor, typically 10–12), returning \
+         the salted `$2b$` hash string.",
+    ),
+    (
+        "bcrypt_verify",
+        "Check `password` against a bcrypt `hash` in constant time; `true` on match.",
+    ),
+    (
+        "constant_time_eq",
+        "Compare two values byte-for-byte in constant time, so timing never leaks how much matched \
+         — for secrets and MACs.",
+    ),
+    (
+        "random_bytes",
+        "`n` cryptographically secure random bytes from the system CSPRNG.",
+    ),
+];
+
+const ID_DOCS: &[(&str, &str)] = &[
+    ("uuid", "A random (version 4) `Uuid`."),
+    (
+        "uuid_v7",
+        "A time-ordered (version 7) `Uuid` — sortable by creation time, ideal for database keys.",
+    ),
+    (
+        "uuid_v5",
+        "A deterministic (version 5) `Uuid` from a namespace UUID and a name — identical inputs \
+         always yield the same UUID.",
+    ),
+    (
+        "parse",
+        "Parse a UUID string into a `Uuid`; `none` if malformed.",
+    ),
+    (
+        "next_id",
+        "A process-unique, monotonically increasing integer id.",
+    ),
+    (
+        "namespace_dns",
+        "The well-known DNS namespace `Uuid`, for deriving v5 UUIDs with `uuid_v5`.",
+    ),
+    (
+        "namespace_url",
+        "The well-known URL namespace `Uuid`, for `uuid_v5`.",
+    ),
+    (
+        "namespace_oid",
+        "The well-known OID namespace `Uuid`, for `uuid_v5`.",
+    ),
+    (
+        "namespace_x500",
+        "The well-known X.500 namespace `Uuid`, for `uuid_v5`.",
+    ),
+];
+
+const HTTP_CLIENT_DOCS: &[(&str, &str)] = &[
+    (
+        "get",
+        "Perform an HTTP GET to `url` with optional headers, returning the `Response` (blocking).",
+    ),
+    (
+        "head",
+        "Perform an HTTP HEAD to `url` with optional headers, returning the `Response`.",
+    ),
+    (
+        "delete",
+        "Perform an HTTP DELETE to `url` with optional headers, returning the `Response`.",
+    ),
+    (
+        "post",
+        "Perform an HTTP POST to `url` with the given body and optional headers.",
+    ),
+    (
+        "put",
+        "Perform an HTTP PUT to `url` with the given body and optional headers.",
+    ),
+    (
+        "query",
+        "Perform an HTTP QUERY to `url` with the given body and optional headers.",
+    ),
+    (
+        "request",
+        "Perform an HTTP request with an arbitrary `method` to `url` — the general form the verb \
+         helpers build on.",
+    ),
+    ("get_async", "Async `get` — yields a `Future<Response>`."),
+    ("head_async", "Async `head`."),
+    ("delete_async", "Async `delete`."),
+    ("post_async", "Async `post`."),
+    ("put_async", "Async `put`."),
+    ("query_async", "Async `query`."),
+    ("request_async", "Async `request`."),
+];
+
+const HTTP_SERVER_DOCS: &[(&str, &str)] = &[
+    (
+        "serve",
+        "Start an HTTP server on `port`, dispatching each `Request` to `handler` and replying with \
+         its `Response`. Blocks, serving until the process exits.",
+    ),
+    (
+        "response",
+        "Build an HTTP `Response` from a status code, an optional body, and optional headers — what \
+         a `serve` handler returns.",
+    ),
+    (
+        "websocket",
+        "Upgrade the current request to a WebSocket, driving the connection with `handler(socket)`.",
+    ),
+    (
+        "liveview_js",
+        "The client-side LiveView JavaScript runtime as a string, to embed in a served page.",
+    ),
+];
+
+const TASK_DOCS: &[(&str, &str)] = &[
+    (
+        "sleep",
+        "A future that completes after `ms` milliseconds, yielding to other tasks meanwhile.",
+    ),
+    (
+        "all",
+        "Await every future in the list concurrently and return their results in order; fails if any \
+         fails.",
+    ),
+    (
+        "race",
+        "Await the first future in the list to complete and return its result.",
+    ),
+    (
+        "map_bounded",
+        "Map `f` over the list concurrently with at most `limit` futures in flight at once, \
+         preserving order.",
+    ),
+];
+
+const REACTIVE_DOCS: &[(&str, &str)] = &[
+    (
+        "signal",
+        "A writable reactive `Signal<T>` holding `value` — `.get()` reads it (tracking the reader), \
+         `.set(v)` updates it and notifies dependents.",
+    ),
+    (
+        "computed",
+        "A derived `Computed<T>` that memoizes `f()` and recomputes when a signal it read changes.",
+    ),
+    (
+        "effect",
+        "Run `f` now and re-run it whenever a signal it read changes — for side effects; returns an \
+         `Effect` handle to stop it.",
+    ),
+    (
+        "view",
+        "The current reactive `View` — the root for rendering reactive UI.",
+    ),
+];
+
+const TEMPLATE_DOCS: &[(&str, &str)] = &[(
+    "render",
+    "Assemble a string from a template's literal `parts` and the rendered values of its `holes`, \
+     interleaved — the desugaring target of `@template` string tiers.",
+)];
+
+const METRICS_DOCS: &[(&str, &str)] = &[
+    (
+        "counter",
+        "A monotonically increasing `Counter` metric named `name` — record with `.add(n)`.",
+    ),
+    (
+        "up_down_counter",
+        "A `Counter` named `name` that can increase and decrease (`.add(n)`, negatives allowed).",
+    ),
+    (
+        "gauge",
+        "A `Gauge` metric named `name` recording a current value with `.record(v)`.",
+    ),
+    (
+        "histogram",
+        "A `Histogram` metric named `name` recording a distribution with `.record(v)`.",
+    ),
+];
+
+const TRACING_DOCS: &[(&str, &str)] = &[
+    (
+        "span",
+        "Start a new tracing `Span` named `name` in the current trace context.",
+    ),
+    (
+        "span_from",
+        "Start a `Span` named `name` as a child of the context serialized in `parent`.",
+    ),
+    (
+        "current_context",
+        "The current trace context serialized to a string, to propagate across a boundary (e.g. \
+         into `span_from`).",
+    ),
+    (
+        "with_span",
+        "Run `f` inside a new span named `name`, closing the span when it returns; returns `f`'s \
+         result.",
+    ),
+];
+
+const CRDT_DOCS: &[(&str, &str)] = &[
+    (
+        "gcounter",
+        "An empty grow-only counter (`GCounter`) — a CRDT that only increments and merges by taking \
+         the per-replica maximum.",
+    ),
+    (
+        "gset",
+        "An empty grow-only set (`GSet`) — a CRDT with `add` and union merge; elements are never \
+         removed.",
+    ),
+    (
+        "pncounter",
+        "An empty increment/decrement counter (`PnCounter`) — a CRDT tracking positive and negative \
+         contributions per replica.",
+    ),
+];
+
+const P2P_DOCS: &[(&str, &str)] = &[
+    (
+        "identity",
+        "This peer's public identity string if p2p networking is configured; `none` otherwise.",
+    ),
+    (
+        "publish",
+        "Publish `data` to the peer-to-peer `topic`, delivering it to subscribed peers.",
+    ),
+    (
+        "receive",
+        "Await the next message published to `topic` by a peer; `none` when the topic closes.",
+    ),
+];
+
+const SYNCED_DOCS: &[(&str, &str)] = &[(
+    "synced_signal",
+    "A `SyncedSignal<T>` over a CRDT value, replicated to peers under `topic` (optionally restricted \
+     to `peers`) — local edits merge conflict-free across the network.",
+)];
+
+const QUAT_DOCS: &[(&str, &str)] = &[
+    (
+        "mul",
+        "The Hamilton product `a * b` — composes two rotations.",
+    ),
+    (
+        "conjugate",
+        "The conjugate of `q` (negates its vector part) — the inverse of a unit rotation.",
+    ),
+    (
+        "normalize",
+        "`q` scaled to unit length — a valid rotation quaternion.",
+    ),
+    ("length", "The magnitude (norm) of quaternion `q`."),
+    ("dot", "The dot product of two quaternions."),
+    (
+        "rotate_vec3",
+        "Rotate a 3-vector by the unit quaternion `q`.",
+    ),
+    (
+        "slerp",
+        "Spherical linear interpolation between rotations `a` and `b` by `t` in `[0, 1]` — smooth, \
+         constant angular speed.",
+    ),
+];
+
+const VEC_DOCS: &[(&str, &str)] = &[
+    ("add", "The component-wise sum of two vectors."),
+    ("sub", "The component-wise difference `a - b`."),
+    (
+        "scale",
+        "Vector `v` scaled by the scalar `s` (component-wise).",
+    ),
+    ("dot", "The dot product of two vectors."),
+    ("cross", "The cross product of two 3-vectors."),
+    ("length", "The magnitude (Euclidean length) of vector `v`."),
+    ("distance", "The Euclidean distance between two points."),
+    ("normalize", "`v` scaled to unit length."),
+    (
+        "lerp",
+        "Linear interpolation between `a` and `b` by `t` in `[0, 1]`.",
+    ),
+    ("clamp", "`v` clamped component-wise between `lo` and `hi`."),
+    ("min", "The component-wise minimum of two vectors."),
+    ("max", "The component-wise maximum of two vectors."),
+    ("abs", "The component-wise absolute value of `v`."),
+    (
+        "reflect",
+        "Reflect vector `v` about the plane with unit normal `n`.",
+    ),
+    (
+        "add_all",
+        "Bulk kernel: component-wise add across two flat packed vector buffers in one pass.",
+    ),
+    (
+        "sub_all",
+        "Bulk kernel: component-wise subtract across two packed vector buffers.",
+    ),
+    (
+        "scale_all",
+        "Bulk kernel: scale every vector in a packed buffer by a scalar.",
+    ),
+    (
+        "dot_all",
+        "Bulk kernel: the per-element dot products of two packed vector buffers.",
+    ),
+    (
+        "length_all",
+        "Bulk kernel: the magnitude of every vector in a packed buffer.",
+    ),
 ];
 
 const RANDOM_FNS: &[ExtFn] = &[
@@ -3073,6 +3636,7 @@ const CORE_MODULES: &[ExtModule] = &[
         functions: RANDOM_FNS,
         dispatch: random_dispatch,
         deep_marshal: false,
+        docs: RANDOM_DOCS,
         ..ExtModule::DEFAULTS
     },
     ExtModule {
@@ -3080,6 +3644,7 @@ const CORE_MODULES: &[ExtModule] = &[
         functions: TIME_FNS,
         dispatch: time_dispatch,
         deep_marshal: false,
+        docs: TIME_DOCS,
         ..ExtModule::DEFAULTS
     },
     ExtModule {
@@ -3087,6 +3652,7 @@ const CORE_MODULES: &[ExtModule] = &[
         functions: ENV_FNS,
         dispatch: env_dispatch,
         deep_marshal: false,
+        docs: ENV_DOCS,
         ..ExtModule::DEFAULTS
     },
     // `os` (stdlib-gaps): system introspection + subprocess exec + exit over the Os capability.
@@ -3097,6 +3663,7 @@ const CORE_MODULES: &[ExtModule] = &[
         functions: OS_FNS,
         dispatch: os_dispatch,
         deep_marshal: true,
+        docs: OS_DOCS,
         ..ExtModule::DEFAULTS
     },
     // `tracing` (native OTEL T1–T2) — the tracing SDK facade. `span`/`with_span`/`current_context`
@@ -3107,6 +3674,7 @@ const CORE_MODULES: &[ExtModule] = &[
         name: "tracing",
         ctx_functions: crate::tracing::TRACING_CTX_FNS,
         ctx_dispatch: Some(|func, ctx, args| crate::tracing::tracing_ctx_dispatch(func, ctx, args)),
+        docs: TRACING_DOCS,
         ..ExtModule::DEFAULTS
     },
     // `log` (native OTEL Phase L) — the logs SDK facade. Emits OTel `LogRecord`s auto-correlated to
@@ -3116,6 +3684,7 @@ const CORE_MODULES: &[ExtModule] = &[
         name: "log",
         ctx_functions: crate::log::LOG_CTX_FNS,
         ctx_dispatch: Some(|func, ctx, args| crate::log::log_ctx_dispatch(func, ctx, args)),
+        docs: LOG_DOCS,
         ..ExtModule::DEFAULTS
     },
     // `metrics` (native OTEL Phase M) — the metrics SDK facade. Instrument constructors are
@@ -3125,6 +3694,7 @@ const CORE_MODULES: &[ExtModule] = &[
         name: "metrics",
         ctx_functions: crate::metrics::METRICS_CTX_FNS,
         ctx_dispatch: Some(|func, ctx, args| crate::metrics::metrics_ctx_dispatch(func, ctx, args)),
+        docs: METRICS_DOCS,
         ..ExtModule::DEFAULTS
     },
     ExtModule {
@@ -3132,6 +3702,7 @@ const CORE_MODULES: &[ExtModule] = &[
         functions: ARGS_FNS,
         dispatch: args_dispatch,
         deep_marshal: false,
+        docs: ARGS_DOCS,
         ..ExtModule::DEFAULTS
     },
     ExtModule {
@@ -3139,6 +3710,7 @@ const CORE_MODULES: &[ExtModule] = &[
         functions: FS_FNS,
         dispatch: fs_dispatch,
         deep_marshal: false,
+        docs: FS_DOCS,
         ..ExtModule::DEFAULTS
     },
     ExtModule {
@@ -3147,6 +3719,7 @@ const CORE_MODULES: &[ExtModule] = &[
         dispatch: json_dispatch,
         // `json.stringify` introspects an arbitrary value, so its arguments are marshalled deeply.
         deep_marshal: true,
+        docs: JSON_DOCS,
         ..ExtModule::DEFAULTS
     },
     // The `task` concurrency module (higher-order-abi H0/H2): its functions need the executor,
@@ -3155,6 +3728,7 @@ const CORE_MODULES: &[ExtModule] = &[
         name: "task",
         ctx_functions: crate::task::TASK_CTX_FNS,
         ctx_dispatch: Some(crate::task::task_ctx_dispatch),
+        docs: TASK_DOCS,
         ..ExtModule::DEFAULTS
     },
     // `cell` (higher-order-abi H4) — the Class-3 proving module: `cell.new(v)` retains the value
@@ -3163,6 +3737,7 @@ const CORE_MODULES: &[ExtModule] = &[
         name: "cell",
         ctx_functions: crate::cell::CELL_CTX_FNS,
         ctx_dispatch: Some(|func, ctx, args| crate::cell::cell_ctx_dispatch(func, ctx, args)),
+        docs: CELL_DOCS,
         ..ExtModule::DEFAULTS
     },
     // `reactive` (higher-order-abi H5) — the last virtual module, now fully registry-backed:
@@ -3173,6 +3748,7 @@ const CORE_MODULES: &[ExtModule] = &[
         ctx_dispatch: Some(|func, ctx, args| {
             crate::reactive::reactive_ctx_dispatch(func, ctx, args)
         }),
+        docs: REACTIVE_DOCS,
         ..ExtModule::DEFAULTS
     },
     // `template` (expr-tiers arc) — the native handler for the `@json` expression tier: takes the
@@ -3184,6 +3760,7 @@ const CORE_MODULES: &[ExtModule] = &[
         ctx_dispatch: Some(|func, ctx, args| {
             crate::template::template_ctx_dispatch(func, ctx, args)
         }),
+        docs: TEMPLATE_DOCS,
         ..ExtModule::DEFAULTS
     },
 ];
@@ -3194,6 +3771,7 @@ const ID_MODULES: &[ExtModule] = &[ExtModule {
     functions: ID_FNS,
     dispatch: id_dispatch,
     deep_marshal: false,
+    docs: ID_DOCS,
     ..ExtModule::DEFAULTS
 }];
 
@@ -3203,6 +3781,7 @@ const CRYPTO_MODULES: &[ExtModule] = &[ExtModule {
     functions: CRYPTO_FNS,
     dispatch: crypto_dispatch,
     deep_marshal: false,
+    docs: CRYPTO_DOCS,
     ..ExtModule::DEFAULTS
 }];
 
@@ -3223,6 +3802,7 @@ const HTTP_MODULES: &[ExtModule] = &[
         // when the program can reach a client function (package-manager P1.0). Single source of truth
         // for the module→ring map the footprint scan reads.
         ring: Some("ring-http-client"),
+        docs: HTTP_CLIENT_DOCS,
         ..ExtModule::DEFAULTS
     },
     ExtModule {
@@ -3238,6 +3818,7 @@ const HTTP_MODULES: &[ExtModule] = &[
         // The inbound serve loop rides tokio (already linked for `fs`) — no separable native dep, so
         // no ring. A `use std.http.server` program links no reqwest, precisely (P0.3b split).
         ring: None,
+        docs: HTTP_SERVER_DOCS,
         ..ExtModule::DEFAULTS
     },
 ];
@@ -3256,6 +3837,7 @@ const VEC_MODULES: &[ExtModule] = &[
         ctx_dispatch: Some(crate::vec3::vec_ctx_dispatch),
         // The same kernels as opt-in METHODS (`impl vec.Kernels for T {}`, kernel-methods K1).
         bundles: &[crate::vec3::VEC_KERNELS],
+        docs: VEC_DOCS,
         ..ExtModule::DEFAULTS
     },
     ExtModule {
@@ -3263,6 +3845,7 @@ const VEC_MODULES: &[ExtModule] = &[
         functions: QUAT_FNS,
         dispatch: quat_dispatch,
         deep_marshal: false,
+        docs: QUAT_DOCS,
         ..ExtModule::DEFAULTS
     },
 ];
@@ -3277,6 +3860,7 @@ const P2P_MODULES: &[ExtModule] = &[
         name: "crdt",
         functions: crate::crdt::CRDT_FNS,
         dispatch: crate::crdt::crdt_dispatch,
+        docs: CRDT_DOCS,
         ..ExtModule::DEFAULTS
     },
     // `p2p` (p2p P1) — publish/receive over the `P2p` host capability. `publish` is a plain host
@@ -3288,6 +3872,7 @@ const P2P_MODULES: &[ExtModule] = &[
         functions: crate::p2p::P2P_FNS,
         dispatch: crate::p2p::p2p_dispatch,
         ring: Some("ring-p2p"),
+        docs: P2P_DOCS,
         ..ExtModule::DEFAULTS
     },
     // `synced` (p2p P2) — `synced_signal(initial, topic)`, a CRDT-backed signal in the reactive
@@ -3298,6 +3883,7 @@ const P2P_MODULES: &[ExtModule] = &[
         ctx_functions: crate::synced::SYNCED_CTX_FNS,
         ctx_dispatch: Some(|func, ctx, args| crate::synced::synced_ctx_dispatch(func, ctx, args)),
         ring: Some("ring-p2p"),
+        docs: SYNCED_DOCS,
         ..ExtModule::DEFAULTS
     },
 ];

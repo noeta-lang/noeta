@@ -603,12 +603,37 @@ const DURATION_METHODS: &[ExtFn] = &[ExtFn {
     ret: Concrete(Str),
 }];
 
+/// Prose for `std.datetime` (docs-browser Arc 2 A3), keyed by function name.
+const DATETIME_DOCS: &[(&str, &str)] = &[
+    ("now", "The current wall-clock time as an `Instant`."),
+    (
+        "from_unix_ms",
+        "The `Instant` at `ms` milliseconds since the Unix epoch.",
+    ),
+    (
+        "parse",
+        "Parse an ISO-8601 / RFC-3339 timestamp string into an `Instant`; `none` if it is not a \
+         valid timestamp.",
+    ),
+    (
+        "seconds",
+        "A `Duration` of `n` seconds, for offsetting an `Instant`.",
+    ),
+    ("minutes", "A `Duration` of `n` minutes."),
+    ("hours", "A `Duration` of `n` hours."),
+    ("days", "A `Duration` of `n` days."),
+    ("weeks", "A `Duration` of `n` weeks."),
+    ("months", "A `Duration` of `n` calendar months."),
+    ("years", "A `Duration` of `n` calendar years."),
+];
+
 const DATETIME_MODULES: &[ExtModule] = &[ExtModule {
     name: "datetime",
     functions: DATETIME_FNS,
     dispatch: datetime_dispatch,
     // Ring-attributed so the AOT footprint scan drops jiff from a binary that never imports it.
     ring: Some("ring-datetime"),
+    docs: DATETIME_DOCS,
     ..ExtModule::DEFAULTS
 }];
 

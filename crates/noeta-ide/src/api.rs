@@ -151,12 +151,10 @@ mod tests {
             .find(|f| f.name == "sqrt")
             .expect("math.sqrt exists");
         assert_eq!(sqrt.signature, "fn sqrt(float): float");
-        // The Arc-2 pilot prose is attached.
         assert!(sqrt.doc.contains("square root"));
-        // An undocumented function still appears, signature-only.
-        let sinh = math.functions.iter().find(|f| f.name == "sinh").unwrap();
-        assert!(sinh.doc.is_empty());
-        assert_eq!(sinh.signature, "fn sinh(float): float");
+        let hyp = math.functions.iter().find(|f| f.name == "hypot").unwrap();
+        assert!(hyp.doc.contains("Euclidean"));
+        assert_eq!(hyp.signature, "fn hypot(float, float): float");
     }
 
     #[test]
