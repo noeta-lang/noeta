@@ -131,7 +131,9 @@ pub fn compile_whole_file(
     // The active tier set is the union of any `--target`'s live tiers (from `noeta.toml`) and any
     // explicit `--tier` flags, resolved before loading so a bad target fails fast.
     let mut active: Vec<String> = match target {
-        Some(name) => manifest::resolve_active_tiers(file, name).map_err(CompileFailure::Message)?,
+        Some(name) => {
+            manifest::resolve_active_tiers(file, name).map_err(CompileFailure::Message)?
+        }
         None => Vec::new(),
     };
     for tier in tiers {

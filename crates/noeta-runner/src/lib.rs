@@ -20,7 +20,7 @@ use noeta_vm::{JitReport, TraceFrame, VmBackend};
 
 pub mod compile;
 
-pub use compile::{Compiled, CompileFailure, compile_real, compile_whole_file, resolve_providers};
+pub use compile::{CompileFailure, Compiled, compile_real, compile_whole_file, resolve_providers};
 
 /// Run an already-compiled [`Module`] against the real host — the shared execution core of the
 /// CLI's source-run path and the `.noeb` bundle runner (P-AOT L1.2), which loads a module directly
@@ -73,10 +73,12 @@ pub fn run_compiled_module(
     app_id: Option<String>,
     jit_stats: bool,
 ) -> ExitCode {
-    let (result, trace, report) = run_module_real_host(Arc::clone(&module), args, app_id, jit_stats);
+    let (result, trace, report) =
+        run_module_real_host(Arc::clone(&module), args, app_id, jit_stats);
     print!("{}", result.stdout);
     let _ = std::io::stdout().flush();
-    let _ = std::io::stderr().write_all(render_mapped(sources, result.diagnostics.iter()).as_bytes());
+    let _ =
+        std::io::stderr().write_all(render_mapped(sources, result.diagnostics.iter()).as_bytes());
     if trace.len() >= 2 {
         eprint!("{}", noeta_vm::render_trace(&trace, sources));
     }
@@ -158,7 +160,9 @@ pub fn run_source_file(
     jit_stats: bool,
 ) -> ExitCode {
     match compile::compile_whole_file(file, tiers, target, no_cache) {
-        Ok(compiled) => run_compiled_module(compiled.module, &compiled.sources, args, app_id, jit_stats),
+        Ok(compiled) => {
+            run_compiled_module(compiled.module, &compiled.sources, args, app_id, jit_stats)
+        }
         Err(failure) => failure.report(),
     }
 }

@@ -990,7 +990,9 @@ fn cmd_publish(
                             .map_or(0, |mods| {
                                 mods.iter()
                                     .map(|m| {
-                                        m.get("items").and_then(|i| i.as_array()).map_or(0, Vec::len)
+                                        m.get("items")
+                                            .and_then(|i| i.as_array())
+                                            .map_or(0, Vec::len)
                                     })
                                     .sum()
                             });

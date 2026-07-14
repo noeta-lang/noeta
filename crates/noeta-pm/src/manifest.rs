@@ -407,13 +407,13 @@ impl Manifest {
 
             // Target-scoped dependencies (dev-deps arc): parsed before tiers so a tier this target
             // declares may name a target-scoped dep as its provider.
-            let target_deps = match target_table.get("dependencies") {
-                None => BTreeMap::new(),
-                Some(v) => parse_dependency_map(
-                    v.as_table()
-                        .ok_or_else(|| format!("target `{name}`: `dependencies` must be a table"))?,
-                )?,
-            };
+            let target_deps =
+                match target_table.get("dependencies") {
+                    None => BTreeMap::new(),
+                    Some(v) => parse_dependency_map(v.as_table().ok_or_else(|| {
+                        format!("target `{name}`: `dependencies` must be a table")
+                    })?)?,
+                };
 
             let mut tiers = BTreeMap::new();
             if let Some(tiers_value) = target_table.get("tiers") {

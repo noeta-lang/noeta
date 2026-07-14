@@ -44,9 +44,43 @@ impl Extension for HtmlExtension {
 /// pragmatic, not exhaustive, list — the common structural elements. `button` is included: templates
 /// use it as a standalone control.)
 const BLOCK: &[&str] = &[
-    "html", "head", "body", "div", "section", "article", "header", "footer", "nav", "main", "aside",
-    "p", "ul", "ol", "li", "dl", "dt", "dd", "table", "thead", "tbody", "tfoot", "tr", "td", "th",
-    "form", "fieldset", "figure", "blockquote", "hr", "h1", "h2", "h3", "h4", "h5", "h6", "button",
+    "html",
+    "head",
+    "body",
+    "div",
+    "section",
+    "article",
+    "header",
+    "footer",
+    "nav",
+    "main",
+    "aside",
+    "p",
+    "ul",
+    "ol",
+    "li",
+    "dl",
+    "dt",
+    "dd",
+    "table",
+    "thead",
+    "tbody",
+    "tfoot",
+    "tr",
+    "td",
+    "th",
+    "form",
+    "fieldset",
+    "figure",
+    "blockquote",
+    "hr",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "button",
 ];
 
 /// Void elements — no closing tag, no children — emitted inline as atoms.
@@ -134,7 +168,10 @@ fn find_close(chars: &[char], from: usize, name: &str) -> Option<usize> {
             .all(|(a, b)| a.eq_ignore_ascii_case(b))
         {
             // The name must end here (next char is `>`, whitespace, or `/`), not be a longer name.
-            if matches!(chars.get(i + needle.len()), Some('>' | ' ' | '\t' | '\n' | '\r' | '/')) {
+            if matches!(
+                chars.get(i + needle.len()),
+                Some('>' | ' ' | '\t' | '\n' | '\r' | '/')
+            ) {
                 return Some(i);
             }
         }
@@ -421,7 +458,10 @@ mod tests {
         // With a "css" sub-formatter, a `<style>` body is reflowed by it (here: uppercased, indented
         // one level under `<style>`); the `<style>`/`</style>` tags keep HTML block layout.
         let out = fmt_with_css("<div><style>a{color:red}</style></div>");
-        assert_eq!(out, "<div>\n  <style>\n    A{COLOR:RED}\n  </style>\n</div>");
+        assert_eq!(
+            out,
+            "<div>\n  <style>\n    A{COLOR:RED}\n  </style>\n</div>"
+        );
     }
 
     #[test]
@@ -436,8 +476,16 @@ mod tests {
     fn pre_content_is_verbatim_uncollapsed_and_unindented() {
         // The whitespace inside <pre> is significant: it survives byte-for-byte, gets no base indent,
         // and is not collapsed — even though the <pre> tag itself is indented as a block.
-        let out = html_reindent("<div><pre>  keep\n    these   spaces\n</pre></div>", "", &|_, _, _| None).expect("ok");
-        assert_eq!(out, "<div>\n  <pre>  keep\n    these   spaces\n</pre>\n</div>");
+        let out = html_reindent(
+            "<div><pre>  keep\n    these   spaces\n</pre></div>",
+            "",
+            &|_, _, _| None,
+        )
+        .expect("ok");
+        assert_eq!(
+            out,
+            "<div>\n  <pre>  keep\n    these   spaces\n</pre>\n</div>"
+        );
     }
 
     #[test]
@@ -448,7 +496,8 @@ mod tests {
 
     #[test]
     fn is_idempotent() {
-        let once = fmt("<div><p>hi <b>\u{0}</b></p><ul><li>a</li></ul><pre>  raw\n  text\n</pre></div>");
+        let once =
+            fmt("<div><p>hi <b>\u{0}</b></p><ul><li>a</li></ul><pre>  raw\n  text\n</pre></div>");
         assert_eq!(fmt(&once), once, "html reindent is not idempotent");
     }
 
