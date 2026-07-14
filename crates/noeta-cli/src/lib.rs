@@ -193,6 +193,11 @@ enum Command {
         /// registry.
         #[arg(long, requires = "api", value_name = "NAMESPACE")]
         root: Option<String>,
+        /// With `--api --root`, fail (before emitting docs) if the package registers any module or
+        /// extern type outside its root namespace — the publish quality gate against a type that
+        /// leaked into `std` (a missing `namespace:`). Exit 2 lists the offenders.
+        #[arg(long, requires = "root")]
+        lint: bool,
     },
     /// Compile a program to a self-contained `.noeb` bundle (P-AOT L1): the versioned bytecode a
     /// `noeta run app.noeb` executes directly, so a program ships **without its `.noe` source**.
@@ -594,7 +599,8 @@ pub fn run_cli(
             target,
             api,
             root,
-        } => cmd_doc(&file, &package, &out, &target, api, root.as_deref()),
+            lint,
+        } => cmd_doc(&file, &package, &out, &target, api, root.as_deref(), lint),
         Command::Build {
             file,
             out,
@@ -4908,7 +4914,24 @@ fn web_docs_url(base: &str, name: &str, version: &str) -> String {
 /// native modules). Prints the schema-1 `docs.json` to stdout, or — with `--out` — writes the
 /// artifact and renders its Markdown tree (the same schema the hosted registry renders). `root`
 /// scopes to one extension's namespace (a package documenting itself).
-fn cmd_doc_api(out: &Option<PathBuf>, root: Option<&str>) -> ExitCode {
+fn cmd_doc_api(out: &Option<PathBuf>, root: Option<&str>, lint: bool) -> ExitCode {
+    // The publish namespace lint: a package's whole surface must sit under its own root (`--root`).
+    // Report every offender and refuse (exit 2) before emitting anything — the publish gate.
+    if lint && let Some(root) = root {
+        let violations = noeta_ide::api::namespace_violations(root);
+        if !violations.is_empty() {
+            eprintln!(
+                "lang: package `{root}` registers surface outside its own namespace ({} \
+                 violation{}):",
+                violations.len(),
+                plural(violations.len()),
+            );
+            for v in &violations {
+                eprintln!("  - {v}");
+            }
+            return ExitCode::from(2);
+        }
+    }
     let (json, done) = docgen::registry_docs_json(None, root);
     match out {
         Some(out_dir) => match docgen::render_json_to(out_dir, &json) {
@@ -4942,11 +4965,12 @@ fn cmd_doc(
     target: &Option<String>,
     api: bool,
     root: Option<&str>,
+    lint: bool,
 ) -> ExitCode {
     // `--api`: the registry-backed path — the intrinsic surface (stdlib + composed native modules)
     // as a schema-1 `docs.json`, organized by module. No local source involved.
     if api {
-        return cmd_doc_api(out, root);
+        return cmd_doc_api(out, root, lint);
     }
     // `--package`: the registry-fetch path — a published release's stored artifact, no local
     // source involved.

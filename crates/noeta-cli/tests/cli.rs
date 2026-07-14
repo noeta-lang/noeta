@@ -4820,6 +4820,25 @@ fn doc_api_in_a_composed_toolchain_documents_the_native_package() {
         !json.contains("\"std.math\""),
         "--root imgfx must exclude the stdlib"
     );
+
+    // The publish namespace lint (`--lint`) rejects the fixture's `Acc` extern type: it omits
+    // `namespace:`, so it defaults to `std` — a package must namespace its types under its own
+    // root, or a consumer's re-rooting (and the published docs) can't reach them. This is the gate
+    // `noeta publish` runs; it would block publishing this (deliberately sloppy) fixture. Reuses
+    // the already-cached composed binary, so no rebuild.
+    let lint = std::process::Command::new(&composed)
+        .args(["doc", "--api", "--root", "imgfx", "--lint"])
+        .output()
+        .expect("run the publish namespace lint");
+    assert!(
+        !lint.status.success(),
+        "the lint must reject a package type that defaults to the std namespace"
+    );
+    let msg = String::from_utf8_lossy(&lint.stderr);
+    assert!(
+        msg.contains("Acc") && msg.contains("namespace"),
+        "the lint names the offending type and its namespace: {msg}"
+    );
 }
 
 #[cfg(feature = "jit")] // `--native` exists only in the JIT-enabled build.

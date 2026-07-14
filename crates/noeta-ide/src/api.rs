@@ -150,6 +150,35 @@ pub fn method(qualified: &str, name: &str) -> Option<ApiFn> {
         .find(|m| m.name == name)
 }
 
+/// Namespacing violations for a package publishing under `pkg_root` (the publish lint). Every
+/// extern type a package's extension registers must be qualified under the package's **own** root
+/// — a consumer re-roots the package at its dependency-table key, and the published API docs use
+/// the package root, so a type that leaks into another namespace (most commonly an `ExtType` that
+/// omits `namespace:` and so defaults to `std`) would be unreachable and is a publish-blocking
+/// error. Returns one message per violation; empty = clean.
+///
+/// Runs in the package's composed toolchain, whose registry holds the first-party toolchain
+/// extensions (std, and the bundled `css`/`html`, each under its own reserved root) plus this
+/// package's extension(s). The package's extensions are exactly the ones rooted at `pkg_root`
+/// (`Extension::root()` == the package's name segment), so we inspect only those — the bundled
+/// extensions under other roots are not the package's surface and are left alone.
+pub fn namespace_violations(pkg_root: &str) -> Vec<String> {
+    let under = |ns: &str| ns == pkg_root || ns.starts_with(&format!("{pkg_root}."));
+    let mut out = Vec::new();
+    for ext in registry::extensions().iter().filter(|e| under(e.root())) {
+        for t in ext.types() {
+            if !under(t.namespace) {
+                out.push(format!(
+                    "extern type `{}` is namespaced `{}`, not under the package root `{pkg_root}` \
+                     — set `namespace: \"{pkg_root}\"` on it (the field defaults to `std`)",
+                    t.name, t.namespace
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// The prose for `name` in module `m`, or empty. Keyed by name so one table serves both plain and
 /// higher-order functions.
 fn doc_of(m: &noeta_stdlib::ExtModule, name: &str) -> String {
@@ -236,6 +265,16 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn namespace_violations_are_clean_for_well_namespaced_extensions() {
+        // The stdlib (and bundled first-party extensions) keep their types under their own root, so
+        // the lint reports nothing — no false positives. A package root with no extension present
+        // is likewise clean. (The catches-a-leak case needs a composed package extension and is
+        // covered by the cli integration test over the imgfx fixture.)
+        assert!(namespace_violations("std").is_empty());
+        assert!(namespace_violations("nosuchpkg").is_empty());
     }
 
     #[test]

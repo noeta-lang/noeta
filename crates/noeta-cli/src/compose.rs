@@ -159,11 +159,15 @@ pub fn package_api_docs(identity: &str, crate_dir: &Path, root_ns: &str) -> Resu
     };
     // A doc-generation query exposes no CLI of its own, so command-trust is irrelevant — `&[]`.
     let binary = compose_binary(&[nc], &[], ShimKind::Toolchain)?;
+    // `--lint`: the composed toolchain refuses (exit 2) if the package registers any module or
+    // extern type outside its own namespace — the publish quality gate against a type that leaked
+    // into `std` (a missing `namespace:`). Its stderr carries the offenders; surface it verbatim.
     let output = std::process::Command::new(&binary)
         .arg("doc")
         .arg("--api")
         .arg("--root")
         .arg(root_ns)
+        .arg("--lint")
         .output()
         .map_err(|err| {
             format!(
@@ -173,7 +177,7 @@ pub fn package_api_docs(identity: &str, crate_dir: &Path, root_ns: &str) -> Resu
         })?;
     if !output.status.success() {
         return Err(format!(
-            "generating API docs in the composed toolchain failed: {}",
+            "generating API docs in the composed toolchain failed:\n{}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
