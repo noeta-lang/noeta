@@ -807,6 +807,46 @@ impl std::fmt::Debug for Registry {
     }
 }
 
+/// One resolution hop from a namespace group into a member (`http` → `.client`): what the next
+/// segment names under a root-qualified prefix. The membership question the compiler/checker ask
+/// when lowering `http.client` / `http.Response` / a deeper `a.b.c` chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NsChild {
+    /// A concrete native module — its **root-qualified identity** (`std.http.client`), the same
+    /// string a `Const::NativeModule` carries and `find_module` keys on.
+    Module(String),
+    /// A deeper namespace group (`std.http` under a hypothetical `std.http.v2`), root-qualified.
+    Namespace(String),
+    /// A registered extension type — its qualified identity (`std.http.Response`).
+    Type(String),
+    /// The member names nothing under this prefix.
+    None,
+}
+
+/// What a `use <path>.{name}` import binds — the single classification every `use`-collection site
+/// (checker, compiler pre-pass + lowering, eval) consults, so the four never drift. `path` is the
+/// segments before the imported leaf; `name` is the leaf (`use std.http.client` → path `["std",
+/// "http"]`, name `"client"`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UseKind {
+    /// A concrete native module value (`use std.json`, `use std.http.client`) — root-qualified.
+    Module(String),
+    /// A navigable **namespace group** (`use std.http`) — a compile-time handle you dot into,
+    /// root-qualified. Binds no runtime value on its own; `http.client` resolves at each use site.
+    Namespace(String),
+    /// A selectively-imported member function (`use std.math.sqrt`) — `(module_identity, func)`.
+    MemberFn { module: String, func: String },
+    /// A registered extension type (`use std.id.Uuid`) — qualified identity.
+    ExternType(String),
+    /// Under a known extension root but resolving to no module / namespace / member / type: a
+    /// genuine error (a typo'd or nonexistent std target). An extension root is fully enumerable,
+    /// so an unknown member cannot be a forward reference — unlike [`UseKind::UserImport`].
+    UnknownUnderRoot,
+    /// Not under any extension root — a sibling/dependency module import the linker resolves later
+    /// (`use App.Models.User`). Opaque to the registry; never an error here.
+    UserImport,
+}
+
 impl Registry {
     /// Assemble a registry from its complete unit list, validating uniqueness (a violation is a
     /// `panic` — a mis-assembled binary must not start; see [`Registry::validate`]).
@@ -861,6 +901,108 @@ impl Registry {
             .filter(|e| e.root() == root.as_str())
             .flat_map(|e| e.modules())
             .find(|m| m.name == module_name.as_str())
+    }
+
+    /// Whether `path` (a **root-qualified** dotted path like `std.http`) is a navigable **namespace
+    /// group**: a strict prefix of ≥1 registered module or extension type, and not itself a concrete
+    /// module. `std.http` is a namespace (parent of `std.http.client`/`std.http.server`);
+    /// `std.http.client` is a module, not a namespace; `std.json` is a module, not a namespace.
+    pub fn is_namespace(&self, path: &str) -> bool {
+        let Some((root, _)) = path.split_once('.') else {
+            return false;
+        };
+        if !self.is_extension_root(root) || self.find_module(path).is_some() {
+            return false;
+        }
+        let dotted = format!("{path}.");
+        self.units.iter().filter(|e| e.root() == root).any(|e| {
+            e.modules()
+                .iter()
+                .any(|m| format!("{root}.{}", m.name).starts_with(&dotted))
+                || e.types().iter().any(|t| t.qualified().starts_with(&dotted))
+        })
+    }
+
+    /// The **immediate** child segment names under a namespace prefix (`std.http` → `["client",
+    /// "server", "Response"]`) — submodules and types one hop down, de-duplicated in registration
+    /// order. Empty when `prefix` is not a namespace. Backs member completion and "did you mean".
+    pub fn namespace_children(&self, prefix: &str) -> Vec<String> {
+        let Some((root, _)) = prefix.split_once('.') else {
+            return Vec::new();
+        };
+        let dotted = format!("{prefix}.");
+        let mut out: Vec<String> = Vec::new();
+        let push_seg = |rest: &str, out: &mut Vec<String>| {
+            let seg = rest.split('.').next().unwrap_or(rest).to_string();
+            if !out.contains(&seg) {
+                out.push(seg);
+            }
+        };
+        for e in self.units.iter().filter(|e| e.root() == root) {
+            for m in e.modules() {
+                let rq = format!("{root}.{}", m.name);
+                if let Some(rest) = rq.strip_prefix(&dotted) {
+                    push_seg(rest, &mut out);
+                }
+            }
+            for t in e.types() {
+                if let Some(rest) = t.qualified().strip_prefix(&dotted) {
+                    push_seg(rest, &mut out);
+                }
+            }
+        }
+        out
+    }
+
+    /// Resolve one namespace hop: what `<prefix>.<member>` names (`std.http` + `client` →
+    /// [`NsChild::Module`]`("std.http.client")`). A module wins over a same-named deeper namespace
+    /// (a concrete leaf is more specific); a type is checked before the namespace fallback.
+    pub fn resolve_namespace_child(&self, prefix: &str, member: &str) -> NsChild {
+        let qualified = format!("{prefix}.{member}");
+        if self.find_module(&qualified).is_some() {
+            NsChild::Module(qualified)
+        } else if self.find_type_qualified(&qualified).is_some() {
+            NsChild::Type(qualified)
+        } else if self.is_namespace(&qualified) {
+            NsChild::Namespace(qualified)
+        } else {
+            NsChild::None
+        }
+    }
+
+    /// Classify what a `use <path>.{name}` import binds — the single source of truth for
+    /// `use`-target resolution, shared by the checker, the compiler (pre-pass + lowering), and the
+    /// eval reference so the four never diverge (the check/run divergence this replaces). See
+    /// [`UseKind`] for the cases; an extension root that resolves to nothing is
+    /// [`UseKind::UnknownUnderRoot`] (a hard error), a non-extension root is [`UseKind::UserImport`]
+    /// (the linker's job).
+    pub fn classify_use(&self, path: &[String], name: &str) -> UseKind {
+        let Some(root) = path.first() else {
+            return UseKind::UserImport;
+        };
+        if !self.is_extension_root(root) {
+            return UseKind::UserImport;
+        }
+        let qualified = format!("{}.{}", path.join("."), name);
+        if self.find_module(&qualified).is_some() {
+            return UseKind::Module(qualified);
+        }
+        if self.find_type_qualified(&qualified).is_some() {
+            return UseKind::ExternType(qualified);
+        }
+        if path.len() >= 2 {
+            let module = path.join(".");
+            if self.find_module(&module).is_some() && self.is_module_function(&module, name) {
+                return UseKind::MemberFn {
+                    module,
+                    func: name.to_string(),
+                };
+            }
+        }
+        if self.is_namespace(&qualified) {
+            return UseKind::Namespace(qualified);
+        }
+        UseKind::UnknownUnderRoot
     }
 
     /// Find a registered function's signature.
@@ -1455,6 +1597,126 @@ mod runtime_registry_tests {
         );
         assert!(bundle.method("nope").is_none());
         validate(&[&G]); // well-formed: unique bundle + method names
+    }
+
+    // --- namespace groups (module-namespaces) ---
+    struct NsUnit(&'static str, &'static [ExtModule], &'static [ExtType]);
+    impl Extension for NsUnit {
+        fn name(&self) -> &'static str {
+            "std.core"
+        }
+        fn root(&self) -> &'static str {
+            self.0
+        }
+        fn modules(&self) -> &'static [ExtModule] {
+            self.1
+        }
+        fn types(&self) -> &'static [ExtType] {
+            self.2
+        }
+    }
+
+    const M_HTTP_CLIENT: ExtModule = ExtModule {
+        name: "http.client",
+        ..ExtModule::DEFAULTS
+    };
+    const M_HTTP_SERVER: ExtModule = ExtModule {
+        name: "http.server",
+        ..ExtModule::DEFAULTS
+    };
+    const M_JSON: ExtModule = ExtModule {
+        name: "json",
+        ..ExtModule::DEFAULTS
+    };
+    const T_RESPONSE: ExtType = ExtType {
+        name: "Response",
+        namespace: "std.http",
+        ..ExtType::DEFAULTS
+    };
+
+    fn ns_registry() -> Registry {
+        static U: NsUnit = NsUnit(
+            "std",
+            &[M_HTTP_CLIENT, M_HTTP_SERVER, M_JSON],
+            &[T_RESPONSE],
+        );
+        Registry::new(vec![&U])
+    }
+
+    #[test]
+    fn namespace_prefix_detection() {
+        let reg = ns_registry();
+        // A shared prefix of ≥1 module/type is a namespace; a concrete module is not.
+        assert!(reg.is_namespace("std.http"), "parent of http.client/server");
+        assert!(!reg.is_namespace("std.http.client"), "a concrete module");
+        assert!(!reg.is_namespace("std.json"), "a leaf module, not a group");
+        assert!(!reg.is_namespace("std.bogus"), "no such prefix");
+        assert!(!reg.is_namespace("other.http"), "not an extension root");
+    }
+
+    #[test]
+    fn namespace_children_lists_submodules_and_types() {
+        let reg = ns_registry();
+        let mut kids = reg.namespace_children("std.http");
+        kids.sort();
+        assert_eq!(kids, vec!["Response", "client", "server"]);
+        assert!(reg.namespace_children("std.json").is_empty(), "a leaf");
+    }
+
+    #[test]
+    fn resolve_namespace_child_hops() {
+        let reg = ns_registry();
+        assert_eq!(
+            reg.resolve_namespace_child("std.http", "client"),
+            NsChild::Module("std.http.client".into())
+        );
+        assert_eq!(
+            reg.resolve_namespace_child("std.http", "Response"),
+            NsChild::Type("std.http.Response".into())
+        );
+        assert_eq!(
+            reg.resolve_namespace_child("std.http", "bogus"),
+            NsChild::None
+        );
+    }
+
+    #[test]
+    fn classify_use_covers_every_case() {
+        let reg = ns_registry();
+        let s = |x: &str| x.to_string();
+        // A namespace group (`use std.http`).
+        assert_eq!(
+            reg.classify_use(&[s("std")], "http"),
+            UseKind::Namespace("std.http".into())
+        );
+        // A concrete nested module (`use std.http.client`) and a flat one (`use std.json`).
+        assert_eq!(
+            reg.classify_use(&[s("std"), s("http")], "client"),
+            UseKind::Module("std.http.client".into())
+        );
+        assert_eq!(
+            reg.classify_use(&[s("std")], "json"),
+            UseKind::Module("std.json".into())
+        );
+        // An extension type (`use std.http.Response`).
+        assert_eq!(
+            reg.classify_use(&[s("std"), s("http")], "Response"),
+            UseKind::ExternType("std.http.Response".into())
+        );
+        // Under a known root but nothing resolves → a hard error (typo'd std target).
+        assert_eq!(
+            reg.classify_use(&[s("std")], "bogus"),
+            UseKind::UnknownUnderRoot
+        );
+        assert_eq!(
+            reg.classify_use(&[s("std"), s("http")], "bogus"),
+            UseKind::UnknownUnderRoot
+        );
+        // Not an extension root → a user/sibling import the linker resolves later.
+        assert_eq!(
+            reg.classify_use(&[s("App"), s("Models")], "User"),
+            UseKind::UserImport
+        );
     }
 
     #[test]

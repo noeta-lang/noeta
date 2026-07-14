@@ -603,8 +603,9 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         Rvalue::Closure { .. }
         | Rvalue::AttributesOf { .. }
         | Rvalue::RolesOf { .. }
-        // A native module-fn reference has no operand atoms (module/func are static strings).
-        | Rvalue::ModuleFn { .. } => {}
+        // A native module-fn reference / module value has no operand atoms (identity is static).
+        | Rvalue::ModuleFn { .. }
+        | Rvalue::NativeModule { .. } => {}
     }
 }
 

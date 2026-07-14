@@ -59,6 +59,7 @@ pub fn reference_run_traced(
             bound_handle_sites: &sites.bound_handle_sites,
             f32_literal_sites: &sites.f32_literal_sites,
             bundle_call_sites: &sites.bundle_call_sites,
+            namespace_module_sites: &sites.namespace_module_sites,
         },
     )
     .expect(
@@ -94,6 +95,7 @@ pub fn reference_run_with_host(
             bound_handle_sites: &sites.bound_handle_sites,
             f32_literal_sites: &sites.f32_literal_sites,
             bundle_call_sites: &sites.bundle_call_sites,
+            namespace_module_sites: &sites.namespace_module_sites,
         },
     )
     .expect(

@@ -32,12 +32,6 @@ pub(super) const RECEIVER: &str = "Receiver";
 /// the E0049 reservation set — a user declaration of any of them is rejected.
 pub(super) const NATIVE_TYPE_NAMES: &[&str] = &[ITERATOR, FUTURE, SENDER, RECEIVER];
 
-/// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. Every module — `json` included
-/// (B4) — comes from the native-extension registry.
-pub(super) fn is_std_module(reg: &registry::Registry, name: &str) -> bool {
-    reg.find_module(name).is_some()
-}
-
 /// The **qualified identity** (`std.id.Uuid`) of a registered extern type named by its bare
 /// registry name (`Uuid`), or the name unchanged if it is not a registered type. This is what the
 /// checker stores in `Type::Named` so a native type is never conflated with a same-short-named user

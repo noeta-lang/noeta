@@ -5553,4 +5553,34 @@ mod tests {
         let non_http = module_with(vec![Const::NativeModule("std.math".into())], vec![], vec![]);
         assert!(aot_ring_features(&non_http).is_empty());
     }
+
+    #[test]
+    fn aot_ring_features_group_form_selects_http_client() {
+        // The navigable namespace group (`use std.http; http.client.get(...)`, module-namespaces)
+        // must lower to the *same* concrete leaf identity `std.http.client` as the direct import, so
+        // AOT ring DCE keeps reqwest. If the group ever recorded the prefix `std.http` in the const
+        // pool, `ring_of` would miss and `--native` would ship a binary with no HTTP client. This
+        // compiles the group form end-to-end and asserts the client ring is selected.
+        let src = "use std.http\nr = http.client.get(\"https://svc.test/echo\")\necho r.status()\n";
+        let source = Source::new(SourceId(0), "<test>", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "parse errors: {:?}",
+            parsed.diagnostics
+        );
+        let checked = noeta_check::check_all(&parsed.program);
+        assert!(
+            checked.diagnostics.is_empty(),
+            "check errors: {:?}",
+            checked.diagnostics
+        );
+        let module = noeta_compiler::compile(&parsed.program).expect("group form compiles");
+        assert_eq!(
+            aot_ring_features(&module),
+            vec!["ring-http-client".to_string()],
+            "group-form http.client.get must select the http-client ring (concrete leaf identity)"
+        );
+    }
 }
