@@ -1579,7 +1579,16 @@ impl Checker {
                                     name.name
                                 )
                             };
-                        self.error(DiagnosticCode::UnresolvedImport, name.span, message);
+                        let candidates = self.reg().import_candidates(path);
+                        let suggestion = noeta_diagnostics::closest(
+                            &name.name,
+                            candidates.iter().map(String::as_str),
+                        )
+                        .map(str::to_string);
+                        let diag = self.error(DiagnosticCode::UnresolvedImport, name.span, message);
+                        if let Some(s) = suggestion {
+                            diag.help(format!("did you mean `{s}`?"));
+                        }
                     }
                     UseKind::UserImport => {
                         self.types.insert(local);
@@ -6695,16 +6704,21 @@ impl Checker {
 
     /// Report an unresolved member on a namespace group (`http.nope`, whether read or called) — a
     /// bare-name miss (E0005). A group is fully enumerable, so an unknown member is never a forward
-    /// reference. `prefix` is the group's root-qualified identity; the message names it as written in
-    /// source (root stripped). (Slice 3 attaches a "did you mean" suggestion from the group's
-    /// children.)
+    /// reference; when a child name is a plausible typo we attach a "did you mean" hint. `prefix` is
+    /// the group's root-qualified identity; the message names it as written in source (root stripped).
     fn namespace_member_error(&mut self, prefix: &str, name: &str, span: Span) {
         let group = prefix.split_once('.').map_or(prefix, |(_, rest)| rest);
-        self.error(
+        let candidates = self.reg().namespace_children(prefix);
+        let suggestion = noeta_diagnostics::closest(name, candidates.iter().map(String::as_str))
+            .map(str::to_string);
+        let diag = self.error(
             DiagnosticCode::UnknownName,
             span,
             format!("namespace `{group}` has no member `{name}`"),
         );
+        if let Some(s) = suggestion {
+            diag.help(format!("did you mean `{s}`?"));
+        }
     }
 
     fn synth_member(

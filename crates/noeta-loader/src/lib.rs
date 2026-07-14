@@ -561,6 +561,20 @@ fn link_core(
         .filter_map(|ns| ns.first().cloned())
         .collect();
 
+    // Everything a `use` could legitimately target, for "did you mean" on an unresolved one: every
+    // loaded module's dotted namespace (matches a mistyped module path like `App.Modles`) plus every
+    // valid root — std extensions, this project's namespaces, and (complete policy) declared native
+    // packages (matches a mistyped package name like `imgtx`).
+    let mut import_targets: Vec<String> = module_views
+        .iter()
+        .map(|mv| mv.namespace.join("."))
+        .collect();
+    import_targets.extend(reg.extensions().iter().map(|e| e.root().to_string()));
+    import_targets.extend(project_roots.iter().cloned());
+    if let RetainPolicy::Complete { native_roots } = &retain {
+        import_targets.extend(native_roots.iter().cloned());
+    }
+
     let entry_map = build_module_map(&entry_ns, &entry_program.stmts, &module_views);
     let module_maps: std::collections::HashMap<Vec<String>, qualify::QMap> = module_views
         .iter()
@@ -650,7 +664,11 @@ fn link_core(
                     if retained {
                         unresolved.push(name.clone());
                     } else {
-                        errors.push(unknown_module_error(entry, path, name));
+                        let suggestion = noeta_diagnostics::closest(
+                            &path.join("."),
+                            import_targets.iter().map(String::as_str),
+                        );
+                        errors.push(unknown_module_error(entry, path, name, suggestion));
                     }
                 }
                 Resolution::Private => {
@@ -956,15 +974,24 @@ fn import_error(
 /// linked workspace — a typo'd or missing sibling/dependency module (`use App.Modles.User`). Only
 /// raised in a complete link (the linker sees the whole pool); a single-file check never runs the
 /// linker, so an isolated file's forward references stay lenient.
-fn unknown_module_error(entry: &Source, path: &[String], name: &UseName) -> LoadDiagnostic {
+fn unknown_module_error(
+    entry: &Source,
+    path: &[String],
+    name: &UseName,
+    suggestion: Option<&str>,
+) -> LoadDiagnostic {
     let namespace = path.join(".");
+    let mut diagnostic = Diagnostic::error(
+        DiagnosticCode::UnresolvedImport,
+        name.span,
+        format!("no module `{namespace}` in this project"),
+    );
+    if let Some(s) = suggestion {
+        diagnostic.help(format!("did you mean `{s}`?"));
+    }
     LoadDiagnostic {
         source: entry.clone(),
-        diagnostic: Diagnostic::error(
-            DiagnosticCode::UnresolvedImport,
-            name.span,
-            format!("no module `{namespace}` in this project"),
-        ),
+        diagnostic,
     }
 }
 
@@ -1152,11 +1179,14 @@ mod tests {
         let entry = "use imgtx.fx;\necho fx.double(21);\n";
         let errors =
             link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap_err();
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.diagnostic.code == DiagnosticCode::UnresolvedImport),
-            "expected E0019 for the undeclared package root `imgtx`, got {errors:?}"
+        let err = errors
+            .iter()
+            .find(|e| e.diagnostic.code == DiagnosticCode::UnresolvedImport)
+            .unwrap_or_else(|| panic!("expected E0019 for `imgtx`, got {errors:?}"));
+        // The declared `imgfx` is a plausible fix for the typo `imgtx` — offered as a hint.
+        assert_eq!(
+            err.diagnostic.help.as_deref(),
+            Some("did you mean `imgfx`?")
         );
     }
 

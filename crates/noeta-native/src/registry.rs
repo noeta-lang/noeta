@@ -954,6 +954,45 @@ impl Registry {
         out
     }
 
+    /// The valid next-segment names for a `use <path>.<?>` — every module, namespace, and extension
+    /// type reachable one segment past `path`, for "did you mean" on a mistyped import. `path` may be
+    /// a bare extension root (`["std"]` → `["http", "math", "json", …]`) or a namespace prefix
+    /// (`["std", "http"]` → `["client", "server", "Response"]`). Empty when `path`'s root is not an
+    /// extension root. De-duplicated in registration order.
+    pub fn import_candidates(&self, path: &[String]) -> Vec<String> {
+        let Some(root) = path.first() else {
+            return Vec::new();
+        };
+        if !self.is_extension_root(root) {
+            return Vec::new();
+        }
+        // `prefix.` is the boundary; the next dotted segment after it is one candidate. For a bare
+        // root the prefix is just the root, so `std.http.client` contributes `http`; for `std.http`
+        // it contributes `client`.
+        let dotted = format!("{}.", path.join("."));
+        let mut out: Vec<String> = Vec::new();
+        let push = |rest: &str, out: &mut Vec<String>| {
+            let seg = rest.split('.').next().unwrap_or(rest).to_string();
+            if !out.contains(&seg) {
+                out.push(seg);
+            }
+        };
+        for e in self.units.iter().filter(|e| e.root() == root) {
+            for m in e.modules() {
+                let rq = format!("{root}.{}", m.name);
+                if let Some(rest) = rq.strip_prefix(&dotted) {
+                    push(rest, &mut out);
+                }
+            }
+            for t in e.types() {
+                if let Some(rest) = t.qualified().strip_prefix(&dotted) {
+                    push(rest, &mut out);
+                }
+            }
+        }
+        out
+    }
+
     /// Resolve one namespace hop: what `<prefix>.<member>` names (`std.http` + `client` →
     /// [`NsChild::Module`]`("std.http.client")`). A module wins over a same-named deeper namespace
     /// (a concrete leaf is more specific); a type is checked before the namespace fallback.

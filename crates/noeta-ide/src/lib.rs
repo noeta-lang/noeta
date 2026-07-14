@@ -1969,6 +1969,23 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_use_is_published_with_a_suggestion() {
+        // The editor surfaces a mistyped `use` target (module-namespaces): a std module typo is an
+        // E0019 the checker produces, flowing through the whole-workspace `linked_checked` query to
+        // the client, and carries a "did you mean" hint.
+        let mut store = DocumentStore::default();
+        store.open("file:///a.noe", "use std.htpt\n".to_string());
+        let (diags, _) = store
+            .diagnostics("file:///a.noe")
+            .expect("diagnostics available");
+        let unresolved = diags
+            .iter()
+            .find(|d| d.code == noeta_diagnostics::DiagnosticCode::UnresolvedImport)
+            .expect("an E0019 for the unresolved import");
+        assert_eq!(unresolved.help.as_deref(), Some("did you mean `http`?"));
+    }
+
+    #[test]
     fn hover_doc_surfaces_the_attached_doc_block() {
         let mut store = DocumentStore::default();
         store.open(
