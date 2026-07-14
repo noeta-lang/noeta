@@ -4685,6 +4685,21 @@ pub static NOETA_EXTENSIONS: &[&(dyn Extension + Sync)] = &[&ImgfxExtension];
 
 /// Point the compose build at the workspace's existing debug artifacts (the shim links the
 /// already-built noeta-cli lib in seconds instead of a cold release build).
+/// Serializes the composition-heavy e2e tests. Each shells out to `cargo` into the **shared**
+/// workspace target dir (`composed_env`'s `NOETA_COMPOSE_TARGET_DIR`, set for speed so the composes
+/// reuse the workspace's already-built debug deps), where every shim crate is named `noeta-composed`.
+/// Running two at once lets cargo's concurrent manifest resolution trip over that shared artifact
+/// (`can't find bin … src/main.rs`). Production never points two composes at one target dir, so this
+/// is purely a test-harness concern — the guard runs these few tests one at a time. Poison-tolerant:
+/// a panicking compose test must not wedge the others.
+static COMPOSE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn compose_guard() -> std::sync::MutexGuard<'static, ()> {
+    COMPOSE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn composed_env(cmd: &mut Command) -> &mut Command {
     cmd.env("NOETA_COMPOSE_DEBUG", "1").env(
         "NOETA_COMPOSE_TARGET_DIR",
@@ -4694,6 +4709,7 @@ fn composed_env(cmd: &mut Command) -> &mut Command {
 
 #[test]
 fn build_exe_of_a_native_dep_app_strips_the_mixed_crates_formatter() {
+    let _guard = compose_guard();
     // dev-deps D5, the capstone: a shipped native-dependency app carries its runtime handler but not
     // the mixed crate's dev formatter. `build --exe` composes a RUNNER (lean base + imgfx runtime
     // extension, `fmt` OFF) and staples the bundle. We prove both halves:
@@ -4749,6 +4765,7 @@ fn find_composed_binary(cache: &std::path::Path) -> Option<PathBuf> {
 
 #[test]
 fn dev_toolchain_composition_includes_a_mixed_crates_formatter() {
+    let _guard = compose_guard();
     // dev-deps D5b, the mirror of the capstone: a *dev toolchain* composed for the same native-dep app
     // turns the mixed crate's `fmt` feature ON, so its tier-body formatter (and its marker) compile IN
     // — exactly the capability a shipped runner strips. We compose the toolchain via a delegating dev
@@ -4779,6 +4796,7 @@ fn dev_toolchain_composition_includes_a_mixed_crates_formatter() {
 #[cfg(feature = "jit")] // `--native` exists only in the JIT-enabled build.
 #[test]
 fn build_native_of_a_native_dep_app_runs_the_composed_handler() {
+    let _guard = compose_guard();
     // dev-deps `--native` gap, closed: a native-dependency app built with `--native` links a *composed
     // AOT runtime* (the lean runtime + the imgfx native extension) so the self-contained native binary
     // resolves the `imgfx` module and runs its handler. Before this, `--native` linked the stock
@@ -4823,6 +4841,7 @@ fn build_native_of_a_native_dep_app_runs_the_composed_handler() {
 
 #[test]
 fn composed_toolchain_end_to_end() {
+    let _guard = compose_guard();
     let entry = composed_project("pm_compose_e2e");
     let app = entry.parent().unwrap().to_path_buf();
 
