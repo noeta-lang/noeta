@@ -39,6 +39,32 @@ fn lang() -> Command {
     cmd
 }
 
+/// Build the lean `noeta-runner` binary (debug, reusing the workspace's `target/debug` so its deps
+/// are already compiled) and return its path, for `NOETA_RUNNER` — so a `--exe` test stapes onto a
+/// ready runner instead of paying the CLI's default on-demand `--release` build. `None` if there is
+/// no build toolchain (the caller then skips), mirroring `build_aot_archive`.
+fn lean_runner_path() -> Option<PathBuf> {
+    let bin = if cfg!(windows) {
+        "noeta-runner.exe"
+    } else {
+        "noeta-runner"
+    };
+    let output = std::process::Command::new(env!("CARGO"))
+        .current_dir(workspace())
+        .args(["build", "-p", "noeta-runner"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        eprintln!(
+            "skipping: building the lean runner failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
+    }
+    let path = workspace().join("target/debug").join(bin);
+    path.exists().then_some(path)
+}
+
 // --- `run` ------------------------------------------------------------------------
 
 #[test]
@@ -2044,10 +2070,13 @@ fn build_then_run_bundle_matches_source_run() {
 
 #[test]
 fn build_exe_runs_the_program_with_no_source_or_bundle_alongside() {
-    // `noeta build --exe -o app` staples the compiled program onto a copy of the runtime binary.
-    // The resulting `app` runs the program directly — no `.noe`, no `.noeb`, no `noeta run` — and
-    // its stdout matches a source run byte-for-byte. Running it also proves the startup trailer
-    // detection fires (the toolchain would otherwise demand a subcommand).
+    // `noeta build --exe -o app` staples the compiled program onto a copy of the LEAN `noeta-runner`
+    // (dev-deps D4a — not the toolchain). The resulting `app` runs the program directly — no `.noe`,
+    // no `.noeb`, no `noeta run` — and its stdout matches a source run byte-for-byte. Running it also
+    // proves the startup trailer detection fires (the runner would otherwise print usage).
+    let Some(runner) = lean_runner_path() else {
+        return; // no build toolchain for the lean runner — skip.
+    };
     let file = temp_program(
         "build_exe",
         "fn sq(n: int): int { return n * n }\nmut t = 0\nfor i in 0..5 {\n    t = t + sq(i)\n}\necho t\n",
@@ -2056,6 +2085,7 @@ fn build_exe_runs_the_program_with_no_source_or_bundle_alongside() {
     let _ = std::fs::remove_file(&app);
 
     lang()
+        .env("NOETA_RUNNER", &runner)
         .arg("build")
         .arg(&file)
         .arg("--exe")
@@ -2075,11 +2105,15 @@ fn build_exe_runs_the_program_with_no_source_or_bundle_alongside() {
 fn build_exe_reports_a_runtime_abort_from_the_stapled_program() {
     // A panic in a stapled exe surfaces as the same abort a source/bundle run gives — the embedded
     // program runs on the real host through the identical path, just with no source text to quote.
+    let Some(runner) = lean_runner_path() else {
+        return; // no build toolchain for the lean runner — skip.
+    };
     let file = temp_program("build_exe_panic", "echo \"before\"\npanic(\"boom\")\n");
     let app = file.parent().unwrap().join("app_panic");
     let _ = std::fs::remove_file(&app);
 
     lang()
+        .env("NOETA_RUNNER", &runner)
         .arg("build")
         .arg(&file)
         .arg("--exe")

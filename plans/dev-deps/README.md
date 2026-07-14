@@ -75,10 +75,21 @@ bundle-execution library (`noeta-vm`/`noeta-backend` over `noeta-bundle`) — ex
 over shared guts, so prod-run and dev-run cannot diverge in behavior. Only the dependency shell
 differs, which is the entire point.
 
-**Execution model — three capability layers; prod excludes only L3.** The security boundary is
-**dev tooling vs app execution**, *not* run-vs-build and *not* source-vs-bundle. Running a source
-tree in production (PHP/Python/Ruby/Node style — deploy source, point the runtime at an entry file,
-compile on the fly) is a first-class mode, so the *compiler* is a prod-legitimate layer.
+**The manifest is the policy; this arc is the mechanism.** We do **not** define "dev" or "prod", nor
+what tiers/commands belong in either, and we add **no new default-target key** — the existing
+layering convention already carries it: the **global (target-less) config is the default/base**
+(global `[dependencies]`, no active tiers), and `[targets.<name>]` **overlay on top** (tiers/deps
+layered over the global, `extends` chaining target-to-target base-first). Omitting `--target` uses
+the global default (`compile_whole_file` passes `None`). So a user keeps their baseline in the global
+config and puts dev-only tiers/deps in `[targets.dev]`; the default `build` excludes them, and
+`--target dev` layers them in. Membership is entirely theirs. Everything below is the *machinery* that
+makes those choices produce a lean, safe artifact; none of it hardcodes a target's meaning.
+
+**Execution model — three capability layers; a shipped artifact excludes only L3.** The security
+boundary is **dev tooling vs app execution**, *not* run-vs-build and *not* source-vs-bundle. Running
+a source tree in production (PHP/Python/Ruby/Node style — deploy source, point the runtime at an
+entry file, compile on the fly) is a first-class mode, so the *compiler* is a legitimate runtime
+layer.
 
 - **L1 — execute a bundle**: VM + real `Host` + runtime extensions. In *every* prod artifact.
 - **L2 — compile source → bundle**: parser + checker + compiler + **tier activation/desugar** +
@@ -98,14 +109,19 @@ Rust handler, expr-tiers `ExtTier`): the handler is L1 *native* — linked into 
 while its formatter stays L3. This is exactly the **mixed-package** case the D3b feature-gate targets:
 keep the native handler, drop the native formatter + its parser.
 
-**The prod artifacts, by deployment style (both exclude L3):**
+**The shipped artifacts, by deployment style (all exclude L3):**
 - **Pre-compiled (`build --exe`/`--native`)** — L1 (+ any extension tier's native L1 handler). The
   `@html` handler is already bytecode in the bundle; nothing `@html`-specific is linked.
-- **PHP-style (ship source)** — L1+L2. `noeta-runner app.noe` compiles + runs, no dev tooling.
+- **Ship source (PHP-style)** — L1+L2. `noeta-runner app.noe` compiles + runs, no dev tooling.
 - **Dev workstation (`noeta`)** — L1+L2+L3.
 
-`noeta-runner` (this arc, Option A) is the **L1+L2 prod runtime**: runs `.noe` source *or* a `.noeb`
+`noeta-runner` (this arc, Option A) is the **L1+L2 runtime**: runs `.noe` source *or* a `.noeb`
 bundle *or* a stapled bundle, links no L3. `build --exe` staples onto it (bundle path skips L2).
+The lean base is **mechanical, not a "prod" definition**: a stapled artifact's argv belongs to the
+program, so a CLI verb is never reachable — the toolchain was always dead weight there. The
+`--target` only decides which *tiers/deps* compile into the program (and into a composed runner);
+the base is lean regardless. `--native` **already** links a fresh binary from the lean
+`noeta-aot-runtime` (zero L3 in its tree), so only `--exe`'s `current_exe` clone needs repointing.
 **`noeta profile`/`dap`** are L3 surfaces that install an Option-gated hook into the *same* VM (the
 DAP "debugs the PROD VM"), zero-cost when absent — so they observe identical execution semantics.
 
@@ -125,11 +141,13 @@ DAP "debugs the PROD VM"), zero-cost when absent — so they observe identical e
 
 ## Slices
 
-- **D0 — verify + decide. ✅ (see above).** Confirmed `--exe`/`--native` copy the full CLI (fmt +
-  malva). Decided (REVISED): a **lean runtime binary** for the prod artifact (structural exclusion,
-  no CLI cfg-threading); feature-gating rescoped to mixed crates only. Remaining D0 decision carried
-  into D4: the default-target story (which target `run`/`test` use = dev, `build` = prod) and whether
-  `--target` is the sole selector. Dev-capability set starts at `body_formatters`.
+- **D0 — verify + decide. ✅ (see above).** Confirmed `--exe` clones the full CLI. `--native` does
+  **not** (it links the lean `noeta-aot-runtime`, zero L3 in its tree) — so only `--exe` needs the
+  base repointed. Decided: a **lean runtime binary** (structural exclusion, no CLI cfg-threading);
+  feature-gating rescoped to mixed crates only. **No default-target key** — the existing
+  global-default + `[targets.*]`-overlay (via `extends`) convention already expresses it; omitting
+  `--target` uses the global config. We do not define "dev"/"prod". Dev-capability set starts at
+  `body_formatters` + the `fmt-config` gate (D3c).
 - **D1 — target-scoped dependencies (manifest).** Parse `[targets.<name>.dependencies]` into
   `Target`; `extends` inherits deps (like tiers). Validate shape; a target's tier provider may now
   name a target-scoped dep. Errors point at the missing/duplicated key. Unit tests over `from_toml`.
@@ -158,15 +176,19 @@ DAP "debugs the PROD VM"), zero-cost when absent — so they observe identical e
     runner *does* link `noeta-fmt`. **The prod artifact MUST be built with `-p noeta-runner` (its own
     crate graph), never pulled from a unified workspace build.** D4's composer already builds an
     isolated Cargo project, which satisfies this; D4 must assert it.
-- **D4 — repoint `--exe`/`--native` onto the lean runtime + per-target compose.** `build --exe`/
-  `--native` staple the bundle onto **`noeta-runner`** (or a composed shim whose base is the runner,
-  for apps with native runtime deps) instead of cloning the running full CLI — the security fix. The
-  composer (`compose.rs`) builds **for a target**: include only that target's native crates (D2), and
-  for a *mixed* crate flip its dev feature **off** in prod / **on** for the toolchain (D5's contract).
-  Content-hash key includes target + feature set so dev/prod artifacts cache separately. Assert
-  `malva`/`noeta-fmt` symbols are **absent** from the prod artifact. **Build in isolation** (the
-  runner's own crate graph, not the workspace) so feature unification can't turn `fmt-config` back on
-  — the D3c invariant.
+- **D4 — repoint `--exe` onto the lean runner + manifest default target + per-target compose.**
+  - **D4a — `--exe` base = lean runner.** `emit_exe` staples onto `noeta-runner` (resolved by a
+    ladder mirroring `resolve_wasm_runner`: `NOETA_RUNNER` env → sibling binary → `cargo build -p
+    noeta-runner --release`), not `current_exe`. The `-p` build isolates the crate graph so feature
+    unification can't turn `fmt-config` back on (the D3c invariant). `--native` needs no change
+    (already lean). Assert the artifact runs; the L3-absence is guaranteed by the runner's crate graph.
+  - **D4b — (dropped).** No default-target key needed: the existing global-default + `[targets.*]`
+    overlay convention already covers it. Omitting `--target` = global config (safe baseline);
+    `--target dev` layers dev tiers/deps in.
+  - **D4c — per-target composed runner.** For an app with native *runtime* deps (extension tiers,
+    native modules), the composer (`compose.rs`) builds a runner-based shim including only the active
+    target's native crates (D2), each mixed crate's dev feature **off** (D5's contract). Content-hash
+    key includes target + feature set. Assert `malva`/`noeta-fmt` absent from the artifact.
 - **D3b — dev-capability feature-gating convention (mixed crates).** The package-author contract for
   the *one* case D3 can't cover structurally: gate a mixed crate's dev-kind impls + optional heavy
   deps behind a Cargo feature — `malva = { optional = true }`, `fmt = ["dep:malva"]`,

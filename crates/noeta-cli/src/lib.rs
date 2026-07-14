@@ -3020,21 +3020,35 @@ fn emit_bundle(
     }
 }
 
-/// Emit `module` as a self-contained executable (P-AOT L2.1): staple its bundle onto a copy of this
-/// runtime binary, so the artifact runs the program with no separate `.noeb` or interpreter. Writes
-/// to `out` if given, else the input path with its extension stripped (`app.noe` → `app`, or `.exe`
-/// on Windows). The artifact is marked executable on Unix.
+/// Emit `module` as a self-contained executable (P-AOT L2.1): staple its bundle onto a copy of the
+/// lean `noeta-runner` (dev-deps D4a — *not* the toolchain), so the artifact runs the program with no
+/// separate `.noeb`, no interpreter, and no dev tooling. Writes to `out` if given, else the input
+/// path with its extension stripped (`app.noe` → `app`, or `.exe` on Windows). Marked executable on
+/// Unix.
 fn emit_exe(
     file: &std::path::Path,
     out: Option<&std::path::Path>,
     module: &noeta_bytecode::Module,
 ) -> ExitCode {
-    // The runtime image to embed is *this* binary — the toolchain the user invoked. (A stapled exe
-    // never reaches `build`; it runs its bundle, so `current_exe` here is always the plain toolchain.)
-    let runtime = match std::env::current_exe().and_then(std::fs::read) {
+    // The runtime image to embed is the LEAN `noeta-runner` (dev-deps D4a) — NOT this CLI. A stapled
+    // artifact's argv belongs to the program (it never invokes a CLI verb: `try_run_stapled` fires
+    // before arg-parsing), so the toolchain was always dead weight and attack surface here. The lean
+    // runner links only app-execution layers (no fmt/LSP/DAP/formatter parsers), so the artifact
+    // carries no dev tooling.
+    let runner_path = match resolve_native_runner() {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let runtime = match std::fs::read(&runner_path) {
         Ok(bytes) => bytes,
         Err(err) => {
-            eprintln!("lang: cannot read the runtime binary to embed: {err}");
+            eprintln!(
+                "lang: cannot read the lean runtime {}: {err}",
+                runner_path.display()
+            );
             return ExitCode::from(2);
         }
     };
@@ -3231,6 +3245,55 @@ fn resolve_serve_component() -> Result<std::path::PathBuf, String> {
     if !artifact.is_file() {
         return Err(format!(
             "the serve component was not found at {} after building",
+            artifact.display()
+        ));
+    }
+    Ok(artifact)
+}
+
+/// Locate the lean `noeta-runner` native binary to staple a `--exe` bundle onto (dev-deps D4a): the
+/// production runtime that links only app-execution layers — no fmt/LSP/DAP/formatter parsers.
+/// Priority mirrors [`resolve_wasm_runner`]: an explicit `NOETA_RUNNER` (packaged/hermetic path) → a
+/// runner shipped next to this toolchain binary → the workspace build, compiled on demand.
+///
+/// The workspace build uses **`-p noeta-runner`** (not `--workspace`): building the runner as its own
+/// crate graph keeps `noeta-pm` at `[]` features so cargo's feature unification cannot turn
+/// `fmt-config` on and drag `noeta-fmt` into the artifact — the D3c build-isolation invariant.
+/// `--release` because a shipped artifact wants an optimized runtime. Packaging the runner with a
+/// shipped toolchain is the same later distribution decision as the wasm runner's.
+fn resolve_native_runner() -> Result<std::path::PathBuf, String> {
+    let bin_name = if cfg!(windows) {
+        "noeta-runner.exe"
+    } else {
+        "noeta-runner"
+    };
+    if let Ok(path) = std::env::var("NOETA_RUNNER") {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join(bin_name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    // Interim workspace build. `--locked` is deliberately absent (dev-tree path); `-p` isolation is
+    // load-bearing (see doc) — never `--workspace`.
+    let output = std::process::Command::new("cargo")
+        .args(["build", "-p", "noeta-runner", "--release"])
+        .output()
+        .map_err(|e| format!("cannot run cargo to build the lean runtime: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "building the lean runtime (`noeta-runner`) failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let artifact = workspace_target_dir()?.join("release").join(bin_name);
+    if !artifact.is_file() {
+        return Err(format!(
+            "the lean runtime was not found at {} after building",
             artifact.display()
         ));
     }

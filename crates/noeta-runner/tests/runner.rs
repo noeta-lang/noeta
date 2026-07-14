@@ -135,6 +135,45 @@ fn treats_a_non_bundle_file_as_source() {
 }
 
 #[test]
+fn the_dependency_graph_links_no_dev_tooling() {
+    // The dev-deps security invariant, regression-guarded: in the runner's OWN crate graph (isolated
+    // `-p` resolution, which is what `build --exe`/the composer use), NO L3 dev tooling is linked —
+    // no fmt/LSP/DAP/MCP, no formatter parsers (malva). `-e features` reflects the real feature
+    // resolution, so the `fmt-config` gate on `noeta-pm` is honoured (workspace-unified builds would
+    // turn it on — the artifact must never be built that way). Best-effort: skip if cargo can't run,
+    // so an infra gap never false-fails; a real regression (a forbidden crate appearing) fails loud.
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let Ok(output) = std::process::Command::new(env!("CARGO"))
+        .current_dir(&workspace)
+        .args(["tree", "-p", "noeta-runner", "-e", "features"])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let tree = String::from_utf8_lossy(&output.stdout);
+    for forbidden in [
+        "noeta-fmt v",
+        "noeta-lsp v",
+        "noeta-dap v",
+        "noeta-mcp v",
+        "noeta-html v",
+        "noeta-css v",
+        "noeta-prof v",
+        "malva v",
+    ] {
+        assert!(
+            !tree.contains(forbidden),
+            "the lean runtime links dev tooling (`{}`) — a dev-deps security regression. \
+             Something added an L3 dependency or un-gated a dev capability:\n{tree}",
+            forbidden.trim_end_matches(" v")
+        );
+    }
+}
+
+#[test]
 fn no_arguments_prints_usage() {
     let out = runner().output().expect("runs");
     assert_eq!(out.status.code(), Some(2));
