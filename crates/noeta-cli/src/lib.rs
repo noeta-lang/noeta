@@ -182,6 +182,12 @@ enum Command {
         /// nothing is emitted.
         #[arg(long)]
         target: Option<String>,
+        /// Generate the **API reference** from the intrinsic registry (the stdlib and any composed
+        /// native modules) instead of from `.noe` source — a registry-ready `docs.json` (schema 1)
+        /// organized by module, with signatures and any registered doc prose. Prints to stdout, or
+        /// writes the artifact + Markdown tree with `--out`.
+        #[arg(long, conflicts_with_all = ["file", "package"])]
+        api: bool,
     },
     /// Compile a program to a self-contained `.noeb` bundle (P-AOT L1): the versioned bytecode a
     /// `noeta run app.noeb` executes directly, so a program ships **without its `.noe` source**.
@@ -581,7 +587,8 @@ pub fn run_cli(
             package,
             out,
             target,
-        } => cmd_doc(&file, &package, &out, &target),
+            api,
+        } => cmd_doc(&file, &package, &out, &target, api),
         Command::Build {
             file,
             out,
@@ -4849,12 +4856,48 @@ fn web_docs_url(base: &str, name: &str, version: &str) -> String {
     format!("{}/{name}/{version}/docs", base.trim_end_matches('/'))
 }
 
+/// `noeta doc --api`: generate the API reference from the intrinsic registry (stdlib + any composed
+/// native modules). Prints the schema-1 `docs.json` to stdout, or — with `--out` — writes the
+/// artifact and renders its Markdown tree (the same schema the hosted registry renders).
+fn cmd_doc_api(out: &Option<PathBuf>) -> ExitCode {
+    let (json, done) = docgen::registry_docs_json(None);
+    match out {
+        Some(out_dir) => match docgen::render_json_to(out_dir, &json) {
+            Ok(_) => {
+                println!(
+                    "documented {} module{} ({} function{}) → {}",
+                    done.modules,
+                    plural(done.modules),
+                    done.decls,
+                    plural(done.decls),
+                    out_dir.display(),
+                );
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("lang: {err}");
+                ExitCode::from(2)
+            }
+        },
+        None => {
+            print!("{json}");
+            ExitCode::SUCCESS
+        }
+    }
+}
+
 fn cmd_doc(
     file: &Option<PathBuf>,
     package: &Option<String>,
     out: &Option<PathBuf>,
     target: &Option<String>,
+    api: bool,
 ) -> ExitCode {
+    // `--api`: the registry-backed path — the intrinsic surface (stdlib + composed native modules)
+    // as a schema-1 `docs.json`, organized by module. No local source involved.
+    if api {
+        return cmd_doc_api(out);
+    }
     // `--package`: the registry-fetch path — a published release's stored artifact, no local
     // source involved.
     if let Some(spec) = package {

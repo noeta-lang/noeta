@@ -102,6 +102,44 @@ pub fn package_docs_json(dir: &Path) -> Result<(String, Generated), String> {
     ))
 }
 
+/// Build the **API-reference** `docs.json` (docs-browser Arc 2) from the intrinsic registry — the
+/// stdlib and any composed native modules — rather than from `.noe` source. One module entry per
+/// registry module (`std.math`, `std.http.client`, …), each function an `fn` item carrying its
+/// rendered signature and any registered doc prose. Same schema-1 shape as [`generate`], so it
+/// rides to the registry and renders on the hosted docs page identically. `package` names the
+/// artifact (e.g. the toolchain's `std`), or `None` for a generic title.
+pub fn registry_docs_json(package: Option<(String, String)>) -> (String, Generated) {
+    let modules: Vec<ModuleDocs> = noeta_ide::api::modules()
+        .into_iter()
+        .map(|m| ModuleDocs {
+            file: String::new(), // native: no source file
+            slug: m.qualified.replace('.', "-"),
+            namespace: Some(m.qualified),
+            doc: None,
+            items: m
+                .functions
+                .into_iter()
+                .map(|f| {
+                    Item::Decl(DeclDocs {
+                        kind: "fn",
+                        name: f.name,
+                        signature: f.signature,
+                        doc: (!f.doc.is_empty()).then_some(f.doc),
+                        public: true,
+                    })
+                })
+                .collect(),
+        })
+        .collect();
+    let json = docs_json(&package, &modules);
+    let generated = Generated {
+        modules: modules.len(),
+        decls: modules.iter().map(|m| m.decl_count()).sum(),
+        skipped: Vec::new(),
+    };
+    (format!("{json:#}\n"), generated)
+}
+
 /// Render the Markdown tree from a stored `docs.json` (the registry-fetch path: `noeta doc
 /// --package … --out DIR`) into `out`, alongside a copy of the artifact itself. The inverse of
 /// [`generate`]'s emit step, working purely from the schema — no source needed.
@@ -146,10 +184,18 @@ pub fn render_json_to(out: &Path, docs_json_text: &str) -> Result<Generated, Str
                 }))
             })
             .collect();
+        let namespace = m["namespace"].as_str().map(str::to_string);
+        // Prefer the source-file stem; a native module (registry API) has no file, so fall back to
+        // its namespace (`std.math` → `std-math`) for a unique, readable page name.
+        let slug = match (file.trim_end_matches(".noe"), &namespace) {
+            ("", Some(ns)) => ns.replace('.', "-"),
+            (stem, _) if !stem.is_empty() => stem.to_string(),
+            _ => "module".to_string(),
+        };
         modules.push(ModuleDocs {
-            slug: file.trim_end_matches(".noe").to_string(),
+            slug,
             file,
-            namespace: m["namespace"].as_str().map(str::to_string),
+            namespace,
             doc: m["doc"].as_str().map(str::to_string),
             items,
         });
@@ -466,6 +512,8 @@ fn index_markdown(package: &Option<(String, String)>, modules: &[ModuleDocs]) ->
 fn module_markdown(m: &ModuleDocs) -> String {
     let mut out = String::new();
     match &m.namespace {
+        // A native (registry API) module has no source file — omit the empty parenthetical.
+        Some(ns) if m.file.is_empty() => out.push_str(&format!("# `{ns}`\n\n")),
         Some(ns) => out.push_str(&format!("# `{ns}` ({})\n\n", m.file)),
         None => out.push_str(&format!("# `{}`\n\n", m.file)),
     }
@@ -490,4 +538,43 @@ fn module_markdown(m: &ModuleDocs) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_docs_json_is_schema1_by_module_with_prose() {
+        let (text, done) = registry_docs_json(None);
+        assert!(done.modules > 3 && done.decls > 0);
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["schema"].as_u64(), Some(SCHEMA as u64));
+
+        let modules = doc["modules"].as_array().unwrap();
+        let math = modules
+            .iter()
+            .find(|m| m["namespace"] == "std.math")
+            .expect("std.math module present");
+        // Every item carries `kind` + `name` — the hosted registry renderer drops items missing
+        // either, so this is the contract with noeta-registry's src/web.ts renderModule().
+        let items = math["items"].as_array().unwrap();
+        assert!(
+            items
+                .iter()
+                .all(|i| i["kind"].is_string() && i["name"].is_string())
+        );
+        let sqrt = items.iter().find(|i| i["name"] == "sqrt").unwrap();
+        assert_eq!(sqrt["kind"], "fn");
+        assert_eq!(sqrt["signature"], "fn sqrt(float): float");
+        assert!(sqrt["doc"].as_str().unwrap().contains("square root"));
+        assert_eq!(sqrt["public"], true);
+
+        // The whole artifact round-trips through the registry-render path (schema-only).
+        let out = std::env::temp_dir().join("noeta_docgen_api_test");
+        let _ = std::fs::remove_dir_all(&out);
+        render_json_to(&out, &text).expect("renders from schema alone");
+        assert!(out.join("std-math.md").exists());
+        let _ = std::fs::remove_dir_all(&out);
+    }
 }

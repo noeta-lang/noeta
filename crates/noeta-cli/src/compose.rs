@@ -177,7 +177,12 @@ pub fn compose_aot_runtime_archive(
         build_aot_archive(&dir, &entries, &toolchain, rings, &archive, &libs_file)?;
     }
     let libs = std::fs::read_to_string(&libs_file)
-        .map_err(|err| format!("reading cached AOT link libs `{}`: {err}", libs_file.display()))?
+        .map_err(|err| {
+            format!(
+                "reading cached AOT link libs `{}`: {err}",
+                libs_file.display()
+            )
+        })?
         .split_whitespace()
         .map(str::to_string)
         .collect();
@@ -203,7 +208,14 @@ fn compose_binary(
     // already built (the binary was copied into the compose dir as its own artifact).
     let binary = dir.join("bin").join(BIN_NAME);
     if !binary.is_file() {
-        build(&dir, &entries, &toolchain, trusted_command_roots, &binary, kind)?;
+        build(
+            &dir,
+            &entries,
+            &toolchain,
+            trusted_command_roots,
+            &binary,
+            kind,
+        )?;
     }
     Ok(binary)
 }
@@ -525,7 +537,15 @@ fn build_aot_archive(
 
 /// A conservative Linux native-link fallback when rustc's `native-static-libs` note is somehow
 /// absent — matches the CLI's stock `default_native_libs`.
-const DEFAULT_AOT_LIBS: &[&str] = &["-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl", "-lc"];
+const DEFAULT_AOT_LIBS: &[&str] = &[
+    "-lgcc_s",
+    "-lutil",
+    "-lrt",
+    "-lpthread",
+    "-lm",
+    "-ldl",
+    "-lc",
+];
 
 /// The composed AOT runtime's manifest: a `staticlib` depending on `noeta-aot-runtime` (with its C
 /// `main` OFF via `default-features = false`, forwarding the program's stdlib rings), `noeta-native`,
@@ -562,7 +582,10 @@ fn aot_shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, rings: &[
         "noeta-aot-runtime = {{ {}, default-features = false, features = [{ring_list}] }}\n",
         src_spec("noeta-aot-runtime")
     ));
-    out.push_str(&format!("noeta-native = {{ {} }}\n", src_spec("noeta-native")));
+    out.push_str(&format!(
+        "noeta-native = {{ {} }}\n",
+        src_spec("noeta-native")
+    ));
     for (n, e) in entries.iter().enumerate() {
         out.push_str(&format!(
             "ext{n} = {{ package = {}, path = {} }}\n",
@@ -905,8 +928,14 @@ mod tests {
         // the embedded program — no `run_cli`, no stapled-runner call.
         let lib = aot_shim_lib_rs(&entries());
         assert!(lib.contains("#[unsafe(no_mangle)]"), "{lib}");
-        assert!(lib.contains("pub extern \"C\" fn main() -> core::ffi::c_int"), "{lib}");
-        assert!(lib.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS);"), "{lib}");
+        assert!(
+            lib.contains("pub extern \"C\" fn main() -> core::ffi::c_int"),
+            "{lib}"
+        );
+        assert!(
+            lib.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS);"),
+            "{lib}"
+        );
         assert!(
             lib.contains("noeta_aot::run_embedded_with_extensions(Box::leak("),
             "{lib}"
@@ -938,7 +967,10 @@ mod tests {
         let main = shim_main_rs(&entries(), &["imgfx".to_string()], ShimKind::Runner);
         assert!(main.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS);"));
         assert!(main.contains("noeta_runner::run_stapled_with_extensions(Box::leak("));
-        assert!(!main.contains("run_cli"), "the runner base must not call run_cli");
+        assert!(
+            !main.contains("run_cli"),
+            "the runner base must not call run_cli"
+        );
         assert!(!main.contains("trusted_command_roots"));
     }
 }
