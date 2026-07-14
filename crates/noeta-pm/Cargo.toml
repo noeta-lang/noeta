@@ -51,7 +51,7 @@ base64 = { workspace = true, optional = true }
 fmt-config = ["dep:noeta-fmt"]
 # Enable the networked registry `Index` (an HTTP client of the hosted index). Off by default; the CLI
 # turns it on. Without it, only the file-backed `LocalIndex` (offline/tests) exists.
-registry-http = ["dep:reqwest", "dep:serde", "dep:serde_json"]
+registry-http = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:getrandom"]
 # Package provenance: sign attestations on publish, verify them on resolve (Ed25519). CLI-only.
 provenance = ["dep:ed25519-dalek", "dep:getrandom"]
 # Keyless provenance (Phase 5): Sigstore bundles verified offline — OIDC identity in place of a

@@ -4395,6 +4395,33 @@ fn noeta_add_refuses_a_builtin_import_root() {
 }
 
 #[test]
+fn noeta_claim_requires_the_hosted_registry() {
+    // namespace-protection #1: claiming a scope talks to the hosted registry — without a configured
+    // URL, `noeta claim` explains that rather than failing opaquely.
+    lang()
+        .env_remove("NOETA_REGISTRY_URL")
+        .args(["claim", "acme"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs the hosted registry"));
+}
+
+#[test]
+fn noeta_claim_guides_when_not_in_ci() {
+    // With a registry URL but no GitHub Actions OIDC environment, `noeta claim` can't prove ownership
+    // — it prints actionable guidance (run from a workflow granting `id-token: write`) and exits 1,
+    // without ever contacting the registry.
+    lang()
+        .env("NOETA_REGISTRY_URL", "https://registry.invalid")
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        .args(["claim", "acme"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("GitHub Actions OIDC token"));
+}
+
+#[test]
 fn noeta_update_rewrites_the_lock() {
     if !git_available() {
         return;

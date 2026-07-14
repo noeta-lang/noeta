@@ -448,6 +448,22 @@ enum Command {
         #[command(subcommand)]
         action: KeyAction,
     },
+    /// Claim a registry **scope** for yourself, proving you control the GitHub org/user of the same
+    /// name via a GitHub Actions OIDC token (namespace-protection #1). Self-service — no admin — and
+    /// squat-proof: you can only claim the scope that matches your GitHub identity. Run it from a
+    /// GitHub Actions workflow that grants `id-token: write`. Binds a publish token to the scope
+    /// (generated and printed unless you pass `--token`), which `noeta publish` then presents.
+    Claim {
+        /// The scope (your GitHub org/user name) to claim.
+        scope: String,
+        /// The publish token to bind (default: a fresh random token, printed on success).
+        #[arg(long)]
+        token: Option<String>,
+        /// The OIDC audience the registry expects (default: `NOETA_REGISTRY_AUDIENCE` or
+        /// `noeta-registry`). Must match the registry's configured audience.
+        #[arg(long)]
+        audience: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -688,6 +704,84 @@ pub fn run_cli(
         } => cmd_publish(&git, tag.as_deref(), key, interactive, oob, no_docs),
         Command::Audit { path } => cmd_audit(&path),
         Command::Key { action } => cmd_key(&action),
+        Command::Claim {
+            scope,
+            token,
+            audience,
+        } => cmd_claim(&scope, token.as_deref(), audience.as_deref()),
+    }
+}
+
+/// `noeta claim <scope> [--token T] [--audience A]` — claim a registry scope by proving control of
+/// the GitHub org/user of the same name via a GitHub Actions OIDC token (namespace-protection #1).
+fn cmd_claim(scope: &str, token: Option<&str>, audience: Option<&str>) -> ExitCode {
+    // Claiming talks to the hosted registry over HTTP.
+    let Some(base) = std::env::var_os("NOETA_REGISTRY_URL") else {
+        eprintln!(
+            "lang: `noeta claim` needs the hosted registry — set `NOETA_REGISTRY_URL` to the \
+             registry you are claiming a scope on"
+        );
+        return ExitCode::from(2);
+    };
+    let base = base.to_string_lossy().into_owned();
+    let audience = audience
+        .map(str::to_string)
+        .or_else(|| std::env::var("NOETA_REGISTRY_AUDIENCE").ok())
+        .unwrap_or_else(|| "noeta-registry".to_string());
+
+    // The OIDC proof: a GitHub Actions token for the registry's audience. Absent → not in CI.
+    let oidc = match registry::fetch_github_oidc(&audience) {
+        Ok(Some(jwt)) => jwt,
+        Ok(None) => {
+            eprintln!(
+                "lang: no GitHub Actions OIDC token is available. `noeta claim` proves scope \
+                 ownership from a GitHub Actions workflow that grants `id-token: write`; run it \
+                 there. (For other setups, a scope can be provisioned via the registry's admin \
+                 bootstrap.)"
+            );
+            return ExitCode::from(1);
+        }
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    // The publish token to bind: the one given, or a freshly minted one we print on success.
+    let (token, generated) = match token {
+        Some(t) => (t.to_string(), false),
+        None => match registry::generate_publish_token() {
+            Ok(t) => (t, true),
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+
+    let index = match registry::HttpIndex::new(base) {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    match index.claim_scope(scope, &token, &oidc) {
+        Ok(status) => {
+            println!("{status}: `{scope}`");
+            if generated {
+                // The token is a secret the user must keep — print it once, for them to store.
+                println!(
+                    "\nBound a new publish token to `{scope}`. Save it — `noeta publish` reads it \
+                     from `NOETA_REGISTRY_TOKEN`:\n\n    export NOETA_REGISTRY_TOKEN={token}\n"
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("lang: {err}");
+            ExitCode::from(1)
+        }
     }
 }
 

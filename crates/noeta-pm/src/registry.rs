@@ -422,6 +422,86 @@ impl HttpIndex {
         // `name` is `company/package`, which becomes the two path segments verbatim.
         format!("{}/v1/packages/{name}", self.base)
     }
+
+    /// Claim `scope` for `token`, proving ownership with a GitHub OIDC `oidc` JWT
+    /// (namespace-protection #1): `POST /v1/scopes/claim`. Returns the registry's status message on
+    /// success (`scope claimed` / `scope re-claimed`), or the server's error. This binds `token` as
+    /// the scope's publish token — the same token `noeta publish` later presents.
+    pub fn claim_scope(&self, scope: &str, token: &str, oidc: &str) -> Result<String, String> {
+        let body = serde_json::json!({ "scope": scope, "token": token, "oidc": oidc });
+        let resp = self
+            .client
+            .post(format!("{}/v1/scopes/claim", self.base))
+            .json(&body)
+            .send()
+            .map_err(|err| format!("claiming scope `{scope}` failed: {err}"))?;
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status.is_success() {
+            // Surface the human-readable status the Worker returns (`{ "status": … }`).
+            let msg = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(str::to_string))
+                .unwrap_or_else(|| format!("scope `{scope}` claimed"));
+            return Ok(msg);
+        }
+        // Prefer the server's `{ "error": … }` message when present.
+        let detail = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| status.to_string());
+        Err(format!("registry refused the claim of `{scope}`: {detail}"))
+    }
+}
+
+/// Mint a fresh 256-bit publish token (hex) from OS entropy — what `noeta claim` binds to a scope
+/// when the user doesn't supply one (namespace-protection #1).
+#[cfg(feature = "registry-http")]
+pub fn generate_publish_token() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|err| format!("cannot read OS entropy: {err}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Fetch a GitHub Actions **OIDC token** for `audience`, or `Ok(None)` when not running under GitHub
+/// Actions (namespace-protection #1). GitHub exposes the request URL + a bearer via the
+/// `ACTIONS_ID_TOKEN_REQUEST_URL` / `ACTIONS_ID_TOKEN_REQUEST_TOKEN` env vars (present only when the
+/// workflow grants `id-token: write`); the response is `{ "value": "<jwt>" }`. The `audience` must
+/// match the registry's configured `OIDC_AUDIENCE`.
+#[cfg(feature = "registry-http")]
+pub fn fetch_github_oidc(audience: &str) -> Result<Option<String>, String> {
+    let (Ok(req_url), Ok(req_token)) = (
+        std::env::var("ACTIONS_ID_TOKEN_REQUEST_URL"),
+        std::env::var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
+    ) else {
+        return Ok(None);
+    };
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent(concat!("noeta/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|err| format!("cannot build the OIDC HTTP client: {err}"))?;
+    let sep = if req_url.contains('?') { '&' } else { '?' };
+    let resp = client
+        .get(format!("{req_url}{sep}audience={audience}"))
+        .bearer_auth(req_token)
+        .send()
+        .map_err(|err| format!("requesting a GitHub OIDC token failed: {err}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "GitHub OIDC token endpoint returned {} (does the workflow grant `id-token: write`?)",
+            resp.status()
+        ));
+    }
+    #[derive(serde::Deserialize)]
+    struct TokenResponse {
+        value: String,
+    }
+    let token: TokenResponse = resp
+        .json()
+        .map_err(|err| format!("GitHub OIDC token response was not the expected JSON: {err}"))?;
+    Ok(Some(token.value))
 }
 
 #[cfg(feature = "registry-http")]
@@ -948,5 +1028,69 @@ mod http_tests {
             )
             .unwrap_err();
         assert!(err.contains("NOETA_REGISTRY_TOKEN"), "{err}");
+    }
+
+    #[test]
+    fn http_index_claims_a_scope_and_surfaces_the_status() {
+        // namespace-protection #1: `claim_scope` POSTs { scope, token, oidc } to /v1/scopes/claim and
+        // returns the Worker's status message; a non-2xx surfaces the server's error verbatim.
+        let (tx, rx) = mpsc::channel();
+        let base = mock_server(move |method, path, body| {
+            tx.send((method.to_string(), path.to_string(), body.to_string()))
+                .unwrap();
+            (
+                201,
+                r#"{"status":"scope claimed","scope":"widgetco","owner":"widgetco"}"#.to_string(),
+            )
+        });
+        let index = HttpIndex::new(base).unwrap();
+        let msg = index
+            .claim_scope("widgetco", "publish-token-abc123", "eyJ.header.sig")
+            .unwrap();
+        assert_eq!(msg, "scope claimed");
+        let (method, path, body) = rx.recv().unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/v1/scopes/claim");
+        assert!(body.contains("\"scope\":\"widgetco\""), "body: {body}");
+        assert!(body.contains("\"oidc\":\"eyJ.header.sig\""), "body: {body}");
+    }
+
+    #[test]
+    fn http_index_claim_surfaces_a_rejection() {
+        let base = mock_server(|_, _, _| {
+            (
+                403,
+                r#"{"error":"your GitHub identity `attacker` cannot claim scope `stripe`"}"#
+                    .to_string(),
+            )
+        });
+        let index = HttpIndex::new(base).unwrap();
+        let err = index
+            .claim_scope("stripe", "publish-token-abc123", "eyJ.header.sig")
+            .unwrap_err();
+        assert!(err.contains("cannot claim scope"), "{err}");
+    }
+
+    #[test]
+    fn github_oidc_is_none_outside_ci() {
+        // Absent the GitHub Actions token-request env, there is no ambient OIDC token — `Ok(None)`, so
+        // `noeta claim` can print actionable guidance rather than error opaquely. (These vars are only
+        // set inside a GitHub Actions job with `id-token: write`.) We don't mutate the environment —
+        // the crate forbids `unsafe`, and `remove_var` is unsafe — so assert only when it is already
+        // absent (the normal case, including ordinary CI test jobs).
+        if std::env::var_os("ACTIONS_ID_TOKEN_REQUEST_URL").is_none()
+            && std::env::var_os("ACTIONS_ID_TOKEN_REQUEST_TOKEN").is_none()
+        {
+            assert_eq!(fetch_github_oidc("noeta-registry").unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn generated_publish_tokens_are_long_and_unique() {
+        let a = generate_publish_token().unwrap();
+        let b = generate_publish_token().unwrap();
+        assert_eq!(a.len(), 64, "256 bits as hex");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b, "tokens must not repeat");
     }
 }
