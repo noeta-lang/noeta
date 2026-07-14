@@ -514,6 +514,13 @@ pub enum Rvalue {
         func: String,
         span: Span,
     },
+    /// A **native module as a first-class value** — the same value a `use std.http.client` binding
+    /// holds (`Const::NativeModule`), but materialized at a `http.client` member-access site that a
+    /// namespace group (`use std.http`) resolved. `module` is the **root-qualified** leaf identity
+    /// (`std.http.client`, never the group prefix `std.http`), so it flows to the const pool exactly
+    /// as a direct import would — keeping AOT ring DCE (which keys on the concrete identity) intact.
+    /// A method call on the result dispatches through the ordinary native-module path.
+    NativeModule { module: String, span: Span },
 }
 
 /// A statement in an IR [`Block`]. The `let`/`eval`/`bind`/`echo`/`return` forms are

@@ -854,6 +854,13 @@ impl Interpreter {
             noeta_ir::Rvalue::ModuleFn { module, func, .. } => {
                 Ok(Value::ModuleFn(module.clone(), func.clone()))
             }
+            // A native module value resolved from a namespace group (`http.client`) — the same
+            // `Value::NativeModule` a direct `use std.http.client` binding holds, so a method call
+            // on it dispatches through the identical native-module path. Mirrors the VM's
+            // `Const::NativeModule`.
+            noeta_ir::Rvalue::NativeModule { module, .. } => {
+                Ok(Value::NativeModule(module.clone()))
+            }
             noeta_ir::Rvalue::Unary { op, operand, span } => {
                 let value = self.eval_ir_atom(operand, frame)?;
                 self.eval_unary(*op, value, *span)

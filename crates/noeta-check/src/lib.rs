@@ -173,6 +173,12 @@ pub struct Sites {
     /// bundle method is not reachable through a `dyn` receiver — `dyn` stays the escape hatch;
     /// a runtime binding table would be an additive later extension.)
     pub bundle_call_sites: HashMap<Span, (String, String)>,
+    /// Namespace-group member-access sites (`http.client`, `use std.http`) → the concrete
+    /// **root-qualified module identity** the chain resolves to (`std.http.client`). Lowering emits
+    /// an [`Rvalue::NativeModule`] at these `Member` spans instead of a field load — so the leaf
+    /// identity reaches the const pool (AOT ring DCE intact) and a method call dispatches as a
+    /// direct import would. A pure function of the program, like the other site maps.
+    pub namespace_module_sites: HashMap<Span, String>,
     /// Bare float-literal spans adapted into an `f32` context (P-NUM-SYM) — the type-directed hint
     /// that makes lowering emit a narrow `Const::F32` instead of the default `Const::Float`. A pure
     /// function of the program (both backends narrow identically), like the other site maps.
@@ -779,6 +785,8 @@ struct SiteMaps {
     f32_literal_sites: HashSet<Span>,
     /// Method-bundle call sites (kernel-methods K2) — see [`Sites::bundle_call_sites`].
     bundle_call_sites: HashMap<Span, (String, String)>,
+    /// Namespace-group member-access sites — see [`Sites::namespace_module_sites`].
+    namespace_module_sites: HashMap<Span, String>,
 }
 
 impl SiteMaps {
@@ -800,6 +808,7 @@ impl SiteMaps {
             bound_handle_sites: self.bound_handle_sites,
             f32_literal_sites: self.f32_literal_sites,
             bundle_call_sites: self.bundle_call_sites,
+            namespace_module_sites: self.namespace_module_sites,
             destructor_relevance,
         }
     }
@@ -893,6 +902,12 @@ struct Checker {
     /// identity** (`"std.json"`, `"std.http.client"`). A call `m.f(args)` on the bound name resolves
     /// through [`stdlib::module_return`] against that identity.
     modules: HashMap<String, String>,
+    /// Names bound to a **namespace group** by `use std.http` — each mapped to the group's
+    /// **root-qualified prefix** (`http` → `"std.http"`). A member access `http.client` resolves one
+    /// hop through [`noeta_stdlib::registry::Registry::resolve_namespace_child`] against this prefix;
+    /// a landing module identity is recorded in `namespace_module_sites` for lowering. The handle is
+    /// not a value on its own — a bare reference is an error (a group must be dotted into).
+    namespaces: HashMap<String, String>,
     /// Names brought into scope bare by a selective member import (`use std.math.sqrt` → `sqrt`),
     /// each mapped to its `(module, func)`. A bare call `sqrt(args)` types through
     /// [`stdlib::module_return`] exactly like the qualified `math.sqrt(args)`.
@@ -1520,41 +1535,72 @@ impl Checker {
     /// before the selective-function case: `use std.id.Uuid` names a *type* in the `id` unit, not a
     /// function, so it must not fall into the "module has no function" error.
     fn collect_imports(&mut self, program: &Program) {
+        use noeta_stdlib::registry::UseKind;
         for stmt in &program.stmts {
             let Stmt::Use { path, names, .. } = stmt else {
                 continue;
             };
-            let rooted = !path.is_empty() && self.reg().is_extension_root(&path[0]);
-            let prefix = path.join(".");
-            // A selective member import `use <root>.<mod>.<fn>` — a rooted path whose prefix is a
-            // known module. Each name binds as a bare function alias against the module identity.
-            let selective = (path.len() >= 2 && rooted)
-                .then(|| prefix.clone())
-                .filter(|m| stdlib::is_std_module(self.reg(), m));
             for name in names {
                 let local = name.local().to_string();
-                // A plain (`use std.{json}`) or nested (`use std.http.client`) module import.
-                let qualified = format!("{prefix}.{}", name.name);
-                if rooted && stdlib::is_std_module(self.reg(), &qualified) {
-                    self.modules.insert(local, qualified);
-                } else if rooted && let Some(ext) = self.reg().find_type_qualified(&qualified) {
-                    // An **extern-type** import (`use std.id.Uuid`, `use std.metrics.Counter as C`):
-                    // the leaf names a registered type in this namespace. Bind the local name (alias
-                    // or short) to its qualified identity — the resolver keys annotations on this.
-                    self.extern_types.insert(local, ext.qualified());
-                } else if let Some(module) = &selective {
-                    if self.reg().is_module_function(module, &name.name) {
-                        self.imported_fns
-                            .insert(local, (module.clone(), name.name.clone()));
-                    } else {
-                        self.error(
-                            DiagnosticCode::UnknownName,
-                            name.span,
-                            format!("module `{module}` has no function `{}`", name.name),
-                        );
+                // One shared classifier decides what every `use` target binds — so the checker, the
+                // compiler, and the eval reference never diverge on whether a name is a module, a
+                // namespace group, a member function, a type, or an error (the check/run divergence
+                // this closes). `UnknownUnderRoot` stays lenient in this slice (except the existing
+                // member-function-miss diagnostic); slice 2 tightens it to a hard E0019.
+                match self.reg().classify_use(path, &name.name) {
+                    UseKind::Module(qualified) => {
+                        self.modules.insert(local, qualified);
                     }
-                } else {
-                    self.types.insert(local);
+                    UseKind::Namespace(prefix) => {
+                        // Expose the group's types under the bound name so a dotted annotation
+                        // (`http.Response`, aliased `h.Response`) resolves like the group's modules
+                        // resolve for a call — mapping `<local>.<rel>` to the type's qualified
+                        // identity, the same channel a leaf `use std.http.Response` import uses.
+                        for (rel, qualified) in self.reg().namespace_types(&prefix) {
+                            self.extern_types
+                                .insert(format!("{local}.{rel}"), qualified);
+                        }
+                        self.namespaces.insert(local, prefix);
+                    }
+                    UseKind::ExternType(qualified) => {
+                        // An **extern-type** import (`use std.id.Uuid`, `use std.metrics.Counter as
+                        // C`): bind the local name (alias or short) to its qualified identity — the
+                        // annotation resolver keys on this.
+                        self.extern_types.insert(local, qualified);
+                    }
+                    UseKind::MemberFn { module, func } => {
+                        self.imported_fns.insert(local, (module, func));
+                    }
+                    UseKind::UnknownUnderRoot => {
+                        // A known extension root is fully enumerable, so a target that resolves to no
+                        // module / namespace / member / type is a genuine error — not an opaque stub
+                        // (this is the check/run divergence: `use std.{http}` used to slip through to
+                        // an opaque type and fail only at run/`--native`). A member miss on a real
+                        // module reads as "has no member"; anything else names nothing under the root.
+                        let module = path.join(".");
+                        let message =
+                            if path.len() >= 2 && self.reg().find_module(&module).is_some() {
+                                format!("module `{module}` has no member `{}`", name.name)
+                            } else {
+                                format!(
+                                    "`{}` is not a module, namespace, or type in `{module}`",
+                                    name.name
+                                )
+                            };
+                        let candidates = self.reg().import_candidates(path);
+                        let suggestion = noeta_diagnostics::closest(
+                            &name.name,
+                            candidates.iter().map(String::as_str),
+                        )
+                        .map(str::to_string);
+                        let diag = self.error(DiagnosticCode::UnresolvedImport, name.span, message);
+                        if let Some(s) = suggestion {
+                            diag.help(format!("did you mean `{s}`?"));
+                        }
+                    }
+                    UseKind::UserImport => {
+                        self.types.insert(local);
+                    }
                 }
             }
         }
@@ -5535,12 +5581,17 @@ impl Checker {
                     self.finalize_closure_args(&[], args, arg_exprs, env);
                     return self.enum_construction_type(tn, name, args, call_span);
                 }
-                // `module.func(args)` — a native module call; `m` is the bound local, `qm` its
-                // root-qualified identity (what the stdlib return-type tables key on).
-                if let Expr::Ident { name: m, .. } = receiver.as_ref()
-                    && let Some(qm) = self.modules.get(m)
-                {
-                    let qm = qm.clone();
+                // `module.func(args)` — a native module call. The module identity comes from either a
+                // bare module binding (`client.get`, `client` from `use std.http.client`) or a
+                // namespace-group member chain (`http.client.get`, `http` from `use std.http`); both
+                // key the same stdlib return-type tables, and the chain form records its span so
+                // lowering materializes the leaf module value (`std.http.client`).
+                let module_id = match receiver.as_ref() {
+                    Expr::Ident { name: m, .. } => self.modules.get(m).cloned(),
+                    _ => None,
+                }
+                .or_else(|| self.resolve_namespace_module(receiver, env));
+                if let Some(qm) = module_id {
                     if let Some(params) = stdlib::module_params(self.reg(), &qm, name, args) {
                         let required =
                             stdlib::module_required(self.reg(), &qm, name).unwrap_or(params.len());
@@ -5550,6 +5601,23 @@ impl Checker {
                     self.check_module_bounds(&qm, name, args, span);
                     return stdlib::module_return(self.reg(), &qm, name, args)
                         .unwrap_or(Type::Unknown);
+                }
+                // The receiver is a namespace group (`http` from `use std.http`) — a submodule chain
+                // (`http.client.get`) already resolved above, so any member reaching here is either
+                // an unknown member (`http.nope` — a hard error, a group is fully enumerable) or a
+                // deferred non-module child (a sub-namespace/type used in call position). Either way
+                // the group handle is not a value, so this must not fall through to the generic
+                // method path (which would synthesize `http` as an unknown name).
+                if let Some(prefix) = self.resolve_namespace_prefix(receiver, env) {
+                    use noeta_stdlib::registry::NsChild;
+                    self.finalize_closure_args(&[], args, arg_exprs, env);
+                    if matches!(
+                        self.reg().resolve_namespace_child(&prefix, name),
+                        NsChild::None
+                    ) {
+                        self.namespace_member_error(&prefix, name, span);
+                    }
+                    return Type::Unknown;
                 }
                 // `Type.assoc(args)` — an associated function / static call on a known user type
                 // (`Box.new(1)`). Resolve to the type's method signature so the result is precisely
@@ -6595,6 +6663,72 @@ impl Checker {
         ));
     }
 
+    /// The **root-qualified namespace prefix** an expression denotes, if it is a namespace group
+    /// (`http` bound by `use std.http` → `"std.http"`) or a deeper namespace member chain
+    /// (`http.v2` → `"std.http.v2"`). `None` for anything that is not a pure namespace path — a
+    /// value, a concrete module, or a type. A local binding shadows a namespace of the same name.
+    fn resolve_namespace_prefix(&self, expr: &Expr, env: &Env) -> Option<String> {
+        use noeta_stdlib::registry::NsChild;
+        match expr {
+            Expr::Ident { name, .. } if lookup(env, name).is_none() => {
+                self.namespaces.get(name).cloned()
+            }
+            Expr::Member { receiver, name, .. } => {
+                let prefix = self.resolve_namespace_prefix(receiver, env)?;
+                match self.reg().resolve_namespace_child(&prefix, name) {
+                    NsChild::Namespace(sub) => Some(sub),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// If `expr` is a namespace-group member chain resolving to a concrete native **module**
+    /// (`http.client` from `use std.http`), return its root-qualified identity (`std.http.client`)
+    /// and record the `Member` span in `namespace_module_sites` so lowering emits an
+    /// [`Rvalue::NativeModule`] carrying the leaf identity. `None` when the chain is not a namespace
+    /// path or the final hop is not a module (a sub-namespace, a type, or unresolved).
+    fn resolve_namespace_module(&mut self, expr: &Expr, env: &Env) -> Option<String> {
+        use noeta_stdlib::registry::NsChild;
+        let Expr::Member {
+            receiver,
+            name,
+            span,
+            ..
+        } = expr
+        else {
+            return None;
+        };
+        let prefix = self.resolve_namespace_prefix(receiver, env)?;
+        match self.reg().resolve_namespace_child(&prefix, name) {
+            NsChild::Module(qm) => {
+                self.sites.namespace_module_sites.insert(*span, qm.clone());
+                Some(qm)
+            }
+            _ => None,
+        }
+    }
+
+    /// Report an unresolved member on a namespace group (`http.nope`, whether read or called) — a
+    /// bare-name miss (E0005). A group is fully enumerable, so an unknown member is never a forward
+    /// reference; when a child name is a plausible typo we attach a "did you mean" hint. `prefix` is
+    /// the group's root-qualified identity; the message names it as written in source (root stripped).
+    fn namespace_member_error(&mut self, prefix: &str, name: &str, span: Span) {
+        let group = prefix.split_once('.').map_or(prefix, |(_, rest)| rest);
+        let candidates = self.reg().namespace_children(prefix);
+        let suggestion = noeta_diagnostics::closest(name, candidates.iter().map(String::as_str))
+            .map(str::to_string);
+        let diag = self.error(
+            DiagnosticCode::UnknownName,
+            span,
+            format!("namespace `{group}` has no member `{name}`"),
+        );
+        if let Some(s) = suggestion {
+            diag.help(format!("did you mean `{s}`?"));
+        }
+    }
+
     fn synth_member(
         &mut self,
         receiver: &Expr,
@@ -6661,6 +6795,28 @@ impl Checker {
                 params,
                 ret: Box::new(ret),
             };
+        }
+        // A namespace-group member access (`http.client` from `use std.http`) in value position:
+        // resolve one hop against the group prefix. A landing module records its span so lowering
+        // materializes the leaf module value; a sub-namespace or extension type is a valid
+        // intermediate. An unresolved member is a hard error (`http.nope`) — a group is fully
+        // enumerable, so this is never a forward reference. The group handle is never a value on its
+        // own, so this precedes the generic receiver synth below (which would treat `http` as an
+        // unknown name).
+        if let Some(prefix) = self.resolve_namespace_prefix(receiver, env) {
+            use noeta_stdlib::registry::NsChild;
+            match self.reg().resolve_namespace_child(&prefix, name) {
+                NsChild::Module(qm) => {
+                    self.sites.namespace_module_sites.insert(member_span, qm);
+                }
+                NsChild::None => {
+                    self.namespace_member_error(&prefix, name, member_span);
+                }
+                // A sub-namespace or extension type reached as a value is not statically typed here
+                // (associated calls resolve through the call path); no error.
+                NsChild::Namespace(_) | NsChild::Type(_) => {}
+            }
+            return Type::Unknown;
         }
         let recv = self.synth(receiver, env);
         if let Type::Named(n, recv_args) = &recv

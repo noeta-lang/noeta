@@ -915,7 +915,26 @@ where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
 {
     recursive(move |type_| {
-        let named = ident_parser(ctx)
+        // A type name may be **dotted** — `http.Response`, a type reached through a namespace group
+        // (`use std.http`), the type-position analog of `http.client.get(...)` (module-namespaces).
+        // The segments join into one qualified name string the checker resolves via the import map;
+        // a plain single-segment name (`int`, an imported leaf `Response`) is the one-segment case.
+        let dotted_name = ident_parser(ctx)
+            .then(
+                just(T::Dot)
+                    .ignore_then(ident_parser(ctx))
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .map(move |((first, _first_span), rest)| {
+                let mut name = first;
+                for (seg, _) in rest {
+                    name.push('.');
+                    name.push_str(&seg);
+                }
+                name
+            });
+        let named = dotted_name
             .then(
                 type_
                     .clone()
@@ -926,7 +945,7 @@ where
                     .delimited_by(just(T::Lt), just(T::Gt))
                     .or_not(),
             )
-            .map_with(move |((name, _name_span), args), e| TypeRef::Named {
+            .map_with(move |(name, args), e| TypeRef::Named {
                 name,
                 args: args.unwrap_or_default(),
                 span: ctx.to_span(e.span()),

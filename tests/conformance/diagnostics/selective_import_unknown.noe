@@ -1,7 +1,7 @@
-// A selective member import of a name the module does not export (`use std.math.bogus`) is a
-// static error (E0005), reported at the member name — the same way an unknown identifier is. Both
-// backends reject it before running (prelude-redesign P0).
-// expect: error E0005 at 7:14
+// A selective member import of a name the module does not export (`use std.math.bogus`) is a static
+// **unresolved-import** error (E0019) at the member name — a known extension root is fully
+// enumerable, so both backends reject it at check time, never as an opaque stub (the divergence fix).
+// expect: error E0019 at 7:14
 // expect: exit 1
 use std.{math}
 use std.math.bogus
