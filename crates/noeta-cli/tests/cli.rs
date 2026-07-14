@@ -68,6 +68,61 @@ fn lean_runner_path() -> Option<PathBuf> {
 // --- `run` ------------------------------------------------------------------------
 
 #[test]
+fn a_bare_file_path_runs_the_program() {
+    // `noeta <file.noe>` (no `run` subcommand) executes the file and forwards trailing args — the
+    // shortcut a `#!/usr/bin/env noeta` shebang relies on. The shebang line itself is tolerated.
+    let file = temp_program(
+        "bare_run",
+        "#!/usr/bin/env noeta\nuse std.args\necho args.all()[1]\n",
+    );
+    lang()
+        .arg(&file)
+        .arg("payload")
+        .assert()
+        .success()
+        .stdout("payload\n");
+}
+
+#[test]
+fn a_typo_subcommand_still_errors() {
+    // The bare-file shortcut must not swallow a genuine mistake: an unknown "subcommand" that is not
+    // an existing file still gets clap's error (and its did-you-mean).
+    lang()
+        .arg("biuld")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"));
+}
+
+#[cfg(unix)]
+#[test]
+fn an_executable_shebang_script_runs() {
+    use std::os::unix::fs::PermissionsExt;
+    // The real thing: a `.noe` file with a `#!<noeta>` shebang, `chmod +x`, executed directly. The
+    // OS invokes `<noeta> <script> <args>`, which the bare-file shortcut runs.
+    let bin = assert_cmd::cargo::cargo_bin("noeta");
+    let file = temp_program(
+        "shebang_exec",
+        &format!("#!{}\nuse std.args\necho args.all()[1]\n", bin.display()),
+    );
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let out = std::process::Command::new(&file)
+        .arg("payload")
+        .env(
+            "NOETA_CACHE_DIR",
+            concat!(env!("CARGO_TARGET_TMPDIR"), "/noeta-cache"),
+        )
+        .output()
+        .expect("run the executable shebang script");
+    assert!(
+        out.status.success(),
+        "script failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "payload\n");
+}
+
+#[test]
 fn run_real_host_uuids_are_real() {
     // Under `noeta run` (the real host, id-entropy U3) `id.uuid()` draws OS entropy and
     // `id.uuid_v7()` real wall time — unlike the sandbox's pinned values (`std/id_uuid.noe`),

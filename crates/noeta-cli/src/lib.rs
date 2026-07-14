@@ -532,6 +532,12 @@ pub fn run_cli(
                 if let Some(code) = compose::maybe_delegate_cwd() {
                     return code;
                 }
+                // A bare file path as the "subcommand" — `noeta script.noe`, or a `.noe` file with a
+                // `#!/usr/bin/env noeta` shebang run as `./script.noe` — is a run shortcut: execute
+                // the file, forwarding any trailing arguments to the program.
+                if let Some(code) = try_bare_file_run(&err) {
+                    return code;
+                }
                 // Then a **declared tier** (tier-providers T4): `noeta <tier> <file>` where the
                 // file's linked program declares `<tier>` with `@tier` dispatches to that tier's
                 // runner in-process.
@@ -2085,6 +2091,38 @@ fn noe_files(root: &std::path::Path) -> Vec<PathBuf> {
 /// attributes travel on the root fns, and the runner reads them with `attributes_of::<Config>()`.
 /// Returns `None` when this is not a tier invocation — no file argument, an unloadable file, or a
 /// name the program does not declare — so the caller falls through to the external-binary probe.
+/// The **bare-file run** shortcut: `noeta <path>` where `<path>` is an existing `.noe`/`.noeb` file
+/// runs it — the same as `noeta run <path>` — forwarding any trailing arguments to the program.
+/// This is what makes a `#!/usr/bin/env noeta` shebang work: the kernel invokes `noeta <script> …`,
+/// which clap sees as an unknown subcommand, and this recovers it. Returns `None` when the "command"
+/// is not an existing Noeta file, so a genuine typo still gets clap's error. `.noeb` is handled by
+/// [`cmd_run`] itself (it sniffs the bundle magic).
+fn try_bare_file_run(err: &clap::Error) -> Option<ExitCode> {
+    let name = err
+        .get(clap::error::ContextKind::InvalidSubcommand)
+        .and_then(|v| match v {
+            clap::error::ContextValue::String(s) => Some(s.clone()),
+            _ => None,
+        })?;
+    let file = PathBuf::from(&name);
+    let runnable = file.is_file()
+        && matches!(
+            file.extension().and_then(|e| e.to_str()),
+            Some("noe" | "noeb")
+        );
+    if !runnable {
+        return None;
+    }
+    // Program arguments are everything after the file path: `./script.noe a b` → the program reads
+    // `a`, `b` via `args.all()`.
+    let prog_args: Vec<String> = std::env::args()
+        .skip(1)
+        .skip_while(|a| *a != name)
+        .skip(1)
+        .collect();
+    Some(cmd_run(&file, &[], &None, false, false, &prog_args))
+}
+
 fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     let name = err
         .get(clap::error::ContextKind::InvalidSubcommand)
