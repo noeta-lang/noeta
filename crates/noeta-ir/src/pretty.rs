@@ -411,6 +411,7 @@ impl Printer<'_> {
                 format!("{module}.{func}::<T>({})", args.join(", "))
             }
             Rvalue::ModuleFn { module, func, .. } => format!("fn {module}.{func}"),
+            Rvalue::NativeModule { module, .. } => format!("module {module}"),
         }
     }
 }

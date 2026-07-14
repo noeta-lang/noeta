@@ -317,6 +317,7 @@ fn compile_to_mc(
         bound_handle_sites,
         f32_literal_sites,
         bundle_call_sites,
+        namespace_module_sites,
         destructor_relevance: _,
     } = sites;
     // Lower the surface program to the shared Core IR, then compile *that* to bytecode. The same
@@ -341,6 +342,7 @@ fn compile_to_mc(
             bound_handle_sites: &bound_handle_sites,
             f32_literal_sites: &f32_literal_sites,
             bundle_call_sites: &bundle_call_sites,
+            namespace_module_sites: &namespace_module_sites,
         },
         real_isolates,
         registry,
@@ -535,6 +537,7 @@ impl SessionCompiler {
                     bound_handle_sites: &sites.bound_handle_sites,
                     f32_literal_sites: &sites.f32_literal_sites,
                     bundle_call_sites: &sites.bundle_call_sites,
+                    namespace_module_sites: &sites.namespace_module_sites,
                 },
                 // The REPL keeps cooperative isolates, exactly like the checkerless path.
                 false,
@@ -3378,6 +3381,15 @@ impl<'m> FnCompiler<'m> {
                     module: module.clone(),
                     func: func.clone(),
                 });
+                self.code.push(Op::LoadConst { dst, k });
+                Ok(())
+            }
+            // A native module value resolved from a namespace group (`http.client`): load the same
+            // `Const::NativeModule` a direct `use std.http.client` binding produces, carrying the
+            // concrete leaf identity — so a method call dispatches identically and AOT ring DCE sees
+            // `std.http.client` in the const pool.
+            Rvalue::NativeModule { module, .. } => {
+                let k = self.add_const(Const::NativeModule(module.clone()));
                 self.code.push(Op::LoadConst { dst, k });
                 Ok(())
             }

@@ -422,6 +422,70 @@ impl Diagnostic {
     }
 }
 
+/// The candidate most similar to `target`, if one is close enough to be a plausible typo — the
+/// engine behind "did you mean `X`?" hints. "Close enough" scales with length: a near neighbor
+/// (Levenshtein distance ≤ 2) always qualifies, and longer names tolerate proportionally more
+/// (≤ ⌊len/3⌋). A candidate equal to `target` is skipped (it is not a typo); ties keep the first,
+/// so callers order candidates by preference. `None` when nothing is close enough — better silence
+/// than a misleading suggestion.
+pub fn closest<'a>(target: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let threshold = (target.chars().count() / 3).max(2);
+    let mut best: Option<(&str, usize)> = None;
+    for cand in candidates {
+        if cand == target {
+            continue;
+        }
+        let d = levenshtein(target, cand);
+        if d <= threshold && best.is_none_or(|(_, bd)| d < bd) {
+            best = Some((cand, d));
+        }
+    }
+    best.map(|(c, _)| c)
+}
+
+/// Levenshtein edit distance (insert/delete/substitute) over Unicode scalars, two-row DP.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+#[cfg(test)]
+mod suggest_tests {
+    use super::closest;
+
+    #[test]
+    fn suggests_a_plausible_typo() {
+        assert_eq!(closest("htpt", ["http", "math", "json"]), Some("http"));
+        assert_eq!(
+            closest("serv", ["client", "server", "Response"]),
+            Some("server")
+        );
+        assert_eq!(closest("clientt", ["client", "server"]), Some("client"));
+    }
+
+    #[test]
+    fn stays_silent_when_nothing_is_close() {
+        assert_eq!(closest("totallyfake", ["http", "math", "json"]), None);
+        assert_eq!(closest("xyz", ["client", "server"]), None);
+    }
+
+    #[test]
+    fn ignores_an_exact_match() {
+        assert_eq!(closest("http", ["http", "https"]), Some("https"));
+    }
+}
+
 mod json;
 mod render;
 pub use json::{JsonDiagnostic, JsonLabel, JsonSpan, to_json};

@@ -242,7 +242,8 @@ pub fn format_source_in(
 /// `sub(language, body, indent)` delegates an embedded sub-language (a `<style>`/`<script>`) to its
 /// own registered formatter, or `None` if none. See [`noeta_native::registry::BodyFormatter`]. `fmt`
 /// owns the Noeta side (hole substitution + escaping); a formatter is pure foreign reflow.
-pub type TierBodyFormatter = fn(&str, &str, &dyn Fn(&str, &str, &str) -> Option<String>) -> Option<String>;
+pub type TierBodyFormatter =
+    fn(&str, &str, &dyn Fn(&str, &str, &str) -> Option<String>) -> Option<String>;
 
 /// Name → its registered body formatter. Used two ways: **tier**-keyed (a tier body's own formatter,
 /// resolved from its `text:` language by the CLI) and **language**-keyed (for `sub`-delegation, e.g.
@@ -302,8 +303,7 @@ pub fn format_source_in_with_formatters(
     // Strict first; if a body formatter reflowed a tier body, the strict gate trips on the changed
     // statics, so fall back to the relaxed gate that ignores tier-body static text (but nothing else).
     let equal = safety::ast_equal_modulo_spans(&program, &reparsed)
-        || (!formatters.is_empty()
-            && safety::ast_equal_ignoring_tier_statics(&program, &reparsed));
+        || (!formatters.is_empty() && safety::ast_equal_ignoring_tier_statics(&program, &reparsed));
     if !equal {
         return Err(FmtError::Safety(
             "formatted output parses to a different AST (printer bug)".to_string(),
@@ -524,8 +524,10 @@ mod tests {
         // The formatter reflows the foreign text (here: uppercases it); fmt reinserts each `${…}`
         // hole (formatted inline) and re-applies tier escaping. The relaxed safety gate accepts the
         // changed statics because the holes and everything else are unchanged.
-        let out = fmt_with_sql_formatter(&format!("{SQL_TIER}r = @sql {{ select ${{ x }} from t }}\n"))
-            .expect("formats");
+        let out = fmt_with_sql_formatter(&format!(
+            "{SQL_TIER}r = @sql {{ select ${{ x }} from t }}\n"
+        ))
+        .expect("formats");
         // Body uppercased by the formatter; the hole reinserted, formatted inline (`${ x }` → `${x}`).
         assert!(
             out.contains("@sql { SELECT ${x} FROM T }"),
@@ -535,8 +537,9 @@ mod tests {
 
     #[test]
     fn tier_formatter_output_is_idempotent() {
-        let once = fmt_with_sql_formatter(&format!("{SQL_TIER}r = @sql {{ select ${{x}} from t }}\n"))
-            .expect("first");
+        let once =
+            fmt_with_sql_formatter(&format!("{SQL_TIER}r = @sql {{ select ${{x}} from t }}\n"))
+                .expect("first");
         let twice = fmt_with_sql_formatter(&once).expect("second");
         assert_eq!(once, twice, "tier-body formatting is not idempotent");
     }
@@ -613,7 +616,10 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(!no_nl.ends_with('\n'), "final newline not suppressed:\n{no_nl:?}");
+        assert!(
+            !no_nl.ends_with('\n'),
+            "final newline not suppressed:\n{no_nl:?}"
+        );
     }
 
     #[test]
@@ -623,9 +629,15 @@ mod tests {
         // trailing space produced by *layout* (an indented blank line) is still stripped.
         let src = "@doc {\nfirst  \nsecond\n}\nfn f(): void {\n\n    echo 1\n}\n";
         let out = fmt(src).unwrap();
-        assert!(out.contains("first  \n"), "markdown line break was trimmed:\n{out:?}");
+        assert!(
+            out.contains("first  \n"),
+            "markdown line break was trimmed:\n{out:?}"
+        );
         // The blank line inside `f` is layout — it carries no trailing indentation.
-        assert!(!out.contains("    \n"), "an indented blank line was not trimmed:\n{out:?}");
+        assert!(
+            !out.contains("    \n"),
+            "an indented blank line was not trimmed:\n{out:?}"
+        );
     }
 
     #[test]
@@ -930,6 +942,15 @@ mod tests {
             fmt(src).unwrap(),
             "fn main() {\n    // leading\n    echo 1 // trailing\n    // dangling\n}\n"
         );
+    }
+
+    #[test]
+    fn preserves_a_leading_shebang() {
+        // A `#!` script line is trivia the formatter must keep verbatim as the first line — it can
+        // never silently drop a comment — and formatting stays idempotent.
+        let out = fmt("#!/usr/bin/env noeta\necho  \"hi\"").unwrap();
+        assert_eq!(out, "#!/usr/bin/env noeta\necho \"hi\"\n");
+        assert_eq!(fmt(&out).unwrap(), out);
     }
 
     #[test]

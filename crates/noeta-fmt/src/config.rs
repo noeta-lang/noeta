@@ -102,14 +102,21 @@ impl FmtConfig {
             return;
         };
         props.use_fallbacks();
-        if let Some(v) = props.get_raw_for_key("indent_style").filter_unset().into_option() {
+        if let Some(v) = props
+            .get_raw_for_key("indent_style")
+            .filter_unset()
+            .into_option()
+        {
             match v {
                 "tab" => self.use_tabs = true,
                 "space" => self.use_tabs = false,
                 _ => {}
             }
         }
-        if let Some(v) = props.get_raw_for_key("indent_size").filter_unset().into_option()
+        if let Some(v) = props
+            .get_raw_for_key("indent_size")
+            .filter_unset()
+            .into_option()
             && let Ok(n) = v.parse::<usize>()
             && n > 0
         {

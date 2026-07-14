@@ -107,6 +107,38 @@ echo json.stringify([1, 2, 3])
 
 Unused `std` modules are tree-shaken — you only pay for what you import. The full catalog is on [Standard-Library Modules](Standard-Library-Modules).
 
+## Namespace groups
+
+A namespace that holds several submodules can be imported as a single **group** — one handle you dot into — instead of importing each leaf. `std.http` is the canonical example: it splits into `http.client` (the request client) and `http.server`, but you can bring in the whole group and reach either through it:
+
+```noeta check
+use std.http
+
+r = http.client.get("https://example.com")   // the `client` submodule
+echo r.status()
+echo r is http.Response                        // a type reached through the group too
+```
+
+`http.client.get(...)` resolves the `client` submodule at each call site and dispatches exactly as the leaf form `use std.http.client; client.get(...)` — the group handle is pure compile-time resolution, so it costs nothing at runtime and tree-shaking still sheds `http.client`'s dependencies from a server-only build. Types work the same way: `http.Response` resolves to the same `std.http.Response` identity as the leaf import `use std.http.Response`. Any extension root whose modules share a prefix can be grouped this way; the leaf forms keep working unchanged.
+
+Reaching for a member the group does not have is a compile error, with a suggestion:
+
+```noeta error
+use std.http
+r = http.get("...")     // E0005: namespace `http` has no member `get`  (did you mean `client`?)
+echo "unreachable"
+```
+
+## Unresolved imports are errors
+
+A `use` that resolves to nothing is a compile-time error on both backends — `check` and `run` agree, and a build never ships a binary that fails at startup. Each carries a "did you mean `X`?" hint when a valid target is a near miss:
+
+- a mistyped std module or member — `use std.htpt` → **E0019** (did you mean `http`?);
+- a missing module in your own project — `use App.Modles.User` → **E0019** (did you mean `App.Models`?);
+- a mistyped or undeclared dependency package — `use imgtx.fx` → **E0019** (did you mean `imgfx`?), when `imgfx` is a declared dependency.
+
+A single file checked in isolation stays lenient about names its siblings or dependencies would supply; the strict check applies once the whole project (with its resolved dependency graph) is linked.
+
 ## See also
 
 - [Standard Library](Standard-Library) — the always-available Ring 1 surface (no import needed).

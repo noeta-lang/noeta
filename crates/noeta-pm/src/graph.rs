@@ -850,6 +850,9 @@ fn assemble(
             root: inst.root_segment.clone(),
             modules,
             dep_renames,
+            // A native package's modules live in its Rust extension (composed in downstream), not the
+            // link pool — so the loader retains, rather than flags, a `use` under its key.
+            native: inst.native.is_some(),
         });
         locked.push(LockedPackage {
             identity: identity.clone(),
@@ -1004,11 +1007,17 @@ mod tests {
         };
         let global = resolve_graph(&entry).expect("resolves");
         assert!(names(&global).contains(&"acme/fx".to_string()));
-        assert!(!names(&global).contains(&"acme/tool".to_string()), "dev dep leaked into globals");
+        assert!(
+            !names(&global).contains(&"acme/tool".to_string()),
+            "dev dep leaked into globals"
+        );
 
         let dev = resolve_graph_for(&entry, Some("dev")).expect("resolves");
         assert!(names(&dev).contains(&"acme/fx".to_string()));
-        assert!(names(&dev).contains(&"acme/tool".to_string()), "dev dep missing under --target dev");
+        assert!(
+            names(&dev).contains(&"acme/tool".to_string()),
+            "dev dep missing under --target dev"
+        );
     }
 
     #[test]

@@ -46,7 +46,12 @@ module.exports = grammar({
   ],
 
   rules: {
-    source_file: $ => repeat($._item),
+    source_file: $ => seq(optional($.shebang), repeat($._item)),
+
+    // A leading `#!…` interpreter line (PHP-style executable scripts). Only valid as the file's
+    // first token — the lexer never produces it elsewhere (a mid-file `#!` is a `#` then an error,
+    // matching the compiler). Distinct from an `#[attribute]` (which is `#` then `[`).
+    shebang: _ => token(seq('#!', /[^\n]*/)),
 
     // A statement/member terminator: an explicit `;` or a scanner-emitted newline.
     _terminator: $ => choice(';', $._newline),

@@ -105,6 +105,9 @@ pub struct LoweringSites<'a> {
     /// Method-bundle call sites (kernel-methods K2) → the resolved `(module, bundle)` route,
     /// baked into an [`Rvalue::BundleMethod`] instead of the generic [`Rvalue::Method`].
     pub bundle_call_sites: &'a HashMap<Span, (String, String)>,
+    /// Namespace-group member-access sites (`http.client`) → the resolved concrete module identity,
+    /// emitted as an [`Rvalue::NativeModule`] instead of a field load.
+    pub namespace_module_sites: &'a HashMap<Span, String>,
 }
 
 /// Lower a whole parsed program to the Core IR, or report the first construct outside the
@@ -123,6 +126,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
     let bound = HashSet::new();
     let f32_lits = HashSet::new();
     let bundles = HashMap::new();
+    let namespaces = HashMap::new();
     lower_with_sites(
         program,
         LoweringSites {
@@ -136,6 +140,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
             bound_handle_sites: &bound,
             f32_literal_sites: &f32_lits,
             bundle_call_sites: &bundles,
+            namespace_module_sites: &namespaces,
         },
     )
 }
@@ -255,6 +260,13 @@ fn collect_type_aliases(
                 // A native type: narrows against its qualified identity, whichever local name it
                 // was bound to.
                 map.insert(local, ext.qualified());
+            } else if registry.is_namespace(&qualified) {
+                // A namespace group (`use std.http`): expose its types so a *dotted* narrowing
+                // target (`http.Response`) resolves to the same qualified identity a value carries,
+                // exactly as the checker's import collection does. Aliased groups key on the alias.
+                for (rel, q) in registry.namespace_types(&qualified) {
+                    map.insert(format!("{local}.{rel}"), q);
+                }
             } else if n.alias.is_some() {
                 // A renamed user (or opaque) import: narrows against the imported leaf name.
                 map.insert(local, n.name.clone());
@@ -1191,6 +1203,20 @@ impl Lowerer<'_> {
                 name_span,
                 span,
             } => {
+                // A namespace-group member access (`http.client`) the checker resolved to a concrete
+                // native module → materialize the module value from its **root-qualified leaf
+                // identity** (`std.http.client`), exactly as a direct `use std.http.client` binding
+                // would. The receiver (the group handle) is not itself a value, so it is not lowered.
+                if let Some(module) = self.sites.namespace_module_sites.get(span) {
+                    return Ok(self.emit(
+                        out,
+                        Rvalue::NativeModule {
+                            module: module.clone(),
+                            span: *span,
+                        },
+                        *span,
+                    ));
+                }
                 // A `list[i].field` read the checker proved fusable (its index receiver is a built-in
                 // `List`) lowers to one [`Rvalue::IndexField`] over the list and index atoms, so a
                 // packed element's field is read without materializing the element (P-PACK 2.5+). Any

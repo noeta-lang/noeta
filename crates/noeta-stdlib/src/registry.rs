@@ -2548,8 +2548,8 @@ const MATH_DOCS: &[(&str, &str)] = &[
 /// together.
 const ARGS_DOCS: &[(&str, &str)] = &[(
     "all",
-    "Every command-line argument passed to the program, in order (excluding the interpreter and the \
-     script path).",
+    "The program's argument vector: element 0 is the program/script path (the `argv[0]` \
+     convention), followed by the arguments passed after it.",
 )];
 
 const CELL_DOCS: &[(&str, &str)] = &[(

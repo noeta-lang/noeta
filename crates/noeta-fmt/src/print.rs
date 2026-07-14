@@ -22,7 +22,6 @@ use noeta_span::{Source, SourceId, Span};
 use crate::doc::{Doc, render, render_protected};
 use crate::{ArrowStyle, FmtConfig, FmtError, ParenStyle, SemicolonStyle, trivia};
 
-
 /// A struct/class body member, unified so comments interleave across them in source order.
 enum Member<'a> {
     Field(&'a FieldDecl),
@@ -102,7 +101,11 @@ pub fn print_program(
     let mut pos = 0;
     for line in rendered.split_inclusive('\n') {
         let has_nl = line.ends_with('\n');
-        let content = if has_nl { &line[..line.len() - 1] } else { line };
+        let content = if has_nl {
+            &line[..line.len() - 1]
+        } else {
+            line
+        };
         let mut end = content.len();
         if config.trim_trailing {
             for (idx, ch) in content.char_indices().rev() {
@@ -693,9 +696,7 @@ impl Printer<'_> {
         // `span.end`: otherwise the then-block's dangling-comment scan (`take_before(region_end)`)
         // greedily swallows the else-branch's *leading* comment. Find the `else` token dividing the
         // two blocks (the first one past the then-body, so a nested `else` inside it is skipped).
-        let then_lower = then_body
-            .last()
-            .map_or(cond.span().end, |s| s.span().end);
+        let then_lower = then_body.last().map_or(cond.span().end, |s| s.span().end);
         let else_kw = else_body
             .is_some()
             .then(|| self.else_between(then_lower, span.end))
@@ -1480,9 +1481,10 @@ impl Printer<'_> {
                     self.operand(right, 1, true)?,
                 ])
             }
-            Expr::Call { callee, args, .. } => {
-                Doc::concat([self.receiver(callee)?, self.arg_list(args, callee.span().end)?])
-            }
+            Expr::Call { callee, args, .. } => Doc::concat([
+                self.receiver(callee)?,
+                self.arg_list(args, callee.span().end)?,
+            ]),
             Expr::Member { receiver, name, .. } => {
                 Doc::concat([self.receiver(receiver)?, Doc::text(format!(".{name}"))])
             }
@@ -1648,7 +1650,14 @@ impl Printer<'_> {
     /// inline, it stays flat — `[a, b, c]`, or `{ a, b }` when `spaced`. With `wrap = true` it becomes
     /// a width-driven [`Doc::group`] instead (flat if it fits [`FmtConfig::line_width`], else broken
     /// with an [`Doc::if_break`] trailing comma), ignoring the author's line breaks.
-    fn delimited(&self, open: &str, elems: Vec<Doc>, close: &str, spaced: bool, broke: bool) -> Doc {
+    fn delimited(
+        &self,
+        open: &str,
+        elems: Vec<Doc>,
+        close: &str,
+        spaced: bool,
+        broke: bool,
+    ) -> Doc {
         if elems.is_empty() {
             return Doc::text(format!("{open}{close}"));
         }
@@ -1801,10 +1810,9 @@ impl Printer<'_> {
             return Ok(None);
         }
         let cond = match (&arms[0].pattern, &arms[1].pattern) {
-            (
-                Pattern::Bool { value: true, .. },
-                Pattern::Bool { value: false, .. },
-            ) => self.restricted_head(scrutinee, false)?,
+            (Pattern::Bool { value: true, .. }, Pattern::Bool { value: false, .. }) => {
+                self.restricted_head(scrutinee, false)?
+            }
             (Pattern::IsType { ty, .. }, Pattern::Wildcard { .. }) => Doc::concat([
                 self.restricted_head(scrutinee, false)?,
                 Doc::text(" is "),
@@ -1913,9 +1921,14 @@ impl Printer<'_> {
         // applied); a multi-line reflow is a block, its already-indented lines placed between the
         // tier's braces with the closing brace back at the tier's own indentation.
         if body.contains('\n') {
-            Ok(Some(Doc::raw_text(format!("@{tier} {{\n{body}\n{tier_indent}}}"))))
+            Ok(Some(Doc::raw_text(format!(
+                "@{tier} {{\n{body}\n{tier_indent}}}"
+            ))))
         } else {
-            Ok(Some(Doc::raw_text(format!("@{tier} {{ {} }}", body.trim()))))
+            Ok(Some(Doc::raw_text(format!(
+                "@{tier} {{ {} }}",
+                body.trim()
+            ))))
         }
     }
 

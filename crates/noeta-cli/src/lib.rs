@@ -532,6 +532,12 @@ pub fn run_cli(
                 if let Some(code) = compose::maybe_delegate_cwd() {
                     return code;
                 }
+                // A bare file path as the "subcommand" — `noeta script.noe`, or a `.noe` file with a
+                // `#!/usr/bin/env noeta` shebang run as `./script.noe` — is a run shortcut: execute
+                // the file, forwarding any trailing arguments to the program.
+                if let Some(code) = try_bare_file_run(&err) {
+                    return code;
+                }
                 // Then a **declared tier** (tier-providers T4): `noeta <tier> <file>` where the
                 // file's linked program declares `<tier>` with `@tier` dispatches to that tier's
                 // runner in-process.
@@ -974,12 +980,28 @@ fn cmd_publish(
                     .parent()
                     .map(std::path::Path::to_path_buf)
                     .unwrap_or_else(|| PathBuf::from("."));
-                let docs_json = match native_docs {
-                    Some(json) => Ok(json),
-                    None => docgen::package_docs_json(&pkg_dir).map(|(json, _)| json),
+                let docs = match native_docs {
+                    // A native package's docs are pre-generated JSON; count declarations from its
+                    // module items (the pure-Noeta path gets an exact count from docgen).
+                    Some(json) => {
+                        let decls = serde_json::from_str::<serde_json::Value>(&json)
+                            .ok()
+                            .and_then(|d| d.get("modules").and_then(|m| m.as_array()).cloned())
+                            .map_or(0, |mods| {
+                                mods.iter()
+                                    .map(|m| {
+                                        m.get("items")
+                                            .and_then(|i| i.as_array())
+                                            .map_or(0, Vec::len)
+                                    })
+                                    .sum()
+                            });
+                        Ok((json, decls))
+                    }
+                    None => docgen::package_docs_json(&pkg_dir).map(|(json, g)| (json, g.decls)),
                 };
-                match docs_json {
-                    Ok(docs_json) => match index.put_docs(&name, &version, &docs_json) {
+                match docs {
+                    Ok((docs_json, decls)) => match index.put_docs(&name, &version, &docs_json) {
                         Ok(()) => {
                             let modules = serde_json::from_str::<serde_json::Value>(&docs_json)
                                 .ok()
@@ -987,7 +1009,11 @@ fn cmd_publish(
                                     d.get("modules").and_then(|m| m.as_array()).map(|a| a.len())
                                 })
                                 .unwrap_or(0);
-                            println!("docs uploaded ({modules} module{})", plural(modules));
+                            println!(
+                                "docs uploaded ({modules} module{}, {decls} declaration{})",
+                                plural(modules),
+                                plural(decls)
+                            );
                         }
                         Err(err) => eprintln!("lang: warning: docs not uploaded: {err}"),
                     },
@@ -2085,6 +2111,38 @@ fn noe_files(root: &std::path::Path) -> Vec<PathBuf> {
 /// attributes travel on the root fns, and the runner reads them with `attributes_of::<Config>()`.
 /// Returns `None` when this is not a tier invocation — no file argument, an unloadable file, or a
 /// name the program does not declare — so the caller falls through to the external-binary probe.
+/// The **bare-file run** shortcut: `noeta <path>` where `<path>` is an existing `.noe`/`.noeb` file
+/// runs it — the same as `noeta run <path>` — forwarding any trailing arguments to the program.
+/// This is what makes a `#!/usr/bin/env noeta` shebang work: the kernel invokes `noeta <script> …`,
+/// which clap sees as an unknown subcommand, and this recovers it. Returns `None` when the "command"
+/// is not an existing Noeta file, so a genuine typo still gets clap's error. `.noeb` is handled by
+/// [`cmd_run`] itself (it sniffs the bundle magic).
+fn try_bare_file_run(err: &clap::Error) -> Option<ExitCode> {
+    let name = err
+        .get(clap::error::ContextKind::InvalidSubcommand)
+        .and_then(|v| match v {
+            clap::error::ContextValue::String(s) => Some(s.clone()),
+            _ => None,
+        })?;
+    let file = PathBuf::from(&name);
+    let runnable = file.is_file()
+        && matches!(
+            file.extension().and_then(|e| e.to_str()),
+            Some("noe" | "noeb")
+        );
+    if !runnable {
+        return None;
+    }
+    // Program arguments are everything after the file path: `./script.noe a b` → the program reads
+    // `a`, `b` via `args.all()`.
+    let prog_args: Vec<String> = std::env::args()
+        .skip(1)
+        .skip_while(|a| *a != name)
+        .skip(1)
+        .collect();
+    Some(cmd_run(&file, &[], &None, false, false, &prog_args))
+}
+
 fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     let name = err
         .get(clap::error::ContextKind::InvalidSubcommand)
@@ -5676,5 +5734,35 @@ mod tests {
         // A program that only touches an always-on core / not-yet-gated module selects no ring.
         let non_http = module_with(vec![Const::NativeModule("std.math".into())], vec![], vec![]);
         assert!(aot_ring_features(&non_http).is_empty());
+    }
+
+    #[test]
+    fn aot_ring_features_group_form_selects_http_client() {
+        // The navigable namespace group (`use std.http; http.client.get(...)`, module-namespaces)
+        // must lower to the *same* concrete leaf identity `std.http.client` as the direct import, so
+        // AOT ring DCE keeps reqwest. If the group ever recorded the prefix `std.http` in the const
+        // pool, `ring_of` would miss and `--native` would ship a binary with no HTTP client. This
+        // compiles the group form end-to-end and asserts the client ring is selected.
+        let src = "use std.http\nr = http.client.get(\"https://svc.test/echo\")\necho r.status()\n";
+        let source = Source::new(SourceId(0), "<test>", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "parse errors: {:?}",
+            parsed.diagnostics
+        );
+        let checked = noeta_check::check_all(&parsed.program);
+        assert!(
+            checked.diagnostics.is_empty(),
+            "check errors: {:?}",
+            checked.diagnostics
+        );
+        let module = noeta_compiler::compile(&parsed.program).expect("group form compiles");
+        assert_eq!(
+            aot_ring_features(&module),
+            vec!["ring-http-client".to_string()],
+            "group-form http.client.get must select the http-client ring (concrete leaf identity)"
+        );
     }
 }

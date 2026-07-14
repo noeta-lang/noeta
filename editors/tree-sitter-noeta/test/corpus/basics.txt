@@ -177,3 +177,17 @@ A code tier block still parses as code
               function: (identifier)
               arguments: (arguments
                 (boolean_literal)))))))))
+
+==================
+Leading shebang line
+==================
+
+#!/usr/bin/env noeta
+echo 1
+
+---
+
+(source_file
+  (shebang)
+  (echo_statement
+    (integer_literal)))

@@ -3,6 +3,7 @@
   "name": "Noeta",
   "scopeName": "source.noeta",
   "patterns": [
+    { "include": "#shebang" },
     { "include": "#comments" },
     { "include": "#attributes" },
     { "include": "#text-tier-blocks" },
@@ -20,6 +21,10 @@
     { "include": "#punctuation" }
   ],
   "repository": {
+    "shebang": {
+      "name": "comment.line.shebang.noeta",
+      "match": "\\A#!.*$"
+    },
     "comments": {
       "patterns": [
         {

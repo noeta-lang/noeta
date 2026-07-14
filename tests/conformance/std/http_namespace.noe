@@ -1,0 +1,38 @@
+// Navigable namespace group (module-namespaces): `use std.http` binds `http` as a single handle you
+// dot into — for modules (`http.client.get(...)` resolves the `client` submodule and dispatches like
+// `use std.http.client; client.get(...)`) AND for types (`http.Response` resolves like the leaf
+// import `use std.http.Response`). This is the group-form twin of `http_sync.noe`; both must produce
+// byte-identical output on both backends (the differential pins it), proving the group handle is
+// pure compile-time resolution over the same concrete `std.http.*` identities.
+// expect: stdout "200"
+// expect: stdout "true"
+// expect: stdout "{"body":"","method":"GET","path":"/echo"}"
+// expect: stdout "some(application/json)"
+// expect: stdout "true"
+// expect: stdout "{"body":"hi","method":"POST","path":"/echo"}"
+// expect: stdout "404"
+// expect: stdout "false"
+// expect: stdout "noeta sandbox: GET /v1/data"
+// expect: stdout "204"
+// expect: stdout "none"
+// expect: exit 0
+use std.http
+
+r = http.client.get("https://svc.test/echo")
+echo r.status()
+echo r.ok()
+echo r.body()
+echo r.header("content-type")
+echo r is http.Response
+
+p = http.client.post("https://svc.test/echo", "hi")
+echo p.body()
+
+nf = http.client.get("https://svc.test/status/404")
+echo nf.status()
+echo nf.ok()
+
+echo http.client.get("https://api.example.com/v1/data").body()
+
+echo http.client.request("delete", "https://svc.test/status/204").status()
+echo http.client.head("https://svc.test/echo").header("x-missing")

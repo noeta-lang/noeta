@@ -552,6 +552,7 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         Rvalue::Closure { .. }
         | Rvalue::AttributesOf { .. }
         | Rvalue::RolesOf { .. }
-        | Rvalue::ModuleFn { .. } => {}
+        | Rvalue::ModuleFn { .. }
+        | Rvalue::NativeModule { .. } => {}
     }
 }
