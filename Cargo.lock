@@ -4460,9 +4460,11 @@ version = "0.1.0"
 name = "noeta-runner"
 version = "0.1.0"
 dependencies = [
+ "mimalloc",
  "noeta-backend",
  "noeta-bundle",
  "noeta-bytecode",
+ "noeta-db",
  "noeta-diagnostics",
  "noeta-runtime",
  "noeta-span",

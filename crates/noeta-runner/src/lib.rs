@@ -8,13 +8,14 @@
 //! simply not dependencies here, so a shipped artifact built on this crate cannot reach them.
 
 use std::io::Write as _;
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use noeta_backend::RunResult;
 use noeta_bytecode::Module;
 use noeta_diagnostics::render_mapped;
-use noeta_span::SourceMap;
+use noeta_span::{Source, SourceId, SourceMap};
 use noeta_vm::{JitReport, TraceFrame, VmBackend};
 
 /// Run an already-compiled [`Module`] against the real host — the shared execution core of the
@@ -91,6 +92,67 @@ pub fn run_compiled_module(
 /// The process exit code for a program result, clamping out-of-`u8` codes to 1.
 pub fn exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
+}
+
+/// Decode a `.noeb` bundle blob and run it (P-AOT L1.2) — no source, no compile. `file` labels the
+/// synthetic source that diagnostics render against; `args` is the program's argument vector
+/// (`args.all()`), `app_id` its p2p namespace. Shared by the CLI's bundle path and the standalone
+/// runner's stapled/two-file paths.
+pub fn run_bundle_bytes(
+    file: &Path,
+    bytes: &[u8],
+    args: Vec<String>,
+    app_id: Option<String>,
+    jit_stats: bool,
+) -> ExitCode {
+    let module = match noeta_bundle::read(bytes) {
+        Ok(module) => module,
+        Err(err) => {
+            eprintln!("lang: cannot load {}: {err}", file.display());
+            return ExitCode::from(2);
+        }
+    };
+    let sources = SourceMap::new(vec![Source::new(
+        SourceId::FIRST,
+        file.display().to_string(),
+        "",
+    )]);
+    run_compiled_module(Arc::new(module), &sources, args, app_id, jit_stats)
+}
+
+/// P-AOT L2: detect and run a bundle stapled onto *this* executable (a `noeta build --exe`
+/// artifact), returning its exit code — or `None` when there is no trailer (the plain toolchain
+/// binary, or a bare runner), so the caller runs its normal path. Reads only the fixed trailer +
+/// embedded blob, seeking rather than slurping the whole binary, so a no-bundle startup is not
+/// taxed. Any IO/format hiccup is treated as "no bundle".
+///
+/// `resolve_app_id` computes the p2p namespace from the program's argv (which this reads): the CLI
+/// passes its `noeta.toml`-aware resolver, the lean runner passes `|_| None` (executable file-stem
+/// default). A shipped artifact is invoked directly, so its real process argv *is* the program's
+/// argument vector — passed straight through to `args.all()`.
+pub fn try_run_stapled(
+    resolve_app_id: impl FnOnce(&[String]) -> Option<String>,
+) -> Option<ExitCode> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let exe_path = std::env::current_exe().ok()?;
+    let mut file = std::fs::File::open(&exe_path).ok()?;
+    let size = file.seek(SeekFrom::End(0)).ok()?;
+    let trailer_len = noeta_bundle::TRAILER_LEN as u64;
+    if size < trailer_len {
+        return None;
+    }
+    file.seek(SeekFrom::End(-(trailer_len as i64))).ok()?;
+    let mut trailer = [0u8; noeta_bundle::TRAILER_LEN];
+    file.read_exact(&mut trailer).ok()?;
+    let blob_len = noeta_bundle::stapled_len(&trailer)?;
+    let blob_start = size.checked_sub(trailer_len + blob_len as u64)?;
+    file.seek(SeekFrom::Start(blob_start)).ok()?;
+    let mut blob = vec![0u8; blob_len];
+    file.read_exact(&mut blob).ok()?;
+    let argv: Vec<String> = std::env::args().collect();
+    let app_id = resolve_app_id(&argv);
+    Some(run_bundle_bytes(&exe_path, &blob, argv, app_id, false))
 }
 
 /// Render the `--jit-stats` report (`noeta run --jit-stats`, stderr): tier-1 compile coverage, the

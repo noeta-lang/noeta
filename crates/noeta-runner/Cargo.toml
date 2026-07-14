@@ -17,7 +17,12 @@ rust-version.workspace = true
 name = "noeta_runner"
 path = "src/lib.rs"
 
+[[bin]]
+name = "noeta-runner"
+path = "src/main.rs"
+
 [dependencies]
+mimalloc = { version = "0.1", default-features = false }
 noeta-span = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-bytecode = { workspace = true }
@@ -32,6 +37,11 @@ noeta-runtime = { workspace = true }
 # Cranelift-free interpreter-only runtime (identical behaviour, smaller build).
 default = ["jit"]
 jit = ["noeta-vm/jit"]
+
+[dev-dependencies]
+# The integration test compiles a tiny program to a bundle through the salsa pipeline and runs the
+# runner binary over it (mirrors noeta-wasm-runner's test harness).
+noeta-db = { workspace = true }
 
 [lints]
 workspace = true

@@ -1744,37 +1744,10 @@ fn run_module_real_host(
 
 /// P-AOT L2: detect and run a bundle stapled onto this executable (a `noeta build --exe` artifact),
 /// returning its exit code — or `None` when this is the plain toolchain binary (no trailer), so the
-/// normal CLI runs. Reads only the trailer + embedded blob, seeking rather than slurping the whole
-/// binary, so the toolchain's own startup is not taxed on the common (no-bundle) path. Any IO/format
-/// hiccup is treated as "no bundle" (returns `None`): the toolchain must still start normally.
+/// normal CLI runs. Delegates to the shared runner core, supplying the CLI's `noeta.toml`-aware p2p
+/// namespace resolver (the lean `noeta-runner` binary uses the file-stem default instead).
 fn try_run_stapled() -> Option<ExitCode> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    let exe_path = std::env::current_exe().ok()?;
-    let mut file = std::fs::File::open(&exe_path).ok()?;
-    let size = file.seek(SeekFrom::End(0)).ok()?;
-    let trailer_len = noeta_bundle::TRAILER_LEN as u64;
-    if size < trailer_len {
-        return None;
-    }
-    // Read the fixed trailer at the tail; a missing sentinel means this is the plain binary.
-    file.seek(SeekFrom::End(-(trailer_len as i64))).ok()?;
-    let mut trailer = [0u8; noeta_bundle::TRAILER_LEN];
-    file.read_exact(&mut trailer).ok()?;
-    let blob_len = noeta_bundle::stapled_len(&trailer)?;
-    let blob_start = size.checked_sub(trailer_len + blob_len as u64)?;
-    file.seek(SeekFrom::Start(blob_start)).ok()?;
-    let mut blob = vec![0u8; blob_len];
-    file.read_exact(&mut blob).ok()?;
-    // A shipped `--exe` artifact is invoked directly, so its real process argv (`[<binary>, <args…>]`)
-    // is exactly the program's argument vector — pass it straight through to `args.all()`.
-    // A stapled executable has no CLI of its own (its argv belongs to the program) — no report.
-    Some(cmd_run_bundle(
-        &exe_path,
-        &blob,
-        std::env::args().collect(),
-        false,
-    ))
+    noeta_runner::try_run_stapled(p2p_app_namespace)
 }
 
 fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a Diagnostic>) {
@@ -2979,19 +2952,8 @@ fn cmd_run_bundle(
     args: Vec<String>,
     jit_stats: bool,
 ) -> ExitCode {
-    let module = match noeta_bundle::read(bytes) {
-        Ok(module) => module,
-        Err(err) => {
-            eprintln!("lang: cannot load {}: {err}", file.display());
-            return ExitCode::from(2);
-        }
-    };
-    let sources = SourceMap::new(vec![Source::new(
-        SourceId::FIRST,
-        file.display().to_string(),
-        "",
-    )]);
-    run_compiled_module(std::sync::Arc::new(module), &sources, args, jit_stats)
+    let app_id = p2p_app_namespace(&args);
+    noeta_runner::run_bundle_bytes(file, bytes, args, app_id, jit_stats)
 }
 
 /// A resolved startup-cache slot: an open cache, the content key for this program, and the workspace
