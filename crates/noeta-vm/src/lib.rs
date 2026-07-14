@@ -39,11 +39,13 @@ use std::sync::mpsc::Sender;
 use noeta_ast::{BinaryOp, ClosureBody, Expr, Param, Program, Stmt};
 // `RunResult` is re-exported below (`pub use noeta_backend::{RunResult, …}`), so it is not imported
 // privately here (that would be a duplicate binding).
+#[cfg(feature = "compile")]
 use noeta_backend::Backend;
 use noeta_bytecode::{
     BoolSide, Builtin, CaptureFrom, Chunk, Const, Module, NarrowTarget, Op, Reg, ReuseCheck,
     StrPart,
 };
+#[cfg(feature = "compile")]
 use noeta_compiler::{Unsupported, compile};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_gc::{collect_trace, release, retain};
@@ -65,7 +67,9 @@ pub(crate) use values::*;
 mod methods;
 mod native_ctx;
 mod scheduler;
+#[cfg(feature = "compile")]
 mod session;
+#[cfg(feature = "compile")]
 pub use session::{CallError, EmbedArg, EmbedHandle, HostFactory, SessionOutput, VmSession};
 
 /// A debugger observing tier-0 execution (the `noeta dap` server implements it). The VM consults it
@@ -135,13 +139,56 @@ impl Debugger for EvalBudget {
     }
 }
 
+/// The **live incremental compiler** behind a debug console / REPL / hot-reload session
+/// (tooling-unification T4, server-hmr W1) — the seam that keeps the VM core free of the compiler
+/// crate (native-size slice 2). `noeta_compiler::SessionCompiler` implements it (behind the
+/// `compile` feature); a shipped AOT binary, which runs a pre-compiled bundle and never compiles a
+/// fragment, links no implementor and sheds the whole compiler front-end. Names only always-present
+/// types ([`Program`], [`Module`]) so the trait — and every install path that drives it — compiles
+/// without `noeta-compiler`.
+pub trait FragmentCompiler: std::fmt::Debug {
+    /// Compile `fragment` as a stable-prefix extension of the running program, returning the
+    /// extended module (a superset — every index minted under an earlier module stays valid).
+    /// `Err` is the rendered reason.
+    fn extend(&mut self, fragment: &Program) -> Result<Module, String>;
+    /// The global slot a name currently binds, if any (used to collect re-bound top-level slots
+    /// before a hot re-run).
+    fn global_slot(&self, name: &str) -> Option<u32>;
+    /// Declare a global into the session's name-space (a fragment's new/overwritten binding).
+    fn declare_global(&mut self, name: &str, mutable: bool, overwrite: bool);
+}
+
+/// The binding names a top-level statement (re)binds — the globals a re-running swap overwrites.
+/// A pure-AST helper shared by the live-VM hot path ([`Vm::apply_pending_hotswap`]) and the session
+/// module; lives here (not in the feature-gated `session`) so the compiler-free hot apply can use it.
+pub(crate) fn binding_targets(stmt: &Stmt) -> Vec<&str> {
+    match stmt {
+        Stmt::Binding { name, .. } => vec![name.as_str()],
+        Stmt::Destructure { targets, .. } => targets.iter().map(|(n, _)| n.as_str()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A ready-to-apply hot-reload fragment (server-hmr W1) — the compiler-free hand-off the VM applies.
+/// The watcher thread (which owns parsing, checking, and diffing) turns its `SwapPlan` into this
+/// plain record when depositing, so [`HotChannel`] — and thus the VM core — never names the compiler.
+#[derive(Debug, Clone)]
+pub struct HotFragment {
+    /// The edit's fragment program (new/changed top-level items, re-run initializers).
+    pub fragment: Program,
+    /// Whether the fragment's top-level statements re-run (initializers), rebinding their slots.
+    pub rerun_top_level: bool,
+    /// Names added by this edit (for the `[hot] swapped: …` report).
+    pub added: Vec<String>,
+    /// Names changed by this edit (preferred over `added` in the report when non-empty).
+    pub changed: Vec<String>,
+}
+
 /// The hot-reload mailbox (server-hmr W1): a watcher thread — which owns parsing, checking
-/// (transactional gate), and diffing — deposits a ready-to-apply [`SwapPlan`]; the run thread
+/// (transactional gate), and diffing — deposits a ready-to-apply [`HotFragment`]; the run thread
 /// takes it at the next scheduler tick and applies it to the live program. A deposit replaces an
 /// unconsumed predecessor (the depositor is responsible for diffing against the last *consumed*
 /// version — see the CLI's hot-serve driver).
-///
-/// [`SwapPlan`]: noeta_compiler::hotswap::SwapPlan
 pub type HotSwapMailbox = Arc<HotChannel>;
 
 /// The hot-reload channel shared by the watcher thread, the VM, and (through the [`NativeCtx`]
@@ -162,7 +209,7 @@ pub struct HotChannel {
     /// so a swap **broadcasts** to every worker isolate (`serve --parallel --watch`) rather than
     /// being taken by one. Each plan is diffed against the previous *deposited* version, so
     /// applying them in order keeps each worker's session in lockstep.
-    pub plans: std::sync::Mutex<Vec<noeta_compiler::hotswap::SwapPlan>>,
+    pub plans: std::sync::Mutex<Vec<HotFragment>>,
     pub error: std::sync::Mutex<Option<String>>,
 }
 
@@ -339,6 +386,7 @@ impl VmBackend {
     }
 
     /// Compile and run a program, or report that it falls outside the supported subset.
+    #[cfg(feature = "compile")]
     pub fn try_run(&self, program: &Program) -> Result<RunResult, Unsupported> {
         let module = compile(program)?;
         // The differential harness path stays pure tier-0 (see `run_module`).
@@ -449,6 +497,7 @@ impl VmBackend {
     /// full language, closures included. The arena owning each extended module snapshot lives
     /// here, for exactly the run's duration; an escaped fragment value stays resolvable until the
     /// program exits.
+    #[cfg(feature = "compile")]
     pub fn run_module_debug_session(
         &self,
         module: &Module,
@@ -463,7 +512,7 @@ impl VmBackend {
         let mut vm = Vm::load(module, host, executor);
         vm.debugger = debugger;
         vm.debug_session = Some(DebugSession {
-            compiler: session,
+            compiler: Box::new(session),
             arena: &arena,
             memo: HashMap::new(),
         });
@@ -481,6 +530,7 @@ impl VmBackend {
     ///
     /// [`SessionCompiler`]: noeta_compiler::SessionCompiler
     /// [`SwapPlan`]: noeta_compiler::hotswap::SwapPlan
+    #[cfg(feature = "compile")]
     pub fn run_module_hot(
         &self,
         module: &Module,
@@ -494,7 +544,7 @@ impl VmBackend {
         let arena = typed_arena::Arena::new();
         let mut vm = Vm::load(module, host, executor);
         vm.debug_session = Some(DebugSession {
-            compiler: session,
+            compiler: Box::new(session),
             arena: &arena,
             memo: HashMap::new(),
         });
@@ -513,7 +563,7 @@ impl VmBackend {
     /// dispatch, so a swap deposited in `mailbox` deterministically exercises retire→re-arm
     /// under live native frames (the off-thread service would race the program's runtime). A
     /// dropped — rather than graveyard-parked — engine fails this by unwinding into freed pages.
-    #[cfg(feature = "jit")]
+    #[cfg(all(feature = "jit", feature = "compile"))]
     pub fn run_module_hot_forced_jit(
         &self,
         module: &Module,
@@ -527,7 +577,7 @@ impl VmBackend {
         let arena = typed_arena::Arena::new();
         let mut vm = Vm::load(module, host, executor);
         vm.debug_session = Some(DebugSession {
-            compiler: session,
+            compiler: Box::new(session),
             arena: &arena,
             memo: HashMap::new(),
         });
@@ -846,6 +896,10 @@ pub struct JitDeclinedLoop {
     pub bail_pcs: Vec<u32>,
 }
 
+// The [`Backend`] contract compiles source → bytecode, so it rides the `compile` feature (native-size
+// slice 2). A shipped AOT runtime drives the VM through `run_module_aot` on a pre-compiled bundle and
+// never needs this, so it links without the compiler.
+#[cfg(feature = "compile")]
 impl Backend for VmBackend {
     /// The [`Backend`] contract. The VM is only driven through [`VmBackend::try_run`] (the
     /// differential harness), so reaching this on an unsupported program is a caller bug.
@@ -934,7 +988,10 @@ struct Abort;
 /// fragment protos/names through the newest module, and an escaped fragment closure stays callable
 /// after the program resumes.
 struct DebugSession<'m> {
-    compiler: noeta_compiler::SessionCompiler,
+    /// The live incremental compiler, behind the [`FragmentCompiler`] seam so this struct — and the
+    /// install/eval paths that use it — stay compiler-free (native-size slice 2). The concrete
+    /// `noeta_compiler::SessionCompiler` is boxed in here by the (feature-gated) session entry points.
+    compiler: Box<dyn FragmentCompiler>,
     arena: &'m typed_arena::Arena<Module>,
     /// Compiled-wrapper memo (tooling-unification U3): `(fragment text, in-scope local names)` →
     /// the installed entry proto. A watch panel re-evaluates its expressions on **every step**;
@@ -2816,12 +2873,15 @@ thread_local! {
 }
 
 /// Register a live session heap-owner on this thread (a [`VmSession`] began holding persistent state).
+/// Only [`VmSession`] (behind `compile`) registers; a plain/AOT run keeps the count at 0.
+#[cfg(feature = "compile")]
 pub(crate) fn session_owner_enter() {
     SESSION_HEAP_OWNERS.with(|c| c.set(c.get() + 1));
 }
 
 /// Retire a session heap-owner (its `SessionState` is being torn down). Called *before* the owner's
 /// [`Vm::teardown`], so the remaining count that gates the sweep reflects only the *siblings*.
+#[cfg(feature = "compile")]
 pub(crate) fn session_owner_exit() {
     SESSION_HEAP_OWNERS.with(|c| c.set(c.get().saturating_sub(1)));
 }
@@ -3280,7 +3340,9 @@ impl<'m> Vm<'m> {
     }
 
     /// Store `value` in the embed-handle table (server-hmr F3), taking ownership of its reference,
-    /// and return the handle. Reuses a freed slot when one is available.
+    /// and return the handle. Reuses a freed slot when one is available. Only the embed API
+    /// (`VmSession`) mints handles, so this is `compile`-gated; the table itself stays (GC roots it).
+    #[cfg(feature = "compile")]
     pub(crate) fn embed_handle_store(&mut self, value: Value) -> crate::session::EmbedHandle {
         let idx = match self.embed_handles_free.pop() {
             Some(idx) => {
@@ -3296,6 +3358,7 @@ impl<'m> Vm<'m> {
     }
 
     /// Release an embed handle's value (destructor-aware) and free its slot (server-hmr F3).
+    #[cfg(feature = "compile")]
     pub(crate) fn embed_handle_release(&mut self, handle: crate::session::EmbedHandle) {
         let idx = handle.index();
         if let Some(value) = self.embed_handles[idx as usize].take() {
@@ -6527,7 +6590,7 @@ impl<'m> Vm<'m> {
         // Drain the broadcast queue from this VM's own generation (server-hmr F5): clone the
         // plans it has not applied yet (the lock is held only for the clone, never across the
         // apply), then apply each in order. N workers each drain the same queue independently.
-        let pending: Vec<noeta_compiler::hotswap::SwapPlan> = match mailbox.plans.try_lock() {
+        let pending: Vec<HotFragment> = match mailbox.plans.try_lock() {
             Ok(plans) if plans.len() > self.applied_swaps => plans[self.applied_swaps..].to_vec(),
             _ => return,
         };
@@ -6541,7 +6604,7 @@ impl<'m> Vm<'m> {
 
     /// Apply a single swap plan to the live session (server-hmr W1/H1; the per-plan body the F5
     /// queue drain calls). Failures report to stderr and keep the previous version serving.
-    fn apply_one_swap(&mut self, plan: noeta_compiler::hotswap::SwapPlan) {
+    fn apply_one_swap(&mut self, plan: HotFragment) {
         // Slots the re-run overwrites — resolved against the session compiler BEFORE the fragment
         // extends it, so only pre-existing bindings (the ones with old nodes) are collected.
         let rebound: Vec<u32> = if plan.rerun_top_level {
@@ -6552,8 +6615,8 @@ impl<'m> Vm<'m> {
             plan.fragment
                 .stmts
                 .iter()
-                .flat_map(session::binding_targets)
-                .filter_map(|name| session.compiler.global_slots().get(name).copied())
+                .flat_map(binding_targets)
+                .filter_map(|name| session.compiler.global_slot(name))
                 .collect()
         } else {
             Vec::new()
@@ -6615,10 +6678,7 @@ impl<'m> Vm<'m> {
             return Err("this run has no debug session (fragments need a session launch)".into());
         };
         let arena = session.arena;
-        let mut extended = session
-            .compiler
-            .extend(fragment)
-            .map_err(|u| u.reason.clone())?;
+        let mut extended = session.compiler.extend(fragment)?;
         // (1) Relocate the entry; proto 0 stays the program's `main`.
         let entry = std::mem::replace(&mut extended.protos[0], self.module.protos[0].clone());
         extended.protos.push(entry);
@@ -8472,7 +8532,7 @@ mod tests {
             Box::new(noeta_stdlib::SandboxExecutor::new()),
         );
         vm.debug_session = Some(DebugSession {
-            compiler,
+            compiler: Box::new(compiler),
             arena,
             memo: HashMap::new(),
         });

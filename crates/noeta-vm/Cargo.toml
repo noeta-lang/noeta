@@ -11,7 +11,14 @@ noeta-ast = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-backend = { workspace = true }
 noeta-bytecode = { workspace = true }
-noeta-compiler = { workspace = true }
+# Optional (native-size slice 2): the compiler is only needed to turn *source* into bytecode at
+# runtime — the REPL/debug-console/hot-reload machinery (`compile`, `SessionCompiler`, hotswap
+# `SwapPlan`). A shipped `--native`/AOT binary runs a *pre-compiled* stapled bundle and never
+# compiles, so it builds `noeta-vm` without `compile` and sheds noeta-compiler → noeta-check →
+# noeta-ir(-passes) entirely (~1 MB of type-checker + compiler out of a run-only artifact — the same
+# "don't ship what you don't run" property the dev-deps arc gave dev tooling). Default-on so every
+# toolchain consumer (CLI, runner, dap, conformance, embed) keeps it with no manifest change.
+noeta-compiler = { workspace = true, optional = true }
 noeta-value = { workspace = true }
 noeta-gc = { workspace = true }
 noeta-span = { workspace = true }
@@ -32,6 +39,13 @@ noeta-jit = { workspace = true, optional = true }
 noeta-jit-abi = { workspace = true, optional = true }
 
 [features]
+# Default-on (native-size slice 2). Turns *source → bytecode* compilation on inside the VM: the
+# `compile` convenience, the debug-console/REPL `SessionCompiler`, and hot-reload (`SwapPlan`,
+# `install_fragment`). Pulls noeta-compiler (→ noeta-check, noeta-ir). A run-only artifact — the AOT
+# runtime staticlib — builds with `default-features = false` and omits this, so the whole compiler
+# front-end drops from a shipped `--native` binary. Every other consumer inherits it via defaults.
+default = ["compile"]
+compile = ["dep:noeta-compiler"]
 # The Cranelift method JIT (P-JIT). Off by default: without it the crate never pulls Cranelift,
 # and the interpreter/sandbox/differential are byte-identical — the same gating the real-thread
 # isolates use. `noeta-conformance` turns it on to run the `--jit-differential` oracle.

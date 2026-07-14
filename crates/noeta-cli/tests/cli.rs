@@ -2316,6 +2316,49 @@ fn build_native_strips_debug_info_from_the_shipped_binary() {
 }
 
 #[test]
+fn aot_runtime_does_not_link_the_compiler_frontend() {
+    // native-size slice 2 (structural guard): a shipped `--native` binary runs a *pre-compiled*
+    // stapled bundle and must never carry the type checker / compiler / IR pipeline — dead weight in
+    // a run-only artifact AND reachable attack surface (the same property the dev-deps arc gave dev
+    // tooling, one layer down: L2 out of a shipped L1). The AOT runtime opts out of noeta-vm's
+    // `compile` feature; assert the front-end is absent from its (non-dev) dependency graph, so a
+    // future edit that re-links it (a new default feature, a compiler dep on noeta-runtime) fails HERE
+    // rather than silently re-bloating and re-arming the artifact.
+    let out = Command::new(env!("CARGO"))
+        .current_dir(workspace())
+        .args([
+            "tree",
+            "-p",
+            "noeta-aot-runtime",
+            "-e",
+            "no-dev",
+            "--prefix",
+            "none",
+        ])
+        .output()
+        .expect("cargo tree runs");
+    assert!(
+        out.status.success(),
+        "cargo tree failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tree = String::from_utf8_lossy(&out.stdout);
+    for forbidden in [
+        "noeta-compiler v",
+        "noeta-check v",
+        "noeta-ir v",
+        "noeta-ir-passes v",
+    ] {
+        assert!(
+            !tree.contains(forbidden),
+            "the AOT runtime must not link `{}` — a run-only artifact carries no compiler front-end \
+             (native-size slice 2). Graph:\n{tree}",
+            forbidden.trim_end_matches(" v")
+        );
+    }
+}
+
+#[test]
 fn bundle_run_rejects_build_time_flags() {
     // Tiers are baked at build time; passing them to a bundle run is a usage error, not a silent
     // no-op.
