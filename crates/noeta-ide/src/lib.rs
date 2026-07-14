@@ -1498,77 +1498,64 @@ impl DocumentStore {
     // linked workspace program (falling back to the entry file's bare parse when a sibling fails
     // to link, so docs still work on WIP code) and resolves through [`StoreDocEnv`].
 
-    /// The documentation corpus roots for the workspace of `uri` — the top level of the docs
-    /// browser (currently just `Project`). `None` when `uri` names no open workspace.
-    pub fn doc_index(&self, uri: &str) -> Option<Vec<docs::DocNode>> {
-        self.workspace_of(uri)?;
-        Some(docs::roots())
+    /// Resolve `uri` to a [`docs::DocCtx`] and run `f` against it. A workspace-backed context when
+    /// `uri` names an open workspace (the project corpus resolves), otherwise an **empty** context
+    /// (only the workspace-independent language guide resolves). Centralizes the borrow dance —
+    /// `linked`/`entry_ast`/`env` live for the closure's duration — so the four doc entry points
+    /// stay one-liners.
+    fn with_doc_ctx<R>(
+        &self,
+        uri: &str,
+        encoding: Encoding,
+        f: impl FnOnce(&docs::DocCtx) -> R,
+    ) -> R {
+        match self.workspace_of(uri) {
+            Some((cache, _)) => {
+                let db = &self.db;
+                let linked = noeta_db::linked(db, cache.workspace);
+                let entry_ast = noeta_db::ast(db, cache.entry());
+                let program = match &linked.0 {
+                    Ok(program) => program,
+                    Err(_) => &entry_ast.0.program,
+                };
+                let env = StoreDocEnv {
+                    store: self,
+                    cache,
+                    encoding,
+                };
+                f(&docs::DocCtx::new(&env, program))
+            }
+            None => f(&docs::DocCtx::empty()),
+        }
+    }
+
+    /// The documentation corpus roots — the top level of the docs browser (`Project` and `Language
+    /// Guide`). Always available: the guide browses even with no `.noe` file open.
+    pub fn doc_index(&self, _uri: &str) -> Vec<docs::DocNode> {
+        docs::roots()
     }
 
     /// One lazily-unfolded level of the docs tree under `id` (root → modules → declarations →
-    /// members), mirroring the Architecture view's lazy unfolding.
-    pub fn doc_children(
-        &self,
-        uri: &str,
-        id: &str,
-        encoding: Encoding,
-    ) -> Option<Vec<docs::DocNode>> {
-        let (cache, _) = self.workspace_of(uri)?;
-        let db = &self.db;
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, cache.entry());
-        let program = match &linked.0 {
-            Ok(program) => program,
-            Err(_) => &entry_ast.0.program,
-        };
-        let env = StoreDocEnv {
-            store: self,
-            cache,
-            encoding,
-        };
-        Some(docs::children(&env, program, &docs::DocId(id.to_string())))
+    /// members), mirroring the Architecture view's lazy unfolding. The language-guide subtree
+    /// resolves even when `uri` names no open workspace.
+    pub fn doc_children(&self, uri: &str, id: &str, encoding: Encoding) -> Vec<docs::DocNode> {
+        self.with_doc_ctx(uri, encoding, |ctx| {
+            docs::children(ctx, &docs::DocId(id.to_string()))
+        })
     }
 
     /// The rendered page (signature + `@doc` prose + source location) for the node `id`, or `None`
-    /// if the id names nothing in the current program.
+    /// if the id names nothing in the current corpus.
     pub fn doc_page(&self, uri: &str, id: &str, encoding: Encoding) -> Option<docs::DocPage> {
-        let (cache, _) = self.workspace_of(uri)?;
-        let db = &self.db;
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, cache.entry());
-        let program = match &linked.0 {
-            Ok(program) => program,
-            Err(_) => &entry_ast.0.program,
-        };
-        let env = StoreDocEnv {
-            store: self,
-            cache,
-            encoding,
-        };
-        docs::page(&env, program, &docs::DocId(id.to_string()))
+        self.with_doc_ctx(uri, encoding, |ctx| {
+            docs::page(ctx, &docs::DocId(id.to_string()))
+        })
     }
 
-    /// Rank the workspace's doc nodes against `query`, best-first (see [`docs::search`]).
-    pub fn doc_search(
-        &self,
-        uri: &str,
-        query: &str,
-        encoding: Encoding,
-    ) -> Option<Vec<docs::DocHit>> {
-        let (cache, _) = self.workspace_of(uri)?;
-        let db = &self.db;
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, cache.entry());
-        let program = match &linked.0 {
-            Ok(program) => program,
-            Err(_) => &entry_ast.0.program,
-        };
-        let env = StoreDocEnv {
-            store: self,
-            cache,
-            encoding,
-        };
-        Some(docs::search(&env, program, query))
+    /// Rank the doc corpus against `query`, best-first (see [`docs::search`]). Spans the guide even
+    /// with no open workspace; adds the project corpus when there is one.
+    pub fn doc_search(&self, uri: &str, query: &str, encoding: Encoding) -> Vec<docs::DocHit> {
+        self.with_doc_ctx(uri, encoding, |ctx| docs::search(ctx, query))
     }
 
     /// The doc node documenting the symbol under the cursor at `position` in `uri` — powers the
@@ -2166,18 +2153,16 @@ mod tests {
         let enc = Encoding::Utf16;
 
         // The roots are the project corpus and the language guide.
-        let roots = store.doc_index(uri).unwrap();
+        let roots = store.doc_index(uri);
         assert_eq!(roots.len(), 2);
         assert_eq!(roots[0].id.as_str(), "project");
         assert_eq!(roots[1].id.as_str(), "guide");
 
         // Expand: root → module (named by file basename) → declarations.
-        let modules = store.doc_children(uri, "project", enc).unwrap();
+        let modules = store.doc_children(uri, "project", enc);
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].title, "widgets.noe");
-        let decls = store
-            .doc_children(uri, modules[0].id.as_str(), enc)
-            .unwrap();
+        let decls = store.doc_children(uri, modules[0].id.as_str(), enc);
         let names: Vec<&str> = decls.iter().map(|d| d.title.as_str()).collect();
         assert_eq!(names, vec!["make", "Widget"]);
 
@@ -2192,8 +2177,17 @@ mod tests {
         assert_eq!(loc.range.start.line, 1); // `fn make` sits on line 1 (0-based)
 
         // Search finds the documented declaration.
-        let hits = store.doc_search(uri, "widget", enc).unwrap();
+        let hits = store.doc_search(uri, "widget", enc);
         assert!(hits.iter().any(|h| h.title == "Widget"));
+
+        // With no open workspace the guide still browses (the project root is empty).
+        let no_ws = store.doc_children("file:///nonexistent.noe", "guide", enc);
+        assert!(no_ws.len() > 5, "guide browses without a workspace");
+        assert!(
+            store
+                .doc_children("file:///nonexistent.noe", "project", enc)
+                .is_empty()
+        );
 
         // "Docs for the symbol under the cursor" resolves the call site on line 3 to `make`.
         let id = store

@@ -182,6 +182,47 @@ pub trait DocEnv {
     fn source_name(&self, source: SourceId) -> Option<String>;
 }
 
+/// The context a doc request resolves in: the workspace's [`DocEnv`] and linked [`Program`] when a
+/// workspace is open, or `None` for both when nothing is open. The **project** corpus needs both
+/// (it yields nothing without them); the **language guide** corpus is workspace-independent and is
+/// served in either case — so the guide is always browsable, even with no `.noe` file open.
+pub struct DocCtx<'a> {
+    pub env: Option<&'a dyn DocEnv>,
+    pub program: Option<&'a Program>,
+}
+
+impl std::fmt::Debug for DocCtx<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `dyn DocEnv`/`Program` are not `Debug`; report only whether a workspace is present.
+        f.debug_struct("DocCtx")
+            .field("workspace", &self.env.is_some())
+            .finish()
+    }
+}
+
+impl<'a> DocCtx<'a> {
+    /// A context backed by an open workspace.
+    pub fn new(env: &'a dyn DocEnv, program: &'a Program) -> Self {
+        DocCtx {
+            env: Some(env),
+            program: Some(program),
+        }
+    }
+
+    /// A workspace-less context — only the guide corpus resolves.
+    pub fn empty() -> Self {
+        DocCtx {
+            env: None,
+            program: None,
+        }
+    }
+
+    /// The `(env, program)` pair when a workspace is open, for the project corpus arms.
+    fn workspace(&self) -> Option<(&'a dyn DocEnv, &'a Program)> {
+        Some((self.env?, self.program?))
+    }
+}
+
 /// The corpus roots, in display order: the active project, then the language guides. The API
 /// reference joins as a third root in a later arc, each an additional root here plus a dispatch arm.
 pub fn roots() -> Vec<DocNode> {
@@ -211,12 +252,16 @@ pub fn roots() -> Vec<DocNode> {
 /// the project root → its source modules; a module → its declarations (and section prose); a
 /// declaration → its members (fields/variants/methods). An unknown or leaf id yields an empty
 /// vec, never an error.
-pub fn children(env: &impl DocEnv, program: &Program, id: &DocId) -> Vec<DocNode> {
-    match id.root() {
-        GUIDE_ROOT => return guide_children(id),
-        PROJECT_ROOT => {}
-        _ => return Vec::new(),
+pub fn children(ctx: &DocCtx, id: &DocId) -> Vec<DocNode> {
+    if id.root() == GUIDE_ROOT {
+        return guide_children(id);
     }
+    if id.root() != PROJECT_ROOT {
+        return Vec::new();
+    }
+    let Some((env, program)) = ctx.workspace() else {
+        return Vec::new(); // the project corpus needs an open workspace
+    };
     let tree = ProjectTree::build(env, program);
     let seg = id.segments();
     match seg.as_slice() {
@@ -239,12 +284,14 @@ pub fn children(env: &impl DocEnv, program: &Program, id: &DocId) -> Vec<DocNode
 
 /// The rendered page for `id` — the node's signature and `@doc` prose — or `None` if the id names
 /// nothing in the current program.
-pub fn page(env: &impl DocEnv, program: &Program, id: &DocId) -> Option<DocPage> {
-    match id.root() {
-        GUIDE_ROOT => return guide_page(id),
-        PROJECT_ROOT => {}
-        _ => return None,
+pub fn page(ctx: &DocCtx, id: &DocId) -> Option<DocPage> {
+    if id.root() == GUIDE_ROOT {
+        return guide_page(id);
     }
+    if id.root() != PROJECT_ROOT {
+        return None;
+    }
+    let (env, program) = ctx.workspace()?; // the project corpus needs an open workspace
     let tree = ProjectTree::build(env, program);
     let seg = id.segments();
     // A section node's id is `project/{source}/~{index}` — dispatch it before the decl arm, which
@@ -300,39 +347,42 @@ fn section_page(tree: &ProjectTree, seg: &[&str]) -> Option<DocPage> {
 
 /// Rank every project node by how well it matches `query` (case-insensitive): a title hit scores
 /// higher than a body/detail hit. Returns hits sorted best-first, capped at [`SEARCH_LIMIT`].
-pub fn search(env: &impl DocEnv, program: &Program, query: &str) -> Vec<DocHit> {
+pub fn search(ctx: &DocCtx, query: &str) -> Vec<DocHit> {
     let needle = query.trim().to_lowercase();
     if needle.is_empty() {
         return Vec::new();
     }
-    let tree = ProjectTree::build(env, program);
     let mut hits: Vec<DocHit> = Vec::new();
-    tree.for_each(&mut |node: &DocNode, prose: &str| {
-        let title_l = node.title.to_lowercase();
-        let detail_l = node.detail.as_deref().unwrap_or("").to_lowercase();
-        let prose_l = prose.to_lowercase();
-        let mut score = 0;
-        if title_l == needle {
-            score += 100;
-        } else if title_l.contains(&needle) {
-            score += 40;
-        }
-        if detail_l.contains(&needle) {
-            score += 8;
-        }
-        if prose_l.contains(&needle) {
-            score += 5;
-        }
-        if score > 0 {
-            hits.push(DocHit {
-                id: node.id.clone(),
-                title: node.title.clone(),
-                kind: node.kind,
-                snippet: snippet_of(prose, node.detail.as_deref()),
-                score,
-            });
-        }
-    });
+    // The project corpus contributes only when a workspace is open.
+    if let Some((env, program)) = ctx.workspace() {
+        let tree = ProjectTree::build(env, program);
+        tree.for_each(&mut |node: &DocNode, prose: &str| {
+            let title_l = node.title.to_lowercase();
+            let detail_l = node.detail.as_deref().unwrap_or("").to_lowercase();
+            let prose_l = prose.to_lowercase();
+            let mut score = 0;
+            if title_l == needle {
+                score += 100;
+            } else if title_l.contains(&needle) {
+                score += 40;
+            }
+            if detail_l.contains(&needle) {
+                score += 8;
+            }
+            if prose_l.contains(&needle) {
+                score += 5;
+            }
+            if score > 0 {
+                hits.push(DocHit {
+                    id: node.id.clone(),
+                    title: node.title.clone(),
+                    kind: node.kind,
+                    snippet: snippet_of(prose, node.detail.as_deref()),
+                    score,
+                });
+            }
+        });
+    }
     // Merge in the language-guide corpus so one search spans both. Guide scores are on the guide
     // ranker's own scale (title×4/heading×3/body×1); the two scales are close enough for a combined
     // best-first order without normalization at this corpus size.
@@ -524,7 +574,7 @@ impl ProjectTree {
         }
     }
 
-    fn build(env: &impl DocEnv, program: &Program) -> ProjectTree {
+    fn build(env: &dyn DocEnv, program: &Program) -> ProjectTree {
         let docs = ResolvedDocs::collect(program);
         let mut modules: Vec<ModuleEntry> = Vec::new();
 
@@ -586,12 +636,7 @@ impl ProjectTree {
     }
 }
 
-fn decl_entry(
-    env: &impl DocEnv,
-    mod_key: &str,
-    sym: &SymbolNode,
-    docs: &ResolvedDocs,
-) -> DeclEntry {
+fn decl_entry(env: &dyn DocEnv, mod_key: &str, sym: &SymbolNode, docs: &ResolvedDocs) -> DeclEntry {
     let id = DocId::new(format!("{PROJECT_ROOT}/{mod_key}/{}", sym.name));
     let members: Vec<MemberEntry> = sym
         .children
@@ -728,7 +773,7 @@ mod tests {
         let program = program_of("fn f() {}");
         let env = StubEnv;
         // The guide corpus is workspace-independent — env/program are ignored for guide ids.
-        let pages = children(&env, &program, &DocId::new("guide"));
+        let pages = children(&DocCtx::new(&env, &program), &DocId::new("guide"));
         assert!(pages.len() > 5, "guide root lists the wiki pages");
         assert!(
             pages
@@ -736,11 +781,30 @@ mod tests {
                 .all(|p| p.kind == DocKind::Guide && p.has_page && !p.expandable)
         );
         let page_node = &pages[0];
-        let page = page(&env, &program, &page_node.id).expect("a guide page renders");
+        let page = page(&DocCtx::new(&env, &program), &page_node.id).expect("a guide page renders");
         assert_eq!(page.kind, DocKind::Guide);
         assert!(!page.markdown.is_empty());
         // A guide page is a leaf.
-        assert!(children(&env, &program, &page_node.id).is_empty());
+        assert!(children(&DocCtx::new(&env, &program), &page_node.id).is_empty());
+    }
+
+    #[test]
+    fn the_guide_corpus_is_browsable_with_no_workspace() {
+        // With no `.noe` file open (an empty context), the guide still browses; only the project
+        // corpus needs a workspace.
+        let ctx = DocCtx::empty();
+        let guide_pages = children(&ctx, &DocId::new("guide"));
+        assert!(guide_pages.len() > 5, "guide browses without a workspace");
+        // The project corpus yields nothing without a workspace.
+        assert!(children(&ctx, &DocId::new("project")).is_empty());
+        assert!(page(&ctx, &DocId::new("project/0/whatever")).is_none());
+        let rendered =
+            page(&ctx, &guide_pages[0].id).expect("a guide page renders with no workspace");
+        assert!(!rendered.markdown.is_empty());
+        // Search still returns guide hits.
+        let hits = search(&ctx, "standard library");
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|h| h.kind == DocKind::Guide));
     }
 
     #[test]
@@ -748,13 +812,13 @@ mod tests {
         // `Widget` exists only in the project; a common guide term surfaces guide hits too.
         let program = program_of("struct Widget { size: int }");
         let env = StubEnv;
-        let project_hit = search(&env, &program, "Widget");
+        let project_hit = search(&DocCtx::new(&env, &program), "Widget");
         assert!(
             project_hit
                 .iter()
                 .any(|h| h.kind == DocKind::Struct && h.title == "Widget")
         );
-        let guide_hits = search(&env, &program, "standard library");
+        let guide_hits = search(&DocCtx::new(&env, &program), "standard library");
         assert!(
             guide_hits.iter().any(|h| h.kind == DocKind::Guide),
             "a guide-only query returns guide hits"
@@ -769,14 +833,14 @@ mod tests {
         let env = StubEnv;
 
         // Level 1: one module for the single source.
-        let modules = children(&env, &program, &DocId::new("project"));
+        let modules = children(&DocCtx::new(&env, &program), &DocId::new("project"));
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].kind, DocKind::Module);
         assert_eq!(modules[0].title, "t.noe");
         assert!(modules[0].expandable);
 
         // Level 2: the module's declarations.
-        let decls = children(&env, &program, &modules[0].id);
+        let decls = children(&DocCtx::new(&env, &program), &modules[0].id);
         let names: Vec<&str> = decls.iter().map(|d| d.title.as_str()).collect();
         assert_eq!(names, vec!["greet", "Point"]);
         let point = decls.iter().find(|d| d.title == "Point").unwrap();
@@ -784,7 +848,7 @@ mod tests {
         assert!(point.expandable);
 
         // Level 3: the struct's fields.
-        let fields = children(&env, &program, &point.id);
+        let fields = children(&DocCtx::new(&env, &program), &point.id);
         let fnames: Vec<&str> = fields.iter().map(|f| f.title.as_str()).collect();
         assert_eq!(fnames, vec!["x", "y"]);
         assert_eq!(fields[0].kind, DocKind::Field);
@@ -797,11 +861,11 @@ mod tests {
             "@doc {\n  Greets a person by name.\n}\nfn greet(name: str): str { return name }",
         );
         let env = StubEnv;
-        let modules = children(&env, &program, &DocId::new("project"));
-        let decls = children(&env, &program, &modules[0].id);
+        let modules = children(&DocCtx::new(&env, &program), &DocId::new("project"));
+        let decls = children(&DocCtx::new(&env, &program), &modules[0].id);
         let greet = &decls[0];
 
-        let page = page(&env, &program, &greet.id).unwrap();
+        let page = page(&DocCtx::new(&env, &program), &greet.id).unwrap();
         assert_eq!(page.title, "greet");
         assert_eq!(page.kind, DocKind::Function);
         assert_eq!(page.markdown, "Greets a person by name.");
@@ -814,9 +878,9 @@ mod tests {
         // not a declaration's doc — the adjacency rule in `resolve_texts`.
         let program = program_of("@doc {\n  The geometry module.\n}\nuse std.math\nfn f() {}");
         let env = StubEnv;
-        let modules = children(&env, &program, &DocId::new("project"));
+        let modules = children(&DocCtx::new(&env, &program), &DocId::new("project"));
         assert!(modules[0].has_page);
-        let page = page(&env, &program, &modules[0].id).unwrap();
+        let page = page(&DocCtx::new(&env, &program), &modules[0].id).unwrap();
         assert_eq!(page.markdown, "The geometry module.");
         assert_eq!(page.kind, DocKind::Module);
     }
@@ -826,7 +890,7 @@ mod tests {
         let program =
             program_of("@doc {\n  A helper about widgets.\n}\nfn helper() {}\nfn widget() {}");
         let env = StubEnv;
-        let hits = search(&env, &program, "widget");
+        let hits = search(&DocCtx::new(&env, &program), "widget");
         // `widget` (name match) outranks `helper` (prose-only match), and both appear.
         assert!(hits.len() >= 2);
         assert_eq!(hits[0].title, "widget");
@@ -852,11 +916,11 @@ mod tests {
             "@doc {\n  Module intro.\n}\nuse std.math\nfn a() {}\n@doc {\n  ## Notes\n  Some free prose.\n}\nuse std.list\nfn b() {}",
         );
         let env = StubEnv;
-        let modules = children(&env, &program, &DocId::new("project"));
-        let kids = children(&env, &program, &modules[0].id);
+        let modules = children(&DocCtx::new(&env, &program), &DocId::new("project"));
+        let kids = children(&DocCtx::new(&env, &program), &modules[0].id);
         let section = kids.iter().find(|k| k.kind == DocKind::Section).unwrap();
         assert_eq!(section.title, "Notes");
-        let page = page(&env, &program, &section.id).unwrap();
+        let page = page(&DocCtx::new(&env, &program), &section.id).unwrap();
         assert!(page.markdown.contains("Some free prose."));
     }
 
@@ -864,8 +928,8 @@ mod tests {
     fn unknown_id_yields_no_children_and_no_page() {
         let program = program_of("fn f() {}");
         let env = StubEnv;
-        assert!(children(&env, &program, &DocId::new("project/99/nope")).is_empty());
-        assert!(page(&env, &program, &DocId::new("guide/whatever")).is_none());
-        assert!(page(&env, &program, &DocId::new("project/0/nope")).is_none());
+        assert!(children(&DocCtx::new(&env, &program), &DocId::new("project/99/nope")).is_empty());
+        assert!(page(&DocCtx::new(&env, &program), &DocId::new("guide/whatever")).is_none());
+        assert!(page(&DocCtx::new(&env, &program), &DocId::new("project/0/nope")).is_none());
     }
 }

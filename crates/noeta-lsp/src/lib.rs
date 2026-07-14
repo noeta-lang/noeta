@@ -622,7 +622,7 @@ impl Backend {
             store.doc_index(&params.uri)
         };
         Ok(DocsResult {
-            nodes: nodes.map(|ns| ns.into_iter().map(DocNodeWire::from).collect()),
+            nodes: Some(nodes.into_iter().map(DocNodeWire::from).collect()),
         })
     }
 
@@ -633,7 +633,7 @@ impl Backend {
             store.doc_children(&params.uri, &params.id, Encoding::Utf16)
         };
         Ok(DocsResult {
-            nodes: nodes.map(|ns| ns.into_iter().map(DocNodeWire::from).collect()),
+            nodes: Some(nodes.into_iter().map(DocNodeWire::from).collect()),
         })
     }
 
@@ -655,7 +655,7 @@ impl Backend {
             store.doc_search(&params.uri, &params.query, Encoding::Utf16)
         };
         Ok(DocsSearchResult {
-            hits: hits.map(|hs| hs.into_iter().map(DocHitWire::from).collect()),
+            hits: Some(hits.into_iter().map(DocHitWire::from).collect()),
         })
     }
 

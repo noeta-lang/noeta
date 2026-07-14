@@ -306,9 +306,10 @@ pub struct DocPageOutput {
 pub fn doc_browse(p: &Prepared, id: Option<&str>) -> DocBrowseOutput {
     let program = linked_program(p);
     let env = PreparedDocEnv { p };
+    let ctx = model::DocCtx::new(&env, &program);
     let nodes = match id {
         None => model::roots(),
-        Some(id) => model::children(&env, &program, &model::DocId(id.to_string())),
+        Some(id) => model::children(&ctx, &model::DocId(id.to_string())),
     };
     DocBrowseOutput {
         nodes: nodes.into_iter().map(DocNodeOut::from).collect(),
@@ -319,7 +320,8 @@ pub fn doc_browse(p: &Prepared, id: Option<&str>) -> DocBrowseOutput {
 pub fn doc_page(p: &Prepared, id: &str) -> DocPageOutput {
     let program = linked_program(p);
     let env = PreparedDocEnv { p };
-    match model::page(&env, &program, &model::DocId(id.to_string())) {
+    let ctx = model::DocCtx::new(&env, &program);
+    match model::page(&ctx, &model::DocId(id.to_string())) {
         Some(page) => DocPageOutput {
             found: true,
             id: page.id.0,
@@ -542,10 +544,8 @@ mod tests {
         let mut store = noeta_ide::DocumentStore::default();
         store.open("file:///t.noe", src.to_string());
         let enc = noeta_ide::Encoding::Utf8;
-        let lsp_mods = store.doc_children("file:///t.noe", "project", enc).unwrap();
-        let lsp_decls = store
-            .doc_children("file:///t.noe", lsp_mods[0].id.as_str(), enc)
-            .unwrap();
+        let lsp_mods = store.doc_children("file:///t.noe", "project", enc);
+        let lsp_decls = store.doc_children("file:///t.noe", lsp_mods[0].id.as_str(), enc);
 
         // Same declarations, same ids/kinds/details/flags (locations may differ by encoding).
         let mcp_shape: Vec<_> = mcp_decls
