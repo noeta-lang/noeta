@@ -1552,6 +1552,14 @@ impl Checker {
                         self.modules.insert(local, qualified);
                     }
                     UseKind::Namespace(prefix) => {
+                        // Expose the group's types under the bound name so a dotted annotation
+                        // (`http.Response`, aliased `h.Response`) resolves like the group's modules
+                        // resolve for a call — mapping `<local>.<rel>` to the type's qualified
+                        // identity, the same channel a leaf `use std.http.Response` import uses.
+                        for (rel, qualified) in self.reg().namespace_types(&prefix) {
+                            self.extern_types
+                                .insert(format!("{local}.{rel}"), qualified);
+                        }
                         self.namespaces.insert(local, prefix);
                     }
                     UseKind::ExternType(qualified) => {

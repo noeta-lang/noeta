@@ -993,6 +993,28 @@ impl Registry {
         out
     }
 
+    /// The extension **types** reachable under a namespace prefix, as `(relative path, qualified
+    /// identity)` — `std.http` → `[("Response", "std.http.Response")]`. A type under a sub-namespace
+    /// keeps the dotted remainder (`("client.Handle", "std.http.client.Handle")`). Lets a `use
+    /// std.http` group expose its types for a dotted annotation (`http.Response`) the way it exposes
+    /// its modules for a call (`http.client.get`).
+    pub fn namespace_types(&self, prefix: &str) -> Vec<(String, String)> {
+        let Some((root, _)) = prefix.split_once('.') else {
+            return Vec::new();
+        };
+        let dotted = format!("{prefix}.");
+        let mut out = Vec::new();
+        for e in self.units.iter().filter(|e| e.root() == root) {
+            for t in e.types() {
+                let q = t.qualified();
+                if let Some(rest) = q.strip_prefix(&dotted) {
+                    out.push((rest.to_string(), q.to_string()));
+                }
+            }
+        }
+        out
+    }
+
     /// Resolve one namespace hop: what `<prefix>.<member>` names (`std.http` + `client` →
     /// [`NsChild::Module`]`("std.http.client")`). A module wins over a same-named deeper namespace
     /// (a concrete leaf is more specific); a type is checked before the namespace fallback.

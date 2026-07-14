@@ -183,6 +183,21 @@ fn use_of_unknown_std_target_is_an_error() {
 }
 
 #[test]
+fn namespaced_type_resolves_in_type_position() {
+    // A type reached through a namespace group — `http.Response` from `use std.http` — resolves in
+    // annotation and `is` position (the type-position analog of `http.client.get`), identical to the
+    // leaf import `use std.http.Response`. A nonexistent one is a hard `unknown type` error.
+    assert!(
+        codes("use std.http\nfn f(r: http.Response): bool { return r is http.Response; }\n")
+            .is_empty()
+    );
+    assert_eq!(
+        codes("use std.http\nfn f(x: http.Bogus): int { return 0; }\n"),
+        ["E0013"]
+    );
+}
+
+#[test]
 fn namespace_group_binds_and_resolves() {
     // `use std.http` binds `http` as a navigable group; `http.client.get(...)` resolves the client
     // submodule and type-checks clean (identical to the leaf form `use std.http.client`).

@@ -260,6 +260,13 @@ fn collect_type_aliases(
                 // A native type: narrows against its qualified identity, whichever local name it
                 // was bound to.
                 map.insert(local, ext.qualified());
+            } else if registry.is_namespace(&qualified) {
+                // A namespace group (`use std.http`): expose its types so a *dotted* narrowing
+                // target (`http.Response`) resolves to the same qualified identity a value carries,
+                // exactly as the checker's import collection does. Aliased groups key on the alias.
+                for (rel, q) in registry.namespace_types(&qualified) {
+                    map.insert(format!("{local}.{rel}"), q);
+                }
             } else if n.alias.is_some() {
                 // A renamed user (or opaque) import: narrows against the imported leaf name.
                 map.insert(local, n.name.clone());
