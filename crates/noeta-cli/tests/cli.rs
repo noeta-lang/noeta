@@ -2231,6 +2231,90 @@ fn build_native_matches_a_source_run_byte_for_byte() {
     let _ = std::fs::remove_file(&app);
 }
 
+/// The names of every section in an ELF64 (LE) image — enough to assert a binary was stripped.
+/// Hand-rolled so the test needs no `object`/`goblin` dependency; returns `None` for a non-ELF64
+/// input (e.g. a macOS Mach-O host), letting the caller skip rather than false-fail.
+#[cfg(feature = "jit")]
+fn elf_section_names(bytes: &[u8]) -> Option<Vec<String>> {
+    let u16le = |o: usize| -> Option<usize> {
+        Some(u16::from_le_bytes(bytes.get(o..o + 2)?.try_into().ok()?) as usize)
+    };
+    let u32le = |o: usize| -> Option<usize> {
+        Some(u32::from_le_bytes(bytes.get(o..o + 4)?.try_into().ok()?) as usize)
+    };
+    let u64le = |o: usize| -> Option<usize> {
+        Some(u64::from_le_bytes(bytes.get(o..o + 8)?.try_into().ok()?) as usize)
+    };
+    if bytes.get(0..4)? != b"\x7fELF" || *bytes.get(4)? != 2 {
+        return None; // not ELF64 — skip on this host.
+    }
+    let (shoff, shentsize, shnum, shstrndx) = (u64le(40)?, u16le(58)?, u16le(60)?, u16le(62)?);
+    // The section-name string table blob, located via the shstrndx'th section header.
+    let strh = shoff + shstrndx * shentsize;
+    let (str_off, str_size) = (u64le(strh + 24)?, u64le(strh + 32)?);
+    let strtab = bytes.get(str_off..str_off + str_size)?;
+    let mut names = Vec::with_capacity(shnum);
+    for i in 0..shnum {
+        let name_off = u32le(shoff + i * shentsize)?;
+        let end = strtab[name_off..].iter().position(|&b| b == 0)? + name_off;
+        names.push(String::from_utf8_lossy(&strtab[name_off..end]).into_owned());
+    }
+    Some(names)
+}
+
+#[test]
+#[cfg(feature = "jit")] // `--native` exists only in the JIT-enabled build.
+fn build_native_strips_debug_info_from_the_shipped_binary() {
+    // A shipped `--native` artifact carries no native debug symbols (`-s` at link, native-size slice
+    // 1): its panic tracebacks come from the bundle's own line table, not DWARF, so stripping is free
+    // and halves the image (~11 MB → ~5.8 MB on a core program). Guard it structurally — assert the
+    // ELF has no `.debug_*` or `.symtab`/`.strtab` sections — rather than by a brittle size ceiling.
+    let Some((archive, libs)) = build_aot_archive() else {
+        return; // no build toolchain for the runtime archive — skip.
+    };
+    if !has_cc() {
+        eprintln!("skipping native strip test: no `cc` on PATH");
+        return;
+    }
+    let file = temp_program("build_native_strip", "echo \"ok\"\n");
+    let app = file.parent().unwrap().join("app_native_strip");
+    let _ = std::fs::remove_file(&app);
+    lang()
+        .arg("build")
+        .arg(&file)
+        .arg("--native")
+        .arg("-o")
+        .arg(&app)
+        .env("NOETA_AOT_RUNTIME_LIB", &archive)
+        .env("NOETA_AOT_LINK_LIBS", &libs)
+        .assert()
+        .success();
+
+    // Still runs (the stapled bundle survived the strip — it is appended *after* the linked ELF that
+    // `-s` stripped) …
+    Command::new(&app).assert().success().stdout("ok\n");
+
+    // … and carries no debug/symbol sections.
+    let bytes = std::fs::read(&app).unwrap();
+    if let Some(sections) = elf_section_names(&bytes) {
+        // `.debug_gdb_scripts` is a ~40-byte gdb-autoload stub cranelift emits into the AOT object,
+        // not DWARF — `-s` leaves it and it costs nothing, so it is not what "stripped" is about here.
+        let leftover: Vec<_> = sections
+            .iter()
+            .filter(|n| {
+                (n.starts_with(".debug") && n.as_str() != ".debug_gdb_scripts")
+                    || n.as_str() == ".symtab"
+                    || n.as_str() == ".strtab"
+            })
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "shipped --native binary should be stripped, but found sections: {leftover:?}"
+        );
+    }
+    let _ = std::fs::remove_file(&app);
+}
+
 #[test]
 fn bundle_run_rejects_build_time_flags() {
     // Tiers are baked at build time; passing them to a bundle run is a usage error, not a silent
