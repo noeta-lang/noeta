@@ -1,0 +1,37 @@
+[package]
+name = "noeta-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# The lean production runtime (dev-deps D3): the native analogue of `noeta-wasm-runner`, extended
+# with the compiler so it can run `.noe` source (PHP-style deploy) as well as a `.noeb`/stapled
+# bundle. It links the app-execution layers (L1 VM+Host+runtime, L2 compile front-end) and NOTHING
+# from the dev toolchain (L3) — no fmt, no formatter/parser (`malva`), no LSP/DAP/MCP. The toolchain
+# is excluded *structurally*: those crates are simply not dependencies, so no `#[cfg]` gates them and
+# a shipped artifact built on this crate cannot reach them. `noeta-cli` depends on this lib so the
+# CLI's `run`/`--exe` path and this binary share ONE execution core — the drift firewall.
+[lib]
+name = "noeta_runner"
+path = "src/lib.rs"
+
+[dependencies]
+noeta-span = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-bytecode = { workspace = true }
+noeta-bundle = { workspace = true }
+noeta-backend = { workspace = true }
+noeta-vm = { workspace = true }
+noeta-stdlib = { workspace = true }
+noeta-runtime = { workspace = true }
+
+[features]
+# Mirror `noeta-cli`: the shipped runner is JIT-enabled by default; `--no-default-features` yields a
+# Cranelift-free interpreter-only runtime (identical behaviour, smaller build).
+default = ["jit"]
+jit = ["noeta-vm/jit"]
+
+[lints]
+workspace = true

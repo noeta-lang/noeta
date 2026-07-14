@@ -4033,6 +4033,7 @@ dependencies = [
  "noeta-parser",
  "noeta-pm",
  "noeta-prof",
+ "noeta-runner",
  "noeta-runtime",
  "noeta-span",
  "noeta-stdlib",
@@ -4454,6 +4455,20 @@ dependencies = [
 [[package]]
 name = "noeta-reactive"
 version = "0.1.0"
+
+[[package]]
+name = "noeta-runner"
+version = "0.1.0"
+dependencies = [
+ "noeta-backend",
+ "noeta-bundle",
+ "noeta-bytecode",
+ "noeta-diagnostics",
+ "noeta-runtime",
+ "noeta-span",
+ "noeta-stdlib",
+ "noeta-vm",
+]
 
 [[package]]
 name = "noeta-runtime"

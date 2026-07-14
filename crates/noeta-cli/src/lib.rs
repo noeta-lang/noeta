@@ -1725,6 +1725,10 @@ fn p2p_app_namespace(args: &[String]) -> Option<String> {
         .map(|s| s.to_string_lossy().into_owned())
 }
 
+/// The p2p application namespace for a source run: the CLI derives it from the nearest `noeta.toml`
+/// (via [`p2p_app_namespace`]) and passes it into the shared execution core (`noeta-runner`), which
+/// is package-manager-free by design. A convenience so the CLI's callers read the same as before the
+/// core was extracted.
 fn run_module_real_host(
     module: std::sync::Arc<noeta_bytecode::Module>,
     args: Vec<String>,
@@ -1734,34 +1738,8 @@ fn run_module_real_host(
     Vec<noeta_vm::TraceFrame>,
     Option<noeta_vm::JitReport>,
 ) {
-    // A factory that mints a fresh real host + wall-clock executor per isolate (isolates I.4b): the
-    // main program gets one, and each real-thread `isolate f(args)` gets its own so a worker's disk /
-    // clock / async state is independent. Injected here (not in `noeta-vm`) so the VM crate needs no
-    // `noeta-runtime`/tokio dependency. A worker that cannot start its runtime panics the worker thread,
-    // which surfaces as an isolate failure at the `.await`. The program argument vector (from
-    // `noeta run … -- <args>`) is cloned into every isolate's host so a worker's `args.all()` agrees
-    // with the main program's.
-    // The p2p application namespace (p2p P3.4): keys each isolate's persistent p2p identity/store
-    // dir on *this* program so two different Noeta apps never collide on one dir. Computed once and
-    // cloned into every isolate's host.
     let app_id = p2p_app_namespace(&args);
-    let factory: noeta_vm::IsolateFactory = std::sync::Arc::new(move || {
-        let host: Box<dyn noeta_stdlib::Host> = Box::new(
-            noeta_runtime::RealHost::new()
-                .expect("cannot start an isolate's runtime")
-                .with_args(args.clone())
-                .with_p2p_app(app_id.clone()),
-        );
-        let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
-            noeta_runtime::RealExecutor::new().expect("cannot start an isolate's async executor"),
-        );
-        (host, executor)
-    });
-    let (host, executor) = factory();
-    // Real isolates run on OS threads (out-of-oracle); channel-shipping isolates fall back to
-    // cooperative tasks (cross-thread channels are I.4c). The differential keeps the sandbox pair.
-    VmBackend::new()
-        .run_module_with_host_and_executor_parallel(module, host, executor, factory, jit_report)
+    noeta_runner::run_module_real_host(module, args, app_id, jit_report)
 }
 
 /// P-AOT L2: detect and run a bundle stapled onto this executable (a `noeta build --exe` artifact),
@@ -3192,118 +3170,17 @@ fn compile_whole_file(
 /// `.noeb` bundle runner and the startup-cache *hit* path (both have a module with no source to
 /// compile). `args` is the program's argv (see [`program_args`]). Diagnostics/trace render against
 /// `sources` (real workspace sources on a cache hit; a synthetic empty source for a source-free bundle).
+/// Run a compiled module and render its output/diagnostics/trace/JIT-report, returning the exit
+/// code. Delegates to the shared execution core (`noeta-runner`) after deriving the p2p app
+/// namespace from the workspace — the CLI's package-manager-aware wrapper over the lean runner.
 fn run_compiled_module(
     module: std::sync::Arc<noeta_bytecode::Module>,
     sources: &SourceMap,
     args: Vec<String>,
     jit_stats: bool,
 ) -> ExitCode {
-    let (result, trace, report) =
-        run_module_real_host(std::sync::Arc::clone(&module), args, jit_stats);
-    print!("{}", result.stdout);
-    let _ = io::stdout().flush();
-    emit_diagnostics_mapped(sources, result.diagnostics.iter());
-    if trace.len() >= 2 {
-        eprint!("{}", noeta_vm::render_trace(&trace, sources));
-    }
-    // `--jit-stats`: the report renders after the program's own output, to stderr (it is
-    // diagnostics, not program output). A JIT-less binary produces no report — say so rather
-    // than print nothing.
-    match report {
-        Some(report) => eprint!("{}", render_jit_report(&report, &module, sources)),
-        None if jit_stats => {
-            eprintln!("lang: --jit-stats: this binary was built without the JIT (no report)");
-        }
-        None => {}
-    }
-    exit_code(result.exit_code)
-}
-
-/// Render the `--jit-stats` report (`noeta run --jit-stats`, stderr): tier-1 compile coverage, the
-/// bail histogram, and OSR-declined loops — each site resolved to its function, source line, and
-/// disassembled op. The histogram counts **native entries** that fell back (a frame stays tier-0
-/// after a bail until its next entry), so read it as "how often the fallback happened", not a
-/// per-iteration figure; a declined loop never enters native at all, which is why it is its own
-/// section.
-fn render_jit_report(
-    report: &noeta_vm::JitReport,
-    module: &noeta_bytecode::Module,
-    sources: &SourceMap,
-) -> String {
-    use std::fmt::Write as _;
-    // "app.noe:12" for an op site, resolved through the line table (always emitted, even in
-    // production compiles); "?" for a site before the first line entry (a prototype's prologue).
-    let site = |proto: u32, pc: u32| -> String {
-        module.protos[proto as usize]
-            .line_span(pc as usize)
-            .map(|span| {
-                let lc = sources.line_col(span);
-                format!("{}:{}", sources.source(span.source).name(), lc.line)
-            })
-            .unwrap_or_else(|| "?".to_string())
-    };
-    let fn_name = |proto: u32| -> String {
-        module.protos[proto as usize]
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("proto {proto}"))
-    };
-    let op_text = |proto: u32, pc: u32| -> String {
-        module.protos[proto as usize].op_repr_at(pc as usize, &module.names, &module.global_names)
-    };
-
-    let mut out = String::new();
-    let stubs = report.compiled.saturating_sub(report.native);
-    let _ = writeln!(
-        out,
-        "── JIT report ──\ntier 1: {} of {} compiled prototypes native ({} bail stubs), compile time {:.1} ms",
-        report.native,
-        report.compiled,
-        stubs,
-        report.compile_ns_total as f64 / 1e6,
-    );
-
-    if report.bails.is_empty() {
-        let _ = writeln!(
-            out,
-            "\nno bail events — native code never fell back mid-frame"
-        );
-    } else {
-        let _ = writeln!(
-            out,
-            "\nbail sites (native code fell back to the interpreter; counts are native entries, not iterations):"
-        );
-        for b in &report.bails {
-            let _ = writeln!(
-                out,
-                "  {:>8}\u{00d7}  {}  {}  {}",
-                b.count,
-                site(b.proto, b.pc),
-                fn_name(b.proto),
-                op_text(b.proto, b.pc),
-            );
-        }
-        if report.bails.iter().any(|b| b.pc == 0) {
-            let _ = writeln!(
-                out,
-                "  (a pc-0 site can also be the entry parameter guard: a heap argument bails before the first op)"
-            );
-        }
-    }
-
-    if !report.declined.is_empty() {
-        let _ = writeln!(
-            out,
-            "\nloops declined tier 1 (every loop contains a non-native op; the prototype ran interpreted):"
-        );
-        for d in &report.declined {
-            let _ = writeln!(out, "  {} — blocked by:", fn_name(d.proto));
-            for &pc in &d.bail_pcs {
-                let _ = writeln!(out, "    {}  {}", site(d.proto, pc), op_text(d.proto, pc),);
-            }
-        }
-    }
-    out
+    let app_id = p2p_app_namespace(&args);
+    noeta_runner::run_compiled_module(module, sources, args, app_id, jit_stats)
 }
 
 /// Build the startup-cache slot for a source run: open the cache and compute the content key from
@@ -5803,10 +5680,6 @@ fn emit_trace(trace: &[noeta_vm::TraceFrame], map: &SourceMap) {
     if trace.len() >= 2 {
         eprint!("{}", noeta_vm::render_trace(trace, map));
     }
-}
-
-fn exit_code(code: i32) -> ExitCode {
-    ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
 #[cfg(test)]

@@ -37,6 +37,11 @@ noeta-loader = { workspace = true }
 # Also the impact engine (server-hmr W3): `noeta test/bench --watch` reruns only impacted decls.
 noeta-ide = { workspace = true }
 noeta-runtime = { workspace = true }
+# The shared app-execution core (dev-deps D3): `run`/`--exe` delegate to it so the CLI and the
+# standalone lean `noeta-runner` binary execute bundles/modules through one implementation. Its JIT
+# rides the CLI's own `jit` feature (below), so `--no-default-features` stays Cranelift-free (the
+# workspace entry sets `default-features = false`).
+noeta-runner = { workspace = true }
 noeta-stdlib = { workspace = true }
 noeta-html = { workspace = true }
 noeta-css = { workspace = true }
@@ -60,7 +65,7 @@ serde_json = { workspace = true }
 # `bench` drive the tier-1 JIT under hot-counter promotion. `--no-default-features` builds a
 # Cranelift-free interpreter-only binary (identical behaviour, smaller build).
 default = ["jit"]
-jit = ["noeta-vm/jit"]
+jit = ["noeta-vm/jit", "noeta-runner/jit"]
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
