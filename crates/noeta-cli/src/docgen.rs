@@ -155,6 +155,49 @@ pub fn registry_docs_json(
     (format!("{json:#}\n"), generated)
 }
 
+/// Combine a native package's registry-derived API `docs.json` (`api_json`, the primary surface)
+/// with any `.noe`-source docs it also ships (`noe_json`) and stamp the package identity, for
+/// `noeta publish` to upload. Modules are concatenated (API first); a `.noe` module whose namespace
+/// already appears in the API surface is dropped (the compiled surface wins). Malformed inputs are
+/// skipped rather than fatal — docs are advisory.
+pub fn finalize_native_docs(
+    api_json: &str,
+    noe_json: Option<&str>,
+    name: &str,
+    version: &str,
+) -> String {
+    let mut doc: serde_json::Value =
+        serde_json::from_str(api_json).unwrap_or_else(|_| serde_json::json!({ "schema": SCHEMA }));
+    let mut modules: Vec<serde_json::Value> = doc
+        .get("modules")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut seen: std::collections::HashSet<String> = modules
+        .iter()
+        .filter_map(|m| {
+            m.get("namespace")
+                .and_then(|n| n.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+    if let Some(noe) = noe_json
+        && let Ok(noe_doc) = serde_json::from_str::<serde_json::Value>(noe)
+        && let Some(noe_mods) = noe_doc.get("modules").and_then(|m| m.as_array())
+    {
+        for m in noe_mods {
+            let ns = m.get("namespace").and_then(|n| n.as_str()).unwrap_or("");
+            if ns.is_empty() || seen.insert(ns.to_string()) {
+                modules.push(m.clone());
+            }
+        }
+    }
+    doc["schema"] = serde_json::json!(SCHEMA);
+    doc["package"] = serde_json::json!({ "name": name, "version": version });
+    doc["modules"] = serde_json::json!(modules);
+    format!("{doc:#}\n")
+}
+
 /// Render the Markdown tree from a stored `docs.json` (the registry-fetch path: `noeta doc
 /// --package … --out DIR`) into `out`, alongside a copy of the artifact itself. The inverse of
 /// [`generate`]'s emit step, working purely from the schema — no source needed.
@@ -591,6 +634,33 @@ mod tests {
         render_json_to(&out, &text).expect("renders from schema alone");
         assert!(out.join("std-math.md").exists());
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn finalize_native_docs_merges_and_stamps() {
+        let api = r#"{"schema":1,"package":null,"modules":[
+            {"file":"","namespace":"imgfx.fx","doc":null,"items":[
+                {"kind":"fn","name":"blur","signature":"fn blur(bytes): bytes","doc":"Blur.","public":true}]}]}"#;
+        // A `.noe` glue module plus a duplicate of the native namespace (the compiled surface wins).
+        let noe = r#"{"schema":1,"package":null,"modules":[
+            {"file":"helpers.noe","namespace":"imgfx.helpers","doc":null,"items":[
+                {"kind":"fn","name":"clamp","signature":"pub fn clamp(x: int): int","doc":null,"public":true}]},
+            {"file":"dup.noe","namespace":"imgfx.fx","doc":null,"items":[]}]}"#;
+        let out = finalize_native_docs(api, Some(noe), "acme/imgfx", "1.2.0");
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["schema"], 1);
+        assert_eq!(doc["package"]["name"], "acme/imgfx");
+        assert_eq!(doc["package"]["version"], "1.2.0");
+        let ns: Vec<&str> = doc["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["namespace"].as_str().unwrap())
+            .collect();
+        // Native module first, the .noe glue merged in, the duplicate namespace dropped.
+        assert_eq!(ns, vec!["imgfx.fx", "imgfx.helpers"]);
+        // API prose survives (the compiled surface, not the empty dup).
+        assert_eq!(doc["modules"][0]["items"][0]["doc"], "Blur.");
     }
 
     #[test]

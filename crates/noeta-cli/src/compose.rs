@@ -145,6 +145,42 @@ pub fn compose_runner_binary(entry: &Path) -> Result<Option<PathBuf>, String> {
     Ok(Some(binary))
 }
 
+/// Build (client-side, cached) a composed toolchain that links **the package's own** native entry
+/// crate at `crate_dir`, then run `noeta doc --api --root <root_ns>` inside it and return the
+/// emitted `docs.json`. This is how `noeta publish` generates a native package's API reference: the
+/// module surface lives only in the compiled Rust, so it must be *built* — on the **publisher's**
+/// machine (the registry never compiles anything). A build failure surfaces as `Err`, which the
+/// publish flow uses as a quality gate (don't publish a native package whose crate won't compile).
+/// `root_ns` scopes the output to the package's own namespace, excluding std.
+pub fn package_api_docs(identity: &str, crate_dir: &Path, root_ns: &str) -> Result<String, String> {
+    let nc = NativeCrate {
+        identity: identity.to_string(),
+        crate_dir: crate_dir.to_path_buf(),
+    };
+    // A doc-generation query exposes no CLI of its own, so command-trust is irrelevant — `&[]`.
+    let binary = compose_binary(&[nc], &[], ShimKind::Toolchain)?;
+    let output = std::process::Command::new(&binary)
+        .arg("doc")
+        .arg("--api")
+        .arg("--root")
+        .arg(root_ns)
+        .output()
+        .map_err(|err| {
+            format!(
+                "running the composed toolchain `{}`: {err}",
+                binary.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "generating API docs in the composed toolchain failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|err| format!("the API docs.json was not UTF-8: {err}"))
+}
+
 /// Build (or reuse the cached) **composed AOT runtime** staticlib for a native-dependency app, and
 /// return its archive path plus the native system libraries it must be linked against. This is the
 /// `--native` analogue of [`compose_runner_binary`]: where a `--exe` artifact staples its bundle onto a

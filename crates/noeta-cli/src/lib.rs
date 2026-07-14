@@ -828,6 +828,41 @@ fn cmd_publish(
         }
     }
 
+    // Native packages: build the package's own native crate **on this machine** (a composed
+    // toolchain, cached) and generate its registry-derived API docs. This doubles as a **publish
+    // quality gate** — a native crate that won't compile can't be composed by any consumer, so we
+    // refuse to publish it (fail fast, before pinning a SHA / attesting / touching the index). The
+    // registry never compiles anything: only the finished `docs.json` is later uploaded.
+    let native_docs: Option<String> = match &pkg.native {
+        Some(native_dir) => {
+            let pkg_dir = manifest_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let crate_dir = pkg_dir.join(native_dir);
+            println!(
+                "building native crate at `{}` (publish quality gate)…",
+                crate_dir.display()
+            );
+            match compose::package_api_docs(&name, &crate_dir, &pkg.name.package) {
+                Ok(api_json) => {
+                    // Fold in any `.noe` glue the package also ships (advisory; the API surface wins).
+                    let noe_json = docgen::package_docs_json(pkg_dir).ok().map(|(j, _)| j);
+                    Some(docgen::finalize_native_docs(
+                        &api_json,
+                        noe_json.as_deref(),
+                        &name,
+                        &version.to_string(),
+                    ))
+                }
+                Err(err) => {
+                    eprintln!("lang: native package build failed — not publishing.\n{err}");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        None => None,
+    };
+
     let tag = tag
         .map(str::to_string)
         .unwrap_or_else(|| format!("v{version}"));
@@ -924,23 +959,30 @@ fn cmd_publish(
     match index.publish(&name, &release) {
         Ok(()) => {
             println!("published `{name}` {version} → {git}#{tag} ({sha}) [{provenance_tag}]");
-            // Docs ride along (docs-ingestion follow-up): generate the artifact from the package
-            // dir and store it with the release. Advisory metadata — a docs failure warns, never
-            // blocks a publish that already succeeded.
+            // Docs ride along: store the artifact with the release. For a native package it is the
+            // already-generated, build-gated API docs (`native_docs`); for a pure-Noeta package it
+            // is generated now from the `.noe` source. Advisory metadata — an upload failure warns,
+            // never unpublishes a release that already succeeded.
             if !no_docs {
                 let pkg_dir = manifest_path
                     .parent()
                     .map(std::path::Path::to_path_buf)
                     .unwrap_or_else(|| PathBuf::from("."));
-                match docgen::package_docs_json(&pkg_dir) {
-                    Ok((docs_json, done)) => match index.put_docs(&name, &version, &docs_json) {
-                        Ok(()) => println!(
-                            "docs uploaded ({} module{}, {} declaration{})",
-                            done.modules,
-                            plural(done.modules),
-                            done.decls,
-                            plural(done.decls),
-                        ),
+                let docs_json = match native_docs {
+                    Some(json) => Ok(json),
+                    None => docgen::package_docs_json(&pkg_dir).map(|(json, _)| json),
+                };
+                match docs_json {
+                    Ok(docs_json) => match index.put_docs(&name, &version, &docs_json) {
+                        Ok(()) => {
+                            let modules = serde_json::from_str::<serde_json::Value>(&docs_json)
+                                .ok()
+                                .and_then(|d| {
+                                    d.get("modules").and_then(|m| m.as_array()).map(|a| a.len())
+                                })
+                                .unwrap_or(0);
+                            println!("docs uploaded ({modules} module{})", plural(modules));
+                        }
                         Err(err) => eprintln!("lang: warning: docs not uploaded: {err}"),
                     },
                     Err(err) => eprintln!("lang: warning: docs not generated: {err}"),
