@@ -124,6 +124,16 @@ Compiles a program to a standalone artifact instead of running it. It shares the
 
 All executable forms see the same `args.all()` vector as `noeta run` (argv[0] = program path), so no code changes between running from source and shipping a binary.
 
+### Shipped artifacts are lean by construction
+
+A `noeta build --exe`/`--native` artifact bundles the **runtime**, not the toolchain. It carries the VM, the standard library, and any of your dependencies' **runtime** capabilities (a native tier's handler, a native module) — and **nothing else**: no formatter, no LSP, no debug adapter, no formatter parsers. That is a deliberate security boundary, not just a size win: every parser or protocol server linked into a production binary is reachable attack surface, so a shipped app must not carry the dev toolchain it never runs.
+
+This is structural. `--exe` staples your program onto the lean **`noeta-runner`** (or, when your app depends on packages with native runtime code, onto a *composed* runner that adds exactly those extensions — still no dev tooling); `--native` links a fresh binary from the AOT runtime. A stapled artifact's argument vector belongs to your program — it never exposes a CLI subcommand — so the toolchain would only ever have been dead weight there.
+
+**Running a source tree in production** (PHP/Python/Ruby-style — deploy the `.noe` sources and point a runtime at the entry file) is a first-class deployment mode with the same guarantee: run it with `noeta-runner app.noe`, the same lean runtime, which compiles on the fly and links no dev tooling. (`noeta run` is the dev-workstation entry point and does carry the full toolchain; for production source deploys, ship `noeta-runner`.)
+
+Which of your dependencies' code is present is governed by [`noeta.toml` targets](Documentation-and-Tiers) — build the default (safe, minimal) target, or `--target <name>` to layer in more. Package authors keep dev-only capabilities (like a tier-body formatter) out of your shipped binary automatically; see *shipping dev capabilities* in [Native Extensions](Native-Extensions).
+
 ## `noeta check`
 
 ```

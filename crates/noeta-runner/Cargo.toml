@@ -1,0 +1,57 @@
+[package]
+name = "noeta-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# The lean production runtime (dev-deps D3): the native analogue of `noeta-wasm-runner`, extended
+# with the compiler so it can run `.noe` source (PHP-style deploy) as well as a `.noeb`/stapled
+# bundle. It links the app-execution layers (L1 VM+Host+runtime, L2 compile front-end) and NOTHING
+# from the dev toolchain (L3) — no fmt, no formatter/parser (`malva`), no LSP/DAP/MCP. The toolchain
+# is excluded *structurally*: those crates are simply not dependencies, so no `#[cfg]` gates them and
+# a shipped artifact built on this crate cannot reach them. `noeta-cli` depends on this lib so the
+# CLI's `run`/`--exe` path and this binary share ONE execution core — the drift firewall.
+[lib]
+name = "noeta_runner"
+path = "src/lib.rs"
+
+[[bin]]
+name = "noeta-runner"
+path = "src/main.rs"
+
+[dependencies]
+mimalloc = { version = "0.1", default-features = false }
+noeta-span = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-bytecode = { workspace = true }
+noeta-bundle = { workspace = true }
+noeta-backend = { workspace = true }
+noeta-vm = { workspace = true }
+noeta-stdlib = { workspace = true }
+noeta-runtime = { workspace = true }
+# The L2 compile front-end (dev-deps D3c): source → typed → bytecode, so the runner runs `.noe`
+# source (PHP-style deploy), sharing the CLI's exact pipeline. `noeta-pm` is pulled with DEFAULT
+# features only — NOT `registry-http`/`provenance`/`keyless` — so the lean runtime links manifest +
+# target/tier resolution but none of the publish/network/crypto surface.
+noeta-ast = { workspace = true }
+noeta-loader = { workspace = true }
+noeta-check = { workspace = true }
+noeta-compiler = { workspace = true }
+noeta-cache = { workspace = true }
+noeta-pm = { workspace = true }
+
+[features]
+# Mirror `noeta-cli`: the shipped runner is JIT-enabled by default; `--no-default-features` yields a
+# Cranelift-free interpreter-only runtime (identical behaviour, smaller build).
+default = ["jit"]
+jit = ["noeta-vm/jit"]
+
+[dev-dependencies]
+# The integration test compiles a tiny program to a bundle through the salsa pipeline and runs the
+# runner binary over it (mirrors noeta-wasm-runner's test harness).
+noeta-db = { workspace = true }
+
+[lints]
+workspace = true

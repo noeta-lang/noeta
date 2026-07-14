@@ -39,6 +39,32 @@ fn lang() -> Command {
     cmd
 }
 
+/// Build the lean `noeta-runner` binary (debug, reusing the workspace's `target/debug` so its deps
+/// are already compiled) and return its path, for `NOETA_RUNNER` — so a `--exe` test stapes onto a
+/// ready runner instead of paying the CLI's default on-demand `--release` build. `None` if there is
+/// no build toolchain (the caller then skips), mirroring `build_aot_archive`.
+fn lean_runner_path() -> Option<PathBuf> {
+    let bin = if cfg!(windows) {
+        "noeta-runner.exe"
+    } else {
+        "noeta-runner"
+    };
+    let output = std::process::Command::new(env!("CARGO"))
+        .current_dir(workspace())
+        .args(["build", "-p", "noeta-runner"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        eprintln!(
+            "skipping: building the lean runner failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
+    }
+    let path = workspace().join("target/debug").join(bin);
+    path.exists().then_some(path)
+}
+
 // --- `run` ------------------------------------------------------------------------
 
 #[test]
@@ -2044,10 +2070,13 @@ fn build_then_run_bundle_matches_source_run() {
 
 #[test]
 fn build_exe_runs_the_program_with_no_source_or_bundle_alongside() {
-    // `noeta build --exe -o app` staples the compiled program onto a copy of the runtime binary.
-    // The resulting `app` runs the program directly — no `.noe`, no `.noeb`, no `noeta run` — and
-    // its stdout matches a source run byte-for-byte. Running it also proves the startup trailer
-    // detection fires (the toolchain would otherwise demand a subcommand).
+    // `noeta build --exe -o app` staples the compiled program onto a copy of the LEAN `noeta-runner`
+    // (dev-deps D4a — not the toolchain). The resulting `app` runs the program directly — no `.noe`,
+    // no `.noeb`, no `noeta run` — and its stdout matches a source run byte-for-byte. Running it also
+    // proves the startup trailer detection fires (the runner would otherwise print usage).
+    let Some(runner) = lean_runner_path() else {
+        return; // no build toolchain for the lean runner — skip.
+    };
     let file = temp_program(
         "build_exe",
         "fn sq(n: int): int { return n * n }\nmut t = 0\nfor i in 0..5 {\n    t = t + sq(i)\n}\necho t\n",
@@ -2056,6 +2085,7 @@ fn build_exe_runs_the_program_with_no_source_or_bundle_alongside() {
     let _ = std::fs::remove_file(&app);
 
     lang()
+        .env("NOETA_RUNNER", &runner)
         .arg("build")
         .arg(&file)
         .arg("--exe")
@@ -2075,11 +2105,15 @@ fn build_exe_runs_the_program_with_no_source_or_bundle_alongside() {
 fn build_exe_reports_a_runtime_abort_from_the_stapled_program() {
     // A panic in a stapled exe surfaces as the same abort a source/bundle run gives — the embedded
     // program runs on the real host through the identical path, just with no source text to quote.
+    let Some(runner) = lean_runner_path() else {
+        return; // no build toolchain for the lean runner — skip.
+    };
     let file = temp_program("build_exe_panic", "echo \"before\"\npanic(\"boom\")\n");
     let app = file.parent().unwrap().join("app_panic");
     let _ = std::fs::remove_file(&app);
 
     lang()
+        .env("NOETA_RUNNER", &runner)
         .arg("build")
         .arg(&file)
         .arg("--exe")
@@ -4272,7 +4306,11 @@ fn composed_project(name: &str) -> PathBuf {
         format!(
             "[package]\nname = \"imgfx-native\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
              [lib]\npath = \"src/lib.rs\"\n\n\
-             [dependencies]\nnoeta-native = {{ path = \"{}\" }}\n\n[workspace]\n",
+             [dependencies]\nnoeta-native = {{ path = \"{}\" }}\n\n\
+             # dev-deps D5: the mixed package gates its dev formatter behind `fmt` (a real crate would\n\
+             # also put `malva`/etc. behind it as `dep:`). Off by default — a shipped runner never\n\
+             # enables it; the dev toolchain does.\n\
+             [features]\nfmt = []\n\n[workspace]\n",
             workspace.join("crates").join("noeta-native").display()
         ),
     )
@@ -4617,6 +4655,27 @@ impl Extension for ImgfxExtension {
     fn commands(&self) -> &'static [ExtCommand] {
         &[FX_INFO]
     }
+    // dev-deps D5: a DEV-only capability — a tier-body formatter — gated behind the `fmt` feature.
+    // The runtime capabilities above (module/type/command) always compile; this one, and the marker
+    // string it carries, only when `fmt` is enabled. A shipped composed runner is built with default
+    // features (fmt OFF), so the formatter and marker are absent from the artifact; the dev toolchain
+    // would enable `fmt` to reflow this extension's tier bodies under `noeta fmt`.
+    #[cfg(feature = "fmt")]
+    fn body_formatters(&self) -> &'static [noeta_native::registry::BodyFormatter] {
+        &[("imgfx", imgfx_reformat)]
+    }
+}
+
+/// The gated dev formatter (see `body_formatters`). Its distinctive marker proves compilation: it is
+/// in the binary iff the `fmt` feature was on.
+#[cfg(feature = "fmt")]
+fn imgfx_reformat(
+    body: &str,
+    _indent: &str,
+    _sub: &noeta_native::registry::SubFormat,
+) -> Option<String> {
+    const MARKER: &str = "IMGFX_FMT_ONLY_MARKER_7c4e9a";
+    Some(format!("{MARKER}:{}", body.trim()))
 }
 
 /// The composition convention (package-manager Phase 3): the entry crate exports its units as a
@@ -4631,6 +4690,135 @@ fn composed_env(cmd: &mut Command) -> &mut Command {
         "NOETA_COMPOSE_TARGET_DIR",
         PathBuf::from(env!("CARGO_TARGET_TMPDIR")).parent().unwrap(),
     )
+}
+
+#[test]
+fn build_exe_of_a_native_dep_app_strips_the_mixed_crates_formatter() {
+    // dev-deps D5, the capstone: a shipped native-dependency app carries its runtime handler but not
+    // the mixed crate's dev formatter. `build --exe` composes a RUNNER (lean base + imgfx runtime
+    // extension, `fmt` OFF) and staples the bundle. We prove both halves:
+    //   1. the artifact RUNS the native handler (`fx.double(21)` → 42) — the extension is composed in;
+    //   2. the gated formatter is STRIPPED — its distinctive marker is absent from the binary.
+    let entry = composed_project("d5_exe_strip");
+    let app_bin = entry.parent().unwrap().join("app_native_exe");
+    let _ = std::fs::remove_file(&app_bin);
+
+    // The runner composition needs the lean runner binary as its base? No — the *composed* runner IS
+    // the base (built from the shim). `composed_env` reuses the workspace's debug artifacts so this
+    // stays a fast debug composition rather than a cold release build.
+    composed_env(&mut lang())
+        .arg("build")
+        .arg(&entry)
+        .arg("--exe")
+        .arg("-o")
+        .arg(&app_bin)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("self-contained"));
+
+    // 1. Runs the native handler — success alone proves it (an unknown `imgfx` module would abort);
+    //    the first echoed line is `fx.double(21)` = 42.
+    Command::new(&app_bin)
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("42\n"));
+
+    // 2. The dev formatter is absent from the shipped artifact.
+    let bytes = std::fs::read(&app_bin).expect("read the artifact");
+    let marker = b"IMGFX_FMT_ONLY_MARKER_7c4e9a";
+    assert!(
+        !bytes.windows(marker.len()).any(|w| w == marker),
+        "the composed runner leaked the mixed crate's dev formatter into the shipped artifact — \
+         the `fmt` feature was not stripped"
+    );
+    let _ = std::fs::remove_file(&app_bin);
+}
+
+/// Find the composed binary a delegation cached under an (isolated) compose cache dir —
+/// `<cache>/compose/<key>/bin/noeta-composed`. Exactly one exists per distinct composition.
+fn find_composed_binary(cache: &std::path::Path) -> Option<PathBuf> {
+    let compose = cache.join("compose");
+    for key in std::fs::read_dir(&compose).ok()? {
+        let bin = key.ok()?.path().join("bin").join("noeta-composed");
+        if bin.is_file() {
+            return Some(bin);
+        }
+    }
+    None
+}
+
+#[test]
+fn dev_toolchain_composition_includes_a_mixed_crates_formatter() {
+    // dev-deps D5b, the mirror of the capstone: a *dev toolchain* composed for the same native-dep app
+    // turns the mixed crate's `fmt` feature ON, so its tier-body formatter (and its marker) compile IN
+    // — exactly the capability a shipped runner strips. We compose the toolchain via a delegating dev
+    // command (`check`) and confirm the cached composed binary carries the formatter marker.
+    let entry = composed_project("d5b_toolchain_fmt");
+    // Isolate the compose cache so we can locate *this* composition's binary (and not touch the user's).
+    let cache = entry.parent().unwrap().join("cache");
+    let _ = std::fs::remove_dir_all(&cache);
+
+    composed_env(&mut lang())
+        .arg("check")
+        .arg(&entry)
+        .env("NOETA_CACHE_DIR", &cache)
+        .assert()
+        .success();
+
+    let composed = find_composed_binary(&cache).expect("a composed toolchain binary was cached");
+    let bytes = std::fs::read(&composed).expect("read the composed toolchain");
+    let marker = b"IMGFX_FMT_ONLY_MARKER_7c4e9a";
+    assert!(
+        bytes.windows(marker.len()).any(|w| w == marker),
+        "the dev toolchain composition did not enable the mixed crate's `fmt` feature — its \
+         formatter marker is absent from {}",
+        composed.display()
+    );
+}
+
+#[cfg(feature = "jit")] // `--native` exists only in the JIT-enabled build.
+#[test]
+fn build_native_of_a_native_dep_app_runs_the_composed_handler() {
+    // dev-deps `--native` gap, closed: a native-dependency app built with `--native` links a *composed
+    // AOT runtime* (the lean runtime + the imgfx native extension) so the self-contained native binary
+    // resolves the `imgfx` module and runs its handler. Before this, `--native` linked the stock
+    // `libnoeta_aot.a` (no extension seam) and aborted on the unknown native module.
+    if !has_cc() {
+        eprintln!("skipping native-dep AOT test: no `cc` on PATH");
+        return;
+    }
+    let entry = composed_project("native_dep_aot");
+    let app_bin = entry.parent().unwrap().join("app_native_aot");
+    let _ = std::fs::remove_file(&app_bin);
+
+    // The composed toolchain (the delegation target) builds the composed AOT staticlib and `cc`-links
+    // it against the program's AOT object. `composed_env` reuses the workspace debug artifacts so both
+    // compositions stay fast; the env is inherited across the `exec` delegation.
+    composed_env(&mut lang())
+        .arg("build")
+        .arg(&entry)
+        .arg("--native")
+        .arg("-o")
+        .arg(&app_bin)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("native AOT"));
+
+    // The native binary runs on its own and resolves the native handler (`fx.double(21)` → 42).
+    Command::new(&app_bin)
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("42\n"));
+
+    // And it is lean: the composed AOT runtime pulls the mixed crate at default features, so its dev
+    // formatter (and marker) are stripped from the shipped native artifact — same guarantee as `--exe`.
+    let bytes = std::fs::read(&app_bin).expect("read the native artifact");
+    let marker = b"IMGFX_FMT_ONLY_MARKER_7c4e9a";
+    assert!(
+        !bytes.windows(marker.len()).any(|w| w == marker),
+        "the composed AOT runtime leaked the mixed crate's dev formatter into the native artifact"
+    );
+    let _ = std::fs::remove_file(&app_bin);
 }
 
 #[test]

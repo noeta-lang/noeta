@@ -146,8 +146,24 @@ doc = "std"
 - `extends = "<base>"` inherits another target's tiers; the child's own entries override the base's. Cycles are detected and rejected.
 - `--target <NAME>` on `noeta run` activates those tiers (unioned with `--tier`). On `noeta test`/`bench`/`doc`, `--target` acts as a **gate** — the tool no-ops if the target does not make its tier live.
 
+### Target-scoped dependencies
+
+A target can also carry its own dependencies, which **layer on top of** the global `[dependencies]` — the same overlay rule as tiers, so a dev-only tool never rides into a build that didn't ask for it:
+
+```toml
+[dependencies]                          # the default/base — present in every build
+http = { registry = "acme/http" }
+
+[targets.dev.dependencies]              # layered on only when this target is selected
+lint = { registry = "acme/noeta-lint" }
+```
+
+The **global config is the default**: omit `--target` and a command sees `[dependencies]` and no tiers — the minimal, safe baseline. Put your shipping dependencies in the global config and keep dev-only tools/tiers in a `[targets.dev]` overlay you opt into with `--target dev`. There is no separate "dev vs prod" concept baked into the language — *you* decide what each target contains; the default build simply excludes anything you scoped under a target.
+
+This is why a **shipped artifact is safe by default**: `noeta build` with no `--target` produces the global (baseline) build, and (as [The CLI](The-CLI#shipped-artifacts-are-lean-by-construction) covers) that artifact links only runtime code — never the dev toolchain. `--target dev` layers dev tiers/deps back in when you actually want them.
+
 > [!NOTE]
-> The table shape leaves room for a target to carry platform/artifact keys later (the full build recipe).
+> The table shape leaves room for a target to carry more of the build recipe later.
 
 ---
 

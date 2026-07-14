@@ -13,7 +13,12 @@ rust-version.workspace = true
 # (noeta-eval) keep noeta-stdlib default-on, so datetime is present everywhere else.
 noeta-stdlib = { path = "../noeta-stdlib", default-features = false }
 compact_str = { workspace = true }
-tokio = { workspace = true }
+# `sync` (Notify/Mutex in `ws.rs` + the WS descriptors) and `macros` (`tokio::select!`) are used by
+# this crate's *always-compiled* code, so declare them here rather than relying on a ring
+# transitively enabling them. Without this a ring-less `noeta build --native`
+# (`noeta-aot-runtime --no-default-features`, no ring pulling reqwest/p2panda) failed to compile
+# tokio's private `sync` module — a latent gap surfaced by the composed AOT runtime (dev-deps).
+tokio = { workspace = true, features = ["sync", "macros"] }
 # Websocket handshake (server-hmr L0b): Sec-WebSocket-Accept = base64(sha1(key + GUID)).
 sha1 = { workspace = true }
 base64 = { workspace = true }

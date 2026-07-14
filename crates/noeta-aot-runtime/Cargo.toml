@@ -13,7 +13,11 @@ rust-version.workspace = true
 # bundle/host machinery to load and run the embedded program.
 [lib]
 name = "noeta_aot"
-crate-type = ["staticlib"]
+# `staticlib` is what a plain `noeta build --native` links directly (`libnoeta_aot.a`). `rlib` is added
+# so a *composed* AOT runtime (a native-dependency app's `--native` base, dev-deps) can depend on this
+# crate as an ordinary Rust library and call `run_embedded_with_extensions` before bundling everything
+# into its own staticlib — a staticlib-only crate produces no rlib to link against.
+crate-type = ["staticlib", "rlib"]
 # A staticlib exporting a C-ABI `main` cannot host a Rust test harness (two `main` symbols) —
 # `cargo test --workspace` fails to even build it otherwise. Its coverage lives in the
 # `noeta build --native` end-to-end differential, which links and runs the real archive.
@@ -41,10 +45,14 @@ noeta-diagnostics = { workspace = true }
 
 [features]
 # All rings on by default — the plain archive is fully capable. `noeta build --native`'s footprint
-# scan builds this crate with `--no-default-features --features <used rings>` to shed the rest, and
-# the linker then drops each unreferenced ring's native dep tree. The `aot` runtime support (on
+# scan builds this crate with `--no-default-features --features entry,<used rings>` to shed the rest,
+# and the linker then drops each unreferenced ring's native dep tree. The `aot` runtime support (on
 # `noeta-vm`) is a hard dep feature above, so it survives `--no-default-features`.
-default = ["ring-http-client", "ring-p2p", "ring-datetime"]
+default = ["entry", "ring-http-client", "ring-p2p", "ring-datetime"]
+# Export the C-ABI `main` entry (dev-deps). Default-on so a plain `--native` links a working entry;
+# a *composed* AOT runtime for a native-dependency app depends on this crate with this feature OFF and
+# supplies its own `main` (which installs the app's extensions), avoiding a duplicate-`main` link error.
+entry = []
 # The `std.http` outbound-client ring — forwards to reqwest in noeta-runtime.
 ring-http-client = ["noeta-runtime/ring-http-client"]
 # The `std.p2p`/`std.synced` real-transport ring — forwards to the p2panda-net node in

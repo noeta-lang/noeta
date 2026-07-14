@@ -38,6 +38,10 @@ use noeta_vm::{SessionOutput, VmBackend, VmSession};
 // The package manager (package-manager P2) now lives in the `noeta-pm` library so `noeta-lsp` and
 // `noeta-db` resolve dependencies through the same code; the CLI names its modules unqualified.
 use noeta_pm::{graph, lock, manifest, registry};
+// The L2 compile pipeline (source → runnable module) and the execution core live in `noeta-runner`
+// so the CLI and the standalone lean runtime share one implementation (dev-deps D3c). The CLI's
+// `run`/`dump`/`build`/`test` paths call these by the same names they used when defined here.
+use noeta_runner::{compile_real, compile_whole_file, resolve_providers};
 
 mod compose;
 mod docgen;
@@ -1595,16 +1599,6 @@ fn report_fmt_error(name: &str, err: &noeta_fmt::FmtError) {
 /// The active tier → provider map for `--target` (empty with no target — default resolution:
 /// extension declarations first). The tier-execution layer dispatches on this: `"std"` runs the
 /// native built-in runner, a dependency key runs that package's `@tier` runner.
-fn resolve_providers(
-    entry: &std::path::Path,
-    target: &Option<String>,
-) -> Result<std::collections::BTreeMap<String, String>, String> {
-    match target {
-        None => Ok(std::collections::BTreeMap::new()),
-        Some(name) => manifest::resolve_active_tier_providers(entry, name),
-    }
-}
-
 fn tier_active_in_target(
     entry: &std::path::Path,
     target: &Option<String>,
@@ -1648,37 +1642,6 @@ fn run_program(program: &noeta_ast::Program, sources: &SourceMap, args: Vec<Stri
             1
         }
     }
-}
-
-/// Compile an already-typechecked program straight to a bytecode [`Module`] for the real (VM)
-/// execution path (isolates I.4a). This runs the *same* Core-IR lowering + precise-RC drop + reuse
-/// passes the differential and the eval reference use, then continues IR → bytecode (the extra stage
-/// the VM needs); reusing `checked`'s site maps keeps the checker to a single run.
-///
-/// Every program that parses and type-checks compiles to bytecode — the differential holds the VM at
-/// 100% coverage *by construction* (each language feature lands in both backends together). So an
-/// `Err` here does not mean "ordinary unsupported user program"; it means that invariant broke, and
-/// we surface it rather than silently downgrading to a different backend.
-fn compile_real(
-    program: &noeta_ast::Program,
-    checked: &noeta_check::Checked,
-) -> Result<noeta_bytecode::Module, String> {
-    noeta_compiler::compile_with_sites(
-        program,
-        checked.sites.clone(),
-        // Real execution runs isolates on OS threads (I.4b): lower `isolate f(args)` to `SpawnIsolate`.
-        // The differential/salsa paths pass false (byte-identical cooperative sandbox).
-        true,
-        // `noeta run` is a production compile — no debug info (the debugger's `noeta dap` compiles
-        // the same program with debug = true).
-        false,
-    )
-    .map_err(|u| {
-        format!(
-            "internal error: the VM cannot compile this program: {}",
-            u.reason
-        )
-    })
 }
 
 /// Execute an already-checked program against the **real host** (real `env`/`args`, real-disk IO)
@@ -1725,6 +1688,10 @@ fn p2p_app_namespace(args: &[String]) -> Option<String> {
         .map(|s| s.to_string_lossy().into_owned())
 }
 
+/// The p2p application namespace for a source run: the CLI derives it from the nearest `noeta.toml`
+/// (via [`p2p_app_namespace`]) and passes it into the shared execution core (`noeta-runner`), which
+/// is package-manager-free by design. A convenience so the CLI's callers read the same as before the
+/// core was extracted.
 fn run_module_real_host(
     module: std::sync::Arc<noeta_bytecode::Module>,
     args: Vec<String>,
@@ -1734,69 +1701,16 @@ fn run_module_real_host(
     Vec<noeta_vm::TraceFrame>,
     Option<noeta_vm::JitReport>,
 ) {
-    // A factory that mints a fresh real host + wall-clock executor per isolate (isolates I.4b): the
-    // main program gets one, and each real-thread `isolate f(args)` gets its own so a worker's disk /
-    // clock / async state is independent. Injected here (not in `noeta-vm`) so the VM crate needs no
-    // `noeta-runtime`/tokio dependency. A worker that cannot start its runtime panics the worker thread,
-    // which surfaces as an isolate failure at the `.await`. The program argument vector (from
-    // `noeta run … -- <args>`) is cloned into every isolate's host so a worker's `args.all()` agrees
-    // with the main program's.
-    // The p2p application namespace (p2p P3.4): keys each isolate's persistent p2p identity/store
-    // dir on *this* program so two different Noeta apps never collide on one dir. Computed once and
-    // cloned into every isolate's host.
     let app_id = p2p_app_namespace(&args);
-    let factory: noeta_vm::IsolateFactory = std::sync::Arc::new(move || {
-        let host: Box<dyn noeta_stdlib::Host> = Box::new(
-            noeta_runtime::RealHost::new()
-                .expect("cannot start an isolate's runtime")
-                .with_args(args.clone())
-                .with_p2p_app(app_id.clone()),
-        );
-        let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
-            noeta_runtime::RealExecutor::new().expect("cannot start an isolate's async executor"),
-        );
-        (host, executor)
-    });
-    let (host, executor) = factory();
-    // Real isolates run on OS threads (out-of-oracle); channel-shipping isolates fall back to
-    // cooperative tasks (cross-thread channels are I.4c). The differential keeps the sandbox pair.
-    VmBackend::new()
-        .run_module_with_host_and_executor_parallel(module, host, executor, factory, jit_report)
+    noeta_runner::run_module_real_host(module, args, app_id, jit_report)
 }
 
 /// P-AOT L2: detect and run a bundle stapled onto this executable (a `noeta build --exe` artifact),
 /// returning its exit code — or `None` when this is the plain toolchain binary (no trailer), so the
-/// normal CLI runs. Reads only the trailer + embedded blob, seeking rather than slurping the whole
-/// binary, so the toolchain's own startup is not taxed on the common (no-bundle) path. Any IO/format
-/// hiccup is treated as "no bundle" (returns `None`): the toolchain must still start normally.
+/// normal CLI runs. Delegates to the shared runner core, supplying the CLI's `noeta.toml`-aware p2p
+/// namespace resolver (the lean `noeta-runner` binary uses the file-stem default instead).
 fn try_run_stapled() -> Option<ExitCode> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    let exe_path = std::env::current_exe().ok()?;
-    let mut file = std::fs::File::open(&exe_path).ok()?;
-    let size = file.seek(SeekFrom::End(0)).ok()?;
-    let trailer_len = noeta_bundle::TRAILER_LEN as u64;
-    if size < trailer_len {
-        return None;
-    }
-    // Read the fixed trailer at the tail; a missing sentinel means this is the plain binary.
-    file.seek(SeekFrom::End(-(trailer_len as i64))).ok()?;
-    let mut trailer = [0u8; noeta_bundle::TRAILER_LEN];
-    file.read_exact(&mut trailer).ok()?;
-    let blob_len = noeta_bundle::stapled_len(&trailer)?;
-    let blob_start = size.checked_sub(trailer_len + blob_len as u64)?;
-    file.seek(SeekFrom::Start(blob_start)).ok()?;
-    let mut blob = vec![0u8; blob_len];
-    file.read_exact(&mut blob).ok()?;
-    // A shipped `--exe` artifact is invoked directly, so its real process argv (`[<binary>, <args…>]`)
-    // is exactly the program's argument vector — pass it straight through to `args.all()`.
-    // A stapled executable has no CLI of its own (its argv belongs to the program) — no report.
-    Some(cmd_run_bundle(
-        &exe_path,
-        &blob,
-        std::env::args().collect(),
-        false,
-    ))
+    noeta_runner::try_run_stapled(p2p_app_namespace)
 }
 
 fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a Diagnostic>) {
@@ -3001,403 +2915,21 @@ fn cmd_run_bundle(
     args: Vec<String>,
     jit_stats: bool,
 ) -> ExitCode {
-    let module = match noeta_bundle::read(bytes) {
-        Ok(module) => module,
-        Err(err) => {
-            eprintln!("lang: cannot load {}: {err}", file.display());
-            return ExitCode::from(2);
-        }
-    };
-    let sources = SourceMap::new(vec![Source::new(
-        SourceId::FIRST,
-        file.display().to_string(),
-        "",
-    )]);
-    run_compiled_module(std::sync::Arc::new(module), &sources, args, jit_stats)
+    let app_id = p2p_app_namespace(&args);
+    noeta_runner::run_bundle_bytes(file, bytes, args, app_id, jit_stats)
 }
 
-/// A resolved startup-cache slot: an open cache, the content key for this program, and the workspace
-/// `SourceMap` (so a cache hit renders diagnostics against real source without re-parsing). Built by
-/// [`open_startup_cache`], consumed by [`compile_whole_file`].
-struct CacheSlot {
-    cache: noeta_cache::Cache,
-    key: noeta_cache::CacheKey,
-    sources: SourceMap,
-}
-
-/// A compiled whole-file program: the runnable module plus the sources its spans resolve against.
-struct Compiled {
-    module: std::sync::Arc<noeta_bytecode::Module>,
-    sources: SourceMap,
-}
-
-/// A whole-file compile failure, carrying what's needed to render it. [`report`](Self::report)
-/// prints it and yields the process exit code, matching each command's prior behavior.
-enum CompileFailure {
-    /// A message rendered as `lang: {0}` with exit 1 (target resolution / compiler-internal error).
-    Message(String),
-    /// The entry file could not be read (exit 2).
-    Unreadable(String),
-    /// Load-time (lex/parse) diagnostics, each paired with its own source (exit 1).
-    Load(Vec<noeta_loader::LoadDiagnostic>),
-    /// Tier-activation or type-check diagnostics, rendered against `sources` (exit 1).
-    Diagnostics {
-        sources: SourceMap,
-        diagnostics: Vec<Diagnostic>,
-    },
-}
-
-impl CompileFailure {
-    /// Print the failure to stderr and return the process exit code.
-    fn report(&self) -> ExitCode {
-        match self {
-            CompileFailure::Message(msg) => {
-                eprintln!("lang: {msg}");
-                ExitCode::from(1)
-            }
-            CompileFailure::Unreadable(msg) => {
-                eprintln!("lang: {msg}");
-                ExitCode::from(2)
-            }
-            CompileFailure::Load(diagnostics) => {
-                let mut stderr = io::stderr();
-                for ld in diagnostics {
-                    let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
-                }
-                ExitCode::from(1)
-            }
-            CompileFailure::Diagnostics {
-                sources,
-                diagnostics,
-            } => {
-                emit_diagnostics_mapped(sources, diagnostics.iter());
-                ExitCode::from(1)
-            }
-        }
-    }
-}
-
-/// The whole-file compile pipeline, shared by `run`/`dump`/`build` and cache-aware in one place: any
-/// command that wants "a source file → its runnable [`Module`]" goes through here, so the startup
-/// cache is applied exactly once rather than wired per command.
-///
-/// Resolves the active tier set (target ∪ `--tier`), then consults the startup cache: on a **hit**
-/// the decoded module is returned directly (the whole front-end is skipped); on a **miss** it loads →
-/// activates tiers → type-checks → compiles, populates the cache (best-effort), and returns. Because
-/// `run`/`dump`/`build` all compile identically (same [`compile_real`]), they share cache entries —
-/// a `noeta build` warms the exact entry `noeta run` reads, and vice versa.
-///
-/// `serve` does **not** use this (it injects an `http.serve(...)` call, so its module differs for the
-/// same source and must never share the `(source+tiers)` key). `test`/`bench` do **not** either (they
-/// compile a separate module per `@test`/`@bench` case — a different granularity).
-fn compile_whole_file(
-    file: &std::path::Path,
-    tiers: &[String],
-    target: &Option<String>,
-    no_cache: bool,
-) -> Result<Compiled, CompileFailure> {
-    // The active tier set is the union of any `--target`'s live tiers (from `noeta.toml`) and any
-    // explicit `--tier` flags, resolved before loading so a bad target fails fast.
-    let mut active: Vec<String> = match target {
-        Some(name) => {
-            manifest::resolve_active_tiers(file, name).map_err(CompileFailure::Message)?
-        }
-        None => Vec::new(),
-    };
-    for tier in tiers {
-        if !active.contains(tier) {
-            active.push(tier.clone());
-        }
-    }
-
-    // The target's tier → provider map (provider dispatch): decides which declaration's config
-    // attribute activation stamps, so it is part of the compiled program — and of the cache key.
-    let providers = resolve_providers(file, target).map_err(CompileFailure::Message)?;
-
-    // The entry's dependency packages (package-manager P2.1): their sources feed both the cache key
-    // (so a dep change never serves stale bytecode) and the loader (so `use <dep-key>.…` resolves).
-    let deps = manifest::dependency_packages(file).map_err(CompileFailure::Message)?;
-
-    // Startup cache (M3): on a hit, return the cached module — load/check/compile all skipped.
-    let cache = open_startup_cache(file, &active, &providers, &deps, no_cache);
-    if let Some(slot) = &cache
-        && let Some(blob) = slot.cache.load(&slot.key)
-        && let Ok(module) = noeta_bundle::read(&blob)
-    {
-        return Ok(Compiled {
-            module: std::sync::Arc::new(module),
-            sources: slot.sources.clone(),
-        });
-    }
-
-    // Miss: load + link (sibling `.noe` modules the entry `use`s are resolved and merged; a lone file
-    // links to itself; dependency packages re-rooted under their keys), activate any dev-tiers,
-    // type-check, and compile to bytecode.
-    let linked = match noeta_loader::load_with_deps(file, &deps) {
-        Err(err) => {
-            return Err(CompileFailure::Unreadable(format!(
-                "cannot read {}: {err}",
-                file.display()
-            )));
-        }
-        Ok(Err(load_diagnostics)) => return Err(CompileFailure::Load(load_diagnostics)),
-        Ok(Ok(linked)) => linked,
-    };
-    let sources = linked.sources;
-    // Activation inlines each `@<tier> { … }` block; with no active tiers the program runs as-is and
-    // every tier block is stripped at lowering (the default). Activation is only done when needed.
-    let program = if active.is_empty() {
-        linked.program
-    } else {
-        let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
-        let activated = noeta_check::activate_tiers_with(&linked.program, &active_refs, &providers);
-        if !activated.diagnostics.is_empty() {
-            return Err(CompileFailure::Diagnostics {
-                sources,
-                diagnostics: activated.diagnostics,
-            });
-        }
-        activated.program
-    };
-    let checked = noeta_check::check_all(&program);
-    if !checked.diagnostics.is_empty() {
-        return Err(CompileFailure::Diagnostics {
-            sources,
-            diagnostics: checked.diagnostics,
-        });
-    }
-    let module = match compile_real(&program, &checked) {
-        Ok(module) => std::sync::Arc::new(module),
-        Err(err) => return Err(CompileFailure::Message(err)),
-    };
-
-    // Populate the cache, best-effort, then bound its size (oldest-first eviction) so it can't grow
-    // without limit. Both run only on this already-slow miss path. Synchronous — encoding + writing
-    // is trivial next to the compile we just paid — and the whole block is **panic-isolated**:
-    // `store`/`prune` only ever return `Err` (already discarded), but `noeta_bundle::write`'s postcard
-    // encode carries an `.expect` that could (practically never) panic, and a cache write must never
-    // be able to abort an otherwise-successful run. A panic here still prints (surfacing the real bug)
-    // but is caught and swallowed. `AssertUnwindSafe`: on unwind we observe none of the captured state
-    // (`slot`/`module` are only read, and discarded), so there is no broken invariant to leak.
-    if let Some(slot) = &cache {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = slot.cache.store(&slot.key, &noeta_bundle::write(&module));
-            let _ = slot.cache.prune_to(noeta_cache::max_bytes());
-        }));
-    }
-    Ok(Compiled { module, sources })
-}
-
-/// Run an already-compiled [`Module`] on the real host and render its output — the shared tail of the
-/// `.noeb` bundle runner and the startup-cache *hit* path (both have a module with no source to
-/// compile). `args` is the program's argv (see [`program_args`]). Diagnostics/trace render against
-/// `sources` (real workspace sources on a cache hit; a synthetic empty source for a source-free bundle).
+/// Run a compiled module and render its output/diagnostics/trace/JIT-report, returning the exit
+/// code. Delegates to the shared execution core (`noeta-runner`) after deriving the p2p app
+/// namespace from the workspace — the CLI's package-manager-aware wrapper over the lean runner.
 fn run_compiled_module(
     module: std::sync::Arc<noeta_bytecode::Module>,
     sources: &SourceMap,
     args: Vec<String>,
     jit_stats: bool,
 ) -> ExitCode {
-    let (result, trace, report) =
-        run_module_real_host(std::sync::Arc::clone(&module), args, jit_stats);
-    print!("{}", result.stdout);
-    let _ = io::stdout().flush();
-    emit_diagnostics_mapped(sources, result.diagnostics.iter());
-    if trace.len() >= 2 {
-        eprint!("{}", noeta_vm::render_trace(&trace, sources));
-    }
-    // `--jit-stats`: the report renders after the program's own output, to stderr (it is
-    // diagnostics, not program output). A JIT-less binary produces no report — say so rather
-    // than print nothing.
-    match report {
-        Some(report) => eprint!("{}", render_jit_report(&report, &module, sources)),
-        None if jit_stats => {
-            eprintln!("lang: --jit-stats: this binary was built without the JIT (no report)");
-        }
-        None => {}
-    }
-    exit_code(result.exit_code)
-}
-
-/// Render the `--jit-stats` report (`noeta run --jit-stats`, stderr): tier-1 compile coverage, the
-/// bail histogram, and OSR-declined loops — each site resolved to its function, source line, and
-/// disassembled op. The histogram counts **native entries** that fell back (a frame stays tier-0
-/// after a bail until its next entry), so read it as "how often the fallback happened", not a
-/// per-iteration figure; a declined loop never enters native at all, which is why it is its own
-/// section.
-fn render_jit_report(
-    report: &noeta_vm::JitReport,
-    module: &noeta_bytecode::Module,
-    sources: &SourceMap,
-) -> String {
-    use std::fmt::Write as _;
-    // "app.noe:12" for an op site, resolved through the line table (always emitted, even in
-    // production compiles); "?" for a site before the first line entry (a prototype's prologue).
-    let site = |proto: u32, pc: u32| -> String {
-        module.protos[proto as usize]
-            .line_span(pc as usize)
-            .map(|span| {
-                let lc = sources.line_col(span);
-                format!("{}:{}", sources.source(span.source).name(), lc.line)
-            })
-            .unwrap_or_else(|| "?".to_string())
-    };
-    let fn_name = |proto: u32| -> String {
-        module.protos[proto as usize]
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("proto {proto}"))
-    };
-    let op_text = |proto: u32, pc: u32| -> String {
-        module.protos[proto as usize].op_repr_at(pc as usize, &module.names, &module.global_names)
-    };
-
-    let mut out = String::new();
-    let stubs = report.compiled.saturating_sub(report.native);
-    let _ = writeln!(
-        out,
-        "── JIT report ──\ntier 1: {} of {} compiled prototypes native ({} bail stubs), compile time {:.1} ms",
-        report.native,
-        report.compiled,
-        stubs,
-        report.compile_ns_total as f64 / 1e6,
-    );
-
-    if report.bails.is_empty() {
-        let _ = writeln!(
-            out,
-            "\nno bail events — native code never fell back mid-frame"
-        );
-    } else {
-        let _ = writeln!(
-            out,
-            "\nbail sites (native code fell back to the interpreter; counts are native entries, not iterations):"
-        );
-        for b in &report.bails {
-            let _ = writeln!(
-                out,
-                "  {:>8}\u{00d7}  {}  {}  {}",
-                b.count,
-                site(b.proto, b.pc),
-                fn_name(b.proto),
-                op_text(b.proto, b.pc),
-            );
-        }
-        if report.bails.iter().any(|b| b.pc == 0) {
-            let _ = writeln!(
-                out,
-                "  (a pc-0 site can also be the entry parameter guard: a heap argument bails before the first op)"
-            );
-        }
-    }
-
-    if !report.declined.is_empty() {
-        let _ = writeln!(
-            out,
-            "\nloops declined tier 1 (every loop contains a non-native op; the prototype ran interpreted):"
-        );
-        for d in &report.declined {
-            let _ = writeln!(out, "  {} — blocked by:", fn_name(d.proto));
-            for &pc in &d.bail_pcs {
-                let _ = writeln!(out, "    {}  {}", site(d.proto, pc), op_text(d.proto, pc),);
-            }
-        }
-    }
-    out
-}
-
-/// Build the startup-cache slot for a source run: open the cache and compute the content key from
-/// the raw workspace (entry + sibling module sources) + runtime version + binary identity + the
-/// active tier set. Returns `None` — meaning "run uncached" — when caching is disabled
-/// (`--no-cache` or `NOETA_NO_CACHE`), the running binary can't be identified (so freshness can't be
-/// guaranteed), the entry can't be read, or the cache directory can't be opened.
-fn open_startup_cache(
-    file: &std::path::Path,
-    active: &[String],
-    providers: &std::collections::BTreeMap<String, String>,
-    deps: &[noeta_loader::DepPackage],
-    no_cache: bool,
-) -> Option<CacheSlot> {
-    if no_cache || std::env::var_os("NOETA_NO_CACHE").is_some() {
-        return None;
-    }
-    // The binary's build identity is mandatory: without it a same-version local toolchain rebuild
-    // would reuse stale bytecode. If we can't obtain it, we must not cache.
-    let binary = noeta_cache::binary_identity()?;
-    // Read the entry + sibling sources (no lex/parse) — both the key material and, on a hit, the
-    // SourceMap for rendering. SourceIds here match `noeta_loader::load_with_deps`'s assignment
-    // (entry = 0, sorted siblings 1.., then each dependency's modules in order), so a cached module's
-    // spans — including those from merged dependency declarations — resolve against this map.
-    let workspace = noeta_loader::read_workspace(file).ok()?;
-    let mut key = noeta_cache::KeyBuilder::new();
-    // Which file is the *entry* is part of the key, not just the source set: a directory of
-    // dir-flat modules compiles to a different program per entry, so `noeta run a.noe` and
-    // `noeta run b.noe` in one directory must not collide (they would otherwise share the same
-    // sorted source set and the second would run the first's cached bytecode).
-    key.entry(source_key_name(&workspace.entry));
-    key.source(
-        source_key_name(&workspace.entry),
-        workspace.entry.text().as_bytes(),
-    );
-    for module in &workspace.modules {
-        key.source(source_key_name(module), module.text().as_bytes());
-    }
-    // Dependency packages are part of the compiled program: fold each dependency's key→root binding
-    // (re-rooting changes the linked program even when the sources are byte-identical) and every
-    // module's source text into the key, so any dependency change invalidates the cache.
-    for dep in deps {
-        key.source(format!("<dep {}>", dep.key), dep.root.as_bytes());
-        // The transitive key-rewrite map is part of what re-rooting produces: two builds with
-        // byte-identical dep sources but different transitive wiring link to different programs.
-        for (local, global) in &dep.dep_renames {
-            key.source(format!("<rename {} {local}>", dep.key), global.as_bytes());
-        }
-        for module in &dep.modules {
-            key.source(&module.name, module.text.as_bytes());
-        }
-    }
-    key.runtime_version(noeta_bundle::RUNTIME_VERSION)
-        .binary_identity(binary);
-    for tier in active {
-        key.tier(tier);
-    }
-    // The provider selection changes what activation stamps (`bench = "criterion"` stamps
-    // criterion's config attribute), so it is key material — encoded distinctly from bare tier
-    // names; `BTreeMap` iteration keeps it deterministic.
-    for (tier, provider) in providers {
-        key.tier(format!("{tier}={provider}"));
-    }
-    let key = key.finish();
-
-    let cache = noeta_cache::Cache::open()?;
-    // Rebuild the exact Source sequence `link_with_deps` assigns SourceIds to, so a cached module's
-    // spans resolve. `read_workspace` already gave entry (id 0) + siblings; the dependency modules
-    // continue the ids in the same order the loader parses them.
-    let mut sources = Vec::with_capacity(1 + workspace.modules.len());
-    sources.push(workspace.entry);
-    sources.extend(workspace.modules);
-    let mut next_id = sources.len() as u32;
-    for dep in deps {
-        for module in &dep.modules {
-            sources.push(Source::new(SourceId(next_id), &module.name, &module.text));
-            next_id += 1;
-        }
-    }
-    Some(CacheSlot {
-        cache,
-        key,
-        sources: SourceMap::new(sources),
-    })
-}
-
-/// The cache-key name for a source: its file name, so the key is independent of the path the program
-/// was invoked through (`./app.noe` and `app.noe` share an entry). Two distinct programs can only
-/// share a name here if their whole hashed content also matches — in which case they are identical.
-fn source_key_name(source: &Source) -> &str {
-    std::path::Path::new(source.name())
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_else(|| source.name())
+    let app_id = p2p_app_namespace(&args);
+    noeta_runner::run_compiled_module(module, sources, args, app_id, jit_stats)
 }
 
 /// `noeta dump <FILE>` — disassemble the program to its VM bytecode and print it to stdout. Loads,
@@ -3488,21 +3020,36 @@ fn emit_bundle(
     }
 }
 
-/// Emit `module` as a self-contained executable (P-AOT L2.1): staple its bundle onto a copy of this
-/// runtime binary, so the artifact runs the program with no separate `.noeb` or interpreter. Writes
-/// to `out` if given, else the input path with its extension stripped (`app.noe` → `app`, or `.exe`
-/// on Windows). The artifact is marked executable on Unix.
+/// Emit `module` as a self-contained executable (P-AOT L2.1): staple its bundle onto a copy of the
+/// lean `noeta-runner` (dev-deps D4a — *not* the toolchain), so the artifact runs the program with no
+/// separate `.noeb`, no interpreter, and no dev tooling. Writes to `out` if given, else the input
+/// path with its extension stripped (`app.noe` → `app`, or `.exe` on Windows). Marked executable on
+/// Unix.
 fn emit_exe(
     file: &std::path::Path,
     out: Option<&std::path::Path>,
     module: &noeta_bytecode::Module,
 ) -> ExitCode {
-    // The runtime image to embed is *this* binary — the toolchain the user invoked. (A stapled exe
-    // never reaches `build`; it runs its bundle, so `current_exe` here is always the plain toolchain.)
-    let runtime = match std::env::current_exe().and_then(std::fs::read) {
+    // The runtime image to embed is the LEAN `noeta-runner` (dev-deps D4a) — NOT this CLI. A stapled
+    // artifact's argv belongs to the program (it never invokes a CLI verb: `try_run_stapled` fires
+    // before arg-parsing), so the toolchain was always dead weight and attack surface here. For an app
+    // with native runtime dependencies the base is a *composed* runner (the lean runner + those crates'
+    // runtime extensions, dev tooling off — dev-deps D4c); a pure-Noeta app uses the stock runner.
+    // Either way it links only app-execution layers (no fmt/LSP/DAP/formatter parsers).
+    let runner_path = match runner_base(file) {
+        Ok(path) => path,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(2);
+        }
+    };
+    let runtime = match std::fs::read(&runner_path) {
         Ok(bytes) => bytes,
         Err(err) => {
-            eprintln!("lang: cannot read the runtime binary to embed: {err}");
+            eprintln!(
+                "lang: cannot read the lean runtime {}: {err}",
+                runner_path.display()
+            );
             return ExitCode::from(2);
         }
     };
@@ -3705,6 +3252,67 @@ fn resolve_serve_component() -> Result<std::path::PathBuf, String> {
     Ok(artifact)
 }
 
+/// Locate the lean `noeta-runner` native binary to staple a `--exe` bundle onto (dev-deps D4a): the
+/// production runtime that links only app-execution layers — no fmt/LSP/DAP/formatter parsers.
+/// Priority mirrors [`resolve_wasm_runner`]: an explicit `NOETA_RUNNER` (packaged/hermetic path) → a
+/// runner shipped next to this toolchain binary → the workspace build, compiled on demand.
+///
+/// The workspace build uses **`-p noeta-runner`** (not `--workspace`): building the runner as its own
+/// crate graph keeps `noeta-pm` at `[]` features so cargo's feature unification cannot turn
+/// `fmt-config` on and drag `noeta-fmt` into the artifact — the D3c build-isolation invariant.
+/// `--release` because a shipped artifact wants an optimized runtime. Packaging the runner with a
+/// shipped toolchain is the same later distribution decision as the wasm runner's.
+/// The base binary a `--exe` artifact staples onto: a **composed runner** (the lean runner + the
+/// app's native runtime extensions, dev tooling off — dev-deps D4c) when the app's dependency graph
+/// carries native crates, else the **stock** lean `noeta-runner` ([`resolve_native_runner`]). Both
+/// bases are free of dev tooling; the composed one additionally carries the runtime handlers the
+/// shipped program needs (without which the artifact would fail on an unknown native module).
+fn runner_base(file: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    match compose::compose_runner_binary(file)? {
+        Some(composed) => Ok(composed),
+        None => resolve_native_runner(),
+    }
+}
+
+fn resolve_native_runner() -> Result<std::path::PathBuf, String> {
+    let bin_name = if cfg!(windows) {
+        "noeta-runner.exe"
+    } else {
+        "noeta-runner"
+    };
+    if let Ok(path) = std::env::var("NOETA_RUNNER") {
+        return Ok(std::path::PathBuf::from(path));
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join(bin_name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    // Interim workspace build. `--locked` is deliberately absent (dev-tree path); `-p` isolation is
+    // load-bearing (see doc) — never `--workspace`.
+    let output = std::process::Command::new("cargo")
+        .args(["build", "-p", "noeta-runner", "--release"])
+        .output()
+        .map_err(|e| format!("cannot run cargo to build the lean runtime: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "building the lean runtime (`noeta-runner`) failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let artifact = workspace_target_dir()?.join("release").join(bin_name);
+    if !artifact.is_file() {
+        return Err(format!(
+            "the lean runtime was not found at {} after building",
+            artifact.display()
+        ));
+    }
+    Ok(artifact)
+}
+
 /// Locate the `noeta-wasm-runner` wasm32-wasip1 binary to staple into. Priority: an explicit
 /// `NOETA_WASM_RUNNER` (the packaged/hermetic path) → a runner shipped next to this toolchain
 /// binary → the workspace build, compiled on demand with cargo (interim: needs cargo + the
@@ -3813,8 +3421,10 @@ fn emit_native(
 
     // 2. Locate the runtime archive + the system libs it must link with, then `cc`-link. The archive
     // is built with only the stdlib rings this program uses, so unused rings' native deps are dropped.
+    // For a native-dependency app it is a *composed* AOT runtime (the lean runtime + those crates'
+    // runtime extensions, dev tooling off — dev-deps); a pure-Noeta app uses the stock archive.
     let rings = aot_ring_features(module);
-    let (archive, libs) = match resolve_aot_runtime(&rings) {
+    let (archive, libs) = match aot_runtime_base(file, &rings) {
         Ok(pair) => pair,
         Err(err) => {
             eprintln!("lang: {err}");
@@ -3940,6 +3550,23 @@ fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
     rings.into_iter().collect()
 }
 
+/// The AOT runtime base a `--native` artifact links against: a **composed** AOT runtime staticlib (the
+/// lean `noeta-aot-runtime` + the app's native runtime extensions, dev tooling off — dev-deps) when the
+/// app's dependency graph carries native crates, else the **stock** `libnoeta_aot.a`
+/// ([`resolve_aot_runtime`]). Both are free of dev tooling; the composed one additionally installs the
+/// runtime handlers the AOT-compiled program needs (without which it would abort on an unknown native
+/// module) — the `--native` analogue of [`runner_base`], closing the last native-dependency gap.
+#[cfg(feature = "jit")]
+fn aot_runtime_base(
+    file: &std::path::Path,
+    rings: &[String],
+) -> Result<(std::path::PathBuf, Vec<String>), String> {
+    match compose::compose_aot_runtime_archive(file, rings)? {
+        Some(pair) => Ok(pair),
+        None => resolve_aot_runtime(rings),
+    }
+}
+
 /// Locate the AOT runtime staticlib (`libnoeta_aot.a`) and the native system libraries it must be
 /// linked against, built with exactly the stdlib `rings` the program needs (DCE Axis B).
 /// Priority: an explicit `NOETA_AOT_RUNTIME_LIB` (paired with `NOETA_AOT_LINK_LIBS`,
@@ -3959,8 +3586,10 @@ fn resolve_aot_runtime(rings: &[String]) -> Result<(std::path::PathBuf, Vec<Stri
     }
 
     // Interim workspace build: one `cargo rustc` compiles the staticlib and prints its
-    // native-static-libs note. `--no-default-features --features <rings>` links only the rings the
-    // program uses; the `aot` runtime support is a hard dep feature, so it survives regardless.
+    // native-static-libs note. `--no-default-features --features entry,<rings>` links only the rings
+    // the program uses; the `aot` runtime support is a hard dep feature, so it survives regardless.
+    // `entry` is forced on (it is *not* selected by `--no-default-features`) so the stock archive
+    // exports its C `main` — only a composed AOT runtime omits it to supply its own.
     let mut args = vec![
         "rustc",
         "-p",
@@ -3968,11 +3597,12 @@ fn resolve_aot_runtime(rings: &[String]) -> Result<(std::path::PathBuf, Vec<Stri
         "--release",
         "--no-default-features",
     ];
-    let joined = rings.join(",");
-    if !joined.is_empty() {
-        args.push("--features");
-        args.push(&joined);
-    }
+    let joined = std::iter::once("entry".to_string())
+        .chain(rings.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(",");
+    args.push("--features");
+    args.push(&joined);
     args.extend(["--", "--print", "native-static-libs"]);
     let output = std::process::Command::new("cargo")
         .args(&args)
@@ -5803,10 +5433,6 @@ fn emit_trace(trace: &[noeta_vm::TraceFrame], map: &SourceMap) {
     if trace.len() >= 2 {
         eprint!("{}", noeta_vm::render_trace(trace, map));
     }
-}
-
-fn exit_code(code: i32) -> ExitCode {
-    ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
 #[cfg(test)]

@@ -27,6 +27,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+// The `[fmt]` grammar lives in `noeta-fmt` (dev tooling), so reading a manifest's formatter config
+// pulls in the formatter crate — gated behind `fmt-config` (dev-deps D3c) so a lean runtime that only
+// needs tier/dependency resolution never links it.
+#[cfg(feature = "fmt-config")]
 use noeta_fmt::FmtConfig;
 
 /// The manifest file name, discovered at or above the entry file's directory.
@@ -142,10 +146,15 @@ pub enum Dependency {
 
 #[derive(Debug, Clone, PartialEq)]
 struct Target {
-    /// The base target this one inherits tiers from (`extends = "dev"`), if any.
+    /// The base target this one inherits tiers and dependencies from (`extends = "dev"`), if any.
     extends: Option<String>,
     /// This target's own tier → provider entries (overlaid on the base's during resolution).
     tiers: BTreeMap<String, String>,
+    /// This target's own **target-scoped dependencies** — packages present only when building this
+    /// target (dev-deps arc). Overlaid on the base's (via `extends`) and on the global
+    /// `[dependencies]` during resolution. A dev tool a package ships lives here under `dev`, so it
+    /// is simply absent from a `prod` build.
+    dependencies: BTreeMap<String, Dependency>,
 }
 
 /// Discover the nearest `noeta.toml` at or above `start_dir`, walking up to the filesystem root.
@@ -314,11 +323,32 @@ pub fn cargo_package_name(crate_dir: &Path) -> Result<String, String> {
         .ok_or_else(|| format!("`{}` has no `[package] name`", path.display()))
 }
 
+/// The feature names a **cargo** manifest declares under `[features]` (dev-deps D5b). A composed
+/// **dev toolchain** consults this to turn on a mixed crate's conventional dev-capability feature
+/// (e.g. `fmt`, gating a tier's `body_formatters`) — but only if the crate actually declares it, so
+/// enabling an absent feature never makes cargo error. A missing/empty `[features]` table yields the
+/// empty set. (A shipped runner/AOT base never calls this: it pulls each crate at default features,
+/// so the formatter and its parser stay uncompiled — the whole point of the split.)
+pub fn cargo_features(crate_dir: &Path) -> Result<Vec<String>, String> {
+    let path = crate_dir.join("Cargo.toml");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
+    let table: toml::Table = text
+        .parse()
+        .map_err(|err| format!("`{}` is not valid TOML: {err}", path.display()))?;
+    Ok(table
+        .get("features")
+        .and_then(|f| f.as_table())
+        .map(|f| f.keys().cloned().collect())
+        .unwrap_or_default())
+}
+
 /// Resolve the [`FmtConfig`] for a target directory: discover the nearest `noeta.toml`, read its
 /// optional `[fmt]` table, and overlay any values on the defaults. A missing manifest or missing
 /// `[fmt]` table yields [`FmtConfig::default`] (so `noeta fmt` works with zero configuration).
 /// Returns `Err` only when a present `[fmt]` table is malformed (wrong types / unknown arrow style),
 /// so a typo surfaces rather than being silently ignored.
+#[cfg(feature = "fmt-config")]
 pub fn resolve_fmt_config(file: &Path) -> Result<FmtConfig, String> {
     // Precedence: built-in defaults, then `.editorconfig` (walked up from the file), then the
     // manifest's `[fmt]` table — so an explicit `noeta.toml` setting wins over `.editorconfig`, which
@@ -375,6 +405,16 @@ impl Manifest {
                 ),
             };
 
+            // Target-scoped dependencies (dev-deps arc): parsed before tiers so a tier this target
+            // declares may name a target-scoped dep as its provider.
+            let target_deps = match target_table.get("dependencies") {
+                None => BTreeMap::new(),
+                Some(v) => parse_dependency_map(
+                    v.as_table()
+                        .ok_or_else(|| format!("target `{name}`: `dependencies` must be a table"))?,
+                )?,
+            };
+
             let mut tiers = BTreeMap::new();
             if let Some(tiers_value) = target_table.get("tiers") {
                 let tiers_table = tiers_value
@@ -396,18 +436,29 @@ impl Manifest {
                     // dependency** — named by its `[dependencies]` key, the same import root used
                     // elsewhere (package-manager P2.6). An undeclared name is an error pointing the
                     // user to add the dependency.
-                    if provider != BUILTIN_PROVIDER && !dependencies.contains_key(&provider) {
+                    if provider != BUILTIN_PROVIDER
+                        && !dependencies.contains_key(&provider)
+                        && !target_deps.contains_key(&provider)
+                    {
                         return Err(format!(
                             "target `{name}`: tier `{tier}` names provider `{provider}`, which is \
                              neither the built-in `\"{BUILTIN_PROVIDER}\"` nor a declared \
-                             dependency — add `{provider}` to `[dependencies]` to provide this tier"
+                             dependency — add `{provider}` to `[dependencies]` or \
+                             `[targets.{name}.dependencies]` to provide this tier"
                         ));
                     }
                     tiers.insert(tier.clone(), provider);
                 }
             }
 
-            targets.insert(name.clone(), Target { extends, tiers });
+            targets.insert(
+                name.clone(),
+                Target {
+                    extends,
+                    tiers,
+                    dependencies: target_deps,
+                },
+            );
         }
 
         Ok(Manifest {
@@ -453,6 +504,55 @@ impl Manifest {
     /// Resolve a target's effective tier map by walking its `extends` chain base-first, overlaying
     /// each target's own tiers on top. `chain` records the targets visited along the current path
     /// to detect a cycle.
+    /// The active dependency set for `target`: the global `[dependencies]` overlaid with the target's
+    /// own and inherited (`extends`) `[targets.<name>.dependencies]` (dev-deps arc). A target-scoped
+    /// key shadows a global one of the same name. `None` (no `--target`) yields just the globals; an
+    /// **unknown** target is lenient — it contributes no scoped deps — since target-scoped deps are
+    /// optional and a project need not declare a `[targets.*]` block to build a bare `--target` name.
+    pub fn active_dependencies(
+        &self,
+        target: Option<&str>,
+    ) -> Result<BTreeMap<String, Dependency>, String> {
+        let mut merged = self.dependencies.clone();
+        if let Some(name) = target
+            && self.targets.contains_key(name)
+        {
+            let mut chain = Vec::new();
+            for (key, dep) in self.resolve_deps(name, &mut chain)? {
+                merged.insert(key, dep);
+            }
+        }
+        Ok(merged)
+    }
+
+    /// The extends-merged target-scoped dependency map for `name` (base's first, then this target's,
+    /// so a nearer target shadows an inherited one). Mirrors [`Self::resolve`] for tiers, including
+    /// its inheritance-cycle guard.
+    fn resolve_deps(
+        &self,
+        name: &str,
+        chain: &mut Vec<String>,
+    ) -> Result<BTreeMap<String, Dependency>, String> {
+        if chain.iter().any(|p| p == name) {
+            chain.push(name.to_string());
+            return Err(format!("target inheritance cycle: {}", chain.join(" -> ")));
+        }
+        let target = self
+            .targets
+            .get(name)
+            .ok_or_else(|| format!("unknown target `{name}`"))?;
+        chain.push(name.to_string());
+        let mut merged = match &target.extends {
+            Some(base) => self.resolve_deps(base, chain)?,
+            None => BTreeMap::new(),
+        };
+        chain.pop();
+        for (key, dep) in &target.dependencies {
+            merged.insert(key.clone(), dep.clone());
+        }
+        Ok(merged)
+    }
+
     fn resolve(
         &self,
         name: &str,
@@ -558,6 +658,12 @@ fn parse_dependencies(table: &toml::Table) -> Result<BTreeMap<String, Dependency
         return Ok(BTreeMap::new());
     };
     let deps = value.as_table().ok_or("`dependencies` must be a table")?;
+    parse_dependency_map(deps)
+}
+
+/// Parse a `[…dependencies]` sub-table (shared by the global `[dependencies]` and a target's
+/// `[targets.<name>.dependencies]`): each key is an import root, each value a [`Dependency`].
+fn parse_dependency_map(deps: &toml::Table) -> Result<BTreeMap<String, Dependency>, String> {
     let mut out = BTreeMap::new();
     for (key, value) in deps {
         if !is_identifier(key) {
@@ -730,6 +836,32 @@ mod tests {
         assert_eq!(pkg.name.root(), "widgets");
         assert_eq!(pkg.version, semver::Version::parse("1.4.2").unwrap());
         assert_eq!(pkg.edition.as_deref(), Some("2026"));
+    }
+
+    // --- cargo manifest introspection (composition: dev-deps D5b) ------------------------------
+
+    #[test]
+    fn reads_declared_cargo_features() {
+        let dir = std::env::temp_dir().join(format!("noeta-pm-feat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"imgfx-native\"\nversion = \"0.1.0\"\n\n\
+             [features]\nfmt = []\nextra = [\"fmt\"]\n",
+        )
+        .unwrap();
+        let mut feats = cargo_features(&dir).unwrap();
+        feats.sort();
+        assert_eq!(feats, vec!["extra".to_string(), "fmt".to_string()]);
+        // A crate with no `[features]` table yields the empty set (not an error) — a pure-runtime
+        // crate the dev toolchain enables nothing extra on.
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        assert!(cargo_features(&dir).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // --- `package.native` (package-manager Phase 3, N3.1) --------------------------------------
@@ -1047,5 +1179,47 @@ mod tests {
         let m = Manifest::parse("[targets.a]\nextends = \"b\"\n[targets.b]\nextends = \"a\"\n")
             .unwrap();
         assert!(m.active_tiers("a").unwrap_err().contains("cycle"));
+    }
+
+    #[test]
+    fn target_scoped_dependencies_overlay_the_globals() {
+        let m = Manifest::parse(
+            "[dependencies]\nliveview = { path = \"../liveview\" }\n\
+             [targets.dev.dependencies]\nlinter = { git = \"https://x/lint\", tag = \"v1.0.0\" }\n",
+        )
+        .expect("valid");
+        // No target → globals only.
+        let base = m.active_dependencies(None).unwrap();
+        assert!(base.contains_key("liveview") && !base.contains_key("linter"));
+        // `dev` → globals + its scoped deps.
+        let dev = m.active_dependencies(Some("dev")).unwrap();
+        assert!(dev.contains_key("liveview") && dev.contains_key("linter"));
+        // A prod target with no scoped deps (undeclared) is lenient → globals only.
+        let prod = m.active_dependencies(Some("prod")).unwrap();
+        assert!(prod.contains_key("liveview") && !prod.contains_key("linter"));
+    }
+
+    #[test]
+    fn extends_inherits_target_scoped_dependencies() {
+        let m = Manifest::parse(
+            "[targets.dev.dependencies]\nlinter = { path = \"../lint\" }\n\
+             [targets.ci]\nextends = \"dev\"\n[targets.ci.dependencies]\ncov = { path = \"../cov\" }\n",
+        )
+        .expect("valid");
+        let ci = m.active_dependencies(Some("ci")).unwrap();
+        assert!(ci.contains_key("linter"), "ci should inherit dev's linter");
+        assert!(ci.contains_key("cov"), "ci should have its own cov");
+    }
+
+    #[test]
+    fn a_tier_provider_may_be_a_target_scoped_dependency() {
+        // `dev`'s `@lint` tier is provided by a dep declared only under `dev`.
+        let m = Manifest::parse(
+            "[targets.dev.dependencies]\nlinter = { path = \"../lint\" }\n\
+             [targets.dev.tiers]\nlint = \"linter\"\n",
+        );
+        assert!(m.is_ok(), "target-scoped provider should validate: {m:?}");
+        // Still rejected when the provider is declared nowhere.
+        assert!(Manifest::parse("[targets.dev.tiers]\nlint = \"ghost\"\n").is_err());
     }
 }

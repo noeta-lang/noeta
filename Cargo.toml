@@ -55,6 +55,11 @@ noeta-html = { path = "crates/noeta-html" }
 noeta-css = { path = "crates/noeta-css" }
 # M2 runtime (host-coupled IO: real disk async + real env/args)
 noeta-runtime = { path = "crates/noeta-runtime" }
+# Lean production runtime (dev-deps D3): the app-execution core (VM+Host+compile front-end, no dev
+# tooling) shared by `noeta-cli` and the standalone `noeta-runner` binary. `default-features = false`
+# here so a consumer's JIT rides *its own* `jit` feature (the CLI forwards it) — the standalone
+# runner binary still builds its own `default = ["jit"]`.
+noeta-runner = { path = "crates/noeta-runner", default-features = false }
 # WASI host (P-WASM W1): the real-but-synchronous third `Host` for the wasm32-wasip1 runner —
 # preopened-dir fs and WASI env/args/wall-clock/entropy through plain std; no tokio, no threads.
 noeta-wasi-host = { path = "crates/noeta-wasi-host" }
