@@ -3698,6 +3698,13 @@ fn link_native(
 ) -> Result<(), String> {
     let cc = std::env::var("NOETA_CC").unwrap_or_else(|_| "cc".to_string());
     let mut cmd = std::process::Command::new(&cc);
+    // `-s` strips the symbol table + DWARF during the link (~5 MB on a core binary — nearly half).
+    // A shipped `--native` artifact never needs native debug symbols: its panic tracebacks come from
+    // the bundle's own line table (`<aot>` source, production-stack-traces arc), not DWARF — the same
+    // reason `profile.wasm-release` sets `strip = true`. Stripping HERE, at the link, is deliberate:
+    // the caller staples the bundle onto this binary *after* we return, and stripping a stapled
+    // executable would rewrite the ELF and discard the appended bundle ("no stapled bundle found").
+    cmd.arg("-s");
     cmd.arg(object).arg(archive).args(libs).arg("-o").arg(out);
     let output = cmd
         .output()

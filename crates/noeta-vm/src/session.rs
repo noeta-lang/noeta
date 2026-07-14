@@ -396,7 +396,7 @@ impl VmSession {
             plan.fragment
                 .stmts
                 .iter()
-                .flat_map(binding_targets)
+                .flat_map(crate::binding_targets)
                 .filter_map(|name| self.compiler.global_slots().get(name).copied())
                 .collect()
         } else {
@@ -784,13 +784,22 @@ fn rewrite_trailing_expr(program: &Program) -> (Program, bool) {
     }
 }
 
-/// The binding names a top-level statement (re)binds — the globals a re-running swap overwrites.
-/// Shared with the live-VM hot path ([`Vm::apply_pending_hotswap`]).
-pub(crate) fn binding_targets(stmt: &Stmt) -> Vec<&str> {
-    match stmt {
-        Stmt::Binding { name, .. } => vec![name.as_str()],
-        Stmt::Destructure { targets, .. } => targets.iter().map(|(n, _)| n.as_str()).collect(),
-        _ => Vec::new(),
+/// The compiler-free seam the VM core drives fragment installs through (native-size slice 2): the
+/// real incremental compiler, adapted to [`crate::FragmentCompiler`] so `DebugSession`,
+/// `install_fragment`, and the hot-swap apply never name `noeta-compiler`. This impl — the only
+/// implementor — lives in the `compile`-gated module, so a shipped AOT binary links none and sheds
+/// the whole front-end.
+impl crate::FragmentCompiler for SessionCompiler {
+    fn extend(&mut self, fragment: &Program) -> Result<Module, String> {
+        SessionCompiler::extend(self, fragment).map_err(|u| u.reason.clone())
+    }
+
+    fn global_slot(&self, name: &str) -> Option<u32> {
+        self.global_slots().get(name).copied()
+    }
+
+    fn declare_global(&mut self, name: &str, mutable: bool, overwrite: bool) {
+        SessionCompiler::declare_global(self, name, mutable, overwrite);
     }
 }
 

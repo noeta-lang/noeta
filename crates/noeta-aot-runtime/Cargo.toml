@@ -27,7 +27,13 @@ doctest = false
 [dependencies]
 # `aot` turns on the JIT and exports the `noeta_jit_*` runtime helpers under their canonical C names,
 # so the linked-in native bodies resolve their helper calls against this archive.
-noeta-vm = { workspace = true, features = ["aot"] }
+# Direct path (not workspace inheritance) so we can set `default-features = false` — an inherited
+# workspace dep may not override the root's default-features. Dropping noeta-vm's default `compile`
+# feature (native-size slice 2) is the point: this runtime runs a *pre-compiled* stapled bundle and
+# never compiles source, so the whole compiler front end (noeta-compiler → noeta-check → noeta-ir) is
+# shed from a shipped `--native` binary — ~1 MB, and no type-checker/compiler as reachable surface in
+# a run-only artifact.
+noeta-vm = { path = "../noeta-vm", default-features = false, features = ["aot"] }
 noeta-bundle = { workspace = true }
 noeta-bytecode = { workspace = true }
 # Direct path (not workspace inheritance) so we can set `default-features = false` — a workspace

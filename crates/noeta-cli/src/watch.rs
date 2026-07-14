@@ -439,8 +439,16 @@ fn hot_watcher(
         ) {
             noeta_compiler::hotswap::SwapDiff::Unchanged => {}
             noeta_compiler::hotswap::SwapDiff::Swap(plan) => {
+                // Convert the compiler's `SwapPlan` into the VM's compiler-free `HotFragment` at the
+                // boundary (native-size slice 2): the watcher owns the compiler, the VM must not.
+                let fragment = noeta_vm::HotFragment {
+                    fragment: plan.fragment,
+                    rerun_top_level: plan.rerun_top_level,
+                    added: plan.added,
+                    changed: plan.changed,
+                };
                 match mailbox.plans.lock() {
-                    Ok(mut plans) => plans.push(plan),
+                    Ok(mut plans) => plans.push(fragment),
                     Err(_) => return,
                 }
                 applied_src = new_src;
