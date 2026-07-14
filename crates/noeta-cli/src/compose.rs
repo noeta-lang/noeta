@@ -25,6 +25,35 @@ use sha2::{Digest, Sha256};
 /// contains this same code) never re-composes, even though its graph still lists native crates.
 const COMPOSED_GUARD: &str = "NOETA_COMPOSED";
 
+/// What a composed shim is built as. The **toolchain** (dev) embeds `noeta-cli` and serves every
+/// command for a native-dependency app. The **runner** (dev-deps D4c) embeds only the lean
+/// `noeta-runner` + the app's native runtime extensions — no dev tooling — and is the base a
+/// `build --exe`/`--native` artifact staples onto, so a shipped native-dependency app carries its
+/// runtime handlers but none of the toolchain.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShimKind {
+    Toolchain,
+    Runner,
+}
+
+impl ShimKind {
+    /// The toolchain crate the shim's base depends on.
+    fn base_crate(self) -> &'static str {
+        match self {
+            ShimKind::Toolchain => "noeta-cli",
+            ShimKind::Runner => "noeta-runner",
+        }
+    }
+    /// The compose-key discriminator, so toolchain and runner compositions of the same dep set cache
+    /// under distinct addresses.
+    fn tag(self) -> &'static [u8] {
+        match self {
+            ShimKind::Toolchain => b"kind:toolchain",
+            ShimKind::Runner => b"kind:runner",
+        }
+    }
+}
+
 /// Delegate to the app's composed toolchain if its dependency graph carries native crates.
 ///
 /// Returns `None` when the stock binary should just proceed (no manifest, no native deps, we ARE
@@ -76,19 +105,48 @@ pub fn maybe_delegate_cwd() -> Option<ExitCode> {
 enum Never {}
 
 fn delegate(crates: &[NativeCrate], trusted_command_roots: &[String]) -> Result<Never, String> {
+    let binary = compose_binary(crates, trusted_command_roots, ShimKind::Toolchain)?;
+    exec(&binary)
+}
+
+/// Build (or reuse the cached) **composed runner** for an app whose dependency graph carries native
+/// runtime crates, and return its path — the lean base a `build --exe`/`--native` artifact staples
+/// onto (dev-deps D4c). Unlike [`delegate`], this never execs: `emit_exe`/`emit_native` read the
+/// returned binary and staple the program's bundle onto it. Returns `Ok(None)` when the app has **no**
+/// native crates (the stock lean `noeta-runner` is the base instead).
+pub fn compose_runner_binary(entry: &Path) -> Result<Option<PathBuf>, String> {
+    let resolved = graph::resolve_graph(entry)
+        .map_err(|err| format!("resolving the app's native dependencies: {err}"))?;
+    if resolved.native_crates.is_empty() {
+        return Ok(None);
+    }
+    let binary = compose_binary(
+        &resolved.native_crates,
+        &resolved.trusted_command_roots,
+        ShimKind::Runner,
+    )?;
+    Ok(Some(binary))
+}
+
+/// Resolve the composed shim of `kind` for `crates` to a built binary (cached, content-addressed),
+/// building it on a miss. Shared by the toolchain delegation and the runner-artifact base.
+fn compose_binary(
+    crates: &[NativeCrate],
+    trusted_command_roots: &[String],
+    kind: ShimKind,
+) -> Result<PathBuf, String> {
     let entries = resolve_entries(crates)?;
     let toolchain = toolchain_source()?;
-    let key = compose_key(&entries, &toolchain, trusted_command_roots);
+    let key = compose_key(&entries, &toolchain, trusted_command_roots, kind);
     let dir = compose_dir(&key)?;
-    // Content-addressed: the key covers the entry crates' package trees, the toolchain source
-    // form, and the running binary's build identity — a hit means this exact composition already
-    // built (the binary was copied into the compose dir as its own artifact), and the whole
-    // delegation is one exec.
+    // Content-addressed: the key covers the entry crates' package trees, the toolchain source form,
+    // the running binary's build identity, and the shim kind — a hit means this exact composition
+    // already built (the binary was copied into the compose dir as its own artifact).
     let binary = dir.join("bin").join(BIN_NAME);
     if !binary.is_file() {
-        build(&dir, &entries, &toolchain, trusted_command_roots, &binary)?;
+        build(&dir, &entries, &toolchain, trusted_command_roots, &binary, kind)?;
     }
-    exec(&binary)
+    Ok(binary)
 }
 
 /// The shim's `[[bin]]` name (also the cached binary's file name).
@@ -184,9 +242,11 @@ fn compose_key(
     entries: &[Entry],
     toolchain: &ToolchainSource,
     trusted_command_roots: &[String],
+    kind: ShimKind,
 ) -> String {
     let mut h = Sha256::new();
     h.update(b"noeta-compose-v1");
+    h.update(kind.tag());
     h.update(noeta_cache::binary_identity().unwrap_or_default());
     // Which packages' commands are trusted changes the shim (and the CLI surface), so a change in
     // `[trust].commands` must recompose (Phase 4).
@@ -241,12 +301,16 @@ fn build(
     toolchain: &ToolchainSource,
     trusted_command_roots: &[String],
     cached: &Path,
+    kind: ShimKind,
 ) -> Result<(), String> {
-    std::fs::write(dir.join("Cargo.toml"), shim_cargo_toml(entries, toolchain))
-        .map_err(|err| format!("writing shim Cargo.toml: {err}"))?;
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        shim_cargo_toml(entries, toolchain, kind),
+    )
+    .map_err(|err| format!("writing shim Cargo.toml: {err}"))?;
     std::fs::write(
         dir.join("src").join("main.rs"),
-        shim_main_rs(entries, trusted_command_roots),
+        shim_main_rs(entries, trusted_command_roots, kind),
     )
     .map_err(|err| format!("writing shim main.rs: {err}"))?;
     let names: Vec<&str> = entries.iter().map(|e| e.identity.as_str()).collect();
@@ -299,10 +363,10 @@ fn build(
 /// The generated shim manifest. `[workspace]` is deliberately empty so the shim never gets
 /// adopted by an enclosing cargo workspace; the release profile mirrors the toolchain's own
 /// (codegen-units=1 + thin LTO — the composed binary should perform like the stock one).
-fn shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource) -> String {
+fn shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, kind: ShimKind) -> String {
     let mut out = String::new();
     out.push_str(
-        "# Generated by noeta (package-manager Phase 3) — the composed toolchain shim.\n\
+        "# Generated by noeta (package-manager Phase 3 / dev-deps D4c) — a composed shim.\n\
          # Derived state: regenerated on dependency-set changes. Do not edit.\n\n\
          [package]\nname = \"noeta-composed\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
          [[bin]]\nname = \"noeta-composed\"\npath = \"src/main.rs\"\n\n[dependencies]\n",
@@ -318,7 +382,11 @@ fn shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource) -> String {
             toml_quote(tag)
         ),
     };
-    out.push_str(&toolchain_dep("noeta-cli"));
+    // The base: the full toolchain (`noeta-cli`) for a dev composition, or the lean `noeta-runner`
+    // for a shipped artifact's base (dev-deps D4c — no fmt/LSP/DAP). `noeta-native` supplies the
+    // extension ABI for both. Each `extN` (a native runtime crate) is pulled with **default features**
+    // so a mixed crate's formatter (gated behind its `fmt` feature) is *not* compiled into a runner.
+    out.push_str(&toolchain_dep(kind.base_crate()));
     out.push_str(&toolchain_dep("noeta-native"));
     for (n, e) in entries.iter().enumerate() {
         out.push_str(&format!(
@@ -336,10 +404,10 @@ fn shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource) -> String {
 /// roots** (Phase 4) so `run_cli` registers a dependency's `noeta <cmd>` only for a package the root
 /// app authorized in `[trust].commands`. `Box::leak` is fine — the units live for the process,
 /// exactly like the stock binary's statics.
-fn shim_main_rs(entries: &[Entry], trusted_command_roots: &[String]) -> String {
+fn shim_main_rs(entries: &[Entry], trusted_command_roots: &[String], kind: ShimKind) -> String {
     let mut out = String::new();
     out.push_str(
-        "//! Generated by noeta (package-manager Phase 3) — the composed toolchain. Do not edit.\n\n\
+        "//! Generated by noeta (package-manager Phase 3 / dev-deps D4c) — a composed shim. Do not edit.\n\n\
          fn main() -> std::process::ExitCode {\n\
          \x20   let mut units: Vec<&'static (dyn noeta_native::Extension + Sync)> = Vec::new();\n",
     );
@@ -349,15 +417,27 @@ fn shim_main_rs(entries: &[Entry], trusted_command_roots: &[String]) -> String {
             e.identity, e.ident
         ));
     }
-    let roots = trusted_command_roots
-        .iter()
-        .map(|r| rust_str(r))
-        .collect::<Vec<_>>()
-        .join(", ");
-    out.push_str(&format!(
-        "    let trusted_command_roots: &[&str] = &[{roots}];\n\
-         \x20   noeta_cli::run_cli(Box::leak(units.into_boxed_slice()), trusted_command_roots)\n}}\n"
-    ));
+    match kind {
+        // The dev toolchain: hand the whole extension set to `run_cli`, gated by command-trust.
+        ShimKind::Toolchain => {
+            let roots = trusted_command_roots
+                .iter()
+                .map(|r| rust_str(r))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!(
+                "    let trusted_command_roots: &[&str] = &[{roots}];\n\
+                 \x20   noeta_cli::run_cli(Box::leak(units.into_boxed_slice()), trusted_command_roots)\n}}\n"
+            ));
+        }
+        // The shipped-artifact base: install the native runtime capabilities, then run the stapled
+        // program. No CLI, no command-trust (a stapled artifact exposes no commands), no dev tooling.
+        ShimKind::Runner => {
+            out.push_str(
+                "    noeta_runner::run_stapled_with_extensions(Box::leak(units.into_boxed_slice()))\n}\n",
+            );
+        }
+    }
     out
 }
 
@@ -414,6 +494,7 @@ mod tests {
         let toml = shim_cargo_toml(
             &entries(),
             &ToolchainSource::Workspace(PathBuf::from("/src/noeta")),
+            ShimKind::Toolchain,
         );
         assert!(toml.contains("noeta-cli = { path = \"/src/noeta/crates/noeta-cli\" }"));
         assert!(toml.contains(
@@ -434,6 +515,7 @@ mod tests {
                 repo: "https://github.com/nsrosenqvist/noeta".to_string(),
                 tag: "v0.1.0".to_string(),
             },
+            ShimKind::Toolchain,
         );
         assert!(
             toml.contains(
@@ -444,8 +526,28 @@ mod tests {
     }
 
     #[test]
+    fn runner_shim_manifest_bases_on_noeta_runner_not_the_cli() {
+        // dev-deps D4c: a shipped artifact's base is the LEAN runner — no `noeta-cli` (no dev tooling).
+        let toml = shim_cargo_toml(
+            &entries(),
+            &ToolchainSource::Workspace(PathBuf::from("/src/noeta")),
+            ShimKind::Runner,
+        );
+        assert!(
+            toml.contains("noeta-runner = { path = \"/src/noeta/crates/noeta-runner\" }"),
+            "{toml}"
+        );
+        assert!(
+            !toml.contains("noeta-cli ="),
+            "a composed runner must not link the full CLI:\n{toml}"
+        );
+        // The native runtime crate is still linked (for its tier handler / modules).
+        assert!(toml.contains("ext0 = { package = \"imgfx-native\","));
+    }
+
+    #[test]
     fn shim_main_aggregates_unit_slices() {
-        let main = shim_main_rs(&entries(), &["imgfx".to_string()]);
+        let main = shim_main_rs(&entries(), &["imgfx".to_string()], ShimKind::Toolchain);
         assert!(main.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS);"));
         assert!(main.contains("noeta_cli::run_cli(Box::leak("));
         // The command-trusted roots are baked in and passed to run_cli (Phase 4).
@@ -455,7 +557,18 @@ mod tests {
 
     #[test]
     fn shim_main_with_no_trusted_commands_passes_an_empty_slice() {
-        let main = shim_main_rs(&entries(), &[]);
+        let main = shim_main_rs(&entries(), &[], ShimKind::Toolchain);
         assert!(main.contains("let trusted_command_roots: &[&str] = &[];"));
+    }
+
+    #[test]
+    fn runner_shim_main_installs_units_and_runs_stapled() {
+        // dev-deps D4c: the runner shim installs the native runtime units then runs the stapled
+        // program — no `run_cli`, no command-trust (a stapled artifact exposes no CLI).
+        let main = shim_main_rs(&entries(), &["imgfx".to_string()], ShimKind::Runner);
+        assert!(main.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS);"));
+        assert!(main.contains("noeta_runner::run_stapled_with_extensions(Box::leak("));
+        assert!(!main.contains("run_cli"), "the runner base must not call run_cli");
+        assert!(!main.contains("trusted_command_roots"));
     }
 }

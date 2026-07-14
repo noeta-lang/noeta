@@ -3032,10 +3032,11 @@ fn emit_exe(
 ) -> ExitCode {
     // The runtime image to embed is the LEAN `noeta-runner` (dev-deps D4a) — NOT this CLI. A stapled
     // artifact's argv belongs to the program (it never invokes a CLI verb: `try_run_stapled` fires
-    // before arg-parsing), so the toolchain was always dead weight and attack surface here. The lean
-    // runner links only app-execution layers (no fmt/LSP/DAP/formatter parsers), so the artifact
-    // carries no dev tooling.
-    let runner_path = match resolve_native_runner() {
+    // before arg-parsing), so the toolchain was always dead weight and attack surface here. For an app
+    // with native runtime dependencies the base is a *composed* runner (the lean runner + those crates'
+    // runtime extensions, dev tooling off — dev-deps D4c); a pure-Noeta app uses the stock runner.
+    // Either way it links only app-execution layers (no fmt/LSP/DAP/formatter parsers).
+    let runner_path = match runner_base(file) {
         Ok(path) => path,
         Err(err) => {
             eprintln!("lang: {err}");
@@ -3261,6 +3262,18 @@ fn resolve_serve_component() -> Result<std::path::PathBuf, String> {
 /// `fmt-config` on and drag `noeta-fmt` into the artifact — the D3c build-isolation invariant.
 /// `--release` because a shipped artifact wants an optimized runtime. Packaging the runner with a
 /// shipped toolchain is the same later distribution decision as the wasm runner's.
+/// The base binary a `--exe` artifact staples onto: a **composed runner** (the lean runner + the
+/// app's native runtime extensions, dev tooling off — dev-deps D4c) when the app's dependency graph
+/// carries native crates, else the **stock** lean `noeta-runner` ([`resolve_native_runner`]). Both
+/// bases are free of dev tooling; the composed one additionally carries the runtime handlers the
+/// shipped program needs (without which the artifact would fail on an unknown native module).
+fn runner_base(file: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    match compose::compose_runner_binary(file)? {
+        Some(composed) => Ok(composed),
+        None => resolve_native_runner(),
+    }
+}
+
 fn resolve_native_runner() -> Result<std::path::PathBuf, String> {
     let bin_name = if cfg!(windows) {
         "noeta-runner.exe"

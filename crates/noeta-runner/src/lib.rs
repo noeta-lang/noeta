@@ -124,6 +124,26 @@ pub fn run_bundle_bytes(
     run_compiled_module(Arc::new(module), &sources, args, app_id, jit_stats)
 }
 
+/// Run a stapled bundle after installing extra native **runtime** extensions — the entry point of a
+/// *composed runner* (dev-deps D4c). When a shipped app depends on packages with native tier handlers
+/// or modules, `build --exe` composes a runner shim that aggregates those crates' `NOETA_EXTENSIONS`
+/// and calls this: install the units into the registry (so the VM resolves the native modules/types/
+/// tiers the compiled bundle references), then run the stapled program. The units are *runtime*
+/// capabilities only — a composed runner links no dev tooling (each mixed crate is built with its
+/// formatter feature off), so this carries no more L3 than the stock runner.
+///
+/// A composed runner only ever exists as a stapled artifact, so a missing trailer is an error (unlike
+/// the two-file `noeta-runner <bundle>` path).
+pub fn run_stapled_with_extensions(
+    units: &'static [&'static (dyn noeta_stdlib::Extension + Sync)],
+) -> ExitCode {
+    noeta_stdlib::registry::install_with_extras(units);
+    try_run_stapled(|_| None).unwrap_or_else(|| {
+        eprintln!("noeta-runner: this composed runtime carries no stapled program");
+        ExitCode::from(2)
+    })
+}
+
 /// Compile a `.noe` **source** file (the PHP-style deploy) and run it — the same L2 pipeline the CLI
 /// uses (`compile_whole_file`), then the shared L1 execution tail. `tiers`/`target`/`no_cache` steer
 /// tier activation and the startup cache; `args`/`app_id` reach the program as in [`run_bundle_bytes`].
