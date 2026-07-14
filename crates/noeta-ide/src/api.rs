@@ -41,8 +41,21 @@ pub struct ApiType {
 /// `std.math`, …), each with its functions (plain + higher-order) sorted by name. Reads the
 /// process-global registry via the stdlib facade, which lazily seeds the built-in `std` units.
 pub fn modules() -> Vec<ApiModule> {
+    modules_impl(None)
+}
+
+/// The modules of just the extension whose [`root`](noeta_stdlib::Extension::root) is `root` (a
+/// package's own namespace segment) — for scoping a package's API docs to itself, excluding std.
+pub fn modules_of(root: &str) -> Vec<ApiModule> {
+    modules_impl(Some(root))
+}
+
+fn modules_impl(root: Option<&str>) -> Vec<ApiModule> {
     let mut out: Vec<ApiModule> = Vec::new();
     for ext in registry::extensions() {
+        if root.is_some_and(|r| ext.root() != r) {
+            continue;
+        }
         for m in ext.modules() {
             let qualified = format!("{}.{}", ext.root(), m.name);
             let mut functions: Vec<ApiFn> = m
@@ -82,8 +95,21 @@ pub fn function(qualified: &str, name: &str) -> Option<ApiFn> {
 /// Every extern type the registry knows, qualified and sorted (`std.crypto.Hasher`, `std.id.Uuid`,
 /// …), each with its methods (plain + higher-order) sorted by name.
 pub fn types() -> Vec<ApiType> {
+    types_impl(None)
+}
+
+/// The extern types of just the extension whose `root` is `root` — the type analogue of
+/// [`modules_of`].
+pub fn types_of(root: &str) -> Vec<ApiType> {
+    types_impl(Some(root))
+}
+
+fn types_impl(root: Option<&str>) -> Vec<ApiType> {
     let mut out: Vec<ApiType> = Vec::new();
     for ext in registry::extensions() {
+        if root.is_some_and(|r| ext.root() != r) {
+            continue;
+        }
         for t in ext.types() {
             let mut methods: Vec<ApiFn> = t
                 .methods

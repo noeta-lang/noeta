@@ -107,8 +107,13 @@ pub fn package_docs_json(dir: &Path) -> Result<(String, Generated), String> {
 /// registry module (`std.math`, `std.http.client`, …), each function an `fn` item carrying its
 /// rendered signature and any registered doc prose. Same schema-1 shape as [`generate`], so it
 /// rides to the registry and renders on the hosted docs page identically. `package` names the
-/// artifact (e.g. the toolchain's `std`), or `None` for a generic title.
-pub fn registry_docs_json(package: Option<(String, String)>) -> (String, Generated) {
+/// artifact (e.g. the toolchain's `std`), or `None` for a generic title. `root` scopes the surface
+/// to a single extension's namespace (a package documenting *itself*, excluding std); `None`
+/// documents the whole registry.
+pub fn registry_docs_json(
+    package: Option<(String, String)>,
+    root: Option<&str>,
+) -> (String, Generated) {
     let fn_item = |f: noeta_ide::api::ApiFn| {
         Item::Decl(DeclDocs {
             kind: "fn",
@@ -118,9 +123,13 @@ pub fn registry_docs_json(package: Option<(String, String)>) -> (String, Generat
             public: true,
         })
     };
+    let (api_modules, api_types) = match root {
+        Some(r) => (noeta_ide::api::modules_of(r), noeta_ide::api::types_of(r)),
+        None => (noeta_ide::api::modules(), noeta_ide::api::types()),
+    };
     // One `docs.json` module per registry module and per extern type — both are qualified surfaces
     // of functions/methods, so they render uniformly by-module on the hosted page.
-    let mut modules: Vec<ModuleDocs> = noeta_ide::api::modules()
+    let mut modules: Vec<ModuleDocs> = api_modules
         .into_iter()
         .map(|m| ModuleDocs {
             file: String::new(), // native: no source file
@@ -130,7 +139,7 @@ pub fn registry_docs_json(package: Option<(String, String)>) -> (String, Generat
             items: m.functions.into_iter().map(fn_item).collect(),
         })
         .collect();
-    modules.extend(noeta_ide::api::types().into_iter().map(|t| ModuleDocs {
+    modules.extend(api_types.into_iter().map(|t| ModuleDocs {
         file: String::new(),
         slug: t.qualified.replace('.', "-"),
         namespace: Some(t.qualified),
@@ -552,7 +561,7 @@ mod tests {
 
     #[test]
     fn registry_docs_json_is_schema1_by_module_with_prose() {
-        let (text, done) = registry_docs_json(None);
+        let (text, done) = registry_docs_json(None, None);
         assert!(done.modules > 3 && done.decls > 0);
         let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(doc["schema"].as_u64(), Some(SCHEMA as u64));
@@ -582,5 +591,23 @@ mod tests {
         render_json_to(&out, &text).expect("renders from schema alone");
         assert!(out.join("std-math.md").exists());
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn registry_docs_json_scopes_to_a_root() {
+        // Scoping to `std` keeps the std surface; an unknown root yields nothing (a native package
+        // documenting itself excludes std this way).
+        let (std_text, std_done) = registry_docs_json(None, Some("std"));
+        assert!(std_done.modules > 3);
+        let doc: serde_json::Value = serde_json::from_str(&std_text).unwrap();
+        assert!(
+            doc["modules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m["namespace"].as_str().unwrap().starts_with("std"))
+        );
+        let (_empty_text, empty_done) = registry_docs_json(None, Some("nosuchpkg"));
+        assert_eq!(empty_done.modules, 0);
     }
 }

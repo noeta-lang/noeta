@@ -188,6 +188,11 @@ enum Command {
         /// writes the artifact + Markdown tree with `--out`.
         #[arg(long, conflicts_with_all = ["file", "package"])]
         api: bool,
+        /// With `--api`, document only the extension whose namespace root is this (a package's own
+        /// name segment) — its own modules/types, excluding `std`. Omit to document the whole
+        /// registry.
+        #[arg(long, requires = "api", value_name = "NAMESPACE")]
+        root: Option<String>,
     },
     /// Compile a program to a self-contained `.noeb` bundle (P-AOT L1): the versioned bytecode a
     /// `noeta run app.noeb` executes directly, so a program ships **without its `.noe` source**.
@@ -588,7 +593,8 @@ pub fn run_cli(
             out,
             target,
             api,
-        } => cmd_doc(&file, &package, &out, &target, api),
+            root,
+        } => cmd_doc(&file, &package, &out, &target, api, root.as_deref()),
         Command::Build {
             file,
             out,
@@ -4858,9 +4864,10 @@ fn web_docs_url(base: &str, name: &str, version: &str) -> String {
 
 /// `noeta doc --api`: generate the API reference from the intrinsic registry (stdlib + any composed
 /// native modules). Prints the schema-1 `docs.json` to stdout, or — with `--out` — writes the
-/// artifact and renders its Markdown tree (the same schema the hosted registry renders).
-fn cmd_doc_api(out: &Option<PathBuf>) -> ExitCode {
-    let (json, done) = docgen::registry_docs_json(None);
+/// artifact and renders its Markdown tree (the same schema the hosted registry renders). `root`
+/// scopes to one extension's namespace (a package documenting itself).
+fn cmd_doc_api(out: &Option<PathBuf>, root: Option<&str>) -> ExitCode {
+    let (json, done) = docgen::registry_docs_json(None, root);
     match out {
         Some(out_dir) => match docgen::render_json_to(out_dir, &json) {
             Ok(_) => {
@@ -4892,11 +4899,12 @@ fn cmd_doc(
     out: &Option<PathBuf>,
     target: &Option<String>,
     api: bool,
+    root: Option<&str>,
 ) -> ExitCode {
     // `--api`: the registry-backed path — the intrinsic surface (stdlib + composed native modules)
     // as a schema-1 `docs.json`, organized by module. No local source involved.
     if api {
-        return cmd_doc_api(out);
+        return cmd_doc_api(out, root);
     }
     // `--package`: the registry-fetch path — a published release's stored artifact, no local
     // source involved.
