@@ -8,6 +8,7 @@
 //! sandbox broker.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 /// The deterministic in-process message broker both hosts use as their p2p "network" (p2p P1/P2).
 /// A topic is an **append-only log**; readers hold independent cursors, so it is genuine broadcast
@@ -68,6 +69,69 @@ impl P2pBroker {
             self.subs.get_mut(&sub).expect("sub exists").1 = cursor + 1;
         }
         message
+    }
+}
+
+/// The loopback broker **is** a self-contained [`crate::host::P2p`] provider — every required method
+/// maps to a broker operation, and the trait's defaults (durable → ephemeral, encrypted-group →
+/// plaintext pass-through, no identity, always-`Synced`) are exactly the loopback semantics. This is
+/// what lets the p2p capability be **owned by an extension** rather than baked into every host
+/// (para-namespace follow-on F2): the `para.p2p` extension parks one of these behind a [`SharedBroker`]
+/// and serves both the synchronous ops and the async `receive` from it, so a host that speaks no peer
+/// networking implements no `P2p` at all.
+impl crate::host::P2p for P2pBroker {
+    fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), crate::StdError> {
+        self.publish(topic, message);
+        Ok(())
+    }
+
+    fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, crate::StdError> {
+        Ok(self.poll_default(topic))
+    }
+
+    fn p2p_subscribe(&mut self, topic: &str) -> Result<u64, crate::StdError> {
+        Ok(self.subscribe(topic))
+    }
+
+    fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, crate::StdError> {
+        Ok(self.poll_sub(sub))
+    }
+}
+
+/// A **shareable, `Send`** handle to a loopback [`P2pBroker`] — the ABI that carries the p2p
+/// capability across the async boundary when an *extension* owns it (para-namespace follow-on F2).
+///
+/// The async `p2p.receive` leaf ([`BrokerReceiveIo`]) is an [`crate::ExternIo`], which is `Send`; the
+/// extension's per-run state ([`crate::NativeCtx::state`]) is `Rc`-based and **not** `Send`, so a
+/// receive descriptor cannot capture the extension state directly. The broker lives behind this
+/// `Arc<Mutex<…>>` instead: the extension stores the `Arc` in its (main-thread) `Rc` state slot and
+/// clones it — the `Arc` *is* `Send` — into each receive descriptor, so the same broker is reached
+/// from both the synchronous dispatch and the async leaf without the host holding any p2p state.
+pub type SharedBroker = Arc<Mutex<P2pBroker>>;
+
+/// The async receive descriptor over an **extension-owned** [`SharedBroker`] (para-namespace F2) — the
+/// `Send` twin of [`ReceiveIo`], which resolves through the *host*. It captures a clone of the broker
+/// `Arc` at spawn (where the extension's ctx is available) and, at resolve, locks it and pops the
+/// topic's next message — so the receive path needs no host p2p capability at all.
+#[derive(Debug)]
+pub struct BrokerReceiveIo {
+    /// The extension-owned broker this receive resolves against (a clone of the ctx-state `Arc`).
+    pub broker: SharedBroker,
+    /// The topic to take the next message from.
+    pub topic: String,
+}
+
+impl crate::ExternIo for BrokerReceiveIo {
+    fn run_sync(
+        &mut self,
+        _host: &mut dyn crate::Host,
+    ) -> Result<crate::NativeOut, crate::StdError> {
+        let next = self
+            .broker
+            .lock()
+            .expect("p2p broker mutex poisoned")
+            .poll_default(&self.topic);
+        Ok(receive_outcome(next))
     }
 }
 

@@ -14,8 +14,12 @@
 //! cross-isolate delivery and real p2panda transport are later slices (P3); the seam and its
 //! determinism story are what P1 proves.
 
-use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType, SpawnBox};
-use noeta_native::{Host, NativeValue, StdError, no_function_error, type_error};
+use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
+use noeta_native::{
+    CtxError, CtxOut, NativeCtx, NativeValue, Slot, ctx_arity, no_function_error, type_error,
+};
+
+use crate::provider::{receive_descriptor, with_p2p};
 
 const MESSAGE_SIG: SigType = SigType::Union(&[SigType::String, SigType::Bytes]);
 
@@ -44,62 +48,66 @@ pub const P2P_FNS: &[ExtFn] = &[
     },
 ];
 
-pub fn p2p_dispatch(
+/// `para.p2p` is a **ctx module** (para-namespace follow-on F2): it reaches the p2p capability through
+/// [`crate::provider`], which resolves to the host's real transport or the extension's own broker in
+/// ctx state — so the capability travels with the package rather than being baked into every host.
+pub fn p2p_ctx_dispatch<C: NativeCtx + ?Sized>(
     func: &str,
-    host: &mut dyn Host,
-    args: &[NativeValue],
-) -> Result<NativeOut, StdError> {
+    ctx: &mut C,
+    args: &[Slot],
+) -> Result<CtxOut, CtxError> {
     match func {
         "publish" => {
-            want_arity(func, args, 2)?;
-            let topic = want_str(func, args, 0)?.to_string();
-            let message = want_message(func, args, 1)?;
-            crate::require_p2p(host)?.p2p_publish(&topic, message)?;
-            Ok(NativeOut::Unit)
+            ctx_arity(func, args, 2)?;
+            let topic = view_str(ctx, func, args, 0)?;
+            let message = view_message(ctx, func, args, 1)?;
+            with_p2p(ctx, |p| p.p2p_publish(&topic, message))?;
+            Ok(CtxOut::Out(NativeOut::Unit))
         }
         "receive" => {
-            want_arity(func, args, 1)?;
-            let topic = want_str(func, args, 0)?.to_string();
-            // WORK, not a value: the backend tickets the descriptor on its executor and hands back
-            // a future (the `NativeOut::Spawn` path, intercepted at the dispatch return). The
-            // default descriptor resolves through `p2p_poll` at spawn — deterministic in the sandbox.
-            Ok(NativeOut::Spawn(SpawnBox(
-                crate::require_p2p(host)?.p2p_receive(topic),
-            )))
+            ctx_arity(func, args, 1)?;
+            let topic = view_str(ctx, func, args, 0)?;
+            // WORK, not a value: ticket the receive descriptor on the executor and hand back a future
+            // slot. The descriptor resolves through the active provider (host transport or the
+            // extension broker) at spawn — deterministic under the loopback broker.
+            let io = receive_descriptor(ctx, topic);
+            Ok(CtxOut::Slot(ctx.spawn_io(io)))
         }
         "identity" => {
-            want_arity(func, args, 0)?;
-            Ok(match crate::require_p2p(host)?.p2p_identity()? {
-                Some(hex) => NativeOut::Some(Box::new(NativeOut::Str(hex))),
-                None => NativeOut::None,
+            ctx_arity(func, args, 0)?;
+            Ok(match with_p2p(ctx, |p| p.p2p_identity())? {
+                Some(hex) => CtxOut::Out(NativeOut::Some(Box::new(NativeOut::Str(hex)))),
+                None => CtxOut::Out(NativeOut::None),
             })
         }
-        _ => Err(no_function_error("p2p", func)),
+        _ => Err(no_function_error("p2p", func).into()),
     }
 }
 
-// --- Small argument helpers (the plain-dispatch ABI exposes only the error constructors) --------
+// --- Small argument helpers (ctx dispatch: marshal each slot through `ctx.view`) ----------------
 
-fn want_arity(func: &str, args: &[NativeValue], expected: usize) -> Result<(), StdError> {
-    if args.len() == expected {
-        Ok(())
-    } else {
-        Err(noeta_native::arity_error(func, expected, args.len()))
-    }
-}
-
-fn want_str<'a>(func: &str, args: &'a [NativeValue], index: usize) -> Result<&'a str, StdError> {
-    match args.get(index) {
-        Some(NativeValue::Str(s)) => Ok(s),
-        _ => Err(type_error(func, "string")),
+fn view_str<C: NativeCtx + ?Sized>(
+    ctx: &mut C,
+    func: &str,
+    args: &[Slot],
+    index: usize,
+) -> Result<String, CtxError> {
+    match ctx.view(args[index])? {
+        NativeValue::Str(s) => Ok(s),
+        _ => Err(type_error(func, "string").into()),
     }
 }
 
 /// Project a `string|bytes` message onto the raw bytes the seam carries (a string as its UTF-8).
-fn want_message(func: &str, args: &[NativeValue], index: usize) -> Result<Vec<u8>, StdError> {
-    match args.get(index) {
-        Some(NativeValue::Str(s)) => Ok(s.as_bytes().to_vec()),
-        Some(NativeValue::Bytes(b)) => Ok(b.clone()),
-        _ => Err(type_error(func, "string|bytes")),
+fn view_message<C: NativeCtx + ?Sized>(
+    ctx: &mut C,
+    func: &str,
+    args: &[Slot],
+    index: usize,
+) -> Result<Vec<u8>, CtxError> {
+    match ctx.view(args[index])? {
+        NativeValue::Str(s) => Ok(s.into_bytes()),
+        NativeValue::Bytes(b) => Ok(b),
+        _ => Err(type_error(func, "string|bytes").into()),
     }
 }

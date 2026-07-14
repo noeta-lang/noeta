@@ -35,7 +35,7 @@ pub use host::{
 pub use map_key::{ExternKeyRef, MapKey, PackedKeyField};
 pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
 pub use os::{ExecIo, ExecResult, Process};
-pub use p2p::{P2pBroker, ReceiveIo};
+pub use p2p::{BrokerReceiveIo, P2pBroker, ReceiveIo, SharedBroker};
 pub use registry::{
     ArenaGetter, BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, CtxTypeDispatch,
     ExtBundle, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut, NativeValue,

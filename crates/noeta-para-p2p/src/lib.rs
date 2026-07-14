@@ -18,13 +18,15 @@
 
 pub mod crdt;
 pub mod p2p;
+pub mod provider;
 pub mod synced;
 
 use noeta_native::registry::{ExtModule, ExtType, Extension};
 
 // `P2p` left the mandatory `Host` union (para-namespace arc): `para.p2p`/`para.synced` reach the
-// capability through the shared `require_p2p` accessor over the optional `P2pProvider` seam.
-pub(crate) use noeta_native::host::require_p2p;
+// capability through [`crate::provider`], which prefers the host's real transport (`P2pProvider`)
+// and otherwise serves an extension-owned loopback broker — so the capability travels with this
+// package rather than being baked into every host (follow-on F2).
 
 /// The `para.p2p` extension unit — CRDT value types, the `p2p` host-capability surface, and the
 /// CRDT-backed `synced` reactive signal. `root() == "para"`, so its modules resolve as
@@ -69,8 +71,8 @@ const PARA_P2P_MODULES: &[ExtModule] = &[
     // p2panda in its binary; one that doesn't sheds it.
     ExtModule {
         name: "p2p",
-        functions: crate::p2p::P2P_FNS,
-        dispatch: crate::p2p::p2p_dispatch,
+        ctx_functions: crate::p2p::P2P_FNS,
+        ctx_dispatch: Some(|func, ctx, args| crate::p2p::p2p_ctx_dispatch(func, ctx, args)),
         ring: Some("ring-p2p"),
         docs: P2P_DOCS,
         ..ExtModule::DEFAULTS
