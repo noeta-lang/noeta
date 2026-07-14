@@ -191,8 +191,8 @@ DAP "debugs the PROD VM"), zero-cost when absent — so they observe identical e
     formatter stays off). `emit_exe` picks the composed runner when the app has native crates, else
     the stock runner. Fixed a D4a regression (native-dep `--exe` had stapled onto the stock runner,
     which lacked the app's extensions). The runner shim's `main` calls
-    `noeta_runner::run_stapled_with_extensions`. `--native` + native deps stays a **pre-existing gap**
-    (it links `noeta-aot-runtime`, which has no extension seam) — out of scope.
+    `noeta_runner::run_stapled_with_extensions`. (`--native` + native deps was noted here as a
+    pre-existing gap — now **closed** in D6 below.)
 - **D3b/D5 — dev-capability gating convention + dogfood. ✅ (`<this branch>`).** The package-author
   contract: gate a mixed crate's dev-kind impls + optional heavy deps behind a Cargo feature
   (`malva = { optional = true }`, `fmt = ["dep:malva"]`, `#[cfg(feature = "fmt")] fn
@@ -204,12 +204,35 @@ DAP "debugs the PROD VM"), zero-cost when absent — so they observe identical e
   is **absent**. Docs: `The-CLI` (shipped artifacts are lean), `Documentation-and-Tiers`
   (target-scoped deps + global-default overlay), `Native-Extensions` (composed runner + the gate-dev-
   capabilities-behind-a-feature convention).
-  - **Follow-up (D5b, deferred):** the *dev-side* half — the dev toolchain/`noeta fmt` actively
-    **enabling** a native crate's `fmt` feature so its tier bodies reflow — is not yet wired (the
-    composer pulls extN at default features for both kinds). It needs the composer to enable the
-    conventional dev feature for the `Toolchain` kind, and *which* feature/when should be **target-
-    driven** (per the "don't hardcode dev/prod" principle), so it is surfaced as a decision, not
-    hardcoded. Security goal (prod strips) is fully met without it.
+- **D6 — `--native` for native-dependency apps + D5b dev-feature enablement. ✅ (`<this branch>`).**
+  The two follow-ups the arc left open, both proven end-to-end.
+  - **`--native` + native deps (the last gap):** `noeta-aot-runtime` gains an **extension seam** —
+    `run_embedded_with_extensions(units)` (installs the app's units via `install_with_extras`, then
+    runs the embedded program) and its C `main` gated behind a default `entry` feature so a composed
+    base can supply its own; `[lib] crate-type` gains `rlib` (a staticlib-only crate exposes no rlib to
+    link as a dep). `compose.rs` grows `ShimKind::AotRuntime` + `compose_aot_runtime_archive`: a
+    generated **`staticlib`** shim on `noeta-aot-runtime` (`default-features = false` → C `main` off,
+    program **rings forwarded** so DCE Axis B still sheds unused rings) + each native crate at default
+    features (formatter stripped), whose `main` installs the units and calls
+    `run_embedded_with_extensions`. `emit_native` links this composed archive when the app has native
+    crates (else the stock `libnoeta_aot.a`) — the `--native` analogue of `runner_base`. e2e
+    `build_native_of_a_native_dep_app_runs_the_composed_handler`: the native binary runs its handler
+    (`fx.double(21)` → 42) **and** carries no dev formatter. Also fixed a **pre-existing latent bug**
+    this surfaced: `noeta-runtime`'s always-compiled `ws.rs` uses `tokio::sync`/`select!`, but the
+    workspace tokio dep declared neither — a ring-less `--native` build (no ring transitively enabling
+    them) failed to compile; `noeta-runtime` now declares `sync`/`macros` for its own code.
+  - **D5b — dev-toolchain dev-feature enablement (was deferred):** the composed **`Toolchain`** now
+    turns on a mixed crate's declared conventional dev feature (`DEV_FEATURES = ["fmt"]`) so `noeta fmt`
+    reflows its tier bodies; the shipped `Runner`/`AotRuntime` bases keep default features (formatter
+    stripped). Resolution of the "target-driven / don't-hardcode-dev/prod" concern: the enablement is
+    tied to the **shim kind**, which is itself chosen by the user's build (a shipped artifact ⇒ lean
+    base; the dev workstation ⇒ toolchain) — not a hardcoded "dev" label; and it is **opt-in by
+    convention**, gated on what the crate declares. New `noeta_pm::manifest::cargo_features` reads a
+    crate's `[features]` so the composer never enables a feature the crate lacks (no cargo error). e2e
+    `dev_toolchain_composition_includes_a_mixed_crates_formatter`: the composed dev toolchain carries
+    the formatter marker; the shipped `--exe`/`--native` artifacts (capstone + native e2e) do not.
+  - Docs: `Native-Extensions` updated (the `--exe` runner vs `--native` AOT-staticlib bases; the dev
+    toolchain enables the `fmt` convention feature).
 
 ## Open questions
 
