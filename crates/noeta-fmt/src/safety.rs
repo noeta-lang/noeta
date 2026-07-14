@@ -26,7 +26,8 @@ pub fn ast_equal_modulo_spans(a: &Program, b: &Program) -> bool {
 /// forms. Everything else — the tier name, the `${…}` holes between the statics, and every node
 /// outside tier bodies — is still compared exactly, so a real formatting bug is still caught.
 pub fn ast_equal_ignoring_tier_statics(a: &Program, b: &Program) -> bool {
-    let norm = |p: &Program| strip_tier_statics(&strip_spans(&canonical_imports(p).to_pretty_string()));
+    let norm =
+        |p: &Program| strip_tier_statics(&strip_spans(&canonical_imports(p).to_pretty_string()));
     norm(a) == norm(b)
 }
 

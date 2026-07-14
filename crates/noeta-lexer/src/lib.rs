@@ -568,11 +568,15 @@ pub struct Comment {
     pub kind: CommentKind,
 }
 
-/// Whether a [`Comment`] is a `// …` line comment or a `/* … */` block comment.
+/// Whether a [`Comment`] is a `// …` line comment, a `/* … */` block comment, or the file's
+/// leading `#!…` **shebang** line (a script interpreter directive, byte 0 only — like PHP). All
+/// three are trivia: dropped from the token stream, kept for the formatter to re-emit verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommentKind {
     Line,
     Block,
+    /// The `#!…` first line, tolerated so a `.noe` file can be a `chmod +x` executable script.
+    Shebang,
 }
 
 /// The result of lexing: the token stream and any diagnostics produced along the way.
@@ -687,6 +691,22 @@ fn lex_pass(source: &Source, collect_trivia: bool, text_tiers: &TextTiers) -> Le
     let mut comments = Vec::new();
     let text = source.text();
     let mut lexer = TokenKind::lexer(text);
+
+    // A `#!…` at the very start of the file is a shebang (`chmod +x` script support, PHP-style):
+    // consume the whole first line as trivia so the parser never sees it, and advance the lexer
+    // past it. Only at byte 0 — `#!` anywhere else is not special (and still a lex error, as before).
+    if text.starts_with("#!") {
+        // Span to end-of-line (excluding the `\n`), matching a `//` line comment; the newline is
+        // then lexed as ordinary skipped whitespace.
+        let content_end = text.find('\n').unwrap_or(text.len());
+        if collect_trivia {
+            comments.push(Comment {
+                span: Span::from(0..content_end),
+                kind: CommentKind::Shebang,
+            });
+        }
+        lexer.bump(content_end);
+    }
 
     while let Some(result) = lexer.next() {
         let span = Span::from(lexer.span());
@@ -1260,6 +1280,43 @@ mod tests {
         assert!(
             t_comments.as_secs_f64() < t_plain.as_secs_f64() * 2.0 + 0.01,
             "comment lexing regressed: plain={t_plain:?} comments={t_comments:?}"
+        );
+    }
+
+    #[test]
+    fn a_leading_shebang_is_trivia() {
+        // The compile path skips a `#!` first line entirely: no diagnostics, and the token stream
+        // matches the same source without the shebang (PHP-style `chmod +x` script support).
+        let with = lex(&Source::new(
+            SourceId::FIRST,
+            "s.noe",
+            "#!/usr/bin/env noeta\necho \"hi\";",
+        ));
+        let without = lex(&Source::new(SourceId::FIRST, "s.noe", "echo \"hi\";"));
+        assert!(
+            with.diagnostics.is_empty(),
+            "shebang produced diagnostics: {:?}",
+            with.diagnostics
+        );
+        let kinds = |l: &Lexed| l.tokens.iter().map(|t| t.kind).collect::<Vec<_>>();
+        assert_eq!(kinds(&with), kinds(&without));
+
+        // With trivia, the shebang is recovered as a `Shebang` comment for the formatter to re-emit.
+        let src = Source::new(SourceId::FIRST, "s.noe", "#!/usr/bin/env noeta\necho 1;");
+        let triv = lex_with_trivia(&src);
+        assert_eq!(triv.comments.len(), 1);
+        assert_eq!(triv.comments[0].kind, CommentKind::Shebang);
+        assert_eq!(
+            &src.text()[triv.comments[0].span.range()],
+            "#!/usr/bin/env noeta"
+        );
+
+        // A `#!` NOT at byte 0 is not a shebang: it is never recovered as shebang trivia (it lexes
+        // as ordinary tokens, which the parser later rejects — the pre-existing behavior).
+        let mid = lex_with_trivia(&Source::new(SourceId::FIRST, "s.noe", "echo 1;\n#!nope"));
+        assert!(
+            !mid.comments.iter().any(|c| c.kind == CommentKind::Shebang),
+            "a mid-file `#!` must not be recovered as a shebang"
         );
     }
 
