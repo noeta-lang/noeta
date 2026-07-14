@@ -102,6 +102,102 @@ pub fn package_docs_json(dir: &Path) -> Result<(String, Generated), String> {
     ))
 }
 
+/// Build the **API-reference** `docs.json` (docs-browser Arc 2) from the intrinsic registry — the
+/// stdlib and any composed native modules — rather than from `.noe` source. One module entry per
+/// registry module (`std.math`, `std.http.client`, …), each function an `fn` item carrying its
+/// rendered signature and any registered doc prose. Same schema-1 shape as [`generate`], so it
+/// rides to the registry and renders on the hosted docs page identically. `package` names the
+/// artifact (e.g. the toolchain's `std`), or `None` for a generic title. `root` scopes the surface
+/// to a single extension's namespace (a package documenting *itself*, excluding std); `None`
+/// documents the whole registry.
+pub fn registry_docs_json(
+    package: Option<(String, String)>,
+    root: Option<&str>,
+) -> (String, Generated) {
+    let fn_item = |f: noeta_ide::api::ApiFn| {
+        Item::Decl(DeclDocs {
+            kind: "fn",
+            name: f.name,
+            signature: f.signature,
+            doc: (!f.doc.is_empty()).then_some(f.doc),
+            public: true,
+        })
+    };
+    let (api_modules, api_types) = match root {
+        Some(r) => (noeta_ide::api::modules_of(r), noeta_ide::api::types_of(r)),
+        None => (noeta_ide::api::modules(), noeta_ide::api::types()),
+    };
+    // One `docs.json` module per registry module and per extern type — both are qualified surfaces
+    // of functions/methods, so they render uniformly by-module on the hosted page.
+    let mut modules: Vec<ModuleDocs> = api_modules
+        .into_iter()
+        .map(|m| ModuleDocs {
+            file: String::new(), // native: no source file
+            slug: m.qualified.replace('.', "-"),
+            namespace: Some(m.qualified),
+            doc: None,
+            items: m.functions.into_iter().map(fn_item).collect(),
+        })
+        .collect();
+    modules.extend(api_types.into_iter().map(|t| ModuleDocs {
+        file: String::new(),
+        slug: t.qualified.replace('.', "-"),
+        namespace: Some(t.qualified),
+        doc: None,
+        items: t.methods.into_iter().map(fn_item).collect(),
+    }));
+    let json = docs_json(&package, &modules);
+    let generated = Generated {
+        modules: modules.len(),
+        decls: modules.iter().map(|m| m.decl_count()).sum(),
+        skipped: Vec::new(),
+    };
+    (format!("{json:#}\n"), generated)
+}
+
+/// Combine a native package's registry-derived API `docs.json` (`api_json`, the primary surface)
+/// with any `.noe`-source docs it also ships (`noe_json`) and stamp the package identity, for
+/// `noeta publish` to upload. Modules are concatenated (API first); a `.noe` module whose namespace
+/// already appears in the API surface is dropped (the compiled surface wins). Malformed inputs are
+/// skipped rather than fatal — docs are advisory.
+pub fn finalize_native_docs(
+    api_json: &str,
+    noe_json: Option<&str>,
+    name: &str,
+    version: &str,
+) -> String {
+    let mut doc: serde_json::Value =
+        serde_json::from_str(api_json).unwrap_or_else(|_| serde_json::json!({ "schema": SCHEMA }));
+    let mut modules: Vec<serde_json::Value> = doc
+        .get("modules")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut seen: std::collections::HashSet<String> = modules
+        .iter()
+        .filter_map(|m| {
+            m.get("namespace")
+                .and_then(|n| n.as_str())
+                .map(str::to_string)
+        })
+        .collect();
+    if let Some(noe) = noe_json
+        && let Ok(noe_doc) = serde_json::from_str::<serde_json::Value>(noe)
+        && let Some(noe_mods) = noe_doc.get("modules").and_then(|m| m.as_array())
+    {
+        for m in noe_mods {
+            let ns = m.get("namespace").and_then(|n| n.as_str()).unwrap_or("");
+            if ns.is_empty() || seen.insert(ns.to_string()) {
+                modules.push(m.clone());
+            }
+        }
+    }
+    doc["schema"] = serde_json::json!(SCHEMA);
+    doc["package"] = serde_json::json!({ "name": name, "version": version });
+    doc["modules"] = serde_json::json!(modules);
+    format!("{doc:#}\n")
+}
+
 /// Render the Markdown tree from a stored `docs.json` (the registry-fetch path: `noeta doc
 /// --package … --out DIR`) into `out`, alongside a copy of the artifact itself. The inverse of
 /// [`generate`]'s emit step, working purely from the schema — no source needed.
@@ -146,10 +242,18 @@ pub fn render_json_to(out: &Path, docs_json_text: &str) -> Result<Generated, Str
                 }))
             })
             .collect();
+        let namespace = m["namespace"].as_str().map(str::to_string);
+        // Prefer the source-file stem; a native module (registry API) has no file, so fall back to
+        // its namespace (`std.math` → `std-math`) for a unique, readable page name.
+        let slug = match (file.trim_end_matches(".noe"), &namespace) {
+            ("", Some(ns)) => ns.replace('.', "-"),
+            (stem, _) if !stem.is_empty() => stem.to_string(),
+            _ => "module".to_string(),
+        };
         modules.push(ModuleDocs {
-            slug: file.trim_end_matches(".noe").to_string(),
+            slug,
             file,
-            namespace: m["namespace"].as_str().map(str::to_string),
+            namespace,
             doc: m["doc"].as_str().map(str::to_string),
             items,
         });
@@ -466,6 +570,8 @@ fn index_markdown(package: &Option<(String, String)>, modules: &[ModuleDocs]) ->
 fn module_markdown(m: &ModuleDocs) -> String {
     let mut out = String::new();
     match &m.namespace {
+        // A native (registry API) module has no source file — omit the empty parenthetical.
+        Some(ns) if m.file.is_empty() => out.push_str(&format!("# `{ns}`\n\n")),
         Some(ns) => out.push_str(&format!("# `{ns}` ({})\n\n", m.file)),
         None => out.push_str(&format!("# `{}`\n\n", m.file)),
     }
@@ -490,4 +596,88 @@ fn module_markdown(m: &ModuleDocs) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_docs_json_is_schema1_by_module_with_prose() {
+        let (text, done) = registry_docs_json(None, None);
+        assert!(done.modules > 3 && done.decls > 0);
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["schema"].as_u64(), Some(SCHEMA as u64));
+
+        let modules = doc["modules"].as_array().unwrap();
+        let math = modules
+            .iter()
+            .find(|m| m["namespace"] == "std.math")
+            .expect("std.math module present");
+        // Every item carries `kind` + `name` — the hosted registry renderer drops items missing
+        // either, so this is the contract with noeta-registry's src/web.ts renderModule().
+        let items = math["items"].as_array().unwrap();
+        assert!(
+            items
+                .iter()
+                .all(|i| i["kind"].is_string() && i["name"].is_string())
+        );
+        let sqrt = items.iter().find(|i| i["name"] == "sqrt").unwrap();
+        assert_eq!(sqrt["kind"], "fn");
+        assert_eq!(sqrt["signature"], "fn sqrt(float): float");
+        assert!(sqrt["doc"].as_str().unwrap().contains("square root"));
+        assert_eq!(sqrt["public"], true);
+
+        // The whole artifact round-trips through the registry-render path (schema-only).
+        let out = std::env::temp_dir().join("noeta_docgen_api_test");
+        let _ = std::fs::remove_dir_all(&out);
+        render_json_to(&out, &text).expect("renders from schema alone");
+        assert!(out.join("std-math.md").exists());
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[test]
+    fn finalize_native_docs_merges_and_stamps() {
+        let api = r#"{"schema":1,"package":null,"modules":[
+            {"file":"","namespace":"imgfx.fx","doc":null,"items":[
+                {"kind":"fn","name":"blur","signature":"fn blur(bytes): bytes","doc":"Blur.","public":true}]}]}"#;
+        // A `.noe` glue module plus a duplicate of the native namespace (the compiled surface wins).
+        let noe = r#"{"schema":1,"package":null,"modules":[
+            {"file":"helpers.noe","namespace":"imgfx.helpers","doc":null,"items":[
+                {"kind":"fn","name":"clamp","signature":"pub fn clamp(x: int): int","doc":null,"public":true}]},
+            {"file":"dup.noe","namespace":"imgfx.fx","doc":null,"items":[]}]}"#;
+        let out = finalize_native_docs(api, Some(noe), "acme/imgfx", "1.2.0");
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["schema"], 1);
+        assert_eq!(doc["package"]["name"], "acme/imgfx");
+        assert_eq!(doc["package"]["version"], "1.2.0");
+        let ns: Vec<&str> = doc["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["namespace"].as_str().unwrap())
+            .collect();
+        // Native module first, the .noe glue merged in, the duplicate namespace dropped.
+        assert_eq!(ns, vec!["imgfx.fx", "imgfx.helpers"]);
+        // API prose survives (the compiled surface, not the empty dup).
+        assert_eq!(doc["modules"][0]["items"][0]["doc"], "Blur.");
+    }
+
+    #[test]
+    fn registry_docs_json_scopes_to_a_root() {
+        // Scoping to `std` keeps the std surface; an unknown root yields nothing (a native package
+        // documenting itself excludes std this way).
+        let (std_text, std_done) = registry_docs_json(None, Some("std"));
+        assert!(std_done.modules > 3);
+        let doc: serde_json::Value = serde_json::from_str(&std_text).unwrap();
+        assert!(
+            doc["modules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m["namespace"].as_str().unwrap().starts_with("std"))
+        );
+        let (_empty_text, empty_done) = registry_docs_json(None, Some("nosuchpkg"));
+        assert_eq!(empty_done.modules, 0);
+    }
 }

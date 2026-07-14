@@ -405,6 +405,13 @@ pub struct ExtModule {
     /// The module's **method bundles** (kernel-methods K0): named method sets a user's `@packed`
     /// type acquires by explicit `impl <module>.<Bundle> for T {}`. Default empty.
     pub bundles: &'static [ExtBundle],
+    /// Per-function **documentation prose** (docs-browser arc, Arc 2): `(function_name, markdown)`
+    /// pairs surfaced by the API-reference docs generator (`noeta doc`, the editor's docs browser,
+    /// the MCP docs tools). Co-located with the module's registration; opt-in and sparse — a
+    /// function absent from this table renders signature-only, like docs.rs. Keyed by name so one
+    /// table covers both [`ExtModule::functions`] and [`ExtModule::ctx_functions`]; third-party
+    /// extensions get the same field for free (their literals use `..ExtModule::DEFAULTS`).
+    pub docs: &'static [(&'static str, &'static str)],
 }
 
 impl ExtModule {
@@ -420,6 +427,7 @@ impl ExtModule {
         ctx_dispatch: None,
         ring: None,
         bundles: &[],
+        docs: &[],
     };
 }
 
@@ -520,6 +528,10 @@ pub struct ExtType {
     /// type whose methods take a container argument (the metrics instruments' `*_with(_, attrs)`).
     /// Default `false` — most extern methods take scalars/handles.
     pub deep_marshal: bool,
+    /// Per-method **documentation prose** (docs-browser Arc 2): `(method_name, markdown)` pairs, the
+    /// extern-type analogue of [`ExtModule::docs`]. Opt-in and sparse; keyed by name so it covers
+    /// both [`ExtType::methods`] and [`ExtType::ctx_methods`].
+    pub docs: &'static [(&'static str, &'static str)],
 }
 
 impl ExtType {
@@ -541,6 +553,7 @@ impl ExtType {
         arena_getter: None,
         traits: &[],
         deep_marshal: false,
+        docs: &[],
     };
 
     /// The type's **qualified identity** (`std.id.Uuid`) — `namespace.name`. This is the string the

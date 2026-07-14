@@ -182,6 +182,22 @@ enum Command {
         /// nothing is emitted.
         #[arg(long)]
         target: Option<String>,
+        /// Generate the **API reference** from the intrinsic registry (the stdlib and any composed
+        /// native modules) instead of from `.noe` source — a registry-ready `docs.json` (schema 1)
+        /// organized by module, with signatures and any registered doc prose. Prints to stdout, or
+        /// writes the artifact + Markdown tree with `--out`.
+        #[arg(long, conflicts_with_all = ["file", "package"])]
+        api: bool,
+        /// With `--api`, document only the extension whose namespace root is this (a package's own
+        /// name segment) — its own modules/types, excluding `std`. Omit to document the whole
+        /// registry.
+        #[arg(long, requires = "api", value_name = "NAMESPACE")]
+        root: Option<String>,
+        /// With `--api --root`, fail (before emitting docs) if the package registers any module or
+        /// extern type outside its root namespace — the publish quality gate against a type that
+        /// leaked into `std` (a missing `namespace:`). Exit 2 lists the offenders.
+        #[arg(long, requires = "root")]
+        lint: bool,
     },
     /// Compile a program to a self-contained `.noeb` bundle (P-AOT L1): the versioned bytecode a
     /// `noeta run app.noeb` executes directly, so a program ships **without its `.noe` source**.
@@ -581,7 +597,10 @@ pub fn run_cli(
             package,
             out,
             target,
-        } => cmd_doc(&file, &package, &out, &target),
+            api,
+            root,
+            lint,
+        } => cmd_doc(&file, &package, &out, &target, api, root.as_deref(), lint),
         Command::Build {
             file,
             out,
@@ -815,6 +834,41 @@ fn cmd_publish(
         }
     }
 
+    // Native packages: build the package's own native crate **on this machine** (a composed
+    // toolchain, cached) and generate its registry-derived API docs. This doubles as a **publish
+    // quality gate** — a native crate that won't compile can't be composed by any consumer, so we
+    // refuse to publish it (fail fast, before pinning a SHA / attesting / touching the index). The
+    // registry never compiles anything: only the finished `docs.json` is later uploaded.
+    let native_docs: Option<String> = match &pkg.native {
+        Some(native_dir) => {
+            let pkg_dir = manifest_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."));
+            let crate_dir = pkg_dir.join(native_dir);
+            println!(
+                "building native crate at `{}` (publish quality gate)…",
+                crate_dir.display()
+            );
+            match compose::package_api_docs(&name, &crate_dir, &pkg.name.package) {
+                Ok(api_json) => {
+                    // Fold in any `.noe` glue the package also ships (advisory; the API surface wins).
+                    let noe_json = docgen::package_docs_json(pkg_dir).ok().map(|(j, _)| j);
+                    Some(docgen::finalize_native_docs(
+                        &api_json,
+                        noe_json.as_deref(),
+                        &name,
+                        &version.to_string(),
+                    ))
+                }
+                Err(err) => {
+                    eprintln!("lang: native package build failed — not publishing.\n{err}");
+                    return ExitCode::from(1);
+                }
+            }
+        }
+        None => None,
+    };
+
     let tag = tag
         .map(str::to_string)
         .unwrap_or_else(|| format!("v{version}"));
@@ -911,23 +965,30 @@ fn cmd_publish(
     match index.publish(&name, &release) {
         Ok(()) => {
             println!("published `{name}` {version} → {git}#{tag} ({sha}) [{provenance_tag}]");
-            // Docs ride along (docs-ingestion follow-up): generate the artifact from the package
-            // dir and store it with the release. Advisory metadata — a docs failure warns, never
-            // blocks a publish that already succeeded.
+            // Docs ride along: store the artifact with the release. For a native package it is the
+            // already-generated, build-gated API docs (`native_docs`); for a pure-Noeta package it
+            // is generated now from the `.noe` source. Advisory metadata — an upload failure warns,
+            // never unpublishes a release that already succeeded.
             if !no_docs {
                 let pkg_dir = manifest_path
                     .parent()
                     .map(std::path::Path::to_path_buf)
                     .unwrap_or_else(|| PathBuf::from("."));
-                match docgen::package_docs_json(&pkg_dir) {
-                    Ok((docs_json, done)) => match index.put_docs(&name, &version, &docs_json) {
-                        Ok(()) => println!(
-                            "docs uploaded ({} module{}, {} declaration{})",
-                            done.modules,
-                            plural(done.modules),
-                            done.decls,
-                            plural(done.decls),
-                        ),
+                let docs_json = match native_docs {
+                    Some(json) => Ok(json),
+                    None => docgen::package_docs_json(&pkg_dir).map(|(json, _)| json),
+                };
+                match docs_json {
+                    Ok(docs_json) => match index.put_docs(&name, &version, &docs_json) {
+                        Ok(()) => {
+                            let modules = serde_json::from_str::<serde_json::Value>(&docs_json)
+                                .ok()
+                                .and_then(|d| {
+                                    d.get("modules").and_then(|m| m.as_array()).map(|a| a.len())
+                                })
+                                .unwrap_or(0);
+                            println!("docs uploaded ({modules} module{})", plural(modules));
+                        }
                         Err(err) => eprintln!("lang: warning: docs not uploaded: {err}"),
                     },
                     Err(err) => eprintln!("lang: warning: docs not generated: {err}"),
@@ -4856,12 +4917,68 @@ fn web_docs_url(base: &str, name: &str, version: &str) -> String {
     format!("{}/{name}/{version}/docs", base.trim_end_matches('/'))
 }
 
+/// `noeta doc --api`: generate the API reference from the intrinsic registry (stdlib + any composed
+/// native modules). Prints the schema-1 `docs.json` to stdout, or — with `--out` — writes the
+/// artifact and renders its Markdown tree (the same schema the hosted registry renders). `root`
+/// scopes to one extension's namespace (a package documenting itself).
+fn cmd_doc_api(out: &Option<PathBuf>, root: Option<&str>, lint: bool) -> ExitCode {
+    // The publish namespace lint: a package's whole surface must sit under its own root (`--root`).
+    // Report every offender and refuse (exit 2) before emitting anything — the publish gate.
+    if lint && let Some(root) = root {
+        let violations = noeta_ide::api::namespace_violations(root);
+        if !violations.is_empty() {
+            eprintln!(
+                "lang: package `{root}` registers surface outside its own namespace ({} \
+                 violation{}):",
+                violations.len(),
+                plural(violations.len()),
+            );
+            for v in &violations {
+                eprintln!("  - {v}");
+            }
+            return ExitCode::from(2);
+        }
+    }
+    let (json, done) = docgen::registry_docs_json(None, root);
+    match out {
+        Some(out_dir) => match docgen::render_json_to(out_dir, &json) {
+            Ok(_) => {
+                println!(
+                    "documented {} module{} ({} function{}) → {}",
+                    done.modules,
+                    plural(done.modules),
+                    done.decls,
+                    plural(done.decls),
+                    out_dir.display(),
+                );
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("lang: {err}");
+                ExitCode::from(2)
+            }
+        },
+        None => {
+            print!("{json}");
+            ExitCode::SUCCESS
+        }
+    }
+}
+
 fn cmd_doc(
     file: &Option<PathBuf>,
     package: &Option<String>,
     out: &Option<PathBuf>,
     target: &Option<String>,
+    api: bool,
+    root: Option<&str>,
+    lint: bool,
 ) -> ExitCode {
+    // `--api`: the registry-backed path — the intrinsic surface (stdlib + composed native modules)
+    // as a schema-1 `docs.json`, organized by module. No local source involved.
+    if api {
+        return cmd_doc_api(out, root, lint);
+    }
     // `--package`: the registry-fetch path — a published release's stored artifact, no local
     // source involved.
     if let Some(spec) = package {

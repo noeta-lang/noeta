@@ -4231,6 +4231,7 @@ dependencies = [
 name = "noeta-ide"
 version = "0.1.0"
 dependencies = [
+ "include_dir",
  "noeta-ast",
  "noeta-check",
  "noeta-compiler",

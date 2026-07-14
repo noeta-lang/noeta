@@ -145,6 +145,46 @@ pub fn compose_runner_binary(entry: &Path) -> Result<Option<PathBuf>, String> {
     Ok(Some(binary))
 }
 
+/// Build (client-side, cached) a composed toolchain that links **the package's own** native entry
+/// crate at `crate_dir`, then run `noeta doc --api --root <root_ns>` inside it and return the
+/// emitted `docs.json`. This is how `noeta publish` generates a native package's API reference: the
+/// module surface lives only in the compiled Rust, so it must be *built* — on the **publisher's**
+/// machine (the registry never compiles anything). A build failure surfaces as `Err`, which the
+/// publish flow uses as a quality gate (don't publish a native package whose crate won't compile).
+/// `root_ns` scopes the output to the package's own namespace, excluding std.
+pub fn package_api_docs(identity: &str, crate_dir: &Path, root_ns: &str) -> Result<String, String> {
+    let nc = NativeCrate {
+        identity: identity.to_string(),
+        crate_dir: crate_dir.to_path_buf(),
+    };
+    // A doc-generation query exposes no CLI of its own, so command-trust is irrelevant — `&[]`.
+    let binary = compose_binary(&[nc], &[], ShimKind::Toolchain)?;
+    // `--lint`: the composed toolchain refuses (exit 2) if the package registers any module or
+    // extern type outside its own namespace — the publish quality gate against a type that leaked
+    // into `std` (a missing `namespace:`). Its stderr carries the offenders; surface it verbatim.
+    let output = std::process::Command::new(&binary)
+        .arg("doc")
+        .arg("--api")
+        .arg("--root")
+        .arg(root_ns)
+        .arg("--lint")
+        .output()
+        .map_err(|err| {
+            format!(
+                "running the composed toolchain `{}`: {err}",
+                binary.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "generating API docs in the composed toolchain failed:\n{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|err| format!("the API docs.json was not UTF-8: {err}"))
+}
+
 /// Build (or reuse the cached) **composed AOT runtime** staticlib for a native-dependency app, and
 /// return its archive path plus the native system libraries it must be linked against. This is the
 /// `--native` analogue of [`compose_runner_binary`]: where a `--exe` artifact staples its bundle onto a
@@ -177,7 +217,12 @@ pub fn compose_aot_runtime_archive(
         build_aot_archive(&dir, &entries, &toolchain, rings, &archive, &libs_file)?;
     }
     let libs = std::fs::read_to_string(&libs_file)
-        .map_err(|err| format!("reading cached AOT link libs `{}`: {err}", libs_file.display()))?
+        .map_err(|err| {
+            format!(
+                "reading cached AOT link libs `{}`: {err}",
+                libs_file.display()
+            )
+        })?
         .split_whitespace()
         .map(str::to_string)
         .collect();
@@ -203,7 +248,14 @@ fn compose_binary(
     // already built (the binary was copied into the compose dir as its own artifact).
     let binary = dir.join("bin").join(BIN_NAME);
     if !binary.is_file() {
-        build(&dir, &entries, &toolchain, trusted_command_roots, &binary, kind)?;
+        build(
+            &dir,
+            &entries,
+            &toolchain,
+            trusted_command_roots,
+            &binary,
+            kind,
+        )?;
     }
     Ok(binary)
 }
@@ -525,7 +577,15 @@ fn build_aot_archive(
 
 /// A conservative Linux native-link fallback when rustc's `native-static-libs` note is somehow
 /// absent — matches the CLI's stock `default_native_libs`.
-const DEFAULT_AOT_LIBS: &[&str] = &["-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl", "-lc"];
+const DEFAULT_AOT_LIBS: &[&str] = &[
+    "-lgcc_s",
+    "-lutil",
+    "-lrt",
+    "-lpthread",
+    "-lm",
+    "-ldl",
+    "-lc",
+];
 
 /// The composed AOT runtime's manifest: a `staticlib` depending on `noeta-aot-runtime` (with its C
 /// `main` OFF via `default-features = false`, forwarding the program's stdlib rings), `noeta-native`,
@@ -562,7 +622,10 @@ fn aot_shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, rings: &[
         "noeta-aot-runtime = {{ {}, default-features = false, features = [{ring_list}] }}\n",
         src_spec("noeta-aot-runtime")
     ));
-    out.push_str(&format!("noeta-native = {{ {} }}\n", src_spec("noeta-native")));
+    out.push_str(&format!(
+        "noeta-native = {{ {} }}\n",
+        src_spec("noeta-native")
+    ));
     for (n, e) in entries.iter().enumerate() {
         out.push_str(&format!(
             "ext{n} = {{ package = {}, path = {} }}\n",
@@ -905,8 +968,14 @@ mod tests {
         // the embedded program — no `run_cli`, no stapled-runner call.
         let lib = aot_shim_lib_rs(&entries());
         assert!(lib.contains("#[unsafe(no_mangle)]"), "{lib}");
-        assert!(lib.contains("pub extern \"C\" fn main() -> core::ffi::c_int"), "{lib}");
-        assert!(lib.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS);"), "{lib}");
+        assert!(
+            lib.contains("pub extern \"C\" fn main() -> core::ffi::c_int"),
+            "{lib}"
+        );
+        assert!(
+            lib.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS);"),
+            "{lib}"
+        );
         assert!(
             lib.contains("noeta_aot::run_embedded_with_extensions(Box::leak("),
             "{lib}"
@@ -938,7 +1007,10 @@ mod tests {
         let main = shim_main_rs(&entries(), &["imgfx".to_string()], ShimKind::Runner);
         assert!(main.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS);"));
         assert!(main.contains("noeta_runner::run_stapled_with_extensions(Box::leak("));
-        assert!(!main.contains("run_cli"), "the runner base must not call run_cli");
+        assert!(
+            !main.contains("run_cli"),
+            "the runner base must not call run_cli"
+        );
         assert!(!main.contains("trusted_command_roots"));
     }
 }

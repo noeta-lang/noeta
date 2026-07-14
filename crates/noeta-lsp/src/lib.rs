@@ -337,6 +337,172 @@ struct TestItemWire {
     end_line: u32,
 }
 
+// ---- The docs browser (docs-browser arc, slice 1): thin JSON adapters over the unified doc
+// model. Positions are UTF-16 like the other custom requests. Every handler delegates to
+// `DocumentStore::doc_*`, the same model the MCP `docs` tools serve. ----
+
+/// A doc-tree node on the wire (`noeta/docs`, `noeta/docsChildren`): a navigation row plus its
+/// source location when it has one.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocNodeWire {
+    id: String,
+    title: String,
+    kind: String,
+    detail: Option<String>,
+    has_page: bool,
+    expandable: bool,
+    uri: Option<String>,
+    line: Option<u32>,
+    character: Option<u32>,
+}
+
+impl From<noeta_ide::docs::DocNode> for DocNodeWire {
+    fn from(n: noeta_ide::docs::DocNode) -> DocNodeWire {
+        let loc = n.location;
+        DocNodeWire {
+            id: n.id.0,
+            title: n.title,
+            kind: n.kind.as_str().to_string(),
+            detail: n.detail,
+            has_page: n.has_page,
+            expandable: n.expandable,
+            uri: loc.as_ref().map(|l| l.uri.clone()),
+            line: loc.as_ref().map(|l| l.range.start.line),
+            character: loc.as_ref().map(|l| l.range.start.character),
+        }
+    }
+}
+
+/// A cross-reference on the wire.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocXrefWire {
+    id: String,
+    title: String,
+}
+
+/// A rendered doc page on the wire (`noeta/docsPage`).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocPageWire {
+    id: String,
+    title: String,
+    kind: String,
+    signature: Option<String>,
+    markdown: String,
+    uri: Option<String>,
+    line: Option<u32>,
+    character: Option<u32>,
+    xrefs: Vec<DocXrefWire>,
+}
+
+impl From<noeta_ide::docs::DocPage> for DocPageWire {
+    fn from(p: noeta_ide::docs::DocPage) -> DocPageWire {
+        let loc = p.location;
+        DocPageWire {
+            id: p.id.0,
+            title: p.title,
+            kind: p.kind.as_str().to_string(),
+            signature: p.signature,
+            markdown: p.markdown,
+            uri: loc.as_ref().map(|l| l.uri.clone()),
+            line: loc.as_ref().map(|l| l.range.start.line),
+            character: loc.as_ref().map(|l| l.range.start.character),
+            xrefs: p
+                .xrefs
+                .into_iter()
+                .map(|x| DocXrefWire {
+                    id: x.id.0,
+                    title: x.title,
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A search hit on the wire (`noeta/docsSearch`).
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocHitWire {
+    id: String,
+    title: String,
+    kind: String,
+    snippet: String,
+    score: i32,
+}
+
+impl From<noeta_ide::docs::DocHit> for DocHitWire {
+    fn from(h: noeta_ide::docs::DocHit) -> DocHitWire {
+        DocHitWire {
+            id: h.id.0,
+            title: h.title,
+            kind: h.kind.as_str().to_string(),
+            snippet: h.snippet,
+            score: h.score,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocsParams {
+    uri: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocsResult {
+    nodes: Option<Vec<DocNodeWire>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocsChildrenParams {
+    uri: String,
+    id: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocsPageParams {
+    uri: String,
+    id: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocsPageResult {
+    page: Option<DocPageWire>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocsSearchParams {
+    uri: String,
+    query: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocsSearchResult {
+    hits: Option<Vec<DocHitWire>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DocsForSymbolParams {
+    uri: String,
+    line: u32,
+    character: u32,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocsForSymbolResult {
+    id: Option<String>,
+}
+
 /// Pick the position encoding: prefer UTF-8 when the client advertises support for it (LSP 3.17),
 /// so the server can use the compiler's native byte offsets directly; otherwise fall back to the
 /// protocol default, UTF-16.
@@ -445,6 +611,70 @@ impl Backend {
                     })
                     .collect()
             }),
+        })
+    }
+
+    /// `noeta/docs` (docs-browser slice 1): the documentation corpus roots — the docs browser's
+    /// top level. Delegates to the unified model the MCP `docs` tools also serve.
+    async fn noeta_docs(&self, params: DocsParams) -> Result<DocsResult> {
+        let nodes = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.doc_index(&params.uri)
+        };
+        Ok(DocsResult {
+            nodes: Some(nodes.into_iter().map(DocNodeWire::from).collect()),
+        })
+    }
+
+    /// `noeta/docsChildren`: one lazily-unfolded level of the docs tree under a node id.
+    async fn noeta_docs_children(&self, params: DocsChildrenParams) -> Result<DocsResult> {
+        let nodes = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.doc_children(&params.uri, &params.id, Encoding::Utf16)
+        };
+        Ok(DocsResult {
+            nodes: Some(nodes.into_iter().map(DocNodeWire::from).collect()),
+        })
+    }
+
+    /// `noeta/docsPage`: the rendered page (signature + prose + location) for a node id.
+    async fn noeta_docs_page(&self, params: DocsPageParams) -> Result<DocsPageResult> {
+        let page = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.doc_page(&params.uri, &params.id, Encoding::Utf16)
+        };
+        Ok(DocsPageResult {
+            page: page.map(DocPageWire::from),
+        })
+    }
+
+    /// `noeta/docsSearch`: ranked full-text search across the workspace's doc nodes.
+    async fn noeta_docs_search(&self, params: DocsSearchParams) -> Result<DocsSearchResult> {
+        let hits = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.doc_search(&params.uri, &params.query, Encoding::Utf16)
+        };
+        Ok(DocsSearchResult {
+            hits: Some(hits.into_iter().map(DocHitWire::from).collect()),
+        })
+    }
+
+    /// `noeta/docsForSymbol`: the doc node documenting the symbol under the cursor — powers the
+    /// editor's "show docs for symbol" command.
+    async fn noeta_docs_for_symbol(
+        &self,
+        params: DocsForSymbolParams,
+    ) -> Result<DocsForSymbolResult> {
+        let id = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.doc_for_symbol(
+                &params.uri,
+                noeta_ide::Position::new(params.line, params.character),
+                Encoding::Utf16,
+            )
+        };
+        Ok(DocsForSymbolResult {
+            id: id.map(|d| d.0),
         })
     }
 
@@ -1042,6 +1272,13 @@ async fn serve() {
             Backend::noeta_architecture_children,
         )
         .custom_method("noeta/tests", Backend::noeta_tests)
+        // The docs browser (docs-browser slice 1): the doc tree, page bodies, search, and
+        // "docs for the symbol under the cursor" — thin adapters over the unified doc model.
+        .custom_method("noeta/docs", Backend::noeta_docs)
+        .custom_method("noeta/docsChildren", Backend::noeta_docs_children)
+        .custom_method("noeta/docsPage", Backend::noeta_docs_page)
+        .custom_method("noeta/docsSearch", Backend::noeta_docs_search)
+        .custom_method("noeta/docsForSymbol", Backend::noeta_docs_for_symbol)
         .finish();
     Server::new(stdin, stdout, socket).serve(service).await;
 }

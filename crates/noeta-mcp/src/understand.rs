@@ -4,6 +4,7 @@
 
 use crate::analyze::{self, LineIndex, Prepared, SpanLoc};
 use noeta_ast::{Program, Stmt};
+use noeta_ide::docs as model;
 use rmcp::schemars;
 use serde::Serialize;
 
@@ -188,6 +189,181 @@ pub fn project_docs(p: &Prepared) -> ProjectDocsOutput {
     ProjectDocsOutput { docs }
 }
 
+// ---- The docs browser over MCP (docs-browser arc, slice 1). ---------------------------------
+//
+// The agent browses the *same* unified doc model (`noeta_ide::docs`) the LSP docs browser serves —
+// both go through it, so the human's tree and the agent's tree can never drift. This is the MCP
+// adapter: a `DocEnv` over the prepared workspace plus two tools (`doc_browse`, `doc_page`).
+
+/// The [`model::DocEnv`] over an MCP [`Prepared`]: resolve a declaration span to a workspace
+/// location, and name a project source (excluding any dependency source beyond the prepared set).
+struct PreparedDocEnv<'a> {
+    p: &'a Prepared,
+}
+
+impl model::DocEnv for PreparedDocEnv<'_> {
+    fn locate(&self, span: noeta_span::Span) -> Option<model::DocLoc> {
+        let (uri, sl) = analyze::locate_span(self.p, span)?;
+        Some(model::DocLoc {
+            uri,
+            range: noeta_ide::Range {
+                start: noeta_ide::Position {
+                    line: sl.start.line.saturating_sub(1),
+                    character: sl.start.column.saturating_sub(1),
+                },
+                end: noeta_ide::Position {
+                    line: sl.end.line.saturating_sub(1),
+                    character: sl.end.column.saturating_sub(1),
+                },
+            },
+        })
+    }
+
+    fn source_name(&self, source: noeta_span::SourceId) -> Option<String> {
+        self.p
+            .sources
+            .get(source.0 as usize)
+            .map(|s| basename(s.name()))
+    }
+}
+
+fn basename(name: &str) -> String {
+    name.rsplit(['/', '\\']).next().unwrap_or(name).to_string()
+}
+
+/// The linked workspace program (entry + linked modules), falling back to the entry file's bare
+/// parse when linking fails — so the docs browser works on work-in-progress code, exactly as
+/// [`project_docs`] does.
+fn linked_program(p: &Prepared) -> Program {
+    let linked = noeta_db::linked(&p.db, p.ws);
+    match &linked.0 {
+        Ok(program) => program.clone(),
+        Err(_) => noeta_db::ast(&p.db, analyze::entry_program(p))
+            .0
+            .program
+            .clone(),
+    }
+}
+
+/// One node of the doc tree for the agent: a navigation row plus its 1-based source line.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DocNodeOut {
+    /// The node's stable id — pass it back to `doc_browse` (to expand) or `doc_page` (to read).
+    pub id: String,
+    pub title: String,
+    /// `root` / `module` / `function` / `struct` / `class` / `enum` / `variant` / `field` /
+    /// `method` / `interface` / `section`.
+    pub kind: String,
+    /// A short signature-like detail, when useful.
+    pub detail: Option<String>,
+    /// Whether `doc_page` yields a body worth reading for this node.
+    pub has_page: bool,
+    /// Whether `doc_browse` on this id yields further children.
+    pub expandable: bool,
+    /// The declaring source file, when the node has a location.
+    pub file: Option<String>,
+    /// The declaration's 1-based line, when located.
+    pub line: Option<u32>,
+}
+
+impl From<model::DocNode> for DocNodeOut {
+    fn from(n: model::DocNode) -> DocNodeOut {
+        let loc = n.location;
+        DocNodeOut {
+            id: n.id.0,
+            title: n.title,
+            kind: n.kind.as_str().to_string(),
+            detail: n.detail,
+            has_page: n.has_page,
+            expandable: n.expandable,
+            file: loc.as_ref().map(|l| l.uri.clone()),
+            line: loc.as_ref().map(|l| l.range.start.line + 1),
+        }
+    }
+}
+
+/// The `doc_browse` result: the children (or roots) at the requested level.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DocBrowseOutput {
+    pub nodes: Vec<DocNodeOut>,
+}
+
+/// A cross-reference to a related doc node (e.g. an API symbol's "see also" guide pages).
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DocXrefOut {
+    /// The related node's id — pass it to `doc_page`/`doc_browse`.
+    pub id: String,
+    pub title: String,
+}
+
+/// A rendered doc page for the agent.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DocPageOutput {
+    pub found: bool,
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub signature: Option<String>,
+    pub markdown: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    /// Related nodes — for an API symbol, the guide pages that mention it.
+    pub xrefs: Vec<DocXrefOut>,
+}
+
+/// Browse one level of the project's doc tree: the corpus roots when `id` is omitted, else the
+/// children of `id` (root → modules → declarations → members).
+pub fn doc_browse(p: &Prepared, id: Option<&str>) -> DocBrowseOutput {
+    let program = linked_program(p);
+    let env = PreparedDocEnv { p };
+    let ctx = model::DocCtx::new(&env, &program);
+    let nodes = match id {
+        None => model::roots(),
+        Some(id) => model::children(&ctx, &model::DocId(id.to_string())),
+    };
+    DocBrowseOutput {
+        nodes: nodes.into_iter().map(DocNodeOut::from).collect(),
+    }
+}
+
+/// The rendered page (signature + `@doc` prose + location) for a node `id`.
+pub fn doc_page(p: &Prepared, id: &str) -> DocPageOutput {
+    let program = linked_program(p);
+    let env = PreparedDocEnv { p };
+    let ctx = model::DocCtx::new(&env, &program);
+    match model::page(&ctx, &model::DocId(id.to_string())) {
+        Some(page) => DocPageOutput {
+            found: true,
+            id: page.id.0,
+            title: page.title,
+            kind: page.kind.as_str().to_string(),
+            signature: page.signature,
+            markdown: page.markdown,
+            file: page.location.as_ref().map(|l| l.uri.clone()),
+            line: page.location.as_ref().map(|l| l.range.start.line + 1),
+            xrefs: page
+                .xrefs
+                .into_iter()
+                .map(|x| DocXrefOut {
+                    id: x.id.0,
+                    title: x.title,
+                })
+                .collect(),
+        },
+        None => DocPageOutput {
+            found: false,
+            id: id.to_string(),
+            title: String::new(),
+            kind: String::new(),
+            signature: None,
+            markdown: String::new(),
+            file: None,
+            line: None,
+            xrefs: Vec::new(),
+        },
+    }
+}
+
 /// Build the entry file's outline: top-level `fn`/`struct`/`class`/`enum`/`impl`, with fields,
 /// variants, and methods as one level of children, in source order. Walks the parsed AST (available
 /// even when the program has type errors), not the merged workspace, so it describes *this file*.
@@ -368,6 +544,64 @@ mod tests {
         assert_eq!(out.docs[1].scope, "decl");
         assert_eq!(out.docs[1].target.as_deref(), Some("add"));
         assert!(out.docs[1].line >= 3);
+    }
+
+    /// The MCP docs adapter and the LSP `DocumentStore` browse the *same* unified model, so the two
+    /// trees must be structurally identical over identical source — the "cannot drift" guarantee.
+    #[test]
+    fn doc_browse_matches_the_lsp_document_store_tree() {
+        let src = "@doc { Adds two ints. }\n\
+                   fn add(a: int, b: int): int { return a + b }\n\
+                   struct Point { x: int }\n";
+
+        // The MCP path: prepare + doc_browse/doc_page.
+        let p = prepare(&Some(src.to_string()), &None).expect("prepare");
+        let mcp_mods = doc_browse(&p, Some("project")).nodes;
+        let mcp_decls = doc_browse(&p, Some(mcp_mods[0].id.as_str())).nodes;
+
+        // The LSP path: a DocumentStore over the same source.
+        let mut store = noeta_ide::DocumentStore::default();
+        store.open("file:///t.noe", src.to_string());
+        let enc = noeta_ide::Encoding::Utf8;
+        let lsp_mods = store.doc_children("file:///t.noe", "project", enc);
+        let lsp_decls = store.doc_children("file:///t.noe", lsp_mods[0].id.as_str(), enc);
+
+        // Same declarations, same ids/kinds/details/flags (locations may differ by encoding).
+        let mcp_shape: Vec<_> = mcp_decls
+            .iter()
+            .map(|n| {
+                (
+                    n.id.as_str(),
+                    n.title.as_str(),
+                    n.kind.as_str(),
+                    n.has_page,
+                    n.expandable,
+                )
+            })
+            .collect();
+        let lsp_shape: Vec<_> = lsp_decls
+            .iter()
+            .map(|n| {
+                (
+                    n.id.as_str(),
+                    n.title.as_str(),
+                    n.kind.as_str(),
+                    n.has_page,
+                    n.expandable,
+                )
+            })
+            .collect();
+        assert_eq!(mcp_shape, lsp_shape);
+        assert_eq!(mcp_shape[0].0, "project/0/add");
+
+        // And the page bodies agree.
+        let mcp_page = doc_page(&p, "project/0/add");
+        let lsp_page = store
+            .doc_page("file:///t.noe", "project/0/add", enc)
+            .unwrap();
+        assert_eq!(mcp_page.markdown, lsp_page.markdown);
+        assert_eq!(mcp_page.markdown, "Adds two ints.");
+        assert_eq!(mcp_page.signature, lsp_page.signature);
     }
 
     const SRC: &str = "\

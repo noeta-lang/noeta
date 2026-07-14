@@ -1,44 +1,20 @@
-//! The embedded documentation + example corpus and the lexical retrieval over it.
+//! The embedded example corpus and the lexical retrieval over it, plus doc-guide retrieval
+//! delegated to [`noeta_ide::guide`].
 //!
-//! An installed `noeta` binary has no repo beside it, so the docs (`docs/*.md`) and the example
-//! programs (`tests/conformance/**/*.noe`) are baked into the binary at compile time via
-//! `include_dir`. Both are already the toolchain's source of truth (the docs' fenced blocks and the
-//! conformance cases are CI-tested), so embedding them ships the *real* corpus, versioned with the
-//! compiler — exactly what an agent grounding itself in a language it has never seen needs.
+//! The language guides (`docs/*.md`) live in one embedded copy in `noeta-ide` (the docs-browser's
+//! canonical loader), so the editor's docs browser and this server read the same pages through one
+//! parser; the `docs_*` functions here are thin forwarders to it. The example programs
+//! (`tests/conformance/**/*.noe`) are MCP-specific (they back `examples_find` /
+//! `explain_diagnostic`, not the docs browser) and stay embedded here.
 //!
-//! Retrieval is deliberately dependency-free lexical scoring: the corpus is small (≈270 KB of docs,
-//! ≈500 example files), so a term-frequency ranker over pre-split sections is instant and good
-//! enough. An embedding index is a later refinement (see `plans/mcp/README.md`, Deferred).
+//! Retrieval is dependency-free lexical scoring: the example corpus is small (~500 files), so a
+//! term-frequency ranker is instant and good enough. An embedding index is a later refinement.
 
 use include_dir::{Dir, include_dir};
+use noeta_ide::guide;
 use std::sync::OnceLock;
 
-static DOCS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../docs");
 static EXAMPLES_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../tests/conformance");
-
-/// One documentation page (a `docs/*.md` file).
-#[derive(Debug)]
-pub struct DocPage {
-    /// The URL-ish slug (the file stem), e.g. `Type-System`. The key for `docs_get`.
-    pub slug: String,
-    /// The human title — the first `# ` heading, else the slug humanized.
-    pub title: String,
-    /// The full markdown body.
-    pub body: &'static str,
-}
-
-/// One heading-delimited section of a page — the unit of `docs_search`.
-#[derive(Debug)]
-pub struct DocSection {
-    pub page_slug: String,
-    pub page_title: String,
-    /// The section heading (the page title for the pre-heading preamble).
-    pub heading: String,
-    /// A GitHub-style anchor for the heading (empty for the preamble).
-    pub anchor: String,
-    /// The section body text (headings excluded).
-    pub text: String,
-}
 
 /// One example program (a `tests/conformance/**/*.noe` file).
 #[derive(Debug)]
@@ -56,74 +32,14 @@ pub struct Example {
 }
 
 struct Corpus {
-    pages: Vec<DocPage>,
-    sections: Vec<DocSection>,
     examples: Vec<Example>,
 }
 
 fn corpus() -> &'static Corpus {
     static CORPUS: OnceLock<Corpus> = OnceLock::new();
-    CORPUS.get_or_init(|| {
-        let pages = load_pages();
-        let sections = pages.iter().flat_map(split_sections).collect();
-        let examples = load_examples();
-        Corpus {
-            pages,
-            sections,
-            examples,
-        }
+    CORPUS.get_or_init(|| Corpus {
+        examples: load_examples(),
     })
-}
-
-fn load_pages() -> Vec<DocPage> {
-    let mut pages: Vec<DocPage> = DOCS_DIR
-        .files()
-        .filter(|f| f.path().extension().is_some_and(|e| e == "md"))
-        .filter_map(|f| {
-            let slug = f.path().file_stem()?.to_str()?.to_string();
-            // Skip GitHub-wiki chrome (`_Sidebar`, `_Footer`, `_Header`) — not real content.
-            if slug.starts_with('_') {
-                return None;
-            }
-            let body = f.contents_utf8()?;
-            let title = first_heading(body).unwrap_or_else(|| humanize(&slug));
-            Some(DocPage { slug, title, body })
-        })
-        .collect();
-    pages.sort_by(|a, b| a.slug.cmp(&b.slug));
-    pages
-}
-
-fn split_sections(page: &DocPage) -> Vec<DocSection> {
-    let mut sections = Vec::new();
-    let mut heading = page.title.clone();
-    let mut anchor = String::new();
-    let mut text = String::new();
-    let flush = |sections: &mut Vec<DocSection>, heading: &str, anchor: &str, text: &str| {
-        if !text.trim().is_empty() {
-            sections.push(DocSection {
-                page_slug: page.slug.clone(),
-                page_title: page.title.clone(),
-                heading: heading.to_string(),
-                anchor: anchor.to_string(),
-                text: text.trim().to_string(),
-            });
-        }
-    };
-    for line in page.body.lines() {
-        if let Some(h) = line.strip_prefix('#') {
-            let h = h.trim_start_matches('#').trim();
-            flush(&mut sections, &heading, &anchor, &text);
-            heading = h.to_string();
-            anchor = github_anchor(h);
-            text = String::new();
-        } else {
-            text.push_str(line);
-            text.push('\n');
-        }
-    }
-    flush(&mut sections, &heading, &anchor, &text);
-    sections
 }
 
 fn load_examples() -> Vec<Example> {
@@ -166,35 +82,6 @@ fn collect_examples(dir: &'static Dir<'_>, out: &mut Vec<Example>) {
 }
 
 // ---- text helpers ----
-
-fn first_heading(body: &str) -> Option<String> {
-    body.lines().find_map(|l| {
-        l.strip_prefix("# ")
-            .map(|h| h.trim().to_string())
-            .filter(|h| !h.is_empty())
-    })
-}
-
-fn humanize(slug: &str) -> String {
-    slug.replace(['-', '_'], " ")
-}
-
-/// A GitHub-flavored heading anchor: lowercase, spaces → `-`, drop other punctuation.
-fn github_anchor(heading: &str) -> String {
-    heading
-        .to_lowercase()
-        .chars()
-        .filter_map(|c| {
-            if c.is_alphanumeric() {
-                Some(c)
-            } else if c == ' ' || c == '-' {
-                Some('-')
-            } else {
-                None
-            }
-        })
-        .collect()
-}
 
 /// The leading `//`-comment block of a `.noe` file — the case's own prose description — with the
 /// comment markers and the machine-readable `expect:` directives stripped.
@@ -262,7 +149,10 @@ fn count_occurrences(haystack_lower: &str, needle: &str) -> u32 {
 
 // ---- public retrieval API ----
 
-/// A `docs_search` hit.
+/// A `docs_search` hit (already ranked best-first). Mirrors the fields the MCP tool surfaces from
+/// [`noeta_ide::guide::GuideHit`], kept as the tool's own wire type so the tool layer stays
+/// decoupled from the engine type. (The ranking score is internal to the guide ranker and not
+/// surfaced, so it is dropped here.)
 #[derive(Debug, Clone)]
 pub struct DocHit {
     pub page: String,
@@ -270,66 +160,33 @@ pub struct DocHit {
     pub heading: String,
     pub anchor: String,
     pub snippet: String,
-    pub score: u32,
 }
 
-/// Rank doc sections against `query`; returns the top `limit` hits (score-descending).
+/// Rank guide sections against `query`; returns the top `limit` hits (best-first) — delegated to
+/// the shared [`noeta_ide::guide`] corpus (one embedded copy, one ranker, shared with the editor's
+/// docs browser).
 pub fn search_docs(query: &str, limit: usize) -> Vec<DocHit> {
-    let terms = terms(query);
-    if terms.is_empty() {
-        return Vec::new();
-    }
-    let mut hits: Vec<DocHit> = corpus()
-        .sections
-        .iter()
-        .filter_map(|s| {
-            let title_l = s.page_title.to_lowercase();
-            let heading_l = s.heading.to_lowercase();
-            let text_l = s.text.to_lowercase();
-            let mut score = 0;
-            for t in &terms {
-                score += count_occurrences(&title_l, t) * 4;
-                score += count_occurrences(&heading_l, t) * 3;
-                score += count_occurrences(&text_l, t);
-            }
-            (score > 0).then(|| DocHit {
-                page: s.page_slug.clone(),
-                title: s.page_title.clone(),
-                heading: s.heading.clone(),
-                anchor: s.anchor.clone(),
-                snippet: snippet(&s.text, &terms),
-                score,
-            })
+    guide::search(query, limit)
+        .into_iter()
+        .map(|h| DocHit {
+            page: h.page,
+            title: h.title,
+            heading: h.heading,
+            anchor: h.anchor,
+            snippet: h.snippet,
         })
-        .collect();
-    hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.page.cmp(&b.page)));
-    hits.truncate(limit);
-    hits
-}
-
-/// The full markdown of the page whose slug or title matches `name` (case-insensitive). Falls back
-/// to a substring match so `types` finds `Type-System`.
-pub fn get_doc(name: &str) -> Option<&'static str> {
-    let want = name.to_lowercase();
-    let pages = &corpus().pages;
-    pages
-        .iter()
-        .find(|p| p.slug.to_lowercase() == want || p.title.to_lowercase() == want)
-        .or_else(|| {
-            pages.iter().find(|p| {
-                p.slug.to_lowercase().contains(&want) || p.title.to_lowercase().contains(&want)
-            })
-        })
-        .map(|p| p.body)
-}
-
-/// The list of `(slug, title)` for every doc page — powers resource listing and a bare `docs_get`.
-pub fn doc_index() -> Vec<(String, String)> {
-    corpus()
-        .pages
-        .iter()
-        .map(|p| (p.slug.clone(), p.title.clone()))
         .collect()
+}
+
+/// The full markdown of the guide page whose slug or title matches `name` (see
+/// [`noeta_ide::guide::get_page`]).
+pub fn get_doc(name: &str) -> Option<&'static str> {
+    guide::get_page(name)
+}
+
+/// The `(slug, title)` of every guide page — powers resource listing and a bare `docs_get`.
+pub fn doc_index() -> Vec<(String, String)> {
+    guide::index()
 }
 
 /// An `examples_find` hit.
@@ -412,14 +269,9 @@ pub fn get_example(feature: &str, name: &str) -> Option<&'static str> {
         .map(|e| e.code)
 }
 
-/// Doc pages whose body mentions `code`, as `(slug, title)`. Powers `explain_diagnostic`'s links.
+/// Guide pages whose body mentions `code`, as `(slug, title)`. Powers `explain_diagnostic`'s links.
 pub fn docs_mentioning(code: &str) -> Vec<(String, String)> {
-    corpus()
-        .pages
-        .iter()
-        .filter(|p| p.body.contains(code))
-        .map(|p| (p.slug.clone(), p.title.clone()))
-        .collect()
+    guide::pages_mentioning(code)
 }
 
 fn example_hit(e: &Example, score: u32) -> ExampleHit {
@@ -431,34 +283,6 @@ fn example_hit(e: &Example, score: u32) -> ExampleHit {
         codes: e.codes.clone(),
         score,
     }
-}
-
-/// A short context snippet from `text`: the run of lines around the first line containing the most
-/// query terms, capped so a hit stays token-frugal.
-fn snippet(text: &str, terms: &[String]) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    let best = lines
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, line)| {
-            let l = line.to_lowercase();
-            terms.iter().filter(|t| l.contains(t.as_str())).count()
-        })
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-    let start = best.saturating_sub(1);
-    let end = (best + 2).min(lines.len());
-    let mut out = lines[start..end].join(" ").trim().to_string();
-    const CAP: usize = 320;
-    if out.len() > CAP {
-        let mut cut = CAP;
-        while !out.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        out.truncate(cut);
-        out.push('…');
-    }
-    out
 }
 
 #[cfg(test)]
@@ -480,11 +304,11 @@ mod tests {
 
     #[test]
     fn docs_search_ranks_relevant_pages() {
+        // Delegates to the shared guide ranker, which returns hits best-first.
         let hits = search_docs("pattern matching", 5);
         assert!(!hits.is_empty(), "expected hits for 'pattern matching'");
         assert!(!hits[0].snippet.is_empty());
-        // Scores are non-increasing.
-        assert!(hits.windows(2).all(|w| w[0].score >= w[1].score));
+        assert!(hits.len() <= 5);
     }
 
     #[test]

@@ -603,12 +603,86 @@ const DURATION_METHODS: &[ExtFn] = &[ExtFn {
     ret: Concrete(Str),
 }];
 
+/// Prose for the datetime extern types (docs-browser Arc 2 A3), keyed by method name.
+const INSTANT_DOCS: &[(&str, &str)] = &[
+    (
+        "add",
+        "This instant plus a time `Duration` (hours or smaller — calendar units need a zone first).",
+    ),
+    ("sub", "This instant minus a time `Duration`."),
+    ("diff", "The `Duration` from this instant to another."),
+    ("is_before", "Whether this instant is before another."),
+    ("is_after", "Whether this instant is after another."),
+    (
+        "in_zone",
+        "This instant resolved into a `Zoned` civil datetime in the given IANA timezone.",
+    ),
+    (
+        "format",
+        "Format this instant with the given format string.",
+    ),
+    ("unix_ms", "Milliseconds since the Unix epoch."),
+];
+
+const ZONED_DOCS: &[(&str, &str)] = &[
+    ("add", "This datetime plus a `Duration` (DST-correct)."),
+    ("sub", "This datetime minus a `Duration`."),
+    ("is_before", "Whether this datetime is before another."),
+    ("is_after", "Whether this datetime is after another."),
+    (
+        "to_instant",
+        "The absolute `Instant` this datetime refers to.",
+    ),
+    ("zone", "The IANA timezone name."),
+    (
+        "format",
+        "Format this datetime with the given format string.",
+    ),
+    ("year", "The year field."),
+    ("month", "The month field (1–12)."),
+    ("day", "The day-of-month field."),
+    ("hour", "The hour field (0–23)."),
+    ("minute", "The minute field (0–59)."),
+    ("second", "The second field (0–59)."),
+    ("weekday", "The day of the week (1 = Monday … 7 = Sunday)."),
+];
+
+const DURATION_METHOD_DOCS: &[(&str, &str)] = &[(
+    "to_string",
+    "The ISO-8601 duration string (`PT1H30M`, `P2DT3H`).",
+)];
+
+/// Prose for `std.datetime` (docs-browser Arc 2 A3), keyed by function name.
+const DATETIME_DOCS: &[(&str, &str)] = &[
+    ("now", "The current wall-clock time as an `Instant`."),
+    (
+        "from_unix_ms",
+        "The `Instant` at `ms` milliseconds since the Unix epoch.",
+    ),
+    (
+        "parse",
+        "Parse an ISO-8601 / RFC-3339 timestamp string into an `Instant`; `none` if it is not a \
+         valid timestamp.",
+    ),
+    (
+        "seconds",
+        "A `Duration` of `n` seconds, for offsetting an `Instant`.",
+    ),
+    ("minutes", "A `Duration` of `n` minutes."),
+    ("hours", "A `Duration` of `n` hours."),
+    ("days", "A `Duration` of `n` days."),
+    ("weeks", "A `Duration` of `n` weeks."),
+    ("months", "A `Duration` of `n` calendar months."),
+    ("years", "A `Duration` of `n` calendar years."),
+];
+
 const DATETIME_MODULES: &[ExtModule] = &[ExtModule {
     name: "datetime",
     functions: DATETIME_FNS,
     dispatch: datetime_dispatch,
     // Ring-attributed so the AOT footprint scan drops jiff from a binary that never imports it.
     ring: Some("ring-datetime"),
+    docs: DATETIME_DOCS,
     ..ExtModule::DEFAULTS
 }];
 
@@ -618,6 +692,7 @@ const DATETIME_TYPES: &[ExtType] = &[
         namespace: "std.datetime",
         methods: INSTANT_METHODS,
         dispatch: instant_method_dispatch,
+        docs: INSTANT_DOCS,
         ..ExtType::DEFAULTS
     },
     ExtType {
@@ -625,6 +700,7 @@ const DATETIME_TYPES: &[ExtType] = &[
         namespace: "std.datetime",
         methods: ZONED_METHODS,
         dispatch: zoned_method_dispatch,
+        docs: ZONED_DOCS,
         ..ExtType::DEFAULTS
     },
     ExtType {
@@ -632,6 +708,7 @@ const DATETIME_TYPES: &[ExtType] = &[
         namespace: "std.datetime",
         methods: DURATION_METHODS,
         dispatch: duration_method_dispatch,
+        docs: DURATION_METHOD_DOCS,
         ..ExtType::DEFAULTS
     },
 ];

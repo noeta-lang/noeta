@@ -249,6 +249,29 @@ pub struct PositionArgs {
     pub column: u32,
 }
 
+/// Arguments to `doc_browse`: a source plus an optional node `id` to expand (roots when omitted).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DocBrowseArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// The node id to expand (from a previous `doc_browse`). Omit to list the corpus roots.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// Arguments to `doc_page`: a source plus the required node `id` to render.
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct DocPageArgs {
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    /// The node id to render (from `doc_browse`).
+    pub id: String,
+}
+
 /// Arguments to `debug_start`: a source, optional breakpoints, and the host choice.
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 pub struct DebugStartArgs {
@@ -640,6 +663,36 @@ docs, or to answer \"where is X documented?\"."
     ) -> Result<Json<understand::ProjectDocsOutput>, ErrorData> {
         let prepared = analyze::prepare(&args.source, &args.file)?;
         Ok(Json(understand::project_docs(&prepared)))
+    }
+
+    /// Browse the project's documentation tree — the same model the editor's docs browser shows.
+    #[tool(
+        description = "Browse the project's documentation as a navigable tree — the same unified \
+model the editor's docs browser shows, so the agent and the human see the same docs. Omit `id` for \
+the corpus roots; pass a node's `id` to expand one level (root → source modules → declarations → \
+members). Each node reports whether it `has_page` (read it with `doc_page`) and whether it is \
+`expandable`. Works from a parse alone, so it reads work-in-progress code."
+    )]
+    async fn doc_browse(
+        &self,
+        Parameters(args): Parameters<DocBrowseArgs>,
+    ) -> Result<Json<understand::DocBrowseOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(understand::doc_browse(&prepared, args.id.as_deref())))
+    }
+
+    /// Read one documentation page — a declaration's signature and `@doc` prose.
+    #[tool(
+        description = "Render one node of the project documentation tree: its signature (for a \
+declaration or member) and its `@doc` prose, with the source location. Pass an `id` from \
+`doc_browse`. `found: false` when the id names nothing in the current program."
+    )]
+    async fn doc_page(
+        &self,
+        Parameters(args): Parameters<DocPageArgs>,
+    ) -> Result<Json<understand::DocPageOutput>, ErrorData> {
+        let prepared = analyze::prepare(&args.source, &args.file)?;
+        Ok(Json(understand::doc_page(&prepared, &args.id)))
     }
 
     /// The pretty-printed AST — the parsed syntax tree with spans.
