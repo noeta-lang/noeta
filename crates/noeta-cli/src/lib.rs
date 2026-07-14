@@ -980,12 +980,26 @@ fn cmd_publish(
                     .parent()
                     .map(std::path::Path::to_path_buf)
                     .unwrap_or_else(|| PathBuf::from("."));
-                let docs_json = match native_docs {
-                    Some(json) => Ok(json),
-                    None => docgen::package_docs_json(&pkg_dir).map(|(json, _)| json),
+                let docs = match native_docs {
+                    // A native package's docs are pre-generated JSON; count declarations from its
+                    // module items (the pure-Noeta path gets an exact count from docgen).
+                    Some(json) => {
+                        let decls = serde_json::from_str::<serde_json::Value>(&json)
+                            .ok()
+                            .and_then(|d| d.get("modules").and_then(|m| m.as_array()).cloned())
+                            .map_or(0, |mods| {
+                                mods.iter()
+                                    .map(|m| {
+                                        m.get("items").and_then(|i| i.as_array()).map_or(0, Vec::len)
+                                    })
+                                    .sum()
+                            });
+                        Ok((json, decls))
+                    }
+                    None => docgen::package_docs_json(&pkg_dir).map(|(json, g)| (json, g.decls)),
                 };
-                match docs_json {
-                    Ok(docs_json) => match index.put_docs(&name, &version, &docs_json) {
+                match docs {
+                    Ok((docs_json, decls)) => match index.put_docs(&name, &version, &docs_json) {
                         Ok(()) => {
                             let modules = serde_json::from_str::<serde_json::Value>(&docs_json)
                                 .ok()
@@ -993,7 +1007,11 @@ fn cmd_publish(
                                     d.get("modules").and_then(|m| m.as_array()).map(|a| a.len())
                                 })
                                 .unwrap_or(0);
-                            println!("docs uploaded ({modules} module{})", plural(modules));
+                            println!(
+                                "docs uploaded ({modules} module{}, {decls} declaration{})",
+                                plural(modules),
+                                plural(decls)
+                            );
                         }
                         Err(err) => eprintln!("lang: warning: docs not uploaded: {err}"),
                     },
