@@ -269,7 +269,14 @@ fn a_swap_lands_under_a_live_force_jit_engine() {
         panic!("a body edit must be swappable");
     };
     let mailbox: HotSwapMailbox = std::sync::Arc::new(HotChannel::default());
-    mailbox.plans.lock().unwrap().push(plan);
+    // The mailbox queues `HotFragment`s (server-hmr F5): the watcher owns the compiler and hands the
+    // VM only the applied-swap payload, mirroring `noeta_cli::watch`'s deposit.
+    mailbox.plans.lock().unwrap().push(noeta_vm::HotFragment {
+        fragment: plan.fragment,
+        rerun_top_level: plan.rerun_top_level,
+        added: plan.added,
+        changed: plan.changed,
+    });
 
     let (result, trace) = VmBackend::new().run_module_hot_forced_jit(
         &module,
