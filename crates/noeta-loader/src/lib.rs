@@ -144,6 +144,12 @@ pub struct DepPackage {
     /// This package's local dependency keys → the global segment of the package each resolves to
     /// (transitive linking, P2.4). Empty for a leaf package; then re-rooting is just `root` → `key`.
     pub dep_renames: std::collections::BTreeMap<String, String>,
+    /// Whether this package carries a **native** entry crate (package-manager Phase 3). A native
+    /// package's modules are provided by its Rust extension, registered only in the *composed*
+    /// toolchain — so the host loader cannot see them and must **retain** (not flag) a `use` under
+    /// its key; the composed checker validates the members. A pure-Noeta package has all its modules
+    /// in the link pool, so a `use` under its key that resolves to nothing is a genuine typo.
+    pub native: bool,
 }
 
 /// Re-root a namespace/use path in place: replace its leading segment per the rules
@@ -389,7 +395,20 @@ pub fn link_with_deps(
 
     let sibling_refs: Vec<&Program> = sibling_programs.iter().collect();
     let dep_refs: Vec<&Program> = dep_programs.iter().collect();
-    let program = link_parsed_with_deps(&entry, &entry_parsed.program, &sibling_refs, &dep_refs)?;
+    // A resolved dependency graph is complete knowledge: the always-legitimate non-std roots are the
+    // declared native-package keys (their members live in the composed toolchain, not the link pool).
+    let native_roots: Vec<String> = deps
+        .iter()
+        .filter(|d| d.native)
+        .map(|d| d.key.clone())
+        .collect();
+    let program = link_parsed_with_deps(
+        &entry,
+        &entry_parsed.program,
+        &sibling_refs,
+        &dep_refs,
+        Some(&native_roots),
+    )?;
     Ok(Linked {
         program,
         entry,
@@ -454,7 +473,9 @@ pub fn link_parsed(
     entry_program: &Program,
     modules: &[&Program],
 ) -> Result<Program, Vec<LoadDiagnostic>> {
-    link_core(entry, entry_program, modules, &[])
+    // Sibling-only linking has no resolved dependency graph, so it is lenient: it can flag a missing
+    // intra-project module but must not adjudicate foreign roots (see [`RetainPolicy`]).
+    link_core(entry, entry_program, modules, &[], RetainPolicy::Lenient)
 }
 
 /// The cross-package variant (package-manager P2.1): like [`link_parsed`], but `dep_modules` are the
@@ -465,15 +486,27 @@ pub fn link_parsed(
 /// ([`link_with_deps`]) does that. Every std import inside a dependency (`use std.…`) resolves against
 /// no module here and is retained (deduped) so the compiler binds it downstream, exactly as an
 /// entry's std imports are.
+/// `native_roots` gates dependency-import strictness (module-namespaces): `Some(roots)` means the
+/// caller resolved the **complete** dependency graph (the CLI), so every legitimate import root is
+/// known — std extensions plus these declared native-package roots — and any other unresolved import
+/// is an error. `None` means the caller (the IDE `linked` query) lacks that graph and stays lenient.
 pub fn link_parsed_with_deps(
     entry: &Source,
     entry_program: &Program,
     siblings: &[&Program],
     dep_modules: &[&Program],
+    native_roots: Option<&[String]>,
 ) -> Result<Program, Vec<LoadDiagnostic>> {
     // Dependency modules join the resolution pool; only they (not siblings) also drive imports.
     let pool: Vec<&Program> = siblings.iter().chain(dep_modules).copied().collect();
-    link_core(entry, entry_program, &pool, dep_modules)
+    let native: HashSet<String> = native_roots.unwrap_or_default().iter().cloned().collect();
+    let retain = match native_roots {
+        Some(_) => RetainPolicy::Complete {
+            native_roots: &native,
+        },
+        None => RetainPolicy::Lenient,
+    };
+    link_core(entry, entry_program, &pool, dep_modules, retain)
 }
 
 /// Where a merged top-level name came from — its local declaration, or the namespace an import
@@ -496,7 +529,11 @@ fn link_core(
     entry_program: &Program,
     pool: &[&Program],
     dep_drivers: &[&Program],
+    retain: RetainPolicy,
 ) -> Result<Program, Vec<LoadDiagnostic>> {
+    // For the complete policy: the always-retained roots are the std extensions. The loader is
+    // already global-registry-coupled (verbatim-tier names below), so the default seed is the lens.
+    let reg = noeta_stdlib::registry::default_seeded();
     // A module contributes only if it declares a namespace to resolve against.
     let module_views: Vec<ModuleView> = pool
         .iter()
@@ -513,6 +550,17 @@ fn link_core(
     // one module per namespace); the entry's own statements with the entry's map. Both are empty for
     // a non-namespaced module, so single-namespace programs stay byte-identical.
     let entry_ns = module_namespace(entry_program).unwrap_or_default();
+
+    // The **root segments of this project's own namespace tree** — the entry's namespace root plus
+    // every loaded module's. Under the lenient policy, an unresolved `use` whose root is one of these
+    // is an *intra-project* reference to a sibling that does not exist (`use App.Models.User` with no
+    // `App.Models` module): a genuine error. Anything else is retained (the lenient path lacks the
+    // dependency graph, so it must not adjudicate foreign roots). See [`RetainPolicy`].
+    let project_roots: HashSet<String> = std::iter::once(&entry_ns)
+        .chain(module_views.iter().map(|mv| &mv.namespace))
+        .filter_map(|ns| ns.first().cloned())
+        .collect();
+
     let entry_map = build_module_map(&entry_ns, &entry_program.stmts, &module_views);
     let module_maps: std::collections::HashMap<Vec<String>, qualify::QMap> = module_views
         .iter()
@@ -588,7 +636,23 @@ fn link_core(
                     // A different declaration under the same local name — ambiguous.
                     Some(_) => errors.push(collision_error(entry, path, name)),
                 },
-                Resolution::NoModule => unresolved.push(name.clone()),
+                // No loaded module declares this namespace. Whether that is an error depends on how
+                // much of the dependency graph the caller knows — see [`RetainPolicy`]. Either way,
+                // a std extension (`std.http`) and a declared native-dependency root are always
+                // retained (resolved downstream by the checker/compiler or the composed toolchain).
+                Resolution::NoModule => {
+                    let root = path.first();
+                    let retained = match &retain {
+                        RetainPolicy::Lenient => !root.is_some_and(|r| project_roots.contains(r)),
+                        RetainPolicy::Complete { native_roots } => root
+                            .is_some_and(|r| reg.is_extension_root(r) || native_roots.contains(r)),
+                    };
+                    if retained {
+                        unresolved.push(name.clone());
+                    } else {
+                        errors.push(unknown_module_error(entry, path, name));
+                    }
+                }
                 Resolution::Private => {
                     errors.push(import_error(entry, path, name, Visibility::Private))
                 }
@@ -814,6 +878,23 @@ fn build_module_map(
     map
 }
 
+/// How the linker treats a `use` whose namespace no loaded module declares — the choice turns on
+/// how much of the dependency graph the caller can see, which is what makes "unknown import" a
+/// reliable error in one context and a false positive in another.
+enum RetainPolicy<'a> {
+    /// **Incomplete** dependency knowledge (single file, sibling-only linking, the IDE `linked`
+    /// query): only an *intra-project* import — a root the project itself declares — can be judged
+    /// missing; every other unresolved `use` is retained, because it may be a dependency this path
+    /// never resolved. Keeps the loader from flagging foreign roots it cannot see.
+    Lenient,
+    /// **Complete** dependency graph (the CLI, with a resolved manifest): every legitimate import
+    /// root is known — the std extensions plus each declared native-dependency root (`native_roots`,
+    /// whose members the composed toolchain validates). Anything else that resolves to no module is
+    /// a genuine error: a missing intra-project module, a typo'd dependency module, or a `use` of an
+    /// undeclared package — the case foreign, hard-to-spell package names most often hit.
+    Complete { native_roots: &'a HashSet<String> },
+}
+
 /// The outcome of resolving one imported name against the loaded modules.
 enum Resolution {
     /// The namespace exists and exports the name (a `pub` declaration): merge this clone. Boxed
@@ -868,6 +949,22 @@ fn import_error(
     LoadDiagnostic {
         source: entry.clone(),
         diagnostic: Diagnostic::error(DiagnosticCode::UnresolvedImport, name.span, message),
+    }
+}
+
+/// Build the `E0019` diagnostic for a `use` whose module namespace is declared nowhere in the
+/// linked workspace — a typo'd or missing sibling/dependency module (`use App.Modles.User`). Only
+/// raised in a complete link (the linker sees the whole pool); a single-file check never runs the
+/// linker, so an isolated file's forward references stay lenient.
+fn unknown_module_error(entry: &Source, path: &[String], name: &UseName) -> LoadDiagnostic {
+    let namespace = path.join(".");
+    LoadDiagnostic {
+        source: entry.clone(),
+        diagnostic: Diagnostic::error(
+            DiagnosticCode::UnresolvedImport,
+            name.span,
+            format!("no module `{namespace}` in this project"),
+        ),
     }
 }
 
@@ -971,6 +1068,7 @@ mod tests {
                 "namespace http.client;\npub class Client {\n  base: string\n}\n",
             )],
             dep_renames: Default::default(),
+            native: false,
         };
         let entry = "use webclient.client.Client;\nc = Client { base: \"x\" };\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
@@ -982,6 +1080,83 @@ mod tests {
                 .stmts
                 .iter()
                 .any(|s| matches!(s, Stmt::Use { path, .. } if path == &["webclient".to_string(), "client".to_string()]))
+        );
+    }
+
+    #[test]
+    fn a_typoed_dependency_module_is_an_error() {
+        // The dependency provides `webclient.client`, so `webclient` is one of the linked project's
+        // roots. A typo in the module path (`webclient.clientt`) resolves to nothing under a known
+        // root — a hard error (E0019), not a silent opaque stub. Foreign-package imports are exactly
+        // the ones you fat-finger, and the loader *does* validate them (they are in the pool).
+        let dep = DepPackage {
+            key: "webclient".to_string(),
+            root: "http".to_string(),
+            modules: vec![module(
+                "client.noe",
+                "namespace http.client;\npub class Client {\n  base: string\n}\n",
+            )],
+            dep_renames: Default::default(),
+            native: false,
+        };
+        let entry = "use webclient.clientt.Client;\nc = Client { base: \"x\" };\n";
+        let errors =
+            link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.diagnostic.code == DiagnosticCode::UnresolvedImport),
+            "expected E0019 for the typo'd dependency module `webclient.clientt`, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_declared_native_dep_root_is_retained() {
+        // A native package contributes no source modules (its members live in its Rust extension,
+        // composed in downstream), so `use imgfx.fx` resolves to nothing in the pool. Because `imgfx`
+        // is a *declared* native dependency (`native: true`), the loader retains the import for the
+        // composed toolchain to validate — it does not flag it.
+        let dep = DepPackage {
+            key: "imgfx".to_string(),
+            root: "imgfx".to_string(),
+            modules: Vec::new(),
+            dep_renames: Default::default(),
+            native: true,
+        };
+        let entry = "use imgfx.fx;\necho fx.double(21);\n";
+        let linked =
+            link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).expect("retained");
+        assert!(
+            linked
+                .program
+                .stmts
+                .iter()
+                .any(|s| matches!(s, Stmt::Use { path, .. } if path == &["imgfx".to_string()])),
+            "the declared native import `use imgfx.fx` should be retained"
+        );
+    }
+
+    #[test]
+    fn an_undeclared_package_root_is_an_error() {
+        // With a resolved dependency graph in hand (the complete policy), a `use` under a root that
+        // is neither std nor any declared dependency — a misspelled package name (`imgtx` for
+        // `imgfx`) or a package never added to the manifest — is an error, not a silent stub. This is
+        // the foreign-package typo case: exactly what you cannot catch by eye.
+        let dep = DepPackage {
+            key: "imgfx".to_string(),
+            root: "imgfx".to_string(),
+            modules: Vec::new(),
+            dep_renames: Default::default(),
+            native: true,
+        };
+        let entry = "use imgtx.fx;\necho fx.double(21);\n";
+        let errors =
+            link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.diagnostic.code == DiagnosticCode::UnresolvedImport),
+            "expected E0019 for the undeclared package root `imgtx`, got {errors:?}"
         );
     }
 
@@ -1004,6 +1179,7 @@ mod tests {
                 ),
             ],
             dep_renames: Default::default(),
+            native: false,
         };
         let entry = "use webclient.client.Client;\nc = Client { body: Body { text: \"hi\" } };\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
@@ -1026,6 +1202,7 @@ mod tests {
                 "namespace http.core;\npub class Ping {\n  n: int\n}\n",
             )],
             dep_renames: Default::default(),
+            native: false,
         };
         let b = DepPackage {
             key: "beta".to_string(),
@@ -1035,6 +1212,7 @@ mod tests {
                 "namespace http.core;\npub class Pong {\n  n: int\n}\n",
             )],
             dep_renames: Default::default(),
+            native: false,
         };
         let entry =
             "use alpha.core.Ping;\nuse beta.core.Pong;\np = Ping { n: 1 };\nq = Pong { n: 2 };\n";
@@ -1059,6 +1237,7 @@ mod tests {
                 "namespace app.core;\nuse jsonlib.parse.Value;\npub class Widget {\n  v: Value\n}\n",
             )],
             dep_renames: app_renames,
+            native: false,
         };
         let json = DepPackage {
             key: "pkg_json".to_string(),
@@ -1068,6 +1247,7 @@ mod tests {
                 "namespace json.parse;\npub class Value {\n  n: int\n}\n",
             )],
             dep_renames: Default::default(),
+            native: false,
         };
         let entry = "use app.core.Widget;\nw = Widget { v: Value { n: 1 } };\n";
         let linked = link_with_deps("main.noe", entry, &[], &[app, json]).unwrap();
@@ -1090,6 +1270,7 @@ mod tests {
                 "namespace shapes.circle;\nuse std.math.sqrt;\npub fn area(r: float): float { return 3.14 * r * r; }\n",
             )],
             dep_renames: Default::default(),
+            native: false,
         };
         let entry = "use geo.circle.area;\necho area(2.0);\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
@@ -1149,16 +1330,38 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_use_falls_back_to_opaque_stub() {
-        // No sibling provides `App.Models.User`, so the `use` is kept for the opaque-stub fallback.
-        let entry = "use App.Models.User;\nu = User { name: \"Ada\" };\n";
-        let linked = link("main.noe", entry, &[]).unwrap();
+    fn unresolved_intra_project_module_is_an_error() {
+        // The entry lives under `namespace App.Orders`, so `App` is one of the project's own roots.
+        // No sibling provides `App.Models`, so `use App.Models.User` is an intra-project reference to
+        // a module that does not exist — a hard error (E0019), not a silent opaque stub (the
+        // check/run divergence for user modules).
+        let entry =
+            "namespace App.Orders;\nuse App.Models.User;\npub fn make(): ?User { return none; }\n";
+        let errors = link("main.noe", entry, &[]).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.diagnostic.code == DiagnosticCode::UnresolvedImport),
+            "expected E0019 for the missing intra-project module `App.Models`, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn unresolved_external_root_is_retained_not_flagged() {
+        // A `use` under a root that is NOT part of the project's namespace tree — an external/native
+        // package (`imgfx`, resolved by the composed runtime) — must be retained, never flagged: the
+        // loader cannot adjudicate roots it does not own. Here the entry declares `App.Orders`, so
+        // `imgfx` is foreign; the link succeeds and keeps the `use` for downstream resolution.
+        let entry = "namespace App.Orders;\nuse imgfx.fx;\npub fn go(): int { return 0; }\n";
+        let linked =
+            link("main.noe", entry, &[]).expect("external-root use is retained, not an error");
         assert!(
             linked
                 .program
                 .stmts
                 .iter()
-                .any(|s| matches!(s, Stmt::Use { .. }))
+                .any(|s| matches!(s, Stmt::Use { path, .. } if path == &["imgfx".to_string()])),
+            "the foreign `use imgfx.fx` should be retained"
         );
     }
 
@@ -1361,6 +1564,7 @@ mod tests {
                  pub fn twice(n: int): int { return helper(n); }\n",
             )],
             dep_renames: Default::default(),
+            native: false,
         };
         let entry = "use mathx.lib.twice;\necho twice(21);\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
@@ -1385,6 +1589,7 @@ mod tests {
                  pub fn origin(): Point { return Point { x: 0, y: 0 }; }\n",
             )],
             dep_renames: Default::default(),
+            native: false,
         };
         let entry = "use widgets.lib.origin;\np = origin();\necho p.x;\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
@@ -1410,6 +1615,7 @@ mod tests {
                  pub fn go(n: int): Inner { return wrap(n); }\n",
             )],
             dep_renames: Default::default(),
+            native: false,
         };
         let entry = "use chain.lib.go;\ni = go(3);\necho i.v;\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();

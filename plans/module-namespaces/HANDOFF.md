@@ -197,3 +197,29 @@ echo "status ${r.status()}"
 3. **Did-you-mean covers the linker's full module pool** — stdlib/extension
    modules, group submodules, member functions, AND user/package module names
    gathered from the linked pool. Genuinely helpful, not stdlib-only.
+
+## Slice 2 addendum — external-package validation (user-directed, in scope)
+
+The opaque-stub closure surfaced that **external/foreign package imports** (the ones most likely to
+be misspelled) also need validating. Resolution turns on how much of the dependency graph the
+linker can see, captured by `RetainPolicy` in `noeta-loader`:
+
+- **Lenient** (single file / sibling-only / IDE `linked` query): no resolved graph, so only an
+  *intra-project* missing module errors; any foreign root is retained (never falsely flagged).
+- **Complete** (the CLI, with a resolved manifest via `load_with_deps`): every legitimate root is
+  known — std extensions + declared **native-dependency** roots (`DepPackage.native`, whose members
+  the *composed* toolchain validates). Anything else that resolves to nothing is E0019: a missing
+  intra-project module, a typo'd dependency module, **or a `use` of an undeclared/misspelled
+  package** (`use imgtx.fx`). Native packages contribute no source modules to the pool, so their
+  roots are threaded explicitly (`native_roots`) rather than inferred.
+
+Where each import-error class is caught:
+- std bad member (`use std.math.bogus`) → checker hole A (E0019).
+- intra-project missing module (`use App.Models.User`) → loader (E0019).
+- source-dep typo'd module (`use webclient.clientt.X`) → loader Complete (E0019).
+- native-dep member typo (`use imgfx.fxx`) → *composed* checker hole A (E0019).
+- undeclared / misspelled package root (`use imgtx.fx`, `use totallyfake.foo`) → loader Complete (E0019).
+
+`check` and `run` agree on all of the above; verified end-to-end (`noeta check`/`run` both exit 1).
+The §14 orders demo, which leaned on the opaque stub for a phantom `App.Models.User`, now ships the
+real `App.Models` module the docs already describe (`examples/models.noe`).

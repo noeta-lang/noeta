@@ -850,6 +850,9 @@ fn assemble(
             root: inst.root_segment.clone(),
             modules,
             dep_renames,
+            // A native package's modules live in its Rust extension (composed in downstream), not the
+            // link pool — so the loader retains, rather than flags, a `use` under its key.
+            native: inst.native.is_some(),
         });
         locked.push(LockedPackage {
             identity: identity.clone(),

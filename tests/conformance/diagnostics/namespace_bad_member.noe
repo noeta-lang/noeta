@@ -1,0 +1,8 @@
+// The handoff's core repro (module-namespaces): `use std.http` is a valid namespace group, but
+// `http.get(...)` names no member of it — `get` lives on the `http.client` submodule. A group is
+// fully enumerable, so both backends reject this at check time (E0005). `check` and `run` now AGREE.
+// expect: error E0005 at 7:5
+// expect: exit 1
+use std.http
+r = http.get("https://svc.test/echo")
+echo "unreachable"

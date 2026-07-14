@@ -164,10 +164,45 @@ fn undeclared_type_annotation_is_e0013() {
 
 #[test]
 fn imported_type_annotation_is_not_flagged() {
-    // A name brought in by `use` is a legal referent — the linker either merged its real
-    // declaration or left an opaque stub, but either way the annotation resolves.
+    // A user-module name brought in by `use` (a non-extension root) is a legal referent in a
+    // single-file check: the linker resolves it later (or, in a complete link, flags it — see
+    // `noeta-loader`'s `unresolved_user_module_is_an_error`), but an isolated file stays lenient.
     let src = "use App.Models.User;\nfn find(): ?User { return none; }\n";
     assert!(codes(src).is_empty());
+}
+
+#[test]
+fn use_of_unknown_std_target_is_an_error() {
+    // An extension root is fully enumerable, so a `use` that resolves to no module / namespace /
+    // member / type is a hard error at check time — not an opaque stub that only fails at run or
+    // `--native` (the check/run divergence). This is the handoff's `use std.{http}` repro's sibling:
+    // a genuinely nonexistent target.
+    assert_eq!(codes("use std.bogus;\n"), ["E0019"]);
+    // A selective import naming a real module but an unknown member.
+    assert_eq!(codes("use std.math.bogus;\n"), ["E0019"]);
+}
+
+#[test]
+fn namespace_group_binds_and_resolves() {
+    // `use std.http` binds `http` as a navigable group; `http.client.get(...)` resolves the client
+    // submodule and type-checks clean (identical to the leaf form `use std.http.client`).
+    assert!(
+        codes("use std.http;\nr = http.client.get(\"https://x\");\necho r.status();\n").is_empty()
+    );
+}
+
+#[test]
+fn bad_member_on_namespace_group_is_an_error() {
+    // The handoff's core repro: `use std.http` is now valid, but `http.get(...)` names no member of
+    // the `http` group (`get` lives on `http.client`). A group is fully enumerable, so this is a
+    // hard error at check time — `check` and `run` now agree (both reject it) instead of `check`
+    // passing and `run`/`--native` failing.
+    assert_eq!(
+        codes("use std.http;\nr = http.get(\"https://x\");\necho \"unreachable\";\n"),
+        ["E0005"]
+    );
+    // The same miss when the member is read, not called.
+    assert_eq!(codes("use std.http;\nx = http.nope;\n"), ["E0005"]);
 }
 
 #[test]

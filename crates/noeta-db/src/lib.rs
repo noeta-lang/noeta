@@ -466,11 +466,15 @@ pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> LinkedProgram {
         noeta_loader::link_parsed(&entry_source, &entry_ast.0.program, &module_programs)
     } else {
         let dep_refs: Vec<&Program> = dep_programs.iter().collect();
+        // The IDE query links from re-rooted dep *sources* but does not carry the resolved native
+        // package set, so it stays lenient on foreign roots (`None`) — it flags a missing
+        // intra-project module, never an import it cannot fully see (module-namespaces).
         noeta_loader::link_parsed_with_deps(
             &entry_source,
             &entry_ast.0.program,
             &module_programs,
             &dep_refs,
+            None,
         )
     };
     match result {

@@ -1564,18 +1564,22 @@ impl Checker {
                         self.imported_fns.insert(local, (module, func));
                     }
                     UseKind::UnknownUnderRoot => {
-                        // Preserve today's targeted diagnostic for a selective import that names a
-                        // real module but an unknown function; otherwise stay lenient here.
+                        // A known extension root is fully enumerable, so a target that resolves to no
+                        // module / namespace / member / type is a genuine error — not an opaque stub
+                        // (this is the check/run divergence: `use std.{http}` used to slip through to
+                        // an opaque type and fail only at run/`--native`). A member miss on a real
+                        // module reads as "has no member"; anything else names nothing under the root.
                         let module = path.join(".");
-                        if path.len() >= 2 && self.reg().find_module(&module).is_some() {
-                            self.error(
-                                DiagnosticCode::UnknownName,
-                                name.span,
-                                format!("module `{module}` has no function `{}`", name.name),
-                            );
-                        } else {
-                            self.types.insert(local);
-                        }
+                        let message =
+                            if path.len() >= 2 && self.reg().find_module(&module).is_some() {
+                                format!("module `{module}` has no member `{}`", name.name)
+                            } else {
+                                format!(
+                                    "`{}` is not a module, namespace, or type in `{module}`",
+                                    name.name
+                                )
+                            };
+                        self.error(DiagnosticCode::UnresolvedImport, name.span, message);
                     }
                     UseKind::UserImport => {
                         self.types.insert(local);
@@ -5581,6 +5585,23 @@ impl Checker {
                     return stdlib::module_return(self.reg(), &qm, name, args)
                         .unwrap_or(Type::Unknown);
                 }
+                // The receiver is a namespace group (`http` from `use std.http`) — a submodule chain
+                // (`http.client.get`) already resolved above, so any member reaching here is either
+                // an unknown member (`http.nope` — a hard error, a group is fully enumerable) or a
+                // deferred non-module child (a sub-namespace/type used in call position). Either way
+                // the group handle is not a value, so this must not fall through to the generic
+                // method path (which would synthesize `http` as an unknown name).
+                if let Some(prefix) = self.resolve_namespace_prefix(receiver, env) {
+                    use noeta_stdlib::registry::NsChild;
+                    self.finalize_closure_args(&[], args, arg_exprs, env);
+                    if matches!(
+                        self.reg().resolve_namespace_child(&prefix, name),
+                        NsChild::None
+                    ) {
+                        self.namespace_member_error(&prefix, name, span);
+                    }
+                    return Type::Unknown;
+                }
                 // `Type.assoc(args)` — an associated function / static call on a known user type
                 // (`Box.new(1)`). Resolve to the type's method signature so the result is precisely
                 // typed (a constructor result is `Box`, not a hole) and a generic class enforces its
@@ -6672,6 +6693,20 @@ impl Checker {
         }
     }
 
+    /// Report an unresolved member on a namespace group (`http.nope`, whether read or called) — a
+    /// bare-name miss (E0005). A group is fully enumerable, so an unknown member is never a forward
+    /// reference. `prefix` is the group's root-qualified identity; the message names it as written in
+    /// source (root stripped). (Slice 3 attaches a "did you mean" suggestion from the group's
+    /// children.)
+    fn namespace_member_error(&mut self, prefix: &str, name: &str, span: Span) {
+        let group = prefix.split_once('.').map_or(prefix, |(_, rest)| rest);
+        self.error(
+            DiagnosticCode::UnknownName,
+            span,
+            format!("namespace `{group}` has no member `{name}`"),
+        );
+    }
+
     fn synth_member(
         &mut self,
         receiver: &Expr,
@@ -6742,13 +6777,22 @@ impl Checker {
         // A namespace-group member access (`http.client` from `use std.http`) in value position:
         // resolve one hop against the group prefix. A landing module records its span so lowering
         // materializes the leaf module value; a sub-namespace or extension type is a valid
-        // intermediate. The group handle is never a value on its own, so this precedes the generic
-        // receiver synth below (which would treat `http` as an unknown name). An unresolved member
-        // stays lenient here — slice 2 tightens it to a hard error with a suggestion.
+        // intermediate. An unresolved member is a hard error (`http.nope`) — a group is fully
+        // enumerable, so this is never a forward reference. The group handle is never a value on its
+        // own, so this precedes the generic receiver synth below (which would treat `http` as an
+        // unknown name).
         if let Some(prefix) = self.resolve_namespace_prefix(receiver, env) {
             use noeta_stdlib::registry::NsChild;
-            if let NsChild::Module(qm) = self.reg().resolve_namespace_child(&prefix, name) {
-                self.sites.namespace_module_sites.insert(member_span, qm);
+            match self.reg().resolve_namespace_child(&prefix, name) {
+                NsChild::Module(qm) => {
+                    self.sites.namespace_module_sites.insert(member_span, qm);
+                }
+                NsChild::None => {
+                    self.namespace_member_error(&prefix, name, member_span);
+                }
+                // A sub-namespace or extension type reached as a value is not statically typed here
+                // (associated calls resolve through the call path); no error.
+                NsChild::Namespace(_) | NsChild::Type(_) => {}
             }
             return Type::Unknown;
         }
