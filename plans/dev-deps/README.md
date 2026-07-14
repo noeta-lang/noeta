@@ -9,10 +9,12 @@ only what the app runs, while the dev toolchain keeps everything.
 
 Three mechanisms, addressing the shapes a dev capability arrives in and where it is shipped:
 
-1. **Lean runtime binary** (`noeta-runner`) — the prod-artifact executor. Depends on runtime crates
-   only; the toolchain (fmt/LSP/DAP/MCP/compiler) is *structurally absent* — no dependency edge, no
-   `#[cfg]`. `build --exe`/`--native` staple onto **this**, not onto a copy of the full CLI. Native
-   analogue of `noeta-wasm-runner`.
+1. **Lean prod runtime binary** (`noeta-runner`) — the prod-artifact executor. Runs `.noe` **source**
+   or a `.noeb` **bundle** or a **stapled** bundle (L1+L2), so it serves *both* PHP-style
+   source deployment and `build --exe`/`--native` (which staple onto **this**, not a copy of the full
+   CLI). Depends on app-execution crates only; the **dev tooling (L3)** — fmt/LSP/DAP/MCP/profiler +
+   `malva` — is *structurally absent* (no dependency edge, no `#[cfg]`). Native analogue of
+   `noeta-wasm-runner`, extended with the compiler so it can run source.
 2. **Target-scoped dependencies** — `[targets.<name>.dependencies]` — for a **standalone** dev tool
    (a package that is *only* dev tooling). Present in `dev`, absent in `prod`; excluded by the same
    no-dependency-edge principle at the manifest layer.
@@ -73,18 +75,39 @@ bundle-execution library (`noeta-vm`/`noeta-backend` over `noeta-bundle`) — ex
 over shared guts, so prod-run and dev-run cannot diverge in behavior. Only the dependency shell
 differs, which is the entire point.
 
-**Execution model (three rings over the shared core).** The exclusion boundary is *shipped artifact
-vs toolchain*, not *run vs debug*:
-- **Shipped artifact** — executes a *pre-built bundle*. No compiler, no dev caps. This is the lean
-  runtime (`build --exe`/`--native`; and `noeta run app.noeb` should dispatch through the identical
-  path).
-- **`noeta run app.noe` (from source)** — needs the **compiler** front-half, so it stays in the
-  toolchain binary; but it installs only *runtime* capabilities (a tier's handler), never *dev* ones
-  (its formatter). It is a dev command on a machine that already has the toolchain, so it is *not*
-  its own lean binary (see non-goals).
-- **`noeta profile` / `noeta dap`** — run the *same* VM with an Option-gated hook installed (the DAP
-  "debugs the PROD VM"); zero-cost when absent. Profiling/debugging therefore observe identical
-  execution semantics and are toolchain-only surfaces.
+**Execution model — three capability layers; prod excludes only L3.** The security boundary is
+**dev tooling vs app execution**, *not* run-vs-build and *not* source-vs-bundle. Running a source
+tree in production (PHP/Python/Ruby/Node style — deploy source, point the runtime at an entry file,
+compile on the fly) is a first-class mode, so the *compiler* is a prod-legitimate layer.
+
+- **L1 — execute a bundle**: VM + real `Host` + runtime extensions. In *every* prod artifact.
+- **L2 — compile source → bundle**: parser + checker + compiler + **tier activation/desugar** +
+  manifest/target tier-set & provider resolution (`noeta-pm` *minus* `registry-http`/`keyless`).
+  Needed to run *source*; baked away in a pre-built bundle. The compiler is our own language's
+  front-end fed only the app's own trusted source — the expected surface of any run-from-source
+  runtime, not the "dev tooling dragged in" risk.
+- **L3 — dev tooling**: fmt + LSP + DAP + MCP + profiler, **and their parsers** (`malva`, the HTML
+  reindenter, …). *Never* in any prod artifact — the whole point.
+
+**A tier is split across these layers, not filed under one.** For a **program tier** (`@html`: its
+`@tier(html, …) fn render(statics, holes)` handler is idiomatic Noeta): the **handler compiles to
+bytecode baked into the bundle** (linker closure) + core `std` it desugars into — so its L1 cost is
+*zero extra linkage*, it rides inside the bundle; the **desugar** (`@html { … } → render(…)`) is L2
+(build-only); the **formatter** (`noeta-html`) is L3 (dev-only). For an **extension tier** (native
+Rust handler, expr-tiers `ExtTier`): the handler is L1 *native* — linked into every prod artifact —
+while its formatter stays L3. This is exactly the **mixed-package** case the D3b feature-gate targets:
+keep the native handler, drop the native formatter + its parser.
+
+**The prod artifacts, by deployment style (both exclude L3):**
+- **Pre-compiled (`build --exe`/`--native`)** — L1 (+ any extension tier's native L1 handler). The
+  `@html` handler is already bytecode in the bundle; nothing `@html`-specific is linked.
+- **PHP-style (ship source)** — L1+L2. `noeta-runner app.noe` compiles + runs, no dev tooling.
+- **Dev workstation (`noeta`)** — L1+L2+L3.
+
+`noeta-runner` (this arc, Option A) is the **L1+L2 prod runtime**: runs `.noe` source *or* a `.noeb`
+bundle *or* a stapled bundle, links no L3. `build --exe` staples onto it (bundle path skips L2).
+**`noeta profile`/`dap`** are L3 surfaces that install an Option-gated hook into the *same* VM (the
+DAP "debugs the PROD VM"), zero-cost when absent — so they observe identical execution semantics.
 
 ## Current state (grounding)
 
@@ -114,14 +137,20 @@ vs toolchain*, not *run vs debug*:
   (everything pinned); a per-target *view* selects its subset. Shared deps unify to one version
   (dev-only deps can't conflict with prod). `resolve_graph` gains a target parameter (or returns
   per-target native-crate sets). No churn for manifests without target deps.
-- **D3 — the lean runtime binary (`noeta-runner`).** A new binary crate, native analogue of
-  `noeta-wasm-runner`: `[dependencies]` = runtime crates only (`noeta-vm`, `noeta-backend`,
-  `noeta-bundle`, `noeta-runtime`, `noeta-stdlib`, the real `Host`) — **no** `noeta-fmt`/`-lsp`/
-  `-dap`/`-mcp`/`-html`/`-css`/`-compiler`. `main` reads a stapled or path bundle
-  (`noeta_bundle::read`) and runs it on the VM, sharing the **exact** execution tail the CLI's `run`
-  verb uses (extract that tail into a shared lib fn if not already one — the drift firewall). Prove
-  it runs a `--exe`-shaped bundle byte-identically to the CLI (reuse the differential-oracle shape).
-  This crate *cannot* contain a formatter/parser — auditable by its Cargo.toml.
+- **D3 — the lean prod runtime binary (`noeta-runner`), source-capable (Option A).** A new lib+bin
+  crate. It runs a `.noe` **source** file, a `.noeb` **bundle**, or a **stapled** bundle, linking
+  **L1+L2 but no L3**: `[dependencies]` = app-execution crates (`noeta-vm`, `noeta-backend`,
+  `noeta-bundle`, `noeta-runtime`, `noeta-stdlib`, the compile front-end, and `noeta-pm` *minus*
+  `registry-http`/`provenance`/`keyless`) — **no** `noeta-fmt`/`-lsp`/`-dap`/`-mcp`/`-html`/`-css`.
+  **Drift firewall:** the CLI's `run`/`--exe` path and this binary share **one** bundle-execution +
+  compile core, extracted into a lib (`noeta-runner`'s lib, or a `noeta-run` crate) that both depend
+  on; the `p2p_app_namespace` coupling to full `noeta-pm` is lifted to a parameter so the runner
+  never links the registry/keyless surface. Step it: (D3a) extract the shared execution tail
+  (`run_module_real_host`/`run_compiled_module`, `app_id` as a param) — pure refactor, CLI delegates,
+  tests stay green; (D3b) the runner bin over source+bundle+stapled; (D3c) share the compile path
+  (`compile_whole_file`) so source-run matches the CLI byte-for-byte. Prove it runs a `--exe`-shaped
+  bundle *and* a source file identically to the CLI. This crate *cannot* contain a formatter/parser —
+  auditable by its Cargo.toml.
 - **D4 — repoint `--exe`/`--native` onto the lean runtime + per-target compose.** `build --exe`/
   `--native` staple the bundle onto **`noeta-runner`** (or a composed shim whose base is the runner,
   for apps with native runtime deps) instead of cloning the running full CLI — the security fix. The
@@ -163,4 +192,7 @@ vs toolchain*, not *run vs debug*:
 
 - A JS/`<script>` formatter (SWC — heavy; the delegation hook already reaches `"javascript"`).
 - Runtime gating of dev *invocation* (prod never calls dev verbs; the concern is *linkage*).
-- Reworking `noeta run`'s toolchain (it *is* the dev toolchain; carrying dev tooling there is fine).
+- The absolute-minimal L1-only `--exe` (no compiler). `noeta-runner` is L1+L2 so one binary serves
+  both source and bundle deploys; carrying the (idle) compiler in a stapled `--exe` is a *size* cost,
+  and the plan deprioritizes size vs the L3 attack surface — which is fully excluded either way. A
+  bundle-only L1 variant stays a possible later refinement.
