@@ -32,14 +32,26 @@ Two mechanisms, addressing the two shapes a dev capability arrives in:
 - **Reuse `[targets.*]`.** We already have dev/prod targets selecting *tier sets* (`extends` for
   inheritance). Extending them to also govern dependencies and dev capabilities keeps one concept.
 
-## The live gap this closes
+## The live gap this closes (D0 — confirmed)
 
 `noeta build --exe` (P-AOT L2) staples the bytecode bundle onto **a copy of the running
-executable** (`noeta-cli/src/lib.rs` ~475/1767). For an app with native deps that runs through the
-**composed toolchain** (`compose.rs` — `noeta-composed`, the *whole* toolchain: fmt, LSP, DAP), the
-running exe carries fmt + every formatter + `malva`. So today's `--exe` prod artifact plausibly
-ships the entire dev toolchain. **Verify first** (D0 open question); if confirmed, the prod-artifact
-build must produce a lean runtime, not staple onto the toolchain.
+executable**; `--native` (L3) does the same plus AOT machine code (they differ only in
+interpreted-vs-native execution + the `cc` requirement, not in what is bundled). That running
+executable is the full `noeta-cli`, whose `run_cli` installs fmt, **every formatter including
+`noeta-css`/malva**, the LSP, and the DAP. So **every** prod artifact — even a plain
+`noeta build --exe app.noe` from the stock binary — ships the entire toolchain and its parsers. The
+gap is broader than native deps.
+
+**Decision (approach for the prod-artifact fix).** Rather than introduce a new lean runtime binary,
+**feature-gate the toolchain's dev capabilities** and build the prod artifact with them off:
+- `noeta-cli`'s own dev extensions (`noeta-html`, `noeta-css`→`malva`) move behind a `fmt` feature
+  (`run_cli` installs them only when enabled; the crates become optional deps);
+- a prod build compiles the artifact (the composed shim, or the stock runtime) **without** `fmt` and
+  without any target's dev-only native crates, so the formatter code and its parsers are never
+  emitted.
+This removes the dev code + parsers from the prod binary (the security core) with far less blast
+radius than a separate runtime crate. A dedicated lean `noeta-runner` (mirroring the existing
+`noeta-wasm-runner`) stays a possible future refinement, not this arc's path.
 
 ## Current state (grounding)
 
@@ -57,10 +69,10 @@ build must produce a lean runtime, not staple onto the toolchain.
 
 ## Slices
 
-- **D0 — verify + decide.** Confirm what `build --exe`/`--native` links (does the prod artifact
-  carry the composed toolchain?). Decide the default-target story: which target `noeta run`/`test`
-  use (dev), which `build` uses (prod), and whether `--target` is the sole selector. Pin the
-  dev-capability *set* (start: `body_formatters`; leave room for future `linters`/`doc`).
+- **D0 — verify + decide. ✅ (see above).** Confirmed `--exe`/`--native` copy the full CLI (fmt +
+  malva). Decided: feature-gate dev capabilities, prod builds with them off. Remaining D0 decision
+  carried into D4: the default-target story (which target `run`/`test` use = dev, `build` = prod)
+  and whether `--target` is the sole selector. Dev-capability set starts at `body_formatters`.
 - **D1 — target-scoped dependencies (manifest).** Parse `[targets.<name>.dependencies]` into
   `Target`; `extends` inherits deps (like tiers). Validate shape; a target's tier provider may now
   name a target-scoped dep. Errors point at the missing/duplicated key. Unit tests over `from_toml`.
