@@ -72,8 +72,10 @@ pub struct PackageMeta {
     /// The global identity `company/package` — what the registry indexes and git coords map to.
     pub name: PackageName,
     pub version: semver::Version,
-    /// The language edition, if pinned (reserved; not yet consumed).
-    pub edition: Option<String>,
+    /// The pinned language [`Edition`] (follow-on arc F1). `None` when the package omits `edition`,
+    /// which the toolchain treats as [`Edition::DEFAULT`]; the value is validated at parse time
+    /// (an unknown edition is a manifest error), so a present value is always a known edition.
+    pub edition: Option<crate::edition::Edition>,
     /// The relative directory of this package's native Rust **entry crate** (package-manager
     /// Phase 3, N3.1): `native = "native"` points at a `Cargo.toml` whose crate exports the
     /// package's extension units (one crate, any number of units — std's own shape). `None` for a
@@ -81,6 +83,15 @@ pub struct PackageMeta {
     /// Rust into a consumer's build, which should never be triggered by the mere presence of a
     /// directory.
     pub native: Option<String>,
+}
+
+impl PackageMeta {
+    /// The **effective** language edition this package compiles under — its pinned [`Edition`], or
+    /// [`Edition::DEFAULT`] when it declared none. The one place the rest of the toolchain reads an
+    /// edition, so the default is applied consistently.
+    pub fn edition(&self) -> crate::edition::Edition {
+        self.edition.unwrap_or_default()
+    }
 }
 
 /// A global package identity `company/package` (package-manager P2.0). The slash is deliberately
@@ -302,6 +313,26 @@ pub fn resolve_active_tier_providers(
 /// `use`s link without key collision.
 pub fn dependency_packages(entry: &Path) -> Result<Vec<noeta_loader::DepPackage>, String> {
     Ok(crate::graph::resolve_graph(entry)?.packages)
+}
+
+/// The **effective language edition** the entry compiles under (follow-on F1) — its own
+/// `[package].edition`, or [`Edition::DEFAULT`] when it declares none or has no manifest at all (a
+/// bare script). This is the entry's *own* package edition, independent of its dependency graph
+/// (each dependency's edition is pinned separately in `noeta.lock`), so it is a cheap manifest read,
+/// not a graph walk — the edition the compile boundary folds into the startup-cache key so a future
+/// edition that changes compilation already invalidates stale bytecode.
+pub fn root_edition(entry: &Path) -> crate::edition::Edition {
+    let dir = entry.parent().unwrap_or_else(|| Path::new("."));
+    let Some(path) = find(dir) else {
+        return crate::edition::Edition::DEFAULT;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return crate::edition::Edition::DEFAULT;
+    };
+    match Manifest::parse(&text) {
+        Ok(m) => m.package().map(|p| p.edition()).unwrap_or_default(),
+        Err(_) => crate::edition::Edition::DEFAULT,
+    }
 }
 
 /// The `[package] name` of a **cargo** manifest — what a composed-toolchain shim writes into its
@@ -602,11 +633,10 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
         .map_err(|err| format!("`package.version` `{version_str}` is not valid SemVer: {err}"))?;
     let edition = match pkg.get("edition") {
         None => None,
-        Some(v) => Some(
-            v.as_str()
-                .ok_or("`package.edition` must be a string")?
-                .to_string(),
-        ),
+        Some(v) => {
+            let s = v.as_str().ok_or("`package.edition` must be a string")?;
+            Some(crate::edition::Edition::parse(s)?)
+        }
     };
     let native = match pkg.get("native") {
         None => None,
@@ -835,7 +865,30 @@ mod tests {
         assert_eq!(pkg.name.package, "widgets");
         assert_eq!(pkg.name.root(), "widgets");
         assert_eq!(pkg.version, semver::Version::parse("1.4.2").unwrap());
-        assert_eq!(pkg.edition.as_deref(), Some("2026"));
+        assert_eq!(pkg.edition, Some(crate::edition::Edition::E2026));
+        assert_eq!(pkg.edition(), crate::edition::Edition::E2026);
+    }
+
+    #[test]
+    fn defaults_edition_when_omitted_and_rejects_an_unknown_one() {
+        let m = Manifest::parse(
+            "[package]\n\
+             name = \"acme/widgets\"\n\
+             version = \"1.0.0\"\n",
+        )
+        .expect("valid");
+        let pkg = m.package().expect("package present");
+        assert_eq!(pkg.edition, None);
+        assert_eq!(pkg.edition(), crate::edition::Edition::DEFAULT);
+
+        let err = Manifest::parse(
+            "[package]\n\
+             name = \"acme/widgets\"\n\
+             version = \"1.0.0\"\n\
+             edition = \"2030\"\n",
+        )
+        .expect_err("unknown edition rejected");
+        assert!(err.contains("2030"), "names the offending value: {err}");
     }
 
     // --- cargo manifest introspection (composition: dev-deps D5b) ------------------------------

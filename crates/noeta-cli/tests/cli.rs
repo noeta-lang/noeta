@@ -3823,7 +3823,7 @@ fn keyless_trust_pins_downgrades_and_switches_are_enforced_end_to_end() {
     //    like. The resolve must fail and name the defense.
     std::fs::write(
         app.join("noeta.lock"),
-        "version = 1\n\n[[scope]]\nname = \"acme\"\n\
+        "version = 2\n\n[[scope]]\nname = \"acme\"\n\
          issuer = \"https://token.actions.githubusercontent.com\"\n\
          identity = \"https://github.com/acme/greet/.github/workflows/r.yaml@refs/heads/main\"\n",
     )
@@ -3855,7 +3855,7 @@ fn keyless_trust_pins_downgrades_and_switches_are_enforced_end_to_end() {
     std::fs::write(
         app.join("noeta.lock"),
         format!(
-            "version = 1\n\n[[scope]]\nname = \"acme\"\npublic_key = \"{}\"\n",
+            "version = 2\n\n[[scope]]\nname = \"acme\"\npublic_key = \"{}\"\n",
             "b".repeat(64)
         ),
     )

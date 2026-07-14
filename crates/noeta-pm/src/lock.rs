@@ -10,7 +10,7 @@
 //!
 //! The format is TOML, Cargo-like:
 //! ```toml
-//! version = 1
+//! version = 2
 //!
 //! [[package]]
 //! name = "acme/greet"
@@ -19,6 +19,7 @@
 //! url = "https://example.com/acme/greet"
 //! tag = "v1.0.0"
 //! sha = "…40 hex…"
+//! edition = "2026"
 //! hash = "…content hash…"
 //! ```
 
@@ -32,8 +33,10 @@ use crate::graph::{LockedPackage, ResolvedSource};
 pub const LOCK_NAME: &str = "noeta.lock";
 
 /// The lock format version. A lock written by a newer format is ignored (treated as absent) so an
-/// older toolchain re-resolves rather than misreading it.
-const LOCK_VERSION: i64 = 1;
+/// older toolchain re-resolves rather than misreading it. Bumped to `2` when the per-package
+/// language `edition` was recorded (follow-on F1) — an older toolchain re-resolves rather than
+/// reading a lock whose editions it wouldn't understand.
+const LOCK_VERSION: i64 = 2;
 
 /// The **pinned trust root** of a scope (`company`), recorded trust-on-first-use in `noeta.lock`.
 /// Two roots exist (Phase 4 #2 / Phase 5) and the pin remembers *which* — that memory is the
@@ -167,6 +170,7 @@ fn render(locked: &[LockedPackage], scope_trust: &BTreeMap<String, ScopeTrust>) 
         if let Some(native) = &pkg.native {
             out.push_str(&format!("native = {}\n", quote(native)));
         }
+        out.push_str(&format!("edition = {}\n", quote(pkg.edition.as_str())));
         out.push_str(&format!("hash = {}\n", quote(&pkg.content_hash)));
     }
     // Pinned scope trust roots (provenance TOFU): once written, a later differing key, differing
@@ -229,6 +233,7 @@ mod tests {
                 sha: "a".repeat(40),
             },
             native: None,
+            edition: crate::edition::Edition::E2026,
         }
     }
 
@@ -241,6 +246,7 @@ mod tests {
                 path: PathBuf::from("../local"),
             },
             native: Some("native".to_string()),
+            edition: crate::edition::Edition::E2026,
         }
     }
 
@@ -268,6 +274,20 @@ mod tests {
             Some(&ScopeTrust::Key("b".repeat(64)))
         );
         assert_eq!(lock.scope_trust("nobody"), None);
+
+        // The per-package edition is recorded for reproducibility (follow-on F1), under the bumped
+        // format version. It is a record field (re-derived from manifests on resolve, like `native`),
+        // so it round-trips via the rendered file, not the read model.
+        let text = std::fs::read_to_string(dir.join(LOCK_NAME)).unwrap();
+        assert!(
+            text.contains("version = 2\n"),
+            "format version bumped: {text}"
+        );
+        assert_eq!(
+            text.matches("edition = \"2026\"").count(),
+            2,
+            "both packages record their edition: {text}"
+        );
     }
 
     #[test]
