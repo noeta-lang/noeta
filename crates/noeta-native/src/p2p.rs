@@ -86,7 +86,9 @@ impl crate::ExternIo for ReceiveIo {
         &mut self,
         host: &mut dyn crate::Host,
     ) -> Result<crate::NativeOut, crate::StdError> {
-        Ok(receive_outcome(host.p2p_poll(&self.topic)?))
+        Ok(receive_outcome(
+            crate::host::require_p2p(host)?.p2p_poll(&self.topic)?,
+        ))
     }
 }
 

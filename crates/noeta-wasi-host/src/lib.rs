@@ -502,6 +502,13 @@ impl Network for WasiHost {
     }
 }
 
+// WasiHost provides the loopback P2p broker, so it opts into the optional `P2pProvider` seam.
+impl noeta_stdlib::host::P2pProvider for WasiHost {
+    fn as_p2p(&mut self) -> Option<&mut dyn noeta_stdlib::host::P2p> {
+        Some(self)
+    }
+}
+
 impl P2p for WasiHost {
     // The loopback broker (single-node, in-process) — the same backing `RealHost` uses without
     // the `ring-p2p` ring, so a p2p/synced program runs locally, just without real peers. The

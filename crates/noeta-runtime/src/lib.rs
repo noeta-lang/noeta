@@ -940,6 +940,14 @@ impl RealHost {
     }
 }
 
+// The real host provides P2p (the loopback broker, or the p2panda node under `ring-p2p`), so it opts
+// into the optional `P2pProvider` seam.
+impl noeta_stdlib::host::P2pProvider for RealHost {
+    fn as_p2p(&mut self) -> Option<&mut dyn noeta_stdlib::host::P2p> {
+        Some(self)
+    }
+}
+
 impl P2p for RealHost {
     // Two backings, chosen by the `ring-p2p` ring:
     //   • default — the in-process pub/sub broker (single-node loopback, shared with the sandbox):

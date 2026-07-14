@@ -1,4 +1,4 @@
-//! `std.p2p` (p2p P1) — the language surface over the [`noeta_native::host::P2p`] capability: a
+//! `para.p2p` (p2p P1) — the language surface over the [`noeta_native::host::P2p`] capability: a
 //! program `publish`es a message to a topic and `receive`s the next message on a topic.
 //!
 //! `publish` is a plain host effect (bytes cross the seam by value). `receive` returns a
@@ -54,7 +54,7 @@ pub fn p2p_dispatch(
             want_arity(func, args, 2)?;
             let topic = want_str(func, args, 0)?.to_string();
             let message = want_message(func, args, 1)?;
-            host.p2p_publish(&topic, message)?;
+            crate::require_p2p(host)?.p2p_publish(&topic, message)?;
             Ok(NativeOut::Unit)
         }
         "receive" => {
@@ -63,11 +63,13 @@ pub fn p2p_dispatch(
             // WORK, not a value: the backend tickets the descriptor on its executor and hands back
             // a future (the `NativeOut::Spawn` path, intercepted at the dispatch return). The
             // default descriptor resolves through `p2p_poll` at spawn — deterministic in the sandbox.
-            Ok(NativeOut::Spawn(SpawnBox(host.p2p_receive(topic))))
+            Ok(NativeOut::Spawn(SpawnBox(
+                crate::require_p2p(host)?.p2p_receive(topic),
+            )))
         }
         "identity" => {
             want_arity(func, args, 0)?;
-            Ok(match host.p2p_identity()? {
+            Ok(match crate::require_p2p(host)?.p2p_identity()? {
                 Some(hex) => NativeOut::Some(Box::new(NativeOut::Str(hex))),
                 None => NativeOut::None,
             })

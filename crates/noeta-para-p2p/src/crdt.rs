@@ -1,4 +1,4 @@
-//! `std.crdt` — the language surface over the [`noeta_crdt`] convergence core (p2p P0): the three
+//! `para.crdt` — the language surface over the [`noeta_crdt`] convergence core (p2p P0): the three
 //! state-based CRDTs (`GCounter`, `PnCounter`, `GSet`) as first-class, **immutable value** extern
 //! types, plus the `crdt` module that constructs them.
 //!
@@ -350,7 +350,7 @@ impl ExternValue for GSet {
     }
 }
 
-// --- Dynamic CRDT operations over boxed extern values (p2p P2, used by `std.synced`) ------------
+// --- Dynamic CRDT operations over boxed extern values (p2p P2, used by `para.synced`) ------------
 //
 // A synced signal holds a CRDT as a backend heap value it only sees as `&dyn ExternValue`; these
 // recover the concrete type to merge/serialize it. Each is a small match over the three CRDTs —

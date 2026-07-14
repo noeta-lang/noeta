@@ -1,4 +1,4 @@
-//! `std.synced` — collaborative, peer-to-peer state (p2p P2, architecture §9.15.1): the point
+//! `para.synced` — collaborative, peer-to-peer state (p2p P2, architecture §9.15.1): the point
 //! where the three layers meet. A `synced_signal(initial, topic)` is **a signal that happens to be
 //! shared** — a node in the *same* reactive graph as `signal`/`computed`/`effect` ([`crate::
 //! reactive`]), holding a CRDT ([`crate::crdt`]), whose changes cross the [`P2p`] transport
@@ -29,7 +29,7 @@
 //! A synced signal is a [`ReactiveGraph`](noeta_reactive::ReactiveGraph) **signal node** over an
 //! arena cell holding the CRDT value — the identical machinery `signal` uses — plus a topic and a
 //! subscription id. `merge`/`sync` land the new value in the cell, `touch` the node, and
-//! `drive_flush` the graph, reusing [`crate::reactive`]'s engine wholesale (shared `ExtState`, same
+//! `drive_flush` the graph, reusing [`noeta_stdlib::reactive`]'s engine wholesale (shared `ExtState`, same
 //! `STATE_KEY`), which is what makes the reactivity integration real rather than a parallel system.
 
 use std::any::Any;
@@ -183,6 +183,13 @@ impl ExternValue for SyncedSignalBox {
     }
 }
 
+/// The host's `P2p` capability, or a [`CtxError`] if this host does not provide it. `P2p` left the
+/// mandatory `Host` union (para-namespace arc — see [`crate::require_p2p`]), so `synced` reaches it
+/// through the optional provider seam rather than assuming every host has it.
+fn p2p<C: NativeCtx + ?Sized>(ctx: &mut C) -> Result<&mut dyn noeta_native::host::P2p, CtxError> {
+    crate::require_p2p(ctx.host()).map_err(CtxError::from)
+}
+
 pub fn synced_ctx_dispatch<C: NativeCtx + ?Sized>(
     func: &str,
     ctx: &mut C,
@@ -232,20 +239,20 @@ pub fn synced_ctx_dispatch<C: NativeCtx + ?Sized>(
             // (`members` given) routes through the group transport, which encrypts the announce to
             // the declared members; a plaintext signal uses the durable transport directly.
             let subscription = if members.is_empty() {
-                ctx.host()
+                p2p(ctx)?
                     .p2p_subscribe_durable(&topic)
                     .map_err(CtxError::from)?
             } else {
-                ctx.host()
+                p2p(ctx)?
                     .p2p_group_open(&topic, &members)
                     .map_err(CtxError::from)?
             };
             if members.is_empty() {
-                ctx.host()
+                p2p(ctx)?
                     .p2p_publish_durable(&topic, bytes)
                     .map_err(CtxError::from)?;
             } else {
-                ctx.host()
+                p2p(ctx)?
                     .p2p_group_publish(&topic, bytes)
                     .map_err(CtxError::from)?;
             }
@@ -304,11 +311,11 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             ctx.free(current_slot);
             self_wake(ctx, handle.node)?;
             if handle.is_encrypted() {
-                ctx.host()
+                p2p(ctx)?
                     .p2p_group_publish(&handle.topic, bytes)
                     .map_err(CtxError::from)?;
             } else {
-                ctx.host()
+                p2p(ctx)?
                     .p2p_publish_durable(&handle.topic, bytes)
                     .map_err(CtxError::from)?;
             }
@@ -322,9 +329,9 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             let mut changed = false;
             let encrypted = handle.is_encrypted();
             while let Some(bytes) = (if encrypted {
-                ctx.host().p2p_group_poll(handle.subscription)
+                p2p(ctx)?.p2p_group_poll(handle.subscription)
             } else {
-                ctx.host().p2p_poll_sub(handle.subscription)
+                p2p(ctx)?.p2p_poll_sub(handle.subscription)
             })
             .map_err(CtxError::from)?
             {
@@ -350,7 +357,7 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
         // This replica's convergence state for its topic — a plain lowercase word (p2p P3.3).
         "status" => {
             ctx_arity(method, args, 0)?;
-            let status = ctx.host().p2p_sync_status(&handle.topic);
+            let status = p2p(ctx)?.p2p_sync_status(&handle.topic);
             Ok(CtxOut::Out(NativeOut::Str(status.as_str().to_string())))
         }
         // Runtime membership changes for an encrypted group (p2p P3.4b). Only valid on an encrypted
@@ -371,11 +378,11 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                 _ => return Err(type_error(method, "a peer-id string").into()),
             };
             if method == "add_member" {
-                ctx.host()
+                p2p(ctx)?
                     .p2p_group_add(&handle.topic, &member)
                     .map_err(CtxError::from)?;
             } else {
-                ctx.host()
+                p2p(ctx)?
                     .p2p_group_remove(&handle.topic, &member)
                     .map_err(CtxError::from)?;
             }

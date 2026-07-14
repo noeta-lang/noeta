@@ -22,6 +22,10 @@ pub mod synced;
 
 use noeta_native::registry::{ExtModule, ExtType, Extension};
 
+// `P2p` left the mandatory `Host` union (para-namespace arc): `para.p2p`/`para.synced` reach the
+// capability through the shared `require_p2p` accessor over the optional `P2pProvider` seam.
+pub(crate) use noeta_native::host::require_p2p;
+
 /// The `para.p2p` extension unit — CRDT value types, the `p2p` host-capability surface, and the
 /// CRDT-backed `synced` reactive signal. `root() == "para"`, so its modules resolve as
 /// `para.crdt` / `para.p2p` / `para.synced`.

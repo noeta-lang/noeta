@@ -478,6 +478,32 @@ pub trait P2p {
     }
 }
 
+/// The **optional** provision of the [`P2p`] capability (para-namespace arc). `P2p` used to be a
+/// mandatory arm of the [`Host`] union; the p2p/local-first stack has since left `std` for the
+/// non-default `para` package, so a host no longer has to implement it. Instead every host declares
+/// whether it provides `P2p` through this accessor: a host that speaks to peers returns `Some(self)`
+/// (its own [`P2p`] impl); a minimal host uses the default `None`. The `para.p2p`/`para.synced`
+/// dispatch reaches the capability through this seam and errors cleanly when it is absent.
+pub trait P2pProvider {
+    /// The `P2p` capability, if this host provides one. Default `None` — a host with no peer
+    /// networking need not implement `P2p` at all.
+    fn as_p2p(&mut self) -> Option<&mut dyn P2p> {
+        None
+    }
+}
+
+/// Reach a host's [`P2p`] capability through the [`P2pProvider`] seam, or a clean error when the host
+/// does not provide it. The shared accessor the p2p receive descriptor ([`crate::p2p::ReceiveIo`])
+/// and the `para.p2p`/`para.synced` dispatch use, now that `P2p` is optional rather than a mandatory
+/// arm of [`Host`]. In practice the error never fires — a program reaching p2p code runs on a host
+/// that provides it — but it makes the dependency explicit and degrades gracefully otherwise.
+pub fn require_p2p(host: &mut dyn Host) -> Result<&mut dyn P2p, crate::StdError> {
+    host.as_p2p().ok_or_else(|| crate::StdError {
+        kind: crate::ErrorKind::Io,
+        message: "this host does not provide the p2p capability".to_string(),
+    })
+}
+
 /// A `synced_signal`'s convergence state relative to its peers (p2p P3.3). Meaningless on the
 /// deterministic loopback broker (always [`SyncStatus::Synced`]); real once a network can be
 /// partitioned — a live p2panda node reports it from its log-sync session lifecycle, letting a
@@ -507,18 +533,22 @@ impl SyncStatus {
 }
 
 /// Every host-coupled effect the interpreters perform, behind one swappable seam — the union of the
-/// twelve capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Os`], [`Entropy`],
-/// [`Ids`], [`Network`], [`P2p`], and the three telemetry signals [`Tracing`](crate::Tracing) /
-/// [`Metrics`](crate::Metrics) / [`Logging`](crate::Logging)). Backends hold a `Box<dyn Host>` and
-/// reach any capability through it; a consumer that needs only one (a read handle → [`FileReader`],
-/// the RNG dispatch → [`Rng`], …) depends on that trait instead, so a partial host (e.g. a read-only
-/// test double) implements exactly what it supports rather than stubbing the rest.
+/// core capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Os`], [`Entropy`],
+/// [`Ids`], [`Network`], the three telemetry signals [`Tracing`](crate::Tracing) /
+/// [`Metrics`](crate::Metrics) / [`Logging`](crate::Logging)) plus [`P2pProvider`], through which a
+/// host **optionally** offers the [`P2p`] capability (the p2p/local-first stack left `std` for the
+/// non-default `para` package, so peer networking is no longer a mandatory arm — see [`P2pProvider`]).
+/// Backends hold a `Box<dyn Host>` and reach any capability through it; a consumer that needs only
+/// one (a read handle → [`FileReader`], the RNG dispatch → [`Rng`], …) depends on that trait instead,
+/// so a partial host (e.g. a read-only test double) implements exactly what it supports rather than
+/// stubbing the rest.
 ///
 /// Object-safe on purpose (IO is never a hot path, so the dynamic dispatch is immaterial). The
-/// blanket impl means any type providing all twelve capabilities *is* a `Host` automatically — there
-/// is nothing extra to implement. Splitting telemetry into three sibling traits costs nothing at
-/// runtime: a `dyn Host` has one vtable and supertrait methods fold into it, so a call is one
-/// indirection regardless of which sub-trait declared it.
+/// blanket impl means any type providing all the core capabilities *is* a `Host` automatically — a
+/// host that omits `P2p` supplies a default `P2pProvider` (which returns `None`) and nothing else.
+/// Splitting telemetry into three sibling traits costs nothing at runtime: a `dyn Host` has one
+/// vtable and supertrait methods fold into it, so a call is one indirection regardless of which
+/// sub-trait declared it.
 pub trait Host:
     FileSystem
     + Rng
@@ -528,7 +558,7 @@ pub trait Host:
     + Entropy
     + Ids
     + Network
-    + P2p
+    + P2pProvider
     + crate::Tracing
     + crate::Metrics
     + crate::Logging
@@ -543,7 +573,7 @@ impl<
         + Entropy
         + Ids
         + Network
-        + P2p
+        + P2pProvider
         + crate::Tracing
         + crate::Metrics
         + crate::Logging,

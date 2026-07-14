@@ -471,6 +471,14 @@ impl Network for BrowserHost {
     }
 }
 
+// The playground's browser host provides the loopback P2p broker, so it opts into the optional
+// `P2pProvider` seam.
+impl noeta_stdlib::host::P2pProvider for BrowserHost {
+    fn as_p2p(&mut self) -> Option<&mut dyn P2p> {
+        Some(self)
+    }
+}
+
 impl P2p for BrowserHost {
     fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
         self.p2p.publish(topic, message);

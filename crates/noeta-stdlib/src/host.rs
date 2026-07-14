@@ -6,7 +6,8 @@
 //! it stays with the modules ([`crate::fs`], [`crate::random`], [`crate::net`]) whose state it holds.
 
 pub use noeta_native::host::{
-    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, ReadSource, Rng,
+    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, P2pProvider,
+    ReadSource, Rng,
 };
 pub use noeta_native::{Logging, Metrics, Tracing};
 
@@ -459,6 +460,14 @@ impl Network for SandboxHost {
             .ws_conns
             .remove(&conn);
         Ok(())
+    }
+}
+
+// The sandbox provides the P2p capability (the deterministic loopback broker), so it opts into the
+// optional `P2pProvider` seam with `Some(self)`.
+impl P2pProvider for SandboxHost {
+    fn as_p2p(&mut self) -> Option<&mut dyn P2p> {
+        Some(self)
     }
 }
 
