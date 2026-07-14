@@ -249,6 +249,12 @@
         "command": "noeta.docsForSymbol",
         "title": "Show Docs for Symbol",
         "category": "Noeta"
+      },
+      {
+        "command": "noeta.docsSearch",
+        "title": "Search Docs",
+        "category": "Noeta",
+        "icon": "$(search)"
       }
     ],
     "menus": {
@@ -314,9 +320,14 @@
           "group": "navigation"
         },
         {
+          "command": "noeta.docsSearch",
+          "when": "view == noetaDocs",
+          "group": "navigation@1"
+        },
+        {
           "command": "noeta.docsRefresh",
           "when": "view == noetaDocs",
-          "group": "navigation"
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
