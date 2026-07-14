@@ -1,0 +1,24 @@
+// para.synced (p2p P2) — the headline: two `synced_signal`s on one topic are two replicas that
+// converge through the p2p broker, and a peer's change propagates through the *reactivity graph*
+// to an `effect` like any local update. `a` starts at A=1, `b` at B=2 (a grow-only counter). The
+// effect on `a` prints on creation (1); `a.sync()` merges `b`'s state (→ 3) and reruns it; both
+// replicas end converged at 3. `.sync()` is the explicit pull — the network boundary stays visible.
+// expect: stdout "effect sees a=1"
+// expect: stdout "effect sees a=3"
+// expect: stdout "final a=3 b=3"
+// expect: exit 0
+use para.{crdt}
+use std.reactive.{effect}
+use para.synced.{synced_signal}
+
+a = synced_signal(crdt.gcounter().increment("A", 1), "counter")
+b = synced_signal(crdt.gcounter().increment("B", 2), "counter")
+
+e = effect(fn() {
+    echo "effect sees a=${a.get().value()}"
+})
+
+a.sync()
+b.sync()
+
+echo "final a=${a.get().value()} b=${b.get().value()}"

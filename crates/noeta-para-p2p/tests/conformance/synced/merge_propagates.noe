@@ -1,0 +1,21 @@
+// para.synced (p2p P2) — a local `.merge()` publishes the new state to the topic, and another
+// replica picks it up on `.sync()`. `a` and `b` are empty grow-only sets on "room"; `a` adds "x"
+// (a local converge that also broadcasts), then `b` syncs and sees it. A CRDT has no "set" — you
+// merge a delta and converge.
+// expect: stdout "before: b has x = false"
+// expect: stdout "after: b has x = true"
+// expect: exit 0
+use para.{crdt}
+use para.synced.{synced_signal}
+
+a = synced_signal(crdt.gset(), "room")
+b = synced_signal(crdt.gset(), "room")
+
+before = b.get().contains("x")
+echo "before: b has x = ${before}"
+
+a.merge(crdt.gset().insert("x"))
+b.sync()
+
+after = b.get().contains("x")
+echo "after: b has x = ${after}"

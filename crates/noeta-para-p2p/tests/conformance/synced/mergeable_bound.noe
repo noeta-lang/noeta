@@ -1,0 +1,9 @@
+// para.synced (p2p P2 / P2.M) — only a CRDT may be synced, enforced at *compile time*: the
+// `initial` parameter of `synced_signal` is bounded `T: Mergeable`, so a plain `int` (no
+// convergence story) is rejected statically — make-illegal-states-unrepresentable applied to sync
+// (§9.15.1), a full slice before any value crosses the wire.
+// expect: error E0025 at 8:5
+// expect: exit 1
+use para.synced.{synced_signal}
+s = synced_signal(42, "counter")
+echo s.get()

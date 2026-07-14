@@ -136,11 +136,12 @@ pub const COMPUTED_ARENA_GETTER: ArenaGetter = ("get", |e| computed_box(e).memo)
 /// The per-run extension state: the graph, over arena-cell ids, plus the last gate state pushed
 /// to the backend (so a redundant sync is one branch, not two backend calls).
 ///
-/// `pub(crate)` because [`crate::synced`] (p2p P2) shares this exact graph: a synced signal is a
-/// signal node here plus a topic, so a peer's merge propagates to `computed`/`effect` like any
-/// local `set`. It reaches the graph, `sync_gates`, and `drive_flush` through the items below.
-pub(crate) struct ReactiveExt {
-    pub(crate) graph: ReactiveGraph<Retained>,
+/// `pub` because the out-of-`std` `para.synced` (noeta-para-p2p) shares this exact graph: a synced
+/// signal is a signal node here plus a topic, so a peer's merge propagates to `computed`/`effect`
+/// like any local `set`. It reaches the graph, `sync_gates`, and `drive_flush` through the pub items
+/// below — the reactive seam that lets the p2p surface live outside core.
+pub struct ReactiveExt {
+    pub graph: ReactiveGraph<Retained>,
     gates_open: std::cell::Cell<bool>,
     /// Every live effect `(node, body)` in creation order — the hot-swap epoch registry
     /// (server-hmr H1). A swap that re-runs the top level disposes all of them first
@@ -160,9 +161,16 @@ pub(crate) struct ReactiveExt {
     trace: std::cell::Cell<Option<bool>>,
 }
 
-pub(crate) const STATE_KEY: &str = "std.reactive";
+// Internal reactive-graph state; opaque in Debug (its `ViewState`/graph internals are not formatted).
+impl std::fmt::Debug for ReactiveExt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReactiveExt").finish_non_exhaustive()
+    }
+}
 
-pub(crate) fn state_of<C: NativeCtx + ?Sized>(ctx: &mut C) -> ExtState {
+pub const STATE_KEY: &str = "std.reactive";
+
+pub fn state_of<C: NativeCtx + ?Sized>(ctx: &mut C) -> ExtState {
     ctx.state(STATE_KEY, || {
         Box::new(ReactiveExt {
             graph: ReactiveGraph::new(),
@@ -178,7 +186,7 @@ pub(crate) fn state_of<C: NativeCtx + ?Sized>(ctx: &mut C) -> ExtState {
 
 /// Recompute the read gates from the graph's state (see the module docs) and push a *change* to
 /// the backend; an unchanged state is one branch.
-pub(crate) fn sync_gates<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) {
+pub fn sync_gates<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) {
     let open =
         !ext.graph.is_flushing() && !ext.graph.tracking() && ext.graph.dirty_computed_count() == 0;
     if ext.gates_open.replace(open) != open {
@@ -193,10 +201,7 @@ pub(crate) fn sync_gates<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) 
 /// `drive_flush`): bodies run via the fused [`NativeCtx::run_thunk`]; an abort inside a body is
 /// stashed and re-raised (the flush stops), and a non-converging update is the E0045
 /// reactive-cycle diagnostic. Gates are re-synced when the dust settles.
-pub(crate) fn drive_flush<C: NativeCtx + ?Sized>(
-    ctx: &mut C,
-    ext: &ReactiveExt,
-) -> Result<(), CtxError> {
+pub fn drive_flush<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) -> Result<(), CtxError> {
     // Opt-in flush telemetry (server-hmr L4 / native-otel T5e): a span only when the flag is on
     // AND the flush will actually run something — a no-op flush (a `set` with no subscribers)
     // emits nothing. The span is pushed as the active context so spans the effect bodies create
@@ -353,9 +358,46 @@ struct ViewBinding {
 
 /// Where a binding's current value is read from: a signal's content cell, or a computed's
 /// body+memo (a dirty memo recomputes on read, exactly like `.get()`).
-enum ViewSource {
+///
+/// **Public — part of the reactive seam.** A foreign node type living outside `noeta-stdlib` (today
+/// `para.synced`'s `SyncedSignal`, which *is* a signal node over this shared graph) produces a
+/// `ViewSource` for `view.expose` via [`register_view_source_extractor`].
+#[derive(Debug)]
+pub enum ViewSource {
     Signal { cell: Retained },
     Computed { body: Retained, memo: Retained },
+}
+
+/// An extractor that recognizes a foreign extern handle as a node over the shared reactive graph and
+/// yields its `(NodeId, ViewSource)` for `view.expose`. Registered by an out-of-crate module (e.g.
+/// `para.synced`) so core `view.expose` accepts its node type without naming — or depending on — it.
+pub type ViewSourceExtractor = fn(&dyn std::any::Any) -> Option<(NodeId, ViewSource)>;
+
+/// The registered foreign view-source extractors (the reactive seam). Process-global and additive;
+/// `view.expose` consults them after the built-in `Signal`/`Computed` handles. Const-initialized so
+/// no lazy init is needed on the hot path.
+static FOREIGN_VIEW_EXTRACTORS: std::sync::RwLock<Vec<ViewSourceExtractor>> =
+    std::sync::RwLock::new(Vec::new());
+
+/// Register a foreign view-source extractor (idempotent by function pointer). Called by an
+/// out-of-`std` reactive-node module (`para.synced`) so `view.expose` accepts its handle type.
+pub fn register_view_source_extractor(f: ViewSourceExtractor) {
+    let mut v = FOREIGN_VIEW_EXTRACTORS
+        .write()
+        .expect("view-extractor lock");
+    if !v.iter().any(|g| std::ptr::fn_addr_eq(*g, f)) {
+        v.push(f);
+    }
+}
+
+/// Try every registered foreign extractor against `any`, returning the first match — the seam
+/// `view.expose` uses to resolve a non-core handle to a `(NodeId, ViewSource)`.
+fn foreign_view_source(any: &dyn std::any::Any) -> Option<(NodeId, ViewSource)> {
+    FOREIGN_VIEW_EXTRACTORS
+        .read()
+        .expect("view-extractor lock")
+        .iter()
+        .find_map(|f| f(any))
 }
 
 /// One `view()`'s state: bindings in expose order plus the dirty set the flush subscriber fills.
@@ -467,8 +509,9 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                 }
                 .into());
             };
-            // Accept any handle that is a node over the shared graph: Signal, Computed, or
-            // SyncedSignal (a synced signal IS a signal node — LiveView over synced state).
+            // Accept any handle that is a node over the shared graph: Signal, Computed, or a
+            // foreign node registered through the reactive seam — `para.synced`'s SyncedSignal IS a
+            // signal node (LiveView over synced state), recognized via `foreign_view_source`.
             let mut found: Option<(NodeId, ViewSource)> = None;
             let _ = ctx.with_extern(args[1], &mut |e| {
                 if let Some(s) = e.as_any().downcast_ref::<SignalBox>() {
@@ -481,9 +524,8 @@ pub fn view_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                             memo: c.memo,
                         },
                     ));
-                } else if let Some(s) = e.as_any().downcast_ref::<crate::synced::SyncedSignalBox>()
-                {
-                    found = Some((s.node, ViewSource::Signal { cell: s.cell }));
+                } else if let Some(hit) = foreign_view_source(e.as_any()) {
+                    found = Some(hit);
                 }
             });
             let Some((node, source)) = found else {

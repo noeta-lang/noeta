@@ -4377,6 +4377,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-para-p2p"
+version = "0.1.0"
+dependencies = [
+ "noeta-conformance",
+ "noeta-crdt",
+ "noeta-native",
+ "noeta-reactive",
+ "noeta-stdlib",
+]
+
+[[package]]
 name = "noeta-parser"
 version = "0.1.0"
 dependencies = [

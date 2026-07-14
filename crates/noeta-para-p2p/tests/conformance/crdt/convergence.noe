@@ -1,0 +1,25 @@
+// para.crdt (p2p P0) — the headline CRDT property at the language level: three replicas that each
+// saw a different subset of the updates converge to the same value regardless of the order they
+// reconcile in (commutativity + associativity), and re-merging an already-seen state changes
+// nothing (idempotence — so duplicate or out-of-order delivery is harmless). This is what makes
+// peer-to-peer replication safe without coordination.
+// expect: stdout "15 15 15"
+// expect: stdout "converge=true"
+// expect: stdout "idempotent=true"
+// expect: exit 0
+use para.{crdt}
+
+a = crdt.gcounter().increment("A", 1).increment("A", 2)
+b = crdt.gcounter().increment("B", 5)
+c = crdt.gcounter().increment("C", 7)
+
+o1 = a.merge(b).merge(c)
+o2 = c.merge(a).merge(b)
+o3 = b.merge(c).merge(a)
+echo "${o1.value()} ${o2.value()} ${o3.value()}"
+
+converged = o1 == o2 && o2 == o3
+echo "converge=${converged}"
+
+// Re-applying a stale copy of A (a duplicated message) does not change the converged state.
+echo "idempotent=${o1.merge(a) == o1}"

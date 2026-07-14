@@ -1,0 +1,25 @@
+[package]
+name = "noeta-para-p2p"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The convergence core (dep-free CRDTs) and the extension ABI.
+noeta-crdt = { workspace = true }
+noeta-native = { workspace = true }
+# `synced` is a node in the SAME reactive graph as core `std.reactive`, so it reaches the graph
+# through noeta-stdlib's reactive seam (`ReactiveExt`/`state_of`/`sync_gates`/`drive_flush` +
+# `register_view_source_extractor`). One-way: noeta-stdlib does not depend on this crate.
+noeta-reactive = { workspace = true }
+noeta-stdlib = { workspace = true }
+
+[dev-dependencies]
+# The para-conformance harness runs this crate's moved fixtures with `ParaP2pExtension` registered
+# (the fixtures resolve `para.*`, which the default std-only registry cannot).
+noeta-conformance = { workspace = true }
+
+[lints]
+workspace = true

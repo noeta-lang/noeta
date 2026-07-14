@@ -2,7 +2,7 @@
 //! type & trait vocabulary lives in [`noeta_native::registry`], re-exported here).
 //!
 //! Core's `std` is the dogfood: several in-tree [`Extension`] units ([`CoreExtension`],
-//! [`HttpExtension`], [`CryptoExtension`], [`IdExtension`], [`VecExtension`], [`P2pExtension`]), all
+//! [`HttpExtension`], [`CryptoExtension`], [`IdExtension`], [`VecExtension`]), all
 //! sharing the `"std"` root, register the Ring 2 modules (`math`/`random`/`fs`/`json`/`crypto`/
 //! `http`/…) and the core extern types (`Uuid`/`FileHandle`/`Hasher`/`Response`) through the very API
 //! a third-party extension would use. Each module declares its [`ExtFn`] signatures
@@ -94,12 +94,9 @@ std_unit!(
 // The `vec`/`quat` packed-3D-math pair, split into its own unit to **prep extraction** into an
 // out-of-tree geometry package (native-extensions; Phase 3). No extern types — pure value math.
 std_unit!(VecExtension, "std.vec", modules = VEC_MODULES, types = &[]);
-std_unit!(
-    P2pExtension,
-    "std.p2p",
-    modules = P2P_MODULES,
-    types = P2P_TYPES
-);
+// The p2p/local-first stack (`crdt`/`p2p`/`synced`) left `std` for the first-party non-default
+// `para` namespace — it now lives in the `noeta-para-p2p` crate (`ParaP2pExtension`, root `para`),
+// installed only when a program depends on the `para-p2p` package. See the para-namespace arc.
 
 /// The `http` unit — the only one contributing a CLI subcommand (`noeta serve`), so it can't use the
 /// `std_unit!` shorthand.
@@ -179,51 +176,6 @@ const HTTP_TYPES: &[ExtType] = &[
         }),
         key_capable: false, // identifies a host resource
         docs: SOCKET_DOCS,
-        ..ExtType::DEFAULTS
-    },
-];
-
-/// The `p2p` unit's extern types: the CRDT value types (p2p P0) plus `SyncedSignal<T>` (p2p P2).
-const P2P_TYPES: &[ExtType] = &[
-    // The CRDT value types (p2p P0): plain-data, immutable, content-equal extern values wrapping
-    // the `noeta-crdt` convergence core. All pure — no arena, no ctx seam, not key-capable.
-    ExtType {
-        name: crate::crdt::GCOUNTER_TYPE_NAME,
-        namespace: "std.crdt",
-        methods: crate::crdt::GCOUNTER_METHODS,
-        dispatch: crate::crdt::GCOUNTER_DISPATCH,
-        traits: crate::crdt::CRDT_TRAITS,
-        docs: GCOUNTER_DOCS,
-        ..ExtType::DEFAULTS
-    },
-    ExtType {
-        name: crate::crdt::PNCOUNTER_TYPE_NAME,
-        namespace: "std.crdt",
-        methods: crate::crdt::PNCOUNTER_METHODS,
-        dispatch: crate::crdt::PNCOUNTER_DISPATCH,
-        traits: crate::crdt::CRDT_TRAITS,
-        docs: PNCOUNTER_DOCS,
-        ..ExtType::DEFAULTS
-    },
-    ExtType {
-        name: crate::crdt::GSET_TYPE_NAME,
-        namespace: "std.crdt",
-        methods: crate::crdt::GSET_METHODS,
-        dispatch: crate::crdt::GSET_DISPATCH,
-        traits: crate::crdt::CRDT_TRAITS,
-        docs: GSET_DOCS,
-        ..ExtType::DEFAULTS
-    },
-    // `SyncedSignal<T>` (p2p P2) — a signal node in the shared reactive graph holding a CRDT; its
-    // methods reach the arena + graph + P2p host, so they live in the ctx table.
-    ExtType {
-        name: crate::synced::SYNCED_SIGNAL_TYPE_NAME,
-        namespace: "std.synced",
-        ctx_methods: crate::synced::SYNCED_CTX_METHODS,
-        ctx_dispatch: Some(|method, ctx, recv, args| {
-            crate::synced::synced_ctx_method_dispatch(method, ctx, recv, args)
-        }),
-        docs: SYNCED_SIGNAL_DOCS,
         ..ExtType::DEFAULTS
     },
 ];
@@ -460,7 +412,6 @@ pub fn std_units() -> Vec<&'static (dyn Extension + Sync)> {
         &CryptoExtension,
         &IdExtension,
         &VecExtension,
-        &P2pExtension,
     ];
     // The `std.datetime` calendar/timezone unit (Ring 3) — present only when its default-on ring is
     // compiled in, so a footprint-tailored build that sheds jiff also sheds the module + types.
@@ -3028,45 +2979,6 @@ const TRACING_DOCS: &[(&str, &str)] = &[
     ),
 ];
 
-const CRDT_DOCS: &[(&str, &str)] = &[
-    (
-        "gcounter",
-        "An empty grow-only counter (`GCounter`) — a CRDT that only increments and merges by taking \
-         the per-replica maximum.",
-    ),
-    (
-        "gset",
-        "An empty grow-only set (`GSet`) — a CRDT with `add` and union merge; elements are never \
-         removed.",
-    ),
-    (
-        "pncounter",
-        "An empty increment/decrement counter (`PnCounter`) — a CRDT tracking positive and negative \
-         contributions per replica.",
-    ),
-];
-
-const P2P_DOCS: &[(&str, &str)] = &[
-    (
-        "identity",
-        "This peer's public identity string if p2p networking is configured; `none` otherwise.",
-    ),
-    (
-        "publish",
-        "Publish `data` to the peer-to-peer `topic`, delivering it to subscribed peers.",
-    ),
-    (
-        "receive",
-        "Await the next message published to `topic` by a peer; `none` when the topic closes.",
-    ),
-];
-
-const SYNCED_DOCS: &[(&str, &str)] = &[(
-    "synced_signal",
-    "A `SyncedSignal<T>` over a CRDT value, replicated to peers under `topic` (optionally restricted \
-     to `peers`) — local edits merge conflict-free across the network.",
-)];
-
 const QUAT_DOCS: &[(&str, &str)] = &[
     (
         "mul",
@@ -3145,34 +3057,6 @@ const CELL_METHOD_DOCS: &[(&str, &str)] = &[
     ("get", "The current value."),
     ("set", "Replace the stored value with `v`."),
     ("update", "Replace the value with `f(current)`."),
-];
-
-const GCOUNTER_DOCS: &[(&str, &str)] = &[
-    (
-        "increment",
-        "Add to this replica's contribution to the counter.",
-    ),
-    ("value", "The total count summed across all replicas."),
-    (
-        "merge",
-        "Merge another `GCounter` in (per-replica maximum) — commutative and idempotent.",
-    ),
-];
-const GSET_DOCS: &[(&str, &str)] = &[
-    ("insert", "Add an element to the set."),
-    ("contains", "Whether the set contains the element."),
-    ("len", "The number of elements."),
-    ("members", "The set's elements as a list."),
-    ("merge", "Merge another `GSet` in (set union)."),
-];
-const PNCOUNTER_DOCS: &[(&str, &str)] = &[
-    ("increment", "Add to this replica's positive count."),
-    ("decrement", "Add to this replica's negative count."),
-    (
-        "value",
-        "The net total (increments minus decrements) across all replicas.",
-    ),
-    ("merge", "Merge another `PnCounter` in."),
 ];
 
 const HASHER_METHOD_DOCS: &[(&str, &str)] = &[
@@ -3319,15 +3203,6 @@ const VIEW_METHOD_DOCS: &[(&str, &str)] = &[
         "expose",
         "Expose a named value into the view for the client.",
     ),
-];
-
-const SYNCED_SIGNAL_DOCS: &[(&str, &str)] = &[
-    ("get", "The current merged value."),
-    ("sync", "Push and pull updates with peers now."),
-    ("merge", "Merge a remote update in."),
-    ("status", "The replication status."),
-    ("add_member", "Grant a peer membership in the shared group."),
-    ("remove_member", "Revoke a peer's membership."),
 ];
 
 const SPAN_METHOD_DOCS: &[(&str, &str)] = &[
@@ -4073,44 +3948,6 @@ const VEC_MODULES: &[ExtModule] = &[
     },
 ];
 
-/// [`P2pExtension`]'s modules — CRDT constructors (p2p P0), the `p2p` host capability (P1), and the
-/// `synced` CRDT-backed reactive signal (P2).
-const P2P_MODULES: &[ExtModule] = &[
-    // `crdt` (p2p P0) — the CRDT constructors; a plain value-in/value-out module like `math`.
-    // **No ring**: the convergence logic is pure Rust (~KB, in `noeta-crdt`) with no native
-    // transport, so a program using only local CRDTs never pulls the p2panda tree.
-    ExtModule {
-        name: "crdt",
-        functions: crate::crdt::CRDT_FNS,
-        dispatch: crate::crdt::crdt_dispatch,
-        docs: CRDT_DOCS,
-        ..ExtModule::DEFAULTS
-    },
-    // `p2p` (p2p P1) — publish/receive over the `P2p` host capability. `publish` is a plain host
-    // effect; `receive` returns a `Future<?bytes>` via `NativeOut::Spawn`, like `fs.read_async`.
-    // Declares the `ring-p2p` ring: a program importing `std.p2p` links the real transport (and
-    // the footprint scan keeps p2panda in its AOT binary); one that doesn't sheds it.
-    ExtModule {
-        name: "p2p",
-        functions: crate::p2p::P2P_FNS,
-        dispatch: crate::p2p::p2p_dispatch,
-        ring: Some("ring-p2p"),
-        docs: P2P_DOCS,
-        ..ExtModule::DEFAULTS
-    },
-    // `synced` (p2p P2) — `synced_signal(initial, topic)`, a CRDT-backed signal in the reactive
-    // graph. A ctx module (it owns arena values + drives the graph), like `reactive`. Needs the
-    // real transport to sync with peers, so it declares the `ring-p2p` ring too.
-    ExtModule {
-        name: "synced",
-        ctx_functions: crate::synced::SYNCED_CTX_FNS,
-        ctx_dispatch: Some(|func, ctx, args| crate::synced::synced_ctx_dispatch(func, ctx, args)),
-        ring: Some("ring-p2p"),
-        docs: SYNCED_DOCS,
-        ..ExtModule::DEFAULTS
-    },
-];
-
 /// Compiled-in fast route for ctx **functions** (H5 perf): the same generic dispatch fns the
 /// dyn table stores, instantiated over the backend's **concrete** ctx so every small ctx op
 /// (arena read/write, slot bookkeeping, closure call) inlines — the Rust generics/dyn duality
@@ -4127,7 +3964,8 @@ pub fn static_dispatch_ctx<C: crate::NativeCtx + ?Sized>(
     match module {
         "cell" => Some(crate::cell::cell_ctx_dispatch(func, ctx, args)),
         "reactive" => Some(crate::reactive::reactive_ctx_dispatch(func, ctx, args)),
-        "synced" => Some(crate::synced::synced_ctx_dispatch(func, ctx, args)),
+        // `para.synced` is out-of-`std` (noeta-para-p2p) — it has no compiled-in fast route here
+        // and dispatches through the registered ExtModule's dyn `ctx_dispatch` instead.
         _ => None,
     }
 }
@@ -4158,9 +3996,8 @@ pub fn static_dispatch_ctx_method<C: crate::NativeCtx + ?Sized>(
         crate::reactive::VIEW_TYPE_NAME => Some(crate::reactive::view_ctx_method_dispatch(
             method, ctx, recv, args,
         )),
-        crate::synced::SYNCED_SIGNAL_TYPE_NAME => Some(crate::synced::synced_ctx_method_dispatch(
-            method, ctx, recv, args,
-        )),
+        // `para.synced`'s `SyncedSignal` is out-of-`std` — dispatched via its registered ExtType's
+        // dyn `ctx_dispatch`, not this compiled-in fast route.
         _ => None,
     }
 }
@@ -4464,10 +4301,8 @@ mod tests {
             ("Computed", "std.reactive.Computed"),
             ("Effect", "std.reactive.Effect"),
             ("View", "std.reactive.View"),
-            ("SyncedSignal", "std.synced.SyncedSignal"),
-            ("GCounter", "std.crdt.GCounter"),
-            ("PnCounter", "std.crdt.PnCounter"),
-            ("GSet", "std.crdt.GSet"),
+            // The CRDT/synced types (`GCounter`/`PnCounter`/`GSet`/`SyncedSignal`) left `std` for the
+            // `para` namespace (noeta-para-p2p); they are covered by that crate's own tests now.
         ];
         for (short, qualified) in expected {
             let t = find_type(short).expect("registered type");

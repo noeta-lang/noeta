@@ -1,0 +1,21 @@
+// para.crdt (p2p P0) — PnCounter, a counter that can go both ways: increments and decrements are
+// each tracked as a grow-only half, and `value()` is their difference. It can go negative, and
+// merge reconciles both halves independently, so it converges like GCounter.
+// expect: stdout "pn=7"
+// expect: stdout "neg=-5"
+// expect: stdout "merged=7 commutes=true"
+// expect: exit 0
+use para.{crdt}
+
+p = crdt.pncounter().increment("A", 10).decrement("A", 3)
+echo "pn=${p.value()}"
+
+n = crdt.pncounter().decrement("A", 7).increment("B", 2)
+echo "neg=${n.value()}"
+
+// Two replicas, then reconcile: A nets +7, B nets +5, minus a shared decrement of 5 → 7.
+a = crdt.pncounter().increment("A", 7).decrement("shared", 5)
+b = crdt.pncounter().increment("B", 5).decrement("shared", 5)
+m1 = a.merge(b)
+m2 = b.merge(a)
+echo "merged=${m1.value()} commutes=${m1 == m2}"

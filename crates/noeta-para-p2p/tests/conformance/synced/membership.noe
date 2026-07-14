@@ -1,0 +1,23 @@
+// para.synced (p2p P3.4b) — runtime membership on an encrypted group: `.add_member` / `.remove_member`
+// change who can read the group, and `remove` rotates the key so a removed peer stops decrypting new
+// state (on a real host). Membership is transparent to the converged value, so under the sandbox the
+// calls are no-ops and the two replicas still converge exactly like the plaintext twin — proving the
+// surface compiles, type-checks, and runs oracle-safe.
+// expect: stdout "converged: true"
+// expect: exit 0
+use para.{crdt}
+use para.synced.{synced_signal}
+
+members = ["alice", "bob"]
+a = synced_signal(crdt.gset(), "team/doc", members)
+b = synced_signal(crdt.gset(), "team/doc", members)
+
+// Runtime membership changes (no-ops in the deterministic sandbox; real revocation on a live node).
+a.add_member("carol")
+a.remove_member("carol")
+
+a.merge(crdt.gset().insert("hello"))
+b.sync()
+
+converged = b.get().contains("hello")
+echo "converged: ${converged}"

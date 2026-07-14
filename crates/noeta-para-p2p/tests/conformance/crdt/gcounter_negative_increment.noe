@@ -1,0 +1,8 @@
+// A GCounter is grow-only: it cannot move backward, so a negative increment amount is a runtime
+// misuse (use PnCounter.decrement for a decrementable counter). The dispatch rejects it rather
+// than silently clamping — a silent clamp would hide the bug.
+// expect: error E0007 at 7:5
+// expect: exit 1
+use para.{crdt}
+x = crdt.gcounter().increment("A", -1)
+echo x.value()
