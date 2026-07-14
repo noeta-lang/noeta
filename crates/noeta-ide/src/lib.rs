@@ -30,6 +30,7 @@
 pub mod callgraph;
 pub mod completion;
 pub mod docs;
+pub mod guide;
 pub mod impact;
 pub mod inlay;
 pub mod offsets;
@@ -2164,10 +2165,11 @@ mod tests {
         let uri = "file:///widgets.noe";
         let enc = Encoding::Utf16;
 
-        // The root is the project corpus.
+        // The roots are the project corpus and the language guide.
         let roots = store.doc_index(uri).unwrap();
-        assert_eq!(roots.len(), 1);
+        assert_eq!(roots.len(), 2);
         assert_eq!(roots[0].id.as_str(), "project");
+        assert_eq!(roots[1].id.as_str(), "guide");
 
         // Expand: root → module (named by file basename) → declarations.
         let modules = store.doc_children(uri, "project", enc).unwrap();

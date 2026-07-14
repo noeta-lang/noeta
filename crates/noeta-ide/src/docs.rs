@@ -22,6 +22,7 @@ use noeta_ast::Program;
 use noeta_check::{DocTarget, dedent_doc, resolve_docs};
 use noeta_span::{SourceId, Span};
 
+use crate::guide;
 use crate::offsets::Range;
 use crate::symbols::{SymbolKind, SymbolNode, outline};
 
@@ -51,6 +52,9 @@ impl DocId {
 /// The root of the project corpus: the active workspace's own declarations and `@doc` blocks.
 pub const PROJECT_ROOT: &str = "project";
 
+/// The root of the language-guide corpus: the embedded `docs/*.md` wiki (see [`crate::guide`]).
+pub const GUIDE_ROOT: &str = "guide";
+
 /// The kind of a doc node — its icon and how an adapter presents it. Spans every corpus; the
 /// project corpus uses the declaration kinds, later corpora add [`DocKind::Guide`] and friends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +73,8 @@ pub enum DocKind {
     Interface,
     /// Free-floating section prose between declarations (an unattached `@doc` block).
     Section,
+    /// A language-guide page (a `docs/*.md` wiki page).
+    Guide,
 }
 
 impl DocKind {
@@ -86,6 +92,7 @@ impl DocKind {
             DocKind::Method => "method",
             DocKind::Interface => "interface",
             DocKind::Section => "section",
+            DocKind::Guide => "guide",
         }
     }
 
@@ -175,18 +182,29 @@ pub trait DocEnv {
     fn source_name(&self, source: SourceId) -> Option<String>;
 }
 
-/// The corpus roots, in display order. Project-only in this slice; guide/api join as later slices
-/// land, each an additional root here plus a dispatch arm below.
+/// The corpus roots, in display order: the active project, then the language guides. The API
+/// reference joins as a third root in a later arc, each an additional root here plus a dispatch arm.
 pub fn roots() -> Vec<DocNode> {
-    vec![DocNode {
-        id: DocId::new(PROJECT_ROOT),
-        title: "Project".to_string(),
-        kind: DocKind::Root,
-        detail: None,
-        has_page: false,
-        expandable: true,
-        location: None,
-    }]
+    vec![
+        DocNode {
+            id: DocId::new(PROJECT_ROOT),
+            title: "Project".to_string(),
+            kind: DocKind::Root,
+            detail: None,
+            has_page: false,
+            expandable: true,
+            location: None,
+        },
+        DocNode {
+            id: DocId::new(GUIDE_ROOT),
+            title: "Language Guide".to_string(),
+            kind: DocKind::Root,
+            detail: None,
+            has_page: false,
+            expandable: true,
+            location: None,
+        },
+    ]
 }
 
 /// The children of `id`, one lazily-unfolded level (mirrors the Architecture view's lazy tree):
@@ -194,8 +212,10 @@ pub fn roots() -> Vec<DocNode> {
 /// declaration → its members (fields/variants/methods). An unknown or leaf id yields an empty
 /// vec, never an error.
 pub fn children(env: &impl DocEnv, program: &Program, id: &DocId) -> Vec<DocNode> {
-    if id.root() != PROJECT_ROOT {
-        return Vec::new();
+    match id.root() {
+        GUIDE_ROOT => return guide_children(id),
+        PROJECT_ROOT => {}
+        _ => return Vec::new(),
     }
     let tree = ProjectTree::build(env, program);
     let seg = id.segments();
@@ -220,8 +240,10 @@ pub fn children(env: &impl DocEnv, program: &Program, id: &DocId) -> Vec<DocNode
 /// The rendered page for `id` — the node's signature and `@doc` prose — or `None` if the id names
 /// nothing in the current program.
 pub fn page(env: &impl DocEnv, program: &Program, id: &DocId) -> Option<DocPage> {
-    if id.root() != PROJECT_ROOT {
-        return None;
+    match id.root() {
+        GUIDE_ROOT => return guide_page(id),
+        PROJECT_ROOT => {}
+        _ => return None,
     }
     let tree = ProjectTree::build(env, program);
     let seg = id.segments();
@@ -311,6 +333,10 @@ pub fn search(env: &impl DocEnv, program: &Program, query: &str) -> Vec<DocHit> 
             });
         }
     });
+    // Merge in the language-guide corpus so one search spans both. Guide scores are on the guide
+    // ranker's own scale (title×4/heading×3/body×1); the two scales are close enough for a combined
+    // best-first order without normalization at this corpus size.
+    hits.extend(guide_search(query));
     hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.title.cmp(&b.title)));
     hits.truncate(SEARCH_LIMIT);
     hits
@@ -328,6 +354,71 @@ pub fn id_for_name_span(env: &impl DocEnv, program: &Program, name_span: Span) -
         }
     });
     found
+}
+
+// ---- The language-guide corpus dispatch (slice 2). Static, workspace-independent. --------------
+
+/// The children of a guide id: the guide root lists one node per `docs/*.md` page; a page is a
+/// leaf (its full markdown is the page body).
+fn guide_children(id: &DocId) -> Vec<DocNode> {
+    if id.segments().len() != 1 {
+        return Vec::new(); // a page node is a leaf
+    }
+    guide::index()
+        .into_iter()
+        .map(|(slug, title)| DocNode {
+            id: DocId::new(format!("{GUIDE_ROOT}/{slug}")),
+            title,
+            kind: DocKind::Guide,
+            detail: None,
+            has_page: true,
+            expandable: false,
+            location: None,
+        })
+        .collect()
+}
+
+/// The page for a `guide/<slug>` id: the full markdown body of the guide page.
+fn guide_page(id: &DocId) -> Option<DocPage> {
+    let segments = id.segments();
+    let [_root, slug] = segments.as_slice() else {
+        return None;
+    };
+    let (title, body) = guide::lookup(slug)?;
+    Some(DocPage {
+        id: id.clone(),
+        title,
+        kind: DocKind::Guide,
+        signature: None,
+        markdown: body.to_string(),
+        location: None,
+        xrefs: Vec::new(),
+    })
+}
+
+/// Guide search hits as [`DocHit`]s addressed to their page node, best hit per page (a page's
+/// sections collapse to one result).
+fn guide_search(query: &str) -> Vec<DocHit> {
+    let mut best: Vec<DocHit> = Vec::new();
+    for hit in guide::search(query, SEARCH_LIMIT) {
+        let id = DocId::new(format!("{GUIDE_ROOT}/{}", hit.page));
+        match best.iter_mut().find(|h| h.id == id) {
+            Some(existing) => {
+                if (hit.score as i32) > existing.score {
+                    existing.score = hit.score as i32;
+                    existing.snippet = hit.snippet;
+                }
+            }
+            None => best.push(DocHit {
+                id,
+                title: hit.title,
+                kind: DocKind::Guide,
+                snippet: hit.snippet,
+                score: hit.score as i32,
+            }),
+        }
+    }
+    best
 }
 
 /// Cap on the number of search hits returned.
@@ -620,12 +711,54 @@ mod tests {
     }
 
     #[test]
-    fn project_root_is_the_sole_root_and_is_expandable() {
+    fn the_roots_are_project_then_guide() {
         let roots = roots();
-        assert_eq!(roots.len(), 1);
+        assert_eq!(roots.len(), 2);
         assert_eq!(roots[0].id.as_str(), "project");
-        assert_eq!(roots[0].kind, DocKind::Root);
-        assert!(roots[0].expandable);
+        assert_eq!(roots[1].id.as_str(), "guide");
+        assert!(
+            roots
+                .iter()
+                .all(|r| r.kind == DocKind::Root && r.expandable)
+        );
+    }
+
+    #[test]
+    fn the_guide_root_lists_pages_that_render_full_markdown() {
+        let program = program_of("fn f() {}");
+        let env = StubEnv;
+        // The guide corpus is workspace-independent — env/program are ignored for guide ids.
+        let pages = children(&env, &program, &DocId::new("guide"));
+        assert!(pages.len() > 5, "guide root lists the wiki pages");
+        assert!(
+            pages
+                .iter()
+                .all(|p| p.kind == DocKind::Guide && p.has_page && !p.expandable)
+        );
+        let page_node = &pages[0];
+        let page = page(&env, &program, &page_node.id).expect("a guide page renders");
+        assert_eq!(page.kind, DocKind::Guide);
+        assert!(!page.markdown.is_empty());
+        // A guide page is a leaf.
+        assert!(children(&env, &program, &page_node.id).is_empty());
+    }
+
+    #[test]
+    fn search_spans_both_the_project_and_the_guide_corpus() {
+        // `Widget` exists only in the project; a common guide term surfaces guide hits too.
+        let program = program_of("struct Widget { size: int }");
+        let env = StubEnv;
+        let project_hit = search(&env, &program, "Widget");
+        assert!(
+            project_hit
+                .iter()
+                .any(|h| h.kind == DocKind::Struct && h.title == "Widget")
+        );
+        let guide_hits = search(&env, &program, "standard library");
+        assert!(
+            guide_hits.iter().any(|h| h.kind == DocKind::Guide),
+            "a guide-only query returns guide hits"
+        );
     }
 
     #[test]
