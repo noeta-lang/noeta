@@ -118,6 +118,15 @@ struct Instance {
 /// unreadable/invalid manifest, a git fetch error, a registry dependency (pending P2.5), or a version
 /// conflict — is a human-readable `Err`.
 pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
+    resolve_graph_for(entry, None)
+}
+
+/// As [`resolve_graph`], but resolving the graph for a specific build **target** (dev-deps arc): the
+/// root's dependency set is [`Manifest::active_dependencies`] for `target` — the global
+/// `[dependencies]` plus that target's own and inherited `[targets.<name>.dependencies]`. `None`
+/// (the [`resolve_graph`] default) is the global set, so every existing caller is unchanged. A
+/// dependency's *own* target-scoped deps never apply — a dep contributes only its `[dependencies]`.
+pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedGraph, String> {
     let dir = entry.parent().unwrap_or_else(|| Path::new("."));
     let Some(manifest_path) = crate::manifest::find(dir) else {
         return Ok(ResolvedGraph {
@@ -129,6 +138,7 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
         });
     };
     let manifest = read_manifest(&manifest_path)?;
+    let root_deps = manifest.active_dependencies(target)?;
     let manifest_dir = manifest_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -154,9 +164,9 @@ pub fn resolve_graph(entry: &Path) -> Result<ResolvedGraph, String> {
     // spine, query the index for every registry candidate + its deps) and run PubGrub. This backtracks
     // over version ranges, so a solvable diamond resolves to a compatible set instead of a greedy
     // false conflict. The walk then materializes exactly the solved versions.
-    walker.solve(&manifest, &manifest_dir)?;
+    walker.solve(&root_deps, &manifest_dir)?;
     let mut root_edges = BTreeMap::new();
-    walker.walk(manifest.dependencies(), &manifest_dir, &mut root_edges)?;
+    walker.walk(&root_deps, &manifest_dir, &mut root_edges)?;
 
     let scope_trust = walker.scope_trust;
     let graph = assemble(
@@ -504,7 +514,11 @@ impl Walker<'_> {
     /// from the index, which serves per-version deps, so no cloning) — then runs PubGrub, which
     /// backtracks over version ranges. A local/git source **overrides** the registry for that identity
     /// (a single pinned version), matching Cargo's source precedence.
-    fn solve(&mut self, manifest: &Manifest, manifest_dir: &Path) -> Result<(), String> {
+    fn solve(
+        &mut self,
+        root_manifest_deps: &BTreeMap<String, crate::manifest::Dependency>,
+        manifest_dir: &Path,
+    ) -> Result<(), String> {
         let mut path_git: BTreeMap<String, PathGitCandidate> = BTreeMap::new();
         let mut registry: BTreeMap<String, Vec<crate::registry::Release>> = BTreeMap::new();
         let mut registry_queue: Vec<String> = Vec::new();
@@ -512,7 +526,7 @@ impl Walker<'_> {
         // Root's direct dependencies as resolver requirements; path/git deps are materialized here to
         // learn their identities + edges, registry identities are queued for index loading.
         let root_deps = self.gather(
-            manifest.dependencies(),
+            root_manifest_deps,
             manifest_dir,
             &mut path_git,
             &mut registry_queue,
@@ -951,6 +965,50 @@ mod tests {
             .unwrap();
         }
         app.join("main.noe")
+    }
+
+    #[test]
+    fn a_target_scoped_dependency_resolves_only_for_its_target() {
+        // An app with a runtime dep `fx` and a dev-only dep `tool` (dev-deps arc): the global graph
+        // sees `fx`; `--target dev` also sees `tool`.
+        let base = std::env::temp_dir().join("noeta_graph_test_target_deps");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        for (name, ver) in [("fx", "1.0.0"), ("tool", "1.0.0")] {
+            let d = base.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join("noeta.toml"),
+                format!("[package]\nname = \"acme/{name}\"\nversion = \"{ver}\"\n"),
+            )
+            .unwrap();
+            std::fs::write(
+                d.join(format!("{name}.noe")),
+                format!("namespace {name}.m;\npub fn one(): int {{ return 1; }}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nfx = { path = \"../fx\" }\n\
+             [targets.dev.dependencies]\ntool = { path = \"../tool\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+        let entry = app.join("main.noe");
+
+        let names = |g: &ResolvedGraph| -> Vec<String> {
+            g.locked.iter().map(|l| l.identity.clone()).collect()
+        };
+        let global = resolve_graph(&entry).expect("resolves");
+        assert!(names(&global).contains(&"acme/fx".to_string()));
+        assert!(!names(&global).contains(&"acme/tool".to_string()), "dev dep leaked into globals");
+
+        let dev = resolve_graph_for(&entry, Some("dev")).expect("resolves");
+        assert!(names(&dev).contains(&"acme/fx".to_string()));
+        assert!(names(&dev).contains(&"acme/tool".to_string()), "dev dep missing under --target dev");
     }
 
     #[test]
