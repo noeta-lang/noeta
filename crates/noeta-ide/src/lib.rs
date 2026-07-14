@@ -29,6 +29,7 @@
 
 pub mod callgraph;
 pub mod completion;
+pub mod docs;
 pub mod impact;
 pub mod inlay;
 pub mod offsets;
@@ -583,8 +584,17 @@ impl DocumentStore {
     /// which tiers a build would activate. Resolution mirrors [`Self::definition`]'s first and
     /// third layers (the scope-aware value index, then top-level definitions by name), and the
     /// match is by the declaration's **name-span** — the key `resolve_docs` reports.
-    pub fn hover_doc(&self, uri: &str, position: Position, encoding: Encoding) -> Option<String> {
-        let cache = self.workspaces.get(uri)?;
+    /// Resolve the cursor to the **name span** of the definition it refers to: the scope-aware
+    /// value index first (a call site or the declaration itself), then the top-level definitions
+    /// by the identifier token's text (type references, constructors). Shared by [`Self::hover_doc`]
+    /// and [`Self::doc_for_symbol`] so hover prose and the docs-browser jump agree on "what symbol
+    /// is under the cursor". Returns a span in the entry source (`SourceId::FIRST`).
+    fn definition_name_span(
+        &self,
+        cache: &WorkspaceCache,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<Span> {
         let db = &self.db;
         let entry = cache.entry();
         let entry_text = entry.text(db);
@@ -598,10 +608,7 @@ impl DocumentStore {
             Err(_) => &entry_ast.0.program,
         };
 
-        // Resolve the cursor to a definition's name-span: the scope-aware value index first
-        // (a call site or the declaration itself), then the top-level definitions by the
-        // identifier token's text (type references, constructors).
-        let def_span = resolve::DefUse::build(program)
+        resolve::DefUse::build(program)
             .definition_at(offset, cursor)
             .or_else(|| {
                 let token = noeta_db::tokens(db, entry).0.tokens.iter().find(|token| {
@@ -610,7 +617,20 @@ impl DocumentStore {
                         && offset <= token.span.end
                 })?;
                 resolve::Definitions::collect(program).resolve(&entry_text[token.span.range()])
-            })?;
+            })
+    }
+
+    pub fn hover_doc(&self, uri: &str, position: Position, encoding: Encoding) -> Option<String> {
+        let cache = self.workspaces.get(uri)?;
+        let db = &self.db;
+        let def_span = self.definition_name_span(cache, position, encoding)?;
+
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, cache.entry());
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
 
         noeta_check::resolve_docs(program)
             .into_iter()
@@ -1469,6 +1489,113 @@ impl DocumentStore {
         )
     }
 
+    // ---- The unified documentation model (docs-browser arc, slice 0). ----------------------
+    //
+    // These four methods are the single interface every tool goes through: `noeta lsp` (the
+    // editor's docs browser) and `noeta mcp` (the agent's docs tool) are both thin adapters over
+    // them, so the human and the agent browse the identical tree (see [`docs`]). Each reads the
+    // linked workspace program (falling back to the entry file's bare parse when a sibling fails
+    // to link, so docs still work on WIP code) and resolves through [`StoreDocEnv`].
+
+    /// The documentation corpus roots for the workspace of `uri` — the top level of the docs
+    /// browser (currently just `Project`). `None` when `uri` names no open workspace.
+    pub fn doc_index(&self, uri: &str) -> Option<Vec<docs::DocNode>> {
+        self.workspace_of(uri)?;
+        Some(docs::roots())
+    }
+
+    /// One lazily-unfolded level of the docs tree under `id` (root → modules → declarations →
+    /// members), mirroring the Architecture view's lazy unfolding.
+    pub fn doc_children(
+        &self,
+        uri: &str,
+        id: &str,
+        encoding: Encoding,
+    ) -> Option<Vec<docs::DocNode>> {
+        let (cache, _) = self.workspace_of(uri)?;
+        let db = &self.db;
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, cache.entry());
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        let env = StoreDocEnv {
+            store: self,
+            cache,
+            encoding,
+        };
+        Some(docs::children(&env, program, &docs::DocId(id.to_string())))
+    }
+
+    /// The rendered page (signature + `@doc` prose + source location) for the node `id`, or `None`
+    /// if the id names nothing in the current program.
+    pub fn doc_page(&self, uri: &str, id: &str, encoding: Encoding) -> Option<docs::DocPage> {
+        let (cache, _) = self.workspace_of(uri)?;
+        let db = &self.db;
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, cache.entry());
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        let env = StoreDocEnv {
+            store: self,
+            cache,
+            encoding,
+        };
+        docs::page(&env, program, &docs::DocId(id.to_string()))
+    }
+
+    /// Rank the workspace's doc nodes against `query`, best-first (see [`docs::search`]).
+    pub fn doc_search(
+        &self,
+        uri: &str,
+        query: &str,
+        encoding: Encoding,
+    ) -> Option<Vec<docs::DocHit>> {
+        let (cache, _) = self.workspace_of(uri)?;
+        let db = &self.db;
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, cache.entry());
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        let env = StoreDocEnv {
+            store: self,
+            cache,
+            encoding,
+        };
+        Some(docs::search(&env, program, query))
+    }
+
+    /// The doc node documenting the symbol under the cursor at `position` in `uri` — powers the
+    /// editor's "show docs for symbol" command. Resolves the cursor exactly like hover
+    /// ([`Self::definition_name_span`]), then maps the definition's name span to its doc id.
+    pub fn doc_for_symbol(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<docs::DocId> {
+        let cache = self.workspaces.get(uri)?;
+        let def_span = self.definition_name_span(cache, position, encoding)?;
+        let db = &self.db;
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, cache.entry());
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        let env = StoreDocEnv {
+            store: self,
+            cache,
+            encoding,
+        };
+        docs::id_for_name_span(&env, program, def_span)
+    }
+
     /// The `@test` fns declared in `uri` (ide-ui U3), in source order — what the editor's test
     /// explorer lists and its gutter run-arrows anchor to. Discovery is the runner's own
     /// [`activate_tiers`](noeta_check::activate_tiers) walk over the merged program, filtered to
@@ -1700,6 +1827,38 @@ pub fn layout_note(repr: &TypeRepr, layouts: &HashMap<String, PackedLayout>) -> 
             Some(format!("@packed — {} bytes{column}", layout.byte_size()))
         }
     }
+}
+
+/// The [`docs::DocEnv`] the store supplies to the unified doc model: resolve a declaration span to
+/// an editor location via [`DocumentStore::locate`], and name a project source (excluding
+/// dependency modules, whose ids sit past the entry+siblings range). Ephemeral per request.
+struct StoreDocEnv<'a> {
+    store: &'a DocumentStore,
+    cache: &'a WorkspaceCache,
+    encoding: Encoding,
+}
+
+impl docs::DocEnv for StoreDocEnv<'_> {
+    fn locate(&self, span: Span) -> Option<docs::DocLoc> {
+        self.store
+            .locate(self.cache, span, self.encoding)
+            .map(|(uri, range)| docs::DocLoc { uri, range })
+    }
+
+    fn source_name(&self, source: SourceId) -> Option<String> {
+        let idx = source.0 as usize;
+        // Project sources are entry + siblings (indices below `programs.len()`); a dependency
+        // module's id continues past them and is excluded from the project corpus.
+        if idx >= self.cache.programs.len() {
+            return None;
+        }
+        self.cache.source_uris.get(idx).map(|uri| basename(uri))
+    }
+}
+
+/// The trailing path segment of a document uri — its file name — for a module's display title.
+fn basename(uri: &str) -> String {
+    uri.rsplit(['/', '\\']).next().unwrap_or(uri).to_string()
 }
 
 /// The top-level function declaration named `name`, for signature help on a plain call.
@@ -1989,6 +2148,56 @@ mod tests {
             store.hover_doc("file:///a.noe", Position::new(2, 10), Encoding::Utf16),
             None
         );
+    }
+
+    #[test]
+    fn doc_model_browses_the_workspace_through_the_store() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///widgets.noe",
+            "@doc { Makes a widget. }\n\
+             fn make(n: int): int { return n }\n\
+             struct Widget { size: int }\n\
+             echo make(1)\n"
+                .to_string(),
+        );
+        let uri = "file:///widgets.noe";
+        let enc = Encoding::Utf16;
+
+        // The root is the project corpus.
+        let roots = store.doc_index(uri).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id.as_str(), "project");
+
+        // Expand: root → module (named by file basename) → declarations.
+        let modules = store.doc_children(uri, "project", enc).unwrap();
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].title, "widgets.noe");
+        let decls = store
+            .doc_children(uri, modules[0].id.as_str(), enc)
+            .unwrap();
+        let names: Vec<&str> = decls.iter().map(|d| d.title.as_str()).collect();
+        assert_eq!(names, vec!["make", "Widget"]);
+
+        // A decl page carries prose, a signature, and — via the real StoreDocEnv — a source
+        // location pointing back at the declaration.
+        let make = decls.iter().find(|d| d.title == "make").unwrap();
+        let page = store.doc_page(uri, make.id.as_str(), enc).unwrap();
+        assert_eq!(page.markdown, "Makes a widget.");
+        assert_eq!(page.signature.as_deref(), Some("(n: int) -> int"));
+        let loc = page.location.expect("decl page has a resolved location");
+        assert_eq!(loc.uri, uri);
+        assert_eq!(loc.range.start.line, 1); // `fn make` sits on line 1 (0-based)
+
+        // Search finds the documented declaration.
+        let hits = store.doc_search(uri, "widget", enc).unwrap();
+        assert!(hits.iter().any(|h| h.title == "Widget"));
+
+        // "Docs for the symbol under the cursor" resolves the call site on line 3 to `make`.
+        let id = store
+            .doc_for_symbol(uri, Position::new(3, 6), enc)
+            .expect("cursor on `make(...)` resolves to a doc node");
+        assert_eq!(id.as_str(), "project/0/make");
     }
 
     #[test]

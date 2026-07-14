@@ -1,0 +1,738 @@
+//! The unified documentation model (docs-browser arc, slice **0**).
+//!
+//! One navigable, searchable model of *everything worth documenting*, assembled over the compiler
+//! so that every tool — `noeta lsp` (the editor's docs browser), `noeta mcp` (the agent's docs
+//! tool), and `noeta doc` (the CLI) — reads the **same** tree and can never drift. This module is
+//! the single interface those adapters go through; none of them assembles docs itself.
+//!
+//! The model is a lazily-unfolded tree of [`DocNode`]s under a small set of **roots** (one per
+//! *corpus*): the project's own `@doc` blocks (this slice), and later the language guides and the
+//! generated stdlib/package API reference. Each corpus is a self-contained arm of the same
+//! dispatch — [`children`], [`page`], [`search`] — keyed off the [`DocId`]'s root segment, so a
+//! new root is a new arm, not a new interface.
+//!
+//! Assembly is pure over a parsed [`Program`] plus a [`DocEnv`] — the small seam through which the
+//! host resolves a [`Span`] to an editor location and names a source. That keeps the tree logic
+//! unit-testable against source (a stub `DocEnv`), exactly like [`crate::symbols::outline`], while
+//! the [`DocumentStore`](crate::DocumentStore) supplies the real salsa-backed environment.
+
+use std::collections::HashMap;
+
+use noeta_ast::Program;
+use noeta_check::{DocTarget, dedent_doc, resolve_docs};
+use noeta_span::{SourceId, Span};
+
+use crate::offsets::Range;
+use crate::symbols::{SymbolKind, SymbolNode, outline};
+
+/// A stable, wire-safe handle to a node in the doc tree. The first `/`-segment is the **root**
+/// (`project`, later `guide`/`api`); the rest is that corpus's own addressing. Round-trips through
+/// an adapter's wire and back into [`page`]/[`children`] unchanged. Segments below the root are
+/// Noeta identifiers or numeric indices (never contain `/`), so splitting on `/` is unambiguous.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DocId(pub String);
+
+impl DocId {
+    fn new(s: impl Into<String>) -> Self {
+        DocId(s.into())
+    }
+    /// The root segment (`"project"`, `"guide"`, `"api"`), or the whole id if it has no `/`.
+    pub fn root(&self) -> &str {
+        self.0.split('/').next().unwrap_or(&self.0)
+    }
+    fn segments(&self) -> Vec<&str> {
+        self.0.split('/').collect()
+    }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The root of the project corpus: the active workspace's own declarations and `@doc` blocks.
+pub const PROJECT_ROOT: &str = "project";
+
+/// The kind of a doc node — its icon and how an adapter presents it. Spans every corpus; the
+/// project corpus uses the declaration kinds, later corpora add [`DocKind::Guide`] and friends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocKind {
+    /// A corpus root (`Project`, `Guide`, `Api`).
+    Root,
+    /// A source module (one `.noe` file of the project).
+    Module,
+    Function,
+    Struct,
+    Class,
+    Enum,
+    Variant,
+    Field,
+    Method,
+    Interface,
+    /// Free-floating section prose between declarations (an unattached `@doc` block).
+    Section,
+}
+
+impl DocKind {
+    /// The wire tag an adapter maps onto its own protocol.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DocKind::Root => "root",
+            DocKind::Module => "module",
+            DocKind::Function => "function",
+            DocKind::Struct => "struct",
+            DocKind::Class => "class",
+            DocKind::Enum => "enum",
+            DocKind::Variant => "variant",
+            DocKind::Field => "field",
+            DocKind::Method => "method",
+            DocKind::Interface => "interface",
+            DocKind::Section => "section",
+        }
+    }
+
+    fn from_symbol(kind: SymbolKind) -> Self {
+        match kind {
+            SymbolKind::Function => DocKind::Function,
+            SymbolKind::Struct => DocKind::Struct,
+            SymbolKind::Class => DocKind::Class,
+            SymbolKind::Enum => DocKind::Enum,
+            SymbolKind::EnumMember => DocKind::Variant,
+            SymbolKind::Field => DocKind::Field,
+            SymbolKind::Method => DocKind::Method,
+            SymbolKind::Interface => DocKind::Interface,
+        }
+    }
+}
+
+/// A resolved source location — where a node's declaration lives, for "go to source".
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocLoc {
+    pub uri: String,
+    pub range: Range,
+}
+
+/// One node of the doc tree: what an adapter renders in the navigation view. Carries enough to
+/// display a row (title, kind, dim `detail`) and to know whether it can be expanded ([`expandable`])
+/// or opened as a page ([`has_page`]), plus its source location when it has one.
+///
+/// [`expandable`]: DocNode::expandable
+/// [`has_page`]: DocNode::has_page
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocNode {
+    pub id: DocId,
+    pub title: String,
+    pub kind: DocKind,
+    /// A short signature-like detail shown dim next to the title (a function's parameters/return,
+    /// a field's type), when useful.
+    pub detail: Option<String>,
+    /// Whether [`page`] yields a body worth opening (a signature and/or prose).
+    pub has_page: bool,
+    /// Whether [`children`] yields sub-nodes (an unexpandable leaf otherwise).
+    pub expandable: bool,
+    pub location: Option<DocLoc>,
+}
+
+/// A cross-reference from a page to another doc node — a clickable "see also" link. Populated
+/// lightly in this slice (empty); later wired to the call graph and prose↔API links.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocXref {
+    pub id: DocId,
+    pub title: String,
+}
+
+/// A rendered doc page: the body an adapter shows when a node is opened. `signature` is the
+/// declaration's code (rendered in a ```` ```noeta ```` block), `markdown` its `@doc` prose (may
+/// be empty). Together with `location` and `xrefs`, this is the whole page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocPage {
+    pub id: DocId,
+    pub title: String,
+    pub kind: DocKind,
+    pub signature: Option<String>,
+    pub markdown: String,
+    pub location: Option<DocLoc>,
+    pub xrefs: Vec<DocXref>,
+}
+
+/// One search hit: the node to open, plus a short snippet of the matching text and a score (higher
+/// is better) the adapter can present in ranked order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocHit {
+    pub id: DocId,
+    pub title: String,
+    pub kind: DocKind,
+    pub snippet: String,
+    pub score: i32,
+}
+
+/// The host seam the pure assembly resolves through: map a declaration [`Span`] to an editor
+/// [`DocLoc`], and name a project source (returning `None` for a source that should not appear in
+/// the project corpus — e.g. a dependency module, excluded in this slice). The
+/// [`DocumentStore`](crate::DocumentStore) implements this over its salsa database; tests stub it.
+pub trait DocEnv {
+    fn locate(&self, span: Span) -> Option<DocLoc>;
+    /// The display name of a project source (a file basename), or `None` if the source is not part
+    /// of the project corpus (excluded from the tree).
+    fn source_name(&self, source: SourceId) -> Option<String>;
+}
+
+/// The corpus roots, in display order. Project-only in this slice; guide/api join as later slices
+/// land, each an additional root here plus a dispatch arm below.
+pub fn roots() -> Vec<DocNode> {
+    vec![DocNode {
+        id: DocId::new(PROJECT_ROOT),
+        title: "Project".to_string(),
+        kind: DocKind::Root,
+        detail: None,
+        has_page: false,
+        expandable: true,
+        location: None,
+    }]
+}
+
+/// The children of `id`, one lazily-unfolded level (mirrors the Architecture view's lazy tree):
+/// the project root → its source modules; a module → its declarations (and section prose); a
+/// declaration → its members (fields/variants/methods). An unknown or leaf id yields an empty
+/// vec, never an error.
+pub fn children(env: &impl DocEnv, program: &Program, id: &DocId) -> Vec<DocNode> {
+    if id.root() != PROJECT_ROOT {
+        return Vec::new();
+    }
+    let tree = ProjectTree::build(env, program);
+    let seg = id.segments();
+    match seg.as_slice() {
+        [_root] => tree.modules.iter().map(|m| m.node.clone()).collect(),
+        [_root, s] => match tree.module(s) {
+            Some(m) => {
+                let mut kids: Vec<DocNode> = m.decls.iter().map(|d| d.node.clone()).collect();
+                kids.extend(m.sections.iter().map(|s| s.node.clone()));
+                kids
+            }
+            None => Vec::new(),
+        },
+        [_root, s, decl] => match tree.module(s).and_then(|m| m.decl(decl)) {
+            Some(d) => d.members.iter().map(|m| m.node.clone()).collect(),
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// The rendered page for `id` — the node's signature and `@doc` prose — or `None` if the id names
+/// nothing in the current program.
+pub fn page(env: &impl DocEnv, program: &Program, id: &DocId) -> Option<DocPage> {
+    if id.root() != PROJECT_ROOT {
+        return None;
+    }
+    let tree = ProjectTree::build(env, program);
+    let seg = id.segments();
+    // A section node's id is `project/{source}/~{index}` — dispatch it before the decl arm, which
+    // it would otherwise shadow (both are three segments).
+    if seg.last().is_some_and(|last| last.starts_with('~')) {
+        return section_page(&tree, &seg);
+    }
+    let (node, signature, markdown) = match seg.as_slice() {
+        [_root, s] => {
+            let m = tree.module(s)?;
+            (&m.node, None, m.prose.clone())
+        }
+        [_root, s, decl] => {
+            let d = tree.module(s)?.decl(decl)?;
+            (&d.node, d.node.detail.clone(), d.prose.clone())
+        }
+        [_root, s, decl, member] => {
+            let m = tree.module(s)?.decl(decl)?.member(member)?;
+            (&m.node, m.node.detail.clone(), m.prose.clone())
+        }
+        _ => return None,
+    };
+    Some(DocPage {
+        id: node.id.clone(),
+        title: node.title.clone(),
+        kind: node.kind,
+        signature,
+        markdown,
+        location: node.location.clone(),
+        xrefs: Vec::new(),
+    })
+}
+
+fn section_page(tree: &ProjectTree, seg: &[&str]) -> Option<DocPage> {
+    let [_root, s, _sec] = seg else {
+        return None;
+    };
+    let module = tree.module(s)?;
+    let section = module
+        .sections
+        .iter()
+        .find(|x| x.node.id.segments() == *seg)?;
+    Some(DocPage {
+        id: section.node.id.clone(),
+        title: section.node.title.clone(),
+        kind: DocKind::Section,
+        signature: None,
+        markdown: section.prose.clone(),
+        location: section.node.location.clone(),
+        xrefs: Vec::new(),
+    })
+}
+
+/// Rank every project node by how well it matches `query` (case-insensitive): a title hit scores
+/// higher than a body/detail hit. Returns hits sorted best-first, capped at [`SEARCH_LIMIT`].
+pub fn search(env: &impl DocEnv, program: &Program, query: &str) -> Vec<DocHit> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let tree = ProjectTree::build(env, program);
+    let mut hits: Vec<DocHit> = Vec::new();
+    tree.for_each(&mut |node: &DocNode, prose: &str| {
+        let title_l = node.title.to_lowercase();
+        let detail_l = node.detail.as_deref().unwrap_or("").to_lowercase();
+        let prose_l = prose.to_lowercase();
+        let mut score = 0;
+        if title_l == needle {
+            score += 100;
+        } else if title_l.contains(&needle) {
+            score += 40;
+        }
+        if detail_l.contains(&needle) {
+            score += 8;
+        }
+        if prose_l.contains(&needle) {
+            score += 5;
+        }
+        if score > 0 {
+            hits.push(DocHit {
+                id: node.id.clone(),
+                title: node.title.clone(),
+                kind: node.kind,
+                snippet: snippet_of(prose, node.detail.as_deref()),
+                score,
+            });
+        }
+    });
+    hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.title.cmp(&b.title)));
+    hits.truncate(SEARCH_LIMIT);
+    hits
+}
+
+/// The [`DocId`] documenting the declaration whose name span is `name_span`, if it is a project
+/// node — the bridge for "show docs for the symbol under the cursor" (the store resolves the
+/// cursor to a name span; this maps that span to its doc node).
+pub fn id_for_name_span(env: &impl DocEnv, program: &Program, name_span: Span) -> Option<DocId> {
+    let tree = ProjectTree::build(env, program);
+    let mut found = None;
+    tree.for_each_with_span(&mut |node: &DocNode, span: Option<Span>| {
+        if span == Some(name_span) {
+            found = Some(node.id.clone());
+        }
+    });
+    found
+}
+
+/// Cap on the number of search hits returned.
+pub const SEARCH_LIMIT: usize = 50;
+
+fn snippet_of(prose: &str, detail: Option<&str>) -> String {
+    let src = if !prose.trim().is_empty() {
+        prose.trim()
+    } else {
+        detail.unwrap_or("").trim()
+    };
+    let one_line = src.split('\n').next().unwrap_or("").trim();
+    if one_line.chars().count() > 140 {
+        let cut: String = one_line.chars().take(137).collect();
+        format!("{cut}…")
+    } else {
+        one_line.to_string()
+    }
+}
+
+// ---- The eagerly-built project tree (one pass per request, like the Architecture view). --------
+
+struct MemberEntry {
+    node: DocNode,
+    name_span: Span,
+    prose: String,
+}
+
+struct DeclEntry {
+    node: DocNode,
+    name_span: Span,
+    prose: String,
+    members: Vec<MemberEntry>,
+}
+
+struct SectionEntry {
+    node: DocNode,
+    prose: String,
+}
+
+struct ModuleEntry {
+    /// The source index string used in ids (`SourceId.0`).
+    key: String,
+    node: DocNode,
+    prose: String,
+    decls: Vec<DeclEntry>,
+    sections: Vec<SectionEntry>,
+}
+
+struct ProjectTree {
+    modules: Vec<ModuleEntry>,
+}
+
+impl DeclEntry {
+    fn member(&self, name: &str) -> Option<&MemberEntry> {
+        self.members
+            .iter()
+            .find(|m| last_segment(&m.node.id) == name)
+    }
+}
+
+impl ModuleEntry {
+    fn decl(&self, name: &str) -> Option<&DeclEntry> {
+        self.decls.iter().find(|d| last_segment(&d.node.id) == name)
+    }
+}
+
+impl ProjectTree {
+    fn module(&self, key: &str) -> Option<&ModuleEntry> {
+        self.modules.iter().find(|m| m.key == key)
+    }
+
+    /// Visit every node paired with its prose (for search).
+    fn for_each(&self, f: &mut impl FnMut(&DocNode, &str)) {
+        for m in &self.modules {
+            f(&m.node, &m.prose);
+            for d in &m.decls {
+                f(&d.node, &d.prose);
+                for mem in &d.members {
+                    f(&mem.node, &mem.prose);
+                }
+            }
+            for s in &m.sections {
+                f(&s.node, &s.prose);
+            }
+        }
+    }
+
+    /// Visit every declaration/member node paired with its name span (for span→id lookup). Module
+    /// and section nodes carry no declaration name span and are visited with `None`.
+    fn for_each_with_span(&self, f: &mut impl FnMut(&DocNode, Option<Span>)) {
+        for m in &self.modules {
+            f(&m.node, None);
+            for d in &m.decls {
+                f(&d.node, Some(d.name_span));
+                for mem in &d.members {
+                    f(&mem.node, Some(mem.name_span));
+                }
+            }
+            for s in &m.sections {
+                f(&s.node, None);
+            }
+        }
+    }
+
+    fn build(env: &impl DocEnv, program: &Program) -> ProjectTree {
+        let docs = ResolvedDocs::collect(program);
+        let mut modules: Vec<ModuleEntry> = Vec::new();
+
+        for sym in outline(program) {
+            let source = sym.name_span.source;
+            let Some(module_name) = env.source_name(source) else {
+                continue; // not a project source (e.g. a dependency module)
+            };
+            let key = source.0.to_string();
+            let mod_idx = match modules.iter().position(|m| m.key == key) {
+                Some(i) => i,
+                None => {
+                    modules.push(ModuleEntry {
+                        key: key.clone(),
+                        node: DocNode {
+                            id: DocId::new(format!("{PROJECT_ROOT}/{key}")),
+                            title: module_name,
+                            kind: DocKind::Module,
+                            detail: None,
+                            has_page: false,
+                            expandable: false,
+                            location: None,
+                        },
+                        prose: docs.module.get(&source).cloned().unwrap_or_default(),
+                        decls: Vec::new(),
+                        sections: Vec::new(),
+                    });
+                    modules.len() - 1
+                }
+            };
+            let decl = decl_entry(env, &key, &sym, &docs);
+            modules[mod_idx].decls.push(decl);
+        }
+
+        // Attach each source's section prose and finalize module page/expandable flags.
+        for m in &mut modules {
+            let source = SourceId(m.key.parse().unwrap_or(0));
+            if let Some(sections) = docs.sections.get(&source) {
+                for (i, (span, text)) in sections.iter().enumerate() {
+                    m.sections.push(SectionEntry {
+                        node: DocNode {
+                            id: DocId::new(format!("{}/~{i}", m.node.id.as_str())),
+                            title: section_title(text),
+                            kind: DocKind::Section,
+                            detail: None,
+                            has_page: true,
+                            expandable: false,
+                            location: env.locate(*span),
+                        },
+                        prose: text.clone(),
+                    });
+                }
+            }
+            m.node.expandable = !m.decls.is_empty() || !m.sections.is_empty();
+            m.node.has_page = !m.prose.trim().is_empty();
+        }
+
+        ProjectTree { modules }
+    }
+}
+
+fn decl_entry(
+    env: &impl DocEnv,
+    mod_key: &str,
+    sym: &SymbolNode,
+    docs: &ResolvedDocs,
+) -> DeclEntry {
+    let id = DocId::new(format!("{PROJECT_ROOT}/{mod_key}/{}", sym.name));
+    let members: Vec<MemberEntry> = sym
+        .children
+        .iter()
+        .map(|child| MemberEntry {
+            node: DocNode {
+                id: DocId::new(format!("{}/{}", id.as_str(), child.name)),
+                title: child.name.clone(),
+                kind: DocKind::from_symbol(child.kind),
+                detail: child.detail.clone(),
+                has_page: true,
+                expandable: false,
+                location: env.locate(child.name_span),
+            },
+            name_span: child.name_span,
+            prose: docs.decl.get(&child.name_span).cloned().unwrap_or_default(),
+        })
+        .collect();
+    DeclEntry {
+        node: DocNode {
+            id,
+            title: sym.name.clone(),
+            kind: DocKind::from_symbol(sym.kind),
+            detail: sym.detail.clone(),
+            has_page: true,
+            expandable: !members.is_empty(),
+            location: env.locate(sym.name_span),
+        },
+        name_span: sym.name_span,
+        prose: docs.decl.get(&sym.name_span).cloned().unwrap_or_default(),
+        members,
+    }
+}
+
+/// The `@doc` prose of a program, bucketed by what it documents — declarations (by name span),
+/// module docs (by source), and free-floating sections (by source, in order).
+struct ResolvedDocs {
+    decl: HashMap<Span, String>,
+    module: HashMap<SourceId, String>,
+    sections: HashMap<SourceId, Vec<(Span, String)>>,
+}
+
+impl ResolvedDocs {
+    fn collect(program: &Program) -> ResolvedDocs {
+        let mut decl = HashMap::new();
+        let mut module = HashMap::new();
+        let mut sections: HashMap<SourceId, Vec<(Span, String)>> = HashMap::new();
+        for block in resolve_docs(program) {
+            let text = dedent_doc(&block.text).trim().to_string();
+            match block.target {
+                DocTarget::Decl { name_span, .. } => {
+                    decl.insert(name_span, text);
+                }
+                DocTarget::Module => {
+                    module.entry(block.span.source).or_insert(text);
+                }
+                DocTarget::Section => {
+                    sections
+                        .entry(block.span.source)
+                        .or_default()
+                        .push((block.span, text));
+                }
+            }
+        }
+        ResolvedDocs {
+            decl,
+            module,
+            sections,
+        }
+    }
+}
+
+fn last_segment(id: &DocId) -> &str {
+    id.0.rsplit('/').next().unwrap_or(&id.0)
+}
+
+fn section_title(text: &str) -> String {
+    let first = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("Section")
+        .trim_start_matches('#')
+        .trim();
+    if first.chars().count() > 60 {
+        let cut: String = first.chars().take(57).collect();
+        format!("{cut}…")
+    } else if first.is_empty() {
+        "Section".to_string()
+    } else {
+        first.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use noeta_lexer::lex;
+    use noeta_parser::parse;
+    use noeta_span::Source;
+
+    /// A stub environment: names the single test source and resolves no locations.
+    struct StubEnv;
+    impl DocEnv for StubEnv {
+        fn locate(&self, _span: Span) -> Option<DocLoc> {
+            None
+        }
+        fn source_name(&self, source: SourceId) -> Option<String> {
+            (source == SourceId::FIRST).then(|| "t.noe".to_string())
+        }
+    }
+
+    fn program_of(src: &str) -> Program {
+        let source = Source::new(SourceId::FIRST, "t.noe", src);
+        let lexed = lex(&source);
+        parse(&source, &lexed.tokens).program
+    }
+
+    #[test]
+    fn project_root_is_the_sole_root_and_is_expandable() {
+        let roots = roots();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].id.as_str(), "project");
+        assert_eq!(roots[0].kind, DocKind::Root);
+        assert!(roots[0].expandable);
+    }
+
+    #[test]
+    fn project_children_are_modules_then_decls_then_members() {
+        let program = program_of(
+            "fn greet(name: str): str { return name }\nstruct Point {\n  x: int\n  y: int\n}",
+        );
+        let env = StubEnv;
+
+        // Level 1: one module for the single source.
+        let modules = children(&env, &program, &DocId::new("project"));
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].kind, DocKind::Module);
+        assert_eq!(modules[0].title, "t.noe");
+        assert!(modules[0].expandable);
+
+        // Level 2: the module's declarations.
+        let decls = children(&env, &program, &modules[0].id);
+        let names: Vec<&str> = decls.iter().map(|d| d.title.as_str()).collect();
+        assert_eq!(names, vec!["greet", "Point"]);
+        let point = decls.iter().find(|d| d.title == "Point").unwrap();
+        assert_eq!(point.kind, DocKind::Struct);
+        assert!(point.expandable);
+
+        // Level 3: the struct's fields.
+        let fields = children(&env, &program, &point.id);
+        let fnames: Vec<&str> = fields.iter().map(|f| f.title.as_str()).collect();
+        assert_eq!(fnames, vec!["x", "y"]);
+        assert_eq!(fields[0].kind, DocKind::Field);
+        assert_eq!(fields[0].detail.as_deref(), Some("int"));
+    }
+
+    #[test]
+    fn a_decl_page_carries_its_doc_prose_and_signature() {
+        let program = program_of(
+            "@doc {\n  Greets a person by name.\n}\nfn greet(name: str): str { return name }",
+        );
+        let env = StubEnv;
+        let modules = children(&env, &program, &DocId::new("project"));
+        let decls = children(&env, &program, &modules[0].id);
+        let greet = &decls[0];
+
+        let page = page(&env, &program, &greet.id).unwrap();
+        assert_eq!(page.title, "greet");
+        assert_eq!(page.kind, DocKind::Function);
+        assert_eq!(page.markdown, "Greets a person by name.");
+        assert_eq!(page.signature.as_deref(), Some("(name: str) -> str"));
+    }
+
+    #[test]
+    fn a_module_doc_becomes_the_module_page() {
+        // A doc block whose next statement is *not* a declaration (here a `use`) is the module doc,
+        // not a declaration's doc — the adjacency rule in `resolve_texts`.
+        let program = program_of("@doc {\n  The geometry module.\n}\nuse std.math\nfn f() {}");
+        let env = StubEnv;
+        let modules = children(&env, &program, &DocId::new("project"));
+        assert!(modules[0].has_page);
+        let page = page(&env, &program, &modules[0].id).unwrap();
+        assert_eq!(page.markdown, "The geometry module.");
+        assert_eq!(page.kind, DocKind::Module);
+    }
+
+    #[test]
+    fn search_ranks_a_name_hit_above_a_prose_hit() {
+        let program =
+            program_of("@doc {\n  A helper about widgets.\n}\nfn helper() {}\nfn widget() {}");
+        let env = StubEnv;
+        let hits = search(&env, &program, "widget");
+        // `widget` (name match) outranks `helper` (prose-only match), and both appear.
+        assert!(hits.len() >= 2);
+        assert_eq!(hits[0].title, "widget");
+        assert!(hits.iter().any(|h| h.title == "helper"));
+        assert!(hits[0].score > hits.iter().find(|h| h.title == "helper").unwrap().score);
+    }
+
+    #[test]
+    fn id_for_name_span_finds_the_documented_decl() {
+        let program = program_of("fn greet() {}\nfn other() {}");
+        let env = StubEnv;
+        // The name span of `greet` is where the identifier sits in source.
+        let greet_span = outline(&program)[0].name_span;
+        let id = id_for_name_span(&env, &program, greet_span).unwrap();
+        assert_eq!(id.as_str(), "project/0/greet");
+    }
+
+    #[test]
+    fn section_prose_becomes_a_leaf_node() {
+        // The first non-attached block is the module doc; a later non-attached block is a section.
+        // Each block's next statement is a `use` (not a declaration), so neither attaches to a decl.
+        let program = program_of(
+            "@doc {\n  Module intro.\n}\nuse std.math\nfn a() {}\n@doc {\n  ## Notes\n  Some free prose.\n}\nuse std.list\nfn b() {}",
+        );
+        let env = StubEnv;
+        let modules = children(&env, &program, &DocId::new("project"));
+        let kids = children(&env, &program, &modules[0].id);
+        let section = kids.iter().find(|k| k.kind == DocKind::Section).unwrap();
+        assert_eq!(section.title, "Notes");
+        let page = page(&env, &program, &section.id).unwrap();
+        assert!(page.markdown.contains("Some free prose."));
+    }
+
+    #[test]
+    fn unknown_id_yields_no_children_and_no_page() {
+        let program = program_of("fn f() {}");
+        let env = StubEnv;
+        assert!(children(&env, &program, &DocId::new("project/99/nope")).is_empty());
+        assert!(page(&env, &program, &DocId::new("guide/whatever")).is_none());
+        assert!(page(&env, &program, &DocId::new("project/0/nope")).is_none());
+    }
+}
