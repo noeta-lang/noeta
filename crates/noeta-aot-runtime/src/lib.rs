@@ -34,25 +34,48 @@ unsafe extern "C" {
     static noeta_aot_dispatch: usize;
 }
 
+/// Install extra native **runtime** extensions, then recover and run the embedded program, returning
+/// its C exit status — the extension seam a **native-dependency** `noeta build --native` links against
+/// (dev-deps: the `--native` analogue of the composed runner). When a shipped app depends on packages
+/// with native tier handlers or modules, `--native` composes an AOT-runtime staticlib that aggregates
+/// those crates' `NOETA_EXTENSIONS` and calls this, so the VM resolves the native modules/types/tiers
+/// the AOT-compiled bundle references. The units are *runtime* capabilities only — a composed AOT
+/// runtime carries no more dev tooling than the plain one (each mixed crate is built with its formatter
+/// feature off). The plain [`main`] passes an empty slice, giving exactly today's std-only behavior.
+///
+/// Maps the process `ExitCode` to a C `int`: `ExitCode` has no getter, so the honest bridge reports
+/// success as 0 and any failure as 1 — the AOT differential compares stdout + success, and the
+/// program's own `exit_code` is already folded into `run`'s return.
+pub fn run_embedded_with_extensions(
+    units: &'static [&'static (dyn noeta_stdlib::Extension + Sync)],
+) -> core::ffi::c_int {
+    // Seed the default registry with std + the app's native units before any lookup (the VM's first
+    // module/type/tier resolution reads it). An empty slice is exactly the lazy std-only default.
+    noeta_stdlib::registry::install_with_extras(units);
+    match run() {
+        c if c == ExitCode::SUCCESS => 0,
+        _ => 1,
+    }
+}
+
 /// C-runtime entry point of a native AOT binary. `crt0` calls this after process setup; it returns
 /// the program's exit code. Declared `extern "C"` and exported as `main` so the system linker
 /// resolves `crt0`'s reference to it. Arguments (`argc`/`argv`) are read through `std::env` — on the
 /// platforms this interim runtime targets, std's startup captures them independently of this entry —
 /// so the signature takes none.
 ///
+/// Gated behind the default **`entry`** feature so a *composed* AOT runtime (a native-dependency app's
+/// `--native` base) can depend on this crate with `default-features = false` and provide its **own**
+/// `main` — which installs the app's extensions via [`run_embedded_with_extensions`] — without a
+/// duplicate-`main` link error. A plain `--native` (no native deps) keeps this entry.
+///
 /// # Safety
 /// Invoked by the C runtime exactly once, as the process entry; not to be called from Rust.
+#[cfg(feature = "entry")]
 #[unsafe(no_mangle)]
 #[allow(unsafe_code)]
 pub unsafe extern "C" fn main() -> core::ffi::c_int {
-    let code = run();
-    // Map the process `ExitCode` to a C `int`. `ExitCode` has no getter, so the honest bridge is to
-    // report success as 0 and any failure as 1 — the AOT differential compares stdout + success, and
-    // the program's own `exit_code` (below) is already folded into `run`'s return.
-    match code {
-        c if c == ExitCode::SUCCESS => 0,
-        _ => 1,
-    }
+    run_embedded_with_extensions(&[])
 }
 
 /// Recover the embedded program, run it native-bound, and print its output — the body of [`main`],
