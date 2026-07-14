@@ -7,14 +7,20 @@ for JS), and every parser in a prod binary is reachable attack surface. The fix 
 exclusion driven by the **target**, so `noeta build --target prod` yields a runtime that contains
 only what the app runs, while the dev toolchain keeps everything.
 
-Two mechanisms, addressing the two shapes a dev capability arrives in:
+Three mechanisms, addressing the shapes a dev capability arrives in and where it is shipped:
 
-1. **Target-scoped dependencies** — `[targets.<name>.dependencies]` — for a **standalone** dev
-   tool (a package that is *only* dev tooling). Present in `dev`, absent in `prod`.
-2. **Dev-capability gating** — for a **mixed** package that ships a runtime tier handler *and* its
-   formatter in one crate. Target-scoped deps can't split one crate; the tier and formatter come
-   as a unit. So the *prod build compiles that crate with its dev-kind capabilities off* (and their
-   optional heavy deps uncompiled), automatically, with no per-dependency config by the app author.
+1. **Lean runtime binary** (`noeta-runner`) — the prod-artifact executor. Depends on runtime crates
+   only; the toolchain (fmt/LSP/DAP/MCP/compiler) is *structurally absent* — no dependency edge, no
+   `#[cfg]`. `build --exe`/`--native` staple onto **this**, not onto a copy of the full CLI. Native
+   analogue of `noeta-wasm-runner`.
+2. **Target-scoped dependencies** — `[targets.<name>.dependencies]` — for a **standalone** dev tool
+   (a package that is *only* dev tooling). Present in `dev`, absent in `prod`; excluded by the same
+   no-dependency-edge principle at the manifest layer.
+3. **Dev-capability feature-gating** — for a **mixed** package that ships a runtime tier handler
+   *and* its formatter in one crate. Target-scoped deps can't split one crate; the tier and
+   formatter come as a unit. So the *prod build compiles that crate with its dev-kind capabilities
+   off* (and their optional heavy deps uncompiled) via a Cargo feature — the one place `#[cfg]` is
+   irreducible, confined to the package author's own crate.
 
 ## Why this shape
 
@@ -42,16 +48,43 @@ executable is the full `noeta-cli`, whose `run_cli` installs fmt, **every format
 `noeta build --exe app.noe` from the stock binary — ships the entire toolchain and its parsers. The
 gap is broader than native deps.
 
-**Decision (approach for the prod-artifact fix).** Rather than introduce a new lean runtime binary,
-**feature-gate the toolchain's dev capabilities** and build the prod artifact with them off:
-- `noeta-cli`'s own dev extensions (`noeta-html`, `noeta-css`→`malva`) move behind a `fmt` feature
-  (`run_cli` installs them only when enabled; the crates become optional deps);
-- a prod build compiles the artifact (the composed shim, or the stock runtime) **without** `fmt` and
-  without any target's dev-only native crates, so the formatter code and its parsers are never
-  emitted.
-This removes the dev code + parsers from the prod binary (the security core) with far less blast
-radius than a separate runtime crate. A dedicated lean `noeta-runner` (mirroring the existing
-`noeta-wasm-runner`) stays a possible future refinement, not this arc's path.
+**Decision (approach for the prod-artifact fix) — REVISED.** The prod-artifact fix is a **dedicated
+lean runtime binary** (`noeta-runner`, the native analogue of the existing `noeta-wasm-runner`),
+*not* feature-gating the CLI. The reason is mechanism: excluding the toolchain by `#[cfg]`-gating it
+within `noeta-cli` requires threading feature checks across every dev seam (fmt, LSP, DAP, MCP,
+prof) and making each an optional dep — a growing, leak-prone maze where a single missed `#[cfg]`
+ships dev code to prod and "is the LSP absent?" is answered only by tracing cfgs. A lean runtime
+excludes them **structurally**: a binary crate whose `[dependencies]` simply never names
+`noeta-lsp`/`noeta-dap`/`noeta-fmt`/`noeta-html`/`noeta-css`/`noeta-mcp`/`noeta-compiler`. With no
+dependency edge, that code is unreachable and never compiled — **zero `#[cfg]` anywhere**, auditable
+by reading one Cargo.toml. `noeta-wasm-runner` already proves the shape: ~90 lines around
+`noeta_bundle::read` + the VM, *"no compiler, no source,"* target-agnostic.
+
+Feature-gating is **not dropped — it is rescoped** to the one case a lean runtime cannot solve: a
+**mixed third-party crate** that ships a runtime tier handler *and* its formatter in one crate. The
+app legitimately depends on that crate for its runtime tier, so "don't depend on it" fails; the
+formatter must be carved out *within* that crate via a Cargo feature (`fmt = ["dep:malva"]`,
+`#[cfg(feature = "fmt")] fn body_formatters`). That is a handful of lines in the *package author's
+own* crate — never cfgs threaded across our CLI.
+
+**Drift firewall.** The lean runtime and the toolchain's own execution path share **one**
+bundle-execution library (`noeta-vm`/`noeta-backend` over `noeta-bundle`) — exactly as
+`noeta-wasm-runner` and the native CLI do today. The runner is a thin *shell* (argv + Host wiring)
+over shared guts, so prod-run and dev-run cannot diverge in behavior. Only the dependency shell
+differs, which is the entire point.
+
+**Execution model (three rings over the shared core).** The exclusion boundary is *shipped artifact
+vs toolchain*, not *run vs debug*:
+- **Shipped artifact** — executes a *pre-built bundle*. No compiler, no dev caps. This is the lean
+  runtime (`build --exe`/`--native`; and `noeta run app.noeb` should dispatch through the identical
+  path).
+- **`noeta run app.noe` (from source)** — needs the **compiler** front-half, so it stays in the
+  toolchain binary; but it installs only *runtime* capabilities (a tier's handler), never *dev* ones
+  (its formatter). It is a dev command on a machine that already has the toolchain, so it is *not*
+  its own lean binary (see non-goals).
+- **`noeta profile` / `noeta dap`** — run the *same* VM with an Option-gated hook installed (the DAP
+  "debugs the PROD VM"); zero-cost when absent. Profiling/debugging therefore observe identical
+  execution semantics and are toolchain-only surfaces.
 
 ## Current state (grounding)
 
@@ -70,9 +103,10 @@ radius than a separate runtime crate. A dedicated lean `noeta-runner` (mirroring
 ## Slices
 
 - **D0 — verify + decide. ✅ (see above).** Confirmed `--exe`/`--native` copy the full CLI (fmt +
-  malva). Decided: feature-gate dev capabilities, prod builds with them off. Remaining D0 decision
-  carried into D4: the default-target story (which target `run`/`test` use = dev, `build` = prod)
-  and whether `--target` is the sole selector. Dev-capability set starts at `body_formatters`.
+  malva). Decided (REVISED): a **lean runtime binary** for the prod artifact (structural exclusion,
+  no CLI cfg-threading); feature-gating rescoped to mixed crates only. Remaining D0 decision carried
+  into D4: the default-target story (which target `run`/`test` use = dev, `build` = prod) and whether
+  `--target` is the sole selector. Dev-capability set starts at `body_formatters`.
 - **D1 — target-scoped dependencies (manifest).** Parse `[targets.<name>.dependencies]` into
   `Target`; `extends` inherits deps (like tiers). Validate shape; a target's tier provider may now
   name a target-scoped dep. Errors point at the missing/duplicated key. Unit tests over `from_toml`.
@@ -80,17 +114,26 @@ radius than a separate runtime crate. A dedicated lean `noeta-runner` (mirroring
   (everything pinned); a per-target *view* selects its subset. Shared deps unify to one version
   (dev-only deps can't conflict with prod). `resolve_graph` gains a target parameter (or returns
   per-target native-crate sets). No churn for manifests without target deps.
-- **D3 — dev-capability gating convention + toggle.** Establish the package-author contract: gate
-  dev-kind capability impls + their optional heavy deps behind a Cargo feature (`fmt`, or a
-  standard `noeta-dev`), e.g. `malva = { optional = true }`, `fmt = ["dep:malva"]`,
-  `#[cfg(feature = "fmt")] fn body_formatters(...)`. The composer sets a single build flag
-  (`--cfg`/feature) — **on** for toolchain builds, **off** for prod. Document + (stretch) a lint
-  that flags an un-gated dev capability in a package meant to ship to prod.
-- **D4 — composer per-target build.** `compose.rs` builds the Cargo project **for a target**:
-  include only that target's native crates (D2), enable/disable the dev feature per `extN` (D3).
-  The prod-artifact path (`build --exe`/`--native`) composes a **runtime** shim (no dev features,
-  no dev-only crates) rather than stapling onto the toolchain — the security fix. Content-hash key
-  includes the target + feature set so dev and prod artifacts cache separately.
+- **D3 — the lean runtime binary (`noeta-runner`).** A new binary crate, native analogue of
+  `noeta-wasm-runner`: `[dependencies]` = runtime crates only (`noeta-vm`, `noeta-backend`,
+  `noeta-bundle`, `noeta-runtime`, `noeta-stdlib`, the real `Host`) — **no** `noeta-fmt`/`-lsp`/
+  `-dap`/`-mcp`/`-html`/`-css`/`-compiler`. `main` reads a stapled or path bundle
+  (`noeta_bundle::read`) and runs it on the VM, sharing the **exact** execution tail the CLI's `run`
+  verb uses (extract that tail into a shared lib fn if not already one — the drift firewall). Prove
+  it runs a `--exe`-shaped bundle byte-identically to the CLI (reuse the differential-oracle shape).
+  This crate *cannot* contain a formatter/parser — auditable by its Cargo.toml.
+- **D4 — repoint `--exe`/`--native` onto the lean runtime + per-target compose.** `build --exe`/
+  `--native` staple the bundle onto **`noeta-runner`** (or a composed shim whose base is the runner,
+  for apps with native runtime deps) instead of cloning the running full CLI — the security fix. The
+  composer (`compose.rs`) builds **for a target**: include only that target's native crates (D2), and
+  for a *mixed* crate flip its dev feature **off** in prod / **on** for the toolchain (D5's contract).
+  Content-hash key includes target + feature set so dev/prod artifacts cache separately. Assert
+  `malva`/`noeta-fmt` symbols are **absent** from the prod artifact.
+- **D3b — dev-capability feature-gating convention (mixed crates).** The package-author contract for
+  the *one* case D3 can't cover structurally: gate a mixed crate's dev-kind impls + optional heavy
+  deps behind a Cargo feature — `malva = { optional = true }`, `fmt = ["dep:malva"]`,
+  `#[cfg(feature = "fmt")] fn body_formatters(...)`. The composer flips it per target (D4).
+  Document + (stretch) a lint flagging an un-gated dev capability in a crate meant to ship to prod.
 - **D5 — dogfood + docs.** A first-party **mixed** example package: a tier with a native handler +
   a feature-gated formatter, proving prod strips the formatter (`malva` absent from the prod binary
   — assert via symbol/size or a link check) while dev formats it. Migrate `noeta-css`'s `malva` to
@@ -100,13 +143,19 @@ radius than a separate runtime crate. A dedicated lean `noeta-runner` (mirroring
 
 ## Open questions
 
-- **Prod-artifact composition (blocking D4).** Does `--exe`/`--native` today carry the toolchain?
-  Determines whether D4 is a refactor or a from-scratch lean-runtime compose path.
+- **Prod-artifact composition. ✅ RESOLVED.** `--exe`/`--native` staple onto a copy of the running
+  full CLI today (D0). D4 repoints them onto the lean `noeta-runner` (D3). The shared bundle-exec
+  library is the drift firewall.
+- **Shared-execution-lib extraction (D3).** Is the CLI's `run`-verb bundle-execution tail already a
+  reusable lib fn, or does D3 extract it? `noeta-wasm-runner` proves the tail is small and
+  target-agnostic; confirm the native path can call the identical fn.
 - **Version unification across targets** — same constraint Cargo solves; confirm our resolver
   handles a dev-only dep that is absent from prod cleanly.
-- **Feature name / granularity** — one conventional `fmt`/`noeta-dev` feature per package, vs a
-  global `--cfg noeta_prod` the ABI keys off. Feature is more Cargo-native (drops optional deps);
-  cfg is less author-ceremony. Likely: ABI methods `#[cfg]` on a std feature the composer flips.
+- **Feature name / granularity (mixed crates only).** One conventional `fmt`/`noeta-dev` feature per
+  package, vs a global `--cfg noeta_prod` the ABI keys off. Feature is more Cargo-native (drops
+  optional deps); cfg is less author-ceremony. Likely: ABI methods `#[cfg]` on a std feature the
+  composer flips. (Only relevant to mixed crates — the lean runtime excludes standalone dev crates
+  structurally, no feature involved.)
 - **Repetition** — expected non-issue: `extends` inherits target deps, and the real shape is one
   `dev` (+ maybe `ci extends dev`) and one `prod`. Confirm no per-target duplication is forced.
 
