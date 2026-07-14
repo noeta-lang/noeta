@@ -137,27 +137,36 @@ DAP "debugs the PROD VM"), zero-cost when absent — so they observe identical e
   (everything pinned); a per-target *view* selects its subset. Shared deps unify to one version
   (dev-only deps can't conflict with prod). `resolve_graph` gains a target parameter (or returns
   per-target native-crate sets). No churn for manifests without target deps.
-- **D3 — the lean prod runtime binary (`noeta-runner`), source-capable (Option A).** A new lib+bin
-  crate. It runs a `.noe` **source** file, a `.noeb` **bundle**, or a **stapled** bundle, linking
-  **L1+L2 but no L3**: `[dependencies]` = app-execution crates (`noeta-vm`, `noeta-backend`,
-  `noeta-bundle`, `noeta-runtime`, `noeta-stdlib`, the compile front-end, and `noeta-pm` *minus*
-  `registry-http`/`provenance`/`keyless`) — **no** `noeta-fmt`/`-lsp`/`-dap`/`-mcp`/`-html`/`-css`.
-  **Drift firewall:** the CLI's `run`/`--exe` path and this binary share **one** bundle-execution +
-  compile core, extracted into a lib (`noeta-runner`'s lib, or a `noeta-run` crate) that both depend
-  on; the `p2p_app_namespace` coupling to full `noeta-pm` is lifted to a parameter so the runner
-  never links the registry/keyless surface. Step it: (D3a) extract the shared execution tail
-  (`run_module_real_host`/`run_compiled_module`, `app_id` as a param) — pure refactor, CLI delegates,
-  tests stay green; (D3b) the runner bin over source+bundle+stapled; (D3c) share the compile path
-  (`compile_whole_file`) so source-run matches the CLI byte-for-byte. Prove it runs a `--exe`-shaped
-  bundle *and* a source file identically to the CLI. This crate *cannot* contain a formatter/parser —
-  auditable by its Cargo.toml.
+- **D3 — the lean prod runtime binary (`noeta-runner`), source-capable (Option A). ✅ DONE.** New
+  lib+bin crate; runs a `.noe` **source** file, a `.noeb` **bundle**, or a **stapled** bundle,
+  linking **L1+L2, no L3**. Shipped in three green sub-slices:
+  - **D3a (`d753e940`)** — extract the shared execution tail (`run_module_real_host`/
+    `run_compiled_module` + `--jit-stats` renderer); `p2p_app_namespace`→`app_id` param so the runner
+    never links `noeta-pm`. Pure refactor; CLI delegates.
+  - **D3b (`8e47fa95`)** — the runner **binary**: bundle execution (stapled + two-file); stapled
+    reader moved to the shared lib. 5 integration tests.
+  - **D3c (`e320c6f2`)** — extract the whole **compile pipeline** (`compile_whole_file`/
+    `open_startup_cache`/`compile_real`/`resolve_providers` + `Compiled`/`CompileFailure`) into
+    `noeta-runner::compile`; the runner runs `.noe` source (dispatch by bundle-magic). **Closed a
+    real L3 leak:** `noeta-pm`'s manifest parser read `[fmt]` into `noeta_fmt::FmtConfig`, so
+    resolving any manifest dragged in the formatter — now gated behind a non-default `fmt-config`
+    feature (CLI enables it), the **first dogfood of the dev-capability gate on a first-party crate**.
+  - **Security proof (isolated `-p noeta-runner` build):** `noeta-pm` resolves to `[]` features,
+    `cargo tree -e features -i noeta-fmt` is empty — no L3 linked, auditable by Cargo.toml.
+  - **⚠ Build-isolation invariant (carried into D4):** feature unification means a `--workspace`
+    build turns `fmt-config` **on** for the shared `noeta-pm`, so a workspace-unified build of the
+    runner *does* link `noeta-fmt`. **The prod artifact MUST be built with `-p noeta-runner` (its own
+    crate graph), never pulled from a unified workspace build.** D4's composer already builds an
+    isolated Cargo project, which satisfies this; D4 must assert it.
 - **D4 — repoint `--exe`/`--native` onto the lean runtime + per-target compose.** `build --exe`/
   `--native` staple the bundle onto **`noeta-runner`** (or a composed shim whose base is the runner,
   for apps with native runtime deps) instead of cloning the running full CLI — the security fix. The
   composer (`compose.rs`) builds **for a target**: include only that target's native crates (D2), and
   for a *mixed* crate flip its dev feature **off** in prod / **on** for the toolchain (D5's contract).
   Content-hash key includes target + feature set so dev/prod artifacts cache separately. Assert
-  `malva`/`noeta-fmt` symbols are **absent** from the prod artifact.
+  `malva`/`noeta-fmt` symbols are **absent** from the prod artifact. **Build in isolation** (the
+  runner's own crate graph, not the workspace) so feature unification can't turn `fmt-config` back on
+  — the D3c invariant.
 - **D3b — dev-capability feature-gating convention (mixed crates).** The package-author contract for
   the *one* case D3 can't cover structurally: gate a mixed crate's dev-kind impls + optional heavy
   deps behind a Cargo feature — `malva = { optional = true }`, `fmt = ["dep:malva"]`,
