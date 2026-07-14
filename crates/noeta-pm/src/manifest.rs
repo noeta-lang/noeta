@@ -323,6 +323,26 @@ pub fn cargo_package_name(crate_dir: &Path) -> Result<String, String> {
         .ok_or_else(|| format!("`{}` has no `[package] name`", path.display()))
 }
 
+/// The feature names a **cargo** manifest declares under `[features]` (dev-deps D5b). A composed
+/// **dev toolchain** consults this to turn on a mixed crate's conventional dev-capability feature
+/// (e.g. `fmt`, gating a tier's `body_formatters`) — but only if the crate actually declares it, so
+/// enabling an absent feature never makes cargo error. A missing/empty `[features]` table yields the
+/// empty set. (A shipped runner/AOT base never calls this: it pulls each crate at default features,
+/// so the formatter and its parser stay uncompiled — the whole point of the split.)
+pub fn cargo_features(crate_dir: &Path) -> Result<Vec<String>, String> {
+    let path = crate_dir.join("Cargo.toml");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
+    let table: toml::Table = text
+        .parse()
+        .map_err(|err| format!("`{}` is not valid TOML: {err}", path.display()))?;
+    Ok(table
+        .get("features")
+        .and_then(|f| f.as_table())
+        .map(|f| f.keys().cloned().collect())
+        .unwrap_or_default())
+}
+
 /// Resolve the [`FmtConfig`] for a target directory: discover the nearest `noeta.toml`, read its
 /// optional `[fmt]` table, and overlay any values on the defaults. A missing manifest or missing
 /// `[fmt]` table yields [`FmtConfig::default`] (so `noeta fmt` works with zero configuration).
@@ -816,6 +836,32 @@ mod tests {
         assert_eq!(pkg.name.root(), "widgets");
         assert_eq!(pkg.version, semver::Version::parse("1.4.2").unwrap());
         assert_eq!(pkg.edition.as_deref(), Some("2026"));
+    }
+
+    // --- cargo manifest introspection (composition: dev-deps D5b) ------------------------------
+
+    #[test]
+    fn reads_declared_cargo_features() {
+        let dir = std::env::temp_dir().join(format!("noeta-pm-feat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"imgfx-native\"\nversion = \"0.1.0\"\n\n\
+             [features]\nfmt = []\nextra = [\"fmt\"]\n",
+        )
+        .unwrap();
+        let mut feats = cargo_features(&dir).unwrap();
+        feats.sort();
+        assert_eq!(feats, vec!["extra".to_string(), "fmt".to_string()]);
+        // A crate with no `[features]` table yields the empty set (not an error) — a pure-runtime
+        // crate the dev toolchain enables nothing extra on.
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        assert!(cargo_features(&dir).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // --- `package.native` (package-manager Phase 3, N3.1) --------------------------------------

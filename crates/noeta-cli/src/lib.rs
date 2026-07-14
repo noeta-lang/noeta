@@ -3421,8 +3421,10 @@ fn emit_native(
 
     // 2. Locate the runtime archive + the system libs it must link with, then `cc`-link. The archive
     // is built with only the stdlib rings this program uses, so unused rings' native deps are dropped.
+    // For a native-dependency app it is a *composed* AOT runtime (the lean runtime + those crates'
+    // runtime extensions, dev tooling off — dev-deps); a pure-Noeta app uses the stock archive.
     let rings = aot_ring_features(module);
-    let (archive, libs) = match resolve_aot_runtime(&rings) {
+    let (archive, libs) = match aot_runtime_base(file, &rings) {
         Ok(pair) => pair,
         Err(err) => {
             eprintln!("lang: {err}");
@@ -3548,6 +3550,23 @@ fn aot_ring_features(module: &noeta_bytecode::Module) -> Vec<String> {
     rings.into_iter().collect()
 }
 
+/// The AOT runtime base a `--native` artifact links against: a **composed** AOT runtime staticlib (the
+/// lean `noeta-aot-runtime` + the app's native runtime extensions, dev tooling off — dev-deps) when the
+/// app's dependency graph carries native crates, else the **stock** `libnoeta_aot.a`
+/// ([`resolve_aot_runtime`]). Both are free of dev tooling; the composed one additionally installs the
+/// runtime handlers the AOT-compiled program needs (without which it would abort on an unknown native
+/// module) — the `--native` analogue of [`runner_base`], closing the last native-dependency gap.
+#[cfg(feature = "jit")]
+fn aot_runtime_base(
+    file: &std::path::Path,
+    rings: &[String],
+) -> Result<(std::path::PathBuf, Vec<String>), String> {
+    match compose::compose_aot_runtime_archive(file, rings)? {
+        Some(pair) => Ok(pair),
+        None => resolve_aot_runtime(rings),
+    }
+}
+
 /// Locate the AOT runtime staticlib (`libnoeta_aot.a`) and the native system libraries it must be
 /// linked against, built with exactly the stdlib `rings` the program needs (DCE Axis B).
 /// Priority: an explicit `NOETA_AOT_RUNTIME_LIB` (paired with `NOETA_AOT_LINK_LIBS`,
@@ -3567,8 +3586,10 @@ fn resolve_aot_runtime(rings: &[String]) -> Result<(std::path::PathBuf, Vec<Stri
     }
 
     // Interim workspace build: one `cargo rustc` compiles the staticlib and prints its
-    // native-static-libs note. `--no-default-features --features <rings>` links only the rings the
-    // program uses; the `aot` runtime support is a hard dep feature, so it survives regardless.
+    // native-static-libs note. `--no-default-features --features entry,<rings>` links only the rings
+    // the program uses; the `aot` runtime support is a hard dep feature, so it survives regardless.
+    // `entry` is forced on (it is *not* selected by `--no-default-features`) so the stock archive
+    // exports its C `main` — only a composed AOT runtime omits it to supply its own.
     let mut args = vec![
         "rustc",
         "-p",
@@ -3576,11 +3597,12 @@ fn resolve_aot_runtime(rings: &[String]) -> Result<(std::path::PathBuf, Vec<Stri
         "--release",
         "--no-default-features",
     ];
-    let joined = rings.join(",");
-    if !joined.is_empty() {
-        args.push("--features");
-        args.push(&joined);
-    }
+    let joined = std::iter::once("entry".to_string())
+        .chain(rings.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(",");
+    args.push("--features");
+    args.push(&joined);
     args.extend(["--", "--print", "native-static-libs"]);
     let output = std::process::Command::new("cargo")
         .args(&args)

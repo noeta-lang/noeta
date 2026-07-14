@@ -25,6 +25,15 @@ use sha2::{Digest, Sha256};
 /// contains this same code) never re-composes, even though its graph still lists native crates.
 const COMPOSED_GUARD: &str = "NOETA_COMPOSED";
 
+/// The conventional Cargo features a package uses to gate its **dev-kind** capabilities (dev-deps
+/// D5b) — a tier's formatter today (`fmt`, which drags in a parser like `malva`). A composed **dev
+/// toolchain** ([`ShimKind::Toolchain`]) turns on each of these that a native crate *declares*, so
+/// `noeta fmt` can reflow that crate's tier bodies; a shipped **runner/AOT** base never enables them,
+/// so the formatter and its parser stay uncompiled and out of the artifact (the security split).
+/// Package authors opt in purely by naming the feature per this convention — the composer never
+/// enables a feature a crate doesn't declare, so this list can grow without breaking any crate.
+const DEV_FEATURES: &[&str] = &["fmt"];
+
 /// What a composed shim is built as. The **toolchain** (dev) embeds `noeta-cli` and serves every
 /// command for a native-dependency app. The **runner** (dev-deps D4c) embeds only the lean
 /// `noeta-runner` + the app's native runtime extensions — no dev tooling — and is the base a
@@ -34,6 +43,12 @@ const COMPOSED_GUARD: &str = "NOETA_COMPOSED";
 enum ShimKind {
     Toolchain,
     Runner,
+    /// A **composed AOT runtime** staticlib (dev-deps): the base a `build --native` artifact for a
+    /// *native-dependency* app links its AOT object against. Like [`Runner`](ShimKind::Runner) it is a
+    /// lean, dev-tooling-free base carrying the app's native runtime extensions — but it is a
+    /// `staticlib` (not a `bin`): the `--native` linker (`cc`) combines it with the program's AOT
+    /// object, and it forwards the program's stdlib rings to `noeta-aot-runtime`.
+    AotRuntime,
 }
 
 impl ShimKind {
@@ -42,14 +57,16 @@ impl ShimKind {
         match self {
             ShimKind::Toolchain => "noeta-cli",
             ShimKind::Runner => "noeta-runner",
+            ShimKind::AotRuntime => "noeta-aot-runtime",
         }
     }
-    /// The compose-key discriminator, so toolchain and runner compositions of the same dep set cache
+    /// The compose-key discriminator, so toolchain/runner/AOT compositions of the same dep set cache
     /// under distinct addresses.
     fn tag(self) -> &'static [u8] {
         match self {
             ShimKind::Toolchain => b"kind:toolchain",
             ShimKind::Runner => b"kind:runner",
+            ShimKind::AotRuntime => b"kind:aot-runtime",
         }
     }
 }
@@ -128,6 +145,48 @@ pub fn compose_runner_binary(entry: &Path) -> Result<Option<PathBuf>, String> {
     Ok(Some(binary))
 }
 
+/// Build (or reuse the cached) **composed AOT runtime** staticlib for a native-dependency app, and
+/// return its archive path plus the native system libraries it must be linked against. This is the
+/// `--native` analogue of [`compose_runner_binary`]: where a `--exe` artifact staples its bundle onto a
+/// composed *runner binary*, a `--native` artifact links its AOT object against this composed
+/// *staticlib* — a lean, dev-tooling-free base that additionally installs the app's native runtime
+/// extensions (so the AOT-compiled bundle resolves the native modules/types/tiers it references) and
+/// forwards the program's stdlib `rings` to `noeta-aot-runtime` (so an unused ring's native deps are
+/// still dropped, DCE Axis B). Returns `Ok(None)` when the app has **no** native crates (the caller
+/// falls back to the stock `libnoeta_aot.a`).
+pub fn compose_aot_runtime_archive(
+    entry: &Path,
+    rings: &[String],
+) -> Result<Option<(PathBuf, Vec<String>)>, String> {
+    let resolved = graph::resolve_graph(entry)
+        .map_err(|err| format!("resolving the app's native dependencies: {err}"))?;
+    if resolved.native_crates.is_empty() {
+        return Ok(None);
+    }
+    let entries = resolve_entries(&resolved.native_crates)?;
+    let toolchain = toolchain_source()?;
+    // A stapled AOT artifact exposes no CLI, so command-trust never reaches this base — key on `&[]`.
+    let key = compose_key(&entries, &toolchain, &[], ShimKind::AotRuntime, rings);
+    let dir = compose_dir(&key)?;
+    let archive = dir.join("lib").join(AOT_ARCHIVE_NAME);
+    let libs_file = dir.join("lib").join("link-libs.txt");
+    // Content-addressed on the same axes as the bin composers, plus the ring set: a hit means this
+    // exact (deps × rings) archive already built. The link-libs note is cached beside the archive so a
+    // hit needs no rebuild to recover it.
+    if !(archive.is_file() && libs_file.is_file()) {
+        build_aot_archive(&dir, &entries, &toolchain, rings, &archive, &libs_file)?;
+    }
+    let libs = std::fs::read_to_string(&libs_file)
+        .map_err(|err| format!("reading cached AOT link libs `{}`: {err}", libs_file.display()))?
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    Ok(Some((archive, libs)))
+}
+
+/// The composed AOT runtime's staticlib file name (its `[lib] name` is `noeta_composed_aot`).
+const AOT_ARCHIVE_NAME: &str = "libnoeta_composed_aot.a";
+
 /// Resolve the composed shim of `kind` for `crates` to a built binary (cached, content-addressed),
 /// building it on a miss. Shared by the toolchain delegation and the runner-artifact base.
 fn compose_binary(
@@ -137,7 +196,7 @@ fn compose_binary(
 ) -> Result<PathBuf, String> {
     let entries = resolve_entries(crates)?;
     let toolchain = toolchain_source()?;
-    let key = compose_key(&entries, &toolchain, trusted_command_roots, kind);
+    let key = compose_key(&entries, &toolchain, trusted_command_roots, kind, &[]);
     let dir = compose_dir(&key)?;
     // Content-addressed: the key covers the entry crates' package trees, the toolchain source form,
     // the running binary's build identity, and the shim kind — a hit means this exact composition
@@ -162,6 +221,10 @@ struct Entry {
     cargo_name: String,
     /// `cargo_name` as a Rust identifier (`-` → `_`) — how `main.rs` references the crate.
     ident: String,
+    /// The conventional dev-capability features this crate declares (⊆ [`DEV_FEATURES`]) — the ones a
+    /// [`ShimKind::Toolchain`] composition turns on; empty for a pure-runtime crate. A shipped base
+    /// ignores this and pulls the crate at default features.
+    dev_features: Vec<String>,
 }
 
 fn resolve_entries(crates: &[NativeCrate]) -> Result<Vec<Entry>, String> {
@@ -170,11 +233,21 @@ fn resolve_entries(crates: &[NativeCrate]) -> Result<Vec<Entry>, String> {
         let cargo_name = noeta_pm::manifest::cargo_package_name(&nc.crate_dir)
             .map_err(|err| format!("native crate of `{}`: {err}", nc.identity))?;
         let ident = cargo_name.replace('-', "_");
+        // A dev toolchain turns on the crate's conventional dev features; take the intersection with
+        // what it actually declares so enabling one never makes cargo error on an unknown feature.
+        let declared = noeta_pm::manifest::cargo_features(&nc.crate_dir)
+            .map_err(|err| format!("native crate of `{}`: {err}", nc.identity))?;
+        let dev_features = DEV_FEATURES
+            .iter()
+            .filter(|f| declared.iter().any(|d| d == *f))
+            .map(|f| (*f).to_string())
+            .collect();
         entries.push(Entry {
             identity: nc.identity.clone(),
             dir: nc.crate_dir.clone(),
             cargo_name,
             ident,
+            dev_features,
         });
     }
     // Deterministic shim content (the graph already sorts by identity; keep it locally true too).
@@ -243,11 +316,19 @@ fn compose_key(
     toolchain: &ToolchainSource,
     trusted_command_roots: &[String],
     kind: ShimKind,
+    rings: &[String],
 ) -> String {
     let mut h = Sha256::new();
     h.update(b"noeta-compose-v1");
     h.update(kind.tag());
     h.update(noeta_cache::binary_identity().unwrap_or_default());
+    // The AOT runtime forwards the program's stdlib rings to `noeta-aot-runtime`, so two programs of
+    // the same native-dep set but different ring footprints must cache distinct archives (bin kinds
+    // pass no rings).
+    for ring in rings {
+        h.update(b"ring:");
+        h.update(ring);
+    }
     // Which packages' commands are trusted changes the shim (and the CLI surface), so a change in
     // `[trust].commands` must recompose (Phase 4).
     for root in trusted_command_roots {
@@ -360,6 +441,167 @@ fn build(
     Ok(())
 }
 
+/// Generate the composed AOT runtime staticlib project, build it with `cargo rustc … --print
+/// native-static-libs` (which both produces `libnoeta_composed_aot.a` and reports the exact native
+/// link line the final `cc` step needs), and cache the archive + that link line. Honors the same
+/// `NOETA_COMPOSE_DEBUG`/`NOETA_COMPOSE_TARGET_DIR` test knobs as [`build`].
+fn build_aot_archive(
+    dir: &Path,
+    entries: &[Entry],
+    toolchain: &ToolchainSource,
+    rings: &[String],
+    cached_archive: &Path,
+    cached_libs: &Path,
+) -> Result<(), String> {
+    std::fs::write(
+        dir.join("Cargo.toml"),
+        aot_shim_cargo_toml(entries, toolchain, rings),
+    )
+    .map_err(|err| format!("writing AOT shim Cargo.toml: {err}"))?;
+    std::fs::write(dir.join("src").join("lib.rs"), aot_shim_lib_rs(entries))
+        .map_err(|err| format!("writing AOT shim lib.rs: {err}"))?;
+    let names: Vec<&str> = entries.iter().map(|e| e.identity.as_str()).collect();
+    eprintln!(
+        "noeta: composing the native AOT runtime with dependencies [{}] (first build of this \
+         dependency set — cached afterwards)",
+        names.join(", ")
+    );
+    let debug = std::env::var_os("NOETA_COMPOSE_DEBUG").is_some();
+    let target_dir = std::env::var_os("NOETA_COMPOSE_TARGET_DIR")
+        .map_or_else(|| dir.join("target"), PathBuf::from);
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.arg("rustc");
+    if !debug {
+        cmd.arg("--release");
+    }
+    // Force plain output: under `CARGO_TERM_COLOR=always` the `native-static-libs` note arrives
+    // ANSI-colored and a stray reset code lands inside the last `-l` flag (mirrors the stock scrape).
+    let output = cmd
+        .arg("--manifest-path")
+        .arg(dir.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(&target_dir)
+        .env("CARGO_TERM_COLOR", "never")
+        .args(["--", "--print", "native-static-libs"])
+        .output()
+        .map_err(|err| {
+            format!(
+                "cannot run `cargo` (required to build native dependencies — install a Rust \
+                 toolchain): {err}"
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "building the composed AOT runtime failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let libs = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .find_map(|l| l.split_once("native-static-libs:"))
+        .map(|(_, libs)| libs.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_AOT_LIBS.join(" "));
+    let built = target_dir
+        .join(if debug { "debug" } else { "release" })
+        .join(AOT_ARCHIVE_NAME);
+    std::fs::create_dir_all(cached_archive.parent().expect("lib/ parent"))
+        .and_then(|()| std::fs::copy(&built, cached_archive))
+        .map_err(|err| {
+            format!(
+                "caching the composed AOT archive (`{}` → `{}`): {err}",
+                built.display(),
+                cached_archive.display()
+            )
+        })?;
+    std::fs::write(cached_libs, &libs).map_err(|err| {
+        format!(
+            "caching the AOT link libs (`{}`): {err}",
+            cached_libs.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// A conservative Linux native-link fallback when rustc's `native-static-libs` note is somehow
+/// absent — matches the CLI's stock `default_native_libs`.
+const DEFAULT_AOT_LIBS: &[&str] = &["-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl", "-lc"];
+
+/// The composed AOT runtime's manifest: a `staticlib` depending on `noeta-aot-runtime` (with its C
+/// `main` OFF via `default-features = false`, forwarding the program's stdlib rings), `noeta-native`,
+/// and each native crate at **default features** (a mixed crate's formatter stays stripped). The empty
+/// `[workspace]` keeps it from being workspace-adopted; the release profile mirrors the toolchain's.
+fn aot_shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, rings: &[String]) -> String {
+    // The dependency source spec (`path = …` in-workspace, `git = …, tag = …` out-of-workspace) that
+    // extra keys (default-features/features/package) are appended to.
+    let src_spec = |krate: &str| -> String {
+        match toolchain {
+            ToolchainSource::Workspace(root) => format!(
+                "path = {}",
+                toml_quote(&root.join("crates").join(krate).display().to_string())
+            ),
+            ToolchainSource::GitTag { repo, tag } => {
+                format!("git = {}, tag = {}", toml_quote(repo), toml_quote(tag))
+            }
+        }
+    };
+    let ring_list = rings
+        .iter()
+        .map(|r| toml_quote(r))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut out = String::new();
+    out.push_str(
+        "# Generated by noeta (dev-deps) — a composed AOT runtime staticlib.\n\
+         # Derived state: regenerated on dependency-set / ring changes. Do not edit.\n\n\
+         [package]\nname = \"noeta-composed-aot\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n\
+         [lib]\nname = \"noeta_composed_aot\"\ncrate-type = [\"staticlib\"]\ntest = false\n\
+         doctest = false\n\n[dependencies]\n",
+    );
+    out.push_str(&format!(
+        "noeta-aot-runtime = {{ {}, default-features = false, features = [{ring_list}] }}\n",
+        src_spec("noeta-aot-runtime")
+    ));
+    out.push_str(&format!("noeta-native = {{ {} }}\n", src_spec("noeta-native")));
+    for (n, e) in entries.iter().enumerate() {
+        out.push_str(&format!(
+            "ext{n} = {{ package = {}, path = {} }}\n",
+            toml_quote(&e.cargo_name),
+            toml_quote(&e.dir.display().to_string())
+        ));
+    }
+    out.push_str("\n[workspace]\n\n[profile.release]\ncodegen-units = 1\nlto = \"thin\"\n");
+    out
+}
+
+/// The composed AOT runtime's entry: export a C-ABI `main` that aggregates every native crate's
+/// `NOETA_EXTENSIONS` and hands them to `noeta_aot_runtime::run_embedded_with_extensions`, which
+/// installs them into the registry (so the AOT-compiled bundle resolves its native
+/// modules/types/tiers) and runs the embedded program. `noeta-aot-runtime`'s own `main` is off here
+/// (its `entry` feature is disabled), so this is the sole entry. `Box::leak` gives the units the
+/// `'static` the registry requires — they live for the process, like the stock binary's statics.
+fn aot_shim_lib_rs(entries: &[Entry]) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "//! Generated by noeta (dev-deps) — a composed AOT runtime staticlib. Do not edit.\n\
+         //! Installs the app's native runtime extensions, then runs the embedded AOT program.\n\n\
+         #[unsafe(no_mangle)]\n\
+         pub extern \"C\" fn main() -> core::ffi::c_int {\n\
+         \x20   let mut units: Vec<&'static (dyn noeta_native::Extension + Sync)> = Vec::new();\n",
+    );
+    for (n, e) in entries.iter().enumerate() {
+        out.push_str(&format!(
+            "    units.extend_from_slice(ext{n}::NOETA_EXTENSIONS); // {} ({})\n",
+            e.identity, e.ident
+        ));
+    }
+    // `noeta-aot-runtime`'s `[lib] name` is `noeta_aot`, so that is the crate path here.
+    out.push_str(
+        "    noeta_aot::run_embedded_with_extensions(Box::leak(units.into_boxed_slice()))\n}\n",
+    );
+    out
+}
+
 /// The generated shim manifest. `[workspace]` is deliberately empty so the shim never gets
 /// adopted by an enclosing cargo workspace; the release profile mirrors the toolchain's own
 /// (codegen-units=1 + thin LTO — the composed binary should perform like the stock one).
@@ -385,12 +627,25 @@ fn shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, kind: ShimKin
     // The base: the full toolchain (`noeta-cli`) for a dev composition, or the lean `noeta-runner`
     // for a shipped artifact's base (dev-deps D4c — no fmt/LSP/DAP). `noeta-native` supplies the
     // extension ABI for both. Each `extN` (a native runtime crate) is pulled with **default features**
-    // so a mixed crate's formatter (gated behind its `fmt` feature) is *not* compiled into a runner.
+    // for a shipped base, so a mixed crate's formatter (gated behind its `fmt` feature) is *not*
+    // compiled in; a **dev toolchain** additionally turns on the crate's declared dev features
+    // (dev-deps D5b) so `noeta fmt` can reflow its tier bodies.
     out.push_str(&toolchain_dep(kind.base_crate()));
     out.push_str(&toolchain_dep("noeta-native"));
     for (n, e) in entries.iter().enumerate() {
+        let features = if kind == ShimKind::Toolchain && !e.dev_features.is_empty() {
+            let list = e
+                .dev_features
+                .iter()
+                .map(|f| toml_quote(f))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(", features = [{list}]")
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "ext{n} = {{ package = {}, path = {} }}\n",
+            "ext{n} = {{ package = {}, path = {}{features} }}\n",
             toml_quote(&e.cargo_name),
             toml_quote(&e.dir.display().to_string())
         ));
@@ -436,6 +691,10 @@ fn shim_main_rs(entries: &[Entry], trusted_command_roots: &[String], kind: ShimK
             out.push_str(
                 "    noeta_runner::run_stapled_with_extensions(Box::leak(units.into_boxed_slice()))\n}\n",
             );
+        }
+        // The AOT runtime is a staticlib, not a bin — it is generated by `aot_shim_lib_rs`, never here.
+        ShimKind::AotRuntime => {
+            unreachable!("the AOT runtime shim is a staticlib (aot_shim_lib_rs), not a bin main")
         }
     }
     out
@@ -486,6 +745,18 @@ mod tests {
             dir: PathBuf::from("/store/acme_imgfx/native"),
             cargo_name: "imgfx-native".to_string(),
             ident: "imgfx_native".to_string(),
+            dev_features: vec![],
+        }]
+    }
+
+    /// A mixed crate that declares the conventional `fmt` dev feature (its formatter + parser).
+    fn mixed_entries() -> Vec<Entry> {
+        vec![Entry {
+            identity: "acme/imgfx".to_string(),
+            dir: PathBuf::from("/store/acme_imgfx/native"),
+            cargo_name: "imgfx-native".to_string(),
+            ident: "imgfx_native".to_string(),
+            dev_features: vec!["fmt".to_string()],
         }]
     }
 
@@ -543,6 +814,105 @@ mod tests {
         );
         // The native runtime crate is still linked (for its tier handler / modules).
         assert!(toml.contains("ext0 = { package = \"imgfx-native\","));
+    }
+
+    #[test]
+    fn dev_toolchain_enables_a_mixed_crates_fmt_feature() {
+        // dev-deps D5b: a composed *dev toolchain* turns on the crate's declared `fmt` feature, so
+        // `noeta fmt` can reflow its tier bodies (the formatter + its parser compile in).
+        let toml = shim_cargo_toml(
+            &mixed_entries(),
+            &ToolchainSource::Workspace(PathBuf::from("/src/noeta")),
+            ShimKind::Toolchain,
+        );
+        assert!(
+            toml.contains(
+                "ext0 = { package = \"imgfx-native\", path = \"/store/acme_imgfx/native\", \
+                 features = [\"fmt\"] }"
+            ),
+            "{toml}"
+        );
+    }
+
+    #[test]
+    fn shipped_runner_keeps_a_mixed_crate_at_default_features() {
+        // dev-deps D5b/D4c: the shipped base pulls the same crate at *default* features — its `fmt`
+        // feature stays off, so the formatter and its parser never enter the artifact.
+        let toml = shim_cargo_toml(
+            &mixed_entries(),
+            &ToolchainSource::Workspace(PathBuf::from("/src/noeta")),
+            ShimKind::Runner,
+        );
+        assert!(
+            toml.contains(
+                "ext0 = { package = \"imgfx-native\", path = \"/store/acme_imgfx/native\" }"
+            ),
+            "the runner base must not enable any dev feature:\n{toml}"
+        );
+        assert!(
+            !toml.contains("features = [\"fmt\"]"),
+            "a shipped runner must not turn on a formatter feature:\n{toml}"
+        );
+    }
+
+    #[test]
+    fn aot_shim_manifest_is_a_lean_staticlib_forwarding_rings() {
+        // dev-deps `--native` gap: the composed AOT runtime is a lean `staticlib` (no CLI/runner base)
+        // that forwards the program's rings to `noeta-aot-runtime` with its C `main` OFF, and pulls the
+        // native crate at *default* features (formatter stripped).
+        let toml = aot_shim_cargo_toml(
+            &mixed_entries(),
+            &ToolchainSource::Workspace(PathBuf::from("/src/noeta")),
+            &["ring-http-client".to_string()],
+        );
+        assert!(toml.contains("crate-type = [\"staticlib\"]"), "{toml}");
+        assert!(
+            toml.contains(
+                "noeta-aot-runtime = { path = \"/src/noeta/crates/noeta-aot-runtime\", \
+                 default-features = false, features = [\"ring-http-client\"] }"
+            ),
+            "{toml}"
+        );
+        // The native crate is linked at default features — no `fmt`, even for a mixed crate.
+        assert!(
+            toml.contains(
+                "ext0 = { package = \"imgfx-native\", path = \"/store/acme_imgfx/native\" }"
+            ),
+            "{toml}"
+        );
+        assert!(!toml.contains("features = [\"fmt\"]"), "{toml}");
+        // No dev-tooling base is dragged into a shipped AOT runtime.
+        assert!(!toml.contains("noeta-cli ="), "{toml}");
+        assert!(!toml.contains("noeta-runner ="), "{toml}");
+    }
+
+    #[test]
+    fn aot_shim_manifest_with_no_rings_forwards_an_empty_feature_set() {
+        let toml = aot_shim_cargo_toml(
+            &entries(),
+            &ToolchainSource::Workspace(PathBuf::from("/src/noeta")),
+            &[],
+        );
+        assert!(
+            toml.contains("default-features = false, features = [] }"),
+            "{toml}"
+        );
+    }
+
+    #[test]
+    fn aot_shim_lib_installs_units_and_runs_embedded() {
+        // The composed AOT runtime exports a C `main` that installs the app's native units then runs
+        // the embedded program — no `run_cli`, no stapled-runner call.
+        let lib = aot_shim_lib_rs(&entries());
+        assert!(lib.contains("#[unsafe(no_mangle)]"), "{lib}");
+        assert!(lib.contains("pub extern \"C\" fn main() -> core::ffi::c_int"), "{lib}");
+        assert!(lib.contains("units.extend_from_slice(ext0::NOETA_EXTENSIONS);"), "{lib}");
+        assert!(
+            lib.contains("noeta_aot::run_embedded_with_extensions(Box::leak("),
+            "{lib}"
+        );
+        assert!(!lib.contains("run_cli"), "{lib}");
+        assert!(!lib.contains("run_stapled_with_extensions"), "{lib}");
     }
 
     #[test]

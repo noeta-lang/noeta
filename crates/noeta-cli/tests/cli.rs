@@ -4734,6 +4734,93 @@ fn build_exe_of_a_native_dep_app_strips_the_mixed_crates_formatter() {
     let _ = std::fs::remove_file(&app_bin);
 }
 
+/// Find the composed binary a delegation cached under an (isolated) compose cache dir —
+/// `<cache>/compose/<key>/bin/noeta-composed`. Exactly one exists per distinct composition.
+fn find_composed_binary(cache: &std::path::Path) -> Option<PathBuf> {
+    let compose = cache.join("compose");
+    for key in std::fs::read_dir(&compose).ok()? {
+        let bin = key.ok()?.path().join("bin").join("noeta-composed");
+        if bin.is_file() {
+            return Some(bin);
+        }
+    }
+    None
+}
+
+#[test]
+fn dev_toolchain_composition_includes_a_mixed_crates_formatter() {
+    // dev-deps D5b, the mirror of the capstone: a *dev toolchain* composed for the same native-dep app
+    // turns the mixed crate's `fmt` feature ON, so its tier-body formatter (and its marker) compile IN
+    // — exactly the capability a shipped runner strips. We compose the toolchain via a delegating dev
+    // command (`check`) and confirm the cached composed binary carries the formatter marker.
+    let entry = composed_project("d5b_toolchain_fmt");
+    // Isolate the compose cache so we can locate *this* composition's binary (and not touch the user's).
+    let cache = entry.parent().unwrap().join("cache");
+    let _ = std::fs::remove_dir_all(&cache);
+
+    composed_env(&mut lang())
+        .arg("check")
+        .arg(&entry)
+        .env("NOETA_CACHE_DIR", &cache)
+        .assert()
+        .success();
+
+    let composed = find_composed_binary(&cache).expect("a composed toolchain binary was cached");
+    let bytes = std::fs::read(&composed).expect("read the composed toolchain");
+    let marker = b"IMGFX_FMT_ONLY_MARKER_7c4e9a";
+    assert!(
+        bytes.windows(marker.len()).any(|w| w == marker),
+        "the dev toolchain composition did not enable the mixed crate's `fmt` feature — its \
+         formatter marker is absent from {}",
+        composed.display()
+    );
+}
+
+#[cfg(feature = "jit")] // `--native` exists only in the JIT-enabled build.
+#[test]
+fn build_native_of_a_native_dep_app_runs_the_composed_handler() {
+    // dev-deps `--native` gap, closed: a native-dependency app built with `--native` links a *composed
+    // AOT runtime* (the lean runtime + the imgfx native extension) so the self-contained native binary
+    // resolves the `imgfx` module and runs its handler. Before this, `--native` linked the stock
+    // `libnoeta_aot.a` (no extension seam) and aborted on the unknown native module.
+    if !has_cc() {
+        eprintln!("skipping native-dep AOT test: no `cc` on PATH");
+        return;
+    }
+    let entry = composed_project("native_dep_aot");
+    let app_bin = entry.parent().unwrap().join("app_native_aot");
+    let _ = std::fs::remove_file(&app_bin);
+
+    // The composed toolchain (the delegation target) builds the composed AOT staticlib and `cc`-links
+    // it against the program's AOT object. `composed_env` reuses the workspace debug artifacts so both
+    // compositions stay fast; the env is inherited across the `exec` delegation.
+    composed_env(&mut lang())
+        .arg("build")
+        .arg(&entry)
+        .arg("--native")
+        .arg("-o")
+        .arg(&app_bin)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("native AOT"));
+
+    // The native binary runs on its own and resolves the native handler (`fx.double(21)` → 42).
+    Command::new(&app_bin)
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("42\n"));
+
+    // And it is lean: the composed AOT runtime pulls the mixed crate at default features, so its dev
+    // formatter (and marker) are stripped from the shipped native artifact — same guarantee as `--exe`.
+    let bytes = std::fs::read(&app_bin).expect("read the native artifact");
+    let marker = b"IMGFX_FMT_ONLY_MARKER_7c4e9a";
+    assert!(
+        !bytes.windows(marker.len()).any(|w| w == marker),
+        "the composed AOT runtime leaked the mixed crate's dev formatter into the native artifact"
+    );
+    let _ = std::fs::remove_file(&app_bin);
+}
+
 #[test]
 fn composed_toolchain_end_to_end() {
     let entry = composed_project("pm_compose_e2e");
