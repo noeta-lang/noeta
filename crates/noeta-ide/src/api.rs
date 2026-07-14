@@ -158,6 +158,19 @@ mod tests {
     }
 
     #[test]
+    fn extern_type_methods_carry_prose() {
+        // The Uuid type's methods are all documented (Arc 2 A3 backfill).
+        let uuid = type_("std.id.Uuid").expect("std.id.Uuid present");
+        assert!(!uuid.methods.is_empty());
+        assert!(
+            uuid.methods.iter().all(|m| !m.doc.is_empty()),
+            "every Uuid method has prose"
+        );
+        let to_string = method("std.id.Uuid", "to_string").unwrap();
+        assert!(to_string.doc.contains("hyphenated"));
+    }
+
+    #[test]
     fn modules_are_sorted_and_lookups_resolve() {
         let mods = modules();
         assert!(mods.windows(2).all(|w| w[0].qualified <= w[1].qualified));

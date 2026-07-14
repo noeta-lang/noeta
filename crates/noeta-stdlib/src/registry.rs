@@ -132,6 +132,7 @@ const ID_TYPES: &[ExtType] = &[ExtType {
     methods: UUID_METHODS,
     dispatch: uuid_method_dispatch,
     key_capable: true,
+    docs: UUID_METHOD_DOCS,
     ..ExtType::DEFAULTS
 }];
 
@@ -142,6 +143,7 @@ const CRYPTO_TYPES: &[ExtType] = &[ExtType {
     methods: HASHER_METHODS,
     dispatch: hasher_method_dispatch,
     key_capable: false, // `update` mutates — a hasher can never key a map
+    docs: HASHER_METHOD_DOCS,
     ..ExtType::DEFAULTS
 }];
 
@@ -154,6 +156,7 @@ const HTTP_TYPES: &[ExtType] = &[
         methods: RESPONSE_METHODS,
         dispatch: response_method_dispatch,
         key_capable: false, // a response is not a map key
+        docs: RESPONSE_DOCS,
         ..ExtType::DEFAULTS
     },
     ExtType {
@@ -162,6 +165,7 @@ const HTTP_TYPES: &[ExtType] = &[
         methods: REQUEST_METHODS,
         dispatch: request_method_dispatch,
         key_capable: false, // an inbound request is not a map key
+        docs: REQUEST_DOCS,
         ..ExtType::DEFAULTS
     },
     // The websocket session handle (server-hmr L0) — its methods reach the `Network` hijack seam
@@ -174,6 +178,7 @@ const HTTP_TYPES: &[ExtType] = &[
             crate::serve::socket_ctx_method_dispatch(method, ctx, recv, args)
         }),
         key_capable: false, // identifies a host resource
+        docs: SOCKET_DOCS,
         ..ExtType::DEFAULTS
     },
 ];
@@ -188,6 +193,7 @@ const P2P_TYPES: &[ExtType] = &[
         methods: crate::crdt::GCOUNTER_METHODS,
         dispatch: crate::crdt::GCOUNTER_DISPATCH,
         traits: crate::crdt::CRDT_TRAITS,
+        docs: GCOUNTER_DOCS,
         ..ExtType::DEFAULTS
     },
     ExtType {
@@ -196,6 +202,7 @@ const P2P_TYPES: &[ExtType] = &[
         methods: crate::crdt::PNCOUNTER_METHODS,
         dispatch: crate::crdt::PNCOUNTER_DISPATCH,
         traits: crate::crdt::CRDT_TRAITS,
+        docs: PNCOUNTER_DOCS,
         ..ExtType::DEFAULTS
     },
     ExtType {
@@ -204,6 +211,7 @@ const P2P_TYPES: &[ExtType] = &[
         methods: crate::crdt::GSET_METHODS,
         dispatch: crate::crdt::GSET_DISPATCH,
         traits: crate::crdt::CRDT_TRAITS,
+        docs: GSET_DOCS,
         ..ExtType::DEFAULTS
     },
     // `SyncedSignal<T>` (p2p P2) — a signal node in the shared reactive graph holding a CRDT; its
@@ -215,6 +223,7 @@ const P2P_TYPES: &[ExtType] = &[
         ctx_dispatch: Some(|method, ctx, recv, args| {
             crate::synced::synced_ctx_method_dispatch(method, ctx, recv, args)
         }),
+        docs: SYNCED_SIGNAL_DOCS,
         ..ExtType::DEFAULTS
     },
 ];
@@ -230,6 +239,7 @@ const CORE_TYPES: &[ExtType] = &[
         methods: crate::tracing::SPAN_METHODS,
         dispatch: crate::tracing::span_method_dispatch,
         key_capable: false,
+        docs: SPAN_METHOD_DOCS,
         ..ExtType::DEFAULTS
     },
     // The metrics instrument handles (native OTEL Phase M) — mutable, effectful, host-coupled like
@@ -244,6 +254,7 @@ const CORE_TYPES: &[ExtType] = &[
         dispatch: crate::metrics::counter_method_dispatch,
         key_capable: false,
         deep_marshal: true,
+        docs: COUNTER_METHOD_DOCS,
         ..ExtType::DEFAULTS
     },
     ExtType {
@@ -253,6 +264,7 @@ const CORE_TYPES: &[ExtType] = &[
         dispatch: crate::metrics::histogram_method_dispatch,
         key_capable: false,
         deep_marshal: true,
+        docs: HISTOGRAM_DOCS,
         ..ExtType::DEFAULTS
     },
     ExtType {
@@ -262,6 +274,7 @@ const CORE_TYPES: &[ExtType] = &[
         dispatch: crate::metrics::gauge_method_dispatch,
         key_capable: false,
         deep_marshal: true,
+        docs: GAUGE_DOCS,
         ..ExtType::DEFAULTS
     },
     ExtType {
@@ -270,6 +283,7 @@ const CORE_TYPES: &[ExtType] = &[
         methods: FILE_HANDLE_METHODS,
         dispatch: file_handle_dispatch,
         key_capable: false,
+        docs: FILE_HANDLE_DOCS,
         ..ExtType::DEFAULTS
     },
     // `ExecResult` (stdlib-gaps) — pure, content-equal subprocess outcome (the `Response` model).
@@ -279,6 +293,7 @@ const CORE_TYPES: &[ExtType] = &[
         methods: EXEC_RESULT_METHODS,
         dispatch: exec_result_dispatch,
         key_capable: false,
+        docs: EXEC_RESULT_DOCS,
         ..ExtType::DEFAULTS
     },
     // `Process` (process-handle arc) — a spawned child's control handle: a mutable, host-coupled
@@ -289,6 +304,7 @@ const CORE_TYPES: &[ExtType] = &[
         methods: PROCESS_METHODS,
         dispatch: process_method_dispatch,
         key_capable: false,
+        docs: PROCESS_DOCS,
         ..ExtType::DEFAULTS
     },
     // `Cell<T>` (higher-order-abi H4) — the generic, Class-3 corner of the matrix: all methods
@@ -304,6 +320,7 @@ const CORE_TYPES: &[ExtType] = &[
             crate::cell::cell_ctx_method_dispatch(method, ctx, recv, args)
         }),
         arena_getter: Some(crate::cell::CELL_ARENA_GETTER),
+        docs: CELL_METHOD_DOCS,
         ..ExtType::DEFAULTS
     },
     // The reactive handles (higher-order-abi H5): generic extern types over the per-run graph
@@ -316,6 +333,7 @@ const CORE_TYPES: &[ExtType] = &[
             crate::reactive::signal_ctx_method_dispatch(method, ctx, recv, args)
         }),
         arena_getter: Some(crate::reactive::SIGNAL_ARENA_GETTER),
+        docs: SIGNAL_METHOD_DOCS,
         ..ExtType::DEFAULTS
     },
     ExtType {
@@ -326,6 +344,7 @@ const CORE_TYPES: &[ExtType] = &[
             crate::reactive::computed_ctx_method_dispatch(method, ctx, recv, args)
         }),
         arena_getter: Some(crate::reactive::COMPUTED_ARENA_GETTER),
+        docs: COMPUTED_METHOD_DOCS,
         ..ExtType::DEFAULTS
     },
     ExtType {
@@ -335,6 +354,7 @@ const CORE_TYPES: &[ExtType] = &[
         ctx_dispatch: Some(|method, ctx, recv, args| {
             crate::reactive::effect_ctx_method_dispatch(method, ctx, recv, args)
         }),
+        docs: EFFECT_METHOD_DOCS,
         ..ExtType::DEFAULTS
     },
     // `View` (server-hmr L1) — the diff-push flush subscriber: named bindings onto
@@ -346,6 +366,7 @@ const CORE_TYPES: &[ExtType] = &[
         ctx_dispatch: Some(|method, ctx, recv, args| {
             crate::reactive::view_ctx_method_dispatch(method, ctx, recv, args)
         }),
+        docs: VIEW_METHOD_DOCS,
         ..ExtType::DEFAULTS
     },
 ];
@@ -3115,6 +3136,208 @@ const VEC_DOCS: &[(&str, &str)] = &[
     (
         "length_all",
         "Bulk kernel: the magnitude of every vector in a packed buffer.",
+    ),
+];
+
+// ---- Extern-type method prose (docs-browser Arc 2 A3), wired below via `docs:` on each ExtType. --
+
+const CELL_METHOD_DOCS: &[(&str, &str)] = &[
+    ("get", "The current value."),
+    ("set", "Replace the stored value with `v`."),
+    ("update", "Replace the value with `f(current)`."),
+];
+
+const GCOUNTER_DOCS: &[(&str, &str)] = &[
+    (
+        "increment",
+        "Add to this replica's contribution to the counter.",
+    ),
+    ("value", "The total count summed across all replicas."),
+    (
+        "merge",
+        "Merge another `GCounter` in (per-replica maximum) — commutative and idempotent.",
+    ),
+];
+const GSET_DOCS: &[(&str, &str)] = &[
+    ("insert", "Add an element to the set."),
+    ("contains", "Whether the set contains the element."),
+    ("len", "The number of elements."),
+    ("members", "The set's elements as a list."),
+    ("merge", "Merge another `GSet` in (set union)."),
+];
+const PNCOUNTER_DOCS: &[(&str, &str)] = &[
+    ("increment", "Add to this replica's positive count."),
+    ("decrement", "Add to this replica's negative count."),
+    (
+        "value",
+        "The net total (increments minus decrements) across all replicas.",
+    ),
+    ("merge", "Merge another `PnCounter` in."),
+];
+
+const HASHER_METHOD_DOCS: &[(&str, &str)] = &[
+    ("update", "Feed more `data` into the running hash."),
+    ("digest", "Finish and return the digest as `bytes`."),
+];
+
+const FILE_HANDLE_DOCS: &[(&str, &str)] = &[
+    ("read", "Read up to `n` bytes from the cursor as a string."),
+    (
+        "read_line",
+        "Read the next line (through the newline); empty at end of file.",
+    ),
+    ("write", "Write a string at the cursor, advancing it."),
+    ("close", "Flush and close the handle."),
+];
+
+const REQUEST_DOCS: &[(&str, &str)] = &[
+    ("method", "The HTTP method (`\"GET\"`, `\"POST\"`, …)."),
+    ("path", "The request path."),
+    ("query", "The raw query string."),
+    (
+        "header",
+        "The value of request header `name`, or empty if absent.",
+    ),
+    ("body", "The request body as a string."),
+    ("body_bytes", "The request body as raw `bytes`."),
+];
+const RESPONSE_DOCS: &[(&str, &str)] = &[
+    ("status", "The HTTP status code."),
+    ("ok", "Whether the status is 2xx."),
+    (
+        "header",
+        "The value of response header `name`, or empty if absent.",
+    ),
+    ("body", "The response body as a string."),
+    ("body_bytes", "The response body as raw `bytes`."),
+    (
+        "with_header",
+        "A copy of the response with header `name: value` set.",
+    ),
+];
+const SOCKET_DOCS: &[(&str, &str)] = &[
+    ("send", "Send a message over the WebSocket."),
+    (
+        "recv",
+        "Await the next message; `none` when the socket closes.",
+    ),
+    ("close", "Close the WebSocket connection."),
+];
+
+const UUID_METHOD_DOCS: &[(&str, &str)] = &[
+    (
+        "to_string",
+        "The canonical hyphenated string form (`550e8400-e29b-…`).",
+    ),
+    (
+        "version",
+        "The UUID version number (4 = random, 5 = name-based, 7 = time-ordered).",
+    ),
+    (
+        "timestamp_ms",
+        "The embedded timestamp in milliseconds since the Unix epoch for a time-based UUID (v7); \
+         `none` otherwise.",
+    ),
+];
+
+const COUNTER_METHOD_DOCS: &[(&str, &str)] = &[
+    ("add", "Add `n` to the counter."),
+    (
+        "add_with",
+        "Add `n` with structured attributes attached to the measurement.",
+    ),
+];
+const GAUGE_DOCS: &[(&str, &str)] = &[
+    ("record", "Record the current value."),
+    (
+        "record_with",
+        "Record the current value with structured attributes.",
+    ),
+];
+const HISTOGRAM_DOCS: &[(&str, &str)] = &[
+    ("record", "Record an observation into the distribution."),
+    (
+        "record_with",
+        "Record an observation with structured attributes.",
+    ),
+];
+
+const EXEC_RESULT_DOCS: &[(&str, &str)] = &[
+    ("status", "The process exit code."),
+    ("ok", "Whether the process exited successfully (status 0)."),
+    ("stdout", "The captured standard output as a string."),
+    ("stderr", "The captured standard error as a string."),
+];
+const PROCESS_DOCS: &[(&str, &str)] = &[
+    ("pid", "The child process id."),
+    (
+        "wait",
+        "Wait for the process to exit and return its status.",
+    ),
+    (
+        "try_wait",
+        "The exit status if the process has finished, else `none`, without blocking.",
+    ),
+    ("kill", "Terminate the process."),
+    ("read", "Read available bytes from the process's stdout."),
+    ("read_line", "Read the next line from the process's stdout."),
+    (
+        "read_err_line",
+        "Read the next line from the process's stderr.",
+    ),
+    ("write", "Write to the process's stdin."),
+    (
+        "close_stdin",
+        "Close the process's stdin, signalling end of input.",
+    ),
+];
+
+const SIGNAL_METHOD_DOCS: &[(&str, &str)] = &[
+    (
+        "get",
+        "The current value — tracked as a dependency when read inside a `computed`/`effect`.",
+    ),
+    ("set", "Set the value and notify dependents."),
+    (
+        "update",
+        "Set the value to `f(current)` and notify dependents.",
+    ),
+];
+const COMPUTED_METHOD_DOCS: &[(&str, &str)] = &[(
+    "get",
+    "The memoized derived value, recomputed only if a dependency changed.",
+)];
+const EFFECT_METHOD_DOCS: &[(&str, &str)] =
+    &[("dispose", "Stop the effect so it no longer re-runs.")];
+const VIEW_METHOD_DOCS: &[(&str, &str)] = &[
+    ("snapshot", "A snapshot of the current reactive view tree."),
+    (
+        "diff",
+        "The changes since the previous snapshot — what a client needs to patch.",
+    ),
+    (
+        "expose",
+        "Expose a named value into the view for the client.",
+    ),
+];
+
+const SYNCED_SIGNAL_DOCS: &[(&str, &str)] = &[
+    ("get", "The current merged value."),
+    ("sync", "Push and pull updates with peers now."),
+    ("merge", "Merge a remote update in."),
+    ("status", "The replication status."),
+    ("add_member", "Grant a peer membership in the shared group."),
+    ("remove_member", "Revoke a peer's membership."),
+];
+
+const SPAN_METHOD_DOCS: &[(&str, &str)] = &[
+    ("set_attribute", "Attach a key→value attribute to the span."),
+    ("add_event", "Record a timestamped event on the span."),
+    ("record_error", "Record an error on the span."),
+    ("end", "End the span, fixing its duration."),
+    (
+        "context",
+        "The span's trace context, serialized for propagation across a boundary.",
     ),
 ];
 
