@@ -331,6 +331,15 @@ impl Walker<'_> {
                     )
                 })?;
                 let name = format!("{}/{}", package.company, package.package);
+                // Defense in depth: `solve` already refused built-in scopes before they entered the
+                // candidate graph, so a solved version can't name one — but the walk is a public entry
+                // too, so keep the invariant local rather than assume the solve ran.
+                if crate::reserved::is_builtin(&package.company) {
+                    return Err(format!(
+                        "dependency `{key}`: {}",
+                        crate::reserved::builtin_registry_refusal(&package.company, &name)
+                    ));
+                }
                 let version = self.solution.get(&name).cloned().ok_or_else(|| {
                     format!("dependency `{key}` (`{name}`) is not in the resolved version set")
                 })?;
@@ -539,6 +548,13 @@ impl Walker<'_> {
             if path_git.contains_key(&identity) || !seen.insert(identity.clone()) {
                 continue;
             }
+            // Same supply-chain invariant, at the transitive frontier: a release from the index may
+            // *declare* a dependency under a built-in scope. Refuse before querying the index for it,
+            // so a compromised registry can't drag a forged `std/*` in behind a legitimate package.
+            let scope = identity.split('/').next().unwrap_or(&identity);
+            if crate::reserved::is_builtin(scope) {
+                return Err(crate::reserved::builtin_registry_refusal(scope, &identity));
+            }
             let releases = self
                 .index()?
                 .releases(&identity)
@@ -615,6 +631,15 @@ impl Walker<'_> {
                         )
                     })?;
                     let identity = format!("{}/{}", package.company, package.package);
+                    // Supply-chain invariant (namespace-protection #2): a built-in scope
+                    // (`std`/`noeta`/`core`) is served by the compiler, never a registry — refuse it
+                    // here, before it can enter the candidate graph, so no registry can shadow core.
+                    if crate::reserved::is_builtin(&package.company) {
+                        return Err(format!(
+                            "dependency `{key}`: {}",
+                            crate::reserved::builtin_registry_refusal(&package.company, &identity)
+                        ));
+                    }
                     reqs.push((identity.clone(), req.clone()));
                     registry_queue.push(identity);
                 }
@@ -1167,6 +1192,29 @@ mod tests {
         let err = resolve_graph(&app.join("main.noe")).expect_err("root must authorize native");
         assert!(err.contains("acme/imgfx"), "{err}");
         assert!(err.contains("[trust].native"), "{err}");
+    }
+
+    #[test]
+    fn a_builtin_scope_registry_dependency_is_refused() {
+        // namespace-protection #2: a registry dependency under a built-in scope (`std`/`noeta`/`core`)
+        // is refused at resolve time — the compiler provides these, so a registry serving `std/…` is a
+        // shadow-core supply-chain attack. Refusal happens in `solve`/`gather` before any index query,
+        // so this needs no network and no configured registry.
+        let base = std::env::temp_dir().join("noeta_graph_test_reserved_scope");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nextra = { version = \"^1\", package = \"std/extra\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+        let err = resolve_graph(&app.join("main.noe")).expect_err("built-in scope must be refused");
+        assert!(err.contains("std/extra"), "{err}");
+        assert!(err.contains("supply-chain"), "names the threat: {err}");
+        assert!(err.contains("built into"), "{err}");
     }
 
     #[test]
