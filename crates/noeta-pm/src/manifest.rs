@@ -27,6 +27,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+// The `[fmt]` grammar lives in `noeta-fmt` (dev tooling), so reading a manifest's formatter config
+// pulls in the formatter crate — gated behind `fmt-config` (dev-deps D3c) so a lean runtime that only
+// needs tier/dependency resolution never links it.
+#[cfg(feature = "fmt-config")]
 use noeta_fmt::FmtConfig;
 
 /// The manifest file name, discovered at or above the entry file's directory.
@@ -324,6 +328,7 @@ pub fn cargo_package_name(crate_dir: &Path) -> Result<String, String> {
 /// `[fmt]` table yields [`FmtConfig::default`] (so `noeta fmt` works with zero configuration).
 /// Returns `Err` only when a present `[fmt]` table is malformed (wrong types / unknown arrow style),
 /// so a typo surfaces rather than being silently ignored.
+#[cfg(feature = "fmt-config")]
 pub fn resolve_fmt_config(file: &Path) -> Result<FmtConfig, String> {
     // Precedence: built-in defaults, then `.editorconfig` (walked up from the file), then the
     // manifest's `[fmt]` table — so an explicit `noeta.toml` setting wins over `.editorconfig`, which

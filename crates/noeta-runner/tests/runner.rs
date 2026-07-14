@@ -63,6 +63,41 @@ fn passes_the_program_argument_vector() {
 }
 
 #[test]
+fn runs_a_noe_source_file_directly() {
+    // PHP-style: point the runner at `.noe` source; it compiles on the fly (no pre-built bundle).
+    let dir = std::env::temp_dir().join(format!("noeta-runner-src-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let src = dir.join("app.noe");
+    std::fs::write(&src, "echo \"from source\";").expect("write source");
+    let out = runner().arg(&src).output().expect("runner runs");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "from source\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn reports_a_compile_error_in_source() {
+    // A compile failure renders diagnostics and exits non-zero — the CLI's exact pipeline. An
+    // undefined name is a guaranteed compile error (E0005).
+    let dir = std::env::temp_dir().join(format!("noeta-runner-err-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let src = dir.join("bad.noe");
+    std::fs::write(&src, "echo undefined_name_xyz;").expect("write source");
+    let out = runner().arg(&src).output().expect("runner runs");
+    assert_ne!(out.status.code(), Some(0));
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).is_empty(),
+        "expected a diagnostic on stderr"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn renders_an_abort_with_its_traceback() {
     let text = "fn boom(): int {\n  panic(\"kaboom\");\n}\necho boom();";
     let path = temp_bundle("abort.noeb", &build_bundle(text));
@@ -74,18 +109,28 @@ fn renders_an_abort_with_its_traceback() {
 }
 
 #[test]
-fn refuses_a_missing_file_and_a_non_bundle() {
+fn refuses_a_missing_file() {
     let out = runner()
         .arg("/nonexistent/app.noeb")
         .output()
         .expect("runs");
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("cannot read"));
+}
 
-    let path = temp_bundle("plain.txt", b"echo \"not a bundle\";");
+#[test]
+fn treats_a_non_bundle_file_as_source() {
+    // Dispatch is by content (bundle magic), not extension — a non-bundle file is compiled as `.noe`
+    // source, exactly as `noeta run` sniffs it. Valid source runs; garbage would be a compile error.
+    let path = temp_bundle("plain.txt", b"echo \"i am source\";");
     let out = runner().arg(&path).output().expect("runs");
-    assert_eq!(out.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&out.stderr).contains("not a `.noeb` bundle"));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "i am source\n",
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.status.code(), Some(0));
     std::fs::remove_file(path).ok();
 }
 

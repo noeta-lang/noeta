@@ -18,6 +18,10 @@ use noeta_diagnostics::render_mapped;
 use noeta_span::{Source, SourceId, SourceMap};
 use noeta_vm::{JitReport, TraceFrame, VmBackend};
 
+pub mod compile;
+
+pub use compile::{Compiled, CompileFailure, compile_real, compile_whole_file, resolve_providers};
+
 /// Run an already-compiled [`Module`] against the real host — the shared execution core of the
 /// CLI's source-run path and the `.noeb` bundle runner (P-AOT L1.2), which loads a module directly
 /// with no source to compile.
@@ -118,6 +122,25 @@ pub fn run_bundle_bytes(
         "",
     )]);
     run_compiled_module(Arc::new(module), &sources, args, app_id, jit_stats)
+}
+
+/// Compile a `.noe` **source** file (the PHP-style deploy) and run it — the same L2 pipeline the CLI
+/// uses (`compile_whole_file`), then the shared L1 execution tail. `tiers`/`target`/`no_cache` steer
+/// tier activation and the startup cache; `args`/`app_id` reach the program as in [`run_bundle_bytes`].
+/// A compile failure is rendered and its exit code returned.
+pub fn run_source_file(
+    file: &Path,
+    tiers: &[String],
+    target: &Option<String>,
+    no_cache: bool,
+    args: Vec<String>,
+    app_id: Option<String>,
+    jit_stats: bool,
+) -> ExitCode {
+    match compile::compile_whole_file(file, tiers, target, no_cache) {
+        Ok(compiled) => run_compiled_module(compiled.module, &compiled.sources, args, app_id, jit_stats),
+        Err(failure) => failure.report(),
+    }
 }
 
 /// P-AOT L2: detect and run a bundle stapled onto *this* executable (a `noeta build --exe`

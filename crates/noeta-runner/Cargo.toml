@@ -31,6 +31,16 @@ noeta-backend = { workspace = true }
 noeta-vm = { workspace = true }
 noeta-stdlib = { workspace = true }
 noeta-runtime = { workspace = true }
+# The L2 compile front-end (dev-deps D3c): source → typed → bytecode, so the runner runs `.noe`
+# source (PHP-style deploy), sharing the CLI's exact pipeline. `noeta-pm` is pulled with DEFAULT
+# features only — NOT `registry-http`/`provenance`/`keyless` — so the lean runtime links manifest +
+# target/tier resolution but none of the publish/network/crypto surface.
+noeta-ast = { workspace = true }
+noeta-loader = { workspace = true }
+noeta-check = { workspace = true }
+noeta-compiler = { workspace = true }
+noeta-cache = { workspace = true }
+noeta-pm = { workspace = true }
 
 [features]
 # Mirror `noeta-cli`: the shipped runner is JIT-enabled by default; `--no-default-features` yields a

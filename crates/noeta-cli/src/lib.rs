@@ -38,6 +38,10 @@ use noeta_vm::{SessionOutput, VmBackend, VmSession};
 // The package manager (package-manager P2) now lives in the `noeta-pm` library so `noeta-lsp` and
 // `noeta-db` resolve dependencies through the same code; the CLI names its modules unqualified.
 use noeta_pm::{graph, lock, manifest, registry};
+// The L2 compile pipeline (source → runnable module) and the execution core live in `noeta-runner`
+// so the CLI and the standalone lean runtime share one implementation (dev-deps D3c). The CLI's
+// `run`/`dump`/`build`/`test` paths call these by the same names they used when defined here.
+use noeta_runner::{compile_real, compile_whole_file, resolve_providers};
 
 mod compose;
 mod docgen;
@@ -1595,16 +1599,6 @@ fn report_fmt_error(name: &str, err: &noeta_fmt::FmtError) {
 /// The active tier → provider map for `--target` (empty with no target — default resolution:
 /// extension declarations first). The tier-execution layer dispatches on this: `"std"` runs the
 /// native built-in runner, a dependency key runs that package's `@tier` runner.
-fn resolve_providers(
-    entry: &std::path::Path,
-    target: &Option<String>,
-) -> Result<std::collections::BTreeMap<String, String>, String> {
-    match target {
-        None => Ok(std::collections::BTreeMap::new()),
-        Some(name) => manifest::resolve_active_tier_providers(entry, name),
-    }
-}
-
 fn tier_active_in_target(
     entry: &std::path::Path,
     target: &Option<String>,
@@ -1648,37 +1642,6 @@ fn run_program(program: &noeta_ast::Program, sources: &SourceMap, args: Vec<Stri
             1
         }
     }
-}
-
-/// Compile an already-typechecked program straight to a bytecode [`Module`] for the real (VM)
-/// execution path (isolates I.4a). This runs the *same* Core-IR lowering + precise-RC drop + reuse
-/// passes the differential and the eval reference use, then continues IR → bytecode (the extra stage
-/// the VM needs); reusing `checked`'s site maps keeps the checker to a single run.
-///
-/// Every program that parses and type-checks compiles to bytecode — the differential holds the VM at
-/// 100% coverage *by construction* (each language feature lands in both backends together). So an
-/// `Err` here does not mean "ordinary unsupported user program"; it means that invariant broke, and
-/// we surface it rather than silently downgrading to a different backend.
-fn compile_real(
-    program: &noeta_ast::Program,
-    checked: &noeta_check::Checked,
-) -> Result<noeta_bytecode::Module, String> {
-    noeta_compiler::compile_with_sites(
-        program,
-        checked.sites.clone(),
-        // Real execution runs isolates on OS threads (I.4b): lower `isolate f(args)` to `SpawnIsolate`.
-        // The differential/salsa paths pass false (byte-identical cooperative sandbox).
-        true,
-        // `noeta run` is a production compile — no debug info (the debugger's `noeta dap` compiles
-        // the same program with debug = true).
-        false,
-    )
-    .map_err(|u| {
-        format!(
-            "internal error: the VM cannot compile this program: {}",
-            u.reason
-        )
-    })
 }
 
 /// Execute an already-checked program against the **real host** (real `env`/`args`, real-disk IO)
@@ -2956,182 +2919,6 @@ fn cmd_run_bundle(
     noeta_runner::run_bundle_bytes(file, bytes, args, app_id, jit_stats)
 }
 
-/// A resolved startup-cache slot: an open cache, the content key for this program, and the workspace
-/// `SourceMap` (so a cache hit renders diagnostics against real source without re-parsing). Built by
-/// [`open_startup_cache`], consumed by [`compile_whole_file`].
-struct CacheSlot {
-    cache: noeta_cache::Cache,
-    key: noeta_cache::CacheKey,
-    sources: SourceMap,
-}
-
-/// A compiled whole-file program: the runnable module plus the sources its spans resolve against.
-struct Compiled {
-    module: std::sync::Arc<noeta_bytecode::Module>,
-    sources: SourceMap,
-}
-
-/// A whole-file compile failure, carrying what's needed to render it. [`report`](Self::report)
-/// prints it and yields the process exit code, matching each command's prior behavior.
-enum CompileFailure {
-    /// A message rendered as `lang: {0}` with exit 1 (target resolution / compiler-internal error).
-    Message(String),
-    /// The entry file could not be read (exit 2).
-    Unreadable(String),
-    /// Load-time (lex/parse) diagnostics, each paired with its own source (exit 1).
-    Load(Vec<noeta_loader::LoadDiagnostic>),
-    /// Tier-activation or type-check diagnostics, rendered against `sources` (exit 1).
-    Diagnostics {
-        sources: SourceMap,
-        diagnostics: Vec<Diagnostic>,
-    },
-}
-
-impl CompileFailure {
-    /// Print the failure to stderr and return the process exit code.
-    fn report(&self) -> ExitCode {
-        match self {
-            CompileFailure::Message(msg) => {
-                eprintln!("lang: {msg}");
-                ExitCode::from(1)
-            }
-            CompileFailure::Unreadable(msg) => {
-                eprintln!("lang: {msg}");
-                ExitCode::from(2)
-            }
-            CompileFailure::Load(diagnostics) => {
-                let mut stderr = io::stderr();
-                for ld in diagnostics {
-                    let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
-                }
-                ExitCode::from(1)
-            }
-            CompileFailure::Diagnostics {
-                sources,
-                diagnostics,
-            } => {
-                emit_diagnostics_mapped(sources, diagnostics.iter());
-                ExitCode::from(1)
-            }
-        }
-    }
-}
-
-/// The whole-file compile pipeline, shared by `run`/`dump`/`build` and cache-aware in one place: any
-/// command that wants "a source file → its runnable [`Module`]" goes through here, so the startup
-/// cache is applied exactly once rather than wired per command.
-///
-/// Resolves the active tier set (target ∪ `--tier`), then consults the startup cache: on a **hit**
-/// the decoded module is returned directly (the whole front-end is skipped); on a **miss** it loads →
-/// activates tiers → type-checks → compiles, populates the cache (best-effort), and returns. Because
-/// `run`/`dump`/`build` all compile identically (same [`compile_real`]), they share cache entries —
-/// a `noeta build` warms the exact entry `noeta run` reads, and vice versa.
-///
-/// `serve` does **not** use this (it injects an `http.serve(...)` call, so its module differs for the
-/// same source and must never share the `(source+tiers)` key). `test`/`bench` do **not** either (they
-/// compile a separate module per `@test`/`@bench` case — a different granularity).
-fn compile_whole_file(
-    file: &std::path::Path,
-    tiers: &[String],
-    target: &Option<String>,
-    no_cache: bool,
-) -> Result<Compiled, CompileFailure> {
-    // The active tier set is the union of any `--target`'s live tiers (from `noeta.toml`) and any
-    // explicit `--tier` flags, resolved before loading so a bad target fails fast.
-    let mut active: Vec<String> = match target {
-        Some(name) => {
-            manifest::resolve_active_tiers(file, name).map_err(CompileFailure::Message)?
-        }
-        None => Vec::new(),
-    };
-    for tier in tiers {
-        if !active.contains(tier) {
-            active.push(tier.clone());
-        }
-    }
-
-    // The target's tier → provider map (provider dispatch): decides which declaration's config
-    // attribute activation stamps, so it is part of the compiled program — and of the cache key.
-    let providers = resolve_providers(file, target).map_err(CompileFailure::Message)?;
-
-    // The entry's dependency packages (package-manager P2.1): their sources feed both the cache key
-    // (so a dep change never serves stale bytecode) and the loader (so `use <dep-key>.…` resolves).
-    let deps = manifest::dependency_packages(file).map_err(CompileFailure::Message)?;
-
-    // Startup cache (M3): on a hit, return the cached module — load/check/compile all skipped.
-    let cache = open_startup_cache(file, &active, &providers, &deps, no_cache);
-    if let Some(slot) = &cache
-        && let Some(blob) = slot.cache.load(&slot.key)
-        && let Ok(module) = noeta_bundle::read(&blob)
-    {
-        return Ok(Compiled {
-            module: std::sync::Arc::new(module),
-            sources: slot.sources.clone(),
-        });
-    }
-
-    // Miss: load + link (sibling `.noe` modules the entry `use`s are resolved and merged; a lone file
-    // links to itself; dependency packages re-rooted under their keys), activate any dev-tiers,
-    // type-check, and compile to bytecode.
-    let linked = match noeta_loader::load_with_deps(file, &deps) {
-        Err(err) => {
-            return Err(CompileFailure::Unreadable(format!(
-                "cannot read {}: {err}",
-                file.display()
-            )));
-        }
-        Ok(Err(load_diagnostics)) => return Err(CompileFailure::Load(load_diagnostics)),
-        Ok(Ok(linked)) => linked,
-    };
-    let sources = linked.sources;
-    // Activation inlines each `@<tier> { … }` block; with no active tiers the program runs as-is and
-    // every tier block is stripped at lowering (the default). Activation is only done when needed.
-    let program = if active.is_empty() {
-        linked.program
-    } else {
-        let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
-        let activated = noeta_check::activate_tiers_with(&linked.program, &active_refs, &providers);
-        if !activated.diagnostics.is_empty() {
-            return Err(CompileFailure::Diagnostics {
-                sources,
-                diagnostics: activated.diagnostics,
-            });
-        }
-        activated.program
-    };
-    let checked = noeta_check::check_all(&program);
-    if !checked.diagnostics.is_empty() {
-        return Err(CompileFailure::Diagnostics {
-            sources,
-            diagnostics: checked.diagnostics,
-        });
-    }
-    let module = match compile_real(&program, &checked) {
-        Ok(module) => std::sync::Arc::new(module),
-        Err(err) => return Err(CompileFailure::Message(err)),
-    };
-
-    // Populate the cache, best-effort, then bound its size (oldest-first eviction) so it can't grow
-    // without limit. Both run only on this already-slow miss path. Synchronous — encoding + writing
-    // is trivial next to the compile we just paid — and the whole block is **panic-isolated**:
-    // `store`/`prune` only ever return `Err` (already discarded), but `noeta_bundle::write`'s postcard
-    // encode carries an `.expect` that could (practically never) panic, and a cache write must never
-    // be able to abort an otherwise-successful run. A panic here still prints (surfacing the real bug)
-    // but is caught and swallowed. `AssertUnwindSafe`: on unwind we observe none of the captured state
-    // (`slot`/`module` are only read, and discarded), so there is no broken invariant to leak.
-    if let Some(slot) = &cache {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = slot.cache.store(&slot.key, &noeta_bundle::write(&module));
-            let _ = slot.cache.prune_to(noeta_cache::max_bytes());
-        }));
-    }
-    Ok(Compiled { module, sources })
-}
-
-/// Run an already-compiled [`Module`] on the real host and render its output — the shared tail of the
-/// `.noeb` bundle runner and the startup-cache *hit* path (both have a module with no source to
-/// compile). `args` is the program's argv (see [`program_args`]). Diagnostics/trace render against
-/// `sources` (real workspace sources on a cache hit; a synthetic empty source for a source-free bundle).
 /// Run a compiled module and render its output/diagnostics/trace/JIT-report, returning the exit
 /// code. Delegates to the shared execution core (`noeta-runner`) after deriving the p2p app
 /// namespace from the workspace — the CLI's package-manager-aware wrapper over the lean runner.
@@ -3143,100 +2930,6 @@ fn run_compiled_module(
 ) -> ExitCode {
     let app_id = p2p_app_namespace(&args);
     noeta_runner::run_compiled_module(module, sources, args, app_id, jit_stats)
-}
-
-/// Build the startup-cache slot for a source run: open the cache and compute the content key from
-/// the raw workspace (entry + sibling module sources) + runtime version + binary identity + the
-/// active tier set. Returns `None` — meaning "run uncached" — when caching is disabled
-/// (`--no-cache` or `NOETA_NO_CACHE`), the running binary can't be identified (so freshness can't be
-/// guaranteed), the entry can't be read, or the cache directory can't be opened.
-fn open_startup_cache(
-    file: &std::path::Path,
-    active: &[String],
-    providers: &std::collections::BTreeMap<String, String>,
-    deps: &[noeta_loader::DepPackage],
-    no_cache: bool,
-) -> Option<CacheSlot> {
-    if no_cache || std::env::var_os("NOETA_NO_CACHE").is_some() {
-        return None;
-    }
-    // The binary's build identity is mandatory: without it a same-version local toolchain rebuild
-    // would reuse stale bytecode. If we can't obtain it, we must not cache.
-    let binary = noeta_cache::binary_identity()?;
-    // Read the entry + sibling sources (no lex/parse) — both the key material and, on a hit, the
-    // SourceMap for rendering. SourceIds here match `noeta_loader::load_with_deps`'s assignment
-    // (entry = 0, sorted siblings 1.., then each dependency's modules in order), so a cached module's
-    // spans — including those from merged dependency declarations — resolve against this map.
-    let workspace = noeta_loader::read_workspace(file).ok()?;
-    let mut key = noeta_cache::KeyBuilder::new();
-    // Which file is the *entry* is part of the key, not just the source set: a directory of
-    // dir-flat modules compiles to a different program per entry, so `noeta run a.noe` and
-    // `noeta run b.noe` in one directory must not collide (they would otherwise share the same
-    // sorted source set and the second would run the first's cached bytecode).
-    key.entry(source_key_name(&workspace.entry));
-    key.source(
-        source_key_name(&workspace.entry),
-        workspace.entry.text().as_bytes(),
-    );
-    for module in &workspace.modules {
-        key.source(source_key_name(module), module.text().as_bytes());
-    }
-    // Dependency packages are part of the compiled program: fold each dependency's key→root binding
-    // (re-rooting changes the linked program even when the sources are byte-identical) and every
-    // module's source text into the key, so any dependency change invalidates the cache.
-    for dep in deps {
-        key.source(format!("<dep {}>", dep.key), dep.root.as_bytes());
-        // The transitive key-rewrite map is part of what re-rooting produces: two builds with
-        // byte-identical dep sources but different transitive wiring link to different programs.
-        for (local, global) in &dep.dep_renames {
-            key.source(format!("<rename {} {local}>", dep.key), global.as_bytes());
-        }
-        for module in &dep.modules {
-            key.source(&module.name, module.text.as_bytes());
-        }
-    }
-    key.runtime_version(noeta_bundle::RUNTIME_VERSION)
-        .binary_identity(binary);
-    for tier in active {
-        key.tier(tier);
-    }
-    // The provider selection changes what activation stamps (`bench = "criterion"` stamps
-    // criterion's config attribute), so it is key material — encoded distinctly from bare tier
-    // names; `BTreeMap` iteration keeps it deterministic.
-    for (tier, provider) in providers {
-        key.tier(format!("{tier}={provider}"));
-    }
-    let key = key.finish();
-
-    let cache = noeta_cache::Cache::open()?;
-    // Rebuild the exact Source sequence `link_with_deps` assigns SourceIds to, so a cached module's
-    // spans resolve. `read_workspace` already gave entry (id 0) + siblings; the dependency modules
-    // continue the ids in the same order the loader parses them.
-    let mut sources = Vec::with_capacity(1 + workspace.modules.len());
-    sources.push(workspace.entry);
-    sources.extend(workspace.modules);
-    let mut next_id = sources.len() as u32;
-    for dep in deps {
-        for module in &dep.modules {
-            sources.push(Source::new(SourceId(next_id), &module.name, &module.text));
-            next_id += 1;
-        }
-    }
-    Some(CacheSlot {
-        cache,
-        key,
-        sources: SourceMap::new(sources),
-    })
-}
-
-/// The cache-key name for a source: its file name, so the key is independent of the path the program
-/// was invoked through (`./app.noe` and `app.noe` share an entry). Two distinct programs can only
-/// share a name here if their whole hashed content also matches — in which case they are identical.
-fn source_key_name(source: &Source) -> &str {
-    std::path::Path::new(source.name())
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_else(|| source.name())
 }
 
 /// `noeta dump <FILE>` — disassemble the program to its VM bytecode and print it to stdout. Loads,

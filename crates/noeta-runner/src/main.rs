@@ -2,11 +2,13 @@
 //! It runs a `.noeb` bundle on the real host — as a **stapled** artifact (`noeta build --exe`
 //! injects the bundle onto this binary) or in **two-file** form (`noeta-runner app.noeb [args…]`).
 //!
-//! It links only the app-execution layers (VM + real `Host` + runtime extensions, via the shared
-//! `noeta_runner` lib) and **nothing from the dev toolchain (L3)**: no fmt, no formatter/parser
-//! (`malva`), no LSP/DAP/MCP. That exclusion is *structural* — this crate does not depend on those
-//! crates, so it is auditable by its `Cargo.toml`, not by tracing `#[cfg]`s. Running `.noe` **source**
-//! (the PHP-style deploy) is the next slice (D3c); today the binary requires a pre-built bundle.
+//! It also runs a `.noe` **source** file directly (PHP-style deploy) — compiling on the fly through
+//! the same L2 pipeline the CLI uses — so a source tree can be deployed and run without the toolchain.
+//!
+//! It links only the app-execution layers (VM + real `Host` + runtime extensions + the compile
+//! front-end, via the shared `noeta_runner` lib) and **nothing from the dev toolchain (L3)**: no fmt,
+//! no formatter/parser (`malva`), no LSP/DAP/MCP. That exclusion is *structural* — this crate does not
+//! depend on those crates, so it is auditable by its `Cargo.toml`, not by tracing `#[cfg]`s.
 
 use std::process::ExitCode;
 
@@ -16,7 +18,7 @@ use std::process::ExitCode;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: noeta-runner <app.noeb> [args...]");
+    eprintln!("usage: noeta-runner <app.noe | app.noeb> [args...]");
     ExitCode::from(2)
 }
 
@@ -35,24 +37,22 @@ fn main() -> ExitCode {
         return usage();
     };
 
-    let bytes = match std::fs::read(&bundle_path) {
+    let path = std::path::Path::new(&bundle_path);
+    let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(err) => {
             eprintln!("noeta-runner: cannot read {bundle_path}: {err}");
             return ExitCode::from(2);
         }
     };
-    if !noeta_bundle::is_bundle(&bytes) {
-        eprintln!(
-            "noeta-runner: {bundle_path} is not a `.noeb` bundle (built by `noeta build`); source execution arrives in D3c"
-        );
-        return ExitCode::from(2);
+    // A pre-built `.noeb` bundle runs directly; anything else is treated as `.noe` source and
+    // compiled on the fly (the PHP-style deploy). Tiers/target come from the entry's `noeta.toml`
+    // (no `--tier`/`--target` flags — a shipped runner takes only the program's argv), and the
+    // startup cache is honoured exactly as `noeta run` does. `app_id = None` → executable-file-stem
+    // p2p namespace.
+    if noeta_bundle::is_bundle(&bytes) {
+        noeta_runner::run_bundle_bytes(path, &bytes, program_argv, None, false)
+    } else {
+        noeta_runner::run_source_file(path, &[], &None, false, program_argv, None, false)
     }
-    noeta_runner::run_bundle_bytes(
-        std::path::Path::new(&bundle_path),
-        &bytes,
-        program_argv,
-        None,
-        false,
-    )
 }
