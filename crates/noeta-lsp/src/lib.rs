@@ -114,6 +114,7 @@ fn to_completion_item(candidate: &completion::Candidate) -> CompletionItem {
         CandidateKind::Method => CompletionItemKind::METHOD,
         CandidateKind::EnumMember => CompletionItemKind::ENUM_MEMBER,
         CandidateKind::Type => CompletionItemKind::INTERFACE,
+        CandidateKind::Module => CompletionItemKind::MODULE,
     };
     CompletionItem {
         label: candidate.label.clone(),
@@ -616,12 +617,13 @@ impl LanguageServer for Backend {
         let position_params = params.text_document_position_params;
         let uri = position_params.text_document.uri;
         let position = ide_position(position_params.position);
-        let (found, doc, tier) = {
+        let (found, doc, tier, namespace) = {
             let store = self.store.lock().expect("document store poisoned");
             (
                 store.hover_type(uri.as_str(), position, self.encoding()),
                 store.hover_doc(uri.as_str(), position, self.encoding()),
                 store.hover_tier(uri.as_str(), position, self.encoding()),
+                store.hover_namespace(uri.as_str(), position, self.encoding()),
             )
         };
         let markdown = |value: String| {
@@ -635,6 +637,14 @@ impl LanguageServer for Backend {
         // registry (program + extension declarations alike). Takes precedence over the type hover
         // because the cursor is on the tier name, not a typed sub-expression.
         if let Some((descriptor, range)) = tier {
+            return Ok(Some(Hover {
+                contents: markdown(descriptor),
+                range: Some(wire_range(range)),
+            }));
+        }
+        // A namespace-group name (`http` from `use std.http`) has no typed expression, so describe
+        // the group and its members here (module-namespaces).
+        if let Some((descriptor, range)) = namespace {
             return Ok(Some(Hover {
                 contents: markdown(descriptor),
                 range: Some(wire_range(range)),

@@ -41,6 +41,8 @@ pub enum CandidateKind {
     EnumMember,
     /// A built-in type name (`int`, `List`, …) offered in a type-annotation position.
     Type,
+    /// A native module or namespace-group member (`http.client`, member completion on a group).
+    Module,
 }
 
 /// One completion candidate: the inserted/filtered text, its kind, and an optional short detail.
@@ -134,6 +136,47 @@ pub fn complete(program: &Program, offset: u32, source: SourceId) -> Vec<Candida
     }
 
     dedupe_by_label(candidates)
+}
+
+/// The namespace-group bindings a program introduces: local (or aliased) name → root-qualified
+/// prefix, from each `use` that binds a group (`use std.http` → `http` → `std.http`, `use std.http
+/// as h` → `h` → `std.http`). What member completion consults to recognize a group receiver.
+pub fn namespace_bindings(program: &Program) -> std::collections::HashMap<String, String> {
+    use noeta_stdlib::registry::UseKind;
+    let reg = noeta_stdlib::registry::default_seeded();
+    let mut map = std::collections::HashMap::new();
+    for stmt in &program.stmts {
+        if let Stmt::Use { path, names, .. } = stmt {
+            for n in names {
+                if let UseKind::Namespace(prefix) = reg.classify_use(path, &n.name) {
+                    map.insert(n.local().to_string(), prefix);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// The member candidates of a namespace group whose root-qualified prefix is `prefix` (`std.http` →
+/// `client`, `server`, `Response`) — its submodules and types one hop down, for completion after
+/// `http.`. A submodule/sub-namespace child is a `Module`; an extension type is a `Type`.
+pub fn namespace_members(prefix: &str) -> Vec<Candidate> {
+    use noeta_stdlib::registry::NsChild;
+    let reg = noeta_stdlib::registry::default_seeded();
+    reg.namespace_children(prefix)
+        .into_iter()
+        .map(|name| {
+            let kind = match reg.resolve_namespace_child(prefix, &name) {
+                NsChild::Type(_) => CandidateKind::Type,
+                _ => CandidateKind::Module,
+            };
+            Candidate {
+                label: name,
+                kind,
+                detail: None,
+            }
+        })
+        .collect()
 }
 
 /// The member candidates of the type named `type_name` in `program`: its fields, enum variants, and

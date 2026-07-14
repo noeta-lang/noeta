@@ -577,6 +577,45 @@ impl DocumentStore {
         Some((repr.clone(), note, index.range(*span, encoding)))
     }
 
+    /// A hover for a **namespace-group** binding (`http` from `use std.http`, module-namespaces):
+    /// the group's qualified prefix and its members. A group is not a typed value, so [`hover_type`]
+    /// returns nothing for it — this fills that gap. `None` unless the cursor's identifier is a group
+    /// bound in this file.
+    ///
+    /// [`hover_type`]: Self::hover_type
+    pub fn hover_namespace(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<(String, Range)> {
+        let cache = self.workspaces.get(uri)?;
+        let db = &self.db;
+        let entry = cache.entry();
+        let entry_text = entry.text(db);
+        let index = LineIndex::new(entry_text);
+        let offset = index.offset(position, encoding);
+        let token = noeta_db::tokens(db, entry).0.tokens.iter().find(|t| {
+            t.kind == TokenKind::Ident && t.span.start <= offset && offset <= t.span.end
+        })?;
+        let name = &entry_text[token.span.range()];
+        let entry_ast = noeta_db::ast(db, entry);
+        let prefix = completion::namespace_bindings(&entry_ast.0.program).remove(name)?;
+        let members = noeta_stdlib::registry::default_seeded().namespace_children(&prefix);
+        let members = if members.is_empty() {
+            String::new()
+        } else {
+            let list = members
+                .iter()
+                .map(|m| format!("`{m}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("\n\nMembers: {list}")
+        };
+        let value = format!("namespace group `{name}` → `{prefix}`{members}");
+        Some((value, index.range(token.span, encoding)))
+    }
+
     /// The `@doc` prose attached to the declaration the cursor's identifier resolves to, if any —
     /// what hover appends under the type. Attachment is adjacency-resolved from the merged
     /// workspace program's bare parse (`noeta_check::resolve_docs`), so it works regardless of
@@ -959,9 +998,14 @@ impl DocumentStore {
         };
 
         // Member completion, partial form: the parser produced a `receiver.member` access under the
-        // cursor. Resolve the receiver's type from the workspace type index and list its members.
+        // cursor. A namespace-group receiver (`http.cl`) has no value type, so it is resolved first
+        // against the group bindings and offers the group's submodules/types (module-namespaces).
         let def_use = resolve::DefUse::build(program);
+        let namespaces = completion::namespace_bindings(program);
         if let Some((receiver_span, _member)) = def_use.member_at(offset, cursor) {
+            if let Some(prefix) = namespaces.get(&entry_text[receiver_span.range()]) {
+                return Some(completion::namespace_members(prefix));
+            }
             let checked = noeta_db::linked_checked_ide(db, cache.workspace);
             let mut members = checked
                 .expr_types
@@ -982,7 +1026,9 @@ impl DocumentStore {
         // cached check. Re-check a copy of the buffer with a synthetic member name inserted, off the
         // salsa graph, to recover it. Single-file: the receiver's type must be declared in this file.
         if is_bare_dot(entry_text, offset) {
-            return Some(bare_dot_members(entry_text, offset, program).unwrap_or_default());
+            return Some(
+                bare_dot_members(entry_text, offset, program, &namespaces).unwrap_or_default(),
+            );
         }
 
         // Type-annotation position (`x: |`, `fn f(): |`, `List<|>`): offer type names only.
@@ -1906,6 +1952,7 @@ fn bare_dot_members(
     text: &str,
     offset: u32,
     program: &noeta_ast::Program,
+    namespaces: &std::collections::HashMap<String, String>,
 ) -> Option<Vec<completion::Candidate>> {
     let o = offset as usize;
     // Splice a synthetic identifier after the dot so `c.` becomes `c.a` — now a real member access
@@ -1917,6 +1964,10 @@ fn bare_dot_members(
     let checked = noeta_check::check_all_with_types(&parsed.program);
     let def_use = resolve::DefUse::build(&parsed.program);
     let (receiver_span, _member) = def_use.member_at(offset, SourceId::FIRST)?;
+    // A namespace-group receiver (`http.`) has no value type — offer the group's members directly.
+    if let Some(prefix) = namespaces.get(&munged[receiver_span.range()]) {
+        return Some(completion::namespace_members(prefix));
+    }
     let repr = checked.expr_types.get(&receiver_span)?;
     let mut members = nominal_name(repr)
         .map(|type_name| completion::members_of(program, type_name))
@@ -3394,6 +3445,61 @@ mod tests {
                 .iter()
                 .any(|i| i.kind == completion::CandidateKind::Keyword),
             "no keywords after a bare dot; got {items:?}"
+        );
+    }
+
+    #[test]
+    fn completions_after_a_namespace_group_dot_offer_its_members() {
+        // `http.` — a namespace-group receiver (module-namespaces) has no value type, so completion
+        // offers the group's submodules and types (`client`, `server`, `Response`), not a keyword or
+        // scope list. Exercises both the group binding and the member-kinds.
+        let mut store = DocumentStore::default();
+        store.open("file:///a.noe", "use std.http\nx = http.".to_string());
+        // Just after the trailing dot of `x = http.` (line 1, col 9).
+        let items = store
+            .completions("file:///a.noe", Position::new(1, 9), Encoding::Utf8)
+            .expect("open document offers completions");
+        assert!(
+            items
+                .iter()
+                .any(|i| i.label == "client" && i.kind == completion::CandidateKind::Module),
+            "offers the `client` submodule; got {items:?}"
+        );
+        assert!(items.iter().any(|i| i.label == "server"));
+        assert!(
+            items
+                .iter()
+                .any(|i| i.label == "Response" && i.kind == completion::CandidateKind::Type),
+            "offers the `Response` type; got {items:?}"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|i| i.kind == completion::CandidateKind::Keyword),
+            "no keywords after a group dot; got {items:?}"
+        );
+    }
+
+    #[test]
+    fn hover_describes_a_namespace_group() {
+        // Hovering the group handle `http` (which has no value type) describes the group and lists
+        // its members (module-namespaces).
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///a.noe",
+            "use std.http\nx = http.client\n".to_string(),
+        );
+        // On `http` in the `use` line (line 0, col 8 — within `std.http`'s `http`).
+        let (desc, _) = store
+            .hover_namespace("file:///a.noe", Position::new(1, 5), Encoding::Utf8)
+            .expect("a namespace-group hover on `http`");
+        assert!(
+            desc.contains("namespace group `http`") && desc.contains("`std.http`"),
+            "describes the group and prefix; got {desc:?}"
+        );
+        assert!(
+            desc.contains("`client`") && desc.contains("`Response`"),
+            "lists the members; got {desc:?}"
         );
     }
 
