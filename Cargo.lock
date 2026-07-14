@@ -4030,6 +4030,7 @@ dependencies = [
  "noeta-loader",
  "noeta-lsp",
  "noeta-mcp",
+ "noeta-para-p2p",
  "noeta-parser",
  "noeta-pm",
  "noeta-prof",

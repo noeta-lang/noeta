@@ -6,12 +6,19 @@
 - **[Reactivity](Reactivity)** — each hole becomes a `computed`, so a `signal` change recomputes *exactly* the affected holes, glitch-free.
 - **The reactive-view diff-push transport** (`std.reactive.view` + `std.http.server` websockets) — which serializes only the holes that changed and pushes a minimal patch to the browser.
 
-It ships as the **`liveview` package** (`examples/liveview/`): the `Html` type, the `@html` handler, and a `handle(req, …)` that wires up the page, the client shim, and the websocket session. A consumer depends on it, imports `render` (which brings the `@html` tier into scope) and `handle`, and writes templates over signals. The runnable apps are `examples/liveview-counter/` and `examples/liveview-todos/`.
+It ships as the **`para.html` package** (`packages/para-html/`): the `Html` type, the `@html` handler, and a `handle(req, …)` that wires up the page, the client shim, and the websocket session. It is a **first-party but non-default** package under the `para` ("alongside") namespace — maintained by the project, distributed through the package registry rather than baked into `std` (its sibling is the [`para.p2p`](Local-First-and-P2P) local-first package). A consumer keys the dependency `para`, imports `render` (which brings the `@html` tier into scope) and `handle`, and writes templates over signals:
+
+```toml
+[dependencies]
+para = { path = "…/packages/para-html" }   # or a registry/git version once published
+```
+
+The runnable apps are `examples/liveview-counter/` and `examples/liveview-todos/`.
 
 ## The counter
 
 ```noeta ignore
-use liveview.{render, Html, handle}
+use para.html.{render, Html, handle}
 use std.reactive.signal
 use std.http.server
 use std.http.{Request, Response}
