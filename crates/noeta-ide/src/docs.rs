@@ -502,92 +502,155 @@ fn api_detail(signature: &str) -> String {
         .to_string()
 }
 
-/// The children of an API id: the API root lists modules; a module lists its functions; a function
-/// is a leaf.
+/// Auto-derived cross-references from an API symbol back to the language-guide pages that mention it
+/// (Arc 2 A3): a guide page using `math.sqrt(…)` links from the `std.math.sqrt` API page. Matches
+/// the call form `<short>.<name>` (`math.sqrt`) in guide bodies; capped to keep a page's "see also"
+/// tidy. One direction only — the guide is the source of truth for what links where, so the
+/// backlink is derived, never hand-maintained.
+fn guide_xrefs_for(qualified: &str, name: &str) -> Vec<DocXref> {
+    let short = qualified.rsplit('.').next().unwrap_or(qualified);
+    let needle = format!("{short}.{name}");
+    guide::pages_mentioning(&needle)
+        .into_iter()
+        .take(6)
+        .map(|(slug, title)| DocXref {
+            id: DocId::new(format!("{GUIDE_ROOT}/{slug}")),
+            title,
+        })
+        .collect()
+}
+
+/// A function/method leaf node under an API module/type.
+fn api_fn_node(qualified: &str, f: &api::ApiFn, kind: DocKind) -> DocNode {
+    DocNode {
+        id: DocId::new(format!("{API_ROOT}/{qualified}/{}", f.name)),
+        title: f.name.clone(),
+        kind,
+        detail: Some(api_detail(&f.signature)),
+        has_page: true,
+        expandable: false,
+        location: None,
+    }
+}
+
+/// The children of an API id: the API root lists modules then extern types; a module lists its
+/// functions, a type its methods; a function/method is a leaf.
 fn api_children(id: &DocId) -> Vec<DocNode> {
     match id.segments().as_slice() {
-        [_root] => api::modules()
-            .into_iter()
-            .map(|m| DocNode {
-                id: DocId::new(format!("{API_ROOT}/{}", m.qualified)),
-                title: m.qualified,
-                kind: DocKind::Module,
+        [_root] => {
+            let mut nodes: Vec<DocNode> = api::modules()
+                .into_iter()
+                .map(|m| DocNode {
+                    id: DocId::new(format!("{API_ROOT}/{}", m.qualified)),
+                    title: m.qualified,
+                    kind: DocKind::Module,
+                    detail: None,
+                    has_page: false,
+                    expandable: true,
+                    location: None,
+                })
+                .collect();
+            nodes.extend(api::types().into_iter().map(|t| DocNode {
+                id: DocId::new(format!("{API_ROOT}/{}", t.qualified)),
+                title: t.qualified,
+                kind: DocKind::Struct,
                 detail: None,
                 has_page: false,
                 expandable: true,
                 location: None,
-            })
-            .collect(),
-        [_root, qualified] => match api::module(qualified) {
-            Some(m) => m
-                .functions
-                .into_iter()
-                .map(|f| DocNode {
-                    id: DocId::new(format!("{API_ROOT}/{qualified}/{}", f.name)),
-                    title: f.name,
-                    kind: DocKind::Function,
-                    detail: Some(api_detail(&f.signature)),
-                    has_page: true,
-                    expandable: false,
-                    location: None,
-                })
-                .collect(),
-            None => Vec::new(),
-        },
+            }));
+            nodes
+        }
+        // A qualified name is either a module (→ functions) or an extern type (→ methods).
+        [_root, qualified] => {
+            if let Some(m) = api::module(qualified) {
+                m.functions
+                    .iter()
+                    .map(|f| api_fn_node(qualified, f, DocKind::Function))
+                    .collect()
+            } else if let Some(t) = api::type_(qualified) {
+                t.methods
+                    .iter()
+                    .map(|f| api_fn_node(qualified, f, DocKind::Method))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        }
         _ => Vec::new(),
     }
 }
 
-/// The page for an `api/<module>/<fn>` id: the rendered signature and its prose.
+/// The page for an `api/<module>/<fn>` or `api/<type>/<method>` id: the rendered signature, its
+/// prose, and cross-references to guide pages that mention it.
 fn api_page(id: &DocId) -> Option<DocPage> {
     let segments = id.segments();
     let [_root, qualified, name] = segments.as_slice() else {
         return None;
     };
-    let f = api::function(qualified, name)?;
+    let (f, kind) = match api::function(qualified, name) {
+        Some(f) => (f, DocKind::Function),
+        None => (api::method(qualified, name)?, DocKind::Method),
+    };
     Some(DocPage {
         id: id.clone(),
         title: format!("{qualified}.{name}"),
-        kind: DocKind::Function,
+        kind,
         signature: Some(f.signature),
         markdown: f.doc,
         location: None,
-        xrefs: Vec::new(),
+        xrefs: guide_xrefs_for(qualified, name),
     })
 }
 
-/// API-reference search: rank functions by name (highest), signature, and prose. `needle` is
-/// already lowercased.
+/// Score one API function/method against `needle`, pushing a hit when it matches.
+fn api_score_into(
+    qualified: &str,
+    f: &api::ApiFn,
+    kind: DocKind,
+    needle: &str,
+    hits: &mut Vec<DocHit>,
+) {
+    let name_l = f.name.to_lowercase();
+    let mut score = 0;
+    if name_l == needle {
+        score += 100;
+    } else if name_l.contains(needle) {
+        score += 40;
+    }
+    if f.signature.to_lowercase().contains(needle) {
+        score += 8;
+    }
+    if f.doc.to_lowercase().contains(needle) {
+        score += 5;
+    }
+    if score > 0 {
+        hits.push(DocHit {
+            id: DocId::new(format!("{API_ROOT}/{qualified}/{}", f.name)),
+            title: format!("{qualified}.{}", f.name),
+            kind,
+            snippet: if f.doc.is_empty() {
+                api_detail(&f.signature)
+            } else {
+                f.doc.clone()
+            },
+            score,
+        });
+    }
+}
+
+/// API-reference search: rank module functions and type methods by name (highest), signature, and
+/// prose. `needle` is already lowercased.
 fn api_search(needle: &str) -> Vec<DocHit> {
     let mut hits = Vec::new();
     for m in api::modules() {
-        for f in m.functions {
-            let name_l = f.name.to_lowercase();
-            let mut score = 0;
-            if name_l == needle {
-                score += 100;
-            } else if name_l.contains(needle) {
-                score += 40;
-            }
-            if f.signature.to_lowercase().contains(needle) {
-                score += 8;
-            }
-            if f.doc.to_lowercase().contains(needle) {
-                score += 5;
-            }
-            if score > 0 {
-                hits.push(DocHit {
-                    id: DocId::new(format!("{API_ROOT}/{}/{}", m.qualified, f.name)),
-                    title: format!("{}.{}", m.qualified, f.name),
-                    kind: DocKind::Function,
-                    snippet: if f.doc.is_empty() {
-                        api_detail(&f.signature)
-                    } else {
-                        f.doc.clone()
-                    },
-                    score,
-                });
-            }
+        for f in &m.functions {
+            api_score_into(&m.qualified, f, DocKind::Function, needle, &mut hits);
+        }
+    }
+    for t in api::types() {
+        for f in &t.methods {
+            api_score_into(&t.qualified, f, DocKind::Method, needle, &mut hits);
         }
     }
     hits
@@ -916,6 +979,31 @@ mod tests {
         // Search spans the API corpus.
         let hits = search(&ctx, "sqrt");
         assert!(hits.iter().any(|h| h.id.as_str() == "api/std.math/sqrt"));
+    }
+
+    #[test]
+    fn the_api_root_includes_extern_types_and_their_methods() {
+        let ctx = DocCtx::empty();
+        let roots = children(&ctx, &DocId::new("api"));
+        // A well-known extern type surfaces alongside the modules (e.g. std.id.Uuid).
+        let uuid = roots
+            .iter()
+            .find(|n| n.title == "std.id.Uuid")
+            .expect("std.id.Uuid extern type present");
+        assert_eq!(uuid.kind, DocKind::Struct);
+        assert!(uuid.expandable);
+        let methods = children(&ctx, &uuid.id);
+        assert!(!methods.is_empty(), "the type exposes methods");
+        assert!(
+            methods
+                .iter()
+                .all(|m| m.kind == DocKind::Method && m.has_page)
+        );
+        // A method page renders (signature at least).
+        let m0 = &methods[0];
+        let rendered = page(&ctx, &m0.id).expect("method page renders");
+        assert_eq!(rendered.kind, DocKind::Method);
+        assert!(rendered.signature.is_some());
     }
 
     #[test]

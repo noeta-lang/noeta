@@ -30,6 +30,13 @@ pub struct ApiModule {
     pub functions: Vec<ApiFn>,
 }
 
+/// One extern **type** of the API reference: its qualified name (`std.id.Uuid`) and its methods.
+#[derive(Debug, Clone)]
+pub struct ApiType {
+    pub qualified: String,
+    pub methods: Vec<ApiFn>,
+}
+
 /// Every module the registry knows, qualified and sorted (`std.crypto`, `std.http.client`,
 /// `std.math`, …), each with its functions (plain + higher-order) sorted by name. Reads the
 /// process-global registry via the stdlib facade, which lazily seeds the built-in `std` units.
@@ -70,6 +77,51 @@ pub fn function(qualified: &str, name: &str) -> Option<ApiFn> {
         .functions
         .into_iter()
         .find(|f| f.name == name)
+}
+
+/// Every extern type the registry knows, qualified and sorted (`std.crypto.Hasher`, `std.id.Uuid`,
+/// …), each with its methods (plain + higher-order) sorted by name.
+pub fn types() -> Vec<ApiType> {
+    let mut out: Vec<ApiType> = Vec::new();
+    for ext in registry::extensions() {
+        for t in ext.types() {
+            let mut methods: Vec<ApiFn> = t
+                .methods
+                .iter()
+                .chain(t.ctx_methods.iter())
+                .map(|f| ApiFn {
+                    name: f.name.to_string(),
+                    signature: f.render(),
+                    doc: t
+                        .docs
+                        .iter()
+                        .find(|(n, _)| *n == f.name)
+                        .map(|(_, d)| d.to_string())
+                        .unwrap_or_default(),
+                })
+                .collect();
+            methods.sort_by(|a, b| a.name.cmp(&b.name));
+            out.push(ApiType {
+                qualified: t.qualified(),
+                methods,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.qualified.cmp(&b.qualified));
+    out
+}
+
+/// The extern type with the given qualified name (`std.id.Uuid`), if present.
+pub fn type_(qualified: &str) -> Option<ApiType> {
+    types().into_iter().find(|t| t.qualified == qualified)
+}
+
+/// A single method `qualified::name` (e.g. `std.id.Uuid` / `to_string`), if present.
+pub fn method(qualified: &str, name: &str) -> Option<ApiFn> {
+    type_(qualified)?
+        .methods
+        .into_iter()
+        .find(|m| m.name == name)
 }
 
 /// The prose for `name` in module `m`, or empty. Keyed by name so one table serves both plain and

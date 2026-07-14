@@ -288,6 +288,14 @@ pub struct DocBrowseOutput {
     pub nodes: Vec<DocNodeOut>,
 }
 
+/// A cross-reference to a related doc node (e.g. an API symbol's "see also" guide pages).
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct DocXrefOut {
+    /// The related node's id — pass it to `doc_page`/`doc_browse`.
+    pub id: String,
+    pub title: String,
+}
+
 /// A rendered doc page for the agent.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct DocPageOutput {
@@ -299,6 +307,8 @@ pub struct DocPageOutput {
     pub markdown: String,
     pub file: Option<String>,
     pub line: Option<u32>,
+    /// Related nodes — for an API symbol, the guide pages that mention it.
+    pub xrefs: Vec<DocXrefOut>,
 }
 
 /// Browse one level of the project's doc tree: the corpus roots when `id` is omitted, else the
@@ -331,6 +341,14 @@ pub fn doc_page(p: &Prepared, id: &str) -> DocPageOutput {
             markdown: page.markdown,
             file: page.location.as_ref().map(|l| l.uri.clone()),
             line: page.location.as_ref().map(|l| l.range.start.line + 1),
+            xrefs: page
+                .xrefs
+                .into_iter()
+                .map(|x| DocXrefOut {
+                    id: x.id.0,
+                    title: x.title,
+                })
+                .collect(),
         },
         None => DocPageOutput {
             found: false,
@@ -341,6 +359,7 @@ pub fn doc_page(p: &Prepared, id: &str) -> DocPageOutput {
             markdown: String::new(),
             file: None,
             line: None,
+            xrefs: Vec::new(),
         },
     }
 }

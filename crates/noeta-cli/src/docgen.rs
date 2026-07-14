@@ -109,28 +109,34 @@ pub fn package_docs_json(dir: &Path) -> Result<(String, Generated), String> {
 /// rides to the registry and renders on the hosted docs page identically. `package` names the
 /// artifact (e.g. the toolchain's `std`), or `None` for a generic title.
 pub fn registry_docs_json(package: Option<(String, String)>) -> (String, Generated) {
-    let modules: Vec<ModuleDocs> = noeta_ide::api::modules()
+    let fn_item = |f: noeta_ide::api::ApiFn| {
+        Item::Decl(DeclDocs {
+            kind: "fn",
+            name: f.name,
+            signature: f.signature,
+            doc: (!f.doc.is_empty()).then_some(f.doc),
+            public: true,
+        })
+    };
+    // One `docs.json` module per registry module and per extern type — both are qualified surfaces
+    // of functions/methods, so they render uniformly by-module on the hosted page.
+    let mut modules: Vec<ModuleDocs> = noeta_ide::api::modules()
         .into_iter()
         .map(|m| ModuleDocs {
             file: String::new(), // native: no source file
             slug: m.qualified.replace('.', "-"),
             namespace: Some(m.qualified),
             doc: None,
-            items: m
-                .functions
-                .into_iter()
-                .map(|f| {
-                    Item::Decl(DeclDocs {
-                        kind: "fn",
-                        name: f.name,
-                        signature: f.signature,
-                        doc: (!f.doc.is_empty()).then_some(f.doc),
-                        public: true,
-                    })
-                })
-                .collect(),
+            items: m.functions.into_iter().map(fn_item).collect(),
         })
         .collect();
+    modules.extend(noeta_ide::api::types().into_iter().map(|t| ModuleDocs {
+        file: String::new(),
+        slug: t.qualified.replace('.', "-"),
+        namespace: Some(t.qualified),
+        doc: None,
+        items: t.methods.into_iter().map(fn_item).collect(),
+    }));
     let json = docs_json(&package, &modules);
     let generated = Generated {
         modules: modules.len(),

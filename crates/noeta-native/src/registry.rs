@@ -528,6 +528,10 @@ pub struct ExtType {
     /// type whose methods take a container argument (the metrics instruments' `*_with(_, attrs)`).
     /// Default `false` — most extern methods take scalars/handles.
     pub deep_marshal: bool,
+    /// Per-method **documentation prose** (docs-browser Arc 2): `(method_name, markdown)` pairs, the
+    /// extern-type analogue of [`ExtModule::docs`]. Opt-in and sparse; keyed by name so it covers
+    /// both [`ExtType::methods`] and [`ExtType::ctx_methods`].
+    pub docs: &'static [(&'static str, &'static str)],
 }
 
 impl ExtType {
@@ -549,6 +553,7 @@ impl ExtType {
         arena_getter: None,
         traits: &[],
         deep_marshal: false,
+        docs: &[],
     };
 
     /// The type's **qualified identity** (`std.id.Uuid`) — `namespace.name`. This is the string the
