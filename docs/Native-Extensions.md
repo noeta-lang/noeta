@@ -165,6 +165,35 @@ The toolchain's own source resolves in order: `NOETA_TOOLCHAIN_SRC` (a checkout 
 
 **Where heavy dependencies belong.** An extension whose implementation needs a heavy native tree should either put the effectful part **behind the `Host` capability seam** (the runtime side, where `noeta build --native` can gate it behind a ring feature — how `std.http`'s reqwest tree stays out of non-http binaries) or accept that its whole crate is the include/exclude unit. Unconditional heavy deps in an always-linked crate cannot be dead-code-eliminated per-program; core's own `crypto`/`id` (~65 KB of sha2/bcrypt/uuid, unconditional in `noeta-stdlib`) are the recorded won't-do-with-trigger example — the extension-unit split makes gating them mechanical if a size budget ever demands it.
 
+### Composition for a shipped artifact — the lean runner
+
+The composed toolchain above is the *development* binary. A **shipped** artifact is composed differently: when `noeta build --exe`/`--native` sees native runtime dependencies, it composes a **runner** shim — same aggregation of `NOETA_EXTENSIONS` units, but the base is the lean `noeta-runner` (not `noeta-cli`), and `main` calls `run_stapled_with_extensions` instead of `run_cli`. So the shipped binary carries your extension's **runtime** capabilities (its modules, types, tier handlers) and **none of the toolchain** — no fmt, no LSP, no DAP, no formatter parsers. The two compositions cache separately; a pure-Noeta app skips both and staples onto the stock runner.
+
+### Shipping dev capabilities — gate them behind a feature
+
+An `Extension`'s capabilities split by *kind*: `modules`/`types`/`tiers`/`commands` are **runtime** (needed to run the program); `body_formatters` (the tier-body formatter `noeta fmt` uses) is **dev-only** — it and its parser (a CSS/HTML/… reformatter is a *parser*, i.e. attack surface) must never ride into a production binary. A single crate that ships both a runtime tier handler *and* its formatter is a **mixed package**; keep the formatter out of shipped artifacts by gating it — and any heavy formatting dependency — behind a Cargo feature:
+
+```toml
+# the native crate's Cargo.toml
+[dependencies]
+malva = { version = "…", optional = true }   # a CSS reformatter — a parser
+
+[features]
+fmt = ["dep:malva"]                            # OFF by default
+```
+
+```rust
+impl Extension for MyExtension {
+    fn modules(&self) -> &'static [ExtModule] { … }   // runtime — always compiled
+    fn tiers(&self)   -> &'static [ExtTier]   { … }   // runtime — always compiled
+
+    #[cfg(feature = "fmt")]                            // dev — compiled only when asked
+    fn body_formatters(&self) -> &'static [BodyFormatter] { &[("mylang", reflow)] }
+}
+```
+
+Because the feature is **off by default**, the composed *runner* (built with default features) never compiles the formatter or links `malva` — the shipped artifact is lean automatically, with no per-dependency configuration by the app author. The dev toolchain is where the feature belongs on; enabling it there so `noeta fmt` reflows your tier's bodies is driven by the [target model](Documentation-and-Tiers#build-targets--noetatoml). The same shape works for any dev-only capability whose implementation drags in a parser or other heavy tree.
+
 ## Extension commands
 
 An extension can contribute a CLI subcommand (`ExtCommand`: name, help, typed `ArgSpec`s, and a `run` fn) — the in-process `cargo clippy` model. The CLI augments its clap parser with each registered command (so `noeta --help` lists them with real parsing/validation) and dispatches a matched name to the extension, which drives a narrow `CommandCtx`: load + check + run a program file on the real host, optionally appending a synthesized trailing entry call. `noeta serve` is the proving client — it is `SERVE_COMMAND` in the std extension, whose entry call is the exact same `server.serve(port, fetch)` a program can write directly.

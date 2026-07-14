@@ -185,21 +185,31 @@ DAP "debugs the PROD VM"), zero-cost when absent — so they observe identical e
   - **D4b — (dropped).** No default-target key needed: the existing global-default + `[targets.*]`
     overlay convention already covers it. Omitting `--target` = global config (safe baseline);
     `--target dev` layers dev tiers/deps in.
-  - **D4c — per-target composed runner.** For an app with native *runtime* deps (extension tiers,
-    native modules), the composer (`compose.rs`) builds a runner-based shim including only the active
-    target's native crates (D2), each mixed crate's dev feature **off** (D5's contract). Content-hash
-    key includes target + feature set. Assert `malva`/`noeta-fmt` absent from the artifact.
-- **D3b — dev-capability feature-gating convention (mixed crates).** The package-author contract for
-  the *one* case D3 can't cover structurally: gate a mixed crate's dev-kind impls + optional heavy
-  deps behind a Cargo feature — `malva = { optional = true }`, `fmt = ["dep:malva"]`,
-  `#[cfg(feature = "fmt")] fn body_formatters(...)`. The composer flips it per target (D4).
-  Document + (stretch) a lint flagging an un-gated dev capability in a crate meant to ship to prod.
-- **D5 — dogfood + docs.** A first-party **mixed** example package: a tier with a native handler +
-  a feature-gated formatter, proving prod strips the formatter (`malva` absent from the prod binary
-  — assert via symbol/size or a link check) while dev formats it. Migrate `noeta-css`'s `malva` to
-  an optional-dep/feature so even the toolchain demonstrates the gate. Docs: the dev/prod target
-  model, `[targets.*.dependencies]`, and the "put dev tooling behind the `fmt` feature or in a
-  dev-dep crate" guidance for package authors.
+  - **D4c — composed runner for native-dependency apps. ✅ (`<this branch>`).** `compose.rs` now
+    composes two shim **kinds** off one machinery: the full-CLI `Toolchain` (dev) and a lean `Runner`
+    base (`noeta-runner` + `noeta-native` + each native crate at default features, so a mixed crate's
+    formatter stays off). `emit_exe` picks the composed runner when the app has native crates, else
+    the stock runner. Fixed a D4a regression (native-dep `--exe` had stapled onto the stock runner,
+    which lacked the app's extensions). The runner shim's `main` calls
+    `noeta_runner::run_stapled_with_extensions`. `--native` + native deps stays a **pre-existing gap**
+    (it links `noeta-aot-runtime`, which has no extension seam) — out of scope.
+- **D3b/D5 — dev-capability gating convention + dogfood. ✅ (`<this branch>`).** The package-author
+  contract: gate a mixed crate's dev-kind impls + optional heavy deps behind a Cargo feature
+  (`malva = { optional = true }`, `fmt = ["dep:malva"]`, `#[cfg(feature = "fmt")] fn
+  body_formatters(...)`). First dogfooded on a **first-party** crate — `noeta-pm`'s `resolve_fmt_config`
+  + its `noeta-fmt` dep behind a `fmt-config` feature (D3c). Capstone e2e
+  (`build_exe_of_a_native_dep_app_strips_the_mixed_crates_formatter`): the imgfx fixture is now a
+  mixed package (runtime module/type/command always compiled; a marker-carrying `body_formatters`
+  behind `fmt`), and `build --exe` proves the artifact **runs the handler** yet the formatter marker
+  is **absent**. Docs: `The-CLI` (shipped artifacts are lean), `Documentation-and-Tiers`
+  (target-scoped deps + global-default overlay), `Native-Extensions` (composed runner + the gate-dev-
+  capabilities-behind-a-feature convention).
+  - **Follow-up (D5b, deferred):** the *dev-side* half — the dev toolchain/`noeta fmt` actively
+    **enabling** a native crate's `fmt` feature so its tier bodies reflow — is not yet wired (the
+    composer pulls extN at default features for both kinds). It needs the composer to enable the
+    conventional dev feature for the `Toolchain` kind, and *which* feature/when should be **target-
+    driven** (per the "don't hardcode dev/prod" principle), so it is surfaced as a decision, not
+    hardcoded. Security goal (prod strips) is fully met without it.
 
 ## Open questions
 
