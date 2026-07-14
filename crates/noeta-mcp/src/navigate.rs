@@ -364,6 +364,7 @@ fn candidate_kind(kind: completion::CandidateKind) -> &'static str {
         CandidateKind::Method => "method",
         CandidateKind::EnumMember => "variant",
         CandidateKind::Type => "type",
+        CandidateKind::Module => "module",
     }
 }
 
