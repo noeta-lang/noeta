@@ -4306,7 +4306,11 @@ fn composed_project(name: &str) -> PathBuf {
         format!(
             "[package]\nname = \"imgfx-native\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
              [lib]\npath = \"src/lib.rs\"\n\n\
-             [dependencies]\nnoeta-native = {{ path = \"{}\" }}\n\n[workspace]\n",
+             [dependencies]\nnoeta-native = {{ path = \"{}\" }}\n\n\
+             # dev-deps D5: the mixed package gates its dev formatter behind `fmt` (a real crate would\n\
+             # also put `malva`/etc. behind it as `dep:`). Off by default — a shipped runner never\n\
+             # enables it; the dev toolchain does.\n\
+             [features]\nfmt = []\n\n[workspace]\n",
             workspace.join("crates").join("noeta-native").display()
         ),
     )
@@ -4651,6 +4655,27 @@ impl Extension for ImgfxExtension {
     fn commands(&self) -> &'static [ExtCommand] {
         &[FX_INFO]
     }
+    // dev-deps D5: a DEV-only capability — a tier-body formatter — gated behind the `fmt` feature.
+    // The runtime capabilities above (module/type/command) always compile; this one, and the marker
+    // string it carries, only when `fmt` is enabled. A shipped composed runner is built with default
+    // features (fmt OFF), so the formatter and marker are absent from the artifact; the dev toolchain
+    // would enable `fmt` to reflow this extension's tier bodies under `noeta fmt`.
+    #[cfg(feature = "fmt")]
+    fn body_formatters(&self) -> &'static [noeta_native::registry::BodyFormatter] {
+        &[("imgfx", imgfx_reformat)]
+    }
+}
+
+/// The gated dev formatter (see `body_formatters`). Its distinctive marker proves compilation: it is
+/// in the binary iff the `fmt` feature was on.
+#[cfg(feature = "fmt")]
+fn imgfx_reformat(
+    body: &str,
+    _indent: &str,
+    _sub: &noeta_native::registry::SubFormat,
+) -> Option<String> {
+    const MARKER: &str = "IMGFX_FMT_ONLY_MARKER_7c4e9a";
+    Some(format!("{MARKER}:{}", body.trim()))
 }
 
 /// The composition convention (package-manager Phase 3): the entry crate exports its units as a
@@ -4665,6 +4690,48 @@ fn composed_env(cmd: &mut Command) -> &mut Command {
         "NOETA_COMPOSE_TARGET_DIR",
         PathBuf::from(env!("CARGO_TARGET_TMPDIR")).parent().unwrap(),
     )
+}
+
+#[test]
+fn build_exe_of_a_native_dep_app_strips_the_mixed_crates_formatter() {
+    // dev-deps D5, the capstone: a shipped native-dependency app carries its runtime handler but not
+    // the mixed crate's dev formatter. `build --exe` composes a RUNNER (lean base + imgfx runtime
+    // extension, `fmt` OFF) and staples the bundle. We prove both halves:
+    //   1. the artifact RUNS the native handler (`fx.double(21)` → 42) — the extension is composed in;
+    //   2. the gated formatter is STRIPPED — its distinctive marker is absent from the binary.
+    let entry = composed_project("d5_exe_strip");
+    let app_bin = entry.parent().unwrap().join("app_native_exe");
+    let _ = std::fs::remove_file(&app_bin);
+
+    // The runner composition needs the lean runner binary as its base? No — the *composed* runner IS
+    // the base (built from the shim). `composed_env` reuses the workspace's debug artifacts so this
+    // stays a fast debug composition rather than a cold release build.
+    composed_env(&mut lang())
+        .arg("build")
+        .arg(&entry)
+        .arg("--exe")
+        .arg("-o")
+        .arg(&app_bin)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("self-contained"));
+
+    // 1. Runs the native handler — success alone proves it (an unknown `imgfx` module would abort);
+    //    the first echoed line is `fx.double(21)` = 42.
+    Command::new(&app_bin)
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("42\n"));
+
+    // 2. The dev formatter is absent from the shipped artifact.
+    let bytes = std::fs::read(&app_bin).expect("read the artifact");
+    let marker = b"IMGFX_FMT_ONLY_MARKER_7c4e9a";
+    assert!(
+        !bytes.windows(marker.len()).any(|w| w == marker),
+        "the composed runner leaked the mixed crate's dev formatter into the shipped artifact — \
+         the `fmt` feature was not stripped"
+    );
+    let _ = std::fs::remove_file(&app_bin);
 }
 
 #[test]
