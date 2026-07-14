@@ -1,5 +1,6 @@
-// The `liveview` package — server-side reactive HTML templating, LiveWire/LiveView-style, in pure
-// Noeta. It composes three language substrates:
+// `para.html` — server-side reactive HTML templating, LiveWire/LiveView-style, in pure Noeta. The
+// liveview module of the first-party (non-default) `para` namespace. It composes three language
+// substrates:
 //
 //   * expression tiers (expr-tiers arc)      — `@html { … ${expr} … }` is a typed template value;
 //   * fine-grained reactivity (std.reactive) — each hole becomes a `computed`, so a signal change
@@ -7,10 +8,10 @@
 //   * the reactive-view diff-push transport (std.reactive.view + std.http.server websockets) —
 //     which serializes only the holes that changed and pushes a minimal patch to the browser.
 //
-// A consumer depends on this package, imports `render` (which brings the `@html` tier declaration
-// into scope) and `handle`, and writes ordinary HTML with `${…}` holes over signals. See
-// `examples/liveview-counter/`.
-namespace liveview
+// A consumer keys this package `para` in `[dependencies]`, imports `render` (which brings the
+// `@html` tier declaration into scope) and `handle`, and writes ordinary HTML with `${…}` holes
+// over signals. See `examples/liveview-counter/`.
+namespace para.html
 
 use std.reactive.{signal, computed, view, Signal, Computed}
 use std.http.server

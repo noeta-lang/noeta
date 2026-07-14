@@ -2,8 +2,8 @@
 version = 1
 
 [[package]]
-name = "noeta/liveview"
+name = "noeta/para"
 version = "0.1.0"
 source = "path"
-path = "../liveview"
-hash = "e646480a1a73e2859868b27e317c2193232c1ba67424e8752748fd9e75f259ed"
+path = "../../packages/para-html"
+hash = "a1d5bf7d71b20ab04bc20f460e9f20fbd05060280391e0093fe0fa9f76c214ee"

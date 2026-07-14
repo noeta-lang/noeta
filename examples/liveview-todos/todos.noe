@@ -6,7 +6,7 @@
 //   noeta serve examples/liveview-todos/todos.noe   →   open http://localhost:8080
 //
 // Importing `render` brings the `@html` tier declaration into scope.
-use liveview.{render, Html, handle, keyed}
+use para.html.{render, Html, handle, keyed}
 use std.reactive.signal
 use std.http.server
 use std.http.{Request, Response}

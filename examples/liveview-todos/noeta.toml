@@ -3,4 +3,4 @@ name = "noeta/liveview_todos"
 version = "0.1.0"
 
 [dependencies]
-liveview = { path = "../liveview" }
+para = { path = "../../packages/para-html" }
