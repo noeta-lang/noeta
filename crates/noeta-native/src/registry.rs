@@ -405,6 +405,13 @@ pub struct ExtModule {
     /// The module's **method bundles** (kernel-methods K0): named method sets a user's `@packed`
     /// type acquires by explicit `impl <module>.<Bundle> for T {}`. Default empty.
     pub bundles: &'static [ExtBundle],
+    /// Per-function **documentation prose** (docs-browser arc, Arc 2): `(function_name, markdown)`
+    /// pairs surfaced by the API-reference docs generator (`noeta doc`, the editor's docs browser,
+    /// the MCP docs tools). Co-located with the module's registration; opt-in and sparse — a
+    /// function absent from this table renders signature-only, like docs.rs. Keyed by name so one
+    /// table covers both [`ExtModule::functions`] and [`ExtModule::ctx_functions`]; third-party
+    /// extensions get the same field for free (their literals use `..ExtModule::DEFAULTS`).
+    pub docs: &'static [(&'static str, &'static str)],
 }
 
 impl ExtModule {
@@ -420,6 +427,7 @@ impl ExtModule {
         ctx_dispatch: None,
         ring: None,
         bundles: &[],
+        docs: &[],
     };
 }
 

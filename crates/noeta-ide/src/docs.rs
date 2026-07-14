@@ -22,6 +22,7 @@ use noeta_ast::Program;
 use noeta_check::{DocTarget, dedent_doc, resolve_docs};
 use noeta_span::{SourceId, Span};
 
+use crate::api;
 use crate::guide;
 use crate::offsets::Range;
 use crate::symbols::{SymbolKind, SymbolNode, outline};
@@ -54,6 +55,10 @@ pub const PROJECT_ROOT: &str = "project";
 
 /// The root of the language-guide corpus: the embedded `docs/*.md` wiki (see [`crate::guide`]).
 pub const GUIDE_ROOT: &str = "guide";
+
+/// The root of the API-reference corpus: the stdlib/native surface from the registry (see
+/// [`crate::api`]). Like the guide, workspace-independent.
+pub const API_ROOT: &str = "api";
 
 /// The kind of a doc node — its icon and how an adapter presents it. Spans every corpus; the
 /// project corpus uses the declaration kinds, later corpora add [`DocKind::Guide`] and friends.
@@ -245,6 +250,15 @@ pub fn roots() -> Vec<DocNode> {
             expandable: true,
             location: None,
         },
+        DocNode {
+            id: DocId::new(API_ROOT),
+            title: "API Reference".to_string(),
+            kind: DocKind::Root,
+            detail: None,
+            has_page: false,
+            expandable: true,
+            location: None,
+        },
     ]
 }
 
@@ -255,6 +269,9 @@ pub fn roots() -> Vec<DocNode> {
 pub fn children(ctx: &DocCtx, id: &DocId) -> Vec<DocNode> {
     if id.root() == GUIDE_ROOT {
         return guide_children(id);
+    }
+    if id.root() == API_ROOT {
+        return api_children(id);
     }
     if id.root() != PROJECT_ROOT {
         return Vec::new();
@@ -287,6 +304,9 @@ pub fn children(ctx: &DocCtx, id: &DocId) -> Vec<DocNode> {
 pub fn page(ctx: &DocCtx, id: &DocId) -> Option<DocPage> {
     if id.root() == GUIDE_ROOT {
         return guide_page(id);
+    }
+    if id.root() == API_ROOT {
+        return api_page(id);
     }
     if id.root() != PROJECT_ROOT {
         return None;
@@ -383,10 +403,10 @@ pub fn search(ctx: &DocCtx, query: &str) -> Vec<DocHit> {
             }
         });
     }
-    // Merge in the language-guide corpus so one search spans both. Guide scores are on the guide
-    // ranker's own scale (title×4/heading×3/body×1); the two scales are close enough for a combined
-    // best-first order without normalization at this corpus size.
+    // Merge in the language-guide and API-reference corpora so one search spans all three. Scores
+    // are on each ranker's own scale; close enough for a combined best-first order at this size.
     hits.extend(guide_search(query));
+    hits.extend(api_search(&needle));
     hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.title.cmp(&b.title)));
     hits.truncate(SEARCH_LIMIT);
     hits
@@ -469,6 +489,108 @@ fn guide_search(query: &str) -> Vec<DocHit> {
         }
     }
     best
+}
+
+// ---- The API-reference corpus dispatch (Arc 2). Static, workspace-independent. ----------------
+
+/// The compact signature detail shown next to a function node — the rendered signature without its
+/// leading `fn ` (`sqrt(float): float`).
+fn api_detail(signature: &str) -> String {
+    signature
+        .strip_prefix("fn ")
+        .unwrap_or(signature)
+        .to_string()
+}
+
+/// The children of an API id: the API root lists modules; a module lists its functions; a function
+/// is a leaf.
+fn api_children(id: &DocId) -> Vec<DocNode> {
+    match id.segments().as_slice() {
+        [_root] => api::modules()
+            .into_iter()
+            .map(|m| DocNode {
+                id: DocId::new(format!("{API_ROOT}/{}", m.qualified)),
+                title: m.qualified,
+                kind: DocKind::Module,
+                detail: None,
+                has_page: false,
+                expandable: true,
+                location: None,
+            })
+            .collect(),
+        [_root, qualified] => match api::module(qualified) {
+            Some(m) => m
+                .functions
+                .into_iter()
+                .map(|f| DocNode {
+                    id: DocId::new(format!("{API_ROOT}/{qualified}/{}", f.name)),
+                    title: f.name,
+                    kind: DocKind::Function,
+                    detail: Some(api_detail(&f.signature)),
+                    has_page: true,
+                    expandable: false,
+                    location: None,
+                })
+                .collect(),
+            None => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+/// The page for an `api/<module>/<fn>` id: the rendered signature and its prose.
+fn api_page(id: &DocId) -> Option<DocPage> {
+    let segments = id.segments();
+    let [_root, qualified, name] = segments.as_slice() else {
+        return None;
+    };
+    let f = api::function(qualified, name)?;
+    Some(DocPage {
+        id: id.clone(),
+        title: format!("{qualified}.{name}"),
+        kind: DocKind::Function,
+        signature: Some(f.signature),
+        markdown: f.doc,
+        location: None,
+        xrefs: Vec::new(),
+    })
+}
+
+/// API-reference search: rank functions by name (highest), signature, and prose. `needle` is
+/// already lowercased.
+fn api_search(needle: &str) -> Vec<DocHit> {
+    let mut hits = Vec::new();
+    for m in api::modules() {
+        for f in m.functions {
+            let name_l = f.name.to_lowercase();
+            let mut score = 0;
+            if name_l == needle {
+                score += 100;
+            } else if name_l.contains(needle) {
+                score += 40;
+            }
+            if f.signature.to_lowercase().contains(needle) {
+                score += 8;
+            }
+            if f.doc.to_lowercase().contains(needle) {
+                score += 5;
+            }
+            if score > 0 {
+                hits.push(DocHit {
+                    id: DocId::new(format!("{API_ROOT}/{}/{}", m.qualified, f.name)),
+                    title: format!("{}.{}", m.qualified, f.name),
+                    kind: DocKind::Function,
+                    snippet: if f.doc.is_empty() {
+                        api_detail(&f.signature)
+                    } else {
+                        f.doc.clone()
+                    },
+                    score,
+                });
+            }
+        }
+    }
+    hits
 }
 
 /// Cap on the number of search hits returned.
@@ -756,16 +878,44 @@ mod tests {
     }
 
     #[test]
-    fn the_roots_are_project_then_guide() {
+    fn the_roots_are_project_guide_api() {
         let roots = roots();
-        assert_eq!(roots.len(), 2);
+        assert_eq!(roots.len(), 3);
         assert_eq!(roots[0].id.as_str(), "project");
         assert_eq!(roots[1].id.as_str(), "guide");
+        assert_eq!(roots[2].id.as_str(), "api");
         assert!(
             roots
                 .iter()
                 .all(|r| r.kind == DocKind::Root && r.expandable)
         );
+    }
+
+    #[test]
+    fn the_api_root_browses_registry_modules_and_functions() {
+        // Workspace-independent, like the guide.
+        let ctx = DocCtx::empty();
+        let modules = children(&ctx, &DocId::new("api"));
+        assert!(modules.len() > 3, "the registry has several modules");
+        let math = modules
+            .iter()
+            .find(|m| m.title == "std.math")
+            .expect("std.math is a module");
+        assert!(math.expandable && !math.has_page);
+
+        let fns = children(&ctx, &math.id);
+        let sqrt = fns.iter().find(|f| f.title == "sqrt").expect("math.sqrt");
+        assert_eq!(sqrt.kind, DocKind::Function);
+        assert!(sqrt.has_page && !sqrt.expandable);
+        assert_eq!(sqrt.detail.as_deref(), Some("sqrt(float): float"));
+
+        let rendered = page(&ctx, &sqrt.id).expect("the function page renders");
+        assert_eq!(rendered.signature.as_deref(), Some("fn sqrt(float): float"));
+        assert!(rendered.markdown.contains("square root"));
+
+        // Search spans the API corpus.
+        let hits = search(&ctx, "sqrt");
+        assert!(hits.iter().any(|h| h.id.as_str() == "api/std.math/sqrt"));
     }
 
     #[test]

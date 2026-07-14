@@ -549,7 +549,9 @@ pub fn ext_verbatim_tier_names() -> Vec<&'static str> {
 /// of these; a language absent here stays verbatim. See [`noeta_native::registry::BodyFormatter`].
 pub fn ext_body_formatters() -> Vec<noeta_native::registry::BodyFormatter> {
     ensure();
-    noeta_native::registry::ext_body_formatters().copied().collect()
+    noeta_native::registry::ext_body_formatters()
+        .copied()
+        .collect()
 }
 
 /// See [`noeta_native::registry::ext_attributes`].
@@ -2498,6 +2500,61 @@ const MATH_FNS: &[ExtFn] = &[
     },
 ];
 
+/// Documentation prose for `std.math` (docs-browser Arc 2 pilot). Sparse — a function absent here
+/// renders signature-only. Keyed by name; see [`ExtModule::docs`].
+const MATH_DOCS: &[(&str, &str)] = &[
+    ("pi", "The mathematical constant π ≈ 3.14159, as a `float`."),
+    ("e", "Euler's number *e* ≈ 2.71828, as a `float`."),
+    (
+        "sqrt",
+        "The non-negative square root of `x`. `x` must be ≥ 0.",
+    ),
+    ("pow", "`base` raised to the power `exp` (both `float`)."),
+    ("sin", "The sine of `x`, with `x` in **radians**."),
+    ("cos", "The cosine of `x`, with `x` in **radians**."),
+    ("tan", "The tangent of `x`, with `x` in **radians**."),
+    (
+        "floor",
+        "The largest `int` not greater than `x` (rounds toward −∞).",
+    ),
+    (
+        "ceil",
+        "The smallest `int` not less than `x` (rounds toward +∞).",
+    ),
+    (
+        "round",
+        "`x` rounded to the nearest `int` (ties away from zero).",
+    ),
+    (
+        "abs",
+        "The absolute value of `x`, preserving its numeric type (`int`→`int`, `float`→`float`).",
+    ),
+    (
+        "min",
+        "The smaller of `a` and `b`, preserving the numeric type.",
+    ),
+    (
+        "max",
+        "The larger of `a` and `b`, preserving the numeric type.",
+    ),
+    (
+        "ln",
+        "The natural logarithm (base *e*) of `x`. `x` must be > 0.",
+    ),
+    ("log", "The logarithm of `x` to the given `base`."),
+    ("log2", "The base-2 logarithm of `x`."),
+    ("log10", "The base-10 logarithm of `x`."),
+    ("exp", "*e* raised to the power `x` — the inverse of `ln`."),
+    (
+        "hypot",
+        "The Euclidean distance `sqrt(x*x + y*y)`, computed without intermediate overflow.",
+    ),
+    (
+        "atan2",
+        "The angle in radians between the positive x-axis and the point `(x, y)`, in `[-π, π]`.",
+    ),
+];
+
 const RANDOM_FNS: &[ExtFn] = &[
     ExtFn {
         name: "seed",
@@ -3008,6 +3065,7 @@ const CORE_MODULES: &[ExtModule] = &[
         functions: MATH_FNS,
         dispatch: math_dispatch,
         deep_marshal: false,
+        docs: MATH_DOCS,
         ..ExtModule::DEFAULTS
     },
     ExtModule {

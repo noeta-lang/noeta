@@ -27,6 +27,7 @@
 //! `noeta mcp` (MCP tools) are both thin adapters over this one implementation and can never
 //! drift.
 
+pub mod api;
 pub mod callgraph;
 pub mod completion;
 pub mod docs;
@@ -2152,11 +2153,12 @@ mod tests {
         let uri = "file:///widgets.noe";
         let enc = Encoding::Utf16;
 
-        // The roots are the project corpus and the language guide.
+        // The roots are the project corpus, the language guide, and the API reference.
         let roots = store.doc_index(uri);
-        assert_eq!(roots.len(), 2);
+        assert_eq!(roots.len(), 3);
         assert_eq!(roots[0].id.as_str(), "project");
         assert_eq!(roots[1].id.as_str(), "guide");
+        assert_eq!(roots[2].id.as_str(), "api");
 
         // Expand: root → module (named by file basename) → declarations.
         let modules = store.doc_children(uri, "project", enc);
