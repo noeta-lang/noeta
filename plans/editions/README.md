@@ -1,9 +1,20 @@
 # Editions — compiler arc (per-package edition application)
 
-**Status:** planned. Prerequisite **done** (editions resolution-side, branch `editions-resolution`): each
-package's edition is validated (`Edition::parse`), pinned per package in `noeta.lock`, and now **carried
-to the loader** on `DepPackage.edition`. This plan is the compiler half — making that per-package
-edition actually *change how each package compiles*, which today it does not.
+**Status:** in progress — **S0 done** (`1d6cca5a`). Prerequisite **done** (editions resolution-side,
+branch `editions-resolution`): each package's edition is validated (`Edition::parse`), pinned per package
+in `noeta.lock`, and **carried to the loader** on `DepPackage.edition`. This plan is the compiler half —
+making that per-package edition actually *change how each package compiles*, which today it does not.
+
+**S0 landed:** `Edition` now lives in the zero-dep leaf crate **`noeta-edition`** (decision #1, option
+(a)); `noeta-pm` re-exports it. The front-end entry points `noeta_lexer::lex_in` and
+`noeta_parser::parse_in` take an `edition: Edition` parameter (defaulted to `E2026` by the `lex()`/
+`parse()` wrappers, so ~90 wrapper call sites are untouched); the parser flows it to a `${…}` hole's
+re-lex. All real compilation paths (loader/db/fmt/conformance) thread `Edition::DEFAULT`, with `// S1`
+markers in the loader where each package's own edition will thread next. The differential oracle is
+byte-identical. **Refinement to the original plan:** the checker becomes edition-aware in **S1** (via
+per-declaration AST tagging — the mechanism S1 already specifies), not via a transient S0 param on
+`check_all` that S1 would immediately remove. S0's checker footprint is therefore zero; arc scope is
+unchanged.
 
 ## Where we are
 
@@ -36,12 +47,10 @@ There is nowhere to switch editions mid-program today.
 
 ## Decision points (settle first, with the user)
 
-1. **Where does `Edition` live?** The lexer/parser/checker do **not** depend on `noeta-pm`, where
-   `Edition` currently is — so they can't name it. Options: **(a)** a new tiny leaf crate `noeta-edition`
-   every layer depends on (recommended — zero deps, one closed enum + `parse`); **(b)** move it into the
-   lowest existing shared crate (e.g. `noeta-lexer` or a `noeta-span`-like base). `DepPackage.edition` is a
-   `String` today precisely to defer this; the arc must resolve it. Recommend **(a)**; `noeta-pm` re-exports
-   for source compatibility.
+1. **Where does `Edition` live?** ✅ **Settled (S0): option (a)** — the new zero-dep leaf crate
+   `noeta-edition`, which the lexer/parser now depend on; `noeta-pm` re-exports it for source
+   compatibility. (`DepPackage.edition` is still a `String`; S1 resolves it back to `Edition` at the
+   loader boundary.)
 2. **Granularity: per-module or per-declaration?** A package's modules all share its edition, so
    **per-module** is the natural unit and matches the merge boundary (each `DepPackage`'s modules parsed
    under that package's edition). Per-*declaration* divergence within one module isn't needed and isn't
@@ -62,8 +71,8 @@ is the same edition must compile **byte-identical** to today (the one-edition wo
 
 | # | Slice | Depends on | Gist |
 |---|---|---|---|
-| 0 | **Relocate `Edition` + thread it (no behavior change)** | — | Move `Edition` to `noeta-edition` (decision #1); add an `edition: Edition` parameter to `lex_in`/`parse_in`/the checker entry, defaulted to `E2026` at every call site. `noeta-pm` re-exports. Oracle unchanged (one edition, one code path). Pure plumbing. |
-| 1 | **Per-module edition at the merge boundary** | 0 | `link_with_deps` parses each `DepPackage`'s modules under `DepPackage.edition` (now a real `Edition`); the entry + its siblings under the root edition. Tag each parsed module with its edition so the checker/lowering can read it. Still no divergence (one edition), so oracle holds — but the wiring that *would* diverge is now live and tested with a stubbed second edition behind `#[cfg(test)]`. |
+| 0 | **Relocate `Edition` + thread it (no behavior change)** ✅ `1d6cca5a` | — | Moved `Edition` to leaf crate `noeta-edition` (decision #1a); `noeta-pm` re-exports. Added `edition: Edition` to `lex_in`/`parse_in`, defaulted by the `lex()`/`parse()` wrappers; parser flows it to the `${…}` hole re-lex. Checker deferred to S1 (per-decl tagging, not a transient entry param). Oracle byte-identical. Pure plumbing. |
+| 1 | **Per-module edition at the merge boundary** | 0 | `link_with_deps` parses each `DepPackage`'s modules under `DepPackage.edition` (a real `Edition` — resolve the `String`→`Edition` at the loader boundary; the entry + siblings under the root edition. Thread the real edition through the loader's `// S1`-marked sites (entry parse + a new `parse_clean` edition param). Tag each parsed module/declaration with its edition so the checker/lowering can read it — this is where the checker becomes edition-aware. Still no divergence (one edition), so oracle holds — the wiring that *would* diverge is live and tested with a stubbed second edition behind `#[cfg(test)]`. |
 | 2 | **All editions in the cache key** | 1 | Fold every resolved package's edition into `CacheKey` (not just the root), so a dependency's edition bump invalidates its cached bytecode. Today only root + dep *sources* are keyed; a dep `noeta.toml` edition change may not be in the hashed source set. Add a key-changes-on-dep-edition test. |
 | 3 | **First edition-gated behavior — the acceptance test** | 1 | Introduce `E2027` with exactly **one** concrete, minimal divergence (candidate: a lint promoted to an error, or a defaulting/name-resolution tweak — *not* new syntax, to keep the lexer stable). Prove end-to-end that a `2026` package and a `2027` package in the **same graph** each compile under their own rules. This is the real validation of per-module application; until it exists, S0–S1 are unfalsifiable. |
 | 4 | **Edition-aware diagnostics + `noeta fix` + docs** | 3 | Diagnostics name the edition whose rule fired; a mechanical migrator for the S3 change (opt-in); the docs page (`docs/Package-Registries.md` sibling, or a section in the language docs) explaining the per-package contract. |
