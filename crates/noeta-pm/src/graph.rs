@@ -204,11 +204,17 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
     // Refresh the lockfile (best-effort: a read-only project must not fail a build). Skipped for a
     // manifest with no resolved dependencies, so a bare-`[targets]` project grows no lock.
     if !graph.locked.is_empty() {
+        // Resolution doesn't touch the advisory feed (that's `noeta audit`), so preserve any advisory
+        // pin already in the lock rather than erasing it on every build.
+        let advisory_trust = crate::lock::Lock::read(&manifest_dir)
+            .advisory_trust()
+            .cloned();
         let _ = crate::lock::write(
             &manifest_dir,
             &graph.locked,
             &graph.scope_trust,
             graph.log_trust.as_ref(),
+            advisory_trust.as_ref(),
         );
     }
     Ok(graph)

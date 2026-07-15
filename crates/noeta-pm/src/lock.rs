@@ -63,6 +63,19 @@ pub struct LogTrust {
     pub root_hash: String,
 }
 
+/// The **pinned advisory-feed head** (namespace-protection #1, advisory feed), recorded
+/// trust-on-first-use. The advisory feed is global to the registry (like the log), so the lock keeps a
+/// single pin: the feed's public key plus the last head (`count` + `digest`) verified. On a later audit
+/// the served head must be signed by this same key; a `count` that regressed below the pinned one is a
+/// rollback (an advisory was dropped) and is surfaced. Crypto-free strings (the lock reasons about
+/// trust *shapes*, like [`ScopeTrust`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvisoryTrust {
+    pub public_key: String,
+    pub count: u64,
+    pub digest: String,
+}
+
 /// A read lockfile: the pins a build consults to reproduce (package-manager P2.4c). Missing or
 /// unreadable → [`Lock::empty`] (the walk then resolves from scratch).
 #[derive(Debug, Default)]
@@ -82,6 +95,8 @@ pub struct Lock {
     scope_trust: BTreeMap<String, ScopeTrust>,
     /// The pinned transparency-log head (namespace-protection #1, TLog), if recorded.
     log_trust: Option<LogTrust>,
+    /// The pinned advisory-feed head (namespace-protection #1, advisory feed), if recorded.
+    advisory_trust: Option<AdvisoryTrust>,
 }
 
 impl Lock {
@@ -152,6 +167,20 @@ impl Lock {
                 });
             }
         }
+        if let Some(a) = table.get("advisory").and_then(|v| v.as_table()) {
+            let get = |k: &str| a.get(k).and_then(|v| v.as_str());
+            if let (Some(public_key), Some(count), Some(digest)) = (
+                get("public_key"),
+                a.get("count").and_then(|v| v.as_integer()),
+                get("digest"),
+            ) {
+                lock.advisory_trust = Some(AdvisoryTrust {
+                    public_key: public_key.to_string(),
+                    count: count.max(0) as u64,
+                    digest: digest.to_string(),
+                });
+            }
+        }
         lock
     }
 
@@ -183,6 +212,11 @@ impl Lock {
     pub fn log_trust(&self) -> Option<&LogTrust> {
         self.log_trust.as_ref()
     }
+
+    /// The pinned advisory-feed head (namespace-protection #1), if the lock records one.
+    pub fn advisory_trust(&self) -> Option<&AdvisoryTrust> {
+        self.advisory_trust.as_ref()
+    }
 }
 
 /// Serialize the resolved packages + pinned scope trust + transparency-log head to `noeta.lock` text
@@ -191,6 +225,7 @@ fn render(
     locked: &[LockedPackage],
     scope_trust: &BTreeMap<String, ScopeTrust>,
     log_trust: Option<&LogTrust>,
+    advisory_trust: Option<&AdvisoryTrust>,
 ) -> String {
     let mut sorted: Vec<&LockedPackage> = locked.iter().collect();
     sorted.sort_by(|a, b| a.identity.cmp(&b.identity));
@@ -241,6 +276,14 @@ fn render(
         out.push_str(&format!("tree_size = {}\n", log.tree_size));
         out.push_str(&format!("root_hash = {}\n", quote(&log.root_hash)));
     }
+    // The pinned advisory-feed head (advisory-feed TOFU): a later head must be signed by this key, and
+    // a `count` below this one is a dropped-advisory rollback.
+    if let Some(adv) = advisory_trust {
+        out.push_str("\n[advisory]\n");
+        out.push_str(&format!("public_key = {}\n", quote(&adv.public_key)));
+        out.push_str(&format!("count = {}\n", adv.count));
+        out.push_str(&format!("digest = {}\n", quote(&adv.digest)));
+    }
     out
 }
 
@@ -253,9 +296,10 @@ pub fn write(
     locked: &[LockedPackage],
     scope_trust: &BTreeMap<String, ScopeTrust>,
     log_trust: Option<&LogTrust>,
+    advisory_trust: Option<&AdvisoryTrust>,
 ) -> io::Result<()> {
     let path = dir.join(LOCK_NAME);
-    let text = render(locked, scope_trust, log_trust);
+    let text = render(locked, scope_trust, log_trust, advisory_trust);
     if std::fs::read_to_string(&path).is_ok_and(|existing| existing == text) {
         return Ok(()); // unchanged
     }
@@ -309,7 +353,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut scope_trust = BTreeMap::new();
         scope_trust.insert("acme".to_string(), ScopeTrust::Key("b".repeat(64)));
-        write(&dir, &[git_pkg(), path_pkg()], &scope_trust, None).unwrap();
+        write(&dir, &[git_pkg(), path_pkg()], &scope_trust, None, None).unwrap();
 
         let lock = Lock::read(&dir);
         assert_eq!(
@@ -343,7 +387,7 @@ mod tests {
         scope_trust.insert("acme".to_string(), pin.clone());
         // A second scope stays on the key root — the two coexist in one lock.
         scope_trust.insert("legacy".to_string(), ScopeTrust::Key("c".repeat(64)));
-        write(&dir, &[git_pkg()], &scope_trust, None).unwrap();
+        write(&dir, &[git_pkg()], &scope_trust, None, None).unwrap();
 
         let lock = Lock::read(&dir);
         assert_eq!(lock.scope_trust("acme"), Some(&pin));
@@ -363,14 +407,38 @@ mod tests {
             tree_size: 42,
             root_hash: "cd".repeat(32),
         };
-        write(&dir, &[git_pkg()], &BTreeMap::new(), Some(&log)).unwrap();
+        write(&dir, &[git_pkg()], &BTreeMap::new(), Some(&log), None).unwrap();
         assert_eq!(Lock::read(&dir).log_trust(), Some(&log));
         // A lock with no `[log]` block reports no pin.
         let dir2 = std::env::temp_dir().join("noeta_lock_test_nolog");
         let _ = std::fs::remove_dir_all(&dir2);
         std::fs::create_dir_all(&dir2).unwrap();
-        write(&dir2, &[git_pkg()], &BTreeMap::new(), None).unwrap();
+        write(&dir2, &[git_pkg()], &BTreeMap::new(), None, None).unwrap();
         assert_eq!(Lock::read(&dir2).log_trust(), None);
+    }
+
+    #[test]
+    fn an_advisory_feed_head_round_trips() {
+        let dir = std::env::temp_dir().join("noeta_lock_test_advtrust");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let adv = AdvisoryTrust {
+            public_key: "ef".repeat(32),
+            count: 7,
+            digest: "12".repeat(32),
+        };
+        write(&dir, &[git_pkg()], &BTreeMap::new(), None, Some(&adv)).unwrap();
+        assert_eq!(Lock::read(&dir).advisory_trust(), Some(&adv));
+        // The advisory pin coexists with a log pin.
+        let log = LogTrust {
+            public_key: "ab".repeat(32),
+            tree_size: 3,
+            root_hash: "cd".repeat(32),
+        };
+        write(&dir, &[git_pkg()], &BTreeMap::new(), Some(&log), Some(&adv)).unwrap();
+        let read = Lock::read(&dir);
+        assert_eq!(read.advisory_trust(), Some(&adv));
+        assert_eq!(read.log_trust(), Some(&log));
     }
 
     #[test]
@@ -378,13 +446,13 @@ mod tests {
         let dir = std::env::temp_dir().join("noeta_lock_test_nochurn");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        write(&dir, &[git_pkg()], &BTreeMap::new(), None).unwrap();
+        write(&dir, &[git_pkg()], &BTreeMap::new(), None, None).unwrap();
         let first = std::fs::metadata(dir.join(LOCK_NAME))
             .unwrap()
             .modified()
             .unwrap();
         // A no-op write must not touch the file (same content).
-        write(&dir, &[git_pkg()], &BTreeMap::new(), None).unwrap();
+        write(&dir, &[git_pkg()], &BTreeMap::new(), None, None).unwrap();
         let second = std::fs::metadata(dir.join(LOCK_NAME))
             .unwrap()
             .modified()

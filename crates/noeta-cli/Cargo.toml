@@ -72,6 +72,8 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 # The hermetic Sigstore (test CA/CT/Rekor) the keyless publish e2e mints against (Phase 5, K4).
 noeta-pm = { workspace = true, features = ["keyless-test-fixtures"] }
+# The advisory-feed e2e signs a mock feed the client verifies (namespace-protection #1).
+ed25519-dalek = { workspace = true }
 
 [lints]
 workspace = true

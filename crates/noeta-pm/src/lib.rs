@@ -34,6 +34,12 @@ pub mod provenance;
 #[cfg(feature = "provenance")]
 pub mod transparency;
 
+/// Client-side security-advisory verification (namespace-protection #1, advisory feed): fetch the
+/// registry's signed advisory database, verify each entry against a pinned key, and match it against
+/// resolved versions. Needs serde (the feed) + Ed25519/SHA-256 (the signatures).
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+pub mod advisory;
+
 /// Keyless provenance — Sigstore bundles verified offline against the public sigstore.dev trust
 /// root (Phase 5). Behind the `keyless` feature (CLI-only), for the same reason as `provenance`.
 #[cfg(feature = "keyless")]

@@ -764,6 +764,145 @@ impl HttpIndex {
     }
 }
 
+/// The registry's advisory-feed signed head (namespace-protection #1): the total advisory count and a
+/// digest over every advisory's canonical bytes, signed with the feed's Ed25519 key.
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+#[derive(Debug, serde::Deserialize)]
+pub struct AdvisoryCheckpoint {
+    pub count: usize,
+    pub digest: String,
+    pub signature: String,
+}
+
+/// The verified advisory feed a client fetched (namespace-protection #1): the pinned advisory key, the
+/// signed head it attests to (`count`/`digest`, for trust-on-first-use rollback detection), and the
+/// signature-verified advisories.
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+#[derive(Debug, Clone)]
+pub struct VerifiedAdvisories {
+    pub public_key: String,
+    pub count: usize,
+    pub digest: String,
+    pub advisories: Vec<crate::advisory::Advisory>,
+}
+
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+impl HttpIndex {
+    /// The advisory feed's **public key** (hex) to pin, or `None` if the registry serves none.
+    pub fn advisory_public_key(&self) -> Result<Option<String>, String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/advisories/key", self.base))
+            .send()
+            .map_err(|err| format!("fetching the advisory-feed key failed: {err}"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the advisory-feed key",
+                resp.status()
+            ));
+        }
+        #[derive(serde::Deserialize)]
+        struct KeyResponse {
+            public_key: String,
+        }
+        Ok(Some(
+            resp.json::<KeyResponse>()
+                .map_err(|err| format!("malformed advisory-feed key: {err}"))?
+                .public_key,
+        ))
+    }
+
+    /// The advisory feed's current **signed head**: `GET /v1/advisories/checkpoint`.
+    pub fn advisory_checkpoint(&self) -> Result<AdvisoryCheckpoint, String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/advisories/checkpoint", self.base))
+            .send()
+            .map_err(|err| format!("fetching the advisory-feed checkpoint failed: {err}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the advisory-feed checkpoint",
+                resp.status()
+            ));
+        }
+        resp.json()
+            .map_err(|err| format!("malformed advisory-feed checkpoint: {err}"))
+    }
+
+    /// The raw advisory feed: `GET /v1/advisories`.
+    pub fn list_advisories(&self) -> Result<Vec<crate::advisory::Advisory>, String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/advisories", self.base))
+            .send()
+            .map_err(|err| format!("fetching the advisory feed failed: {err}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the advisory feed",
+                resp.status()
+            ));
+        }
+        #[derive(serde::Deserialize)]
+        struct FeedResponse {
+            advisories: Vec<crate::advisory::Advisory>,
+        }
+        Ok(resp
+            .json::<FeedResponse>()
+            .map_err(|err| format!("malformed advisory feed: {err}"))?
+            .advisories)
+    }
+
+    /// Fetch and **verify** the whole advisory feed (namespace-protection #1). `pinned_key` is the
+    /// advisory key the caller already trusts; `None` adopts the served key (trust-on-first-use). Every
+    /// advisory's signature is checked against that key, the signed head's signature is checked, and the
+    /// head's digest is required to equal the digest recomputed from the served advisories — so a
+    /// registry can't withhold an advisory (the digest would diverge) or serve a tampered one. Returns
+    /// the verified feed and its head, for the caller to pin and to match against resolved versions.
+    pub fn fetch_advisories(&self, pinned_key: Option<&str>) -> Result<VerifiedAdvisories, String> {
+        use crate::advisory;
+        let key = match pinned_key {
+            Some(k) => k.to_string(),
+            None => self
+                .advisory_public_key()?
+                .ok_or("the registry serves no advisory-feed public key")?,
+        };
+        let advisories = self.list_advisories()?;
+        for a in &advisories {
+            if !a.verify(&key)? {
+                return Err(format!(
+                    "advisory `{}` does not verify against the advisory-feed key — the feed may be \
+                     tampered, or the key changed",
+                    a.id
+                ));
+            }
+        }
+        let cp = self.advisory_checkpoint()?;
+        if !advisory::verify_feed_head(&key, cp.count, &cp.digest, &cp.signature)? {
+            return Err(
+                "the advisory-feed head signature does not verify against the feed key".to_string(),
+            );
+        }
+        // The signed head must attest to exactly the advisories served (else one was withheld).
+        let recomputed = advisory::feed_digest(&advisories);
+        if cp.count != advisories.len() || cp.digest != recomputed {
+            return Err(
+                "the advisory-feed head does not match the served advisories — the registry may be \
+                 withholding an advisory"
+                    .to_string(),
+            );
+        }
+        Ok(VerifiedAdvisories {
+            public_key: key,
+            count: cp.count,
+            digest: cp.digest,
+            advisories,
+        })
+    }
+}
+
 /// A proof of scope ownership presented to `POST /v1/scopes/claim` (namespace-protection #1): a GitHub
 /// Actions OIDC token (CI) or a GitHub OAuth access token from the device flow (laptop). Both resolve
 /// server-side to the owner's stable GitHub id, so they are interchangeable.

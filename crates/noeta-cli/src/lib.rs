@@ -1523,6 +1523,79 @@ fn cmd_audit(path: &std::path::Path) -> ExitCode {
             );
         }
     }
+
+    // Security advisories (namespace-protection #1, advisory feed): cross-reference every resolved
+    // dependency against the registry's signed advisory database, flagging any pinned to a version with
+    // a known vulnerability or a known-malicious release. Best-effort (needs a hosted registry); a
+    // matched *active* advisory makes the audit exit non-zero so CI catches it. The advisory key + feed
+    // head are pinned trust-on-first-use in the lock, so a later feed whose count shrank is surfaced as
+    // a possible rollback (a withheld advisory).
+    let mut advisory_hits = 0usize;
+    if let Ok(Some(index)) = registry::open_http() {
+        println!("\n  Security advisories:");
+        let old = lock::Lock::read(&manifest_dir).advisory_trust().cloned();
+        match index.fetch_advisories(old.as_ref().map(|a| a.public_key.as_str())) {
+            Ok(feed) => {
+                if let Some(prev) = &old
+                    && feed.count < prev.count as usize
+                {
+                    println!(
+                        "    ⚠ the advisory feed shrank ({} → {}) since the last audit — an advisory \
+                         may have been withdrawn upstream, or the registry may be rolling the feed back.",
+                        prev.count, feed.count
+                    );
+                }
+                for pkg in &deps {
+                    for a in &feed.advisories {
+                        if a.is_active() && a.package == pkg.identity && a.affects(&pkg.version) {
+                            advisory_hits += 1;
+                            let url = if a.url.is_empty() {
+                                String::new()
+                            } else {
+                                format!("  <{}>", a.url)
+                            };
+                            println!(
+                                "    ⚠ {} {}: [{}] {} ({}){}",
+                                pkg.identity, pkg.version, a.severity, a.summary, a.id, url
+                            );
+                        }
+                    }
+                }
+                if advisory_hits == 0 {
+                    println!(
+                        "    no advisories affect the {} resolved dependencies (checked {} signed \
+                         advisor{} against the pinned feed key).",
+                        deps.len(),
+                        feed.count,
+                        if feed.count == 1 { "y" } else { "ies" }
+                    );
+                }
+                // Pin (or refresh) the verified advisory-feed head, trust-on-first-use.
+                let pin = lock::AdvisoryTrust {
+                    public_key: feed.public_key,
+                    count: feed.count as u64,
+                    digest: feed.digest,
+                };
+                let _ = lock::write(
+                    &manifest_dir,
+                    &graph.locked,
+                    &graph.scope_trust,
+                    graph.log_trust.as_ref(),
+                    Some(&pin),
+                );
+            }
+            Err(err) => println!("    not checked — {err}"),
+        }
+    }
+
+    if advisory_hits > 0 {
+        eprintln!(
+            "\n{advisory_hits} known-vulnerable or known-malicious dependenc{} in the graph — see the \
+             advisories above.",
+            if advisory_hits == 1 { "y" } else { "ies" }
+        );
+        return ExitCode::from(1);
+    }
     ExitCode::SUCCESS
 }
 

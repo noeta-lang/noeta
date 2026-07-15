@@ -3263,6 +3263,75 @@ fn noeta_audit_reports_the_trust_footprint() {
 }
 
 #[test]
+fn noeta_audit_flags_a_dependency_with_a_known_advisory() {
+    // End-to-end (namespace-protection #1, advisory feed): a mock registry serves a *signed* advisory
+    // for the resolved dependency `acme/greet@1.0.0`. `noeta audit` fetches the feed, verifies every
+    // signature against the served (then pinned) advisory key, matches the version against the
+    // advisory's range, prints the hit, and exits non-zero so CI catches it.
+    use ed25519_dalek::{Signer, SigningKey};
+    use noeta_pm::advisory::{self, Advisory};
+
+    let to_hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let sk = SigningKey::from_bytes(&[3u8; 32]);
+    let pub_hex = to_hex(sk.verifying_key().as_bytes());
+
+    // Build the advisory, sign its canonical bytes exactly as the registry would.
+    let mut adv = Advisory {
+        id: "NOETA-2026-0007".to_string(),
+        package: "acme/greet".to_string(),
+        ranges: ">=1.0.0, <2.0.0".to_string(),
+        patched: Some("2.0.0".to_string()),
+        severity: "high".to_string(),
+        summary: "greeting injection via unescaped punctuation".to_string(),
+        details: String::new(),
+        url: "https://example.com/advisories/7".to_string(),
+        withdrawn: false,
+        seq: 0,
+        signature: String::new(),
+    };
+    adv.signature = to_hex(&sk.sign(&adv.canonical_bytes()).to_bytes());
+    let digest = advisory::feed_digest(std::slice::from_ref(&adv));
+    let head_sig = to_hex(&sk.sign(&advisory::feed_head_bytes(1, &digest)).to_bytes());
+
+    let advisory_json = format!(
+        r#"{{"id":"{}","package":"{}","ranges":"{}","patched":"2.0.0","severity":"{}","summary":"{}","details":"","url":"{}","withdrawn":false,"seq":0,"signature":"{}"}}"#,
+        adv.id, adv.package, adv.ranges, adv.severity, adv.summary, adv.url, adv.signature,
+    );
+    let feed = format!(r#"{{"advisories":[{advisory_json}]}}"#);
+    let key_json = format!(r#"{{"public_key":"{pub_hex}"}}"#);
+    let checkpoint = format!(r#"{{"count":1,"digest":"{digest}","signature":"{head_sig}"}}"#);
+
+    let base = mock_http(move |_method, path, _body| match path {
+        "/v1/advisories" => (200, feed.clone()),
+        "/v1/advisories/key" => (200, key_json.clone()),
+        "/v1/advisories/checkpoint" => (200, checkpoint.clone()),
+        // The transparency section also opens the registry, but path deps aren't logged, so it makes
+        // no proof calls; anything else the audit happens to probe is a 404 it tolerates.
+        _ => (404, r#"{"error":"not found"}"#.to_string()),
+    });
+
+    let entry = path_dep_project("pm_audit_advisory");
+    let app_dir = entry.parent().unwrap();
+    lang()
+        .arg("audit")
+        .arg(app_dir)
+        .env("NOETA_REGISTRY_URL", &base)
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Security advisories:"))
+        .stdout(predicate::str::contains("NOETA-2026-0007"))
+        .stdout(predicate::str::contains("greeting injection"));
+
+    // The advisory-feed head is now pinned in the lockfile (trust-on-first-use).
+    let lock = std::fs::read_to_string(app_dir.join("noeta.lock")).unwrap();
+    assert!(
+        lock.contains("[advisory]"),
+        "lock should pin the advisory head:\n{lock}"
+    );
+    assert!(lock.contains(&pub_hex), "lock should pin the advisory key");
+}
+
+#[test]
 fn noeta_check_resolves_cross_package_use() {
     // `noeta check` must see dependency packages too (package-manager P2.1c), so a cross-package
     // `use` that references a real exported symbol checks clean rather than erroring.
