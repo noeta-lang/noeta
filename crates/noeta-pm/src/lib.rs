@@ -28,6 +28,12 @@ pub mod github;
 #[cfg(feature = "provenance")]
 pub mod provenance;
 
+/// Client-side transparency-log verification (namespace-protection #1): inclusion + consistency proofs
+/// and signed-checkpoint verification over the registry's RFC 6962 Merkle log. Behind `provenance`
+/// (it needs Ed25519 + SHA-256).
+#[cfg(feature = "provenance")]
+pub mod transparency;
+
 /// Keyless provenance — Sigstore bundles verified offline against the public sigstore.dev trust
 /// root (Phase 5). Behind the `keyless` feature (CLI-only), for the same reason as `provenance`.
 #[cfg(feature = "keyless")]

@@ -53,7 +53,7 @@ fmt-config = ["dep:noeta-fmt"]
 # turns it on. Without it, only the file-backed `LocalIndex` (offline/tests) exists.
 registry-http = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:getrandom"]
 # Package provenance: sign attestations on publish, verify them on resolve (Ed25519). CLI-only.
-provenance = ["dep:ed25519-dalek", "dep:getrandom"]
+provenance = ["dep:ed25519-dalek", "dep:getrandom", "dep:sha2"]
 # Keyless provenance (Phase 5): Sigstore bundles verified offline — OIDC identity in place of a
 # registered key, public transparency log in place of local-only detection. CLI-only, and
 # includes `provenance`: both trust roots sign the SAME `Attestation` (its canonical bytes are
