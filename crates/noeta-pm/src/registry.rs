@@ -341,6 +341,41 @@ pub fn open_default() -> Result<Box<dyn Index>, String> {
     Ok(Box::new(LocalIndex::open()?))
 }
 
+/// Open the index for a `[registries]` source (private-registries arc): `None` = the environment
+/// default ([`open_default`]); a hosted URL = an [`HttpIndex`] at that base; a GitHub org = a
+/// git-forge index over that org. This is what lets a project route each scope to its own registry.
+pub fn open_source(
+    source: Option<&crate::manifest::RegistrySource>,
+) -> Result<Box<dyn Index>, String> {
+    match source {
+        None => open_default(),
+        Some(crate::manifest::RegistrySource::Hosted(url)) => open_hosted(url),
+        Some(crate::manifest::RegistrySource::GitHub(org)) => open_github(org),
+    }
+}
+
+/// Open a hosted HTTP registry at an explicit base URL (a `[registries]` `https://…` source).
+#[cfg(feature = "registry-http")]
+fn open_hosted(url: &str) -> Result<Box<dyn Index>, String> {
+    Ok(Box::new(HttpIndex::new(url.to_string())?))
+}
+
+#[cfg(not(feature = "registry-http"))]
+fn open_hosted(_url: &str) -> Result<Box<dyn Index>, String> {
+    Err(
+        "a hosted `[registries]` source needs the `registry-http` build of the toolchain"
+            .to_string(),
+    )
+}
+
+/// Open a GitHub org as a registry (a `[registries]` `github:<org>` source). Implemented in
+/// private-registries S3 — a stub until then so routing (S2) can be built and tested first.
+fn open_github(org: &str) -> Result<Box<dyn Index>, String> {
+    Err(format!(
+        "GitHub-org registries (`github:{org}`) are not implemented yet (private-registries S3)"
+    ))
+}
+
 /// The networked registry index (package-manager Phase 4, S4): an HTTP client of the hosted index
 /// (see the `noeta-registry` Worker + its `PROTOCOL.md`). Reads over `GET`, publishes over `POST`
 /// with a bearer token (`NOETA_REGISTRY_TOKEN`). The registry serves only git *coordinates*, never

@@ -160,11 +160,13 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
     // anywhere in the tree must be listed here or resolution refuses it. A dependency's own trust
     // never applies — authority flows top-down from the human.
     let native_trust = &manifest.trust().native;
+    let registries = manifest.registries();
     let mut walker = Walker {
         instances: BTreeMap::new(),
         store: None,
         lock: &lock,
-        index: None,
+        indexes: BTreeMap::new(),
+        registries,
         native_trust,
         solution: BTreeMap::new(),
         scope_trust: BTreeMap::new(),
@@ -204,7 +206,12 @@ struct Walker<'a> {
     instances: BTreeMap<String, Instance>,
     store: Option<Store>,
     lock: &'a crate::lock::Lock,
-    index: Option<Box<dyn crate::registry::Index>>,
+    /// Registry indexes, opened on first use and cached by source key (private-registries arc): with a
+    /// `[registries]` map a scope may resolve from a different registry than the default, so there can
+    /// be more than one live index. Keyed so two scopes pointing at the same source share one client.
+    indexes: BTreeMap<String, Box<dyn crate::registry::Index>>,
+    /// The root manifest's `[registries]` — which registry each scope resolves from.
+    registries: &'a crate::manifest::Registries,
     /// The root manifest's `[trust].native` — package identities allowed to run native code (Phase 4).
     native_trust: &'a std::collections::BTreeSet<String>,
     /// The resolved `identity → version` map (Phase 4, S5b), computed by [`Walker::solve`] before the
@@ -351,11 +358,11 @@ impl Walker<'_> {
                 })?;
                 let scope = package.company.clone();
                 let scope_key = self
-                    .index()?
+                    .index_for(&scope)?
                     .scope_key(&scope)
                     .map_err(|err| format!("dependency `{key}`: {err}"))?;
                 let release = self
-                    .index()?
+                    .index_for(&scope)?
                     .releases(&name)
                     .map_err(|err| format!("dependency `{key}`: {err}"))?
                     .into_iter()
@@ -515,13 +522,18 @@ impl Walker<'_> {
         Ok(self.store.as_ref().expect("just opened"))
     }
 
-    /// The registry index, opened on first use (only a registry dependency needs it): the networked
-    /// index when configured (`NOETA_REGISTRY_URL` + the `registry-http` feature), else the local one.
-    fn index(&mut self) -> Result<&dyn crate::registry::Index, String> {
-        if self.index.is_none() {
-            self.index = Some(crate::registry::open_default()?);
+    /// The registry index for `company`'s packages, opened on first use and cached (private-registries
+    /// arc). The `[registries]` map routes the scope to its source — a specific hosted registry, a
+    /// GitHub org, or (unmapped) the environment default (`NOETA_REGISTRY_URL` + `registry-http`, else
+    /// the local index). Two scopes on the same source share one client.
+    fn index_for(&mut self, company: &str) -> Result<&dyn crate::registry::Index, String> {
+        let source = self.registries.source_for(company);
+        let key = registry_cache_key(source);
+        if !self.indexes.contains_key(&key) {
+            let index = crate::registry::open_source(source)?;
+            self.indexes.insert(key.clone(), index);
         }
-        Ok(self.index.as_deref().expect("just opened"))
+        Ok(self.indexes.get(&key).expect("just inserted").as_ref())
     }
 
     /// Select one compatible version per package (Phase 4, S5b) and store it in `self.solution`.
@@ -555,8 +567,9 @@ impl Walker<'_> {
             if path_git.contains_key(&identity) || !seen.insert(identity.clone()) {
                 continue;
             }
+            let company = identity.split('/').next().unwrap_or(&identity).to_string();
             let releases = self
-                .index()?
+                .index_for(&company)?
                 .releases(&identity)
                 .map_err(|err| format!("registry package `{identity}`: {err}"))?;
             for release in &releases {
@@ -643,6 +656,16 @@ impl Walker<'_> {
 /// An exact `=x.y.z` requirement — how a path/git pin presents to the resolver.
 fn exact_req(version: &Version) -> VersionReq {
     VersionReq::parse(&format!("={version}")).expect("=<version> is always a valid requirement")
+}
+
+/// A stable cache key for a `[registries]` source (private-registries arc), so two scopes routed to the
+/// same registry share one opened index. `None` (the environment default) is one shared bucket.
+fn registry_cache_key(source: Option<&crate::manifest::RegistrySource>) -> String {
+    match source {
+        None => "default".to_string(),
+        Some(crate::manifest::RegistrySource::Hosted(url)) => format!("hosted:{url}"),
+        Some(crate::manifest::RegistrySource::GitHub(org)) => format!("github:{org}"),
+    }
 }
 
 /// A path/git package as a resolver candidate (Phase 4, S5b): its single pinned version and its
@@ -1036,6 +1059,30 @@ mod tests {
         assert!(
             names(&dev).contains(&"acme/tool".to_string()),
             "dev dep missing under --target dev"
+        );
+    }
+
+    #[test]
+    fn registries_route_a_scope_to_its_configured_source() {
+        // private-registries S2: a `[registries]` mapping sends `acme/*` to a github source. Resolving
+        // an `acme` registry dep must reach that source (here the S3 stub error), proving the router
+        // picked the per-scope registry rather than the default index.
+        let base = std::env::temp_dir().join("noeta_graph_test_registry_routing");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"me/app\"\nversion = \"0.1.0\"\n\
+             [registries]\nacme = \"github:acme\"\n\
+             [dependencies]\nthing = { version = \"^1.0\", package = \"acme/thing\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+        let err = resolve_graph(&app.join("main.noe")).expect_err("github source is a stub in S2");
+        assert!(
+            err.contains("github:acme") && err.contains("not implemented"),
+            "routing should have reached the github source: {err}"
         );
     }
 
