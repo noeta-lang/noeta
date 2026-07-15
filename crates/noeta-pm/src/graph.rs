@@ -151,12 +151,16 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
     // anywhere in the tree must be listed here or resolution refuses it. A dependency's own trust
     // never applies — authority flows top-down from the human.
     let native_trust = &manifest.trust().native;
+    // Same top-down authority: the consumer's require-provenance policy is the root's, applied to every
+    // resolved dependency (namespace-protection #1). A dependency can't relax it for itself.
+    let require_provenance = &manifest.trust().require_provenance;
     let mut walker = Walker {
         instances: BTreeMap::new(),
         store: None,
         lock: &lock,
         index: None,
         native_trust,
+        require_provenance,
         solution: BTreeMap::new(),
         scope_trust: BTreeMap::new(),
     };
@@ -193,6 +197,10 @@ struct Walker<'a> {
     index: Option<Box<dyn crate::registry::Index>>,
     /// The root manifest's `[trust].native` — package identities allowed to run native code (Phase 4).
     native_trust: &'a std::collections::BTreeSet<String>,
+    /// The root manifest's `[trust].require_provenance` — scopes whose releases the consumer demands
+    /// carry verified provenance (namespace-protection #1). An unsigned release from a required scope
+    /// is refused during the walk.
+    require_provenance: &'a crate::manifest::RequireProvenance,
     /// The resolved `identity → version` map (Phase 4, S5b), computed by [`Walker::solve`] before the
     /// walk. The walk materializes each registry dependency at *its* selected version rather than
     /// greedily picking the highest; empty until `solve` runs (a pure path/git graph leaves registry
@@ -425,6 +433,19 @@ impl Walker<'_> {
         served_key: Option<&str>,
     ) -> Result<(), String> {
         let scope = name.split('/').next().unwrap_or(name);
+        // Consumer require-provenance (namespace-protection #1): if this project demands `scope`
+        // carry provenance, an unsigned release is refused outright — the guarantee holds even if the
+        // scope set no policy of its own, and even on first use where TOFU would otherwise allow it.
+        if self.require_provenance.requires(scope)
+            && release.signature.is_none()
+            && release.bundle.is_none()
+        {
+            return Err(format!(
+                "dependency `{key}` (`{name}`): `[trust].require_provenance` demands verified \
+                 provenance from scope `{scope}`, but this release is unsigned — refusing to resolve \
+                 an unattested release"
+            ));
+        }
         let action = provenance_decision(
             self.lock.scope_trust(scope),
             release.signature.as_deref(),

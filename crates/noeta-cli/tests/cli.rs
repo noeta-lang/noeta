@@ -3470,6 +3470,79 @@ fn a_published_package_resolves_as_a_registry_dependency() {
 }
 
 #[test]
+fn require_provenance_refuses_an_unsigned_registry_dependency() {
+    // namespace-protection #1, Phase 1 (consumer side): `[trust].require_provenance` demands a scope's
+    // releases carry verified provenance. The published `acme/greet` is unsigned, so a consumer that
+    // requires provenance for `acme` refuses to resolve it — while an unconstrained consumer still can.
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_require_prov_e2e");
+    let _ = std::fs::remove_dir_all(&base);
+    let repo = base.join("greet_repo");
+    let app = base.join("app");
+    let reg = base.join("registry");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+
+    git_in(&["init", "-q"], &repo);
+    std::fs::write(
+        repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greet\"\nversion = \"1.2.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join("hello.noe"),
+        "namespace greet.hello;\npub fn greeting(): string { return \"hi\"; }\n",
+    )
+    .unwrap();
+    git_in(&["add", "."], &repo);
+    git_in(&["commit", "-q", "-m", "release"], &repo);
+    git_in(&["tag", "v1.2.0"], &repo);
+
+    // Publish it UNSIGNED (no key, no ambient identity) to the local index.
+    lang()
+        .current_dir(&repo)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["publish", "--git", repo.to_str().unwrap(), "--tag", "v1.2.0"])
+        .assert()
+        .success();
+
+    std::fs::write(app.join("main.noe"), "use gc.hello.greeting;\necho greeting();\n").unwrap();
+
+    // A consumer that requires provenance for `acme` refuses the unsigned release.
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [trust]\nrequire_provenance = [\"acme\"]\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("require_provenance").and(predicate::str::contains("unattested")));
+
+    // Without the policy, the same unsigned dependency still resolves (gradual-adoption default).
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    lang()
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hi"));
+}
+
+#[test]
 fn a_registry_dependency_without_a_package_is_an_error() {
     // A bare registry requirement names no package identity, so it can't be resolved — the error
     // points the user to add `package = "company/pkg"` (P2.5).

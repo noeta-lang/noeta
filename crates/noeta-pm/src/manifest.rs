@@ -63,6 +63,35 @@ pub struct Trust {
     /// Packages permitted to contribute `noeta <subcommand>` CLI commands. A command from an
     /// unlisted package is silently omitted (a capability the user never asked for).
     pub commands: std::collections::BTreeSet<String>,
+    /// Which registry **scopes** (the `company` segment) this project demands carry verified
+    /// provenance (namespace-protection #1, require-provenance). A dependency resolved from a required
+    /// scope whose release is unsigned is a hard resolve error — the consumer's own guarantee, held
+    /// independently of whether the scope itself set a require-provenance policy.
+    pub require_provenance: RequireProvenance,
+}
+
+/// The consumer's `[trust].require_provenance` policy: demand verified provenance from no scope
+/// (default), every scope, or a named set of scopes. The `company` segment is the scope.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum RequireProvenance {
+    /// Unset — a scope's releases are accepted unsigned (gradual-adoption default).
+    #[default]
+    None,
+    /// `require_provenance = true` — every registry dependency must carry verified provenance.
+    All,
+    /// `require_provenance = ["acme", "para"]` — only these scopes must.
+    Scopes(std::collections::BTreeSet<String>),
+}
+
+impl RequireProvenance {
+    /// Whether releases from `scope` (a `company` segment) must carry verified provenance.
+    pub fn requires(&self, scope: &str) -> bool {
+        match self {
+            RequireProvenance::None => false,
+            RequireProvenance::All => true,
+            RequireProvenance::Scopes(scopes) => scopes.contains(scope),
+        }
+    }
 }
 
 /// The `[package]` table — a package's global identity and version (package-manager P2.0). Absent for
@@ -716,9 +745,43 @@ fn parse_trust(table: &toml::Table) -> Result<Trust, String> {
         }
         Ok(out)
     };
+    // `require_provenance` is `true` (every scope), `false`/absent (none), or an array of scope
+    // (`company`) strings. A scope entry is validated as an identifier so a typo fails loudly.
+    let require_provenance = match trust_table.get("require_provenance") {
+        None => RequireProvenance::None,
+        Some(v) => {
+            if let Some(b) = v.as_bool() {
+                if b {
+                    RequireProvenance::All
+                } else {
+                    RequireProvenance::None
+                }
+            } else if let Some(array) = v.as_array() {
+                let mut scopes = std::collections::BTreeSet::new();
+                for entry in array {
+                    let s = entry.as_str().ok_or(
+                        "`trust.require_provenance` entries must be scope strings (a `company`)",
+                    )?;
+                    if !is_identifier(s) {
+                        return Err(format!(
+                            "`trust.require_provenance`: `{s}` is not a scope (a `company` identifier)"
+                        ));
+                    }
+                    scopes.insert(s.to_string());
+                }
+                RequireProvenance::Scopes(scopes)
+            } else {
+                return Err(
+                    "`trust.require_provenance` must be a boolean or an array of scope strings"
+                        .to_string(),
+                );
+            }
+        }
+    };
     Ok(Trust {
         native: parse_list("native")?,
         commands: parse_list("commands")?,
+        require_provenance,
     })
 }
 
@@ -929,6 +992,28 @@ mod tests {
         assert!(m.trust().native.contains("acme/simd"));
         assert!(m.trust().commands.contains("acme/scaffold"));
         assert!(!m.trust().commands.contains("acme/imgfx"));
+    }
+
+    #[test]
+    fn trust_parses_require_provenance() {
+        // Default: no scope is required.
+        let none = Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").unwrap();
+        assert!(!none.trust().require_provenance.requires("acme"));
+        // `true` → every scope required.
+        let all = Manifest::parse("[trust]\nrequire_provenance = true\n").unwrap();
+        assert!(all.trust().require_provenance.requires("acme"));
+        assert!(all.trust().require_provenance.requires("anything"));
+        // A scope list → only those scopes required.
+        let some = Manifest::parse("[trust]\nrequire_provenance = [\"para\", \"acme\"]\n").unwrap();
+        assert!(some.trust().require_provenance.requires("para"));
+        assert!(some.trust().require_provenance.requires("acme"));
+        assert!(!some.trust().require_provenance.requires("other"));
+        // `false` is explicitly none.
+        let off = Manifest::parse("[trust]\nrequire_provenance = false\n").unwrap();
+        assert!(!off.trust().require_provenance.requires("acme"));
+        // A malformed scope entry / wrong type fails loudly.
+        assert!(Manifest::parse("[trust]\nrequire_provenance = [\"a/b\"]\n").is_err());
+        assert!(Manifest::parse("[trust]\nrequire_provenance = 42\n").is_err());
     }
 
     #[test]
