@@ -509,6 +509,194 @@ impl HttpIndex {
             "registry rejected the policy for `{scope}`: {detail}"
         ))
     }
+
+    /// The transparency log's current **signed checkpoint** (namespace-protection #1): `GET
+    /// /v1/log/checkpoint`.
+    pub fn log_checkpoint(&self) -> Result<LogCheckpoint, String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/log/checkpoint", self.base))
+            .send()
+            .map_err(|err| format!("fetching the transparency-log checkpoint failed: {err}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the transparency-log checkpoint",
+                resp.status()
+            ));
+        }
+        resp.json()
+            .map_err(|err| format!("malformed transparency-log checkpoint: {err}"))
+    }
+
+    /// The transparency log's **public key** (hex) to pin, or `None` if the registry serves none.
+    pub fn log_public_key(&self) -> Result<Option<String>, String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/log/key", self.base))
+            .send()
+            .map_err(|err| format!("fetching the transparency-log key failed: {err}"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the transparency-log key",
+                resp.status()
+            ));
+        }
+        #[derive(serde::Deserialize)]
+        struct KeyResponse {
+            public_key: String,
+        }
+        Ok(Some(
+            resp.json::<KeyResponse>()
+                .map_err(|err| format!("malformed transparency-log key: {err}"))?
+                .public_key,
+        ))
+    }
+
+    /// The **inclusion proof** for `name`@`version`, or `None` if the release is not logged: `GET
+    /// /v1/log/proof/{name}/{version}`.
+    pub fn log_inclusion(&self, name: &str, version: &str) -> Result<Option<LogInclusion>, String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/log/proof/{name}/{version}", self.base))
+            .send()
+            .map_err(|err| format!("fetching the transparency-log proof failed: {err}"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the transparency-log proof of `{name}`@{version}",
+                resp.status()
+            ));
+        }
+        Ok(Some(resp.json().map_err(|err| {
+            format!("malformed transparency-log proof: {err}")
+        })?))
+    }
+}
+
+/// A transparency-log signed checkpoint (RFC 6962 signed tree head) as served by the registry.
+#[cfg(feature = "registry-http")]
+#[derive(Debug, serde::Deserialize)]
+pub struct LogCheckpoint {
+    pub tree_size: u64,
+    pub root_hash: String,
+    pub signature: String,
+}
+
+/// A transparency-log inclusion proof for one release.
+#[cfg(feature = "registry-http")]
+#[derive(Debug, serde::Deserialize)]
+pub struct LogInclusion {
+    pub index: u64,
+    pub tree_size: u64,
+    pub root_hash: String,
+    /// The canonical leaf record — the client recomputes the leaf from it.
+    pub record: String,
+    /// The audit path (hex hashes).
+    pub proof: Vec<String>,
+}
+
+/// A transparency-log checkpoint the client verified and can pin (namespace-protection #1): the log
+/// key that signed it, plus the tree size + root it attests to (trust-on-first-use / anti-equivocation).
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+#[derive(Debug, Clone)]
+pub struct VerifiedLog {
+    pub tree_size: u64,
+    pub root_hex: String,
+    pub public_key: String,
+}
+
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+impl HttpIndex {
+    /// Verify a resolved release is **included** in the transparency log at a **signed** checkpoint
+    /// (namespace-protection #1). `pinned_key` is the log public key the caller already trusts; `None`
+    /// adopts the served key (trust-on-first-use). The release is identified by its coordinates
+    /// (`name`/`version`/`url`/`tag`/`sha`), which must match the logged record. Returns the verified
+    /// checkpoint to pin. This proves, without trusting the registry, that the release we're about to
+    /// use is publicly logged under a key the log operator controls — a compromised registry can't
+    /// quietly serve an unlogged forgery.
+    pub fn verify_release_logged(
+        &self,
+        name: &str,
+        version: &str,
+        url: &str,
+        tag: &str,
+        sha: &str,
+        pinned_key: Option<&str>,
+    ) -> Result<VerifiedLog, String> {
+        use crate::transparency;
+        let key = match pinned_key {
+            Some(k) => k.to_string(),
+            None => self
+                .log_public_key()?
+                .ok_or("the registry serves no transparency-log public key")?,
+        };
+        let cp = self.log_checkpoint()?;
+        if !transparency::verify_checkpoint(&key, cp.tree_size, &cp.root_hash, &cp.signature)? {
+            return Err(
+                "the transparency-log checkpoint signature does not verify against the log key \
+                 — the registry may be equivocating, or the log key changed"
+                    .to_string(),
+            );
+        }
+        let incl = self
+            .log_inclusion(name, version)?
+            .ok_or_else(|| format!("`{name}`@{version} is not in the transparency log"))?;
+        // The inclusion proof must be against the *signed* checkpoint's tree, else a registry could
+        // prove inclusion in some other (unsigned) tree.
+        if incl.root_hash != cp.root_hash || incl.tree_size != cp.tree_size {
+            return Err(
+                "the transparency inclusion proof is not against the signed checkpoint (a concurrent \
+                 publish can cause this — retry)"
+                    .to_string(),
+            );
+        }
+        // The logged record (whose leaf we verify below) must be for exactly the release we resolved:
+        // its identity, version, and git coordinates. The record's provenance field rides along,
+        // authenticated by inclusion. We check the *served* record so the client needn't recompute the
+        // provenance digest.
+        let fields: Vec<&str> = incl.record.split('\n').collect();
+        let matches = fields.len() >= 6
+            && fields[0] == "noeta-transparency-log-v1"
+            && fields[1] == name
+            && fields[2] == version
+            && fields[3] == url
+            && fields[4] == tag
+            && fields[5] == sha;
+        if !matches {
+            return Err(
+                "the transparency-log record does not match the resolved release (coordinates differ)"
+                    .to_string(),
+            );
+        }
+        let root = transparency::hex_to_array::<32>(&cp.root_hash)
+            .ok_or("malformed checkpoint root hash")?;
+        let proof = incl
+            .proof
+            .iter()
+            .map(|h| transparency::hex_to_array::<32>(h))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("malformed inclusion-proof hash")?;
+        let leaf = transparency::leaf_hash(incl.record.as_bytes());
+        if !transparency::verify_inclusion(
+            leaf,
+            incl.index as usize,
+            incl.tree_size as usize,
+            &proof,
+            &root,
+        ) {
+            return Err("the transparency inclusion proof does not verify".to_string());
+        }
+        Ok(VerifiedLog {
+            tree_size: cp.tree_size,
+            root_hex: cp.root_hash,
+            public_key: key,
+        })
+    }
 }
 
 /// A proof of scope ownership presented to `POST /v1/scopes/claim` (namespace-protection #1): a GitHub
@@ -1215,5 +1403,65 @@ mod http_tests {
         assert_eq!(a.len(), 64, "256 bits as hex");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b, "tokens must not repeat");
+    }
+
+    #[cfg(feature = "provenance")]
+    #[test]
+    fn verify_release_logged_checks_the_signed_checkpoint_and_inclusion() {
+        // namespace-protection #1 TLog 3: end-to-end client verification against a mock log. A size-1
+        // tree keeps the fixture simple (empty audit path); the multi-size proof math is exhaustively
+        // covered in `transparency`. What this proves is the *wiring* — fetch key/checkpoint/proof,
+        // verify the signature, match the record, verify inclusion — plus that a wrong pinned key is
+        // rejected.
+        use crate::transparency;
+        use ed25519_dalek::{Signer, SigningKey};
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+
+        let sk = SigningKey::from_bytes(&[9u8; 32]);
+        let pub_hex = hex(&sk.verifying_key().to_bytes());
+        let record = transparency::log_record("acme/imgfx", "1.0.0", "u", "t", "abc", "unsigned");
+        let root_hex = hex(&transparency::leaf_hash(record.as_bytes())); // size-1 tree: root == leaf
+        let sig_hex = hex(&sk
+            .sign(format!("noeta-log-checkpoint-v1\n1\n{root_hex}\n").as_bytes())
+            .to_bytes());
+
+        let (pk, rk, sg, rec) = (pub_hex.clone(), root_hex.clone(), sig_hex, record.clone());
+        let base = mock_server(move |_method, path, _body| match path {
+            "/v1/log/key" => (200, format!("{{\"public_key\":\"{pk}\"}}")),
+            "/v1/log/checkpoint" => (
+                200,
+                format!("{{\"tree_size\":1,\"root_hash\":\"{rk}\",\"signature\":\"{sg}\"}}"),
+            ),
+            "/v1/log/proof/acme/imgfx/1.0.0" => (
+                200,
+                format!(
+                    "{{\"index\":0,\"tree_size\":1,\"root_hash\":\"{rk}\",\"record\":{},\"proof\":[]}}",
+                    serde_json::to_string(&rec).unwrap()
+                ),
+            ),
+            _ => (404, "{}".to_string()),
+        });
+        let index = HttpIndex::new(base).unwrap();
+
+        // First use (no pinned key) adopts the served key and verifies the whole chain.
+        let verified = index
+            .verify_release_logged("acme/imgfx", "1.0.0", "u", "t", "abc", None)
+            .unwrap();
+        assert_eq!(verified.tree_size, 1);
+        assert_eq!(verified.public_key, pub_hex);
+        assert_eq!(verified.root_hex, root_hex);
+
+        // A wrong pinned log key is rejected — the checkpoint signature won't verify against it.
+        let err = index
+            .verify_release_logged(
+                "acme/imgfx",
+                "1.0.0",
+                "u",
+                "t",
+                "abc",
+                Some(&"00".repeat(32)),
+            )
+            .unwrap_err();
+        assert!(err.contains("checkpoint signature"), "{err}");
     }
 }

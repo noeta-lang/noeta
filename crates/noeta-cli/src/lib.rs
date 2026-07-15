@@ -1479,6 +1479,50 @@ fn cmd_audit(path: &std::path::Path) -> ExitCode {
              a downgraded trust root, or a bad signature/bundle aborts the build."
         );
     }
+
+    // Transparency log (namespace-protection #1): verify each dependency is publicly **included** in
+    // the registry's append-only log under a **signed** checkpoint — so a compromised registry can't
+    // serve an unlogged forgery without detection. Best-effort and only when a hosted registry is
+    // configured; a not-logged/unreachable result is a note (direct git deps aren't logged), not a
+    // failure. The pinned key is carried across deps so a registry serving different keys is caught.
+    if let Some(base) = std::env::var_os("NOETA_REGISTRY_URL")
+        && let Ok(index) = registry::HttpIndex::new(base.to_string_lossy().into_owned())
+    {
+        println!("\n  Transparency log:");
+        let mut pinned: Option<String> = None;
+        let mut verified = 0usize;
+        for pkg in &deps {
+            let noeta_pm::graph::ResolvedSource::Git { url, tag, sha } = &pkg.source else {
+                continue;
+            };
+            match index.verify_release_logged(
+                &pkg.identity,
+                &pkg.version.to_string(),
+                url,
+                tag,
+                sha,
+                pinned.as_deref(),
+            ) {
+                Ok(v) => {
+                    pinned.get_or_insert(v.public_key);
+                    println!(
+                        "    {} {}: ✓ included (log size {})",
+                        pkg.identity, pkg.version, v.tree_size
+                    );
+                    verified += 1;
+                }
+                Err(err) => println!("    {} {}: not verified — {err}", pkg.identity, pkg.version),
+            }
+        }
+        if verified == 0 {
+            println!("    (no dependencies are recorded in this registry's transparency log)");
+        } else {
+            println!(
+                "    included releases were verified against the log's signed checkpoint — the \
+                 registry cannot serve an unlogged release without detection."
+            );
+        }
+    }
     ExitCode::SUCCESS
 }
 
