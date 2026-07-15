@@ -18,6 +18,13 @@ doctest = false
 # `[patch]` (see `compose.rs::toolchain_patch_section`), so the `dyn Extension` types unify. That
 # git-dep + `[patch]` path is proven (para-namespace follow-on F3); the in-tree copy stays a path dep,
 # like `packages/para-html`, until the toolchain repo is published (F4). See `packages/README.md`.
-noeta-para-p2p = { path = "../../../crates/noeta-para-p2p" }
+noeta-para-p2p = { path = "../../../crates/noeta-para-p2p", default-features = false }
+
+# The real-transport ring, forwarded to the impl crate. Not default: the composed toolchain/runner
+# enables it (real networking for `noeta run`/`--exe`), and `noeta build --native`'s footprint scan
+# enables it only when the program imports `para.p2p`/`para.synced` — so a `--native` binary that
+# depends on this package but never touches its p2p modules links no p2panda (para-namespace F2b).
+[features]
+ring-p2p = ["noeta-para-p2p/ring-p2p"]
 
 [workspace]

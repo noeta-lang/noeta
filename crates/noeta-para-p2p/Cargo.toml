@@ -22,11 +22,11 @@ noeta-stdlib = { workspace = true }
 noeta-para-p2p-net = { workspace = true, optional = true }
 
 [features]
-# On by default so the composed **dev toolchain** (`noeta run`) gets real peer networking, mirroring
-# how `ring-p2p` used to be a noeta-runtime default. `noeta build --native`'s footprint scan turns it
-# OFF for a binary whose program never imports `para.p2p`/`para.synced`, shedding the whole p2panda
-# tree (the same DCE axis the http/datetime rings use — now gated on THIS crate's feature).
-default = ["ring-p2p"]
+# The real-transport ring — **not** default (footprint-gated, like the base's http/datetime rings).
+# The composed toolchain/runner enables it (so `noeta run`/`--exe` have real peer networking); the
+# AOT footprint scan enables it only for a `--native` binary that imports `para.p2p`/`para.synced`,
+# shedding the whole p2panda tree otherwise. Plain `cargo build`/tests link no p2panda — the extension
+# uses only its dep-free loopback broker.
 ring-p2p = ["dep:noeta-para-p2p-net"]
 
 [dev-dependencies]

@@ -39,7 +39,7 @@ const DEV_FEATURES: &[&str] = &["fmt"];
 /// `noeta-runner` + the app's native runtime extensions — no dev tooling — and is the base a
 /// `build --exe`/`--native` artifact staples onto, so a shipped native-dependency app carries its
 /// runtime handlers but none of the toolchain.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ShimKind {
     Toolchain,
     Runner,
@@ -277,6 +277,12 @@ struct Entry {
     /// [`ShimKind::Toolchain`] composition turns on; empty for a pure-runtime crate. A shipped base
     /// ignores this and pulls the crate at default features.
     dev_features: Vec<String>,
+    /// The **footprint rings** this entry crate declares (a `ring-*` feature — e.g. `ring-p2p` for the
+    /// para.p2p transport, para-namespace F2b). A Toolchain/Runner composition enables **all** of them
+    /// (full runtime capability); the AOT composition enables only the subset the program's footprint
+    /// scan selected, so a `--native` binary that never imports the ring's modules sheds its native
+    /// dep tree. Empty for a crate with no gated rings (built at default features, unchanged).
+    ring_features: Vec<String>,
 }
 
 fn resolve_entries(crates: &[NativeCrate]) -> Result<Vec<Entry>, String> {
@@ -294,12 +300,20 @@ fn resolve_entries(crates: &[NativeCrate]) -> Result<Vec<Entry>, String> {
             .filter(|f| declared.iter().any(|d| d == *f))
             .map(|f| (*f).to_string())
             .collect();
+        // Footprint rings the crate gates (a `ring-*` feature). Sorted for deterministic shim output.
+        let mut ring_features: Vec<String> = declared
+            .iter()
+            .filter(|f| f.starts_with("ring-"))
+            .cloned()
+            .collect();
+        ring_features.sort();
         entries.push(Entry {
             identity: nc.identity.clone(),
             dir: nc.crate_dir.clone(),
             cargo_name,
             ident,
             dev_features,
+            ring_features,
         });
     }
     // Deterministic shim content (the graph already sorts by identity; keep it locally true too).
@@ -636,8 +650,27 @@ fn aot_shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, rings: &[
         src_spec("noeta-native")
     ));
     for (n, e) in entries.iter().enumerate() {
+        // Footprint-gate the entry crate's rings: enable only those the program actually selected, so
+        // a `--native` binary that depends on a native package but never imports the ring's modules
+        // sheds that ring's native dep tree (e.g. a para-p2p-depending program that never touches
+        // `para.p2p`/`para.synced` links no p2panda). A crate with no `ring-*` features is unaffected.
+        let selected: Vec<&String> = e
+            .ring_features
+            .iter()
+            .filter(|r| rings.iter().any(|s| s == *r))
+            .collect();
+        let features = if selected.is_empty() {
+            String::new()
+        } else {
+            let list = selected
+                .iter()
+                .map(|f| toml_quote(f))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(", features = [{list}]")
+        };
         out.push_str(&format!(
-            "ext{n} = {{ package = {}, path = {} }}\n",
+            "ext{n} = {{ package = {}, path = {}{features} }}\n",
             toml_quote(&e.cargo_name),
             toml_quote(&e.dir.display().to_string())
         ));
@@ -706,16 +739,23 @@ fn shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, kind: ShimKin
     out.push_str(&toolchain_dep(kind.base_crate()));
     out.push_str(&toolchain_dep("noeta-native"));
     for (n, e) in entries.iter().enumerate() {
-        let features = if kind == ShimKind::Toolchain && !e.dev_features.is_empty() {
-            let list = e
-                .dev_features
+        // A dev toolchain turns on the crate's dev features (`fmt`); a Toolchain *and* a Runner
+        // (shipped `--exe`) both enable ALL of the crate's footprint rings — a runnable binary is
+        // fully capable. (Only the AOT composition footprint-gates rings; see `aot_shim_cargo_toml`.)
+        let mut feats: Vec<String> = Vec::new();
+        if kind == ShimKind::Toolchain {
+            feats.extend(e.dev_features.iter().cloned());
+        }
+        feats.extend(e.ring_features.iter().cloned());
+        let features = if feats.is_empty() {
+            String::new()
+        } else {
+            let list = feats
                 .iter()
                 .map(|f| toml_quote(f))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(", features = [{list}]")
-        } else {
-            String::new()
         };
         out.push_str(&format!(
             "ext{n} = {{ package = {}, path = {}{features} }}\n",
@@ -870,6 +910,7 @@ mod tests {
             cargo_name: "imgfx-native".to_string(),
             ident: "imgfx_native".to_string(),
             dev_features: vec![],
+            ring_features: vec![],
         }]
     }
 
@@ -881,6 +922,19 @@ mod tests {
             cargo_name: "imgfx-native".to_string(),
             ident: "imgfx_native".to_string(),
             dev_features: vec!["fmt".to_string()],
+            ring_features: vec![],
+        }]
+    }
+
+    /// A crate declaring a footprint ring (like `para-p2p-native`'s `ring-p2p`).
+    fn ring_entries() -> Vec<Entry> {
+        vec![Entry {
+            identity: "acme/imgfx".to_string(),
+            dir: PathBuf::from("/store/acme_imgfx/native"),
+            cargo_name: "imgfx-native".to_string(),
+            ident: "imgfx_native".to_string(),
+            dev_features: vec![],
+            ring_features: vec!["ring-p2p".to_string()],
         }]
     }
 
@@ -965,6 +1019,36 @@ mod tests {
             "no patch for a git-tag toolchain:\n{git}"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn footprint_rings_are_full_in_a_runnable_shim_but_gated_in_the_aot_shim() {
+        let ws = ToolchainSource::Workspace(PathBuf::from("/src/noeta"));
+
+        // A Toolchain (and a Runner) shim enables ALL of an entry crate's rings — a runnable binary
+        // is fully capable, so `noeta run` / `--exe` get real p2p.
+        for kind in [ShimKind::Toolchain, ShimKind::Runner] {
+            let toml = shim_cargo_toml(&ring_entries(), &ws, kind);
+            assert!(
+                toml.contains("ext0 = { package = \"imgfx-native\", path = \"/store/acme_imgfx/native\", features = [\"ring-p2p\"] }"),
+                "{kind:?} shim enables the ring:\n{toml}"
+            );
+        }
+
+        // The AOT shim gates rings on the footprint: selected ⇒ enabled …
+        let selected = aot_shim_cargo_toml(&ring_entries(), &ws, &["ring-p2p".to_string()]);
+        assert!(
+            selected.contains("ext0 = { package = \"imgfx-native\", path = \"/store/acme_imgfx/native\", features = [\"ring-p2p\"] }"),
+            "selected ring enabled:\n{selected}"
+        );
+        // … not selected (the program never imports the ring's modules) ⇒ shed (no features).
+        let shed = aot_shim_cargo_toml(&ring_entries(), &ws, &[]);
+        assert!(
+            shed.contains(
+                "ext0 = { package = \"imgfx-native\", path = \"/store/acme_imgfx/native\" }"
+            ),
+            "unselected ring shed:\n{shed}"
+        );
     }
 
     #[test]
