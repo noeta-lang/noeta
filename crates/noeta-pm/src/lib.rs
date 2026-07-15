@@ -40,6 +40,8 @@ pub mod keyless_fixtures;
 // Internal to the crate: the git fetch, the content-addressed store, and the pure resolver are
 // implementation details the public modules above compose (the CLI never names them directly).
 mod git;
+/// Optional git credential injection for private-repo access (private-registries arc).
+mod git_auth;
 mod resolve;
 mod store;
 

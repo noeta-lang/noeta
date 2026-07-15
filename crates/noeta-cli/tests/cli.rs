@@ -3637,6 +3637,60 @@ fn a_github_org_registry_resolves_and_runs_a_package() {
 }
 
 #[test]
+fn a_github_registry_resolve_tolerates_the_auth_token_override() {
+    // private-registries S5: with NOETA_GITHUB_TOKEN set, every git subprocess gets a scoped
+    // `-c http.https://github.com.extraHeader=…` auth config. Resolution against the local host (a file
+    // path, not github.com) must still succeed — proving git accepts the arg and the header is scoped
+    // so it doesn't interfere. (Authenticating a *real* private repo needs real GitHub; here we prove
+    // the plumbing is inert where it should be.)
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_github_registry_token_e2e");
+    let _ = std::fs::remove_dir_all(&base);
+    let host = base.join("host");
+    let repo = host.join("acme").join("greet");
+    let app = base.join("app");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+
+    git_in(&["init", "-q", "-b", "main"], &repo);
+    std::fs::write(
+        repo.join("hello.noe"),
+        "namespace greet.hello;\npub fn greeting(): string { return \"hello (token path)\"; }\n",
+    )
+    .unwrap();
+    commit_version(
+        &repo,
+        "v1.0.0",
+        "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
+    );
+
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"me/app\"\nversion = \"0.1.0\"\n\
+         [registries]\nacme = \"github:acme\"\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use gc.hello.greeting;\necho greeting();\n",
+    )
+    .unwrap();
+
+    lang()
+        .env("NOETA_GITHUB_BASE", &host)
+        .env("NOETA_GIT_FORGE_CACHE", base.join("cache"))
+        .env("NOETA_GITHUB_TOKEN", "ghp_faketoken_for_plumbing_test")
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello (token path)"));
+}
+
+#[test]
 fn a_registry_dependency_without_a_package_is_an_error() {
     // A bare registry requirement names no package identity, so it can't be resolved — the error
     // points the user to add `package = "company/pkg"` (P2.5).

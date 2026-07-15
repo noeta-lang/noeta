@@ -9,8 +9,9 @@
 //! a direct `git` dependency takes. Publishing is `git tag && git push` (so [`Index::publish`] is
 //! intentionally unsupported here).
 //!
-//! S3 is read-only over **public** repos; authentication for private repos arrives in S5 (the `token`
-//! field is threaded now but unused until then).
+//! Private repos authenticate via git itself: ambient credentials (a helper / `gh auth` / SSH) by
+//! default, or `NOETA_GITHUB_TOKEN` as a CI override — see [`crate::git_auth`]. This type holds no
+//! credential; auth is applied per git-invocation.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,7 +21,10 @@ use semver::Version;
 use crate::registry::{Dep, GitCoords, Index, Release};
 
 /// A git-forge registry over one org. Version discovery + per-tag manifests come from a cached bare
-/// clone of each repo (so tags and `noeta.toml@tag` are read with plain local git).
+/// clone of each repo (so tags and `noeta.toml@tag` are read with plain local git). Authentication for
+/// private repos is applied per git-invocation from the environment (see [`crate::git_auth`]) — this
+/// type holds no credential.
+#[derive(Debug)]
 pub struct GitForgeIndex {
     /// The org (GitHub org / user) whose repos back this registry.
     org: String,
@@ -29,40 +33,23 @@ pub struct GitForgeIndex {
     base: String,
     /// Where bare clones are cached (one per repo).
     cache_dir: PathBuf,
-    /// A credential for private repos (S5). Unused in S3.
-    #[allow(dead_code)]
-    token: Option<String>,
-}
-
-// A manual Debug so the `token` credential can never leak into a log or panic message.
-impl std::fmt::Debug for GitForgeIndex {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GitForgeIndex")
-            .field("org", &self.org)
-            .field("base", &self.base)
-            .field("cache_dir", &self.cache_dir)
-            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
-            .finish()
-    }
 }
 
 impl GitForgeIndex {
     /// Open the GitHub org `org` as a registry, reading configuration from the environment:
-    /// `NOETA_GITHUB_BASE` (default `https://github.com`) and `NOETA_GITHUB_TOKEN` (for S5). Bare
-    /// clones are cached under the toolchain cache dir.
+    /// `NOETA_GITHUB_BASE` (default `https://github.com`). Private-repo auth is separate (ambient git
+    /// credentials, or `NOETA_GITHUB_TOKEN` — see [`crate::git_auth`]). Bare clones are cached under the
+    /// toolchain cache dir.
     pub fn github(org: &str) -> Result<GitForgeIndex, String> {
         let base =
             std::env::var("NOETA_GITHUB_BASE").unwrap_or_else(|_| "https://github.com".to_string());
-        let token = std::env::var("NOETA_GITHUB_TOKEN")
-            .ok()
-            .filter(|t| !t.is_empty());
         let cache_dir = match std::env::var_os("NOETA_GIT_FORGE_CACHE") {
             Some(dir) => PathBuf::from(dir),
             None => noeta_cache::Cache::locate()
                 .ok_or("cannot locate a cache directory for git-forge registries (set HOME)")?
                 .join("git-forge"),
         };
-        Ok(GitForgeIndex::new(org, base, cache_dir, token))
+        Ok(GitForgeIndex::new(org, base, cache_dir))
     }
 
     /// Construct with explicit configuration (used by tests to point at a local repo host).
@@ -70,13 +57,11 @@ impl GitForgeIndex {
         org: impl Into<String>,
         base: impl Into<String>,
         cache_dir: impl Into<PathBuf>,
-        token: Option<String>,
     ) -> GitForgeIndex {
         GitForgeIndex {
             org: org.into(),
             base: base.into(),
             cache_dir: cache_dir.into(),
-            token,
         }
     }
 
@@ -219,9 +204,13 @@ fn path_str(p: &Path) -> Result<&str, String> {
         .ok_or_else(|| format!("path `{}` is not valid UTF-8", p.display()))
 }
 
-/// Run `git` with `args`, returning trimmed stdout or an error built from stderr.
+/// Run `git` with `args`, returning trimmed stdout or an error built from stderr. Token auth
+/// (private-registries S5) is prepended so private-repo version discovery authenticates; empty when no
+/// `NOETA_GITHUB_TOKEN`, so git uses ambient credentials.
 fn git(args: &[&str]) -> Result<String, String> {
+    let auth = crate::git_auth::git_auth_args();
     let output = Command::new("git")
+        .args(auth.iter().map(String::as_str))
         .args(args)
         .output()
         .map_err(|err| format!("cannot run `git` (is it installed and on PATH?): {err}"))?;
@@ -303,7 +292,7 @@ mod tests {
         let cache = tmp.join("cache");
         make_repo(&host, "acme", "thing");
 
-        let idx = GitForgeIndex::new("acme", host.to_str().unwrap(), cache.clone(), None);
+        let idx = GitForgeIndex::new("acme", host.to_str().unwrap(), cache.clone());
         // Called twice to exercise both the initial clone and the refresh path.
         let _ = idx.releases("acme/thing").unwrap();
         let mut releases = idx.releases("acme/thing").unwrap();
@@ -344,7 +333,6 @@ mod tests {
             "acme",
             tmp.join("host").to_str().unwrap(),
             tmp.join("cache"),
-            None,
         );
         let err = idx.releases("acme/nope").unwrap_err();
         assert!(
@@ -355,7 +343,7 @@ mod tests {
 
     #[test]
     fn publish_is_unsupported() {
-        let idx = GitForgeIndex::new("acme", "https://github.com", std::env::temp_dir(), None);
+        let idx = GitForgeIndex::new("acme", "https://github.com", std::env::temp_dir());
         let r = Release {
             version: Version::new(1, 0, 0),
             coords: GitCoords {
