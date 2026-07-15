@@ -1,5 +1,5 @@
 [package]
-name = "noeta-lexer"
+name = "noeta-edition"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,13 +7,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-noeta-edition = { workspace = true }
+# `SourceId` — the key of an `EditionMap`. `noeta-span` is itself a leaf (it depends on nothing in
+# the pipeline), so this stays acyclic and `noeta-edition` remains near the bottom of the DAG.
 noeta-span = { workspace = true }
-noeta-diagnostics = { workspace = true }
-logos = { workspace = true }
-
-[dev-dependencies]
-insta = { workspace = true }
 
 [lints]
 workspace = true

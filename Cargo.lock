@@ -3999,6 +3999,7 @@ dependencies = [
  "insta",
  "noeta-ast",
  "noeta-diagnostics",
+ "noeta-edition",
  "noeta-lexer",
  "noeta-parser",
  "noeta-span",
@@ -4127,6 +4128,7 @@ dependencies = [
  "noeta-lexer",
  "noeta-loader",
  "noeta-parser",
+ "noeta-pm",
  "noeta-runtime",
  "noeta-span",
  "noeta-stdlib",
@@ -4161,6 +4163,13 @@ dependencies = [
  "noeta-span",
  "schemars",
  "serde",
+]
+
+[[package]]
+name = "noeta-edition"
+version = "0.1.0"
+dependencies = [
+ "noeta-span",
 ]
 
 [[package]]
@@ -4307,6 +4316,7 @@ dependencies = [
  "insta",
  "logos",
  "noeta-diagnostics",
+ "noeta-edition",
  "noeta-span",
 ]
 
@@ -4350,6 +4360,7 @@ dependencies = [
  "noeta-lexer",
  "noeta-loader",
  "noeta-parser",
+ "noeta-pm",
  "noeta-runtime",
  "noeta-span",
  "noeta-stdlib",
@@ -4415,6 +4426,7 @@ dependencies = [
  "insta",
  "noeta-ast",
  "noeta-diagnostics",
+ "noeta-edition",
  "noeta-lexer",
  "noeta-span",
  "proptest",
@@ -4446,6 +4458,7 @@ dependencies = [
  "getrandom 0.3.4",
  "noeta-cache",
  "noeta-check",
+ "noeta-edition",
  "noeta-fmt",
  "noeta-loader",
  "p256",
@@ -4477,6 +4490,7 @@ dependencies = [
  "noeta-compiler",
  "noeta-diagnostics",
  "noeta-loader",
+ "noeta-pm",
  "noeta-runtime",
  "noeta-span",
  "noeta-stdlib",

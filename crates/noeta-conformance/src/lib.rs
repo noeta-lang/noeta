@@ -88,13 +88,17 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         .into_iter()
         .map(str::to_string)
         .collect();
-    let lexed = noeta_lexer::lex_in(&source, &noeta_lexer::TextTiers::with(tier_names.clone()));
+    let lexed = noeta_lexer::lex_in(
+        &source,
+        noeta_lexer::Edition::DEFAULT,
+        &noeta_lexer::TextTiers::with(tier_names.clone()),
+    );
     // Union the file's own `@tier(…, text/expr)` declarations (the lexer's two-pass discovered
     // them) so a `${…}` hole's re-lex knows *this* file's tiers too — an inline `@t { … }` loop
     // body inside a hole. Re-lexing is idempotent, so a second pass with the full set is safe.
     tier_names.extend(lexed.text_tier_decls.iter().cloned());
     let ext_tiers = noeta_lexer::TextTiers::with(tier_names);
-    let lexed = noeta_lexer::lex_in(&source, &ext_tiers);
+    let lexed = noeta_lexer::lex_in(&source, noeta_lexer::Edition::DEFAULT, &ext_tiers);
     let mut diagnostics = lexed.diagnostics.clone();
 
     let mut stdout = String::new();
@@ -103,7 +107,12 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
     if stage == Stage::Lexer {
         exit_code = if diagnostics.is_empty() { 0 } else { 1 };
     } else {
-        let parsed = noeta_parser::parse_in(&source, &lexed.tokens, &ext_tiers);
+        let parsed = noeta_parser::parse_in(
+            &source,
+            &lexed.tokens,
+            noeta_lexer::Edition::DEFAULT,
+            &ext_tiers,
+        );
         diagnostics.extend(parsed.diagnostics);
 
         // The type checker (M1.7) is the front-end gate for the eval stage: a program with type
@@ -246,7 +255,7 @@ pub fn run_case_path(entry: &Path, display: &str, stage: Stage) -> CaseResult {
 /// Load + link `entry` and run the merged program to an [`Outcome`]. Lex/parse errors render
 /// against the source they came from; check/runtime diagnostics against the entry source.
 fn run_linked(entry: &Path, stage: Stage) -> Outcome {
-    let linked = match noeta_loader::load(entry) {
+    let linked = match noeta_loader::load(entry, noeta_lexer::Edition::DEFAULT) {
         Ok(Ok(linked)) => linked,
         Ok(Err(load_diagnostics)) => {
             let errors = load_diagnostics

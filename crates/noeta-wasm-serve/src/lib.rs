@@ -260,7 +260,7 @@ mod tests {
     fn compile(text: &str) -> noeta_bytecode::Module {
         let db = noeta_db::LangDatabase::default();
         let source = noeta_span::Source::new(noeta_span::SourceId::FIRST, "app.noe", text);
-        let src = noeta_db::source_program(&db, &source);
+        let src = noeta_db::source_program(&db, &source, noeta_db::Edition::DEFAULT);
         noeta_db::bytecode(&db, src)
             .0
             .as_ref()

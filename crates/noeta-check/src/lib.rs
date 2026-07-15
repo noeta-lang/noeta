@@ -71,6 +71,7 @@ use noeta_ast::{
     StrPart, StructDecl, TypeParam, TypeRef, UnaryOp,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
+use noeta_edition::{Edition, EditionMap};
 use noeta_span::Span;
 use noeta_types::{BuiltinTrait, Type};
 
@@ -189,19 +190,81 @@ pub struct Sites {
     pub destructor_relevance: DestructorRelevance,
 }
 
+/// Everything that varies a whole-program check, so callers configure one entry point
+/// ([`check_all_with`]) instead of the checker growing a `_with_types_and_editions_and_registry`
+/// combinatorial family. `Default` is an ordinary compile-path check (no type index, process-global
+/// registry, every declaration at [`Edition::DEFAULT`]) — identical to [`check_all`].
+#[derive(Default)]
+pub struct CheckOptions {
+    /// Record every expression's inferred type into [`Checked::expr_types`] — the span→type index the
+    /// IDE hover path reads. Off on the compile path (it pays nothing for the index).
+    pub record_expr_types: bool,
+    /// A per-session extension [`Registry`] (instance-registry F2) to resolve native
+    /// modules/functions/extern types/bundles against, instead of the process-global default. `None`
+    /// routes every lookup through the default registry — identical to an ordinary check.
+    pub registry: Option<&'static noeta_stdlib::registry::Registry>,
+    /// Which language [`Edition`] governs each source, keyed by `SourceId` (editions arc): the loader
+    /// builds it per merged program. Empty means every declaration is [`Edition::DEFAULT`].
+    pub editions: EditionMap,
+}
+
+impl std::fmt::Debug for CheckOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CheckOptions")
+            .field("record_expr_types", &self.record_expr_types)
+            // The registry is a `&'static` handle whose contents aren't `Debug`; report only presence.
+            .field("registry", &self.registry.is_some())
+            .field("editions", &self.editions)
+            .finish()
+    }
+}
+
+/// Type-check a program once against explicit [`CheckOptions`] — the single configurable entry every
+/// other `check_all*` is a thin preset of. Edition-, type-index-, and registry-aware in one call, so
+/// a tool that has (say) both a per-package [`EditionMap`] and the IDE type index asks for both
+/// without a bespoke entry point.
+pub fn check_all_with(program: &Program, opts: CheckOptions) -> Checked {
+    check_all_impl(
+        program,
+        opts.record_expr_types,
+        opts.registry,
+        opts.editions,
+    )
+}
+
 /// Type-check a program once, returning both its diagnostics and its resolved-type map. This is
 /// the single-pass entry point the hot paths (the CLI, the conformance/differential harnesses,
 /// the `noeta-db` `bytecode` query) use so the checker runs exactly once per program.
 pub fn check_all(program: &Program) -> Checked {
-    check_all_impl(program, false, None)
+    check_all_with(program, CheckOptions::default())
 }
 
 /// Like [`check_all`], but additionally records every expression's inferred type into
-/// [`Checked::expr_types`] — the span→type index the IDE hover feature reads. Only the IDE path
-/// (`noeta-db`'s `checked_ide` query) calls this; the compile path uses [`check_all`] and never
-/// builds the index. Diagnostics are identical either way — recording types is a pure side-channel.
+/// [`Checked::expr_types`] — the span→type index the IDE hover feature reads. Diagnostics are
+/// identical either way — recording types is a pure side-channel.
 pub fn check_all_with_types(program: &Program) -> Checked {
-    check_all_impl(program, true, None)
+    check_all_with(
+        program,
+        CheckOptions {
+            record_expr_types: true,
+            ..CheckOptions::default()
+        },
+    )
+}
+
+/// [`check_all`] against the per-source [`EditionMap`] the loader built for a merged program, so the
+/// checker can recover each declaration's own language [`Edition`] from its span (editions compiler
+/// arc). Passing an empty map is identical to [`check_all`]. The whole-program compile/run and tool
+/// paths call this with `Linked::editions`; today, with one edition, the result is byte-identical to
+/// [`check_all`], but the per-package edition is now carried into the checker.
+pub fn check_all_with_editions(program: &Program, editions: EditionMap) -> Checked {
+    check_all_with(
+        program,
+        CheckOptions {
+            editions,
+            ..CheckOptions::default()
+        },
+    )
 }
 
 /// [`check_all`] against an explicit per-session extension [`Registry`] (instance-registry F2)
@@ -214,17 +277,25 @@ pub fn check_all_with_registry(
     program: &Program,
     registry: &'static noeta_stdlib::registry::Registry,
 ) -> Checked {
-    check_all_impl(program, false, Some(registry))
+    check_all_with(
+        program,
+        CheckOptions {
+            registry: Some(registry),
+            ..CheckOptions::default()
+        },
+    )
 }
 
 fn check_all_impl(
     program: &Program,
     record_expr_types: bool,
     registry: Option<&'static noeta_stdlib::registry::Registry>,
+    editions: EditionMap,
 ) -> Checked {
     let mut checker = Checker {
         record_expr_types,
         registry,
+        editions,
         ..Checker::default()
     };
     checker.register_prelude();
@@ -245,7 +316,21 @@ fn check_all_impl(
 /// [`Checked`] is identical to [`check_all`]'s (same phases, same env — merely kept instead of
 /// dropped, the same move `compile_with_sites_session` made for the compiler).
 pub fn check_all_session(program: &Program) -> (Checked, SessionChecker) {
-    let mut checker = Checker::default();
+    check_all_session_with(program, EditionMap::default())
+}
+
+/// [`check_all_session`] against the per-source [`EditionMap`] the loader built for the program under
+/// debug/REPL (editions arc): the seeded whole-program check — and the session that outlives it —
+/// resolve each declaration's edition from its span, exactly as the batch checker does. Passing an
+/// empty map is identical to [`check_all_session`].
+pub fn check_all_session_with(
+    program: &Program,
+    editions: EditionMap,
+) -> (Checked, SessionChecker) {
+    let mut checker = Checker {
+        editions,
+        ..Checker::default()
+    };
     checker.register_prelude();
     checker.collect_imports(program);
     checker.collect(program);
@@ -1028,6 +1113,14 @@ struct Checker {
     /// return `&'static` (its units are static); the handle is `Copy`, so `Clone` (the transactional
     /// session snapshot) stays cheap.
     registry: Option<&'static noeta_stdlib::registry::Registry>,
+    /// Which language [`Edition`] governs each source of the merged program, keyed by `SourceId`
+    /// (editions compiler arc). The loader builds this from each package's own edition; the checker
+    /// recovers a declaration's edition from its span via [`Checker::edition_at`]. Empty — the
+    /// default — means every declaration is [`Edition::DEFAULT`] (a single-file check, or the
+    /// one-edition world), so an ordinary check is unchanged. The first rule to branch on it is the
+    /// editions arc's S3 (the first edition-gated behaviour); until then this is threaded and
+    /// per-span-queryable but consulted by no rule.
+    editions: EditionMap,
     diags: Vec<Diagnostic>,
 }
 
@@ -1065,6 +1158,20 @@ impl Checker {
     fn reg(&self) -> &'static noeta_stdlib::registry::Registry {
         self.registry
             .unwrap_or_else(noeta_stdlib::registry::default_seeded)
+    }
+
+    /// The language [`Edition`] governing the declaration a `span` belongs to — resolved from the
+    /// per-source [`EditionMap`] the loader threaded in ([`Checker::editions`]) via the span's
+    /// `SourceId`, defaulting to [`Edition::DEFAULT`] for any source without a recorded edition (a
+    /// single-file check, a synthetic span, or the one-edition world).
+    ///
+    /// This is the per-declaration edition switch for a merged program: every rule that will diverge
+    /// by edition reads it here rather than assuming the root's edition. No rule branches on it yet —
+    /// the first is the editions arc's S3 — so it is `allow(dead_code)` until then; it is wired and
+    /// unit-tested now so that slice adds only the divergent behaviour, not the plumbing.
+    #[allow(dead_code)]
+    fn edition_at(&self, span: Span) -> Edition {
+        self.editions.at(span)
     }
 
     /// Record an error diagnostic, returning `&mut` to the just-pushed diagnostic so a help line can

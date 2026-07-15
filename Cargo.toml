@@ -11,6 +11,9 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 # Internal crates (path deps; the pipeline DAG)
+# Language editions — the lowest crate (zero deps): the shared `Edition` vocabulary every layer
+# (lexer, parser, checker, package manager) names without pulling in the pm stack.
+noeta-edition = { path = "crates/noeta-edition" }
 noeta-span = { path = "crates/noeta-span" }
 noeta-diagnostics = { path = "crates/noeta-diagnostics" }
 noeta-ast = { path = "crates/noeta-ast" }

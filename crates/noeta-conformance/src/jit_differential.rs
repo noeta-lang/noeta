@@ -125,7 +125,7 @@ pub fn run_jit_differential(root: &Path, only: Option<&Path>) -> JitDiffReport {
 fn compare_tiers(name: &str, text: &str, report: &mut JitDiffReport) {
     let db = LangDatabase::default();
     let source = Source::new(SourceId::FIRST, name, text);
-    let src = noeta_db::source_program(&db, &source);
+    let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
 
     let tokens = noeta_db::tokens(&db, src);
     let parsed = noeta_db::ast(&db, src);
@@ -152,7 +152,7 @@ fn compare_tiers_workspace(
     report: &mut JitDiffReport,
 ) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules);
+    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
 
     if noeta_db::linked(&db, ws).0.is_err() {
         report.parse_failed += 1;

@@ -416,7 +416,7 @@ fn parse_hole(ctx: Ctx<'_>, text: &str, abs_offset: u32) -> Expr {
     let temp = Source::new(SourceId::FIRST, "<interp>", text);
     // Re-lex the hole with the file's tier set, so a nested `@html { … }` inside the hole (an
     // inline loop body) captures its verbatim body just as it would at the top level.
-    let lexed = lex_in(&temp, ctx.text_tiers);
+    let lexed = lex_in(&temp, ctx.edition, ctx.text_tiers);
     let toks: Vec<(T, SimpleSpan)> = lexed
         .tokens
         .iter()

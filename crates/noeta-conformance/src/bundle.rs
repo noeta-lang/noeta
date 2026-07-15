@@ -173,7 +173,7 @@ fn describe_run_difference(source: &RunResult, bundle: &RunResult) -> Option<Str
 fn roundtrip_single(name: &str, text: &str, report: &mut BundleReport) {
     let db = LangDatabase::default();
     let source = Source::new(SourceId::FIRST, name, text);
-    let src = noeta_db::source_program(&db, &source);
+    let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
 
     if !noeta_db::tokens(&db, src).0.diagnostics.is_empty()
         || !noeta_db::ast(&db, src).0.diagnostics.is_empty()
@@ -196,7 +196,7 @@ fn roundtrip_single(name: &str, text: &str, report: &mut BundleReport) {
 /// The workspace analogue of [`roundtrip_single`] for a multi-file fixture.
 fn roundtrip_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mut BundleReport) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules);
+    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
 
     if noeta_db::linked(&db, ws).0.is_err() {
         report.parse_failed += 1;

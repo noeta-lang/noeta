@@ -297,7 +297,8 @@ impl DocumentStore {
             .and_then(|p| p.parent().map(noeta_fmt::FmtConfig::discover))
             .unwrap_or_default();
         let tiers = self.text_tiers_of(uri);
-        let formatted = noeta_fmt::format_source_in(uri, text, &config, &tiers).ok()?;
+        let edition = edition_of_uri(uri);
+        let formatted = noeta_fmt::format_source_in(uri, text, &config, edition, &tiers).ok()?;
         if formatted == *text {
             return Some(Vec::new()); // already canonical — no edit, no churn
         }
@@ -325,8 +326,9 @@ impl DocumentStore {
         let index = LineIndex::new(text);
         let offset = index.offset(position, encoding);
         let tiers = self.text_tiers_of(uri);
+        let edition = edition_of_uri(uri);
         let (start, end, new_text) =
-            noeta_fmt::format_stmt_at_in(uri, text, offset, &config, &tiers)?;
+            noeta_fmt::format_stmt_at_in(uri, text, offset, &config, edition, &tiers)?;
         Some(vec![TextEdit {
             range: Range::new(
                 index.position(start, encoding),
@@ -353,7 +355,8 @@ impl DocumentStore {
         let start = index.offset(range.start, encoding);
         let end = index.offset(range.end, encoding);
         let tiers = self.text_tiers_of(uri);
-        let edits = noeta_fmt::format_range_in(uri, text, start, end, &config, &tiers)?;
+        let edition = edition_of_uri(uri);
+        let edits = noeta_fmt::format_range_in(uri, text, start, end, &config, edition, &tiers)?;
         Some(
             edits
                 .into_iter()
@@ -398,7 +401,15 @@ impl DocumentStore {
         let programs: Vec<SourceProgram> = sources
             .iter()
             .enumerate()
-            .map(|(id, (u, text))| SourceProgram::new(&self.db, id as u32, u.clone(), text.clone()))
+            .map(|(id, (u, text))| {
+                SourceProgram::new(
+                    &self.db,
+                    id as u32,
+                    u.clone(),
+                    text.clone(),
+                    edition_of_uri(u).as_str().to_string(),
+                )
+            })
             .collect();
         // Dependency packages (package-manager P2.1c): resolve the entry's deps and add each dep
         // module as a `DepModule` input (SourceIds continue past the siblings), so cross-package
@@ -473,8 +484,14 @@ impl DocumentStore {
                 .flat_map(|(local, global)| [local.clone(), global.clone()])
                 .collect();
             for module in &package.modules {
-                let src =
-                    SourceProgram::new(&self.db, next_id, module.name.clone(), module.text.clone());
+                let src = SourceProgram::new(
+                    &self.db,
+                    next_id,
+                    module.name.clone(),
+                    module.text.clone(),
+                    // The dependency package's own edition (already canonical on `DepPackage`).
+                    package.edition.clone(),
+                );
                 next_id += 1;
                 deps.modules.push(DepModule::new(
                     &self.db,
@@ -1789,6 +1806,17 @@ fn uri_to_path(uri: &str) -> Option<PathBuf> {
     let rest = uri.strip_prefix("file://")?;
     // `file:///abs` → `/abs`; a leading host (`file://host/p`) is not expected for local files.
     Some(PathBuf::from(rest))
+}
+
+/// The language edition the document at `uri` is written against — its package's `edition`, read
+/// from the nearest `noeta.toml` (the editions arc). Defaults to [`Edition::DEFAULT`] for a
+/// directory-less document (e.g. `untitled:`) or a manifest-less file, so formatting/analysis of a
+/// lone buffer is unchanged. The formatter and (later) analysis run under this so a future edition's
+/// grammar is parsed correctly.
+fn edition_of_uri(uri: &str) -> noeta_lexer::Edition {
+    uri_to_path(uri)
+        .map(|p| noeta_pm::manifest::root_edition(&p))
+        .unwrap_or_default()
 }
 
 /// The `file:` URI for a filesystem path — the inverse of [`uri_to_path`] for the paths it produces.

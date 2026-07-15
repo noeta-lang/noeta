@@ -214,7 +214,13 @@ impl std::error::Error for FmtError {}
 /// The output is guaranteed to (a) re-parse and (b) re-parse to the same AST modulo spans — the
 /// safety gate enforces this before returning `Ok`.
 pub fn format_source(name: &str, text: &str, config: &FmtConfig) -> Result<String, FmtError> {
-    format_source_in(name, text, config, &noeta_lexer::TextTiers::default())
+    format_source_in(
+        name,
+        text,
+        config,
+        noeta_lexer::Edition::DEFAULT,
+        &noeta_lexer::TextTiers::default(),
+    )
 }
 
 /// [`format_source`] with an explicit text-tier set (text-tiers arc): tiers declared in *other*
@@ -225,12 +231,14 @@ pub fn format_source_in(
     name: &str,
     text: &str,
     config: &FmtConfig,
+    edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Result<String, FmtError> {
     format_source_in_with_formatters(
         name,
         text,
         config,
+        edition,
         text_tiers,
         &TierBodyFormatters::new(),
         &TierBodyFormatters::new(),
@@ -274,6 +282,7 @@ pub fn format_source_in_with_formatters(
     name: &str,
     text: &str,
     config: &FmtConfig,
+    edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
     formatters: &TierBodyFormatters,
     lang_formatters: &TierBodyFormatters,
@@ -281,15 +290,18 @@ pub fn format_source_in_with_formatters(
     let source = Source::new(SourceId(0), name, text);
 
     // Lex with trivia so comments are available to the printer (reattached in F4). The token stream
-    // is identical to a plain `lex`, so parsing is unaffected.
-    let lexed = noeta_lexer::lex_with_trivia_in(&source, text_tiers);
-    let program = parse_checked(&source, &lexed)?;
+    // is identical to a plain `lex`, so parsing is unaffected. Everything — forward lex/parse, the
+    // printer's token lookup, and the safety-gate reparse — runs under the file's edition, so a
+    // future edition's grammar is parsed (and re-parsed) consistently.
+    let lexed = noeta_lexer::lex_with_trivia_in(&source, edition, text_tiers);
+    let program = parse_checked(&source, edition, &lexed)?;
 
     let out = print::print_program(
         &program,
         text,
         &lexed.comments,
         config,
+        edition,
         text_tiers,
         formatters,
         lang_formatters,
@@ -297,7 +309,7 @@ pub fn format_source_in_with_formatters(
 
     // Safety gate: the formatted text must parse, and parse to the same program modulo spans.
     let formatted = Source::new(SourceId(0), name, out.as_str());
-    let reparsed = parse_clean(&formatted, text_tiers).map_err(|_| {
+    let reparsed = parse_clean(&formatted, edition, text_tiers).map_err(|_| {
         FmtError::Safety("formatted output does not re-parse (printer bug)".to_string())
     })?;
     // Strict first; if a body formatter reflowed a tier body, the strict gate trips on the changed
@@ -332,21 +344,23 @@ pub fn format_stmt_at(
         text,
         offset,
         config,
+        noeta_lexer::Edition::DEFAULT,
         &noeta_lexer::TextTiers::default(),
     )
 }
 
-/// [`format_stmt_at`] with an explicit text-tier set (see [`format_source_in`]).
+/// [`format_stmt_at`] with an explicit language edition + text-tier set (see [`format_source_in`]).
 pub fn format_stmt_at_in(
     name: &str,
     text: &str,
     offset: u32,
     config: &FmtConfig,
+    edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Option<(u32, u32, String)> {
     let source = Source::new(SourceId(0), name, text);
-    let lexed = noeta_lexer::lex_with_trivia_in(&source, text_tiers);
-    let program = parse_checked(&source, &lexed).ok()?;
+    let lexed = noeta_lexer::lex_with_trivia_in(&source, edition, text_tiers);
+    let program = parse_checked(&source, edition, &lexed).ok()?;
 
     let stmt = program.stmts.iter().find(|s| {
         let span = s.span();
@@ -355,7 +369,8 @@ pub fn format_stmt_at_in(
     let span = stmt.span();
     let (start, end) = (span.start as usize, span.end as usize);
 
-    let formatted = print::print_stmt(stmt, text, &lexed.comments, config, text_tiers).ok()?;
+    let formatted =
+        print::print_stmt(stmt, text, &lexed.comments, config, edition, text_tiers).ok()?;
     if text.get(start..end) == Some(formatted.as_str()) {
         return None; // already canonical
     }
@@ -365,8 +380,12 @@ pub fn format_stmt_at_in(
     edited.push_str(&text[..start]);
     edited.push_str(&formatted);
     edited.push_str(&text[end..]);
-    let reparsed =
-        parse_clean(&Source::new(SourceId(0), name, edited.as_str()), text_tiers).ok()?;
+    let reparsed = parse_clean(
+        &Source::new(SourceId(0), name, edited.as_str()),
+        edition,
+        text_tiers,
+    )
+    .ok()?;
     if !safety::ast_equal_modulo_spans(&program, &reparsed) {
         return None;
     }
@@ -395,22 +414,24 @@ pub fn format_range(
         start,
         end,
         config,
+        noeta_lexer::Edition::DEFAULT,
         &noeta_lexer::TextTiers::default(),
     )
 }
 
-/// [`format_range`] with an explicit text-tier set (see [`format_source_in`]).
+/// [`format_range`] with an explicit language edition + text-tier set (see [`format_source_in`]).
 pub fn format_range_in(
     name: &str,
     text: &str,
     start: u32,
     end: u32,
     config: &FmtConfig,
+    edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Option<Vec<(u32, u32, String)>> {
     let source = Source::new(SourceId(0), name, text);
-    let lexed = noeta_lexer::lex_with_trivia_in(&source, text_tiers);
-    let program = parse_checked(&source, &lexed).ok()?;
+    let lexed = noeta_lexer::lex_with_trivia_in(&source, edition, text_tiers);
+    let program = parse_checked(&source, edition, &lexed).ok()?;
 
     let mut edits: Vec<(u32, u32, String)> = Vec::new();
     for stmt in &program.stmts {
@@ -418,7 +439,7 @@ pub fn format_range_in(
         // A statement overlaps the (possibly zero-width) selection when their ranges touch.
         if span.start <= end && start <= span.end {
             let formatted =
-                print::print_stmt(stmt, text, &lexed.comments, config, text_tiers).ok()?;
+                print::print_stmt(stmt, text, &lexed.comments, config, edition, text_tiers).ok()?;
             if text.get(span.start as usize..span.end as usize) != Some(formatted.as_str()) {
                 edits.push((span.start, span.end, formatted));
             }
@@ -438,8 +459,12 @@ pub fn format_range_in(
         prev = *e as usize;
     }
     edited.push_str(&text[prev..]);
-    let reparsed =
-        parse_clean(&Source::new(SourceId(0), name, edited.as_str()), text_tiers).ok()?;
+    let reparsed = parse_clean(
+        &Source::new(SourceId(0), name, edited.as_str()),
+        edition,
+        text_tiers,
+    )
+    .ok()?;
     if !safety::ast_equal_modulo_spans(&program, &reparsed) {
         return None;
     }
@@ -450,9 +475,18 @@ pub fn format_range_in(
 /// any diagnostic. The formatter only ever operates on programs that parse cleanly.
 fn parse_checked(
     source: &Source,
+    edition: noeta_lexer::Edition,
     lexed: &noeta_lexer::Lexed,
 ) -> Result<noeta_ast::Program, FmtError> {
-    let parsed = noeta_parser::parse(source, &lexed.tokens);
+    // Parse under the file's edition (a future edition may change the grammar). Tiers stay the
+    // default set here, exactly as the previous `noeta_parser::parse` did — the forward pass already
+    // captured verbatim bodies, so the safety-gate reparse only needs the code grammar.
+    let parsed = noeta_parser::parse_in(
+        source,
+        &lexed.tokens,
+        edition,
+        &noeta_lexer::TextTiers::default(),
+    );
     let mut diagnostics = lexed.diagnostics.clone();
     diagnostics.extend(parsed.diagnostics);
     if !diagnostics.is_empty() {
@@ -466,9 +500,14 @@ fn parse_checked(
 /// the same node on both sides.
 fn parse_clean(
     source: &Source,
+    edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Result<noeta_ast::Program, FmtError> {
-    parse_checked(source, &noeta_lexer::lex_in(source, text_tiers))
+    parse_checked(
+        source,
+        edition,
+        &noeta_lexer::lex_in(source, edition, text_tiers),
+    )
 }
 
 #[cfg(test)]
@@ -510,6 +549,7 @@ mod tests {
             "t.noe",
             text,
             &FmtConfig::default(),
+            noeta_lexer::Edition::DEFAULT,
             &tiers,
             &formatters,
             &TierBodyFormatters::new(),
@@ -552,6 +592,7 @@ mod tests {
             "t.noe",
             &format!("{SQL_TIER}r = @sql {{ select ${{ x }} from T }}\n"),
             &FmtConfig::default(),
+            noeta_lexer::Edition::DEFAULT,
             &noeta_lexer::TextTiers::with(vec!["sql".to_string()]),
         )
         .expect("formats");
@@ -576,6 +617,7 @@ mod tests {
             "test.noe",
             src,
             &FmtConfig::default(),
+            noeta_lexer::Edition::DEFAULT,
             &noeta_lexer::TextTiers::default(),
         )
         .unwrap();

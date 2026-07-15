@@ -19,6 +19,7 @@ noeta-ast = { workspace = true }
 noeta-diagnostics = { workspace = true, features = ["schema"] }
 noeta-db = { workspace = true }
 noeta-loader = { workspace = true }
+noeta-pm = { workspace = true }
 # The native-extension registry (M2 `stdlib_api`): enumerate every registered module/function/type +
 # its `SigType` signatures, rendered into agent-readable Noeta signatures. Re-exports `noeta-native`'s
 # ABI vocabulary (SigType/RetTy/ExtFn/ExtModule/ExtType), so the tool reads the same single source of

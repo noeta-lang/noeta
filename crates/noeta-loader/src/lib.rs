@@ -42,6 +42,12 @@ pub struct Linked {
     /// that module's `SourceId`, so it resolves to the right file through this map rather than
     /// always rendering against the entry.
     pub sources: SourceMap,
+    /// Which language [`Edition`](noeta_lexer::Edition) each source was written against, keyed by
+    /// `SourceId` — the parallel of [`Self::sources`] for editions. The entry and its siblings take
+    /// the root package's edition; each dependency package's modules take that package's own
+    /// edition. The checker consults this per declaration (via a span's `SourceId`) so a merged
+    /// program applies each package's own edition rules — the editions compiler arc's whole point.
+    pub editions: noeta_lexer::EditionMap,
 }
 
 /// A diagnostic produced while loading, paired with the source it renders against.
@@ -54,11 +60,14 @@ pub struct LoadDiagnostic {
 /// Load and link the program rooted at `entry_path`. Returns the linked program, or the
 /// load-time (lex/parse) diagnostics of the entry, each paired with its source. An `io::Error`
 /// is only for a failure to read the entry file itself.
-pub fn load(entry_path: &Path) -> io::Result<Result<Linked, Vec<LoadDiagnostic>>> {
+pub fn load(
+    entry_path: &Path,
+    root_edition: noeta_lexer::Edition,
+) -> io::Result<Result<Linked, Vec<LoadDiagnostic>>> {
     let text = std::fs::read_to_string(entry_path)?;
     let name = entry_path.display().to_string();
     let siblings = read_siblings(entry_path);
-    Ok(link(&name, &text, &siblings))
+    Ok(link(&name, &text, root_edition, &siblings))
 }
 
 /// One sibling module's identity (display name + source text), before parsing. Public so the
@@ -75,12 +84,13 @@ pub struct RawModule {
 /// a failure to read the entry file itself.
 pub fn load_with_deps(
     entry_path: &Path,
+    root_edition: noeta_lexer::Edition,
     deps: &[DepPackage],
 ) -> io::Result<Result<Linked, Vec<LoadDiagnostic>>> {
     let text = std::fs::read_to_string(entry_path)?;
     let name = entry_path.display().to_string();
     let siblings = read_siblings(entry_path);
-    Ok(link_with_deps(&name, &text, &siblings, deps))
+    Ok(link_with_deps(&name, &text, root_edition, &siblings, deps))
 }
 
 /// Read every `.noe` file **under `dir` recursively** as a [`RawModule`], in sorted order (so
@@ -150,6 +160,12 @@ pub struct DepPackage {
     /// its key; the composed checker validates the members. A pure-Noeta package has all its modules
     /// in the link pool, so a `use` under its key that resolves to nothing is a genuine typo.
     pub native: bool,
+    /// The package's language **edition** in canonical string form (`"2026"`) — the semantics its
+    /// source is written against (editions arc). Carried per package from resolution so a later
+    /// compiler pass can apply *each* package's edition to *its own* declarations; today the merged
+    /// program still compiles under the root's edition, so this is recorded, not yet acted on. A
+    /// string (not the `Edition` enum) because the loader sits below the manifest layer that owns it.
+    pub edition: String,
 }
 
 /// Re-root a namespace/use path in place: replace its leading segment per the rules
@@ -259,22 +275,27 @@ fn read_siblings(entry_path: &Path) -> Vec<RawModule> {
 pub fn link(
     entry_name: &str,
     entry_text: &str,
+    root_edition: noeta_lexer::Edition,
     siblings: &[RawModule],
 ) -> Result<Linked, Vec<LoadDiagnostic>> {
     // The entry is always SourceId 0; siblings follow. Each module keeps its own source so its
-    // spans stay valid and its diagnostics render against it.
+    // spans stay valid and its diagnostics render against it. The deps-free path: entry + siblings
+    // are one package, so every source takes the root edition.
     let entry = Source::new(SourceId(0), entry_name, entry_text);
     let mut sources: Vec<Source> = vec![entry.clone()];
+    let mut editions = noeta_lexer::EditionMap::new();
+    editions.set(SourceId(0), root_edition);
     for (i, raw) in siblings.iter().enumerate() {
-        sources.push(Source::new(
-            SourceId((i + 1) as u32),
-            raw.name.as_str(),
-            raw.text.as_str(),
-        ));
+        let id = SourceId((i + 1) as u32);
+        sources.push(Source::new(id, raw.name.as_str(), raw.text.as_str()));
+        editions.set(id, root_edition);
     }
     let (lexeds, text_tiers) = lex_program(&sources);
 
-    let entry_parsed = noeta_parser::parse_in(&entry, &lexeds[0].tokens, &text_tiers);
+    // Entry + siblings parse under the root package's edition (deps-free: no dependency packages,
+    // so no other editions are in play). `link_with_deps` is the twin that also links dependencies,
+    // each under its own edition.
+    let entry_parsed = noeta_parser::parse_in(&entry, &lexeds[0].tokens, root_edition, &text_tiers);
     let entry_diags: Vec<Diagnostic> = lexeds[0]
         .diagnostics
         .iter()
@@ -291,14 +312,14 @@ pub fn link(
             .collect());
     }
 
-    // Parse each sibling. Only cleanly-parsed modules contribute (a module that fails to lex/parse
-    // cannot be resolved against and is skipped — surfacing a *referenced-but-broken* module's
-    // errors is the deferred SourceMap work). Keep the parsed programs alive for [`link_parsed`].
-    // Every sibling's `Source` is retained (whether or not it parsed) so the `SourceMap` indices
-    // line up with the `SourceId`s the parser stamped onto spans (entry = 0, sibling i = i + 1).
+    // Parse each sibling under the root edition. Only cleanly-parsed modules contribute (a module
+    // that fails to lex/parse cannot be resolved against and is skipped — surfacing a
+    // *referenced-but-broken* module's errors is the deferred SourceMap work). Keep the parsed
+    // programs alive for [`link_parsed`]. Every sibling's `Source` is retained (whether or not it
+    // parsed) so the `SourceMap` indices line up with the `SourceId`s the parser stamped onto spans.
     let mut module_programs: Vec<Program> = Vec::new();
     for (source, lexed) in sources.iter().zip(&lexeds).skip(1) {
-        if let Some(program) = parse_clean(source, lexed, &text_tiers) {
+        if let Some(program) = parse_clean(source, lexed, root_edition, &text_tiers) {
             module_programs.push(program);
         }
     }
@@ -309,6 +330,7 @@ pub fn link(
         program,
         entry,
         sources: SourceMap::new(sources),
+        editions,
     })
 }
 
@@ -322,38 +344,53 @@ pub fn link(
 pub fn link_with_deps(
     entry_name: &str,
     entry_text: &str,
+    root_edition: noeta_lexer::Edition,
     siblings: &[RawModule],
     deps: &[DepPackage],
 ) -> Result<Linked, Vec<LoadDiagnostic>> {
     // Assemble every module's `Source` up front — entry = 0, siblings `1..=S`, dependency modules
     // continuing the sequence — then lex them as one program (see [`lex_program`]: a text tier
     // declared in any file, a dependency package's included, captures verbatim bodies in every
-    // file) before any parsing.
+    // file) before any parsing. The `editions` side-table is built in lock-step: the entry and its
+    // siblings take the root package's edition, each dependency's modules that package's own.
     let entry = Source::new(SourceId(0), entry_name, entry_text);
     let mut next_id: u32 = 1;
     let mut sources: Vec<Source> = vec![entry.clone()];
+    let mut editions = noeta_lexer::EditionMap::new();
+    editions.set(SourceId(0), root_edition);
     for raw in siblings {
         sources.push(Source::new(
             SourceId(next_id),
             raw.name.as_str(),
             raw.text.as_str(),
         ));
+        editions.set(SourceId(next_id), root_edition);
         next_id += 1;
     }
     let sibling_end = sources.len();
-    for dep in deps {
+    // A dependency's edition is a `String` on `DepPackage` (the loader is below the manifest layer);
+    // resolution already validated it against the closed set, so reconstruct the enum and fall back
+    // to the default on the impossible parse failure rather than propagate an error the walker ruled
+    // out. Recorded per module so the map keys by `SourceId`.
+    let dep_editions: Vec<noeta_lexer::Edition> = deps
+        .iter()
+        .map(|dep| noeta_lexer::Edition::parse(&dep.edition).unwrap_or_default())
+        .collect();
+    for (dep, &dep_edition) in deps.iter().zip(&dep_editions) {
         for raw in &dep.modules {
             sources.push(Source::new(
                 SourceId(next_id),
                 raw.name.as_str(),
                 raw.text.as_str(),
             ));
+            editions.set(SourceId(next_id), dep_edition);
             next_id += 1;
         }
     }
     let (lexeds, text_tiers) = lex_program(&sources);
 
-    let entry_parsed = noeta_parser::parse_in(&entry, &lexeds[0].tokens, &text_tiers);
+    // The entry parses under the root package's edition.
+    let entry_parsed = noeta_parser::parse_in(&entry, &lexeds[0].tokens, root_edition, &text_tiers);
     let entry_diags: Vec<Diagnostic> = lexeds[0]
         .diagnostics
         .iter()
@@ -370,22 +407,26 @@ pub fn link_with_deps(
             .collect());
     }
 
-    // Parse the siblings (pure decl-sources).
+    // Parse the siblings (pure decl-sources) under the root edition.
     let mut sibling_programs: Vec<Program> = Vec::new();
     for (source, lexed) in sources[1..sibling_end].iter().zip(&lexeds[1..sibling_end]) {
-        if let Some(program) = parse_clean(source, lexed, &text_tiers) {
+        if let Some(program) = parse_clean(source, lexed, root_edition, &text_tiers) {
             sibling_programs.push(program);
         }
     }
 
-    // Parse + re-root each dependency package's modules (the sources continue past the siblings
-    // in the same package order they were assembled above).
+    // Parse + re-root each dependency package's modules under *that package's* edition (the sources
+    // continue past the siblings in the same package order they were assembled above).
     let mut dep_programs: Vec<Program> = Vec::new();
     let mut dep_idx = sibling_end;
-    for dep in deps {
+    for (dep, &dep_edition) in deps.iter().zip(&dep_editions) {
         for _ in &dep.modules {
-            if let Some(mut program) = parse_clean(&sources[dep_idx], &lexeds[dep_idx], &text_tiers)
-            {
+            if let Some(mut program) = parse_clean(
+                &sources[dep_idx],
+                &lexeds[dep_idx],
+                dep_edition,
+                &text_tiers,
+            ) {
                 reroot_program(&mut program, &dep.root, &dep.key, &dep.dep_renames);
                 dep_programs.push(program);
             }
@@ -413,6 +454,7 @@ pub fn link_with_deps(
         program,
         entry,
         sources: SourceMap::new(sources),
+        editions,
     })
 }
 
@@ -442,7 +484,7 @@ fn lex_program(sources: &[Source]) -> (Vec<noeta_lexer::Lexed>, noeta_lexer::Tex
     }
     let relexed = sources
         .iter()
-        .map(|source| noeta_lexer::lex_in(source, &set))
+        .map(|source| noeta_lexer::lex_in(source, noeta_lexer::Edition::DEFAULT, &set))
         .collect();
     (relexed, set)
 }
@@ -453,10 +495,13 @@ fn lex_program(sources: &[Source]) -> (Vec<noeta_lexer::Lexed>, noeta_lexer::Tex
 fn parse_clean(
     source: &Source,
     lexed: &noeta_lexer::Lexed,
+    edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Option<Program> {
     (lexed.diagnostics.is_empty())
-        .then(|| noeta_parser::parse_in(source, &lexed.tokens, text_tiers))
+        // Parse under the owning package's edition — the entry/sibling's root edition or a
+        // dependency's own — so a future edition-gated grammar applies per package.
+        .then(|| noeta_parser::parse_in(source, &lexed.tokens, edition, text_tiers))
         .filter(|parsed| parsed.diagnostics.is_empty())
         .map(|parsed| parsed.program)
 }
@@ -1083,6 +1128,74 @@ mod tests {
     }
 
     #[test]
+    fn the_edition_map_keys_every_source_by_its_package() {
+        // Two dependency packages, each one module; no siblings. SourceIds: entry = 0, dep A's
+        // module = 1, dep B's module = 2. The editions map must record every one of them: the entry
+        // under the root edition passed to `link_with_deps`, each dep module under that package's
+        // own edition. (One edition ships today, so every value is `E2026`; what this proves is the
+        // *keying* — the map is populated, not left empty, and covers each source — which is the
+        // wiring the first edition-gated rule will consult once editions diverge.)
+        let dep_a = DepPackage {
+            key: "a".to_string(),
+            root: "a".to_string(),
+            modules: vec![module(
+                "a.noe",
+                "namespace a;\npub fn ay() -> int {\n  1\n}\n",
+            )],
+            dep_renames: Default::default(),
+            native: false,
+            edition: "2026".to_string(),
+        };
+        let dep_b = DepPackage {
+            key: "b".to_string(),
+            root: "b".to_string(),
+            modules: vec![module(
+                "b.noe",
+                "namespace b;\npub fn bee() -> int {\n  2\n}\n",
+            )],
+            dep_renames: Default::default(),
+            native: false,
+            edition: "2026".to_string(),
+        };
+        // The entry need not import the deps: their sources are assembled (and thus keyed in the
+        // editions map) whether or not a declaration is pulled into the merge.
+        let entry = "x = 1;\n";
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::E2026,
+            &[],
+            &[dep_a, dep_b],
+        )
+        .unwrap();
+
+        // Every source is recorded — the map was populated, not left empty.
+        assert_eq!(linked.editions.len(), 3, "entry + two dep modules");
+        assert!(!linked.editions.is_empty());
+        // The entry takes the root edition; each dependency module takes its package's edition.
+        assert_eq!(
+            linked.editions.source_edition(SourceId(0)),
+            noeta_lexer::Edition::E2026,
+            "entry under the root edition"
+        );
+        assert_eq!(
+            linked.editions.source_edition(SourceId(1)),
+            noeta_lexer::Edition::E2026,
+            "dep a's module"
+        );
+        assert_eq!(
+            linked.editions.source_edition(SourceId(2)),
+            noeta_lexer::Edition::E2026,
+            "dep b's module"
+        );
+        // An unrecorded source falls back to the default edition.
+        assert_eq!(
+            linked.editions.source_edition(SourceId(99)),
+            noeta_lexer::Edition::DEFAULT
+        );
+    }
+
+    #[test]
     fn a_dependency_package_is_imported_under_the_consumer_key() {
         // Package `guzzle/http` (root segment `http`) exposes `http.client.Client`; the consumer
         // keys it `webclient` and imports `use webclient.client.Client` — the loader re-roots
@@ -1096,9 +1209,17 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use webclient.client.Client;\nc = Client { base: \"x\" };\n";
-        let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .unwrap();
         assert!(has_class(&linked, "Client"));
         // The consumer's `use` resolved — no opaque stub remains for it.
         assert!(
@@ -1125,10 +1246,17 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use webclient.clientt.Client;\nc = Client { base: \"x\" };\n";
-        let errors =
-            link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap_err();
+        let errors = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .unwrap_err();
         assert!(
             errors
                 .iter()
@@ -1149,10 +1277,17 @@ mod tests {
             modules: Vec::new(),
             dep_renames: Default::default(),
             native: true,
+            edition: "2026".to_string(),
         };
         let entry = "use imgfx.fx;\necho fx.double(21);\n";
-        let linked =
-            link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).expect("retained");
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .expect("retained");
         assert!(
             linked
                 .program
@@ -1175,10 +1310,17 @@ mod tests {
             modules: Vec::new(),
             dep_renames: Default::default(),
             native: true,
+            edition: "2026".to_string(),
         };
         let entry = "use imgtx.fx;\necho fx.double(21);\n";
-        let errors =
-            link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap_err();
+        let errors = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .unwrap_err();
         let err = errors
             .iter()
             .find(|e| e.diagnostic.code == DiagnosticCode::UnresolvedImport)
@@ -1210,9 +1352,17 @@ mod tests {
             ],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use webclient.client.Client;\nc = Client { body: Body { text: \"hi\" } };\n";
-        let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .unwrap();
         assert!(has_class(&linked, "Client"));
         assert!(
             has_class(&linked, "Body"),
@@ -1233,6 +1383,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let b = DepPackage {
             key: "beta".to_string(),
@@ -1243,10 +1394,18 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry =
             "use alpha.core.Ping;\nuse beta.core.Pong;\np = Ping { n: 1 };\nq = Pong { n: 2 };\n";
-        let linked = link_with_deps("main.noe", entry, &[], &[a, b]).unwrap();
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            &[a, b],
+        )
+        .unwrap();
         assert!(has_class(&linked, "Ping"));
         assert!(has_class(&linked, "Pong"));
     }
@@ -1268,6 +1427,7 @@ mod tests {
             )],
             dep_renames: app_renames,
             native: false,
+            edition: "2026".to_string(),
         };
         let json = DepPackage {
             key: "pkg_json".to_string(),
@@ -1278,9 +1438,17 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use app.core.Widget;\nw = Widget { v: Value { n: 1 } };\n";
-        let linked = link_with_deps("main.noe", entry, &[], &[app, json]).unwrap();
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            &[app, json],
+        )
+        .unwrap();
         assert!(has_class(&linked, "Widget"));
         assert!(
             has_class(&linked, "Value"),
@@ -1301,9 +1469,17 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use geo.circle.area;\necho area(2.0);\n";
-        let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .unwrap();
         // `use std.math.sqrt` survives (retained) so the native-module resolver still sees it.
         assert!(
             linked.program.stmts.iter().any(|s| matches!(
@@ -1322,7 +1498,13 @@ mod tests {
         );
         let entry =
             "namespace App.Main;\nuse App.Models.User;\nu = User.new(\"Ada\", 7);\necho u.name;\n";
-        let linked = link("main.noe", entry, std::slice::from_ref(&models)).unwrap();
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&models),
+        )
+        .unwrap();
         // The real `User` class is merged in under its qualified identity `App.Models.User`
         // (arc Phase B); its `use` is dropped (no opaque stub for it).
         assert!(
@@ -1367,7 +1549,7 @@ mod tests {
         // check/run divergence for user modules).
         let entry =
             "namespace App.Orders;\nuse App.Models.User;\npub fn make(): ?User { return none; }\n";
-        let errors = link("main.noe", entry, &[]).unwrap_err();
+        let errors = link("main.noe", entry, noeta_lexer::Edition::DEFAULT, &[]).unwrap_err();
         assert!(
             errors
                 .iter()
@@ -1383,8 +1565,8 @@ mod tests {
         // loader cannot adjudicate roots it does not own. Here the entry declares `App.Orders`, so
         // `imgfx` is foreign; the link succeeds and keeps the `use` for downstream resolution.
         let entry = "namespace App.Orders;\nuse imgfx.fx;\npub fn go(): int { return 0; }\n";
-        let linked =
-            link("main.noe", entry, &[]).expect("external-root use is retained, not an error");
+        let linked = link("main.noe", entry, noeta_lexer::Edition::DEFAULT, &[])
+            .expect("external-root use is retained, not an error");
         assert!(
             linked
                 .program
@@ -1403,7 +1585,13 @@ mod tests {
             "namespace App.Models;\nclass User { id: int }\n",
         );
         let entry = "use App.Models.User;\n";
-        let errs = link("main.noe", entry, std::slice::from_ref(&models)).unwrap_err();
+        let errs = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&models),
+        )
+        .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].diagnostic.code, DiagnosticCode::UnresolvedImport);
     }
@@ -1416,7 +1604,13 @@ mod tests {
             "namespace App.Models;\npub class User { id: int }\n",
         );
         let entry = "use App.Models.Ghost;\n";
-        let errs = link("main.noe", entry, std::slice::from_ref(&models)).unwrap_err();
+        let errs = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&models),
+        )
+        .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].diagnostic.code, DiagnosticCode::UnresolvedImport);
     }
@@ -1429,7 +1623,13 @@ mod tests {
             "namespace App.Models;\npub class User { id: int }\n",
         );
         let entry = "use App.Models.User;\nclass User { name: string }\n";
-        let errs = link("main.noe", entry, std::slice::from_ref(&models)).unwrap_err();
+        let errs = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&models),
+        )
+        .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].diagnostic.code, DiagnosticCode::NameCollision);
     }
@@ -1446,7 +1646,13 @@ mod tests {
             "namespace App.People;\npub class User { name: string }\n",
         );
         let entry = "use App.Models.User;\nuse App.People.User;\n";
-        let errs = link("main.noe", entry, &[models, people]).unwrap_err();
+        let errs = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[models, people],
+        )
+        .unwrap_err();
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].diagnostic.code, DiagnosticCode::NameCollision);
     }
@@ -1466,7 +1672,13 @@ mod tests {
         );
         let entry = "use App.Models.User as MUser;\nuse App.People.User as PUser;\n\
                      a = MUser { id: 1 };\nb = PUser { name: \"x\" };\n";
-        let linked = link("main.noe", entry, &[models, people]).unwrap();
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[models, people],
+        )
+        .unwrap();
 
         // Both classes are present under their full qualified identities — distinct, coexisting.
         let names: Vec<&str> = linked
@@ -1516,7 +1728,13 @@ mod tests {
         );
         let entry = "use App.Metric.scale as mscale;\nuse App.Audio.scale as ascale;\n\
                      echo mscale(1);\necho ascale(1);\n";
-        let linked = link("main.noe", entry, &[metric, audio]).unwrap();
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[metric, audio],
+        )
+        .unwrap();
 
         let fn_names: Vec<&str> = linked
             .program
@@ -1533,7 +1751,7 @@ mod tests {
 
     #[test]
     fn entry_parse_error_is_reported_against_the_entry() {
-        let errs = link("main.noe", "echo $;", &[]).unwrap_err();
+        let errs = link("main.noe", "echo $;", noeta_lexer::Edition::DEFAULT, &[]).unwrap_err();
         assert!(!errs.is_empty());
         assert!(errs.iter().all(|e| e.source.name() == "main.noe"));
     }
@@ -1548,7 +1766,13 @@ mod tests {
             "namespace App.Models;\npub class User {\n  id: int\n  fn bad(): int { return 1 / 0; }\n}\n",
         );
         let entry = "use App.Models.User;\nu = User { id: 1 };\n";
-        let linked = link("main.noe", entry, std::slice::from_ref(&models)).unwrap();
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&models),
+        )
+        .unwrap();
 
         // The merged class statement and everything under it belong to source 1 (the sibling).
         let class = linked
@@ -1595,9 +1819,17 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use mathx.lib.twice;\necho twice(21);\n";
-        let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .unwrap();
         assert!(has_fn(&linked, "twice"), "the imported fn is merged");
         assert!(
             has_fn(&linked, "helper"),
@@ -1620,9 +1852,17 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use widgets.lib.origin;\np = origin();\necho p.x;\n";
-        let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .unwrap();
         assert!(has_fn(&linked, "origin"), "the imported fn is merged");
         assert!(
             has_struct(&linked, "Point"),
@@ -1646,9 +1886,17 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use chain.lib.go;\ni = go(3);\necho i.v;\n";
-        let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
+        let linked = link_with_deps(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            &[],
+            std::slice::from_ref(&dep),
+        )
+        .unwrap();
         assert!(has_fn(&linked, "go"));
         assert!(has_fn(&linked, "wrap"), "one hop away must be pulled");
         assert!(
@@ -1669,7 +1917,13 @@ mod tests {
              pub fn make(n: int): Box { return build(n); }\n",
         );
         let entry = "use app.lib.make;\nb = make(5);\necho b.n;\n";
-        let linked = link("main.noe", entry, std::slice::from_ref(&sibling)).unwrap();
+        let linked = link(
+            "main.noe",
+            entry,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&sibling),
+        )
+        .unwrap();
         assert!(has_fn(&linked, "make"));
         assert!(
             has_fn(&linked, "build"),

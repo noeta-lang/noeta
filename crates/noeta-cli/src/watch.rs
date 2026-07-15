@@ -195,7 +195,11 @@ fn next_filter(entry: Option<&Path>, baseline: Option<&str>, changed: &[PathBuf]
     let Ok(new_src) = std::fs::read_to_string(entry) else {
         return Filter::All(None);
     };
-    match noeta_ide::impact::impact_of_edit(baseline, &new_src) {
+    match noeta_ide::impact::impact_of_edit(
+        baseline,
+        &new_src,
+        noeta_pm::manifest::root_edition(entry),
+    ) {
         noeta_ide::impact::Impact::Decls(decls) if decls.is_empty() => Filter::Skip,
         noeta_ide::impact::Impact::Decls(decls) => Filter::Names(decls),
         noeta_ide::impact::Impact::All { reason } => Filter::All(Some(reason)),
@@ -408,7 +412,13 @@ fn hot_watcher(
         // The transactional gate: red code never swaps; the old version keeps serving. The
         // rendered diagnostics also ride the channel's error slot to live LiveView clients
         // (the browser overlay, server-hmr L3) — waking the run thread to deliver promptly.
-        let checked = noeta_check::check_all(&new_program);
+        // The hot-reparsed entry is one source (id 0), checked under the entry package's edition.
+        let mut editions = noeta_lexer::EditionMap::new();
+        editions.set(
+            noeta_span::SourceId::FIRST,
+            noeta_pm::manifest::root_edition(&entry),
+        );
+        let checked = noeta_check::check_all_with_editions(&new_program, editions);
         if !checked.diagnostics.is_empty() {
             let source = noeta_span::Source::new(noeta_span::SourceId::FIRST, "<entry>", &new_src);
             let mut rendered = String::new();

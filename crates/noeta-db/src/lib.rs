@@ -37,6 +37,11 @@ use noeta_lexer::Lexed;
 use noeta_parser::Parsed;
 use noeta_span::{Source, SourceId, Span};
 
+/// Re-export of the language [`Edition`](noeta_lexer::Edition) (and its `EditionMap`) so a crate that
+/// feeds the db — building [`SourceProgram`]/[`Workspace`] inputs — can name the edition to thread
+/// without a separate `noeta-lexer` dependency.
+pub use noeta_lexer::{Edition, EditionMap};
+
 /// The salsa database for the compile pipeline. Construct with `LangDatabase::default()`.
 #[salsa::db]
 #[derive(Default, Clone)]
@@ -63,16 +68,46 @@ pub struct SourceProgram {
     pub name: String,
     #[returns(ref)]
     pub text: String,
+    /// The language [`Edition`](noeta_lexer::Edition) this source is written against, in canonical
+    /// string form (`"2026"`) — its package's edition (editions arc). Every db query that
+    /// lexes/parses/checks this source does so under it, so the IDE stack honors a future edition's
+    /// grammar/rules exactly as the batch compiler does. A string (not the enum) because a salsa
+    /// input field must be `Update`, which the leaf `Edition` enum does not implement; the queries
+    /// parse it back with [`edition_of`]. Editing it invalidates exactly the queries that read it.
+    #[returns(ref)]
+    pub edition: String,
 }
 
-/// Build (or rebuild) the [`SourceProgram`] input from a [`Source`].
-pub fn source_program(db: &LangDatabase, source: &Source) -> SourceProgram {
+/// Build (or rebuild) the [`SourceProgram`] input from a [`Source`] and the language edition its
+/// package is written against.
+pub fn source_program(
+    db: &LangDatabase,
+    source: &Source,
+    edition: noeta_lexer::Edition,
+) -> SourceProgram {
     SourceProgram::new(
         db,
         source.id().0,
         source.name().to_string(),
         source.text().to_string(),
+        edition.as_str().to_string(),
     )
+}
+
+/// The language edition a [`SourceProgram`] declares, parsed from its canonical string form back to
+/// the enum. An unrecognised value (only reachable if a caller stored a non-canonical string) falls
+/// back to the default edition rather than failing a query.
+fn edition_of(db: &dyn salsa::Database, src: SourceProgram) -> noeta_lexer::Edition {
+    noeta_lexer::Edition::parse(src.edition(db)).unwrap_or_default()
+}
+
+/// A one-source [`EditionMap`](noeta_lexer::EditionMap) for the single-file query family: the source
+/// governs itself under its own edition, everything else defaults. The workspace family builds a
+/// multi-source map in [`workspace_editions`] instead.
+fn source_edition_map(db: &dyn salsa::Database, src: SourceProgram) -> noeta_lexer::EditionMap {
+    let mut map = noeta_lexer::EditionMap::new();
+    map.set(SourceId(src.id(db)), edition_of(db, src));
+    map
 }
 
 /// Reconstruct a [`Source`] from the input fields (cheap; recomputes line starts).
@@ -170,7 +205,11 @@ replace_update!(LinkedProgram);
 #[salsa::tracked(returns(ref))]
 pub fn tokens(db: &dyn salsa::Database, src: SourceProgram) -> Tokens {
     let source = source_of(db, src);
-    Tokens(noeta_lexer::lex(&source))
+    Tokens(noeta_lexer::lex_in(
+        &source,
+        edition_of(db, src),
+        &noeta_lexer::TextTiers::default(),
+    ))
 }
 
 /// Parse the token stream into an AST. Depends on [`tokens`].
@@ -187,7 +226,12 @@ pub fn ast(db: &dyn salsa::Database, src: SourceProgram) -> Ast {
             .map(str::to_string),
     );
     let set = noeta_lexer::TextTiers::with(names);
-    Ast(noeta_parser::parse_in(&source, &toks.0.tokens, &set))
+    Ast(noeta_parser::parse_in(
+        &source,
+        &toks.0.tokens,
+        edition_of(db, src),
+        &set,
+    ))
 }
 
 /// Type-check the AST and return the checker's diagnostics. Depends on [`ast`]. The pipeline's
@@ -196,7 +240,10 @@ pub fn ast(db: &dyn salsa::Database, src: SourceProgram) -> Ast {
 #[salsa::tracked(returns(ref))]
 pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
     let parsed = ast(db, src);
-    from_check_output(noeta_check::check_all(&parsed.0.program))
+    from_check_output(noeta_check::check_all_with_editions(
+        &parsed.0.program,
+        source_edition_map(db, src),
+    ))
 }
 
 /// The IDE-flavored type-check: like [`checked`], but the result's [`Checked::expr_types`] is
@@ -207,7 +254,14 @@ pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
 #[salsa::tracked(returns(ref))]
 pub fn checked_ide(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
     let parsed = ast(db, src);
-    from_check_output(noeta_check::check_all_with_types(&parsed.0.program))
+    from_check_output(noeta_check::check_all_with(
+        &parsed.0.program,
+        noeta_check::CheckOptions {
+            record_expr_types: true,
+            editions: source_edition_map(db, src),
+            ..noeta_check::CheckOptions::default()
+        },
+    ))
 }
 
 /// Project a `noeta_check` result into this crate's memoized [`Checked`]. Shared by [`checked`] and
@@ -305,33 +359,50 @@ pub struct DepSources {
     pub key: String,
     pub renames: Vec<(String, String)>,
     pub modules: Vec<Source>,
+    /// This package's language edition (canonical string, e.g. `"2026"`) — its modules are parsed
+    /// and checked under it, exactly as the CLI's `load_with_deps` does (editions arc).
+    pub edition: String,
 }
 
-/// Build a [`Workspace`] input from the entry [`Source`] and its sibling module sources (as
-/// produced by `noeta_loader::read_workspace`). Each becomes a [`SourceProgram`] input; no
-/// dependency packages (use [`workspace_with_deps`] for those).
-pub fn workspace(db: &LangDatabase, entry: &Source, modules: &[Source]) -> Workspace {
-    let entry_input = source_program(db, entry);
-    let module_inputs = modules.iter().map(|s| source_program(db, s)).collect();
+/// Build a [`Workspace`] input from the entry [`Source`], its sibling module sources (as produced by
+/// `noeta_loader::read_workspace`), and the root package's edition. Each source becomes a
+/// [`SourceProgram`] under `root_edition`; no dependency packages (use [`workspace_with_deps`]).
+pub fn workspace(
+    db: &LangDatabase,
+    entry: &Source,
+    modules: &[Source],
+    root_edition: noeta_lexer::Edition,
+) -> Workspace {
+    let entry_input = source_program(db, entry, root_edition);
+    let module_inputs = modules
+        .iter()
+        .map(|s| source_program(db, s, root_edition))
+        .collect();
     Workspace::new(db, entry_input, module_inputs, Vec::new())
 }
 
-/// Build a [`Workspace`] that also links **dependency packages** (package-manager P2.1c): each dep
-/// module becomes a [`DepModule`] input carrying its re-root info, so cross-package
+/// Build a [`Workspace`] that also links **dependency packages** (package-manager P2.1c): the entry
+/// and siblings take `root_edition`; each dependency's modules take that package's own edition. Each
+/// dep module becomes a [`DepModule`] input carrying its re-root info, so cross-package
 /// `use <dep-key>.…` resolves in the salsa graph exactly as in the CLI's `load_with_deps`.
 pub fn workspace_with_deps(
     db: &LangDatabase,
     entry: &Source,
     modules: &[Source],
     deps: &[DepSources],
+    root_edition: noeta_lexer::Edition,
 ) -> Workspace {
-    let entry_input = source_program(db, entry);
-    let module_inputs = modules.iter().map(|s| source_program(db, s)).collect();
+    let entry_input = source_program(db, entry, root_edition);
+    let module_inputs = modules
+        .iter()
+        .map(|s| source_program(db, s, root_edition))
+        .collect();
     let mut dep_inputs = Vec::new();
     for dep in deps {
         let renames = flatten_renames(&dep.renames);
+        let dep_edition = noeta_lexer::Edition::parse(&dep.edition).unwrap_or_default();
         for src in &dep.modules {
-            let sp = source_program(db, src);
+            let sp = source_program(db, src, dep_edition);
             dep_inputs.push(DepModule::new(
                 db,
                 sp,
@@ -393,7 +464,7 @@ pub fn workspace_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> Vec<Stri
 pub fn tokens_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) -> Tokens {
     let set = noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned());
     let source = source_of(db, src);
-    Tokens(noeta_lexer::lex_in(&source, &set))
+    Tokens(noeta_lexer::lex_in(&source, edition_of(db, src), &set))
 }
 
 /// Workspace-aware parse over [`tokens_in`] — the [`linked`] pipeline's counterpart of [`ast`].
@@ -404,7 +475,12 @@ pub fn ast_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) -> As
     // The whole workspace's verbatim-body tier set — the same one `tokens_in` lexed with — so a
     // nested tier body inside a `${…}` hole re-lexes correctly (an inline `@html { … }` loop).
     let set = noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned());
-    Ast(noeta_parser::parse_in(&source, &toks.0.tokens, &set))
+    Ast(noeta_parser::parse_in(
+        &source,
+        &toks.0.tokens,
+        edition_of(db, src),
+        &set,
+    ))
 }
 
 /// queries remain independent. The merge means both backends run the linked program unchanged, so
@@ -483,6 +559,23 @@ pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> LinkedProgram {
     }
 }
 
+/// The per-source [`EditionMap`](noeta_lexer::EditionMap) for a whole workspace — every member
+/// source (entry, siblings, dependency modules) under its own package's edition, keyed by
+/// `SourceId`. The salsa analogue of the loader's `Linked::editions`, so [`linked_checked`] applies
+/// each package's edition per declaration over the merged program. Public so a consumer that checks
+/// a *derived* program (e.g. `noeta-mcp` re-checking a tier-activated linked program) can apply the
+/// same per-source editions — the `SourceId`s survive activation, so the map stays valid.
+pub fn workspace_editions(db: &dyn salsa::Database, ws: Workspace) -> noeta_lexer::EditionMap {
+    let mut map = noeta_lexer::EditionMap::new();
+    for src in std::iter::once(ws.entry(db))
+        .chain(ws.modules(db).iter().copied())
+        .chain(ws.dep_modules(db).iter().map(|dm| dm.src(db)))
+    {
+        map.set(SourceId(src.id(db)), edition_of(db, src));
+    }
+    map
+}
+
 /// Type-check the linked program — the workspace analogue of [`checked`]. A load failure carries
 /// its diagnostics straight through (there is no program to check).
 #[salsa::tracked(returns(ref))]
@@ -490,7 +583,10 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
     match &linked(db, ws).0 {
         // The shared helper maps every checker output field — both the LSP track's
         // `expr_types`/`f32_literal_sites` and the prelude-redesign handle-site maps.
-        Ok(program) => from_check_output(noeta_check::check_all(program)),
+        Ok(program) => from_check_output(noeta_check::check_all_with_editions(
+            program,
+            workspace_editions(db, ws),
+        )),
         Err(diags) => Checked {
             diagnostics: diags.clone(),
             expr_types: std::collections::HashMap::new(),
@@ -508,7 +604,14 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
 #[salsa::tracked(returns(ref))]
 pub fn linked_checked_ide(db: &dyn salsa::Database, ws: Workspace) -> Checked {
     match &linked(db, ws).0 {
-        Ok(program) => from_check_output(noeta_check::check_all_with_types(program)),
+        Ok(program) => from_check_output(noeta_check::check_all_with(
+            program,
+            noeta_check::CheckOptions {
+                record_expr_types: true,
+                editions: workspace_editions(db, ws),
+                ..noeta_check::CheckOptions::default()
+            },
+        )),
         Err(diags) => Checked {
             diagnostics: diags.clone(),
             expr_types: std::collections::HashMap::new(),
@@ -550,7 +653,7 @@ mod tests {
     fn db_and_src(text: &str) -> (LangDatabase, SourceProgram) {
         let db = LangDatabase::default();
         let source = Source::new(SourceId::FIRST, "test.noe", text);
-        let src = source_program(&db, &source);
+        let src = source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
         (db, src)
     }
 
@@ -635,7 +738,12 @@ mod tests {
             "a.noe",
             "namespace App.A;\npub class Foo { pub x: int }\n",
         );
-        let ws = workspace(&db, &entry, std::slice::from_ref(&a));
+        let ws = workspace(
+            &db,
+            &entry,
+            std::slice::from_ref(&a),
+            noeta_lexer::Edition::DEFAULT,
+        );
 
         let prog = match &linked(&db, ws).0 {
             Ok(p) => p,
@@ -670,13 +778,23 @@ mod tests {
             name: "a.noe".into(),
             text: a_text.into(),
         };
-        let loader =
-            noeta_loader::link("main.noe", entry_text, std::slice::from_ref(&raw)).unwrap();
+        let loader = noeta_loader::link(
+            "main.noe",
+            entry_text,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&raw),
+        )
+        .unwrap();
 
         let db = LangDatabase::default();
         let entry = Source::new(SourceId(0), "main.noe", entry_text);
         let a = Source::new(SourceId(1), "a.noe", a_text);
-        let ws = workspace(&db, &entry, std::slice::from_ref(&a));
+        let ws = workspace(
+            &db,
+            &entry,
+            std::slice::from_ref(&a),
+            noeta_lexer::Edition::DEFAULT,
+        );
         let salsa = match &linked(&db, ws).0 {
             Ok(p) => p.clone(),
             Err(e) => panic!("{e:?}"),
@@ -709,9 +827,9 @@ mod tests {
             "b.noe",
             "namespace App.B;\npub class Bar { y: int }\n",
         );
-        let entry_src = source_program(&db, &entry);
-        let a_src = source_program(&db, &a);
-        let b_src = source_program(&db, &b);
+        let entry_src = source_program(&db, &entry, noeta_lexer::Edition::DEFAULT);
+        let a_src = source_program(&db, &a, noeta_lexer::Edition::DEFAULT);
+        let b_src = source_program(&db, &b, noeta_lexer::Edition::DEFAULT);
         let ws = Workspace::new(&db, entry_src, vec![a_src, b_src], Vec::new());
 
         assert!(linked(&db, ws).0.is_ok());
@@ -751,8 +869,15 @@ mod tests {
                 "hello.noe",
                 "namespace greet.hello;\npub fn greeting(): string { return \"hi\"; }\n",
             )],
+            edition: "2026".to_string(),
         };
-        let ws = workspace_with_deps(&db, &entry, &[], std::slice::from_ref(&dep));
+        let ws = workspace_with_deps(
+            &db,
+            &entry,
+            &[],
+            std::slice::from_ref(&dep),
+            noeta_lexer::Edition::DEFAULT,
+        );
         let linked = linked(&db, ws);
         assert!(
             linked.0.is_ok(),
