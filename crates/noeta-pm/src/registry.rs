@@ -913,6 +913,108 @@ impl HttpIndex {
             advisories,
         })
     }
+
+    /// The inclusion proof for an advisory's current transparency-log leaf (`GET
+    /// /v1/log/advisory/{id}`), or `None` if the advisory is not logged.
+    pub fn advisory_inclusion(&self, id: &str) -> Result<Option<LogInclusion>, String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/log/advisory/{id}", self.base))
+            .send()
+            .map_err(|err| format!("fetching the advisory inclusion proof failed: {err}"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the advisory inclusion proof of `{id}`",
+                resp.status()
+            ));
+        }
+        Ok(Some(resp.json().map_err(|err| {
+            format!("malformed advisory inclusion proof: {err}")
+        })?))
+    }
+
+    /// Verify that every advisory in `advisories` is **included** in the transparency log at the
+    /// registry's current **signed** checkpoint (advisory-log binding, namespace-protection #1) — so an
+    /// advisory the registry serves is provably in the public, append-only log, not fabricated for one
+    /// consumer. `pinned_log_key` is the log key the caller already trusts (TOFU); `None` adopts the
+    /// served one. Returns `(verified count, unlogged ids)`: an advisory the registry serves *without* a
+    /// log index, or whose logged leaf doesn't match, is surfaced. `Ok(None)` if the registry runs no
+    /// transparency log at all (nothing to verify against).
+    pub fn verify_advisories_logged(
+        &self,
+        advisories: &[crate::advisory::Advisory],
+        pinned_log_key: Option<&str>,
+    ) -> Result<Option<(usize, Vec<String>)>, String> {
+        use crate::transparency;
+        let log_key = match pinned_log_key {
+            Some(k) => k.to_string(),
+            None => match self.log_public_key()? {
+                Some(k) => k,
+                None => return Ok(None), // no transparency log configured
+            },
+        };
+        let cp = self.log_checkpoint()?;
+        if !transparency::verify_checkpoint(&log_key, cp.tree_size, &cp.root_hash, &cp.signature)? {
+            return Err(
+                "the transparency-log checkpoint signature does not verify against the log key"
+                    .to_string(),
+            );
+        }
+        let mut verified = 0usize;
+        let mut unlogged = Vec::new();
+        for a in advisories {
+            let Some(_idx) = a.log_index else {
+                unlogged.push(a.id.clone());
+                continue;
+            };
+            let incl = match self.advisory_inclusion(&a.id)? {
+                Some(incl) => incl,
+                None => {
+                    unlogged.push(a.id.clone());
+                    continue;
+                }
+            };
+            // The proof must be against the *signed* checkpoint, the logged record must be exactly this
+            // advisory's canonical bytes, and the audit path must verify.
+            let canonical = String::from_utf8(a.canonical_bytes())
+                .map_err(|_| "advisory canonical bytes are not UTF-8".to_string())?;
+            if incl.root_hash != cp.root_hash
+                || incl.tree_size != cp.tree_size
+                || incl.record != canonical
+            {
+                return Err(format!(
+                    "advisory `{}` in the feed does not match its transparency-log leaf",
+                    a.id
+                ));
+            }
+            let root = transparency::hex_to_array::<32>(&cp.root_hash)
+                .ok_or("malformed checkpoint root hash")?;
+            let proof = incl
+                .proof
+                .iter()
+                .map(|h| transparency::hex_to_array::<32>(h))
+                .collect::<Option<Vec<_>>>()
+                .ok_or("malformed advisory inclusion-proof hash")?;
+            let leaf = transparency::leaf_hash(canonical.as_bytes());
+            if !transparency::verify_inclusion(
+                leaf,
+                incl.index as usize,
+                incl.tree_size as usize,
+                &proof,
+                &root,
+            ) {
+                return Err(format!(
+                    "the transparency inclusion proof for advisory `{}` does not verify",
+                    a.id
+                ));
+            }
+            verified += 1;
+        }
+        Ok(Some((verified, unlogged)))
+    }
 }
 
 /// A proof of scope ownership presented to `POST /v1/scopes/claim` (namespace-protection #1): a GitHub

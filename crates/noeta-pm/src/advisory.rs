@@ -50,6 +50,11 @@ pub struct Advisory {
     pub seq: u64,
     /// Hex Ed25519 signature over [`Self::canonical_bytes`].
     pub signature: String,
+    /// The index of this advisory's leaf in the transparency log (advisory-log binding). `None` if the
+    /// registry doesn't log advisories — then its issuance is only signature-attested, not publicly
+    /// logged.
+    #[serde(default)]
+    pub log_index: Option<u64>,
 }
 
 impl Advisory {
@@ -164,6 +169,7 @@ mod tests {
             withdrawn,
             seq: 0,
             signature: String::new(),
+            log_index: None,
         };
         a.signature = hex_encode(&sk.sign(&a.canonical_bytes()).to_bytes());
         a

@@ -3288,25 +3288,46 @@ fn noeta_audit_flags_a_dependency_with_a_known_advisory() {
         withdrawn: false,
         seq: 0,
         signature: String::new(),
+        log_index: Some(0),
     };
     adv.signature = to_hex(&sk.sign(&adv.canonical_bytes()).to_bytes());
     let digest = advisory::feed_digest(std::slice::from_ref(&adv));
     let head_sig = to_hex(&sk.sign(&advisory::feed_head_bytes(1, &digest)).to_bytes());
 
+    // Bind the advisory into a single-leaf transparency log so the audit can verify its inclusion. The
+    // leaf record is the advisory's canonical bytes; a one-leaf tree's root *is* that leaf.
+    let record = String::from_utf8(adv.canonical_bytes()).unwrap();
+    let leaf = noeta_pm::transparency::leaf_hash(record.as_bytes());
+    let root_hex = to_hex(&leaf);
+    let log_sk = SigningKey::from_bytes(&[5u8; 32]);
+    let log_pub_hex = to_hex(log_sk.verifying_key().as_bytes());
+    let cp_msg = format!("noeta-log-checkpoint-v1\n1\n{root_hex}\n");
+    let log_cp_sig = to_hex(&log_sk.sign(cp_msg.as_bytes()).to_bytes());
+    let record_json = record.replace('\n', "\\n"); // canonical bytes contain only newlines to escape
+
     let advisory_json = format!(
-        r#"{{"id":"{}","package":"{}","ranges":"{}","patched":"2.0.0","severity":"{}","summary":"{}","details":"","url":"{}","withdrawn":false,"seq":0,"signature":"{}"}}"#,
+        r#"{{"id":"{}","package":"{}","ranges":"{}","patched":"2.0.0","severity":"{}","summary":"{}","details":"","url":"{}","withdrawn":false,"seq":0,"signature":"{}","log_index":0}}"#,
         adv.id, adv.package, adv.ranges, adv.severity, adv.summary, adv.url, adv.signature,
     );
     let feed = format!(r#"{{"advisories":[{advisory_json}]}}"#);
     let key_json = format!(r#"{{"public_key":"{pub_hex}"}}"#);
     let checkpoint = format!(r#"{{"count":1,"digest":"{digest}","signature":"{head_sig}"}}"#);
+    let log_key_json = format!(r#"{{"public_key":"{log_pub_hex}"}}"#);
+    let log_cp_json =
+        format!(r#"{{"tree_size":1,"root_hash":"{root_hex}","signature":"{log_cp_sig}"}}"#);
+    let log_incl_json = format!(
+        r#"{{"index":0,"tree_size":1,"root_hash":"{root_hex}","record":"{record_json}","proof":[]}}"#
+    );
 
     let base = mock_http(move |_method, path, _body| match path {
         "/v1/advisories" => (200, feed.clone()),
         "/v1/advisories/key" => (200, key_json.clone()),
         "/v1/advisories/checkpoint" => (200, checkpoint.clone()),
-        // The transparency section also opens the registry, but path deps aren't logged, so it makes
-        // no proof calls; anything else the audit happens to probe is a 404 it tolerates.
+        "/v1/log/key" => (200, log_key_json.clone()),
+        "/v1/log/checkpoint" => (200, log_cp_json.clone()),
+        p if p.starts_with("/v1/log/advisory/") => (200, log_incl_json.clone()),
+        // Path deps aren't logged, so the release transparency section makes no proof calls; anything
+        // else the audit probes is a 404 it tolerates.
         _ => (404, r#"{"error":"not found"}"#.to_string()),
     });
 
@@ -3320,7 +3341,9 @@ fn noeta_audit_flags_a_dependency_with_a_known_advisory() {
         .failure()
         .stdout(predicate::str::contains("Security advisories:"))
         .stdout(predicate::str::contains("NOETA-2026-0007"))
-        .stdout(predicate::str::contains("greeting injection"));
+        .stdout(predicate::str::contains("greeting injection"))
+        // The advisory is verified as included in the transparency log (log-binding).
+        .stdout(predicate::str::contains("included in the transparency log"));
 
     // The advisory-feed head is now pinned in the lockfile (trust-on-first-use).
     let lock = std::fs::read_to_string(app_dir.join("noeta.lock")).unwrap();

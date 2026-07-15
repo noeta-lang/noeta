@@ -1592,6 +1592,27 @@ fn cmd_audit(path: &std::path::Path) -> ExitCode {
                         if feed.count == 1 { "y" } else { "ies" }
                     );
                 }
+                // Advisory-log binding (namespace-protection #1): verify each served advisory is
+                // **included** in the registry's transparency log at its signed checkpoint — so an
+                // advisory is provably in the public, append-only log, not fabricated (or a real one
+                // suppressed) for this consumer. Uses the log key pinned at resolve time when present.
+                let pinned_log = graph.log_trust.as_ref().map(|l| l.public_key.as_str());
+                match index.verify_advisories_logged(&feed.advisories, pinned_log) {
+                    Ok(Some((n, unlogged))) if !unlogged.is_empty() => println!(
+                        "    ⚠ {n} advisor{} publicly logged, but {} not in the transparency log: {}",
+                        if n == 1 { "y" } else { "ies" },
+                        unlogged.len(),
+                        unlogged.join(", ")
+                    ),
+                    Ok(Some((n, _))) if n > 0 => println!(
+                        "    {n} advisor{} verified as included in the transparency log (the registry \
+                         can't fabricate or silently drop a logged advisory).",
+                        if n == 1 { "y" } else { "ies" }
+                    ),
+                    Ok(Some(_)) => {}
+                    Ok(None) => {} // this registry runs no transparency log
+                    Err(err) => println!("    ⚠ advisory-log verification failed — {err}"),
+                }
                 // Pin (or refresh) the verified advisory-feed head, trust-on-first-use.
                 let pin = lock::AdvisoryTrust {
                     public_key: feed.public_key,
