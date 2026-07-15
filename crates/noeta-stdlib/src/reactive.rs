@@ -133,14 +133,14 @@ pub const VIEW_CTX_METHODS: &[ExtFn] = &[
 pub const SIGNAL_ARENA_GETTER: ArenaGetter = ("get", |e| signal_box(e).cell);
 pub const COMPUTED_ARENA_GETTER: ArenaGetter = ("get", |e| computed_box(e).memo);
 
-/// The per-run extension state: the graph, over arena-cell ids, plus the last gate state pushed
-/// to the backend (so a redundant sync is one branch, not two backend calls).
+/// The per-run reactive engine state: the graph, over arena-cell ids, plus the last gate state
+/// pushed to the backend (so a redundant sync is one branch, not two backend calls).
 ///
-/// `pub` because the out-of-`std` `para.synced` (noeta-para-p2p) shares this exact graph: a synced
-/// signal is a signal node here plus a topic, so a peer's merge propagates to `computed`/`effect`
-/// like any local `set`. It reaches the graph, `sync_gates`, and `drive_flush` through the pub items
-/// below — the reactive seam that lets the p2p surface live outside core.
-pub struct ReactiveExt {
+/// **Private engine detail** (`pub(crate)`). An out-of-`std` reactive node — `para.synced`, whose
+/// synced signal *is* a node in this shared graph — never touches this type or the graph; it goes
+/// through the opaque [`extension_point`] seam instead, so this representation can evolve without
+/// breaking it.
+pub(crate) struct ReactiveExt {
     pub graph: ReactiveGraph<Retained>,
     gates_open: std::cell::Cell<bool>,
     /// Every live effect `(node, body)` in creation order — the hot-swap epoch registry
@@ -170,7 +170,7 @@ impl std::fmt::Debug for ReactiveExt {
 
 pub const STATE_KEY: &str = "std.reactive";
 
-pub fn state_of<C: NativeCtx + ?Sized>(ctx: &mut C) -> ExtState {
+pub(crate) fn state_of<C: NativeCtx + ?Sized>(ctx: &mut C) -> ExtState {
     ctx.state(STATE_KEY, || {
         Box::new(ReactiveExt {
             graph: ReactiveGraph::new(),
@@ -186,7 +186,7 @@ pub fn state_of<C: NativeCtx + ?Sized>(ctx: &mut C) -> ExtState {
 
 /// Recompute the read gates from the graph's state (see the module docs) and push a *change* to
 /// the backend; an unchanged state is one branch.
-pub fn sync_gates<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) {
+pub(crate) fn sync_gates<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) {
     let open =
         !ext.graph.is_flushing() && !ext.graph.tracking() && ext.graph.dirty_computed_count() == 0;
     if ext.gates_open.replace(open) != open {
@@ -201,7 +201,10 @@ pub fn sync_gates<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) {
 /// `drive_flush`): bodies run via the fused [`NativeCtx::run_thunk`]; an abort inside a body is
 /// stashed and re-raised (the flush stops), and a non-converging update is the E0045
 /// reactive-cycle diagnostic. Gates are re-synced when the dust settles.
-pub fn drive_flush<C: NativeCtx + ?Sized>(ctx: &mut C, ext: &ReactiveExt) -> Result<(), CtxError> {
+pub(crate) fn drive_flush<C: NativeCtx + ?Sized>(
+    ctx: &mut C,
+    ext: &ReactiveExt,
+) -> Result<(), CtxError> {
     // Opt-in flush telemetry (server-hmr L4 / native-otel T5e): a span only when the flag is on
     // AND the flush will actually run something — a no-op flush (a `set` with no subscribers)
     // emits nothing. The span is pushed as the active context so spans the effect bodies create
@@ -398,6 +401,73 @@ fn foreign_view_source(any: &dyn std::any::Any) -> Option<(NodeId, ViewSource)> 
         .expect("view-extractor lock")
         .iter()
         .find_map(|f| f(any))
+}
+
+/// # The reactive extension point — a stable seam
+///
+/// The **only** supported way for an out-of-`std` extension to contribute a value that is a *node in
+/// the same reactive graph* as core `signal`/`computed`/`effect`. `para.synced`'s CRDT-backed signal
+/// is the first client: a shared value that dependents (`computed`/`effect`) track, and that an
+/// external event — a peer merge — wakes so the graph reruns those dependents.
+///
+/// Such a node is a **source**: it holds its value in an arena cell the extension owns (through the
+/// retained arena, [`NativeCtx::retain`]), it is *read* to subscribe a running computation, and it is
+/// *woken* when its value changes out of band. Those are the three operations here, plus the
+/// `view.expose` hook.
+///
+/// **Why this is a seam and not just `pub` items.** It is deliberately **opaque**: a client works
+/// only with `NodeId`s and arena `Retained` cells, and never sees the engine's representation (the
+/// `ReactiveExt` state, the `ReactiveGraph`, the gate/flush machinery). So the engine's internals —
+/// the flush loop, gate coalescing, telemetry, the graph's storage — evolve freely without breaking a
+/// client. **The stability guarantee is scoped to the signatures in this module**; everything else in
+/// `noeta-stdlib::reactive` is private engine detail. An out-of-tree reactive extension programs
+/// against `extension_point` and nothing else.
+pub mod extension_point {
+    use super::{ReactiveExt, drive_flush, state_of, sync_gates};
+    use noeta_native::{CtxError, NativeCtx, Retained};
+    use noeta_reactive::NodeId;
+
+    // The view-expose hook is part of the same contract; re-exported here so a client imports the
+    // whole seam from one place.
+    pub use super::{ViewSource, ViewSourceExtractor, register_view_source_extractor};
+
+    /// Create a **source node** over the arena `cell` the extension owns, returning its [`NodeId`] in
+    /// the shared reactive graph. The cell holds the node's current value; the extension updates it
+    /// (via the retained arena) and calls [`wake`] when it changes. Do this once, when the extension's
+    /// reactive value is constructed.
+    pub fn create_source<C: NativeCtx + ?Sized>(ctx: &mut C, cell: Retained) -> NodeId {
+        let state = state_of(ctx);
+        let ext = state.borrow();
+        let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
+        ext.graph.signal(cell)
+    }
+
+    /// Read a source node inside the current reactive scope: **subscribe** the running computation to
+    /// it (so it reruns when the node wakes) and return the node's backing arena cell. Outside a
+    /// reactive scope it simply returns the cell. This is the `.get()` path — the read that wires up a
+    /// dependency.
+    pub fn read_source<C: NativeCtx + ?Sized>(ctx: &mut C, node: NodeId) -> Retained {
+        let state = state_of(ctx);
+        let ext = state.borrow();
+        let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
+        ext.graph.read(node, &mut |body| body)
+    }
+
+    /// Signal that a source node's value changed **out of band** — a peer merge, an external event —
+    /// so the graph reruns its dependents: mark it dirty, resync the read gates, and drive the flush
+    /// (unless one is already in progress). The extension's external-change entry point, the analogue
+    /// of a language-level `signal.set`.
+    pub fn wake<C: NativeCtx + ?Sized>(ctx: &mut C, node: NodeId) -> Result<(), CtxError> {
+        let state = state_of(ctx);
+        let ext = state.borrow();
+        let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
+        ext.graph.touch(node);
+        sync_gates(ctx, ext);
+        if !ext.graph.is_flushing() {
+            drive_flush(ctx, ext)?;
+        }
+        Ok(())
+    }
 }
 
 /// One `view()`'s state: bindings in expose order plus the dirty set the flush subscriber fills.

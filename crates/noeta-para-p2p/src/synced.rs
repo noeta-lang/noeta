@@ -26,11 +26,13 @@
 //!
 //! # Sharing the reactive graph
 //!
-//! A synced signal is a [`ReactiveGraph`](noeta_reactive::ReactiveGraph) **signal node** over an
-//! arena cell holding the CRDT value — the identical machinery `signal` uses — plus a topic and a
-//! subscription id. `merge`/`sync` land the new value in the cell, `touch` the node, and
-//! `drive_flush` the graph, reusing [`noeta_stdlib::reactive`]'s engine wholesale (shared `ExtState`, same
-//! `STATE_KEY`), which is what makes the reactivity integration real rather than a parallel system.
+//! A synced signal is a **signal node** in the shared reactive graph over an arena cell holding the
+//! CRDT value — the identical machinery `signal` uses — plus a topic and a subscription id. It
+//! participates through [`noeta_stdlib::reactive::extension_point`], the stable opaque seam:
+//! `create_source` mints the node, `read_source` is the reactive `.get`, and `wake` is the
+//! external-change epilogue `merge`/`sync` run after landing a new value in the cell. That the
+//! integration is *real* (one graph, not a parallel system) is what makes a peer's merge rerun
+//! `computed`/`effect` exactly like a local `set`, without this crate seeing the engine's internals.
 
 use std::any::Any;
 use std::cmp::Ordering;
@@ -44,10 +46,11 @@ use noeta_reactive::NodeId;
 
 use crate::crdt::{from_bytes_like, merge_dyn, to_bytes_dyn};
 use crate::provider::with_p2p;
-// `synced` shares the SAME reactive graph as core `std.reactive` (shared `ExtState`, same
-// `STATE_KEY`), reached through noeta-stdlib's public reactive seam. This is the one-way dependency
-// that lets the p2p surface live out of `std`.
-use noeta_stdlib::reactive::{ReactiveExt, drive_flush, state_of, sync_gates};
+// `synced` shares the SAME reactive graph as core `std.reactive`: a synced signal IS a node in that
+// graph, so a peer's merge propagates to `computed`/`effect` like a local `set`. It participates
+// through the stable, opaque `extension_point` seam — never the engine's internals — the one-way
+// dependency that lets the p2p surface live out of `std`.
+use noeta_stdlib::reactive::extension_point;
 
 /// Register the `SyncedSignal` → reactive-`view` extractor exactly once (the reactive seam that lets
 /// core `view.expose` accept a `SyncedSignalBox` — a signal node over the shared graph — without
@@ -57,13 +60,9 @@ fn ensure_view_seam_registered() {
     use std::sync::Once;
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        noeta_stdlib::reactive::register_view_source_extractor(|any| {
-            any.downcast_ref::<SyncedSignalBox>().map(|s| {
-                (
-                    s.node,
-                    noeta_stdlib::reactive::ViewSource::Signal { cell: s.cell },
-                )
-            })
+        extension_point::register_view_source_extractor(|any| {
+            any.downcast_ref::<SyncedSignalBox>()
+                .map(|s| (s.node, extension_point::ViewSource::Signal { cell: s.cell }))
         });
     });
 }
@@ -244,12 +243,8 @@ pub fn synced_ctx_dispatch<C: NativeCtx + ?Sized>(
             }
             // The CRDT lives in an arena cell; the node is a signal in the shared reactive graph.
             let cell = ctx.retain(args[0])?;
-            let node = {
-                let state = state_of(ctx);
-                let ext = state.borrow();
-                let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
-                ext.graph.signal(cell)
-            };
+            // A signal node in the shared reactive graph over the arena cell holding the CRDT.
+            let node = extension_point::create_source(ctx, cell);
             Ok(CtxOut::Out(NativeOut::Extern(ExternBox::new(
                 SyncedSignalBox {
                     node,
@@ -275,10 +270,7 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
         // A reactive read of the content cell — subscribes the running body, exactly like a signal.
         "get" => {
             ctx_arity(method, args, 0)?;
-            let state = state_of(ctx);
-            let ext = state.borrow();
-            let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
-            let read_cell = ext.graph.read(handle.node, &mut |body| body);
+            let read_cell = extension_point::read_source(ctx, handle.node);
             Ok(CtxOut::Retained(read_cell))
         }
         // Local converge + publish: merge `delta` into the current state, wake dependents, and
@@ -295,7 +287,7 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
             ctx.retained_set(handle.cell, merged_slot)?;
             ctx.free(merged_slot);
             ctx.free(current_slot);
-            self_wake(ctx, handle.node)?;
+            extension_point::wake(ctx, handle.node)?;
             if handle.is_encrypted() {
                 with_p2p(ctx, |p| p.p2p_group_publish(&handle.topic, bytes))?;
             } else {
@@ -332,7 +324,7 @@ pub fn synced_ctx_method_dispatch<C: NativeCtx + ?Sized>(
                 ctx.free(current_slot);
             }
             if changed {
-                self_wake(ctx, handle.node)?;
+                extension_point::wake(ctx, handle.node)?;
             }
             Ok(CtxOut::Out(NativeOut::Unit))
         }
@@ -389,20 +381,6 @@ fn clone_crdt<C: NativeCtx + ?Sized>(ctx: &mut C, slot: Slot) -> Option<Box<dyn 
         }
     });
     cloned
-}
-
-/// Touch the node and flush the shared reactive graph (unless a flush is already running) — the
-/// signal `set` epilogue, reused so a synced change propagates identically.
-fn self_wake<C: NativeCtx + ?Sized>(ctx: &mut C, node: NodeId) -> Result<(), CtxError> {
-    let state = state_of(ctx);
-    let ext = state.borrow();
-    let ext: &ReactiveExt = ext.downcast_ref().expect("std.reactive state");
-    ext.graph.touch(node);
-    sync_gates(ctx, ext);
-    if !ext.graph.is_flushing() {
-        drive_flush(ctx, ext)?;
-    }
-    Ok(())
 }
 
 fn not_a_crdt() -> CtxError {
