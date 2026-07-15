@@ -123,6 +123,8 @@ oracle.
 | T4 | **Salsa `SourceProgram` refactor** | `979ac355` | `SourceProgram` gains an `edition`; `source_program`/`workspace`/`workspace_with_deps` + `DepSources` carry it; every query (`tokens`/`ast`/`checked`/`linked_checked`, single-file + workspace) runs under it; `workspace_editions` is the salsa analogue of `Linked::editions`. Feeders (LSP/IDE/MCP) pass real editions. So the whole IDE stack (diagnostics/hover/completion) is edition-aware. |
 | T5 | **Residual analysis paths** | `9a95b71e` | MCP test-run (`workspace_editions`, now public), `--watch` hot-reload + `--watch --impact` (`impact_of_edit` gained an edition). Remaining `check_all` sites are test/synthetic snippets (correctly default). |
 
+**Syntax highlighting.** The LSP **semantic-token overlay** is edition-aware for free: `IdeState::semantic_tokens` renders over `noeta_db::ast(entry)`, which T4 parses under the source's edition. The **base grammars** (`editors/tree-sitter-noeta/grammar.js`, `editors/vscode-noeta/syntaxes/noeta.tmLanguage.json`) are static editor assets — a single grammar per language, not a toolchain path — so they can't be per-file-edition-parameterized. **Follow-up (only when a *syntactic* edition ever ships):** version/regenerate those two grammar files. Moot now — no divergence ships, and the planned first divergence is non-syntactic (lexer stays stable).
+
 ## Acceptance test (the S3 gate)
 
 A single resolved graph with two packages of different editions compiles, and the edition-gated rule
