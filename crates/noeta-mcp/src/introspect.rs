@@ -170,7 +170,7 @@ pub fn module_graph(p: &Prepared) -> ModuleGraphOutput {
         .iter()
         .enumerate()
         .map(|(source_idx, src)| {
-            let sp = noeta_db::source_program(&p.db, src);
+            let sp = noeta_db::source_program(&p.db, src, p.edition);
             let parsed = noeta_db::ast(&p.db, sp);
             let mut namespace = String::new();
             let mut imports = Vec::new();

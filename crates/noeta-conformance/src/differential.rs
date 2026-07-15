@@ -141,7 +141,7 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
     // behavior-preserving, since any divergence would surface here.
     let db = LangDatabase::default();
     let source = Source::new(SourceId::FIRST, name, text);
-    let src = noeta_db::source_program(&db, &source);
+    let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
 
     // A program that does not parse cleanly has no eval-level behavior to compare — that is
     // the normal conformance harness's job (the lexer/parser stages). Exclude it here.
@@ -194,7 +194,7 @@ fn compare_backends_workspace(
     report: &mut DiffReport,
 ) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules);
+    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
 
     let program = match &noeta_db::linked(&db, ws).0 {
         Ok(program) => program,

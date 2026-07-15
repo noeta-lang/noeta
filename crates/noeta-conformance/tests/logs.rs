@@ -17,7 +17,7 @@ use noeta_vm::VmBackend;
 fn compile(text: &str) -> noeta_bytecode::Module {
     let db = LangDatabase::default();
     let source = Source::new(SourceId::FIRST, "logs.noe", text);
-    let src = noeta_db::source_program(&db, &source);
+    let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
     assert!(
         noeta_db::tokens(&db, src).0.diagnostics.is_empty()
             && noeta_db::ast(&db, src).0.diagnostics.is_empty(),
@@ -39,7 +39,7 @@ fn compile(text: &str) -> noeta_bytecode::Module {
 fn emitted_logs(text: &str) -> Vec<LogRecord> {
     let db = LangDatabase::default();
     let source = Source::new(SourceId::FIRST, "logs.noe", text);
-    let src = noeta_db::source_program(&db, &source);
+    let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
     let module = compile(text);
 
     let sink = Arc::new(Mutex::new(Vec::new()));

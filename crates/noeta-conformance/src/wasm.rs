@@ -173,7 +173,7 @@ pub fn run_wasm_differential(root: &Path, only: Option<&Path>) -> Result<WasmDif
 fn diff_single(name: &str, text: &str, tools: &WasmTools, report: &mut WasmDiffReport) {
     let db = LangDatabase::default();
     let source = Source::new(SourceId::FIRST, name, text);
-    let src = noeta_db::source_program(&db, &source);
+    let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
 
     if !noeta_db::tokens(&db, src).0.diagnostics.is_empty()
         || !noeta_db::ast(&db, src).0.diagnostics.is_empty()
@@ -201,7 +201,7 @@ fn diff_workspace(
     report: &mut WasmDiffReport,
 ) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules);
+    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
 
     if noeta_db::linked(&db, ws).0.is_err() {
         report.parse_failed += 1;

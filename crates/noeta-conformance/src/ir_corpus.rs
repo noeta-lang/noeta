@@ -103,7 +103,7 @@ pub fn run_ir_corpus(root: &Path, only: Option<&Path>) -> IrCorpusReport {
 fn run_single(text: &str, report: &mut IrCorpusReport) {
     let db = LangDatabase::default();
     let source = Source::new(SourceId::FIRST, "ir-corpus", text);
-    let src = noeta_db::source_program(&db, &source);
+    let src = noeta_db::source_program(&db, &source, noeta_lexer::Edition::DEFAULT);
 
     let tokens = noeta_db::tokens(&db, src);
     let parsed = noeta_db::ast(&db, src);
@@ -122,7 +122,7 @@ fn run_single(text: &str, report: &mut IrCorpusReport) {
 
 fn run_workspace(raw: &noeta_loader::RawWorkspace, report: &mut IrCorpusReport) {
     let db = LangDatabase::default();
-    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules);
+    let ws = noeta_db::workspace(&db, &raw.entry, &raw.modules, noeta_lexer::Edition::DEFAULT);
 
     let program = match &noeta_db::linked(&db, ws).0 {
         Ok(program) => program,

@@ -18,6 +18,9 @@ pub struct Prepared {
     pub db: LangDatabase,
     pub ws: Workspace,
     pub sources: Vec<Source>,
+    /// The root package's language edition — the entry and its siblings are one package (this path
+    /// resolves no dependencies), so every source is analyzed under it (editions arc).
+    pub edition: noeta_lexer::Edition,
 }
 
 impl Prepared {
@@ -36,11 +39,21 @@ pub fn prepare(
 ) -> Result<Prepared, rmcp::ErrorData> {
     let sources = crate::resolve_sources(source, file)?;
     let db = LangDatabase::default();
+    // The entry's package edition (from its `noeta.toml`), or the default for an inline `source`.
+    let edition = file
+        .as_deref()
+        .map(|f| noeta_pm::manifest::root_edition(std::path::Path::new(f)))
+        .unwrap_or_default();
     let (entry, modules) = sources
         .split_first()
         .expect("resolve_sources always yields at least the entry");
-    let ws = noeta_db::workspace(&db, entry, modules);
-    Ok(Prepared { db, ws, sources })
+    let ws = noeta_db::workspace(&db, entry, modules, edition);
+    Ok(Prepared {
+        db,
+        ws,
+        sources,
+        edition,
+    })
 }
 
 /// A resolved source location: 1-based line and column plus the raw byte offset. The column counts
@@ -158,7 +171,7 @@ pub fn locate_span(p: &Prepared, span: noeta_span::Span) -> Option<(String, Span
 
 /// The entry file's [`SourceProgram`] — the salsa input the per-file `ast`/`tokens` queries take.
 pub fn entry_program(p: &Prepared) -> noeta_db::SourceProgram {
-    noeta_db::source_program(&p.db, &p.sources[0])
+    noeta_db::source_program(&p.db, &p.sources[0], p.edition)
 }
 
 /// Whether a span belongs to the entry file (spans from imported siblings are filtered out of

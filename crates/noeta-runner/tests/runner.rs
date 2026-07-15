@@ -10,7 +10,7 @@ use noeta_span::{Source, SourceId};
 fn build_bundle(text: &str) -> Vec<u8> {
     let db = noeta_db::LangDatabase::default();
     let source = Source::new(SourceId::FIRST, "test.noe", text);
-    let src = noeta_db::source_program(&db, &source);
+    let src = noeta_db::source_program(&db, &source, noeta_db::Edition::DEFAULT);
     let module = noeta_db::bytecode(&db, src)
         .0
         .as_ref()

@@ -401,7 +401,15 @@ impl DocumentStore {
         let programs: Vec<SourceProgram> = sources
             .iter()
             .enumerate()
-            .map(|(id, (u, text))| SourceProgram::new(&self.db, id as u32, u.clone(), text.clone()))
+            .map(|(id, (u, text))| {
+                SourceProgram::new(
+                    &self.db,
+                    id as u32,
+                    u.clone(),
+                    text.clone(),
+                    edition_of_uri(u).as_str().to_string(),
+                )
+            })
             .collect();
         // Dependency packages (package-manager P2.1c): resolve the entry's deps and add each dep
         // module as a `DepModule` input (SourceIds continue past the siblings), so cross-package
@@ -476,8 +484,14 @@ impl DocumentStore {
                 .flat_map(|(local, global)| [local.clone(), global.clone()])
                 .collect();
             for module in &package.modules {
-                let src =
-                    SourceProgram::new(&self.db, next_id, module.name.clone(), module.text.clone());
+                let src = SourceProgram::new(
+                    &self.db,
+                    next_id,
+                    module.name.clone(),
+                    module.text.clone(),
+                    // The dependency package's own edition (already canonical on `DepPackage`).
+                    package.edition.clone(),
+                );
                 next_id += 1;
                 deps.modules.push(DepModule::new(
                     &self.db,

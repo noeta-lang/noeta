@@ -156,7 +156,7 @@ fn front_end(
 ) {
     let db = LangDatabase::default();
     let source = Source::new(SourceId::FIRST, SOURCE_NAME, text);
-    let src = noeta_db::source_program(&db, &source);
+    let src = noeta_db::source_program(&db, &source, noeta_db::Edition::DEFAULT);
     let sources = source_map(text);
 
     let mut diagnostics = Vec::new();

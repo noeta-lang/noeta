@@ -462,7 +462,13 @@ modules are resolved so imports check). Run this before claiming Noeta code comp
         Parameters(args): Parameters<CheckArgs>,
     ) -> Result<Json<CheckOutput>, ErrorData> {
         let sources = resolve_sources(&args.source, &args.file)?;
-        Ok(Json(run_check(&sources)))
+        // Check under the entry's package edition (from its `noeta.toml`), default for inline source.
+        let root_edition = args
+            .file
+            .as_deref()
+            .map(|f| noeta_pm::manifest::root_edition(std::path::Path::new(f)))
+            .unwrap_or_default();
+        Ok(Json(run_check(&sources, root_edition)))
     }
 
     /// Search the Noeta documentation — the first stop before writing unfamiliar Noeta.
@@ -1082,12 +1088,12 @@ pub(crate) fn resolve_sources(
 /// Run the whole-workspace check over `sources` (entry at index 0) and resolve the diagnostics into
 /// the canonical `JsonDiagnostic` form (the same one `noeta check --format json` emits). Uses a
 /// fresh `LangDatabase` — the memoization is per call in M0.
-fn run_check(sources: &[Source]) -> CheckOutput {
+fn run_check(sources: &[Source], root_edition: noeta_lexer::Edition) -> CheckOutput {
     let db = noeta_db::LangDatabase::default();
     let (entry, modules) = sources
         .split_first()
         .expect("resolve_sources always yields at least the entry");
-    let ws = noeta_db::workspace(&db, entry, modules);
+    let ws = noeta_db::workspace(&db, entry, modules, root_edition);
     let checked = noeta_db::linked_checked(&db, ws);
     // The `SourceMap` resolves each diagnostic's span → file + line/column (entry is SourceId 0).
     let source_map = SourceMap::new(sources.to_vec());
@@ -1188,11 +1194,14 @@ mod tests {
     use super::*;
 
     fn check_source(text: &str) -> CheckOutput {
-        run_check(&[Source::new(
-            SourceId::FIRST,
-            "<inline>".to_string(),
-            text.to_string(),
-        )])
+        run_check(
+            &[Source::new(
+                SourceId::FIRST,
+                "<inline>".to_string(),
+                text.to_string(),
+            )],
+            noeta_lexer::Edition::DEFAULT,
+        )
     }
 
     #[test]
