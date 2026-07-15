@@ -121,6 +121,14 @@ pub trait Index {
     fn docs(&self, _name: &str, _version: &Version) -> Result<Option<String>, String> {
         Ok(None)
     }
+
+    /// A **local git repository** already holding `name`'s commits, if this index maintains one, so the
+    /// resolver can materialize a release's tree from it instead of a second network clone
+    /// (private-registries arc). The default `None` means "fetch from the release's coordinates URL"
+    /// (the hosted/local index don't hold a clone). A git-forge index returns its cached bare clone.
+    fn local_repo(&self, _name: &str) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// Resolve a registry requirement to a concrete release's coordinates: the **highest published
@@ -339,6 +347,39 @@ pub fn open_default() -> Result<Box<dyn Index>, String> {
         return Ok(Box::new(HttpIndex::new(base)?));
     }
     Ok(Box::new(LocalIndex::open()?))
+}
+
+/// Open the index for a `[registries]` source (private-registries arc): `None` = the environment
+/// default ([`open_default`]); a hosted URL = an [`HttpIndex`] at that base; a GitHub org = a
+/// git-forge index over that org. This is what lets a project route each scope to its own registry.
+pub fn open_source(
+    source: Option<&crate::manifest::RegistrySource>,
+) -> Result<Box<dyn Index>, String> {
+    match source {
+        None => open_default(),
+        Some(crate::manifest::RegistrySource::Hosted(url)) => open_hosted(url),
+        Some(crate::manifest::RegistrySource::GitForge(base)) => open_git_forge(base),
+    }
+}
+
+/// Open a hosted HTTP registry at an explicit base URL (a `[registries]` `https://…` source).
+#[cfg(feature = "registry-http")]
+fn open_hosted(url: &str) -> Result<Box<dyn Index>, String> {
+    Ok(Box::new(HttpIndex::new(url.to_string())?))
+}
+
+#[cfg(not(feature = "registry-http"))]
+fn open_hosted(_url: &str) -> Result<Box<dyn Index>, String> {
+    Err(
+        "a hosted `[registries]` source needs the `registry-http` build of the toolchain"
+            .to_string(),
+    )
+}
+
+/// Open a git forge as a registry (a `[registries]` `github:`/`gitlab:`/`git:` source, normalized to a
+/// base URL): packages resolve from `<base>/<package>` by their semver tags (private-registries arc).
+fn open_git_forge(base: &str) -> Result<Box<dyn Index>, String> {
+    Ok(Box::new(crate::git_forge::GitForgeIndex::from_base(base)?))
 }
 
 /// The networked registry index (package-manager Phase 4, S4): an HTTP client of the hosted index

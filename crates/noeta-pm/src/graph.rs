@@ -160,11 +160,13 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
     // anywhere in the tree must be listed here or resolution refuses it. A dependency's own trust
     // never applies — authority flows top-down from the human.
     let native_trust = &manifest.trust().native;
+    let registries = manifest.registries();
     let mut walker = Walker {
         instances: BTreeMap::new(),
         store: None,
         lock: &lock,
-        index: None,
+        indexes: BTreeMap::new(),
+        registries,
         native_trust,
         solution: BTreeMap::new(),
         scope_trust: BTreeMap::new(),
@@ -204,7 +206,12 @@ struct Walker<'a> {
     instances: BTreeMap<String, Instance>,
     store: Option<Store>,
     lock: &'a crate::lock::Lock,
-    index: Option<Box<dyn crate::registry::Index>>,
+    /// Registry indexes, opened on first use and cached by source key (private-registries arc): with a
+    /// `[registries]` map a scope may resolve from a different registry than the default, so there can
+    /// be more than one live index. Keyed so two scopes pointing at the same source share one client.
+    indexes: BTreeMap<String, Box<dyn crate::registry::Index>>,
+    /// The root manifest's `[registries]` — which registry each scope resolves from.
+    registries: &'a crate::manifest::Registries,
     /// The root manifest's `[trust].native` — package identities allowed to run native code (Phase 4).
     native_trust: &'a std::collections::BTreeSet<String>,
     /// The resolved `identity → version` map (Phase 4, S5b), computed by [`Walker::solve`] before the
@@ -333,7 +340,7 @@ impl Walker<'_> {
                 let dir = joined.canonicalize().unwrap_or(joined);
                 Ok((dir, ResolvedSource::Path { path: path.clone() }))
             }
-            Dependency::Git { url, git_ref } => self.fetch_git(key, url, git_ref, None),
+            Dependency::Git { url, git_ref } => self.fetch_git(key, url, git_ref, None, None),
             Dependency::Registry { package, .. } => {
                 // Materialize the **resolver-selected** version (Phase 4, S5b): the PubGrub solve
                 // already chose one compatible version per identity, so look up the coordinates of
@@ -351,11 +358,11 @@ impl Walker<'_> {
                 })?;
                 let scope = package.company.clone();
                 let scope_key = self
-                    .index()?
+                    .index_for(&scope)?
                     .scope_key(&scope)
                     .map_err(|err| format!("dependency `{key}`: {err}"))?;
                 let release = self
-                    .index()?
+                    .index_for(&scope)?
                     .releases(&name)
                     .map_err(|err| format!("dependency `{key}`: {err}"))?
                     .into_iter()
@@ -371,7 +378,16 @@ impl Walker<'_> {
                 // The registry pins the SHA (Phase 4, S2), so a first resolve fetches by it rather
                 // than trusting the tag's current target. A published release is always a tag.
                 let git_ref = crate::manifest::GitRef::Tag(coords.tag.clone());
-                self.fetch_git(key, &coords.url, &git_ref, Some(&coords.sha))
+                // Materialize from the index's already-fetched local clone when it has one (a git-forge
+                // index), avoiding a second network clone; the lock still records `coords.url`.
+                let local = self.index_for(&scope)?.local_repo(&name);
+                self.fetch_git(
+                    key,
+                    &coords.url,
+                    &git_ref,
+                    Some(&coords.sha),
+                    local.as_deref(),
+                )
             }
         }
     }
@@ -382,22 +398,31 @@ impl Walker<'_> {
     /// reproducibility authority once written) → the **registry** pin (closes trust-on-first-use on a
     /// first registry resolve) → an `ls-remote` of the tag (a bare `git` dep's first fetch). A pinned
     /// SHA already in the store needs no network at all.
+    ///
+    /// `url` is the **recorded** origin — the lock pin and `ResolvedSource` key, portable across
+    /// machines. `local_repo`, when set (a git-forge index's already-fetched bare clone,
+    /// private-registries arc), is where the tree is actually **fetched from**, so a git-forge release
+    /// materializes offline from that clone instead of a second network clone; `url` is still what the
+    /// lock records.
     fn fetch_git(
         &mut self,
         key: &str,
         url: &str,
         git_ref: &crate::manifest::GitRef,
         registry_sha: Option<&str>,
+        local_repo: Option<&Path>,
     ) -> Result<(PathBuf, ResolvedSource), String> {
         let pin = self
             .lock
             .git_pin(url, git_ref)
             .or(registry_sha)
             .map(str::to_string);
+        // Fetch from the local clone when the index provides one; the lock still keys on `url`.
+        let source = local_repo.and_then(Path::to_str).unwrap_or(url);
         let store = self.store()?;
         let fetched = match &pin {
-            Some(sha) => crate::git::fetch_pinned(url, git_ref, sha, store),
-            None => crate::git::fetch(url, git_ref, store),
+            Some(sha) => crate::git::fetch_pinned(source, git_ref, sha, store),
+            None => crate::git::fetch(source, git_ref, store),
         }
         .map_err(|err| format!("dependency `{key}`: {err}"))?;
         Ok((
@@ -515,13 +540,18 @@ impl Walker<'_> {
         Ok(self.store.as_ref().expect("just opened"))
     }
 
-    /// The registry index, opened on first use (only a registry dependency needs it): the networked
-    /// index when configured (`NOETA_REGISTRY_URL` + the `registry-http` feature), else the local one.
-    fn index(&mut self) -> Result<&dyn crate::registry::Index, String> {
-        if self.index.is_none() {
-            self.index = Some(crate::registry::open_default()?);
+    /// The registry index for `company`'s packages, opened on first use and cached (private-registries
+    /// arc). The `[registries]` map routes the scope to its source — a specific hosted registry, a
+    /// GitHub org, or (unmapped) the environment default (`NOETA_REGISTRY_URL` + `registry-http`, else
+    /// the local index). Two scopes on the same source share one client.
+    fn index_for(&mut self, company: &str) -> Result<&dyn crate::registry::Index, String> {
+        let source = self.registries.source_for(company);
+        let key = registry_cache_key(source);
+        if !self.indexes.contains_key(&key) {
+            let index = crate::registry::open_source(source)?;
+            self.indexes.insert(key.clone(), index);
         }
-        Ok(self.index.as_deref().expect("just opened"))
+        Ok(self.indexes.get(&key).expect("just inserted").as_ref())
     }
 
     /// Select one compatible version per package (Phase 4, S5b) and store it in `self.solution`.
@@ -555,8 +585,9 @@ impl Walker<'_> {
             if path_git.contains_key(&identity) || !seen.insert(identity.clone()) {
                 continue;
             }
+            let company = identity.split('/').next().unwrap_or(&identity).to_string();
             let releases = self
-                .index()?
+                .index_for(&company)?
                 .releases(&identity)
                 .map_err(|err| format!("registry package `{identity}`: {err}"))?;
             for release in &releases {
@@ -643,6 +674,16 @@ impl Walker<'_> {
 /// An exact `=x.y.z` requirement — how a path/git pin presents to the resolver.
 fn exact_req(version: &Version) -> VersionReq {
     VersionReq::parse(&format!("={version}")).expect("=<version> is always a valid requirement")
+}
+
+/// A stable cache key for a `[registries]` source (private-registries arc), so two scopes routed to the
+/// same registry share one opened index. `None` (the environment default) is one shared bucket.
+fn registry_cache_key(source: Option<&crate::manifest::RegistrySource>) -> String {
+    match source {
+        None => "default".to_string(),
+        Some(crate::manifest::RegistrySource::Hosted(url)) => format!("hosted:{url}"),
+        Some(crate::manifest::RegistrySource::GitForge(base)) => format!("forge:{base}"),
+    }
 }
 
 /// A path/git package as a resolver candidate (Phase 4, S5b): its single pinned version and its
@@ -1036,6 +1077,29 @@ mod tests {
         assert!(
             names(&dev).contains(&"acme/tool".to_string()),
             "dev dep missing under --target dev"
+        );
+    }
+
+    #[test]
+    fn registry_cache_key_is_distinct_per_source() {
+        // private-registries S2: the per-scope index cache keys off the source, so two scopes on the
+        // same registry share one index and different registries get distinct ones (the routing seam).
+        use crate::manifest::RegistrySource;
+        assert_eq!(registry_cache_key(None), "default");
+        assert_eq!(
+            registry_cache_key(Some(&RegistrySource::GitForge(
+                "https://github.com/acme".into()
+            ))),
+            "forge:https://github.com/acme"
+        );
+        assert_ne!(
+            registry_cache_key(Some(&RegistrySource::Hosted("https://a".into()))),
+            registry_cache_key(Some(&RegistrySource::Hosted("https://b".into())))
+        );
+        // The forge and hosted namespaces don't collide.
+        assert_ne!(
+            registry_cache_key(Some(&RegistrySource::GitForge("x".into()))),
+            registry_cache_key(Some(&RegistrySource::Hosted("x".into())))
         );
     }
 

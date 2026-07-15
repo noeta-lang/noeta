@@ -162,7 +162,12 @@ fn clone_ref(url: &str, git_ref: &GitRef, expected_sha: &str, staging: &Path) ->
 /// failure to even spawn `git` (not installed) is reported as such.
 fn run_git<'a>(args: impl IntoIterator<Item = &'a str>) -> Result<String, String> {
     let args: Vec<&str> = args.into_iter().collect();
+    // Prepend any token-auth `-c` config (private-registries S5) so a private github.com URL — whether
+    // a registry package or a plain private `git` dependency — authenticates; empty when no
+    // NOETA_GITHUB_TOKEN, so git falls back to ambient credentials.
+    let auth = crate::git_auth::git_auth_args();
     let output = Command::new("git")
+        .args(auth.iter().map(String::as_str))
         .args(&args)
         .output()
         .map_err(|err| format!("cannot run `git` (is it installed and on PATH?): {err}"))?;

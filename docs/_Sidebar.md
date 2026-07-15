@@ -6,6 +6,7 @@
 
 **Tools**
 - [The `noeta` CLI](The-CLI)
+- [Package Registries](Package-Registries)
 - [Package Provenance](Package-Provenance)
 - [Testing](Testing)
 - [Benchmarking](Benchmarking)

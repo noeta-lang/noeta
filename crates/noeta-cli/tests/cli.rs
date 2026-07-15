@@ -3582,6 +3582,121 @@ fn a_published_package_resolves_as_a_registry_dependency() {
 }
 
 #[test]
+fn a_git_forge_registry_resolves_and_runs_a_package() {
+    // private-registries (end-to-end): a consumer maps a scope to a git forge via `[registries]` and
+    // resolves a package from that forge's repos + tags. Hermetic — a local directory is the forge (a
+    // `git:<path>` base), so no network and no auth (public path). Proves the full chain: per-scope
+    // routing → GitForgeIndex (tags → versions) → git materialization → run. The `github:`/`gitlab:`
+    // shorthands parse to the same GitForge base (unit-tested), so this exercises them all.
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_git_forge_registry_e2e");
+    let _ = std::fs::remove_dir_all(&base);
+    let host = base.join("host"); // the forge host
+    let repo = host.join("acme").join("greet"); // the org/repo = acme/greet
+    let app = base.join("app");
+    let cache = base.join("forge-cache");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+
+    // The package repo, with a tagged release (versions are tags — no publish step).
+    git_in(&["init", "-q", "-b", "main"], &repo);
+    std::fs::write(
+        repo.join("hello.noe"),
+        "namespace greet.hello;\npub fn greeting(): string { return \"hello from the org registry\"; }\n",
+    )
+    .unwrap();
+    commit_version(
+        &repo,
+        "v1.2.0",
+        "[package]\nname = \"acme/greet\"\nversion = \"1.2.0\"\n",
+    );
+
+    // The consumer routes scope `acme` to the forge base (`<host>/acme`); everything else stays on the
+    // default. A `git:<path>` base clones a local repo, so no network.
+    std::fs::write(
+        app.join("noeta.toml"),
+        format!(
+            "[package]\nname = \"me/app\"\nversion = \"0.1.0\"\n\
+             [registries]\nacme = \"git:{}/acme\"\n\
+             [dependencies]\ngc = {{ version = \"^1.0\", package = \"acme/greet\" }}\n",
+            host.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use gc.hello.greeting;\necho greeting();\n",
+    )
+    .unwrap();
+
+    lang()
+        .env("NOETA_GIT_FORGE_CACHE", &cache)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello from the org registry"));
+}
+
+#[test]
+fn a_git_forge_resolve_tolerates_the_auth_token_override() {
+    // private-registries S5: with NOETA_GITHUB_TOKEN set, every git subprocess gets a scoped
+    // `-c http.https://github.com.extraHeader=…` auth config. Resolution against the local forge (a
+    // file path, not github.com) must still succeed — proving git accepts the arg and the header is
+    // scoped so it doesn't interfere. (Authenticating a *real* private repo needs real GitHub; here we
+    // prove the plumbing is inert where it should be.)
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_git_forge_token_e2e");
+    let _ = std::fs::remove_dir_all(&base);
+    let host = base.join("host");
+    let repo = host.join("acme").join("greet");
+    let app = base.join("app");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+
+    git_in(&["init", "-q", "-b", "main"], &repo);
+    std::fs::write(
+        repo.join("hello.noe"),
+        "namespace greet.hello;\npub fn greeting(): string { return \"hello (token path)\"; }\n",
+    )
+    .unwrap();
+    commit_version(
+        &repo,
+        "v1.0.0",
+        "[package]\nname = \"acme/greet\"\nversion = \"1.0.0\"\n",
+    );
+
+    std::fs::write(
+        app.join("noeta.toml"),
+        format!(
+            "[package]\nname = \"me/app\"\nversion = \"0.1.0\"\n\
+             [registries]\nacme = \"git:{}/acme\"\n\
+             [dependencies]\ngc = {{ version = \"^1.0\", package = \"acme/greet\" }}\n",
+            host.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use gc.hello.greeting;\necho greeting();\n",
+    )
+    .unwrap();
+
+    lang()
+        .env("NOETA_GIT_FORGE_CACHE", base.join("cache"))
+        .env("NOETA_GITHUB_TOKEN", "ghp_faketoken_for_plumbing_test")
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello (token path)"));
+}
+
+#[test]
 fn a_registry_dependency_without_a_package_is_an_error() {
     // A bare registry requirement names no package identity, so it can't be resolved — the error
     // points the user to add `package = "company/pkg"` (P2.5).
