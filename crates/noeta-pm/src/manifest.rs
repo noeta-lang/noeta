@@ -74,6 +74,11 @@ pub struct Trust {
     /// `noeta.lock` — so a compromised registry can't serve an unlogged or history-rewritten release.
     /// Default `false` (gradual adoption).
     pub require_transparency: bool,
+    /// A **publish cooldown** window in seconds (namespace-protection #1): a registry release published
+    /// more recently than this is not *newly selected* during resolution — so an advisory or a yank can
+    /// catch a compromised release before it auto-propagates to consumers. An existing lockfile pin is
+    /// unaffected (already your choice); only fresh selection is held back. `None` = off (default).
+    pub publish_cooldown: Option<u64>,
 }
 
 /// The consumer's `[trust].require_provenance` policy: demand verified provenance from no scope
@@ -790,12 +795,50 @@ fn parse_trust(table: &toml::Table) -> Result<Trust, String> {
             .as_bool()
             .ok_or("`trust.require_transparency` must be a boolean")?,
     };
+    let publish_cooldown = match trust_table.get("publish_cooldown") {
+        None => None,
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or("`trust.publish_cooldown` must be a duration string like \"24h\"")?;
+            Some(parse_duration(s)?)
+        }
+    };
     Ok(Trust {
         native: parse_list("native")?,
         commands: parse_list("commands")?,
         require_provenance,
         require_transparency,
+        publish_cooldown,
     })
+}
+
+/// Parse a human duration into seconds for `[trust].publish_cooldown`: an integer with an optional unit
+/// suffix `s`/`m`/`h`/`d` (seconds/minutes/hours/days), e.g. `"24h"`, `"30m"`, `"7d"`, `"3600s"`. A
+/// bare number is seconds. Zero is allowed (a no-op window). Rejects a negative, empty, or malformed
+/// value so a typo can't silently disable the cooldown.
+fn parse_duration(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("`trust.publish_cooldown` is empty".to_string());
+    }
+    let (digits, unit_secs) = match s.chars().last().unwrap() {
+        's' => (&s[..s.len() - 1], 1u64),
+        'm' => (&s[..s.len() - 1], 60),
+        'h' => (&s[..s.len() - 1], 3600),
+        'd' => (&s[..s.len() - 1], 86_400),
+        c if c.is_ascii_digit() => (s, 1),
+        _ => {
+            return Err(format!(
+                "`trust.publish_cooldown` = \"{s}\" has an unknown unit (use s, m, h, or d)"
+            ));
+        }
+    };
+    let n: u64 = digits.trim().parse().map_err(|_| {
+        format!("`trust.publish_cooldown` = \"{s}\" is not a whole number of time units")
+    })?;
+    n.checked_mul(unit_secs)
+        .ok_or_else(|| format!("`trust.publish_cooldown` = \"{s}\" overflows"))
 }
 
 /// Parse one dependency value: a bare SemVer string (`dep = "^1.2"`, the registry shorthand) or a
@@ -1036,6 +1079,46 @@ mod tests {
         let on = Manifest::parse("[trust]\nrequire_transparency = true\n").unwrap();
         assert!(on.trust().require_transparency);
         assert!(Manifest::parse("[trust]\nrequire_transparency = \"yes\"\n").is_err());
+    }
+
+    #[test]
+    fn trust_parses_publish_cooldown() {
+        let off = Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").unwrap();
+        assert_eq!(off.trust().publish_cooldown, None);
+        assert_eq!(
+            Manifest::parse("[trust]\npublish_cooldown = \"24h\"\n")
+                .unwrap()
+                .trust()
+                .publish_cooldown,
+            Some(86_400)
+        );
+        assert_eq!(
+            Manifest::parse("[trust]\npublish_cooldown = \"7d\"\n")
+                .unwrap()
+                .trust()
+                .publish_cooldown,
+            Some(604_800)
+        );
+        // A bare number is seconds; a non-string or bad unit is an error, not a silent no-op.
+        assert_eq!(
+            Manifest::parse("[trust]\npublish_cooldown = \"90\"\n")
+                .unwrap()
+                .trust()
+                .publish_cooldown,
+            Some(90)
+        );
+        assert!(Manifest::parse("[trust]\npublish_cooldown = \"2w\"\n").is_err());
+        assert!(Manifest::parse("[trust]\npublish_cooldown = 24\n").is_err());
+    }
+
+    #[test]
+    fn parse_duration_units() {
+        assert_eq!(parse_duration("30m").unwrap(), 1_800);
+        assert_eq!(parse_duration("3600s").unwrap(), 3_600);
+        assert_eq!(parse_duration("0").unwrap(), 0);
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("h").is_err());
+        assert!(parse_duration("-5h").is_err());
     }
 
     #[test]

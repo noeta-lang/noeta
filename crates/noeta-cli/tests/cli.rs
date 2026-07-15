@@ -3539,6 +3539,66 @@ fn a_published_package_resolves_as_a_registry_dependency() {
 }
 
 #[test]
+fn publish_cooldown_holds_back_a_freshly_published_registry_version() {
+    // namespace-protection #1 (publish cooldown): `[trust].publish_cooldown` makes the resolver skip a
+    // registry release published within the window, so an advisory/yank can catch a compromised release
+    // before it auto-propagates. Here the mock registry serves only a *just-published* version, so with
+    // a 1-day cooldown resolution fails closed (nothing old enough) — proving the filter is wired
+    // through the HTTP index and the trust policy. The failure happens during version selection, before
+    // any git materialization, so the test needs no real repo.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let feed = format!(
+        r#"{{"name":"acme/imgfx","versions":[{{"version":"1.0.0","url":"https://x/acme/imgfx","tag":"v1.0.0","sha":"abc","yanked":false,"published_at_unix":{now_ms}}}]}}"#
+    );
+    let base = mock_http(move |_method, path, _body| {
+        if path == "/v1/packages/acme/imgfx" {
+            (200, feed.clone())
+        } else {
+            (404, r#"{"error":"not found"}"#.to_string())
+        }
+    });
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_cooldown_e2e");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nfx = { version = \"^1.0\", package = \"acme/imgfx\" }\n\
+         [trust]\npublish_cooldown = \"1d\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.noe"), "use fx.core.go;\necho go();\n").unwrap();
+
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .arg("check")
+        .arg(dir.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("publish cooldown"));
+
+    // The same project without the cooldown gets past selection (it then fails later trying to fetch
+    // the mock's bogus git coordinates — a *different* error, proving cooldown was the gate above).
+    std::fs::write(
+        dir.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nfx = { version = \"^1.0\", package = \"acme/imgfx\" }\n",
+    )
+    .unwrap();
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .arg("check")
+        .arg(dir.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("publish cooldown").not());
+}
+
+#[test]
 fn require_provenance_refuses_an_unsigned_registry_dependency() {
     // namespace-protection #1, Phase 1 (consumer side): `[trust].require_provenance` demands a scope's
     // releases carry verified provenance. The published `acme/greet` is unsigned, so a consumer that

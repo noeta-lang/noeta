@@ -1311,6 +1311,8 @@ fn cmd_publish(
         deps,
         signature,
         bundle,
+        // The registry stamps the publish time server-side; the client doesn't supply it.
+        published_at: None,
     };
     match index.publish(&name, &release) {
         Ok(()) => {

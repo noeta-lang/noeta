@@ -63,6 +63,11 @@ pub struct Release {
     /// JSON Sigstore bundle over the same attestation (keyless trust root, Phase 5): a DSSE
     /// envelope + Fulcio certificate + Rekor inclusion proof, verified offline. Or `None`.
     pub bundle: Option<String>,
+    /// Publish time as Unix epoch **milliseconds** (publish-cooldown, namespace-protection #1), when
+    /// the index knows it. Drives the consumer's `[trust].publish_cooldown` filter — a release younger
+    /// than the window is not newly selected. `None` for sources without a timestamp (the local index,
+    /// path/git), which are never subject to cooldown.
+    pub published_at: Option<i64>,
 }
 
 impl Release {
@@ -249,6 +254,8 @@ impl Index for LocalIndex {
                     deps,
                     signature: get("sig").map(str::to_string),
                     bundle: get("bundle").map(str::to_string),
+                    // The local (offline) index carries no publish time — never subject to cooldown.
+                    published_at: None,
                 });
             }
         }
@@ -384,6 +391,10 @@ struct WireVersion {
     signature: Option<String>,
     #[serde(default)]
     bundle: Option<String>,
+    /// Publish time as Unix epoch milliseconds (publish-cooldown). Absent for a registry that predates
+    /// the field or can't parse its own timestamp → treated as undateable (never in cooldown).
+    #[serde(default)]
+    published_at_unix: Option<i64>,
 }
 
 #[cfg(feature = "registry-http")]
@@ -1020,6 +1031,7 @@ impl Index for HttpIndex {
                 deps,
                 signature: v.signature,
                 bundle: v.bundle,
+                published_at: v.published_at_unix,
             });
         }
         Ok(out)
@@ -1157,6 +1169,7 @@ mod tests {
             deps: Vec::new(),
             signature: None,
             bundle: None,
+            published_at: None,
         }
     }
 
@@ -1356,7 +1369,7 @@ mod http_tests {
             (
                 200,
                 r#"{"name":"acme/imgfx","versions":[
-                    {"version":"1.2.0","url":"https://x/acme/imgfx","tag":"v1.2.0","sha":"abc","yanked":false},
+                    {"version":"1.2.0","url":"https://x/acme/imgfx","tag":"v1.2.0","sha":"abc","yanked":false,"published_at_unix":1700000000000},
                     {"version":"2.0.0","url":"https://x/acme/imgfx","tag":"v2.0.0","sha":"def","yanked":true}
                 ]}"#
                     .to_string(),
@@ -1368,6 +1381,8 @@ mod http_tests {
         assert_eq!(releases.len(), 1);
         assert_eq!(releases[0].version, Version::new(1, 2, 0));
         assert_eq!(releases[0].coords.sha, "abc");
+        // The publish timestamp flows through as epoch-millis for the cooldown filter.
+        assert_eq!(releases[0].published_at, Some(1_700_000_000_000));
 
         // resolve_coords picks it through the same trait the local index uses.
         let (v, c) =
@@ -1405,6 +1420,7 @@ mod http_tests {
                     }],
                     signature: Some("deadbeef".to_string()),
                     bundle: None,
+                    published_at: None,
                 },
             )
             .unwrap();
@@ -1462,6 +1478,7 @@ mod http_tests {
             deps: Vec::new(),
             signature: None,
             bundle: Some(r#"{"mediaType":"m"}"#.to_string()),
+            published_at: None,
         };
         index.publish("a/b", &rel).unwrap();
         let body = rx.recv().unwrap();
@@ -1496,6 +1513,7 @@ mod http_tests {
                     deps: Vec::new(),
                     signature: None,
                     bundle: None,
+                    published_at: None,
                 },
             )
             .unwrap_err();

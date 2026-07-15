@@ -162,6 +162,7 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
     // Same top-down authority: the consumer's require-provenance policy is the root's, applied to every
     // resolved dependency (namespace-protection #1). A dependency can't relax it for itself.
     let require_provenance = &manifest.trust().require_provenance;
+    let publish_cooldown = manifest.trust().publish_cooldown;
     let mut walker = Walker {
         instances: BTreeMap::new(),
         store: None,
@@ -169,6 +170,7 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
         index: None,
         native_trust,
         require_provenance,
+        publish_cooldown,
         solution: BTreeMap::new(),
         scope_trust: BTreeMap::new(),
         registry_ids: std::collections::BTreeSet::new(),
@@ -312,6 +314,10 @@ struct Walker<'a> {
     /// carry verified provenance (namespace-protection #1). An unsigned release from a required scope
     /// is refused during the walk.
     require_provenance: &'a crate::manifest::RequireProvenance,
+    /// The root manifest's `[trust].publish_cooldown` in seconds (namespace-protection #1): a registry
+    /// release published more recently than this is dropped from the candidate set before PubGrub, so a
+    /// too-fresh version is never newly selected. `None` = off.
+    publish_cooldown: Option<u64>,
     /// The resolved `identity → version` map (Phase 4, S5b), computed by [`Walker::solve`] before the
     /// walk. The walk materializes each registry dependency at *its* selected version rather than
     /// greedily picking the highest; empty until `solve` runs (a pure path/git graph leaves registry
@@ -697,6 +703,7 @@ impl Walker<'_> {
                 .index()?
                 .releases(&identity)
                 .map_err(|err| format!("registry package `{identity}`: {err}"))?;
+            let releases = self.apply_cooldown(&identity, releases)?;
             for release in &releases {
                 for dep in &release.deps {
                     if !path_git.contains_key(&dep.package) && !seen.contains(&dep.package) {
@@ -785,11 +792,83 @@ impl Walker<'_> {
         }
         Ok(reqs)
     }
+
+    /// Drop registry candidates published within `[trust].publish_cooldown` (namespace-protection #1),
+    /// so a too-fresh release is never *newly selected* — giving an advisory or a yank time to catch a
+    /// compromised release before it auto-propagates. A release with no known publish time is kept
+    /// (undateable — the local index and any pre-cooldown registry aren't subject to it). If **every**
+    /// candidate of a package is within the window, that's a hard error naming the package: the control
+    /// fails closed (silently allowing the just-published version would defeat its purpose), and the
+    /// message points at the levers (wait, lower, or disable the cooldown).
+    fn apply_cooldown(
+        &self,
+        identity: &str,
+        releases: Vec<crate::registry::Release>,
+    ) -> Result<Vec<crate::registry::Release>, String> {
+        let Some(cooldown_secs) = self.publish_cooldown else {
+            return Ok(releases);
+        };
+        if cooldown_secs == 0 || releases.is_empty() {
+            return Ok(releases);
+        }
+        let had = releases.len();
+        let kept = cooldown_kept(releases, cooldown_secs, now_unix_ms());
+        if kept.is_empty() && had > 0 {
+            return Err(format!(
+                "every published version of `{identity}` is within the {} publish cooldown \
+                 (`[trust].publish_cooldown`) — wait for a version to age out, lower the cooldown, or \
+                 remove the setting",
+                human_secs(cooldown_secs)
+            ));
+        }
+        Ok(kept)
+    }
 }
 
 /// An exact `=x.y.z` requirement — how a path/git pin presents to the resolver.
 fn exact_req(version: &Version) -> VersionReq {
     VersionReq::parse(&format!("={version}")).expect("=<version> is always a valid requirement")
+}
+
+/// Now as Unix epoch **milliseconds** (publish-cooldown). A clock before the epoch → 0 (treats every
+/// release as old enough — cooldown fails safe toward availability if the clock is absurd).
+fn now_unix_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Keep only registry candidates old enough to clear the cooldown: `published_at ≤ now − cooldown`.
+/// An undateable release (`published_at == None`) is always kept. Pure (clock passed in) so it is
+/// directly testable; [`Walker::apply_cooldown`] wraps it with the fail-closed empty check.
+fn cooldown_kept(
+    releases: Vec<crate::registry::Release>,
+    cooldown_secs: u64,
+    now_ms: i64,
+) -> Vec<crate::registry::Release> {
+    let cutoff_ms = now_ms.saturating_sub((cooldown_secs as i64).saturating_mul(1000));
+    releases
+        .into_iter()
+        .filter(|r| match r.published_at {
+            Some(ts) => ts <= cutoff_ms,
+            None => true,
+        })
+        .collect()
+}
+
+/// A compact rendering of a cooldown window (`86400` → `"1d"`), for the error message.
+fn human_secs(s: u64) -> String {
+    if s != 0 && s.is_multiple_of(86_400) {
+        format!("{}d", s / 86_400)
+    } else if s != 0 && s.is_multiple_of(3_600) {
+        format!("{}h", s / 3_600)
+    } else if s != 0 && s.is_multiple_of(60) {
+        format!("{}m", s / 60)
+    } else {
+        format!("{s}s")
+    }
 }
 
 /// A path/git package as a resolver candidate (Phase 4, S5b): its single pinned version and its
@@ -1091,6 +1170,53 @@ fn read_manifest(path: &Path) -> Result<Manifest, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dated_release(major: u64, published_at: Option<i64>) -> crate::registry::Release {
+        crate::registry::Release {
+            version: Version::new(major, 0, 0),
+            coords: crate::registry::GitCoords {
+                url: "u".into(),
+                tag: format!("v{major}.0.0"),
+                sha: "s".into(),
+            },
+            deps: Vec::new(),
+            signature: None,
+            bundle: None,
+            published_at,
+        }
+    }
+
+    #[test]
+    fn cooldown_drops_only_versions_inside_the_window() {
+        let now = 1_000_000_000_000i64; // fixed "now" in ms
+        let day = 86_400_000i64;
+        let releases = vec![
+            dated_release(1, Some(now - 10 * day)), // old → kept
+            dated_release(2, Some(now - day / 2)),  // 12h old → within a 1d window → dropped
+            dated_release(3, None),                 // undateable → kept
+        ];
+        let kept = cooldown_kept(releases, 86_400, now); // 1-day cooldown
+        let versions: Vec<u64> = kept.iter().map(|r| r.version.major).collect();
+        assert_eq!(versions, vec![1, 3]);
+    }
+
+    #[test]
+    fn cooldown_keeps_everything_at_the_boundary_and_when_zero() {
+        let now = 2_000_000_000_000i64;
+        // Published exactly at the cutoff is old enough (inclusive).
+        let at_cutoff = dated_release(1, Some(now - 3_600_000));
+        assert_eq!(cooldown_kept(vec![at_cutoff], 3_600, now).len(), 1);
+    }
+
+    #[test]
+    fn human_secs_renders_the_largest_whole_unit() {
+        assert_eq!(human_secs(86_400), "1d");
+        assert_eq!(human_secs(7 * 86_400), "7d");
+        assert_eq!(human_secs(3_600), "1h");
+        assert_eq!(human_secs(1_800), "30m");
+        assert_eq!(human_secs(45), "45s");
+        assert_eq!(human_secs(0), "0s");
+    }
 
     /// Lay out an app + one path dep under a fresh temp base; the dep declares `native = "native"`
     /// when `with_crate` says to create the crate dir (Phase 3, N3.1). When `trusted`, the app's
