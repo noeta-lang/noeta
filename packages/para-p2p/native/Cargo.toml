@@ -1,4 +1,4 @@
-# The native entry crate for the `noeta/para_p2p` package. Standalone (its own empty `[workspace]`)
+# The native entry crate for the `para/p2p` package. Standalone (its own empty `[workspace]`)
 # so the composed toolchain can build it as a path dependency without the main workspace adopting it,
 # exactly like the generated shim. It re-exports the `noeta-para-p2p` crate's extension slice under
 # the fixed `NOETA_EXTENSIONS` convention.
