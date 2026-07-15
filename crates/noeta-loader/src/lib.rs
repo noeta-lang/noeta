@@ -280,7 +280,14 @@ pub fn link(
     }
     let (lexeds, text_tiers) = lex_program(&sources);
 
-    let entry_parsed = noeta_parser::parse_in(&entry, &lexeds[0].tokens, &text_tiers);
+    // S0: the entry parses under the default edition. S1 threads the root package's own edition
+    // here (and each dependency's edition at `parse_clean`), applying per-package rules.
+    let entry_parsed = noeta_parser::parse_in(
+        &entry,
+        &lexeds[0].tokens,
+        noeta_lexer::Edition::DEFAULT,
+        &text_tiers,
+    );
     let entry_diags: Vec<Diagnostic> = lexeds[0]
         .diagnostics
         .iter()
@@ -359,7 +366,14 @@ pub fn link_with_deps(
     }
     let (lexeds, text_tiers) = lex_program(&sources);
 
-    let entry_parsed = noeta_parser::parse_in(&entry, &lexeds[0].tokens, &text_tiers);
+    // S0: the entry parses under the default edition. S1 threads the root package's own edition
+    // here (and each dependency's edition at `parse_clean`), applying per-package rules.
+    let entry_parsed = noeta_parser::parse_in(
+        &entry,
+        &lexeds[0].tokens,
+        noeta_lexer::Edition::DEFAULT,
+        &text_tiers,
+    );
     let entry_diags: Vec<Diagnostic> = lexeds[0]
         .diagnostics
         .iter()
@@ -448,7 +462,7 @@ fn lex_program(sources: &[Source]) -> (Vec<noeta_lexer::Lexed>, noeta_lexer::Tex
     }
     let relexed = sources
         .iter()
-        .map(|source| noeta_lexer::lex_in(source, &set))
+        .map(|source| noeta_lexer::lex_in(source, noeta_lexer::Edition::DEFAULT, &set))
         .collect();
     (relexed, set)
 }
@@ -462,7 +476,15 @@ fn parse_clean(
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Option<Program> {
     (lexed.diagnostics.is_empty())
-        .then(|| noeta_parser::parse_in(source, &lexed.tokens, text_tiers))
+        // S0: default edition. S1 passes the owning package's edition (a new `parse_clean` param).
+        .then(|| {
+            noeta_parser::parse_in(
+                source,
+                &lexed.tokens,
+                noeta_lexer::Edition::DEFAULT,
+                text_tiers,
+            )
+        })
         .filter(|parsed| parsed.diagnostics.is_empty())
         .map(|parsed| parsed.program)
 }

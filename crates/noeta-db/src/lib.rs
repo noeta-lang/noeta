@@ -187,7 +187,12 @@ pub fn ast(db: &dyn salsa::Database, src: SourceProgram) -> Ast {
             .map(str::to_string),
     );
     let set = noeta_lexer::TextTiers::with(names);
-    Ast(noeta_parser::parse_in(&source, &toks.0.tokens, &set))
+    Ast(noeta_parser::parse_in(
+        &source,
+        &toks.0.tokens,
+        noeta_lexer::Edition::DEFAULT,
+        &set,
+    ))
 }
 
 /// Type-check the AST and return the checker's diagnostics. Depends on [`ast`]. The pipeline's
@@ -393,7 +398,11 @@ pub fn workspace_text_tiers(db: &dyn salsa::Database, ws: Workspace) -> Vec<Stri
 pub fn tokens_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) -> Tokens {
     let set = noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned());
     let source = source_of(db, src);
-    Tokens(noeta_lexer::lex_in(&source, &set))
+    Tokens(noeta_lexer::lex_in(
+        &source,
+        noeta_lexer::Edition::DEFAULT,
+        &set,
+    ))
 }
 
 /// Workspace-aware parse over [`tokens_in`] — the [`linked`] pipeline's counterpart of [`ast`].
@@ -404,7 +413,12 @@ pub fn ast_in(db: &dyn salsa::Database, ws: Workspace, src: SourceProgram) -> As
     // The whole workspace's verbatim-body tier set — the same one `tokens_in` lexed with — so a
     // nested tier body inside a `${…}` hole re-lexes correctly (an inline `@html { … }` loop).
     let set = noeta_lexer::TextTiers::with(workspace_text_tiers(db, ws).iter().cloned());
-    Ast(noeta_parser::parse_in(&source, &toks.0.tokens, &set))
+    Ast(noeta_parser::parse_in(
+        &source,
+        &toks.0.tokens,
+        noeta_lexer::Edition::DEFAULT,
+        &set,
+    ))
 }
 
 /// queries remain independent. The merge means both backends run the linked program unchanged, so

@@ -4164,6 +4164,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-edition"
+version = "0.1.0"
+
+[[package]]
 name = "noeta-embed"
 version = "0.1.0"
 dependencies = [
@@ -4307,6 +4311,7 @@ dependencies = [
  "insta",
  "logos",
  "noeta-diagnostics",
+ "noeta-edition",
  "noeta-span",
 ]
 
@@ -4415,6 +4420,7 @@ dependencies = [
  "insta",
  "noeta-ast",
  "noeta-diagnostics",
+ "noeta-edition",
  "noeta-lexer",
  "noeta-span",
  "proptest",
@@ -4446,6 +4452,7 @@ dependencies = [
  "getrandom 0.3.4",
  "noeta-cache",
  "noeta-check",
+ "noeta-edition",
  "noeta-fmt",
  "noeta-loader",
  "p256",

@@ -12,7 +12,10 @@
 //! producing on-disk source trees + `noeta.lock`; the loader/compiler then run deterministically over
 //! those, outside the differential oracle.
 
-pub mod edition;
+/// Language **editions** — re-exported from the leaf `noeta-edition` crate so `noeta_pm::edition`
+/// keeps resolving (the resolution-side arc introduced the type here; the compiler arc relocated it
+/// to a crate the front-end can also depend on).
+pub use noeta_edition as edition;
 pub mod graph;
 pub mod lock;
 pub mod manifest;

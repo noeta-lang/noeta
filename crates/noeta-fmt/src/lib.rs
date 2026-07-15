@@ -282,7 +282,7 @@ pub fn format_source_in_with_formatters(
 
     // Lex with trivia so comments are available to the printer (reattached in F4). The token stream
     // is identical to a plain `lex`, so parsing is unaffected.
-    let lexed = noeta_lexer::lex_with_trivia_in(&source, text_tiers);
+    let lexed = noeta_lexer::lex_with_trivia_in(&source, noeta_lexer::Edition::DEFAULT, text_tiers);
     let program = parse_checked(&source, &lexed)?;
 
     let out = print::print_program(
@@ -345,7 +345,7 @@ pub fn format_stmt_at_in(
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Option<(u32, u32, String)> {
     let source = Source::new(SourceId(0), name, text);
-    let lexed = noeta_lexer::lex_with_trivia_in(&source, text_tiers);
+    let lexed = noeta_lexer::lex_with_trivia_in(&source, noeta_lexer::Edition::DEFAULT, text_tiers);
     let program = parse_checked(&source, &lexed).ok()?;
 
     let stmt = program.stmts.iter().find(|s| {
@@ -409,7 +409,7 @@ pub fn format_range_in(
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Option<Vec<(u32, u32, String)>> {
     let source = Source::new(SourceId(0), name, text);
-    let lexed = noeta_lexer::lex_with_trivia_in(&source, text_tiers);
+    let lexed = noeta_lexer::lex_with_trivia_in(&source, noeta_lexer::Edition::DEFAULT, text_tiers);
     let program = parse_checked(&source, &lexed).ok()?;
 
     let mut edits: Vec<(u32, u32, String)> = Vec::new();
@@ -468,7 +468,10 @@ fn parse_clean(
     source: &Source,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Result<noeta_ast::Program, FmtError> {
-    parse_checked(source, &noeta_lexer::lex_in(source, text_tiers))
+    parse_checked(
+        source,
+        &noeta_lexer::lex_in(source, noeta_lexer::Edition::DEFAULT, text_tiers),
+    )
 }
 
 #[cfg(test)]

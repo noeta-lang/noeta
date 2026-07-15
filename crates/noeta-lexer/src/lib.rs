@@ -10,6 +10,12 @@ use logos::Logos;
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::{Source, Span};
 
+/// Re-export of the language [`Edition`] type (from the leaf `noeta-edition` crate) so every
+/// front-end crate that already depends on the lexer (loader, db, fmt, conformance) can name the
+/// edition it threads into [`lex_in`] / `noeta_parser::parse_in` without a separate dependency on
+/// `noeta-edition`.
+pub use noeta_edition::Edition;
+
 /// The lexical category of a token. Declarative `logos` definitions keep the lexer
 /// fast and the token set legible. `logos` resolves overlaps by longest match (so `==`
 /// beats `=`) and gives literal `#[token]`s priority over regexes (so `mut` is a
@@ -640,29 +646,35 @@ impl TextTiers {
 /// Text-tier bodies are captured for the default [`TextTiers`] set plus any `@tier(…, text: "…")`
 /// declaration in the file itself.
 pub fn lex(source: &Source) -> Lexed {
-    lex_in(source, &TextTiers::default())
+    lex_in(source, Edition::DEFAULT, &TextTiers::default())
 }
 
 /// Lex a source file, additionally collecting every comment into [`Lexed::comments`] (the formatter
 /// path). The token stream is identical to [`lex`]'s; only trivia recovery is added.
 pub fn lex_with_trivia(source: &Source) -> Lexed {
-    lex_with_trivia_in(source, &TextTiers::default())
+    lex_with_trivia_in(source, Edition::DEFAULT, &TextTiers::default())
 }
 
-/// [`lex`] with an explicit text-tier set — the pipeline entry point when declarations from other
-/// files (dependencies) are in play.
+/// [`lex`] with an explicit language [`Edition`] and text-tier set — the pipeline entry point when
+/// declarations from other files (dependencies) are in play.
+///
+/// The `edition` is the seam for edition-gated **tokenization** (a future edition that promotes an
+/// identifier to a keyword, or changes a literal's syntax). Today there is one edition, so it does
+/// not yet alter the token stream — it is threaded so the day one does, the value is already here.
 ///
 /// **Two-pass self-use:** a file can *declare* a text tier and use it, in either order, with no
 /// caller help. After a first pass, the token stream is scanned for `@tier(<name>, …, text: …)`
 /// declarations; if that discovers text-tier names the supplied set lacks, the file is re-lexed
 /// once with the augmented set, so `@<name> { prose }` bodies capture verbatim. Only files
 /// declaring text tiers pay the second pass.
-pub fn lex_in(source: &Source, text_tiers: &TextTiers) -> Lexed {
+pub fn lex_in(source: &Source, edition: Edition, text_tiers: &TextTiers) -> Lexed {
+    let _ = edition;
     lex_impl(source, false, text_tiers)
 }
 
-/// [`lex_with_trivia`] with an explicit text-tier set (see [`lex_in`]).
-pub fn lex_with_trivia_in(source: &Source, text_tiers: &TextTiers) -> Lexed {
+/// [`lex_with_trivia`] with an explicit [`Edition`] and text-tier set (see [`lex_in`]).
+pub fn lex_with_trivia_in(source: &Source, edition: Edition, text_tiers: &TextTiers) -> Lexed {
+    let _ = edition;
     lex_impl(source, true, text_tiers)
 }
 
@@ -1720,7 +1732,11 @@ mod tests {
             "<t>",
             "@spec {\n  # prose \"unmatched\n}\n".to_string(),
         );
-        let lexed = lex_in(&source, &TextTiers::with(["spec".to_string()]));
+        let lexed = lex_in(
+            &source,
+            Edition::DEFAULT,
+            &TextTiers::with(["spec".to_string()]),
+        );
         assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
         let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
         assert!(kinds.contains(&TokenKind::DocText));

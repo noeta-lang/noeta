@@ -37,6 +37,7 @@ use noeta_ast::{
     UnaryOp, UseName, VariantDecl,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
+use noeta_edition::Edition;
 use noeta_lexer::{Token, TokenKind as T};
 use noeta_span::{Source, SourceId, Span};
 
@@ -97,6 +98,12 @@ pub(crate) struct Ctx<'src> {
     /// terminator so a complete statement is newline-ended even when its last token is not one the
     /// lexer treats as statement-ending (e.g. a generic-close `>`).
     soft_terminators: &'src HashSet<u32>,
+    /// The language [`Edition`] the file is written against — its own package's edition when parsed
+    /// through the pipeline, the default for a plain [`parse`]. A `${…}` hole is re-lexed on its own
+    /// text slice ([`parse_hole`]) under this edition, so a nested tier body inside a hole tokenizes
+    /// exactly as the enclosing file does. Currently one edition exists, so it does not yet change
+    /// the grammar; it is the seam future edition-gated parsing will consult.
+    edition: Edition,
     /// The verbatim-body tier set the file was lexed with (`doc` plus any declared/extension text
     /// or expression tiers). A `${…}` hole is re-lexed on its own text slice ([`parse_hole`]), so
     /// it needs the same set — otherwise a **nested** `@html { … }` inside a hole (an inline loop
@@ -781,14 +788,29 @@ const DEEP_PARSE_STACK: usize = 64 * 1024 * 1024;
 /// (E0032) and, for merely deep input, runs the recursive-descent grammar on a large-stack worker
 /// thread so it cannot overflow the caller's stack.
 pub fn parse(source: &Source, tokens: &[Token]) -> Parsed {
-    parse_in(source, tokens, &noeta_lexer::TextTiers::default())
+    parse_in(
+        source,
+        tokens,
+        Edition::DEFAULT,
+        &noeta_lexer::TextTiers::default(),
+    )
 }
 
-/// As [`parse`], but with the file's **verbatim-body tier set** (the same set the whole-program
-/// lexer used) so a `${…}` hole's re-lex recognizes a nested tier body — an inline `@html { … }`
-/// loop body inside a hole. The pipeline (loader/db) passes its workspace set; a plain [`parse`]
-/// uses the default (`doc` only), which is correct for a file that uses no nested tier holes.
-pub fn parse_in(source: &Source, tokens: &[Token], text_tiers: &noeta_lexer::TextTiers) -> Parsed {
+/// As [`parse`], but with the file's language [`Edition`] and **verbatim-body tier set** (the same
+/// set the whole-program lexer used) so a `${…}` hole's re-lex recognizes a nested tier body — an
+/// inline `@html { … }` loop body inside a hole. The pipeline (loader/db) passes each package's own
+/// edition + its workspace set; a plain [`parse`] uses the default edition and set (`doc` only),
+/// which is correct for a file that uses no nested tier holes.
+///
+/// The `edition` is the seam for edition-gated **grammar** (a future edition that changes how a form
+/// parses). It flows into the parse context so a `${…}` hole re-lexes under the same edition as the
+/// file that contains it; today one edition exists, so it does not yet alter the parse.
+pub fn parse_in(
+    source: &Source,
+    tokens: &[Token],
+    edition: Edition,
+    text_tiers: &noeta_lexer::TextTiers,
+) -> Parsed {
     let (max_depth, overflow_span) = nesting_depth(tokens);
     if let Some(span) = overflow_span {
         // Stop before invoking the recursive parser: deeper than the stack can safely hold.
@@ -811,13 +833,13 @@ pub fn parse_in(source: &Source, tokens: &[Token], text_tiers: &noeta_lexer::Tex
         std::thread::scope(|scope| {
             std::thread::Builder::new()
                 .stack_size(DEEP_PARSE_STACK)
-                .spawn_scoped(scope, || parse_inner(source, tokens, text_tiers))
+                .spawn_scoped(scope, || parse_inner(source, tokens, edition, text_tiers))
                 .expect("spawn parse worker")
                 .join()
                 .expect("parse worker panicked")
         })
     } else {
-        parse_inner(source, tokens, text_tiers)
+        parse_inner(source, tokens, edition, text_tiers)
     }
 }
 
@@ -844,7 +866,12 @@ fn nesting_depth(tokens: &[Token]) -> (usize, Option<Span>) {
     (max, overflow)
 }
 
-fn parse_inner(source: &Source, tokens: &[Token], text_tiers: &noeta_lexer::TextTiers) -> Parsed {
+fn parse_inner(
+    source: &Source,
+    tokens: &[Token],
+    edition: Edition,
+    text_tiers: &noeta_lexer::TextTiers,
+) -> Parsed {
     let diags = RefCell::new(Vec::new());
     let soft_terminators: HashSet<u32> = noeta_lexer::newline_terminator_offsets(source, tokens)
         .into_iter()
@@ -853,6 +880,7 @@ fn parse_inner(source: &Source, tokens: &[Token], text_tiers: &noeta_lexer::Text
         source,
         diags: &diags,
         soft_terminators: &soft_terminators,
+        edition,
         text_tiers,
     };
     let len = source.text().len();

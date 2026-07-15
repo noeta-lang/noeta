@@ -1,5 +1,5 @@
-//! Language **editions** (follow-on arc F1) — a per-package pin of the language/ABI semantics a
-//! package's source is written against, declared `edition = "2026"` in its `[package]` table.
+//! Language **editions** — a per-package pin of the language/ABI semantics a package's source is
+//! written against, declared `edition = "2026"` in its `[package]` table.
 //!
 //! Editions exist so a first-party-but-out-of-tree package can evolve on its own cadence yet stay
 //! buildable by a newer toolchain: the toolchain keeps understanding every past edition and applies
@@ -7,19 +7,24 @@
 //! ships behind a new edition instead of splitting the ecosystem. This is the same contract as Rust
 //! editions — opt-in, per-package, and never silently changing an existing package's meaning.
 //!
-//! **What this arc lands is the seam, not a divergence.** There is exactly one edition today
+//! **This is the lowest crate in the pipeline** — it depends on nothing, so every layer that must
+//! name an edition (the lexer, the parser, the checker, the package manager) can depend on it
+//! without pulling in the package-manager stack. `noeta-pm` re-exports it as `noeta_pm::edition`
+//! for source compatibility with the resolution-side arc that introduced the type.
+//!
+//! **What the editions arc lands is the seam, not a divergence.** There is exactly one edition today
 //! ([`Edition::E2026`]), so no two editions yet compile differently. What is real now: the value is
 //! *validated* (an unknown edition is a manifest error, not a silently-accepted string), *pinned* in
-//! `noeta.lock` for reproducibility, and folded into the **startup-cache key** — so the moment a
-//! future edition *does* change compilation, switching a package's edition already invalidates its
-//! cached bytecode rather than serving a stale artifact. The first edition-gated *behaviour* is a
-//! later, separately-scoped change; it reads the edition the toolchain already threads here.
+//! `noeta.lock` for reproducibility, folded into the **startup-cache key**, and — as of the compiler
+//! arc's S0 — *threaded into the front-end entry points* (`noeta_lexer::lex_in` /
+//! `noeta_parser::parse_in`) so the day a future edition *does* change syntax or lints, the value
+//! is already at the point that would consult it. The first edition-gated *behaviour* is a later,
+//! separately-scoped slice; it reads the edition the toolchain already threads.
 //!
 //! **Granularity is per-package.** The data model records each resolved package's own edition
-//! (manifest + lock), so a dependency graph may mix editions. The compilation *unit* the front-end
-//! currently consumes is the merged program, whose edition is the **root** package's (a merged
-//! program has no per-declaration edition switch yet); per-declaration divergence within one
-//! compilation is the future refinement the per-package model leaves room for.
+//! (manifest + lock + `DepPackage.edition`), so a dependency graph may mix editions. Applying each
+//! package's own edition across the single merged program is the compiler arc's later work; this
+//! crate is the shared vocabulary that work is written in.
 
 use std::fmt;
 

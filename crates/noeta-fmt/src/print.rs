@@ -207,12 +207,16 @@ struct Printer<'a> {
 /// [`Printer::layout_terminates`]. Synthetic and explicit `;` are dropped so a search finds the next
 /// *content* token, and the natural token order keeps the vec sorted by `start` for a partition search.
 fn code_tokens(source: &str, text_tiers: &noeta_lexer::TextTiers) -> Vec<(u32, TokenKind)> {
-    noeta_lexer::lex_in(&Source::new(SourceId(0), "<fmt>", source), text_tiers)
-        .tokens
-        .iter()
-        .filter(|t| t.kind != TokenKind::Semicolon)
-        .map(|t| (t.span.start, t.kind))
-        .collect()
+    noeta_lexer::lex_in(
+        &Source::new(SourceId(0), "<fmt>", source),
+        noeta_lexer::Edition::DEFAULT,
+        text_tiers,
+    )
+    .tokens
+    .iter()
+    .filter(|t| t.kind != TokenKind::Semicolon)
+    .map(|t| (t.span.start, t.kind))
+    .collect()
 }
 
 impl Printer<'_> {
