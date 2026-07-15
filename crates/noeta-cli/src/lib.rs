@@ -37,7 +37,7 @@ use noeta_vm::{SessionOutput, VmBackend, VmSession};
 
 // The package manager (package-manager P2) now lives in the `noeta-pm` library so `noeta-lsp` and
 // `noeta-db` resolve dependencies through the same code; the CLI names its modules unqualified.
-use noeta_pm::{graph, lock, manifest, registry, reserved};
+use noeta_pm::{authorship, commit_web_url, graph, lock, manifest, registry, reserved};
 // The L2 compile pipeline (source → runnable module) and the execution core live in `noeta-runner`
 // so the CLI and the standalone lean runtime share one implementation (dev-deps D3c). The CLI's
 // `run`/`dump`/`build`/`test` paths call these by the same names they used when defined here.
@@ -992,6 +992,9 @@ fn cmd_add(
         return ExitCode::from(2);
     }
 
+    // The pins before this add — so we can flag a newly-pulled dependency authored by a first-time
+    // committer (the committer signal). `add_dependency` only edits the manifest, not the lock.
+    let old_lock = lock::Lock::read(manifest_dir);
     if let Err(err) = manifest::add_dependency(&manifest_path, &binding_key, &value_toml) {
         eprintln!("lang: {err}");
         return ExitCode::from(1);
@@ -1013,6 +1016,7 @@ fn cmd_add(
                     root = dep.root
                 );
             }
+            warn_new_committers(&old_lock, &resolved);
             ExitCode::SUCCESS
         }
         Err(err) => {
@@ -1032,6 +1036,9 @@ fn cmd_update() -> ExitCode {
     let dir = manifest_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
+    // Capture the previous pins *before* discarding the lock, so we can point out which upgrades pull
+    // in a new committer (the committer signal) once the graph re-resolves.
+    let old_lock = lock::Lock::read(dir);
     let _ = std::fs::remove_file(dir.join(lock::LOCK_NAME));
     match graph::resolve_graph(&manifest_path) {
         Ok(graph) => {
@@ -1044,11 +1051,55 @@ fn cmd_update() -> ExitCode {
                     graph.locked.len()
                 );
             }
+            warn_new_committers(&old_lock, &graph);
             ExitCode::SUCCESS
         }
         Err(err) => {
             eprintln!("lang: {err}");
             ExitCode::from(1)
+        }
+    }
+}
+
+/// Surface the **committer signal** (namespace-protection): after resolving, for each git-sourced
+/// dependency whose pinned commit is new or changed relative to `old_lock`, look at the authorship of
+/// the new commit and warn — on stderr, best-effort — when it was authored by a first-time committer
+/// of that repo, or when an upgrade pulls in a committer new to it. Each warning links straight to the
+/// commit so a reviewer can navigate there after seeing it. This is a *soft* signal (git author fields
+/// are self-set and forgeable): a prompt to look, never a gate, and never a failure.
+fn warn_new_committers(old_lock: &lock::Lock, graph: &graph::ResolvedGraph) {
+    for pkg in &graph.locked {
+        let graph::ResolvedSource::Git { url, sha, .. } = &pkg.source else {
+            continue; // path deps have no upstream history
+        };
+        let old = old_lock.git_sha(&pkg.identity);
+        // Unchanged since last lock → nothing new to review.
+        if old == Some(sha.as_str()) {
+            continue;
+        }
+        let since = old.filter(|old| *old != sha);
+        let Ok(facts) = authorship(url, sha, since) else {
+            continue; // best-effort: an unreachable remote / missing git just stays quiet
+        };
+        if !facts.is_noteworthy() {
+            continue;
+        }
+        let link = commit_web_url(url, sha).unwrap_or_else(|| format!("{url} @ {sha}"));
+        if !facts.new_since.is_empty() {
+            eprintln!(
+                "⚠ {} {}: this upgrade pulls in commits from committer(s) new to `{}`:",
+                pkg.identity, pkg.version, url
+            );
+            for who in &facts.new_since {
+                eprintln!("      {who}");
+            }
+            eprintln!("    review the change before trusting it: {link}");
+        } else {
+            eprintln!(
+                "⚠ {} {}: the release commit was authored by a first-time committer of `{}`:\n\
+                 \x20     {}\n    review it before trusting it: {link}",
+                pkg.identity, pkg.version, url, facts.author
+            );
         }
     }
 }

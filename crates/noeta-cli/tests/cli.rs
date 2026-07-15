@@ -3556,6 +3556,84 @@ fn require_provenance_refuses_an_unsigned_registry_dependency() {
 }
 
 #[test]
+fn noeta_add_warns_when_a_new_committer_authored_the_release() {
+    // namespace-protection committer signal: adding a git dependency whose release commit was authored
+    // by someone with no prior history in an established repo surfaces a soft warning (with a link to
+    // the commit), so the user can review before trusting it. The add itself still succeeds.
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_committer_signal");
+    let _ = std::fs::remove_dir_all(&base);
+    let repo = base.join("greetlib");
+    let app = base.join("app");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+
+    let commit = |file: &str, contents: &str, name: &str, email: &str| {
+        std::fs::write(repo.join(file), contents).unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-q", "-m", file]] {
+            let ok = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", name)
+                .env("GIT_AUTHOR_EMAIL", email)
+                .env("GIT_COMMITTER_NAME", name)
+                .env("GIT_COMMITTER_EMAIL", email)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            assert!(ok, "git {args:?} failed");
+        }
+    };
+    git_in(&["init", "-q"], &repo);
+    // Alice establishes the package; Bob (a first-time committer) authors the release commit.
+    std::fs::write(
+        repo.join("noeta.toml"),
+        "[package]\nname = \"acme/greetlib\"\nversion = \"1.0.0\"\n",
+    )
+    .unwrap();
+    commit(
+        "g.noe",
+        "namespace greetlib.g;\npub fn hi(): int { return 1; }\n",
+        "Alice Maintainer",
+        "alice@example.com",
+    );
+    commit(
+        "CHANGELOG.md",
+        "# 1.0.0\n",
+        "Bob Newcomer",
+        "bob@example.com",
+    );
+    git_in(&["tag", "v1.0.0"], &repo);
+
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+
+    lang()
+        .current_dir(&app)
+        .args([
+            "add",
+            "greet",
+            "--git",
+            repo.to_str().unwrap(),
+            "--tag",
+            "v1.0.0",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added `greet`"))
+        .stderr(
+            predicate::str::contains("first-time committer")
+                .and(predicate::str::contains("Bob Newcomer")),
+        );
+}
+
+#[test]
 fn a_registry_dependency_without_a_package_is_an_error() {
     // A bare registry requirement names no package identity, so it can't be resolved — the error
     // points the user to add `package = "company/pkg"` (P2.5).

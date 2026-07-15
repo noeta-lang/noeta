@@ -59,6 +59,10 @@ pub struct Lock {
     git_pins: BTreeMap<(String, String), String>,
     /// package identity → content hash (integrity check for immutable git sources).
     hashes: BTreeMap<String, String>,
+    /// package identity → its pinned commit SHA (git sources) — the *previous* commit, so `noeta
+    /// update`/`add` can diff old→new and surface a new committer (namespace-protection, committer
+    /// signal). Keyed by identity because a version bump changes the tag, so `(url, tag)` won't match.
+    shas: BTreeMap<String, String>,
     /// scope (`company`) → **pinned** trust root, trust-on-first-use (Phase 4 #2 / Phase 5): once
     /// a scope's root is recorded here, a later registry serving a different key, a different
     /// keyless identity, or a *weaker root* (keyless → key/unsigned) is rejected — so a registry
@@ -98,6 +102,7 @@ impl Lock {
                 if let (Some(url), Some(tag), Some(sha)) = (get("url"), get("tag"), get("sha")) {
                     lock.git_pins
                         .insert((url.to_string(), tag.to_string()), sha.to_string());
+                    lock.shas.insert(name.to_string(), sha.to_string());
                 }
             }
         }
@@ -132,6 +137,12 @@ impl Lock {
     /// The recorded content hash for a package identity, if any.
     pub fn content_hash(&self, identity: &str) -> Option<&str> {
         self.hashes.get(identity).map(String::as_str)
+    }
+
+    /// The previously-pinned commit SHA for a package identity (git sources), if the lock records one
+    /// — the `since` point for the committer-signal diff on `noeta update`/`add`.
+    pub fn git_sha(&self, identity: &str) -> Option<&str> {
+        self.shas.get(identity).map(String::as_str)
     }
 
     /// The pinned trust root for `scope`, if the lock records one (provenance TOFU, Phase 4 #2 /
