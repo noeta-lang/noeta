@@ -107,28 +107,6 @@ impl crate::host::P2p for P2pBroker {
 /// async leaf, and no host holds any p2p state at all.
 pub type P2pBackend = Arc<Mutex<dyn crate::host::P2p + Send>>;
 
-#[cfg(test)]
-mod tests {
-    use super::P2pBroker;
-    use crate::host::P2p;
-
-    #[test]
-    fn loopback_broker_round_trips() {
-        // The loopback broker is a self-contained `P2p` provider (para-namespace F2b): the extension
-        // parks one when a host speaks no peer networking. A published message reaches a subscriber
-        // exactly once, then the subscription reads caught-up. (Was a `WasiHost` test before P2p left
-        // the Host union; it belongs here now, at the broker itself.)
-        let mut broker = P2pBroker::default();
-        broker.p2p_publish("t", b"m1".to_vec()).expect("publish");
-        let sub = broker.p2p_subscribe("t").expect("subscribe");
-        assert_eq!(
-            broker.p2p_poll_sub(sub).expect("poll"),
-            Some(b"m1".to_vec())
-        );
-        assert_eq!(broker.p2p_poll_sub(sub).expect("caught up"), None);
-    }
-}
-
 /// The async receive descriptor over an extension-owned [`P2pBackend`] (para-namespace F2b) — the
 /// `Send` twin of the old host-driven receive. It captures a clone of the backend `Arc` at spawn
 /// (where the extension's ctx is available) and, at resolve, locks it and pops the topic's next
@@ -169,5 +147,27 @@ pub fn receive_outcome(next: Option<Vec<u8>>) -> crate::NativeOut {
     match next {
         Some(message) => crate::NativeOut::Some(Box::new(crate::NativeOut::Bytes(message))),
         None => crate::NativeOut::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::P2pBroker;
+    use crate::host::P2p;
+
+    #[test]
+    fn loopback_broker_round_trips() {
+        // The loopback broker is a self-contained `P2p` provider (para-namespace F2b): the extension
+        // parks one when a host speaks no peer networking. A published message reaches a subscriber
+        // exactly once, then the subscription reads caught-up. (Was a `WasiHost` test before P2p left
+        // the Host union; it belongs here now, at the broker itself.)
+        let mut broker = P2pBroker::default();
+        broker.p2p_publish("t", b"m1".to_vec()).expect("publish");
+        let sub = broker.p2p_subscribe("t").expect("subscribe");
+        assert_eq!(
+            broker.p2p_poll_sub(sub).expect("poll"),
+            Some(b"m1".to_vec())
+        );
+        assert_eq!(broker.p2p_poll_sub(sub).expect("caught up"), None);
     }
 }
