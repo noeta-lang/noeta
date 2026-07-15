@@ -167,17 +167,34 @@ fn corpus_files() -> Vec<PathBuf> {
 
 #[test]
 fn corpus_evaluates_without_panic_and_deterministically() {
-    let files = corpus_files();
-    assert!(!files.is_empty(), "the conformance corpus is empty");
-    for path in files {
-        let text = std::fs::read_to_string(&path).expect("corpus file is readable");
-        let first = run_pipeline(&text);
-        let second = run_pipeline(&text);
-        assert_eq!(
-            first,
-            second,
-            "non-deterministic evaluation for {}",
-            path.display()
-        );
-    }
+    // The tree-walker recurses to the depth of the program's nesting, and real corpus cases — a
+    // reactive `@html` LiveView template compiling every hole into a `computed`, for one — go deep
+    // enough to blow the default ~2 MiB test-thread stack. The production harness always runs eval
+    // inside a 64 MiB worker (`noeta_conformance::on_deep_stack`, matched to `noeta_parser`'s deep
+    // stack); this sweep must do the same, or the binding constraint is the harness's stack, not the
+    // interpreter's real depth. Inlined (rather than depending on noeta-conformance) to avoid a
+    // dev-dependency cycle — that crate depends on this one.
+    const DEEP_STACK: usize = 64 * 1024 * 1024;
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(DEEP_STACK)
+            .spawn_scoped(scope, || {
+                let files = corpus_files();
+                assert!(!files.is_empty(), "the conformance corpus is empty");
+                for path in files {
+                    let text = std::fs::read_to_string(&path).expect("corpus file is readable");
+                    let first = run_pipeline(&text);
+                    let second = run_pipeline(&text);
+                    assert_eq!(
+                        first,
+                        second,
+                        "non-deterministic evaluation for {}",
+                        path.display()
+                    );
+                }
+            })
+            .expect("spawn deep-stack corpus worker")
+            .join()
+            .expect("corpus worker panicked");
+    });
 }
