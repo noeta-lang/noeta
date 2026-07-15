@@ -1486,6 +1486,7 @@ fn cmd_fmt(
             &file.to_string_lossy(),
             &original,
             &config,
+            manifest::root_edition(file),
             &text_tiers,
             &tier_formatters,
             &sub_formatters,

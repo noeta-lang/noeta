@@ -65,11 +65,13 @@ impl Member<'_> {
 }
 
 /// Render `program` to canonical text.
+#[allow(clippy::too_many_arguments)] // a printer needs the program + its full formatting context
 pub fn print_program(
     program: &Program,
     source: &str,
     comments: &[Comment],
     config: &FmtConfig,
+    edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
     tier_formatters: &crate::TierBodyFormatters,
     lang_formatters: &crate::TierBodyFormatters,
@@ -78,7 +80,7 @@ pub fn print_program(
         source,
         comments,
         cursor: Cell::new(0),
-        code_tokens: code_tokens(source, text_tiers),
+        code_tokens: code_tokens(source, edition, text_tiers),
         config,
         force_flat: Cell::new(false),
         tier_formatters,
@@ -139,6 +141,7 @@ pub fn print_stmt(
     source: &str,
     comments: &[Comment],
     config: &FmtConfig,
+    edition: noeta_lexer::Edition,
     text_tiers: &noeta_lexer::TextTiers,
 ) -> Result<String, FmtError> {
     let cursor = comments
@@ -152,7 +155,7 @@ pub fn print_stmt(
         source,
         comments,
         cursor: Cell::new(cursor),
-        code_tokens: code_tokens(source, text_tiers),
+        code_tokens: code_tokens(source, edition, text_tiers),
         config,
         force_flat: Cell::new(false),
         tier_formatters: &no_formatters,
@@ -206,10 +209,14 @@ struct Printer<'a> {
 /// The `(start, kind)` of every non-`;` token in `source`, in order — the lookup behind
 /// [`Printer::layout_terminates`]. Synthetic and explicit `;` are dropped so a search finds the next
 /// *content* token, and the natural token order keeps the vec sorted by `start` for a partition search.
-fn code_tokens(source: &str, text_tiers: &noeta_lexer::TextTiers) -> Vec<(u32, TokenKind)> {
+fn code_tokens(
+    source: &str,
+    edition: noeta_lexer::Edition,
+    text_tiers: &noeta_lexer::TextTiers,
+) -> Vec<(u32, TokenKind)> {
     noeta_lexer::lex_in(
         &Source::new(SourceId(0), "<fmt>", source),
-        noeta_lexer::Edition::DEFAULT,
+        edition,
         text_tiers,
     )
     .tokens
