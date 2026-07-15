@@ -685,6 +685,12 @@ impl Walker<'_> {
             &mut registry_queue,
         )?;
 
+        // Versions the **root consumer** exact-pins (`dep = "=1.5.0"`) — a deliberate choice that
+        // bypasses their own publish cooldown (namespace-protection #1). Only the root's *direct* deps
+        // count: a transitive dependency can't exact-pin its way past the consumer's cooldown, so the
+        // control stays sound against a malicious dep declaring `= <fresh version>`.
+        let exact_pins = root_exact_pins(&root_deps);
+
         // Transitively load every registry candidate (and the identities its releases depend on) from
         // the index — a path/git-overridden identity is skipped (its single version already wins).
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -703,7 +709,7 @@ impl Walker<'_> {
                 .index()?
                 .releases(&identity)
                 .map_err(|err| format!("registry package `{identity}`: {err}"))?;
-            let releases = self.apply_cooldown(&identity, releases)?;
+            let releases = self.apply_cooldown(&identity, releases, &exact_pins)?;
             for release in &releases {
                 for dep in &release.deps {
                     if !path_git.contains_key(&dep.package) && !seen.contains(&dep.package) {
@@ -804,6 +810,7 @@ impl Walker<'_> {
         &self,
         identity: &str,
         releases: Vec<crate::registry::Release>,
+        exact_pins: &std::collections::BTreeSet<(String, Version)>,
     ) -> Result<Vec<crate::registry::Release>, String> {
         let Some(cooldown_secs) = self.publish_cooldown else {
             return Ok(releases);
@@ -811,8 +818,14 @@ impl Walker<'_> {
         if cooldown_secs == 0 || releases.is_empty() {
             return Ok(releases);
         }
+        // The versions of *this* package the root consumer exact-pinned — exempt from the window.
+        let exempt: std::collections::BTreeSet<Version> = exact_pins
+            .iter()
+            .filter(|(id, _)| id == identity)
+            .map(|(_, v)| v.clone())
+            .collect();
         let had = releases.len();
-        let kept = cooldown_kept(releases, cooldown_secs, now_unix_ms());
+        let kept = cooldown_kept(releases, cooldown_secs, now_unix_ms(), &exempt);
         if kept.is_empty() && had > 0 {
             return Err(format!(
                 "every published version of `{identity}` is within the {} publish cooldown \
@@ -841,21 +854,51 @@ fn now_unix_ms() -> i64 {
 }
 
 /// Keep only registry candidates old enough to clear the cooldown: `published_at ≤ now − cooldown`.
-/// An undateable release (`published_at == None`) is always kept. Pure (clock passed in) so it is
-/// directly testable; [`Walker::apply_cooldown`] wraps it with the fail-closed empty check.
+/// A release is also kept if it is undateable (`published_at == None`) or its version is in `exempt`
+/// (the root consumer exact-pinned it). Pure (clock passed in) so it is directly testable;
+/// [`Walker::apply_cooldown`] wraps it with the fail-closed empty check.
 fn cooldown_kept(
     releases: Vec<crate::registry::Release>,
     cooldown_secs: u64,
     now_ms: i64,
+    exempt: &std::collections::BTreeSet<Version>,
 ) -> Vec<crate::registry::Release> {
     let cutoff_ms = now_ms.saturating_sub((cooldown_secs as i64).saturating_mul(1000));
     releases
         .into_iter()
         .filter(|r| match r.published_at {
-            Some(ts) => ts <= cutoff_ms,
+            Some(ts) => ts <= cutoff_ms || exempt.contains(&r.version),
             None => true,
         })
         .collect()
+}
+
+/// The `(identity, version)` pairs a set of resolver requirements **exactly** pins — a fully specified
+/// `=x.y.z`. Only these bypass the publish cooldown; a range (`^1`, `>=1, <2`) or a partial exact
+/// (`=1.5`) is not a single deliberate version and does not.
+fn root_exact_pins(reqs: &[(String, VersionReq)]) -> std::collections::BTreeSet<(String, Version)> {
+    reqs.iter()
+        .filter_map(|(id, req)| exact_version(req).map(|v| (id.clone(), v)))
+        .collect()
+}
+
+/// If `req` is a fully specified exact pin (`=x.y.z`), the pinned [`Version`]; else `None`. A partial
+/// exact (`=1.5`, `=1`) matches a range of patches, so it isn't a single-version pin.
+fn exact_version(req: &VersionReq) -> Option<Version> {
+    if req.comparators.len() != 1 {
+        return None;
+    }
+    let c = &req.comparators[0];
+    if c.op != semver::Op::Exact {
+        return None;
+    }
+    Some(Version {
+        major: c.major,
+        minor: c.minor?,
+        patch: c.patch?,
+        pre: c.pre.clone(),
+        build: semver::BuildMetadata::EMPTY,
+    })
 }
 
 /// A compact rendering of a cooldown window (`86400` → `"1d"`), for the error message.
@@ -1195,7 +1238,8 @@ mod tests {
             dated_release(2, Some(now - day / 2)),  // 12h old → within a 1d window → dropped
             dated_release(3, None),                 // undateable → kept
         ];
-        let kept = cooldown_kept(releases, 86_400, now); // 1-day cooldown
+        let none = std::collections::BTreeSet::new();
+        let kept = cooldown_kept(releases, 86_400, now, &none); // 1-day cooldown
         let versions: Vec<u64> = kept.iter().map(|r| r.version.major).collect();
         assert_eq!(versions, vec![1, 3]);
     }
@@ -1203,9 +1247,42 @@ mod tests {
     #[test]
     fn cooldown_keeps_everything_at_the_boundary_and_when_zero() {
         let now = 2_000_000_000_000i64;
+        let none = std::collections::BTreeSet::new();
         // Published exactly at the cutoff is old enough (inclusive).
         let at_cutoff = dated_release(1, Some(now - 3_600_000));
-        assert_eq!(cooldown_kept(vec![at_cutoff], 3_600, now).len(), 1);
+        assert_eq!(cooldown_kept(vec![at_cutoff], 3_600, now, &none).len(), 1);
+    }
+
+    #[test]
+    fn an_exact_pin_bypasses_the_cooldown() {
+        let now = 3_000_000_000_000i64;
+        // A brand-new version, within the window — normally dropped.
+        let fresh = dated_release(2, Some(now - 60_000)); // 1 minute old
+        let none = std::collections::BTreeSet::new();
+        assert!(cooldown_kept(vec![fresh.clone()], 86_400, now, &none).is_empty());
+        // But if the consumer exact-pinned exactly that version, it's exempt.
+        let exempt = std::collections::BTreeSet::from([Version::new(2, 0, 0)]);
+        assert_eq!(cooldown_kept(vec![fresh], 86_400, now, &exempt).len(), 1);
+    }
+
+    #[test]
+    fn only_fully_specified_exact_reqs_pin_a_version() {
+        assert_eq!(
+            exact_version(&VersionReq::parse("=1.5.0").unwrap()),
+            Some(Version::new(1, 5, 0))
+        );
+        // A range or partial exact is not a single deliberate version.
+        assert_eq!(exact_version(&VersionReq::parse("=1.5").unwrap()), None);
+        assert_eq!(exact_version(&VersionReq::parse("^1.5.0").unwrap()), None);
+        assert_eq!(exact_version(&VersionReq::parse(">=1, <2").unwrap()), None);
+        // root_exact_pins keys by identity.
+        let reqs = vec![
+            ("acme/a".to_string(), VersionReq::parse("=2.0.0").unwrap()),
+            ("acme/b".to_string(), VersionReq::parse("^1").unwrap()),
+        ];
+        let pins = root_exact_pins(&reqs);
+        assert!(pins.contains(&("acme/a".to_string(), Version::new(2, 0, 0))));
+        assert_eq!(pins.len(), 1);
     }
 
     #[test]

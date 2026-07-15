@@ -3596,6 +3596,24 @@ fn publish_cooldown_holds_back_a_freshly_published_registry_version() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("publish cooldown").not());
+
+    // With the cooldown *and* an exact pin on the fresh version, the consumer's deliberate choice
+    // bypasses the window — selection succeeds (again failing later on the bogus git coords, not on
+    // the cooldown).
+    std::fs::write(
+        dir.join("noeta.toml"),
+        "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+         [dependencies]\nfx = { version = \"=1.0.0\", package = \"acme/imgfx\" }\n\
+         [trust]\npublish_cooldown = \"1d\"\n",
+    )
+    .unwrap();
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .arg("check")
+        .arg(dir.join("main.noe"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("publish cooldown").not());
 }
 
 #[test]
