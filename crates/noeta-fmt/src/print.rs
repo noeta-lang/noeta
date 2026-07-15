@@ -12,7 +12,8 @@
 use noeta_ast::{
     AttrArg, AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr,
     FieldDecl, FnDecl, ForPattern, ImplBlock, ImplDecl, MatchArm, ObjectLit, Param, Pattern,
-    Program, RoleTag, Stmt, StrPart, StructDecl, TypeParam, TypeRef, UseName, VariantDecl,
+    Program, RoleTag, Stmt, StrPart, StructDecl, TraitDecl, TraitMethod, TypeParam, TypeRef,
+    UseName, VariantDecl,
 };
 use std::cell::Cell;
 
@@ -569,6 +570,7 @@ impl Printer<'_> {
             Stmt::Class(decl) => self.class_decl(decl),
             Stmt::Enum(decl) => self.enum_decl(decl),
             Stmt::Impl(decl) => self.impl_decl(decl),
+            Stmt::Trait(decl) => self.trait_decl(decl),
             Stmt::TierBlock {
                 tier,
                 args,
@@ -995,6 +997,54 @@ impl Printer<'_> {
             ])
         };
         Ok(Doc::concat([head, body]))
+    }
+
+    fn trait_decl(&self, d: &TraitDecl) -> Result<Doc, FmtError> {
+        let mut parts = Vec::new();
+        if d.is_public {
+            parts.push(Doc::text("pub "));
+        }
+        parts.push(Doc::text("trait "));
+        parts.push(Doc::text(d.name.clone()));
+        parts.push(self.type_params(&d.type_params)?);
+        parts.push(Doc::text(" "));
+        let body = if d.methods.is_empty() {
+            Doc::text("{}")
+        } else {
+            let mut ms = Vec::new();
+            for m in &d.methods {
+                ms.push(self.trait_method(m)?);
+            }
+            let inner = Doc::join(ms, Doc::hardline());
+            Doc::concat([
+                Doc::text("{"),
+                Doc::concat([Doc::hardline(), inner]).nest(self.indent_step()),
+                Doc::hardline(),
+                Doc::text("}"),
+            ])
+        };
+        parts.push(body);
+        Ok(Doc::concat(parts))
+    }
+
+    /// A trait method: a bodiless required signature (`fn f(...): T`) or a default with a body.
+    fn trait_method(&self, m: &TraitMethod) -> Result<Doc, FmtError> {
+        let mut parts = self.attrs(&m.sig.attrs)?;
+        if m.sig.is_async {
+            parts.push(Doc::text("async "));
+        }
+        parts.push(Doc::text("fn "));
+        parts.push(Doc::text(m.sig.name.clone()));
+        parts.push(self.params(&m.sig.params)?);
+        if let Some(ret) = &m.sig.ret {
+            parts.push(Doc::text(": "));
+            parts.push(self.type_ref(ret)?);
+        }
+        if m.has_default {
+            parts.push(Doc::text(" "));
+            parts.push(self.block(&m.sig.body, m.sig.name_span.end, m.sig.span.end)?);
+        }
+        Ok(Doc::concat(parts))
     }
 
     fn enum_decl(&self, d: &EnumDecl) -> Result<Doc, FmtError> {

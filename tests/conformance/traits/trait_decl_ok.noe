@@ -1,0 +1,16 @@
+// A user-defined `trait` declaration (L1 user traits, UT1): a named contract of method
+// signatures — required (bodiless) and default (bodied) — parses and checks with no error. A
+// trait has no runtime footprint of its own yet (it is implemented on types in a later slice), so
+// a program that only declares one runs to completion.
+// expect: stdout "ok"
+// expect: exit 0
+trait Middleware {
+    fn handle(req: int, next: int): int
+    fn label(): string { return "mw" }
+}
+
+pub trait Greeter {
+    fn greet(who: string): string
+}
+
+echo "ok"

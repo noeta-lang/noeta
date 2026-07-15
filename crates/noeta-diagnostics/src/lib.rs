@@ -49,6 +49,9 @@ pub enum DiagnosticCode {
     /// An `impl` block does not satisfy the trait it names — a required method is missing or has
     /// the wrong arity.
     InvalidImpl,
+    /// A user-defined `trait` declaration is malformed — a duplicate trait name, a name that
+    /// collides with a declared type, or a duplicated method signature (L1 user traits).
+    InvalidTraitDeclaration,
     /// An index expression `a[i]` addressed a list position outside its bounds.
     IndexOutOfBounds,
     /// A `#[...]` data attribute is malformed or misused — most commonly the old `#[derive(...)]`
@@ -242,6 +245,7 @@ impl DiagnosticCode {
         DiagnosticCode::UnknownType,
         DiagnosticCode::UnknownTrait,
         DiagnosticCode::InvalidImpl,
+        DiagnosticCode::InvalidTraitDeclaration,
         DiagnosticCode::IndexOutOfBounds,
         DiagnosticCode::InvalidAttribute,
         DiagnosticCode::KeyNotFound,
@@ -337,6 +341,7 @@ impl DiagnosticCode {
             DiagnosticCode::UnderivableTrait => "E0050",
             DiagnosticCode::InvalidTierDeclaration => "E0051",
             DiagnosticCode::InvalidTierExpression => "E0052",
+            DiagnosticCode::InvalidTraitDeclaration => "E0053",
         }
     }
 

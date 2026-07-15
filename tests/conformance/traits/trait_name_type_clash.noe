@@ -1,0 +1,9 @@
+// A `trait` may not share a name with a declared type (L1, UT1): `dyn Bar` / `Bar` would be
+// ambiguous. E0053.
+// expect: error E0053 at 7:7
+// expect: exit 1
+struct Bar { x: int }
+
+trait Bar {
+    fn a(): int
+}

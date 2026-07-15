@@ -638,8 +638,10 @@ impl Resolver {
                     self.walk_stmt(item);
                 }
             }
-            // Control-flow leaves and module statements bind and reference nothing.
+            // Control-flow leaves and module statements bind and reference nothing. (A `trait`'s
+            // default-method bodies are not yet walked — resolved once defaults type-check, UT5.)
             Stmt::Impl(_)
+            | Stmt::Trait(_)
             | Stmt::Namespace { .. }
             | Stmt::Use { .. }
             | Stmt::Break { .. }

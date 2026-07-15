@@ -144,6 +144,7 @@ impl Walker<'_> {
             Stmt::Concurrent { body, .. } => self.stmts(body),
             Stmt::TierBlock { items, .. } => self.stmts(items),
             Stmt::Impl(_)
+            | Stmt::Trait(_)
             | Stmt::Namespace { .. }
             | Stmt::Use { .. }
             | Stmt::Break { .. }

@@ -33,8 +33,8 @@ use chumsky::prelude::*;
 use noeta_ast::{
     AttrArg, AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr,
     FieldDecl, FieldInit, FnDecl, ForPattern, ImplBlock, MatchArm, ObjectLit, PackedDirective,
-    PackedLayout, Param, Pattern, Program, RoleTag, Stmt, StructDecl, TierDecl, TypeParam, TypeRef,
-    UnaryOp, UseName, VariantDecl,
+    PackedLayout, Param, Pattern, Program, RoleTag, Stmt, StructDecl, TierDecl, TraitDecl,
+    TraitMethod, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_edition::Edition;
@@ -2614,6 +2614,67 @@ where
                     })
                 },
             );
+        // A trait-method signature (L1 user traits): `#[...]? async? fn name(params): Ret` with an
+        // OPTIONAL body. A bodiless signature is a *required* method; a `{ ... }` body is a *default*
+        // implementation an `impl` may omit.
+        let trait_method = attr_decl
+            .clone()
+            .repeated()
+            .collect::<Vec<_>>()
+            .then(just(T::AsyncKw).or_not())
+            .then_ignore(just(T::FnKw))
+            .then(id.clone())
+            .then(params_parser(ctx, expr.clone(), true))
+            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
+            .then(block.clone().or_not())
+            .map_with(
+                move |(((((attrs, async_kw), name_pair), params), ret), body), e| {
+                    let has_default = body.is_some();
+                    TraitMethod {
+                        sig: FnDecl {
+                            name: name_pair.0,
+                            name_span: name_pair.1,
+                            is_public: false,
+                            type_params: Vec::new(),
+                            params,
+                            ret,
+                            attrs,
+                            is_dev_tier: false,
+                            tier: None,
+                            is_async: async_kw.is_some(),
+                            body: body.unwrap_or_default(),
+                            span: ctx.to_span(e.span()),
+                        },
+                        has_default,
+                    }
+                },
+            );
+        // `pub? trait Name<T> { method-sigs }` — a user-defined trait declaration (L1). Names a
+        // contract of method signatures a type `impl`s; usable as a `<T: Name>` bound and a `dyn Name`
+        // trait object. `pub` is consumed here (traits take no `@derive`/`@attribute` decorators).
+        let trait_decl = just(T::PubKw)
+            .or_not()
+            .then_ignore(just(T::TraitKw))
+            .then(id.clone())
+            .then(type_params.clone())
+            .then(
+                trait_method
+                    // Absorb the synthetic `;` between members on separate lines (slice 7).
+                    .then_ignore(just(T::Semicolon).repeated())
+                    .repeated()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LBrace), just(T::RBrace)),
+            )
+            .map_with(move |(((pub_kw, name_pair), type_params), methods), e| {
+                Stmt::Trait(TraitDecl {
+                    name: name_pair.0,
+                    name_span: name_pair.1,
+                    is_public: pub_kw.is_some(),
+                    type_params,
+                    methods,
+                    span: ctx.to_span(e.span()),
+                })
+            });
         // A struct declaration: `struct Name<T> { fields; methods; impl Trait { ... } }` — the value
         // kind. The **same unified body grammar** as a class, minus `destruct` (pure data has no
         // destructor — that capability is class-only). Replaces the retired `struct X { ... }` form.
@@ -3347,6 +3408,7 @@ where
             continue_,
             fn_decl,
             standalone_impl,
+            trait_decl,
             tier_decl_fn,
             tier_block,
             tier_annotation,

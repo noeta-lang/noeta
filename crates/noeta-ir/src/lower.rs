@@ -647,7 +647,9 @@ impl Lowerer<'_> {
             }
             // A standalone `impl` and a `namespace` have no runtime effect in the tree-walker
             // (both are `Ok(Flow::Normal)` no-ops), so they lower to nothing.
-            AstStmt::Impl(_) | AstStmt::Namespace { .. } => Ok(()),
+            // A `trait` declaration (L1) has no runtime footprint of its own — its methods reach the
+            // backends only as flattened impls on concrete types (UT2).
+            AstStmt::Impl(_) | AstStmt::Trait(_) | AstStmt::Namespace { .. } => Ok(()),
             // `concurrent { }` (Track A.3b) lowers to a scope-bracketed body: `ScopeBegin`, the body
             // statements (their `spawn`s register tasks; their `.await`s drive the scope), then
             // `ScopeEnd` (which joins every remaining task). The body runs inline in the enclosing

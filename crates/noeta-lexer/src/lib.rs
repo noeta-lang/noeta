@@ -101,6 +101,10 @@ pub enum TokenKind {
     DestructKw,
     #[token("impl")]
     ImplKw,
+    /// User-defined trait declaration: `trait Name { fn sig(...): T }`. A keyword so `trait` in
+    /// declaration position is unambiguous against an identifier.
+    #[token("trait")]
+    TraitKw,
     #[token("namespace")]
     NamespaceKw,
     #[token("use")]
@@ -375,6 +379,7 @@ impl TokenKind {
             TokenKind::ClassKw => "ClassKw",
             TokenKind::DestructKw => "DestructKw",
             TokenKind::ImplKw => "ImplKw",
+            TokenKind::TraitKw => "TraitKw",
             TokenKind::NamespaceKw => "NamespaceKw",
             TokenKind::UseKw => "UseKw",
             TokenKind::PubKw => "PubKw",
@@ -481,6 +486,7 @@ impl TokenKind {
             TokenKind::ClassKw => "`class`",
             TokenKind::DestructKw => "`destruct`",
             TokenKind::ImplKw => "`impl`",
+            TokenKind::TraitKw => "`trait`",
             TokenKind::NamespaceKw => "`namespace`",
             TokenKind::UseKw => "`use`",
             TokenKind::PubKw => "`pub`",

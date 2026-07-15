@@ -204,6 +204,14 @@ fn walk_stmt(stmt: &mut Stmt, visit: &mut NameVisitor) {
             }
         }
         Stmt::Impl(decl) => q_impl_decl(decl, visit),
+        Stmt::Trait(decl) => {
+            // A trait's name qualifies like a type's (cross-module `dyn Trait` / `impl` resolution);
+            // its method signatures name types in this module, so qualify them in lockstep.
+            visit(&mut decl.name);
+            for m in &mut decl.methods {
+                q_fn(&mut m.sig, visit);
+            }
+        }
         // No type references: control-flow leaves, namespace/use (paths handled by the linker).
         Stmt::Namespace { .. } | Stmt::Use { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => {}
     }

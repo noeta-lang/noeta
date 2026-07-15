@@ -7,7 +7,8 @@
 
 use crate::{
     AttrArg, AttrValue, ClassDecl, ClosureBody, EnumDecl, Expr, FieldDecl, FnDecl, ForPattern,
-    ImplDecl, ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl, TypeParam, TypeRef,
+    ImplDecl, ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl, TraitDecl, TypeParam,
+    TypeRef,
 };
 use noeta_span::Span;
 
@@ -96,6 +97,7 @@ impl Pretty for Stmt {
             Stmt::Struct(decl) => decl.pretty(out, level),
             Stmt::Class(decl) => decl.pretty(out, level),
             Stmt::Impl(decl) => decl.pretty(out, level),
+            Stmt::Trait(decl) => decl.pretty(out, level),
             Stmt::Namespace { path, span: s } => {
                 indent(out, level);
                 out.push_str(&format!("(namespace {} {})", path.join("."), span(*s)));
@@ -461,6 +463,18 @@ impl Pretty for ImplDecl {
         for method in &self.methods {
             out.push('\n');
             method.pretty(out, level + 1);
+        }
+        out.push(')');
+    }
+}
+
+impl Pretty for TraitDecl {
+    fn pretty(&self, out: &mut String, level: usize) {
+        indent(out, level);
+        out.push_str(&format!("(trait {} {}", self.name, span(self.span)));
+        for method in &self.methods {
+            out.push('\n');
+            method.sig.pretty(out, level + 1);
         }
         out.push(')');
     }

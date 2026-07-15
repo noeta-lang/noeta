@@ -78,6 +78,11 @@ pub enum Stmt {
     /// {...}`) declares a capability such as `impl Serialize for Route {}`; it works uniformly
     /// for classes too. The target must be a type declared in the same module (the orphan rule).
     Impl(ImplDecl),
+    /// A user-defined trait declaration: `trait Name { fn sig(...): T }` (L1 user traits). Declares a
+    /// named contract of method signatures a type can `impl`, usable as a generic bound (`<T: Name>`)
+    /// and as a trait object (`dyn Name`). A method with a body is a *default*; a bodiless one is
+    /// *required*.
+    Trait(TraitDecl),
     /// `namespace App.Orders;` — declares the file's namespace. M0 records the path but
     /// otherwise treats it as a no-op (real module scoping is M1).
     Namespace { path: Vec<String>, span: Span },
@@ -176,6 +181,7 @@ impl Stmt {
             Stmt::Struct(decl) => decl.span,
             Stmt::Class(decl) => decl.span,
             Stmt::Impl(decl) => decl.span,
+            Stmt::Trait(decl) => decl.span,
         }
     }
 }
@@ -428,6 +434,29 @@ pub struct ImplBlock {
     pub trait_span: Span,
     pub methods: Vec<FnDecl>,
     pub span: Span,
+}
+
+/// A user-defined trait declaration (L1): `trait Name<T> { fn sig(...): R  fn other(...) { default } }`.
+/// The named contract a type implements via `impl Name for Type { ... }` (or an in-body `impl Name`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitDecl {
+    pub name: String,
+    pub name_span: Span,
+    /// Whether the trait is `pub` (exported for `use`).
+    pub is_public: bool,
+    /// Generic type parameters (`trait Serialize<Fmt>`); empty for the common case.
+    pub type_params: Vec<TypeParam>,
+    /// The trait's method contract, in source order.
+    pub methods: Vec<TraitMethod>,
+    pub span: Span,
+}
+
+/// One method in a [`TraitDecl`]. `sig.body` holds the default implementation when `has_default`;
+/// a **required** method has `has_default == false` and an empty `sig.body`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitMethod {
+    pub sig: FnDecl,
+    pub has_default: bool,
 }
 
 /// A standalone `impl Trait for Type { ... }` declaration (top-level, not inside a class body).
@@ -1153,6 +1182,7 @@ impl Stmt {
             | Stmt::Struct(_)
             | Stmt::Class(_)
             | Stmt::Impl(_)
+            | Stmt::Trait(_)
             | Stmt::Namespace { .. }
             | Stmt::Use { .. }
             | Stmt::Break { .. }

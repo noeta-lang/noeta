@@ -1,0 +1,5 @@
+// A `trait` declared twice with the same name is rejected (L1, UT1); pass 1 keeps the first. E0053.
+// expect: error E0053 at 5:7
+// expect: exit 1
+trait Foo { fn a(): int }
+trait Foo { fn b(): int }

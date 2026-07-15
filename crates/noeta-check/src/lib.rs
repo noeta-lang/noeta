@@ -974,6 +974,11 @@ struct Checker {
     /// or `impl`s. The basis (with the built-in-type table in [`Self::satisfies`]) for enforcing a
     /// generic call's trait bounds (S4.2).
     trait_impls: HashMap<String, HashSet<BuiltinTrait>>,
+    /// User-defined traits (L1 user traits), by name → its declaration. Populated in pass 1
+    /// (`collect`) so forward references resolve. The basis for `impl` conformance (UT2),
+    /// `<T: UserTrait>` generic bounds (UT3), and `dyn UserTrait` trait-object dispatch (UT4). A name
+    /// here is a legal trait in an `impl`/bound alongside the closed [`BuiltinTrait`] set.
+    user_traits: HashMap<String, noeta_ast::TraitDecl>,
     /// The subset of [`Self::trait_impls`] that came from `@derive(...)` (not a hand-written
     /// `impl`). A **generic** type's derive is conditional on its instantiated fields
     /// (derive-soundness S4); a hand-written impl is unconditional. Keyed like `trait_impls`.
@@ -2113,6 +2118,12 @@ impl Checker {
                         .or_default()
                         .push((decl.trait_name.clone(), decl.trait_span));
                 }
+                // A user-defined trait (L1) is registered up front so forward references (an `impl`
+                // or `<T: Trait>` bound textually above the `trait`) resolve. A duplicate declaration
+                // keeps the first; pass 2 (`check_trait_decl`) reports the collision.
+                Stmt::Trait(t) => {
+                    self.user_traits.entry(t.name.clone()).or_insert_with(|| t.clone());
+                }
                 _ => {}
             }
         }
@@ -2667,6 +2678,7 @@ impl Checker {
                 self.check_enum(e, env)
             }
             Stmt::Impl(decl) => self.check_standalone_impl(decl),
+            Stmt::Trait(decl) => self.check_trait_decl(decl),
             Stmt::Namespace { .. } | Stmt::Use { .. } => {}
             // A dev-tier block reaching the checker is an *inactive* residual (object-model
             // slice 6): the strip pass already spliced any *active* block's items into the
@@ -3585,6 +3597,57 @@ impl Checker {
             );
         }
         self.check_trait_impl(&decl.trait_name, decl.trait_span, &decl.methods);
+    }
+
+    /// Validate a user-defined `trait` declaration (L1, UT1). The declaration was registered in
+    /// pass 1; here we reject a name that collides with a built-in trait, a declared type, or an
+    /// earlier `trait` of the same name, plus duplicated method signatures within the body. Default
+    /// method bodies are accepted syntactically but not yet type-checked (UT5).
+    fn check_trait_decl(&mut self, decl: &noeta_ast::TraitDecl) {
+        // A user trait may not shadow a built-in trait name — an `impl`/bound naming it would be
+        // ambiguous against the closed built-in set.
+        if BuiltinTrait::from_name(&decl.name).is_some() {
+            self.error(
+                DiagnosticCode::InvalidTraitDeclaration,
+                decl.name_span,
+                format!("`{}` is a built-in trait and cannot be redeclared", decl.name),
+            );
+        } else if self.types.contains(&decl.name)
+            || self.records.contains_key(&decl.name)
+            || self.enums.contains_key(&decl.name)
+        {
+            // A trait and a type sharing a name would make `dyn {name}` / `{name}` ambiguous.
+            self.error(
+                DiagnosticCode::InvalidTraitDeclaration,
+                decl.name_span,
+                format!("`{}` is already declared as a type; a trait cannot reuse the name", decl.name),
+            );
+        } else if self
+            .user_traits
+            .get(&decl.name)
+            .is_some_and(|first| first.span != decl.span)
+        {
+            // A second `trait` of the same name; pass 1 kept the first.
+            self.error(
+                DiagnosticCode::InvalidTraitDeclaration,
+                decl.name_span,
+                format!("trait `{}` is declared more than once", decl.name),
+            );
+        }
+        // Duplicate method signatures within the trait body.
+        let mut seen: HashSet<&str> = HashSet::new();
+        for m in &decl.methods {
+            if !seen.insert(m.sig.name.as_str()) {
+                self.error(
+                    DiagnosticCode::InvalidTraitDeclaration,
+                    m.sig.name_span,
+                    format!(
+                        "trait `{}` declares method `{}` more than once",
+                        decl.name, m.sig.name
+                    ),
+                );
+            }
+        }
     }
 
     /// Validate a method-bundle binding `impl <module>.<Bundle> for T {}` (kernel-methods K1).

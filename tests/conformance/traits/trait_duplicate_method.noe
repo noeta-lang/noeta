@@ -1,0 +1,7 @@
+// A `trait` that declares the same method name twice is rejected (L1, UT1). E0053.
+// expect: error E0053 at 6:8
+// expect: exit 1
+trait Baz {
+    fn a(): int
+    fn a(): string
+}
