@@ -4720,6 +4720,50 @@ fn noeta_claim_requires_the_hosted_registry() {
 }
 
 #[test]
+fn noeta_claim_by_domain_posts_the_domain_proof() {
+    // namespace-protection #1 (domain proof): `noeta claim <scope> --domain <domain>` skips the GitHub
+    // path and posts a `domain` proof to the registry (which then verifies the well-known file server
+    // side). The mock registry captures the body and confirms the proof shape.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let base = mock_http(move |method, path, body| {
+        tx.send((method.to_string(), path.to_string(), body.to_string()))
+            .unwrap();
+        (
+            201,
+            r#"{"status":"scope claimed","owner":"acme.dev"}"#.to_string(),
+        )
+    });
+
+    lang()
+        .env("NOETA_REGISTRY_URL", &base)
+        .args([
+            "claim",
+            "acme",
+            "--domain",
+            "acme.dev",
+            "--token",
+            "domain-publish-token-123456",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("scope claimed"));
+
+    let (method, path, body) = rx.recv().unwrap();
+    assert_eq!(method, "POST");
+    assert_eq!(path, "/v1/scopes/claim");
+    assert!(
+        body.contains(r#""domain":"acme.dev""#),
+        "body carries the domain proof: {body}"
+    );
+    assert!(body.contains(r#""scope":"acme""#), "body: {body}");
+    // The GitHub proofs must not appear on the domain path.
+    assert!(
+        !body.contains("github_token") && !body.contains("\"oidc\""),
+        "body: {body}"
+    );
+}
+
+#[test]
 fn noeta_scope_require_provenance_validates_and_needs_a_registry() {
     // namespace-protection #1 Phase 1: the CLI validates `--root` and requires a registry URL before
     // it would ever contact the network.

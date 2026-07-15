@@ -463,6 +463,11 @@ enum Command {
         /// `noeta-registry`). Must match the registry's configured audience.
         #[arg(long)]
         audience: Option<String>,
+        /// Claim by **domain** instead of GitHub: prove you control this domain (whose first label must
+        /// be the scope, e.g. `acme.dev` for `acme`) by serving `/.well-known/noeta-registry.txt`
+        /// containing `noeta-scope=<scope>`. Skips the GitHub OIDC/device-flow path.
+        #[arg(long)]
+        domain: Option<String>,
     },
     /// Manage a registry scope you own — its publishing policy (namespace-protection #1). Authenticated
     /// with the scope's publish token (`NOETA_REGISTRY_TOKEN`) against `NOETA_REGISTRY_URL`.
@@ -731,7 +736,13 @@ pub fn run_cli(
             scope,
             token,
             audience,
-        } => cmd_claim(&scope, token.as_deref(), audience.as_deref()),
+            domain,
+        } => cmd_claim(
+            &scope,
+            token.as_deref(),
+            audience.as_deref(),
+            domain.as_deref(),
+        ),
         Command::Scope { action } => cmd_scope(&action),
     }
 }
@@ -793,7 +804,12 @@ fn cmd_scope_require_provenance(scope: &str, root: Option<&str>, off: bool) -> E
 
 /// `noeta claim <scope> [--token T] [--audience A]` — claim a registry scope by proving control of
 /// the GitHub org/user of the same name via a GitHub Actions OIDC token (namespace-protection #1).
-fn cmd_claim(scope: &str, token: Option<&str>, audience: Option<&str>) -> ExitCode {
+fn cmd_claim(
+    scope: &str,
+    token: Option<&str>,
+    audience: Option<&str>,
+    domain: Option<&str>,
+) -> ExitCode {
     // Claiming talks to the hosted registry over HTTP.
     let Some(base) = std::env::var_os("NOETA_REGISTRY_URL") else {
         eprintln!(
@@ -808,14 +824,18 @@ fn cmd_claim(scope: &str, token: Option<&str>, audience: Option<&str>) -> ExitCo
         .or_else(|| std::env::var("NOETA_REGISTRY_AUDIENCE").ok())
         .unwrap_or_else(|| "noeta-registry".to_string());
 
-    // Prove ownership: prefer an ambient GitHub Actions OIDC token (CI); off-CI, fall back to the
-    // GitHub OAuth device flow (laptop). Either resolves to the same GitHub identity server-side.
-    let proof = match acquire_claim_proof(&audience) {
-        Ok(proof) => proof,
-        Err(err) => {
-            eprintln!("lang: {err}");
-            return ExitCode::from(1);
-        }
+    // Prove ownership. `--domain` claims by proving control of a domain (the registry fetches its
+    // well-known file); otherwise prefer an ambient GitHub Actions OIDC token (CI) and fall back to the
+    // GitHub OAuth device flow (laptop) — both resolve to the same GitHub identity server-side.
+    let proof = match domain {
+        Some(domain) => registry::ClaimProof::Domain(domain.to_string()),
+        None => match acquire_claim_proof(&audience) {
+            Ok(proof) => proof,
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(1);
+            }
+        },
     };
 
     // The publish token to bind: the one given, or a freshly minted one we print on success.

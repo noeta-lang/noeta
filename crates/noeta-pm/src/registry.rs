@@ -449,6 +449,7 @@ impl HttpIndex {
         match proof {
             ClaimProof::Oidc(jwt) => body["oidc"] = serde_json::json!(jwt),
             ClaimProof::GithubToken(gh) => body["github_token"] = serde_json::json!(gh),
+            ClaimProof::Domain(domain) => body["domain"] = serde_json::json!(domain),
         }
         let resp = self
             .client
@@ -915,26 +916,31 @@ impl HttpIndex {
 }
 
 /// A proof of scope ownership presented to `POST /v1/scopes/claim` (namespace-protection #1): a GitHub
-/// Actions OIDC token (CI) or a GitHub OAuth access token from the device flow (laptop). Both resolve
-/// server-side to the owner's stable GitHub id, so they are interchangeable.
+/// Actions OIDC token (CI), a GitHub OAuth access token from the device flow (laptop), or a **domain**
+/// whose control the registry verifies via a well-known file (namespace-protection follow-on). The two
+/// GitHub proofs resolve server-side to one owner identity (interchangeable); a domain proof is its own
+/// `domain` owner kind.
 #[cfg(feature = "registry-http")]
 pub enum ClaimProof {
     /// A GitHub Actions OIDC JWT (the CI path).
     Oidc(String),
     /// A GitHub OAuth access token (the laptop device-flow path).
     GithubToken(String),
+    /// A domain the claimant controls — the registry fetches its `/.well-known/noeta-registry.txt`.
+    /// The domain is public (not a secret), so Debug shows it.
+    Domain(String),
 }
 
-// A proof carries a bearer secret, so its Debug redacts the token rather than deriving it — the value
-// must never leak into a log or panic message.
+// The GitHub proofs carry a bearer secret, so Debug redacts them — the value must never leak into a log
+// or panic message. A domain is public, so it's shown.
 #[cfg(feature = "registry-http")]
 impl std::fmt::Debug for ClaimProof {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let kind = match self {
-            ClaimProof::Oidc(_) => "Oidc",
-            ClaimProof::GithubToken(_) => "GithubToken",
-        };
-        write!(f, "ClaimProof::{kind}(<redacted>)")
+        match self {
+            ClaimProof::Oidc(_) => write!(f, "ClaimProof::Oidc(<redacted>)"),
+            ClaimProof::GithubToken(_) => write!(f, "ClaimProof::GithubToken(<redacted>)"),
+            ClaimProof::Domain(domain) => write!(f, "ClaimProof::Domain({domain:?})"),
+        }
     }
 }
 
