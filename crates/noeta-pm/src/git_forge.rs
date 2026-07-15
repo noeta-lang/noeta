@@ -169,10 +169,18 @@ impl Index for GitForgeIndex {
 
     fn publish(&self, _name: &str, _release: &Release) -> Result<(), String> {
         Err(
-            "a GitHub-org registry has no publish endpoint — publish by pushing a semver tag \
+            "a git-forge registry has no publish endpoint — publish by pushing a semver tag \
              (`git tag v1.2.3 && git push --tags`)"
                 .to_string(),
         )
+    }
+
+    /// The bare clone this index already fetched for `name` (populated by [`Self::releases`]), so the
+    /// resolver materializes the tree from it — no second network clone. `None` if it isn't on disk.
+    fn local_repo(&self, name: &str) -> Option<PathBuf> {
+        let package = name.split('/').nth(1).filter(|p| !p.is_empty())?;
+        let bare = self.bare_path(package);
+        bare.join("HEAD").exists().then_some(bare)
     }
 
     // scope_key defaults to None: a git-forge registry serves no provenance keys (its trust model is
@@ -359,5 +367,42 @@ mod tests {
                 .unwrap_err()
                 .contains("pushing a semver tag")
         );
+    }
+
+    #[test]
+    fn materializes_a_tree_from_the_local_clone() {
+        // Unified clone (private-registries): the resolver materializes a release's tree from the
+        // index's already-fetched bare clone (`local_repo`), not a second network clone. Prove it by
+        // fetching straight from that clone — the origin is never consulted here.
+        if !git_available() {
+            return;
+        }
+        let tmp = std::env::temp_dir().join("noeta_git_forge_local_mat");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let host = tmp.join("host");
+        make_repo(&host, "acme", "thing");
+
+        let idx = GitForgeIndex::new(host.join("acme").to_str().unwrap(), tmp.join("cache"));
+        let releases = idx.releases("acme/thing").unwrap();
+        let sha = releases
+            .iter()
+            .find(|r| r.version == Version::new(1, 1, 0))
+            .unwrap()
+            .coords
+            .sha
+            .clone();
+
+        // The index exposes the local clone it fetched…
+        let bare = idx
+            .local_repo("acme/thing")
+            .expect("bare clone present after releases()");
+        // …and the store materializes the pinned tree from it, with no reference to the origin.
+        let store = crate::store::Store::open_at(tmp.join("store")).unwrap();
+        let git_ref = crate::manifest::GitRef::Tag("v1.1.0".to_string());
+        let fetched =
+            crate::git::fetch_pinned(bare.to_str().unwrap(), &git_ref, &sha, &store).unwrap();
+        assert!(fetched.path.join("lib.noe").exists());
+        assert!(fetched.path.join("noeta.toml").exists());
+        assert_eq!(fetched.sha, sha);
     }
 }

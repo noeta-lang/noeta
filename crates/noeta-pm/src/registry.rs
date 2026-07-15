@@ -121,6 +121,14 @@ pub trait Index {
     fn docs(&self, _name: &str, _version: &Version) -> Result<Option<String>, String> {
         Ok(None)
     }
+
+    /// A **local git repository** already holding `name`'s commits, if this index maintains one, so the
+    /// resolver can materialize a release's tree from it instead of a second network clone
+    /// (private-registries arc). The default `None` means "fetch from the release's coordinates URL"
+    /// (the hosted/local index don't hold a clone). A git-forge index returns its cached bare clone.
+    fn local_repo(&self, _name: &str) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// Resolve a registry requirement to a concrete release's coordinates: the **highest published

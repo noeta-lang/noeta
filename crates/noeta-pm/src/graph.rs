@@ -340,7 +340,7 @@ impl Walker<'_> {
                 let dir = joined.canonicalize().unwrap_or(joined);
                 Ok((dir, ResolvedSource::Path { path: path.clone() }))
             }
-            Dependency::Git { url, git_ref } => self.fetch_git(key, url, git_ref, None),
+            Dependency::Git { url, git_ref } => self.fetch_git(key, url, git_ref, None, None),
             Dependency::Registry { package, .. } => {
                 // Materialize the **resolver-selected** version (Phase 4, S5b): the PubGrub solve
                 // already chose one compatible version per identity, so look up the coordinates of
@@ -378,7 +378,16 @@ impl Walker<'_> {
                 // The registry pins the SHA (Phase 4, S2), so a first resolve fetches by it rather
                 // than trusting the tag's current target. A published release is always a tag.
                 let git_ref = crate::manifest::GitRef::Tag(coords.tag.clone());
-                self.fetch_git(key, &coords.url, &git_ref, Some(&coords.sha))
+                // Materialize from the index's already-fetched local clone when it has one (a git-forge
+                // index), avoiding a second network clone; the lock still records `coords.url`.
+                let local = self.index_for(&scope)?.local_repo(&name);
+                self.fetch_git(
+                    key,
+                    &coords.url,
+                    &git_ref,
+                    Some(&coords.sha),
+                    local.as_deref(),
+                )
             }
         }
     }
@@ -389,22 +398,31 @@ impl Walker<'_> {
     /// reproducibility authority once written) → the **registry** pin (closes trust-on-first-use on a
     /// first registry resolve) → an `ls-remote` of the tag (a bare `git` dep's first fetch). A pinned
     /// SHA already in the store needs no network at all.
+    ///
+    /// `url` is the **recorded** origin — the lock pin and `ResolvedSource` key, portable across
+    /// machines. `local_repo`, when set (a git-forge index's already-fetched bare clone,
+    /// private-registries arc), is where the tree is actually **fetched from**, so a git-forge release
+    /// materializes offline from that clone instead of a second network clone; `url` is still what the
+    /// lock records.
     fn fetch_git(
         &mut self,
         key: &str,
         url: &str,
         git_ref: &crate::manifest::GitRef,
         registry_sha: Option<&str>,
+        local_repo: Option<&Path>,
     ) -> Result<(PathBuf, ResolvedSource), String> {
         let pin = self
             .lock
             .git_pin(url, git_ref)
             .or(registry_sha)
             .map(str::to_string);
+        // Fetch from the local clone when the index provides one; the lock still keys on `url`.
+        let source = local_repo.and_then(Path::to_str).unwrap_or(url);
         let store = self.store()?;
         let fetched = match &pin {
-            Some(sha) => crate::git::fetch_pinned(url, git_ref, sha, store),
-            None => crate::git::fetch(url, git_ref, store),
+            Some(sha) => crate::git::fetch_pinned(source, git_ref, sha, store),
+            None => crate::git::fetch(source, git_ref, store),
         }
         .map_err(|err| format!("dependency `{key}`: {err}"))?;
         Ok((
