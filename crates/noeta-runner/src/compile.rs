@@ -259,21 +259,13 @@ fn open_startup_cache(
     for module in &workspace.modules {
         key.source(source_key_name(module), module.text().as_bytes());
     }
-    // Dependency packages are part of the compiled program: fold each dependency's key→root binding
-    // (re-rooting changes the linked program even when the sources are byte-identical) and every
-    // module's source text into the key, so any dependency change invalidates the cache.
-    for dep in deps {
-        key.source(format!("<dep {}>", dep.key), dep.root.as_bytes());
-        for (local, global) in &dep.dep_renames {
-            key.source(format!("<rename {} {local}>", dep.key), global.as_bytes());
-        }
-        for module in &dep.modules {
-            key.source(&module.name, module.text.as_bytes());
-        }
-    }
-    // The language edition is part of the compilation identity (follow-on F1): a future edition that
-    // changes what the front-end accepts or how it lowers must not reuse another edition's cached
-    // bytecode, so the entry's effective edition is key material. Distinct from tier names.
+    // Dependency packages are part of the compiled program: fold each dependency's identity, edition,
+    // and sources into the key so any dependency change invalidates the cache.
+    key_deps(&mut key, deps);
+    // The **root** package's edition is part of the compilation identity (follow-on F1): a future
+    // edition that changes what the front-end accepts or how it lowers must not reuse another
+    // edition's cached bytecode, so the entry's effective edition is key material. (Each *dependency's*
+    // edition is folded per-dep by `key_deps`.) Distinct from tier names.
     key.source("<edition>", edition.as_str().as_bytes());
     key.runtime_version(noeta_bundle::RUNTIME_VERSION)
         .binary_identity(binary);
@@ -315,4 +307,70 @@ fn source_key_name(source: &Source) -> &str {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or_else(|| source.name())
+}
+
+/// Fold the dependency packages into the startup-cache key: each dependency's key→root binding
+/// (re-rooting changes the linked program even when the sources are byte-identical), its **edition**,
+/// its local dependency renames, and every module's source text.
+///
+/// A dependency's edition is key material for the same reason its sources are (editions arc S2): it
+/// changes how *that* package compiles, so a dep whose `noeta.toml` edition bumps must invalidate its
+/// cached bytecode even when the dep's source bytes are unchanged. Before S2 only the *root* package's
+/// edition was keyed, so a dependency-edition change could serve a stale artifact.
+fn key_deps(key: &mut noeta_cache::KeyBuilder, deps: &[noeta_loader::DepPackage]) {
+    for dep in deps {
+        key.source(format!("<dep {}>", dep.key), dep.root.as_bytes());
+        key.source(format!("<dep-edition {}>", dep.key), dep.edition.as_bytes());
+        for (local, global) in &dep.dep_renames {
+            key.source(format!("<rename {} {local}>", dep.key), global.as_bytes());
+        }
+        for module in &dep.modules {
+            key.source(&module.name, module.text.as_bytes());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dep_at_edition(edition: &str) -> noeta_loader::DepPackage {
+        noeta_loader::DepPackage {
+            key: "lib".to_string(),
+            root: "lib".to_string(),
+            modules: vec![noeta_loader::RawModule {
+                name: "lib.noe".to_string(),
+                text: "namespace lib.api;\npub fn f(): int { return 1; }\n".to_string(),
+            }],
+            dep_renames: Default::default(),
+            native: false,
+            edition: edition.to_string(),
+        }
+    }
+
+    fn key_of(deps: &[noeta_loader::DepPackage]) -> String {
+        let mut key = noeta_cache::KeyBuilder::new();
+        key_deps(&mut key, deps);
+        key.finish().as_hex().to_string()
+    }
+
+    #[test]
+    fn a_dependencys_edition_is_part_of_the_cache_key() {
+        // Two dependency sets with byte-identical sources, differing only in the dependency's edition,
+        // must produce different cache keys — otherwise a dep-edition bump would serve stale bytecode
+        // (editions arc S2). Uses raw edition strings, so it does not depend on which editions the
+        // toolchain currently accepts.
+        let key_2026 = key_of(std::slice::from_ref(&dep_at_edition("2026")));
+        let key_other = key_of(std::slice::from_ref(&dep_at_edition("2099")));
+        assert_ne!(
+            key_2026, key_other,
+            "a dependency's edition change must change the cache key"
+        );
+
+        // And identical inputs still produce the same key (the change above is the edition, nothing else).
+        assert_eq!(
+            key_2026,
+            key_of(std::slice::from_ref(&dep_at_edition("2026")))
+        );
+    }
 }
