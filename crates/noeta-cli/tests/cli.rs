@@ -3556,7 +3556,7 @@ fn require_provenance_refuses_an_unsigned_registry_dependency() {
 }
 
 #[test]
-fn noeta_add_warns_when_a_new_committer_authored_the_release() {
+fn noeta_add_warns_when_a_release_introduces_a_new_committer() {
     // namespace-protection committer signal: adding a git dependency whose release commit was authored
     // by someone with no prior history in an established repo surfaces a soft warning (with a link to
     // the commit), so the user can review before trusting it. The add itself still succeeds.
@@ -3587,7 +3587,8 @@ fn noeta_add_warns_when_a_new_committer_authored_the_release() {
         }
     };
     git_in(&["init", "-q"], &repo);
-    // Alice establishes the package; Bob (a first-time committer) authors the release commit.
+    // Alice ships v0.9.0; the v1.0.0 release *range* (v0.9.0..v1.0.0) then contains a first-time
+    // committer, Bob. The signal must span that range, not just look at the tip commit.
     std::fs::write(
         repo.join("noeta.toml"),
         "[package]\nname = \"acme/greetlib\"\nversion = \"1.0.0\"\n",
@@ -3599,6 +3600,7 @@ fn noeta_add_warns_when_a_new_committer_authored_the_release() {
         "Alice Maintainer",
         "alice@example.com",
     );
+    git_in(&["tag", "v0.9.0"], &repo);
     commit(
         "CHANGELOG.md",
         "# 1.0.0\n",
@@ -3628,7 +3630,7 @@ fn noeta_add_warns_when_a_new_committer_authored_the_release() {
         .success()
         .stdout(predicate::str::contains("added `greet`"))
         .stderr(
-            predicate::str::contains("first-time committer")
+            predicate::str::contains("committer(s) new to this repo")
                 .and(predicate::str::contains("Bob Newcomer")),
         );
 }

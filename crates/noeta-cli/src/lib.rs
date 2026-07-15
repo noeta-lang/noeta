@@ -37,7 +37,7 @@ use noeta_vm::{SessionOutput, VmBackend, VmSession};
 
 // The package manager (package-manager P2) now lives in the `noeta-pm` library so `noeta-lsp` and
 // `noeta-db` resolve dependencies through the same code; the CLI names its modules unqualified.
-use noeta_pm::{authorship, commit_web_url, graph, lock, manifest, registry, reserved};
+use noeta_pm::{authorship, graph, lock, manifest, registry, repo_web_url, reserved};
 // The L2 compile pipeline (source → runnable module) and the execution core live in `noeta-runner`
 // so the CLI and the standalone lean runtime share one implementation (dev-deps D3c). The CLI's
 // `run`/`dump`/`build`/`test` paths call these by the same names they used when defined here.
@@ -1062,11 +1062,12 @@ fn cmd_update() -> ExitCode {
 }
 
 /// Surface the **committer signal** (namespace-protection): after resolving, for each git-sourced
-/// dependency whose pinned commit is new or changed relative to `old_lock`, look at the authorship of
-/// the new commit and warn — on stderr, best-effort — when it was authored by a first-time committer
-/// of that repo, or when an upgrade pulls in a committer new to it. Each warning links straight to the
-/// commit so a reviewer can navigate there after seeing it. This is a *soft* signal (git author fields
-/// are self-set and forgeable): a prompt to look, never a gate, and never a failure.
+/// dependency whose pinned commit is new or changed relative to `old_lock`, look at the *range* of
+/// commits the release introduced and warn — on stderr, best-effort — when it brought in a committer
+/// new to that repo (the event-stream / new-maintainer pattern). A release spans several commits, so
+/// this reports the whole set of new committers, and links once to the repo (linking each commit would
+/// be noise). This is a *soft* signal (git author fields are self-set and forgeable): a prompt to
+/// look, never a gate, and never a failure.
 fn warn_new_committers(old_lock: &lock::Lock, graph: &graph::ResolvedGraph) {
     for pkg in &graph.locked {
         let graph::ResolvedSource::Git { url, sha, .. } = &pkg.source else {
@@ -1077,6 +1078,8 @@ fn warn_new_committers(old_lock: &lock::Lock, graph: &graph::ResolvedGraph) {
         if old == Some(sha.as_str()) {
             continue;
         }
+        // `since` is the previously-locked commit for an upgrade; for a fresh add it's absent and
+        // `authorship` falls back to the previous release tag to define the range.
         let since = old.filter(|old| *old != sha);
         let Ok(facts) = authorship(url, sha, since) else {
             continue; // best-effort: an unreachable remote / missing git just stays quiet
@@ -1084,23 +1087,15 @@ fn warn_new_committers(old_lock: &lock::Lock, graph: &graph::ResolvedGraph) {
         if !facts.is_noteworthy() {
             continue;
         }
-        let link = commit_web_url(url, sha).unwrap_or_else(|| format!("{url} @ {sha}"));
-        if !facts.new_since.is_empty() {
-            eprintln!(
-                "⚠ {} {}: this upgrade pulls in commits from committer(s) new to `{}`:",
-                pkg.identity, pkg.version, url
-            );
-            for who in &facts.new_since {
-                eprintln!("      {who}");
-            }
-            eprintln!("    review the change before trusting it: {link}");
-        } else {
-            eprintln!(
-                "⚠ {} {}: the release commit was authored by a first-time committer of `{}`:\n\
-                 \x20     {}\n    review it before trusting it: {link}",
-                pkg.identity, pkg.version, url, facts.author
-            );
+        eprintln!(
+            "⚠ {} {}: this release introduces commits from committer(s) new to this repo:",
+            pkg.identity, pkg.version
+        );
+        for who in &facts.new_committers {
+            eprintln!("      {who}");
         }
+        let link = repo_web_url(url).unwrap_or_else(|| url.to_string());
+        eprintln!("    review before trusting it: {link}");
     }
 }
 

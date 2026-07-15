@@ -111,37 +111,32 @@ fn clone_tag(url: &str, tag: &str, expected_sha: &str, staging: &Path) -> io::Re
     Ok(())
 }
 
-/// The authorship of a release commit and how it sits in the repo's history (namespace-protection,
-/// committer signal) — a **soft** anomaly signal (git author/committer fields are self-set and thus
-/// forgeable), meant to prompt a human to look, not to gate. Computed by [`authorship`].
+/// The committers a release introduces (namespace-protection, committer signal) — a **soft** anomaly
+/// signal (git author/committer fields are self-set and thus forgeable), meant to prompt a human to
+/// look, not to gate. A release spans a *range* of commits, so this reports every committer new to the
+/// repo across that whole range — not just the tip commit's author. Computed by [`authorship`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Authorship {
-    /// The release commit's author, `Name <email>`.
-    pub author: String,
-    /// Whether the author has **no earlier commit** reachable from the release commit — this is their
-    /// first contribution to the repo (the event-stream / new-maintainer pattern).
-    pub author_first_seen: bool,
-    /// How many *distinct other* authors appear earlier in the history. Zero means a brand-new or
-    /// solo repo, where "first-time author" is trivially true and not worth flagging.
-    pub prior_authors: usize,
-    /// Authors introduced in `since..sha` who never appear before `since` — the committers an upgrade
-    /// pulls in. Empty when `since` is `None`, unrelated to `sha`, or introduces nobody new.
-    pub new_since: Vec<String>,
+    /// Distinct committers (as `Name <email>`) who appear in the release's commit range but nowhere
+    /// in the repo's history before it — the new maintainers to review. Empty when there are none, or
+    /// when no baseline release exists to compare against.
+    pub new_committers: Vec<String>,
 }
 
 impl Authorship {
-    /// Whether this is worth warning about: a first-time author *in a repo that already had other
-    /// authors* (so a fresh solo project doesn't warn), or an upgrade that pulls in a new committer.
+    /// Whether this is worth warning about — the release brought in at least one new committer.
     pub fn is_noteworthy(&self) -> bool {
-        (self.author_first_seen && self.prior_authors > 0) || !self.new_since.is_empty()
+        !self.new_committers.is_empty()
     }
 }
 
-/// Analyze the authorship of `sha` in `url`'s repo, optionally relative to a previously-pinned commit
-/// `since` (namespace-protection, committer signal). Does a **blobless** clone (`--filter=blob:none`,
-/// no working tree) so it pulls the commit graph without file contents — a network op done only for
-/// `noeta update`/`add` on the deps that changed, never on the resolve hot path. Best-effort: the
-/// caller treats an `Err` as "couldn't tell" and stays quiet rather than failing the command.
+/// Analyze the committers a release (`sha`) introduces in `url`'s repo (namespace-protection, committer
+/// signal). The release's commit *range* is `baseline..sha`, where `baseline` is `since` when given
+/// (an upgrade: the previously-locked commit), else the **previous tag** reachable from `sha` (a fresh
+/// add: the prior release). Does a **blobless** clone (`--filter=blob:none`, no working tree) — the
+/// commit graph without file contents, a network op run only for `noeta update`/`add` on the deps that
+/// changed, never on the resolve hot path. Best-effort: an `Err` means "couldn't tell", so the caller
+/// stays quiet rather than failing the command.
 pub fn authorship(url: &str, sha: &str, since: Option<&str>) -> Result<Authorship, String> {
     let short = &sha[..sha.len().min(12)];
     let dir = std::env::temp_dir().join(format!("noeta-authorship-{}-{short}", std::process::id()));
@@ -165,60 +160,51 @@ pub fn authorship(url: &str, sha: &str, since: Option<&str>) -> Result<Authorshi
     result
 }
 
-/// Compute the authorship facts from an already-cloned `git_dir` (split out so the git-plumbing is
+/// Compute the new committers from an already-cloned `git_dir` (split out so the git-plumbing is
 /// testable against a local clone without the network).
 fn authorship_from(git_dir: &str, sha: &str, since: Option<&str>) -> Result<Authorship, String> {
     let gd = format!("--git-dir={git_dir}");
-    // The tip author's display + email, and the full ancestor author-email list (newest first).
-    let author = run_git([&gd, "show", "-s", "--format=%an <%ae>", sha])?
-        .trim()
-        .to_string();
-    let emails = run_git([&gd, "log", "--format=%ae", sha])?;
-    let mut lines = emails.lines();
-    let tip_email = lines.next().unwrap_or("").trim().to_string();
-    let ancestors: Vec<String> = lines.map(|l| l.trim().to_string()).collect();
-    let author_first_seen = !ancestors.contains(&tip_email);
-    let prior_authors = ancestors
-        .iter()
-        .filter(|e| **e != tip_email)
-        .collect::<std::collections::BTreeSet<_>>()
-        .len();
-
-    // New authors an upgrade pulls in (best-effort — a `since` unrelated to `sha` yields nobody new).
-    let new_since = match since {
-        None => Vec::new(),
-        Some(since) => {
-            let before: std::collections::BTreeSet<String> =
-                run_git([&gd, "log", "--format=%ae", since])
-                    .map(|out| out.lines().map(|l| l.trim().to_string()).collect())
-                    .unwrap_or_default();
-            let range = run_git([
-                &gd,
-                "log",
-                "--format=%an <%ae>%x1f%ae",
-                &format!("{since}..{sha}"),
-            ])
-            .unwrap_or_default();
-            let mut seen = std::collections::BTreeSet::new();
-            let mut out = Vec::new();
-            for line in range.lines() {
-                if let Some((display, email)) = line.split_once('\u{1f}') {
-                    let email = email.trim();
-                    if !before.contains(email) && seen.insert(email.to_string()) {
-                        out.push(display.trim().to_string());
-                    }
-                }
-            }
-            out
-        }
+    // The baseline that defines the release range: the caller's `since` (an upgrade's previous commit),
+    // else the previous tag reachable from `sha`'s parent (the prior release). No baseline — a repo's
+    // very first release — means there is nothing to compare against, so nobody is "new".
+    let baseline = match since {
+        Some(since) => Some(since.to_string()),
+        None => run_git([&gd, "describe", "--tags", "--abbrev=0", &format!("{sha}^")])
+            .ok()
+            .map(|tag| tag.trim().to_string())
+            .filter(|tag| !tag.is_empty()),
+    };
+    let Some(baseline) = baseline else {
+        return Ok(Authorship {
+            new_committers: Vec::new(),
+        });
     };
 
-    Ok(Authorship {
-        author,
-        author_first_seen,
-        prior_authors,
-        new_since,
-    })
+    // Author emails already present before the baseline, and the authors across the release range.
+    // Both best-effort: an unrelated baseline (force-push / wrong repo) yields an empty range, so we
+    // simply report nobody rather than failing.
+    let before: std::collections::BTreeSet<String> =
+        run_git([&gd, "log", "--format=%ae", &baseline])
+            .map(|out| out.lines().map(|l| l.trim().to_string()).collect())
+            .unwrap_or_default();
+    let range = run_git([
+        &gd,
+        "log",
+        "--format=%an <%ae>%x1f%ae",
+        &format!("{baseline}..{sha}"),
+    ])
+    .unwrap_or_default();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut new_committers = Vec::new();
+    for line in range.lines() {
+        if let Some((display, email)) = line.split_once('\u{1f}') {
+            let email = email.trim();
+            if !before.contains(email) && seen.insert(email.to_string()) {
+                new_committers.push(display.trim().to_string());
+            }
+        }
+    }
+    Ok(Authorship { new_committers })
 }
 
 /// Normalize a git remote `url` to a browsable **HTTPS repo URL** (best-effort): strip a trailing
@@ -379,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn authorship_flags_a_new_committer_but_not_an_established_one() {
+    fn authorship_reports_new_committers_across_a_release_range() {
         if !git_available() {
             return;
         }
@@ -391,28 +377,41 @@ mod tests {
             .current_dir(&repo)
             .output()
             .unwrap();
-        // History: alice, alice (tag v1), then bob (tag v2).
-        commit_as(&repo, "a.noe", "Alice", "alice@example.com");
-        commit_as(&repo, "b.noe", "Alice", "alice@example.com");
-        let v1 = super::run_git(["-C", repo.to_str().unwrap(), "rev-parse", "HEAD"]).unwrap();
-        let v1 = v1.trim();
-        commit_as(&repo, "c.noe", "Bob", "bob@example.com");
-        let v2 = super::run_git(["-C", repo.to_str().unwrap(), "rev-parse", "HEAD"]).unwrap();
-        let v2 = v2.trim();
         let url = repo.to_str().unwrap();
+        let head = || {
+            super::run_git(["-C", url, "rev-parse", "HEAD"])
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        // History: Alice (v0.9.0), then two more commits — one by Alice, one by first-timer Bob —
+        // making up the v1.0.0 release; the release *range* spans both, not just the tip.
+        commit_as(&repo, "a.noe", "Alice", "alice@example.com");
+        let v0 = head();
+        git(&["tag", "v0.9.0"], &repo);
+        commit_as(&repo, "b.noe", "Alice", "alice@example.com");
+        commit_as(&repo, "c.noe", "Bob", "bob@example.com");
+        let v1 = head();
+        git(&["tag", "v1.0.0"], &repo);
 
-        // The v2 release commit is authored by a first-time committer of an established repo.
-        let up = authorship(url, v2, Some(v1)).unwrap();
-        assert!(up.author.contains("Bob"), "{:?}", up);
-        assert!(up.author_first_seen, "bob is new: {up:?}");
-        assert_eq!(up.prior_authors, 1, "alice preceded him: {up:?}");
-        assert!(up.new_since.iter().any(|a| a.contains("Bob")), "{up:?}");
+        // Explicit baseline (an upgrade from v0.9.0): Bob is new across v0..v1; Alice is established.
+        let up = authorship(url, &v1, Some(&v0)).unwrap();
+        assert_eq!(up.new_committers.len(), 1, "only Bob is new: {up:?}");
+        assert!(up.new_committers[0].contains("Bob"), "{up:?}");
         assert!(up.is_noteworthy(), "{up:?}");
 
-        // v1's author (alice) is established — not noteworthy.
-        let est = authorship(url, v1, None).unwrap();
-        assert!(est.author.contains("Alice"));
-        assert!(!est.author_first_seen, "alice recurs: {est:?}");
+        // No baseline given (a fresh add): the previous tag v0.9.0 is discovered and used — same range,
+        // same result. This is what proves we span the release, not just look at the tip commit.
+        let added = authorship(url, &v1, None).unwrap();
+        assert!(
+            added.new_committers.iter().any(|a| a.contains("Bob")),
+            "{added:?}"
+        );
+        assert!(added.is_noteworthy(), "{added:?}");
+
+        // A release entirely by the established maintainer introduces nobody new.
+        let est = authorship(url, &v0, Some(&v0)).unwrap();
+        assert!(est.new_committers.is_empty(), "{est:?}");
         assert!(!est.is_noteworthy(), "{est:?}");
     }
 
