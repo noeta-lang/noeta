@@ -48,6 +48,75 @@ pub struct Manifest {
     dependencies: BTreeMap<String, Dependency>,
     targets: BTreeMap<String, Target>,
     trust: Trust,
+    registries: Registries,
+}
+
+/// The `[registries]` table (private-registries arc) — a map from a **scope** (`company`) to the
+/// registry that scope's packages resolve from, plus an optional `default` for every other scope. Lets
+/// a project mix the public hosted registry with private ones (e.g. a whole GitHub org) without making
+/// everything private: `acme/*` can come from `github:acme` while everything else stays on the default.
+/// Empty = the single default registry (`NOETA_REGISTRY_URL` or the local index) for everything, i.e.
+/// today's behavior.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Registries {
+    /// The fallback for scopes with no explicit mapping. `None` = the environment default.
+    default: Option<RegistrySource>,
+    /// scope (`company`) → its registry source.
+    by_scope: BTreeMap<String, RegistrySource>,
+}
+
+impl Registries {
+    /// The registry source for `scope` (a `company` segment): its explicit mapping, else the `default`
+    /// mapping, else `None` (meaning "use the environment default registry").
+    pub fn source_for(&self, scope: &str) -> Option<&RegistrySource> {
+        self.by_scope.get(scope).or(self.default.as_ref())
+    }
+
+    /// Every distinct source configured (for auditing/UX).
+    pub fn all(&self) -> impl Iterator<Item = (&str, &RegistrySource)> {
+        self.default
+            .iter()
+            .map(|s| ("default", s))
+            .chain(self.by_scope.iter().map(|(k, v)| (k.as_str(), v)))
+    }
+
+    /// Whether any mapping is configured.
+    pub fn is_empty(&self) -> bool {
+        self.default.is_none() && self.by_scope.is_empty()
+    }
+}
+
+/// Where a scope's packages resolve from (private-registries arc). Crypto-/IO-free: the manifest layer
+/// only parses the *shape*; opening the concrete index happens in the resolver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrySource {
+    /// A hosted HTTP registry (the noeta-registry service) at this base URL.
+    Hosted(String),
+    /// A GitHub org used as a registry: `company/package` → `github.com/<org>/<package>`, versions =
+    /// semver git tags. The stored string is the org.
+    GitHub(String),
+}
+
+impl RegistrySource {
+    /// Parse a `[registries]` value string: `github:<org>` or an `http(s)://…` base URL.
+    pub fn parse(s: &str) -> Result<RegistrySource, String> {
+        let s = s.trim();
+        if let Some(org) = s.strip_prefix("github:") {
+            let org = org.trim();
+            if org.is_empty() || !org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                return Err(format!(
+                    "`github:` registry needs a valid org name (got `{s}`)"
+                ));
+            }
+            Ok(RegistrySource::GitHub(org.to_string()))
+        } else if s.starts_with("http://") || s.starts_with("https://") {
+            Ok(RegistrySource::Hosted(s.trim_end_matches('/').to_string()))
+        } else {
+            Err(format!(
+                "registry source `{s}` must be `github:<org>` or an http(s):// URL"
+            ))
+        }
+    }
 }
 
 /// The `[trust]` table (package-manager Phase 4) — the **complete, auditable set of every elevated
@@ -449,6 +518,7 @@ impl Manifest {
         let package = parse_package(&table)?;
         let dependencies = parse_dependencies(&table)?;
         let trust = parse_trust(&table)?;
+        let registries = parse_registries(&table)?;
         let mut targets = BTreeMap::new();
 
         let Some(targets_value) = table.get("targets") else {
@@ -457,6 +527,7 @@ impl Manifest {
                 dependencies,
                 targets,
                 trust,
+                registries,
             });
         };
         let targets_table = targets_value
@@ -538,12 +609,18 @@ impl Manifest {
             dependencies,
             targets,
             trust,
+            registries,
         })
     }
 
     /// The package's identity, if it declares a `[package]` table (a bare entry script has none).
     pub fn package(&self) -> Option<&PackageMeta> {
         self.package.as_ref()
+    }
+
+    /// The `[registries]` mapping (private-registries arc) — which registry each scope resolves from.
+    pub fn registries(&self) -> &Registries {
+        &self.registries
     }
 
     /// The `[trust]` grants — the authority this manifest extends to its dependencies (Phase 4).
@@ -783,6 +860,37 @@ fn parse_trust(table: &toml::Table) -> Result<Trust, String> {
     })
 }
 
+/// Parse the `[registries]` table (private-registries arc): a map of scope (`company`) → source string
+/// (`github:<org>` or an http(s):// URL), plus an optional reserved `default` key applied to unmapped
+/// scopes. A non-string value, an unknown source syntax, or a non-identifier scope key is an error.
+fn parse_registries(table: &toml::Table) -> Result<Registries, String> {
+    let Some(value) = table.get("registries") else {
+        return Ok(Registries::default());
+    };
+    let reg_table = value.as_table().ok_or("`registries` must be a table")?;
+    let mut registries = Registries::default();
+    for (key, val) in reg_table {
+        let s = val
+            .as_str()
+            .ok_or_else(|| format!("`registries.{key}` must be a source string"))?;
+        let source =
+            RegistrySource::parse(s).map_err(|err| format!("`registries.{key}`: {err}"))?;
+        if key == "default" {
+            registries.default = Some(source);
+        } else {
+            // A scope key must be a bare `company` identifier (not `company/package`).
+            if !is_identifier(key) {
+                return Err(format!(
+                    "`registries.{key}`: a registry key must be a scope (`company`) identifier or \
+                     `default`"
+                ));
+            }
+            registries.by_scope.insert(key.clone(), source);
+        }
+    }
+    Ok(registries)
+}
+
 /// Parse one dependency value: a bare SemVer string (`dep = "^1.2"`, the registry shorthand) or a
 /// table with exactly one source key — `path`, `git` (+ required `tag`), or `version`.
 fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String> {
@@ -909,6 +1017,77 @@ fn provider_of(target: &str, tier: &str, value: &toml::Value) -> Result<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- `[registries]` (private-registries arc) -----------------------------------------------
+
+    #[test]
+    fn parses_a_registries_table() {
+        let m = Manifest::parse(
+            "[registries]\n\
+             default = \"https://registry.noeta.dev\"\n\
+             acme = \"github:acme\"\n\
+             widgets = \"https://widgets.example/reg/\"\n",
+        )
+        .expect("valid");
+        let r = m.registries();
+        assert!(!r.is_empty());
+        // A scope with an explicit mapping resolves to it.
+        assert_eq!(
+            r.source_for("acme"),
+            Some(&RegistrySource::GitHub("acme".to_string()))
+        );
+        // Trailing slash trimmed on hosted URLs.
+        assert_eq!(
+            r.source_for("widgets"),
+            Some(&RegistrySource::Hosted(
+                "https://widgets.example/reg".to_string()
+            ))
+        );
+        // An unmapped scope falls back to `default`.
+        assert_eq!(
+            r.source_for("other"),
+            Some(&RegistrySource::Hosted(
+                "https://registry.noeta.dev".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn registries_default_is_optional_and_absent_means_env_default() {
+        let m = Manifest::parse("[registries]\nacme = \"github:acme\"\n").unwrap();
+        let r = m.registries();
+        assert!(r.source_for("acme").is_some());
+        assert_eq!(r.source_for("unmapped"), None); // no default → use the environment registry
+        // No table at all → empty.
+        assert!(
+            Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n")
+                .unwrap()
+                .registries()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rejects_a_bad_registry_source_or_key() {
+        assert!(Manifest::parse("[registries]\nacme = \"ftp://nope\"\n").is_err());
+        assert!(Manifest::parse("[registries]\nacme = \"github:\"\n").is_err());
+        assert!(Manifest::parse("[registries]\n\"a/b\" = \"github:acme\"\n").is_err());
+        assert!(Manifest::parse("[registries]\nacme = 5\n").is_err());
+    }
+
+    #[test]
+    fn registry_source_parse_forms() {
+        assert_eq!(
+            RegistrySource::parse("github:my-org").unwrap(),
+            RegistrySource::GitHub("my-org".to_string())
+        );
+        assert_eq!(
+            RegistrySource::parse("https://x.example").unwrap(),
+            RegistrySource::Hosted("https://x.example".to_string())
+        );
+        assert!(RegistrySource::parse("github:bad org").is_err());
+        assert!(RegistrySource::parse("just-a-string").is_err());
+    }
 
     // --- `[package]` + `[dependencies]` (package-manager P2.0) ---------------------------------
 
