@@ -684,8 +684,13 @@ mod tests {
             name: "a.noe".into(),
             text: a_text.into(),
         };
-        let loader =
-            noeta_loader::link("main.noe", entry_text, std::slice::from_ref(&raw)).unwrap();
+        let loader = noeta_loader::link(
+            "main.noe",
+            entry_text,
+            noeta_lexer::Edition::DEFAULT,
+            std::slice::from_ref(&raw),
+        )
+        .unwrap();
 
         let db = LangDatabase::default();
         let entry = Source::new(SourceId(0), "main.noe", entry_text);

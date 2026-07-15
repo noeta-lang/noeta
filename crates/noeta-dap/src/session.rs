@@ -62,7 +62,7 @@ impl RunOutput {
 /// unreadable file, parse/check diagnostics, or a compile error — returns the failure already shaped
 /// as a [`RunOutput`] (a `stderr` chunk + non-zero exit) for the adapter to replay.
 pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
-    let linked = match noeta_loader::load(path) {
+    let linked = match noeta_loader::load(path, noeta_pm::manifest::root_edition(path)) {
         Err(err) => {
             return Err(RunOutput::failed(
                 format!("noeta: cannot read {}: {err}\n", path.display()),
@@ -81,7 +81,8 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
 
     // The session flavor keeps the checker alive (C3): console fragments will check against the
     // typing environment this whole-program check accumulates.
-    let (checked, checker) = noeta_check::check_all_session(&linked.program);
+    let (checked, checker) =
+        noeta_check::check_all_session_with(&linked.program, linked.editions.clone());
     if !checked.diagnostics.is_empty() {
         return Err(RunOutput::failed(
             render_mapped(&linked.sources, checked.diagnostics.iter()),

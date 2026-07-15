@@ -1706,11 +1706,16 @@ fn tier_active_in_target(
 /// Type-check and run a program, writing stdout to the real stdout and rendering any diagnostics to
 /// stderr — each against the source its span belongs to (via the `SourceMap`). Returns the process
 /// exit code. `program` is the loaded program, possibly after dev-tier activation (`cmd_run`).
-fn run_program(program: &noeta_ast::Program, sources: &SourceMap, args: Vec<String>) -> i32 {
+fn run_program(
+    program: &noeta_ast::Program,
+    editions: &noeta_lexer::EditionMap,
+    sources: &SourceMap,
+    args: Vec<String>,
+) -> i32 {
     // The loader already lexed + parsed (and reported any lex/parse errors); type-check then run.
     // One `check_all` produces both the gate diagnostics and the `type_of` site map the backend
     // needs, so the checker runs exactly once (it previously ran again inside the backend).
-    let checked = noeta_check::check_all(program);
+    let checked = noeta_check::check_all_with_editions(program, editions.clone());
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(sources, checked.diagnostics.iter());
         return 1;
@@ -2005,12 +2010,19 @@ fn cmd_check(
                 // against the same workspace sources.
                 let sources = std::rc::Rc::new(linked.sources);
                 let program_diags = if active_refs.is_empty() {
-                    noeta_check::check_all(&linked.program).diagnostics
+                    noeta_check::check_all_with_editions(&linked.program, linked.editions.clone())
+                        .diagnostics
                 } else {
                     let activated =
                         noeta_check::activate_tiers_with(&linked.program, &active_refs, &providers);
                     let mut ds = activated.diagnostics;
-                    ds.extend(noeta_check::check_all(&activated.program).diagnostics);
+                    ds.extend(
+                        noeta_check::check_all_with_editions(
+                            &activated.program,
+                            linked.editions.clone(),
+                        )
+                        .diagnostics,
+                    );
                     ds
                 };
                 for d in &program_diags {
@@ -2335,8 +2347,9 @@ fn run_declared_tier(
         span,
     ));
     // One check over the whole dispatch program: the user's code, the stamped attributes, the
-    // runner's signature, and the synthesized call all validate together.
-    let checked = noeta_check::check_all(&program);
+    // runner's signature, and the synthesized call all validate together — under the project's
+    // per-package editions (the user code keeps its source ids; the synthesized nodes are default).
+    let checked = noeta_check::check_all_with_editions(&program, linked.editions.clone());
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
         return ExitCode::from(1);
@@ -2614,7 +2627,7 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         // Hot mode (server-hmr W1, armed by the `--watch` wrapper for `serve`): run through the
         // debug-session machinery with the hot-swap mailbox, so edits swap into the LIVE process.
         if std::env::var_os("NOETA_HOT").is_some() {
-            return run_program_hot(file, &linked.program, &linked.sources);
+            return run_program_hot(file, &linked.program, &linked.editions, &linked.sources);
         }
         // An entry call injected before compiling means the module differs from `run`'s for the
         // same source — a command run must never share the startup cache's `(source+tiers)` key,
@@ -2623,6 +2636,7 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
         // the program sees the real process argv.
         u8::try_from(run_program(
             &linked.program,
+            &linked.editions,
             &linked.sources,
             std::env::args().collect(),
         ))
@@ -2729,7 +2743,7 @@ fn serve_parallel_impl(file: &std::path::Path, port: i64, host: &str, workers: u
         span: sp,
     });
 
-    let checked = noeta_check::check_all(&linked.program);
+    let checked = noeta_check::check_all_with_editions(&linked.program, linked.editions.clone());
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
         return 1;
@@ -2966,9 +2980,10 @@ fn run_worker_hot(
 fn run_program_hot(
     entry_path: &std::path::Path,
     program: &noeta_ast::Program,
+    editions: &noeta_lexer::EditionMap,
     sources: &SourceMap,
 ) -> u8 {
-    let checked = noeta_check::check_all(program);
+    let checked = noeta_check::check_all_with_editions(program, editions.clone());
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(sources, checked.diagnostics.iter());
         return 1;
@@ -3959,7 +3974,7 @@ fn cmd_test(
 
     // Type-check the activated program once, so a broken test is a compile error reported a single
     // time here rather than redundantly inside every per-test run.
-    let checked = noeta_check::check_all(&activated.program);
+    let checked = noeta_check::check_all_with_editions(&activated.program, linked.editions.clone());
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
         return ExitCode::from(1);
@@ -4043,7 +4058,14 @@ fn cmd_test(
         );
     }
 
-    let outcomes = run_tests(&setup, &cases, activated.program.span, jobs, fail_fast);
+    let outcomes = run_tests(
+        &setup,
+        &linked.editions,
+        &cases,
+        activated.program.span,
+        jobs,
+        fail_fast,
+    );
     if json {
         report_json(&outcomes, &skipped, total)
     } else {
@@ -4245,6 +4267,7 @@ fn plural(n: usize) -> &'static str {
 /// order, so the report is deterministic regardless of completion order.
 fn run_tests(
     setup: &[Stmt],
+    editions: &noeta_lexer::EditionMap,
     cases: &[TestCase],
     span: Span,
     jobs: usize,
@@ -4265,7 +4288,7 @@ fn run_tests(
                     if idx >= cases.len() {
                         break;
                     }
-                    let outcome = run_one_test(setup, &cases[idx], span);
+                    let outcome = run_one_test(setup, editions, &cases[idx], span);
                     let failed = !outcome.passed;
                     results.lock().unwrap().push((idx, outcome));
                     if fail_fast && failed {
@@ -4288,7 +4311,12 @@ fn run_tests(
 /// without running. The synthesized program is a subset of the already-checked activated program
 /// plus one call, so it cannot introduce new type errors; one is surfaced as a failure rather than
 /// panicking the worker.
-fn run_one_test(setup: &[Stmt], case: &TestCase, span: Span) -> TestOutcome {
+fn run_one_test(
+    setup: &[Stmt],
+    editions: &noeta_lexer::EditionMap,
+    case: &TestCase,
+    span: Span,
+) -> TestOutcome {
     let args = match &case.arg {
         CaseArg::None => Vec::new(),
         CaseArg::Value(expr) => vec![expr.clone()],
@@ -4306,7 +4334,7 @@ fn run_one_test(setup: &[Stmt], case: &TestCase, span: Span) -> TestOutcome {
     stmts.push(call_stmt(&case.fn_name, args, case.span));
     let program = Program { stmts, span };
 
-    let checked = noeta_check::check_all(&program);
+    let checked = noeta_check::check_all_with_editions(&program, editions.clone());
     if !checked.diagnostics.is_empty() {
         return TestOutcome {
             name: display,
@@ -4510,7 +4538,7 @@ fn cmd_bench(
 
     // Type-check once, so a broken benchmark is a compile error reported here rather than inside
     // every per-bench run.
-    let checked = noeta_check::check_all(&activated.program);
+    let checked = noeta_check::check_all_with_editions(&activated.program, linked.editions.clone());
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
         return ExitCode::from(1);
@@ -4565,10 +4593,10 @@ fn cmd_bench(
         let n = iterations_override
             .or_else(|| iterations_arg(bench))
             .map(|n| n.max(1))
-            .unwrap_or_else(|| calibrate_iterations(&setup, bench));
+            .unwrap_or_else(|| calibrate_iterations(&setup, &linked.editions, bench));
         let mut outcome = match (
-            measure_iterations(&setup, bench, n, 3),
-            measure_iterations(&setup, bench, n.saturating_mul(2), 3),
+            measure_iterations(&setup, &linked.editions, bench, n, 3),
+            measure_iterations(&setup, &linked.editions, bench, n.saturating_mul(2), 3),
         ) {
             (Ok(t1), Ok(t2)) => BenchOutcome {
                 name: bench.name.clone(),
@@ -4685,10 +4713,10 @@ fn print_bench_outcome(outcome: &BenchOutcome, baseline: Option<&str>) {
 /// which is the property that makes the reported per-iteration number stable. A failing probe
 /// falls back to [`DEFAULT_BENCH_ITERATIONS`] (the bench fails identically in the real
 /// measurement, where it is reported).
-fn calibrate_iterations(setup: &[Stmt], bench: &TierFn) -> u64 {
+fn calibrate_iterations(setup: &[Stmt], editions: &noeta_lexer::EditionMap, bench: &TierFn) -> u64 {
     let mut n: u64 = 64;
     loop {
-        let Ok(t) = measure_iterations(setup, bench, n, 1) else {
+        let Ok(t) = measure_iterations(setup, editions, bench, n, 1) else {
             return DEFAULT_BENCH_ITERATIONS;
         };
         let elapsed = t.as_nanos().max(1) as f64;
@@ -4789,6 +4817,7 @@ fn iterations_arg(bench: &TierFn) -> Option<u64> {
 /// nonzero exit / any diagnostic (a panic in the bench body) is a failure, surfaced as `Err`.
 fn measure_iterations(
     setup: &[Stmt],
+    editions: &noeta_lexer::EditionMap,
     bench: &TierFn,
     n: u64,
     runs: u32,
@@ -4824,7 +4853,7 @@ fn measure_iterations(
         span: bench.span,
     };
 
-    let checked = noeta_check::check_all(&program);
+    let checked = noeta_check::check_all_with_editions(&program, editions.clone());
     if !checked.diagnostics.is_empty() {
         return Err(checked.diagnostics[0].message.clone());
     }
@@ -5181,7 +5210,7 @@ fn repl_bootstrap(
     path: &std::path::Path,
     checker: &mut Option<noeta_check::SessionChecker>,
 ) -> Result<(VmSession, Vec<Source>), ExitCode> {
-    let linked = match noeta_loader::load(path) {
+    let linked = match noeta_loader::load(path, manifest::root_edition(path)) {
         Err(err) => {
             eprintln!("noeta: cannot read {}: {err}", path.display());
             return Err(ExitCode::from(2));
@@ -5196,7 +5225,8 @@ fn repl_bootstrap(
     };
 
     // Always checked (it is a file); the session flavor keeps the checker when the prompt wants it.
-    let (checked, session_checker) = noeta_check::check_all_session(&linked.program);
+    let (checked, session_checker) =
+        noeta_check::check_all_session_with(&linked.program, linked.editions.clone());
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
         return Err(ExitCode::FAILURE);

@@ -62,7 +62,7 @@ impl RunOutput {
 /// failure — unreadable file, parse/check diagnostics, or a compile error — returns the failure
 /// already shaped as a [`RunOutput`] (a `stderr` chunk + non-zero exit) for the caller to replay.
 pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
-    let linked = match noeta_loader::load(path) {
+    let linked = match noeta_loader::load(path, noeta_pm::manifest::root_edition(path)) {
         Err(err) => {
             return Err(RunOutput::failed(
                 format!("noeta: cannot read {}: {err}\n", path.display()),
@@ -79,7 +79,7 @@ pub fn compile_file(path: &Path) -> Result<Compiled, RunOutput> {
         Ok(Ok(linked)) => linked,
     };
 
-    let checked = noeta_check::check_all(&linked.program);
+    let checked = noeta_check::check_all_with_editions(&linked.program, linked.editions.clone());
     if !checked.diagnostics.is_empty() {
         return Err(RunOutput::failed(
             render_mapped(&linked.sources, checked.diagnostics.iter()),

@@ -449,7 +449,7 @@ struct Compiled {
 /// DAP launch runs, host-agnostic. `real_isolates` mirrors the host choice: real OS threads on the
 /// real host, cooperative on the sandbox.
 fn compile_debug(entry: &Entry, real_isolates: bool) -> Result<Compiled, String> {
-    let (program, sources) = match entry {
+    let (program, sources, editions) = match entry {
         Entry::Inline(text) => {
             let source = Source::new(SourceId::FIRST, "<inline>".to_string(), text.clone());
             let lexed = noeta_lexer::lex(&source);
@@ -461,22 +461,29 @@ fn compile_debug(entry: &Entry, real_isolates: bool) -> Result<Compiled, String>
             if !diags.is_empty() {
                 return Err(diags);
             }
-            (parsed.program, SourceMap::new(vec![source]))
+            // An inline debug snippet has no manifest, so every source is the default edition.
+            (
+                parsed.program,
+                SourceMap::new(vec![source]),
+                noeta_lexer::EditionMap::new(),
+            )
         }
-        Entry::File(path) => match noeta_loader::load(path) {
-            Err(err) => return Err(format!("noeta: cannot read {}: {err}\n", path.display())),
-            Ok(Err(load_diagnostics)) => {
-                let mut text = String::new();
-                for ld in &load_diagnostics {
-                    text.push_str(&render(&ld.source, &ld.diagnostic));
+        Entry::File(path) => {
+            match noeta_loader::load(path, noeta_pm::manifest::root_edition(path)) {
+                Err(err) => return Err(format!("noeta: cannot read {}: {err}\n", path.display())),
+                Ok(Err(load_diagnostics)) => {
+                    let mut text = String::new();
+                    for ld in &load_diagnostics {
+                        text.push_str(&render(&ld.source, &ld.diagnostic));
+                    }
+                    return Err(text);
                 }
-                return Err(text);
+                Ok(Ok(linked)) => (linked.program, linked.sources, linked.editions),
             }
-            Ok(Ok(linked)) => (linked.program, linked.sources),
-        },
+        }
     };
 
-    let (checked, checker) = noeta_check::check_all_session(&program);
+    let (checked, checker) = noeta_check::check_all_session_with(&program, editions);
     if !checked.diagnostics.is_empty() {
         return Err(render_mapped(&sources, checked.diagnostics.iter()));
     }

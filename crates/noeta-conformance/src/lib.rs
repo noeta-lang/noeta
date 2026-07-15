@@ -255,7 +255,7 @@ pub fn run_case_path(entry: &Path, display: &str, stage: Stage) -> CaseResult {
 /// Load + link `entry` and run the merged program to an [`Outcome`]. Lex/parse errors render
 /// against the source they came from; check/runtime diagnostics against the entry source.
 fn run_linked(entry: &Path, stage: Stage) -> Outcome {
-    let linked = match noeta_loader::load(entry) {
+    let linked = match noeta_loader::load(entry, noeta_lexer::Edition::DEFAULT) {
         Ok(Ok(linked)) => linked,
         Ok(Err(load_diagnostics)) => {
             let errors = load_diagnostics
