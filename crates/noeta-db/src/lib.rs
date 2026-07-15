@@ -562,9 +562,10 @@ pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> LinkedProgram {
 /// The per-source [`EditionMap`](noeta_lexer::EditionMap) for a whole workspace — every member
 /// source (entry, siblings, dependency modules) under its own package's edition, keyed by
 /// `SourceId`. The salsa analogue of the loader's `Linked::editions`, so [`linked_checked`] applies
-/// each package's edition per declaration over the merged program. A plain helper (not a tracked
-/// query): it is cheap, and its only caller is already memoized.
-fn workspace_edition_map(db: &dyn salsa::Database, ws: Workspace) -> noeta_lexer::EditionMap {
+/// each package's edition per declaration over the merged program. Public so a consumer that checks
+/// a *derived* program (e.g. `noeta-mcp` re-checking a tier-activated linked program) can apply the
+/// same per-source editions — the `SourceId`s survive activation, so the map stays valid.
+pub fn workspace_editions(db: &dyn salsa::Database, ws: Workspace) -> noeta_lexer::EditionMap {
     let mut map = noeta_lexer::EditionMap::new();
     for src in std::iter::once(ws.entry(db))
         .chain(ws.modules(db).iter().copied())
@@ -584,7 +585,7 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
         // `expr_types`/`f32_literal_sites` and the prelude-redesign handle-site maps.
         Ok(program) => from_check_output(noeta_check::check_all_with_editions(
             program,
-            workspace_edition_map(db, ws),
+            workspace_editions(db, ws),
         )),
         Err(diags) => Checked {
             diagnostics: diags.clone(),
@@ -607,7 +608,7 @@ pub fn linked_checked_ide(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             program,
             noeta_check::CheckOptions {
                 record_expr_types: true,
-                editions: workspace_edition_map(db, ws),
+                editions: workspace_editions(db, ws),
                 ..noeta_check::CheckOptions::default()
             },
         )),

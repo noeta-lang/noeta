@@ -41,14 +41,14 @@ pub enum Impact {
 
 /// Compute the impact of editing `old_src` into `new_src` (one file — the entry the runner was
 /// pointed at; an edit to any *other* file is the caller's impact-all case).
-pub fn impact_of_edit(old_src: &str, new_src: &str) -> Impact {
-    let Some(old_program) = parse_clean(old_src) else {
+pub fn impact_of_edit(old_src: &str, new_src: &str, edition: noeta_lexer::Edition) -> Impact {
+    let Some(old_program) = parse_clean(old_src, edition) else {
         // The BASELINE not parsing means we cannot attribute anything against it.
         return Impact::All {
             reason: "the previous version does not parse".into(),
         };
     };
-    let Some(new_program) = parse_clean(new_src) else {
+    let Some(new_program) = parse_clean(new_src, edition) else {
         return Impact::All {
             reason: "the edit does not parse".into(),
         };
@@ -84,7 +84,9 @@ pub fn impact_of_edit(old_src: &str, new_src: &str) -> Impact {
             let tier_refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
             let activated = noeta_check::activate_tiers(&new_program, &tier_refs);
             let program = &activated.program;
-            let checked = noeta_check::check_all(program);
+            let mut editions = noeta_lexer::EditionMap::new();
+            editions.set(noeta_span::SourceId::FIRST, edition);
+            let checked = noeta_check::check_all_with_editions(program, editions);
             if !activated.diagnostics.is_empty() || !checked.diagnostics.is_empty() {
                 // Red code: the consumer's own run will surface the diagnostics.
                 return Impact::All {
@@ -146,10 +148,15 @@ pub fn impact_of_edit(old_src: &str, new_src: &str) -> Impact {
     }
 }
 
-fn parse_clean(src: &str) -> Option<noeta_ast::Program> {
+fn parse_clean(src: &str, edition: noeta_lexer::Edition) -> Option<noeta_ast::Program> {
     let source = noeta_span::Source::new(noeta_span::SourceId::FIRST, "<impact>", src);
-    let lexed = noeta_lexer::lex(&source);
-    let parsed = noeta_parser::parse(&source, &lexed.tokens);
+    let lexed = noeta_lexer::lex_in(&source, edition, &noeta_lexer::TextTiers::default());
+    let parsed = noeta_parser::parse_in(
+        &source,
+        &lexed.tokens,
+        edition,
+        &noeta_lexer::TextTiers::default(),
+    );
     (lexed.diagnostics.is_empty() && parsed.diagnostics.is_empty()).then_some(parsed.program)
 }
 
@@ -175,7 +182,7 @@ mod tests {
         // leaf changed → mid (calls leaf) → t_mid (calls mid). t_other untouched.
         let v2 = V1.replace("return 1;", "return 0 + 1;");
         assert_eq!(
-            decls(impact_of_edit(V1, &v2)),
+            decls(impact_of_edit(V1, &v2, noeta_lexer::Edition::DEFAULT)),
             vec!["leaf".to_string(), "mid".to_string(), "t_mid".to_string()]
         );
     }
@@ -183,7 +190,10 @@ mod tests {
     #[test]
     fn a_test_body_edit_impacts_only_that_test() {
         let v2 = V1.replace("assert(other() == 2);", "assert(other() == 1 + 1);");
-        assert_eq!(decls(impact_of_edit(V1, &v2)), vec!["t_other".to_string()]);
+        assert_eq!(
+            decls(impact_of_edit(V1, &v2, noeta_lexer::Edition::DEFAULT)),
+            vec!["t_other".to_string()]
+        );
     }
 
     #[test]
@@ -192,23 +202,29 @@ mod tests {
             "fn other(): int { return 2; }",
             "fn other(): int  { return 2; }",
         );
-        assert_eq!(decls(impact_of_edit(V1, &v2)), Vec::<String>::new());
+        assert_eq!(
+            decls(impact_of_edit(V1, &v2, noeta_lexer::Edition::DEFAULT)),
+            Vec::<String>::new()
+        );
     }
 
     #[test]
     fn unattributable_edits_degrade_to_all_with_a_reason() {
         // A signature change.
         let v2 = V1.replace("fn leaf(): int", "fn leaf(n: int): int");
-        let Impact::All { reason } = impact_of_edit(V1, &v2) else {
+        let Impact::All { reason } = impact_of_edit(V1, &v2, noeta_lexer::Edition::DEFAULT) else {
             panic!("a signature change is unattributable");
         };
         assert!(reason.contains("leaf"), "{reason}");
         // A top-level statement change.
         let v3 = format!("{V1}echo mid()\n");
-        assert!(matches!(impact_of_edit(V1, &v3), Impact::All { .. }));
+        assert!(matches!(
+            impact_of_edit(V1, &v3, noeta_lexer::Edition::DEFAULT),
+            Impact::All { .. }
+        ));
         // Red code.
         let v4 = V1.replace("return leaf();", "return leaf() * \"boom\";");
-        let Impact::All { reason } = impact_of_edit(V1, &v4) else {
+        let Impact::All { reason } = impact_of_edit(V1, &v4, noeta_lexer::Edition::DEFAULT) else {
             panic!("red code is unattributable");
         };
         assert!(reason.contains("check"), "{reason}");
@@ -222,7 +238,7 @@ mod tests {
                   @test fn t(): void { assert(apply(leaf) == 1); }\n";
         let v2 = v1.replace("return 1;", "return 2 - 1;");
         assert_eq!(
-            decls(impact_of_edit(v1, &v2)),
+            decls(impact_of_edit(v1, &v2, noeta_lexer::Edition::DEFAULT)),
             vec!["leaf".to_string(), "t".to_string()]
         );
     }
@@ -234,7 +250,7 @@ mod tests {
                   @test fn t_none(): void { assert(true); }\n";
         let v2 = v1.replace("return self.n + 1;", "return 1 + self.n;");
         assert_eq!(
-            decls(impact_of_edit(v1, &v2)),
+            decls(impact_of_edit(v1, &v2, noeta_lexer::Edition::DEFAULT)),
             vec!["Counter.bump".to_string(), "t_bump".to_string()]
         );
     }

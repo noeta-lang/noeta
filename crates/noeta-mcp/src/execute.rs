@@ -338,7 +338,10 @@ pub fn test(p: &Prepared, filter: Option<&str>, real: bool) -> TestOutput {
     if !activated.diagnostics.is_empty() {
         return empty(map_diagnostics(&source_map, &activated.diagnostics));
     }
-    let checked = noeta_check::check_all(&activated.program);
+    let checked = noeta_check::check_all_with_editions(
+        &activated.program,
+        noeta_db::workspace_editions(&p.db, p.ws),
+    );
     if !checked.diagnostics.is_empty() {
         return empty(map_diagnostics(&source_map, &checked.diagnostics));
     }
