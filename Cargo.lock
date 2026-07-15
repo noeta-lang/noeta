@@ -4386,6 +4386,7 @@ dependencies = [
  "noeta-native",
  "noeta-para-p2p-net",
  "noeta-reactive",
+ "noeta-reactive-abi",
  "noeta-stdlib",
 ]
 
@@ -4488,6 +4489,14 @@ name = "noeta-reactive"
 version = "0.1.0"
 
 [[package]]
+name = "noeta-reactive-abi"
+version = "0.1.0"
+dependencies = [
+ "noeta-native",
+ "noeta-reactive",
+]
+
+[[package]]
 name = "noeta-runner"
 version = "0.1.0"
 dependencies = [
@@ -4547,6 +4556,7 @@ dependencies = [
  "noeta-crdt",
  "noeta-native",
  "noeta-reactive",
+ "noeta-reactive-abi",
  "serde_json",
  "sha1",
  "sha2 0.10.9",

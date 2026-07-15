@@ -10,12 +10,13 @@ rust-version.workspace = true
 # The convergence core (dep-free CRDTs) and the extension ABI.
 noeta-crdt = { workspace = true }
 noeta-native = { workspace = true }
-# `synced` is a node in the SAME reactive graph as core `std.reactive`, reached through the stable
-# opaque seam `noeta_stdlib::reactive::extension_point` (create_source / read_source / wake + the
-# view-source hook) — never the engine internals. This one dependency is solely that seam; one-way
-# (noeta-stdlib does not depend on this crate). noeta-reactive supplies the `NodeId` handle type.
+# `synced` is a node in the SAME reactive graph as core `std.reactive`, reached through the
+# `ReactiveSource` **capability** (`noeta_native::capability::<dyn ReactiveSource>`): create_source /
+# read_source / wake + the view-source hook — never the engine internals. The contract lives in the
+# tiny `noeta-reactive-abi` crate, so this extension depends on **nothing of `noeta-stdlib`**; the
+# engine implements the same trait on the other side. noeta-reactive supplies the `NodeId` handle.
 noeta-reactive = { workspace = true }
-noeta-stdlib = { workspace = true }
+noeta-reactive-abi = { workspace = true }
 # The real p2panda transport (para-namespace F2b). Optional and behind the `ring-p2p` ring: when a
 # host permits real networking (`RealHost`) this crate owns a live p2panda node; off ⇒ the extension
 # uses only the dep-free loopback broker, so a loopback/wasm build never links iroh/QUIC. Needs the
@@ -34,6 +35,10 @@ ring-p2p = ["dep:noeta-para-p2p-net"]
 # The para-conformance harness runs this crate's moved fixtures with `ParaP2pExtension` registered
 # (the fixtures resolve `para.*`, which the default std-only registry cannot).
 noeta-conformance = { workspace = true }
+# **Test-only** (a dev-dependency — it does not ship): the harness installs the full `std` runtime so
+# the fixtures actually execute. The library itself depends on nothing of `noeta-stdlib` — it reaches
+# the reactive engine purely through the `noeta-reactive-abi` capability contract.
+noeta-stdlib = { workspace = true }
 
 [lints]
 workspace = true

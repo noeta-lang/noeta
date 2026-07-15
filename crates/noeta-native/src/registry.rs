@@ -776,6 +776,54 @@ pub trait Extension: Sync {
     fn body_formatters(&self) -> &'static [BodyFormatter] {
         &[]
     }
+    /// The **per-run capabilities** this extension provides to *other* extensions (the
+    /// capability-broker seam). Default empty — most extensions provide none.
+    ///
+    /// A capability is a service one extension exposes to another as a **trait object**, reached at
+    /// run time by trait type via [`NativeCtx::capability`] / [`capability`]. It generalizes the
+    /// hardcoded cross-extension seams (`std.tracing`'s context stack, the reactive graph) into one
+    /// mechanism, so a new collaboration between extensions — including an out-of-tree package and
+    /// core — needs neither a new `NativeCtx` method nor either side naming the other's types. See
+    /// [`ExtCapability`].
+    fn capabilities(&self) -> &'static [ExtCapability] {
+        &[]
+    }
+}
+
+/// One **per-run capability** an extension provides (the capability-broker seam): a service exposed
+/// to other extensions as a trait object, discovered by trait type.
+///
+/// The provider declares this on its [`Extension::capabilities`]; a consumer asks for it with
+/// `capability::<dyn Trait>(ctx)`. The broker matches on [`ExtCapability::id`], ensures the backing
+/// [`ExtState`](crate::ExtState) exists, and calls [`ExtCapability::build`] to mint the erased
+/// trait-object handle. `noeta-native` never names any concrete capability trait — only stores and
+/// vends these erased thunks.
+pub struct ExtCapability {
+    /// The capability trait's `TypeId`, e.g. `|| TypeId::of::<dyn ReactiveSource>()`. A thunk
+    /// because `TypeId::of` over a `dyn Trait` is not callable in a `&'static` slice initializer.
+    pub id: fn() -> std::any::TypeId,
+    /// The [`ExtState`](crate::ExtState) slot that backs this capability (the provider's own per-run
+    /// state key — e.g. `"std.reactive"`). Reused, so a capability and its owning module share one
+    /// cell.
+    pub state_key: &'static str,
+    /// Initializer for that state on first access — the same `init` the provider passes to
+    /// [`NativeCtx::state`], so reaching the engine via a module dispatch or via a capability yields
+    /// the *same* cell regardless of which happened first.
+    pub init: fn() -> Box<dyn std::any::Any>,
+    /// Build the erased trait-object handle from the backing state: returns a boxed
+    /// `Box<dyn Trait>` (a concrete, sized fat pointer) type-erased as `Box<dyn Any>`, which
+    /// [`capability`] recovers by a safe `downcast`. The handle typically holds a clone of `state`
+    /// so it can borrow the engine per-call and release before re-entry.
+    pub build: fn(crate::ExtState) -> Box<dyn std::any::Any>,
+}
+
+impl std::fmt::Debug for ExtCapability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtCapability")
+            .field("id", &(self.id)())
+            .field("state_key", &self.state_key)
+            .finish_non_exhaustive()
+    }
 }
 
 // --- the runtime registry (package-manager Phase 3, N3.0) ---------------------------------------
@@ -871,6 +919,17 @@ impl Registry {
     /// All units in this registry.
     pub fn extensions(&self) -> &[&'static (dyn Extension + Sync)] {
         &self.units
+    }
+
+    /// Find the capability provider for a trait type id, across every registered unit (the
+    /// capability-broker seam). Cold path — capabilities are resolved on orchestration ops, never in
+    /// hot loops — so a linear scan is right. First declaration wins; a program that installs two
+    /// providers for one capability trait is a configuration error the first one silently shadows.
+    pub fn find_capability(&self, id: std::any::TypeId) -> Option<&'static ExtCapability> {
+        self.units
+            .iter()
+            .flat_map(|e| e.capabilities())
+            .find(|c| (c.id)() == id)
     }
 
     /// Find a registered module by its identity string — a **root-qualified path** (`"std.math"`,

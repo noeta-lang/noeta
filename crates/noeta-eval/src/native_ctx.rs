@@ -296,6 +296,14 @@ impl NativeCtx for EvalCtx<'_> {
         state
     }
 
+    fn capability(&mut self, id: std::any::TypeId) -> Option<Box<dyn std::any::Any>> {
+        // Mirror of the VM: resolve the provider in this interpreter's registry, ensure its backing
+        // state, mint the erased handle (differential parity — same seam, same shape).
+        let decl = self.interp.reg().find_capability(id)?;
+        let state = self.state(decl.state_key, decl.init);
+        Some((decl.build)(state))
+    }
+
     fn retain(&mut self, slot: Slot) -> CtxResult<noeta_stdlib::Retained> {
         let value = self.get(slot)?.clone();
         Ok(if let Some(index) = self.interp.ext_arena_free.pop() {

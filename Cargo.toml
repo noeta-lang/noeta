@@ -76,6 +76,12 @@ noeta-playground = { path = "crates/noeta-playground" }
 noeta-wasm-serve = { path = "crates/noeta-wasm-serve" }
 # M2 reactivity core (signal/computed/effect graph — value-generic, backend-driven)
 noeta-reactive = { path = "crates/noeta-reactive" }
+# The reactive extension **contract** (capability-broker seam): the trait an out-of-tree reactive-node
+# extension (`para.synced`) programs against and the in-tree engine (`noeta-stdlib::reactive`)
+# implements — reached per-run via `noeta_native::capability::<dyn ReactiveSource>`. Tiny: deps only
+# noeta-native (NativeCtx/Retained) + noeta-reactive (NodeId). Neither engine internals nor consumer
+# node types cross it.
+noeta-reactive-abi = { path = "crates/noeta-reactive-abi" }
 # M3 CRDT convergence core (p2p/local-first P0): state-based merge algebra — dep-free, value-less,
 # the data-convergence layer of the local-first stack (§9.15), wrapped by `std.crdt`.
 noeta-crdt = { path = "crates/noeta-crdt" }

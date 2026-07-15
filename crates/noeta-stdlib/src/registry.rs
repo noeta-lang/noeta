@@ -78,6 +78,11 @@ impl Extension for CoreExtension {
     fn body_formatters(&self) -> &'static [noeta_native::registry::BodyFormatter] {
         crate::tiers::BODY_FORMATTERS
     }
+    fn capabilities(&self) -> &'static [noeta_native::registry::ExtCapability] {
+        // The reactive engine provides the `ReactiveSource` capability (capability-broker seam) so a
+        // foreign source node — `para.synced` — reaches the shared graph by trait, out of `std`.
+        crate::reactive::REACTIVE_CAPABILITIES
+    }
 }
 std_unit!(
     CryptoExtension,

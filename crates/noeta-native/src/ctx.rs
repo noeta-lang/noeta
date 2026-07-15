@@ -255,6 +255,15 @@ pub trait NativeCtx {
     /// re-entry. Plain data only — language values belong in the retained arena.
     fn state(&mut self, key: &'static str, init: fn() -> Box<dyn Any>) -> ExtState;
 
+    /// The type-erased **capability broker** (the capability-broker seam): given a capability
+    /// trait's `TypeId`, find the registered provider (an [`ExtCapability`](crate::registry::ExtCapability)
+    /// on some installed extension), ensure its backing [`ExtState`] exists, and return the provider's
+    /// erased trait-object handle — a `Box<dyn Trait>` boxed once more and type-erased as
+    /// `Box<dyn Any>`. `None` if no installed extension provides the capability. Consumers use the
+    /// typed front door [`capability`] rather than this directly. Cold path (orchestration ops), so
+    /// the linear provider scan and the boxing are not on any hot loop.
+    fn capability(&mut self, id: std::any::TypeId) -> Option<Box<dyn Any>>;
+
     /// Move a slot's value into the per-run **retained arena** — the extension now owns one
     /// reference to it across dispatches (the slot itself stays valid and table-owned). The
     /// arena is a root set the backend enumerates: the cycle collector traces it, teardown
@@ -407,4 +416,47 @@ pub trait NativeCtx {
     fn take_hot_error(&mut self) -> Option<String> {
         None
     }
+}
+
+/// A typed per-run **capability handle** — the front door of the capability-broker seam. Owns the
+/// provider's trait-object handle (which in turn holds its own reference to the backing engine
+/// state), so it coexists with `&mut dyn NativeCtx`: derefs to `T`, and each `T` method takes `ctx`.
+pub struct Cap<T: ?Sized> {
+    inner: Box<T>,
+}
+
+impl<T: ?Sized> std::ops::Deref for Cap<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T: ?Sized> std::fmt::Debug for Cap<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The handle is an opaque trait object (no `Debug` bound); name the type only.
+        f.debug_struct("Cap").finish_non_exhaustive()
+    }
+}
+
+/// Obtain a per-run **capability** by trait type — the typed front door over [`NativeCtx::capability`].
+///
+/// `capability::<dyn ReactiveSource>(ctx)` returns `Some(cap)` when some installed extension provides
+/// it (declared on its [`Extension::capabilities`](crate::registry::Extension::capabilities)), or
+/// `None` when none does (e.g. `std.reactive` is not installed in this run). The handle derefs to the
+/// capability trait, so the call reads `cap.wake(ctx, node)`.
+///
+/// Sound because the provider's `build` returns a concrete, sized `Box<dyn T>` erased as
+/// `Box<dyn Any>`; recovery is a safe `downcast` back to that exact `Box<dyn T>`. `TypeId` is
+/// consistent within one linked program (the composed toolchain builds everything under one
+/// lockfile), so the trait's id matches on both sides.
+pub fn capability<T, C>(ctx: &mut C) -> Option<Cap<T>>
+where
+    T: ?Sized + 'static,
+    C: NativeCtx + ?Sized,
+{
+    let erased = ctx.capability(std::any::TypeId::of::<T>())?;
+    // The provider boxed a `Box<dyn T>` (a sized fat pointer) inside the `Box<dyn Any>`; recover it.
+    let handle: Box<Box<T>> = erased.downcast().ok()?;
+    Some(Cap { inner: *handle })
 }

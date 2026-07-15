@@ -389,6 +389,14 @@ impl NativeCtx for VmCtx<'_, '_> {
         state
     }
 
+    fn capability(&mut self, id: std::any::TypeId) -> Option<Box<dyn std::any::Any>> {
+        // Find the provider (across every registered unit), ensure its backing state, mint the
+        // erased trait-object handle. Cold path — a synced wake/read, not a hot loop.
+        let decl = self.vm.reg().find_capability(id)?;
+        let state = self.state(decl.state_key, decl.init);
+        Some((decl.build)(state))
+    }
+
     fn retain(&mut self, slot: Slot) -> CtxResult<noeta_stdlib::Retained> {
         let value = self.get(slot)?;
         // The arena takes its own reference; the slot stays table-owned.

@@ -23,8 +23,8 @@ pub mod telemetry;
 
 pub use command::{ArgKind, ArgSpec, CommandCtx, EntryArg, EntryCall, ExtCommand, ParsedArgs};
 pub use ctx::{
-    CtxDispatch, CtxError, CtxOut, CtxResult, ExtState, NativeCtx, PackedField, PackedView,
-    Retained, Slot, ctx_arity,
+    Cap, CtxDispatch, CtxError, CtxOut, CtxResult, ExtState, NativeCtx, PackedField, PackedView,
+    Retained, Slot, capability, ctx_arity,
 };
 pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};
@@ -38,8 +38,8 @@ pub use os::{ExecIo, ExecResult, Process};
 pub use p2p::{P2pBackend, P2pBroker, P2pReceiveIo};
 pub use registry::{
     ArenaGetter, BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, CtxTypeDispatch,
-    ExtBundle, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut, NativeValue,
-    PackedConstraint, RetTy, Scalar, ScalarVec, SigType, TypeDispatch, TypeRecipe,
+    ExtBundle, ExtCapability, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut,
+    NativeValue, PackedConstraint, RetTy, Scalar, ScalarVec, SigType, TypeDispatch, TypeRecipe,
 };
 pub use telemetry::{
     AttrValue, DEFAULT_HISTOGRAM_BOUNDS, HistogramPoint, InstrumentId, InstrumentKind, LogRecord,
