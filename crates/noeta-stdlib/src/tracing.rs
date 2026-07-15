@@ -183,7 +183,7 @@ pub fn tracing_ctx_dispatch<C: NativeCtx + ?Sized>(
                     // its polls run under this span's context and the span ends when it
                     // completes, so the duration is the body's, not the construction's. A
                     // non-traceable future flavor falls back to ending now.
-                    if ctx.type_name(slot)? == "future" && ctx.trace_future(slot, id)? {
+                    if ctx.type_name(slot)? == "future" && ctx.future_tracing().trace(slot, id)? {
                         return Ok(CtxOut::Slot(slot));
                     }
                     ctx.host().tel_span_end(id);
@@ -276,17 +276,17 @@ pub fn span_method_dispatch(
 // interleaved tasks' `with_span`s no longer see (or corrupt) each other's parents.
 
 pub(crate) fn push_active<C: NativeCtx + ?Sized>(ctx: &mut C, id: SpanId) {
-    ctx.context_push(id);
+    ctx.task_context().push(id);
 }
 
 /// Pop `id` if it is the current top (defensive against a re-entrant push imbalance).
 pub(crate) fn pop_active<C: NativeCtx + ?Sized>(ctx: &mut C, id: SpanId) {
-    ctx.context_pop(id);
+    ctx.task_context().pop(id);
 }
 
 /// The W3C context of the current active span — a new span's implicit parent.
 pub(crate) fn current_parent<C: NativeCtx + ?Sized>(ctx: &mut C) -> Option<TraceContext> {
-    let top = ctx.context_top()?;
+    let top = ctx.task_context().top()?;
     Some(ctx.host().tel_span_context(top))
 }
 

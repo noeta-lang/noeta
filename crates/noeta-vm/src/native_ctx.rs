@@ -615,27 +615,44 @@ impl NativeCtx for VmCtx<'_, '_> {
         Ok(self.insert(Value::object(shape, slots)))
     }
 
-    // ----- task-local context (native-otel T5a): thin views over `Vm::ctx_current` -----
+    // ----- scheduler-service sub-capabilities: the VM is its own provider (returns `self`) -----
 
-    fn context_top(&mut self) -> Option<u64> {
+    fn task_context(&mut self) -> &mut dyn noeta_stdlib::TaskContext {
+        self
+    }
+
+    fn future_tracing(&mut self) -> &mut dyn noeta_stdlib::FutureTracing {
+        self
+    }
+
+    fn hot_reload(&mut self) -> &mut dyn noeta_stdlib::HotReload {
+        self
+    }
+}
+
+// task-local context (native-otel T5a): thin views over `Vm::ctx_current`.
+impl noeta_stdlib::TaskContext for VmCtx<'_, '_> {
+    fn top(&mut self) -> Option<u64> {
         self.vm.ctx_current.last().copied()
     }
 
-    fn context_push(&mut self, v: u64) {
+    fn push(&mut self, v: u64) {
         self.vm.ctx_current.push(v);
     }
 
-    fn context_pop(&mut self, v: u64) {
+    fn pop(&mut self, v: u64) {
         if self.vm.ctx_current.last() == Some(&v) {
             self.vm.ctx_current.pop();
         }
     }
 
-    fn context_swap(&mut self, ctx: Vec<u64>) -> Vec<u64> {
+    fn swap(&mut self, ctx: Vec<u64>) -> Vec<u64> {
         std::mem::replace(&mut self.vm.ctx_current, ctx)
     }
+}
 
-    fn trace_future(&mut self, future: Slot, span: u64) -> CtxResult<bool> {
+impl noeta_stdlib::FutureTracing for VmCtx<'_, '_> {
+    fn trace(&mut self, future: Slot, span: u64) -> CtxResult<bool> {
         let value = self.get(future)?;
         // Only a step future (a lowered `async fn` body) is traceable — both backends draw the
         // same line, so telemetry parity holds for the fallback too.
@@ -653,14 +670,16 @@ impl NativeCtx for VmCtx<'_, '_> {
         });
         Ok(true)
     }
+}
 
-    fn hot_swap_count(&mut self) -> u64 {
+impl noeta_stdlib::HotReload for VmCtx<'_, '_> {
+    fn swap_count(&mut self) -> u64 {
         // Per-VM (server-hmr F5): each worker reports its OWN applied-swap generation, so its
         // serve loop pushes `reload` to its OWN clients when it applies a broadcast swap.
         self.vm.applied_swaps as u64
     }
 
-    fn take_hot_error(&mut self) -> Option<String> {
+    fn take_error(&mut self) -> Option<String> {
         self.vm
             .hot_mailbox
             .as_ref()

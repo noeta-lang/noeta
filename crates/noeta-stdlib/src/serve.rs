@@ -406,7 +406,7 @@ pub fn http_ctx_dispatch(
             let mut closing = false;
             // The swap generation as of the last iteration (server-hmr L3); a change means a hot
             // swap landed inside `advance_tasks` and live ws clients must be told to reload.
-            let mut hot_gen = ctx.hot_swap_count();
+            let mut hot_gen = ctx.hot_reload().swap_count();
             loop {
                 // Graceful drain (server-hmr S0): a SIGINT sets the process shutdown flag; stop
                 // accepting, cancel the pending accept so the loop isn't blocked waiting for a
@@ -463,9 +463,9 @@ pub fn http_ctx_dispatch(
                                     // returns the `Response` immediately (its whole body runs
                                     // inside this call — under the context); an async one a
                                     // `Future` reaped below. A call-time abort → 500 now.
-                                    let prior = ctx.context_swap(std::mem::take(&mut context));
+                                    let prior = ctx.task_context().swap(std::mem::take(&mut context));
                                     let called = ctx.call(handler, &[request]);
-                                    context = ctx.context_swap(prior);
+                                    context = ctx.task_context().swap(prior);
                                     ctx.free(request);
                                     match called {
                                         Ok(fut) => in_flight.push(InFlight {
@@ -510,9 +510,9 @@ pub fn http_ctx_dispatch(
                     // scheduler's per-task discipline, so a resumed handler sees exactly the scope
                     // it suspended with — never a sibling's.
                     let handler_ctx = std::mem::take(&mut in_flight[k].context);
-                    let prior = ctx.context_swap(handler_ctx);
+                    let prior = ctx.task_context().swap(handler_ctx);
                     let polled = ctx.poll(fut);
-                    in_flight[k].context = ctx.context_swap(prior);
+                    in_flight[k].context = ctx.task_context().swap(prior);
                     let done = match polled {
                         Ok(Some(value)) if in_flight[k].ws => {
                             // A finished websocket session (server-hmr L0): the handler returned
@@ -556,9 +556,9 @@ pub fn http_ctx_dispatch(
                                         ))?;
                                         let session = ctx.retained_get(upgrade.handler)?;
                                         let handler_ctx = std::mem::take(&mut in_flight[k].context);
-                                        let prior = ctx.context_swap(handler_ctx);
+                                        let prior = ctx.task_context().swap(handler_ctx);
                                         let called = ctx.call(session, &[socket]);
-                                        in_flight[k].context = ctx.context_swap(prior);
+                                        in_flight[k].context = ctx.task_context().swap(prior);
                                         ctx.free(socket);
                                         ctx.free(session);
                                         ctx.release_retained(upgrade.handler);
@@ -710,7 +710,7 @@ fn hot_broadcast(
     hot_gen: &mut u64,
 ) -> CtxResult<bool> {
     let mut progressed = false;
-    let generation = ctx.hot_swap_count();
+    let generation = ctx.hot_reload().swap_count();
     if generation != *hot_gen {
         *hot_gen = generation;
         progressed = true;
@@ -719,7 +719,7 @@ fn hot_broadcast(
             let _ = ws_close(ctx, f.conn);
         }
     }
-    if let Some(message) = ctx.take_hot_error() {
+    if let Some(message) = ctx.hot_reload().take_error() {
         progressed = true;
         let frame = format!(
             "{{\"type\":\"error\",\"message\":{}}}",

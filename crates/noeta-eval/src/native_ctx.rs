@@ -494,27 +494,46 @@ impl NativeCtx for EvalCtx<'_> {
         Ok(self.insert(built))
     }
 
-    // ----- task-local context (native-otel T5a): thin views over `Interpreter::ctx_current` -----
+    // ----- scheduler-service sub-capabilities: the interpreter is its own provider (returns `self`).
+    // `HotReload` is not overridden (the tree-walker is never under `serve --watch`) — it takes the
+    // trait defaults (0/None), the same inert answers the flat method gave before the split. -----
 
-    fn context_top(&mut self) -> Option<u64> {
+    fn task_context(&mut self) -> &mut dyn noeta_stdlib::TaskContext {
+        self
+    }
+
+    fn future_tracing(&mut self) -> &mut dyn noeta_stdlib::FutureTracing {
+        self
+    }
+
+    fn hot_reload(&mut self) -> &mut dyn noeta_stdlib::HotReload {
+        self
+    }
+}
+
+// task-local context (native-otel T5a): thin views over `Interpreter::ctx_current`.
+impl noeta_stdlib::TaskContext for EvalCtx<'_> {
+    fn top(&mut self) -> Option<u64> {
         self.interp.ctx_current.last().copied()
     }
 
-    fn context_push(&mut self, v: u64) {
+    fn push(&mut self, v: u64) {
         self.interp.ctx_current.push(v);
     }
 
-    fn context_pop(&mut self, v: u64) {
+    fn pop(&mut self, v: u64) {
         if self.interp.ctx_current.last() == Some(&v) {
             self.interp.ctx_current.pop();
         }
     }
 
-    fn context_swap(&mut self, ctx: Vec<u64>) -> Vec<u64> {
+    fn swap(&mut self, ctx: Vec<u64>) -> Vec<u64> {
         std::mem::replace(&mut self.interp.ctx_current, ctx)
     }
+}
 
-    fn trace_future(&mut self, future: Slot, span: u64) -> CtxResult<bool> {
+impl noeta_stdlib::FutureTracing for EvalCtx<'_> {
+    fn trace(&mut self, future: Slot, span: u64) -> CtxResult<bool> {
         let value = self.get(future)?;
         // Only a step future is traceable — the same line the VM draws, so telemetry parity
         // holds for the fallback too.
@@ -531,6 +550,9 @@ impl NativeCtx for EvalCtx<'_> {
         Ok(true)
     }
 }
+
+// The tree-walker never runs under `serve --watch`, so hot-reload takes the inert defaults.
+impl noeta_stdlib::HotReload for EvalCtx<'_> {}
 
 impl Interpreter {
     /// Call a registered extern type's **higher-order method** (higher-order-abi H4) — the
