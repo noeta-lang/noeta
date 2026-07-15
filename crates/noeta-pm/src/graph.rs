@@ -664,7 +664,7 @@ fn registry_cache_key(source: Option<&crate::manifest::RegistrySource>) -> Strin
     match source {
         None => "default".to_string(),
         Some(crate::manifest::RegistrySource::Hosted(url)) => format!("hosted:{url}"),
-        Some(crate::manifest::RegistrySource::GitHub(org)) => format!("github:{org}"),
+        Some(crate::manifest::RegistrySource::GitForge(base)) => format!("forge:{base}"),
     }
 }
 
@@ -1069,16 +1069,18 @@ mod tests {
         use crate::manifest::RegistrySource;
         assert_eq!(registry_cache_key(None), "default");
         assert_eq!(
-            registry_cache_key(Some(&RegistrySource::GitHub("acme".into()))),
-            "github:acme"
+            registry_cache_key(Some(&RegistrySource::GitForge(
+                "https://github.com/acme".into()
+            ))),
+            "forge:https://github.com/acme"
         );
         assert_ne!(
             registry_cache_key(Some(&RegistrySource::Hosted("https://a".into()))),
             registry_cache_key(Some(&RegistrySource::Hosted("https://b".into())))
         );
-        // The GitHub and hosted namespaces don't collide.
+        // The forge and hosted namespaces don't collide.
         assert_ne!(
-            registry_cache_key(Some(&RegistrySource::GitHub("x".into()))),
+            registry_cache_key(Some(&RegistrySource::GitForge("x".into()))),
             registry_cache_key(Some(&RegistrySource::Hosted("x".into())))
         );
     }

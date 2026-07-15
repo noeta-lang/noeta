@@ -3582,17 +3582,18 @@ fn a_published_package_resolves_as_a_registry_dependency() {
 }
 
 #[test]
-fn a_github_org_registry_resolves_and_runs_a_package() {
-    // private-registries S4 (end-to-end): a consumer maps a scope to a GitHub org via `[registries]`
-    // and resolves a package from that org's repos + tags. Hermetic — a local directory stands in for
-    // github.com (NOETA_GITHUB_BASE), so no network and no auth (public path). Proves the full chain:
-    // per-scope routing → GitForgeIndex (tags → versions) → git materialization → run.
+fn a_git_forge_registry_resolves_and_runs_a_package() {
+    // private-registries (end-to-end): a consumer maps a scope to a git forge via `[registries]` and
+    // resolves a package from that forge's repos + tags. Hermetic — a local directory is the forge (a
+    // `git:<path>` base), so no network and no auth (public path). Proves the full chain: per-scope
+    // routing → GitForgeIndex (tags → versions) → git materialization → run. The `github:`/`gitlab:`
+    // shorthands parse to the same GitForge base (unit-tested), so this exercises them all.
     if !git_available() {
         return;
     }
-    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_github_registry_e2e");
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_git_forge_registry_e2e");
     let _ = std::fs::remove_dir_all(&base);
-    let host = base.join("host"); // stands in for github.com
+    let host = base.join("host"); // the forge host
     let repo = host.join("acme").join("greet"); // the org/repo = acme/greet
     let app = base.join("app");
     let cache = base.join("forge-cache");
@@ -3612,12 +3613,16 @@ fn a_github_org_registry_resolves_and_runs_a_package() {
         "[package]\nname = \"acme/greet\"\nversion = \"1.2.0\"\n",
     );
 
-    // The consumer routes scope `acme` to the org; everything else stays on the default.
+    // The consumer routes scope `acme` to the forge base (`<host>/acme`); everything else stays on the
+    // default. A `git:<path>` base clones a local repo, so no network.
     std::fs::write(
         app.join("noeta.toml"),
-        "[package]\nname = \"me/app\"\nversion = \"0.1.0\"\n\
-         [registries]\nacme = \"github:acme\"\n\
-         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+        format!(
+            "[package]\nname = \"me/app\"\nversion = \"0.1.0\"\n\
+             [registries]\nacme = \"git:{}/acme\"\n\
+             [dependencies]\ngc = {{ version = \"^1.0\", package = \"acme/greet\" }}\n",
+            host.display()
+        ),
     )
     .unwrap();
     std::fs::write(
@@ -3627,7 +3632,6 @@ fn a_github_org_registry_resolves_and_runs_a_package() {
     .unwrap();
 
     lang()
-        .env("NOETA_GITHUB_BASE", &host)
         .env("NOETA_GIT_FORGE_CACHE", &cache)
         .arg("run")
         .arg(app.join("main.noe"))
@@ -3637,16 +3641,16 @@ fn a_github_org_registry_resolves_and_runs_a_package() {
 }
 
 #[test]
-fn a_github_registry_resolve_tolerates_the_auth_token_override() {
+fn a_git_forge_resolve_tolerates_the_auth_token_override() {
     // private-registries S5: with NOETA_GITHUB_TOKEN set, every git subprocess gets a scoped
-    // `-c http.https://github.com.extraHeader=…` auth config. Resolution against the local host (a file
-    // path, not github.com) must still succeed — proving git accepts the arg and the header is scoped
-    // so it doesn't interfere. (Authenticating a *real* private repo needs real GitHub; here we prove
-    // the plumbing is inert where it should be.)
+    // `-c http.https://github.com.extraHeader=…` auth config. Resolution against the local forge (a
+    // file path, not github.com) must still succeed — proving git accepts the arg and the header is
+    // scoped so it doesn't interfere. (Authenticating a *real* private repo needs real GitHub; here we
+    // prove the plumbing is inert where it should be.)
     if !git_available() {
         return;
     }
-    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_github_registry_token_e2e");
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_git_forge_token_e2e");
     let _ = std::fs::remove_dir_all(&base);
     let host = base.join("host");
     let repo = host.join("acme").join("greet");
@@ -3668,9 +3672,12 @@ fn a_github_registry_resolve_tolerates_the_auth_token_override() {
 
     std::fs::write(
         app.join("noeta.toml"),
-        "[package]\nname = \"me/app\"\nversion = \"0.1.0\"\n\
-         [registries]\nacme = \"github:acme\"\n\
-         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+        format!(
+            "[package]\nname = \"me/app\"\nversion = \"0.1.0\"\n\
+             [registries]\nacme = \"git:{}/acme\"\n\
+             [dependencies]\ngc = {{ version = \"^1.0\", package = \"acme/greet\" }}\n",
+            host.display()
+        ),
     )
     .unwrap();
     std::fs::write(
@@ -3680,7 +3687,6 @@ fn a_github_registry_resolve_tolerates_the_auth_token_override() {
     .unwrap();
 
     lang()
-        .env("NOETA_GITHUB_BASE", &host)
         .env("NOETA_GIT_FORGE_CACHE", base.join("cache"))
         .env("NOETA_GITHUB_TOKEN", "ghp_faketoken_for_plumbing_test")
         .arg("run")

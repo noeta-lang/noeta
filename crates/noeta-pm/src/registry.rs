@@ -350,7 +350,7 @@ pub fn open_source(
     match source {
         None => open_default(),
         Some(crate::manifest::RegistrySource::Hosted(url)) => open_hosted(url),
-        Some(crate::manifest::RegistrySource::GitHub(org)) => open_github(org),
+        Some(crate::manifest::RegistrySource::GitForge(base)) => open_git_forge(base),
     }
 }
 
@@ -368,10 +368,10 @@ fn open_hosted(_url: &str) -> Result<Box<dyn Index>, String> {
     )
 }
 
-/// Open a GitHub org as a registry (a `[registries]` `github:<org>` source): packages resolve from
-/// `github.com/<org>/<package>` by their semver tags (private-registries S3).
-fn open_github(org: &str) -> Result<Box<dyn Index>, String> {
-    Ok(Box::new(crate::git_forge::GitForgeIndex::github(org)?))
+/// Open a git forge as a registry (a `[registries]` `github:`/`gitlab:`/`git:` source, normalized to a
+/// base URL): packages resolve from `<base>/<package>` by their semver tags (private-registries arc).
+fn open_git_forge(base: &str) -> Result<Box<dyn Index>, String> {
+    Ok(Box::new(crate::git_forge::GitForgeIndex::from_base(base)?))
 }
 
 /// The networked registry index (package-manager Phase 4, S4): an HTTP client of the hosted index

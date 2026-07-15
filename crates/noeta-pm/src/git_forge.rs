@@ -1,8 +1,10 @@
-//! A **git forge as a registry** (private-registries arc, S3) — resolve packages directly from a
-//! GitHub org (or any git host) instead of the hosted index service. The convention is Go-module-like:
-//! a package `company/pkg` routed here lives at `<host>/<org>/<pkg>`, its **published versions are the
-//! semver git tags** (`v1.2.3`), and each version's dependencies come from the `noeta.toml` at that
-//! tag. Nothing is stored server-side: the "registry" is just the org's repos + tags.
+//! A **git forge as a registry** (private-registries arc) — resolve packages directly from any git
+//! host (GitHub, GitLab, Gitea/Forgejo, a bare git server) instead of the hosted index service. The
+//! convention is Go-module-like: a package `company/pkg` routed to a forge base `<base>` lives at
+//! `<base>/<pkg>`, its **published versions are the semver git tags** (`v1.2.3`), and each version's
+//! dependencies come from the `noeta.toml` at that tag. Nothing is stored server-side: the "registry"
+//! is just the forge's repos + tags. The `[registries]` shorthands `github:<owner>`, `gitlab:<group>`,
+//! and `git:<url>` all resolve to a forge base URL (see [`crate::manifest::RegistrySource`]).
 //!
 //! Because it implements the same [`crate::registry::Index`] trait as the hosted index, the resolver
 //! treats a git-forge package identically — the `GitCoords` it returns flow through the same fetch path
@@ -20,65 +22,51 @@ use semver::Version;
 
 use crate::registry::{Dep, GitCoords, Index, Release};
 
-/// A git-forge registry over one org. Version discovery + per-tag manifests come from a cached bare
-/// clone of each repo (so tags and `noeta.toml@tag` are read with plain local git). Authentication for
-/// private repos is applied per git-invocation from the environment (see [`crate::git_auth`]) — this
-/// type holds no credential.
+/// A git-forge registry over one org/group **base URL** (any git host). Version discovery + per-tag
+/// manifests come from a cached bare clone of each repo (so tags and `noeta.toml@tag` are read with
+/// plain local git). Authentication for private repos is applied per git-invocation from the
+/// environment (see [`crate::git_auth`]) — this type holds no credential.
 #[derive(Debug)]
 pub struct GitForgeIndex {
-    /// The org (GitHub org / user) whose repos back this registry.
-    org: String,
-    /// The host base for clone URLs — `https://github.com` in production, a local path in tests
-    /// (`NOETA_GITHUB_BASE`).
+    /// The org/group prefix URL — e.g. `https://github.com/acme`, `https://gitlab.com/team/sub`, a
+    /// self-hosted `https://git.example.com/org`, or (tests) a local path. `<base>/<package>` is a repo.
     base: String,
     /// Where bare clones are cached (one per repo).
     cache_dir: PathBuf,
 }
 
 impl GitForgeIndex {
-    /// Open the GitHub org `org` as a registry, reading configuration from the environment:
-    /// `NOETA_GITHUB_BASE` (default `https://github.com`). Private-repo auth is separate (ambient git
-    /// credentials, or `NOETA_GITHUB_TOKEN` — see [`crate::git_auth`]). Bare clones are cached under the
-    /// toolchain cache dir.
-    pub fn github(org: &str) -> Result<GitForgeIndex, String> {
-        let base =
-            std::env::var("NOETA_GITHUB_BASE").unwrap_or_else(|_| "https://github.com".to_string());
+    /// Open the git forge at `base` (an org/group prefix URL) as a registry. The cache dir comes from
+    /// `NOETA_GIT_FORGE_CACHE` or the toolchain cache. Private-repo auth is separate (ambient git
+    /// credentials, or `NOETA_GITHUB_TOKEN` — see [`crate::git_auth`]).
+    pub fn from_base(base: &str) -> Result<GitForgeIndex, String> {
         let cache_dir = match std::env::var_os("NOETA_GIT_FORGE_CACHE") {
             Some(dir) => PathBuf::from(dir),
             None => noeta_cache::Cache::locate()
                 .ok_or("cannot locate a cache directory for git-forge registries (set HOME)")?
                 .join("git-forge"),
         };
-        Ok(GitForgeIndex::new(org, base, cache_dir))
+        Ok(GitForgeIndex::new(base, cache_dir))
     }
 
-    /// Construct with explicit configuration (used by tests to point at a local repo host).
-    pub fn new(
-        org: impl Into<String>,
-        base: impl Into<String>,
-        cache_dir: impl Into<PathBuf>,
-    ) -> GitForgeIndex {
+    /// Construct with an explicit cache dir (used by tests to point at a local repo host).
+    pub fn new(base: impl Into<String>, cache_dir: impl Into<PathBuf>) -> GitForgeIndex {
         GitForgeIndex {
-            org: org.into(),
             base: base.into(),
             cache_dir: cache_dir.into(),
         }
     }
 
-    /// The clone URL for a repo in this org.
+    /// The clone URL for a repo under this forge: `<base>/<package>`.
     fn repo_url(&self, package: &str) -> String {
-        format!(
-            "{}/{}/{}",
-            self.base.trim_end_matches('/'),
-            self.org,
-            package
-        )
+        format!("{}/{}", self.base.trim_end_matches('/'), package)
     }
 
-    /// The cached bare-clone path for a repo.
+    /// The cached bare-clone path for a repo — under a filesystem-safe slug of the base URL, so forges
+    /// on different hosts/orgs never collide in the cache.
     fn bare_path(&self, package: &str) -> PathBuf {
         self.cache_dir
-            .join(&self.org)
+            .join(slug(&self.base))
             .join(format!("{package}.git"))
     }
 
@@ -100,7 +88,7 @@ impl GitForgeIndex {
                 &url,
                 "refs/tags/*:refs/tags/*",
             ])
-            .map_err(|err| format!("refreshing `{}/{package}`: {err}", self.org))?;
+            .map_err(|err| format!("refreshing `{url}`: {err}"))?;
         } else {
             if let Some(parent) = bare.parent() {
                 std::fs::create_dir_all(parent)
@@ -108,14 +96,27 @@ impl GitForgeIndex {
             }
             git(&["clone", "--bare", "--quiet", &url, path_str(&bare)?]).map_err(|err| {
                 format!(
-                    "cannot access `{}/{package}` at {url} — the repo may not exist, or be private \
-                     and require authentication: {err}",
-                    self.org
+                    "cannot access `{url}` — the repo may not exist, or be private and require \
+                     authentication: {err}"
                 )
             })?;
         }
         Ok(bare)
     }
+}
+
+/// A filesystem-safe slug of a base URL for the cache directory (`https://github.com/acme` →
+/// `https_github.com_acme`). Distinct bases map to distinct slugs (non-`[A-Za-z0-9.-]` → `_`).
+fn slug(base: &str) -> String {
+    base.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 impl Index for GitForgeIndex {
@@ -292,7 +293,9 @@ mod tests {
         let cache = tmp.join("cache");
         make_repo(&host, "acme", "thing");
 
-        let idx = GitForgeIndex::new("acme", host.to_str().unwrap(), cache.clone());
+        // The forge base is the org prefix (`<host>/acme`); the package's repo is `<base>/thing`.
+        let base = host.join("acme");
+        let idx = GitForgeIndex::new(base.to_str().unwrap(), cache.clone());
         // Called twice to exercise both the initial clone and the refresh path.
         let _ = idx.releases("acme/thing").unwrap();
         let mut releases = idx.releases("acme/thing").unwrap();
@@ -306,10 +309,7 @@ mod tests {
             .find(|r| r.version == Version::new(1, 1, 0))
             .unwrap();
         assert_eq!(v11.coords.tag, "v1.1.0");
-        assert_eq!(
-            v11.coords.url,
-            format!("{}/acme/thing", host.to_str().unwrap())
-        );
+        assert_eq!(v11.coords.url, format!("{}/thing", base.to_str().unwrap()));
         assert_eq!(v11.coords.sha.len(), 40);
         // The registry dependency declared at v1.1.0 is surfaced for the resolver.
         assert_eq!(v11.deps.len(), 1);
@@ -330,8 +330,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("noeta_git_forge_missing");
         let _ = std::fs::remove_dir_all(&tmp);
         let idx = GitForgeIndex::new(
-            "acme",
-            tmp.join("host").to_str().unwrap(),
+            tmp.join("host").join("acme").to_str().unwrap(),
             tmp.join("cache"),
         );
         let err = idx.releases("acme/nope").unwrap_err();
@@ -343,7 +342,7 @@ mod tests {
 
     #[test]
     fn publish_is_unsupported() {
-        let idx = GitForgeIndex::new("acme", "https://github.com", std::env::temp_dir());
+        let idx = GitForgeIndex::new("https://github.com/acme", std::env::temp_dir());
         let r = Release {
             version: Version::new(1, 0, 0),
             coords: GitCoords {

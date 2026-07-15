@@ -90,33 +90,83 @@ impl Registries {
 /// only parses the *shape*; opening the concrete index happens in the resolver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistrySource {
-    /// A hosted HTTP registry (the noeta-registry service) at this base URL.
+    /// A hosted noeta-registry service at this base URL (a bare `http(s)://…`).
     Hosted(String),
-    /// A GitHub org used as a registry: `company/package` → `github.com/<org>/<package>`, versions =
-    /// semver git tags. The stored string is the org.
-    GitHub(String),
+    /// A **git forge** used as a registry — any git host (GitHub, GitLab, Gitea/Forgejo, a bare git
+    /// server). `company/package` → `<base>/<package>`, versions = semver git tags. The stored string
+    /// is the org/group **base URL** (e.g. `https://github.com/acme`); the shorthands `github:<owner>`,
+    /// `gitlab:<group>`, and `git:<url>` all parse to this.
+    GitForge(String),
 }
 
 impl RegistrySource {
-    /// Parse a `[registries]` value string: `github:<org>` or an `http(s)://…` base URL.
+    /// Parse a `[registries]` value string. Four forms:
+    /// - `github:<owner>` → the git forge `https://github.com/<owner>`
+    /// - `gitlab:<group>` → the git forge `https://gitlab.com/<group>` (nested groups allowed)
+    /// - `git:<url>` → the git forge at that base URL verbatim (self-hosted Gitea/GitLab/Forgejo, SSH,
+    ///   or a `file://`/local path for tests)
+    /// - a bare `http(s)://…` → a hosted noeta-registry service
     pub fn parse(s: &str) -> Result<RegistrySource, String> {
         let s = s.trim();
-        if let Some(org) = s.strip_prefix("github:") {
-            let org = org.trim();
-            if org.is_empty() || !org.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-                return Err(format!(
-                    "`github:` registry needs a valid org name (got `{s}`)"
-                ));
+        if let Some(owner) = s.strip_prefix("github:") {
+            Ok(RegistrySource::GitForge(format!(
+                "https://github.com/{}",
+                forge_owner("github", owner)?
+            )))
+        } else if let Some(group) = s.strip_prefix("gitlab:") {
+            // GitLab groups may nest (`group/subgroup`), so a slash is allowed here.
+            Ok(RegistrySource::GitForge(format!(
+                "https://gitlab.com/{}",
+                forge_group("gitlab", group)?
+            )))
+        } else if let Some(base) = s.strip_prefix("git:") {
+            let base = base.trim().trim_end_matches('/');
+            if base.is_empty() || base.contains(char::is_whitespace) {
+                return Err(format!("`git:` registry needs a base URL (got `{s}`)"));
             }
-            Ok(RegistrySource::GitHub(org.to_string()))
+            Ok(RegistrySource::GitForge(base.to_string()))
         } else if s.starts_with("http://") || s.starts_with("https://") {
             Ok(RegistrySource::Hosted(s.trim_end_matches('/').to_string()))
         } else {
             Err(format!(
-                "registry source `{s}` must be `github:<org>` or an http(s):// URL"
+                "registry source `{s}` must be `github:<owner>`, `gitlab:<group>`, `git:<url>`, or an \
+                 http(s):// URL"
             ))
         }
     }
+}
+
+/// Validate a forge owner/user segment (no slashes) for a shorthand.
+fn forge_owner(scheme: &str, owner: &str) -> Result<String, String> {
+    let owner = owner.trim();
+    if owner.is_empty()
+        || !owner
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "`{scheme}:` registry needs a valid owner name (got `{owner}`)"
+        ));
+    }
+    Ok(owner.to_string())
+}
+
+/// Validate a forge group path (slashes allowed, for nested groups) for a shorthand.
+fn forge_group(scheme: &str, group: &str) -> Result<String, String> {
+    let group = group.trim().trim_matches('/');
+    let ok = !group.is_empty()
+        && group.split('/').all(|seg| {
+            !seg.is_empty()
+                && seg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        });
+    if !ok {
+        return Err(format!(
+            "`{scheme}:` registry needs a valid group path (got `{group}`)"
+        ));
+    }
+    Ok(group.to_string())
 }
 
 /// The `[trust]` table (package-manager Phase 4) — the **complete, auditable set of every elevated
@@ -1031,10 +1081,12 @@ mod tests {
         .expect("valid");
         let r = m.registries();
         assert!(!r.is_empty());
-        // A scope with an explicit mapping resolves to it.
+        // A scope with an explicit mapping resolves to it (the `github:` shorthand → a forge base URL).
         assert_eq!(
             r.source_for("acme"),
-            Some(&RegistrySource::GitHub("acme".to_string()))
+            Some(&RegistrySource::GitForge(
+                "https://github.com/acme".to_string()
+            ))
         );
         // Trailing slash trimmed on hosted URLs.
         assert_eq!(
@@ -1077,15 +1129,31 @@ mod tests {
 
     #[test]
     fn registry_source_parse_forms() {
+        // Every git-forge shorthand + the generic `git:` normalize to one GitForge base URL.
         assert_eq!(
             RegistrySource::parse("github:my-org").unwrap(),
-            RegistrySource::GitHub("my-org".to_string())
+            RegistrySource::GitForge("https://github.com/my-org".to_string())
         );
+        assert_eq!(
+            RegistrySource::parse("gitlab:team/sub").unwrap(),
+            RegistrySource::GitForge("https://gitlab.com/team/sub".to_string())
+        );
+        assert_eq!(
+            RegistrySource::parse("git:https://git.example.com/org/").unwrap(),
+            RegistrySource::GitForge("https://git.example.com/org".to_string())
+        );
+        assert_eq!(
+            RegistrySource::parse("git:ssh://git@example.com/org").unwrap(),
+            RegistrySource::GitForge("ssh://git@example.com/org".to_string())
+        );
+        // A bare http(s) URL stays a hosted noeta-registry service (not a forge).
         assert_eq!(
             RegistrySource::parse("https://x.example").unwrap(),
             RegistrySource::Hosted("https://x.example".to_string())
         );
         assert!(RegistrySource::parse("github:bad org").is_err());
+        assert!(RegistrySource::parse("gitlab:").is_err());
+        assert!(RegistrySource::parse("git:").is_err());
         assert!(RegistrySource::parse("just-a-string").is_err());
     }
 
