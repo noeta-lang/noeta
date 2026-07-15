@@ -18,6 +18,11 @@ pub mod manifest;
 pub mod registry;
 pub mod reserved;
 
+/// GitHub OAuth device flow for the laptop scope-claim path (namespace-protection #1). Behind
+/// `registry-http` (it needs the HTTP client), like the rest of the hosted-registry client.
+#[cfg(feature = "registry-http")]
+pub mod github;
+
 /// Package provenance — Ed25519-signed attestations binding a release to its commit (Phase 4, #2).
 /// Behind the `provenance` feature (CLI-only; the LSP and offline consumers don't pull the crypto).
 #[cfg(feature = "provenance")]

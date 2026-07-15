@@ -37,7 +37,7 @@ use noeta_vm::{SessionOutput, VmBackend, VmSession};
 
 // The package manager (package-manager P2) now lives in the `noeta-pm` library so `noeta-lsp` and
 // `noeta-db` resolve dependencies through the same code; the CLI names its modules unqualified.
-use noeta_pm::{authorship, graph, lock, manifest, registry, repo_web_url, reserved};
+use noeta_pm::{authorship, github, graph, lock, manifest, registry, repo_web_url, reserved};
 // The L2 compile pipeline (source → runnable module) and the execution core live in `noeta-runner`
 // so the CLI and the standalone lean runtime share one implementation (dev-deps D3c). The CLI's
 // `run`/`dump`/`build`/`test` paths call these by the same names they used when defined here.
@@ -808,18 +808,10 @@ fn cmd_claim(scope: &str, token: Option<&str>, audience: Option<&str>) -> ExitCo
         .or_else(|| std::env::var("NOETA_REGISTRY_AUDIENCE").ok())
         .unwrap_or_else(|| "noeta-registry".to_string());
 
-    // The OIDC proof: a GitHub Actions token for the registry's audience. Absent → not in CI.
-    let oidc = match registry::fetch_github_oidc(&audience) {
-        Ok(Some(jwt)) => jwt,
-        Ok(None) => {
-            eprintln!(
-                "lang: no GitHub Actions OIDC token is available. `noeta claim` proves scope \
-                 ownership from a GitHub Actions workflow that grants `id-token: write`; run it \
-                 there. (For other setups, a scope can be provisioned via the registry's admin \
-                 bootstrap.)"
-            );
-            return ExitCode::from(1);
-        }
+    // Prove ownership: prefer an ambient GitHub Actions OIDC token (CI); off-CI, fall back to the
+    // GitHub OAuth device flow (laptop). Either resolves to the same GitHub identity server-side.
+    let proof = match acquire_claim_proof(&audience) {
+        Ok(proof) => proof,
         Err(err) => {
             eprintln!("lang: {err}");
             return ExitCode::from(1);
@@ -845,7 +837,7 @@ fn cmd_claim(scope: &str, token: Option<&str>, audience: Option<&str>) -> ExitCo
             return ExitCode::from(1);
         }
     };
-    match index.claim_scope(scope, &token, &oidc) {
+    match index.claim_scope(scope, &token, &proof) {
         Ok(status) => {
             println!("{status}: `{scope}`");
             if generated {
@@ -862,6 +854,33 @@ fn cmd_claim(scope: &str, token: Option<&str>, audience: Option<&str>) -> ExitCo
             ExitCode::from(1)
         }
     }
+}
+
+/// Acquire a proof of GitHub ownership for `noeta claim` (namespace-protection #1): an ambient GitHub
+/// Actions OIDC token when running in CI, else the GitHub OAuth **device flow** on a laptop — printing
+/// the URL + code and blocking until the user authorizes in their browser.
+fn acquire_claim_proof(audience: &str) -> Result<registry::ClaimProof, String> {
+    // CI: a GitHub Actions OIDC token for the registry's audience.
+    if let Some(jwt) = registry::fetch_github_oidc(audience)? {
+        return Ok(registry::ClaimProof::Oidc(jwt));
+    }
+    // Laptop: the GitHub OAuth device flow. Needs the registry's GitHub OAuth app client id (public —
+    // the device flow uses no secret); `NOETA_GITHUB_OAUTH_URL` overrides the endpoint for testing.
+    let client_id = std::env::var("NOETA_GITHUB_CLIENT_ID").map_err(|_| {
+        "not running in GitHub Actions, and the GitHub OAuth device flow isn't configured — set \
+         NOETA_GITHUB_CLIENT_ID to the registry's GitHub OAuth app client id (the registry operator \
+         provides it), or run `noeta claim` from a GitHub Actions workflow granting `id-token: write`."
+            .to_string()
+    })?;
+    let oauth_base = std::env::var("NOETA_GITHUB_OAUTH_URL")
+        .unwrap_or_else(|_| "https://github.com".to_string());
+    let device = github::request_device_code(&oauth_base, &client_id, "read:org")?;
+    println!(
+        "To authorize this device, open {} and enter the code:\n\n    {}\n\nWaiting for authorization…",
+        device.verification_uri, device.user_code
+    );
+    let token = github::poll_for_token(&oauth_base, &client_id, &device)?;
+    Ok(registry::ClaimProof::GithubToken(token))
 }
 
 /// `noeta add [key] --path/--git+--tag/--version [--package company/pkg]` — add a dependency to the

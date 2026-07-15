@@ -4592,19 +4592,109 @@ fn noeta_scope_require_provenance_validates_and_needs_a_registry() {
         .stderr(predicate::str::contains("needs the hosted registry"));
 }
 
+/// A tiny in-process HTTP/1.1 server for the CLI e2e: `handler(method, path, body) -> (status, json)`.
+/// Handles connections sequentially on a background thread; returns the base URL.
+fn mock_http(handler: impl Fn(&str, &str, &str) -> (u16, String) + Send + 'static) -> String {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                continue;
+            }
+            let mut parts = line.split_whitespace();
+            let method = parts.next().unwrap_or("").to_string();
+            let path = parts.next().unwrap_or("").to_string();
+            let mut content_length = 0usize;
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                    break;
+                }
+                if let Some(v) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            if content_length > 0 {
+                reader.read_exact(&mut body).unwrap();
+            }
+            let (status, json) = handler(&method, &path, &String::from_utf8_lossy(&body));
+            let response = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                json.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    format!("http://{addr}")
+}
+
 #[test]
-fn noeta_claim_guides_when_not_in_ci() {
-    // With a registry URL but no GitHub Actions OIDC environment, `noeta claim` can't prove ownership
-    // — it prints actionable guidance (run from a workflow granting `id-token: write`) and exits 1,
-    // without ever contacting the registry.
+fn noeta_claim_uses_the_github_device_flow_off_ci() {
+    // The full laptop path (namespace-protection #1): with no CI OIDC, `noeta claim` runs the GitHub
+    // OAuth device flow (mocked), then POSTs the resulting access token to the registry claim endpoint
+    // (mocked). Both endpoints live on one mock server, dispatched by path.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let base = mock_http(move |_method, path, body| {
+        match path {
+        "/login/device/code" => (
+            200,
+            r#"{"device_code":"DC","user_code":"WDJB-MJHT","verification_uri":"https://github.test/device","expires_in":900,"interval":0}"#
+                .to_string(),
+        ),
+        "/login/oauth/access_token" => (200, r#"{"access_token":"gho_laptop"}"#.to_string()),
+        "/v1/scopes/claim" => {
+            tx.send(body.to_string()).unwrap();
+            (201, r#"{"status":"scope claimed","scope":"lapco","owner":"lapco"}"#.to_string())
+        }
+        _ => (404, "{}".to_string()),
+    }
+    });
+
+    lang()
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
+        .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        .env("NOETA_REGISTRY_URL", &base)
+        .env("NOETA_GITHUB_OAUTH_URL", &base)
+        .env("NOETA_GITHUB_CLIENT_ID", "test-client-id")
+        .args(["claim", "lapco"])
+        .assert()
+        .success()
+        // The device code is shown to the user, and the generated publish token is printed to save.
+        .stdout(
+            predicate::str::contains("WDJB-MJHT")
+                .and(predicate::str::contains("scope claimed"))
+                .and(predicate::str::contains("NOETA_REGISTRY_TOKEN")),
+        );
+
+    // The claim POST carried the device-flow access token as `github_token`.
+    let claim_body = rx.recv().unwrap();
+    assert!(
+        claim_body.contains("\"github_token\":\"gho_laptop\""),
+        "claim sent the device-flow token: {claim_body}"
+    );
+    assert!(claim_body.contains("\"scope\":\"lapco\""), "{claim_body}");
+}
+
+#[test]
+fn noeta_claim_guides_when_not_in_ci_and_device_flow_unconfigured() {
+    // With a registry URL but no GitHub Actions OIDC environment and no configured device-flow client
+    // id, `noeta claim` can't prove ownership — it points at both paths (set NOETA_GITHUB_CLIENT_ID,
+    // or run from a workflow) and exits 1 without contacting the registry.
     lang()
         .env("NOETA_REGISTRY_URL", "https://registry.invalid")
         .env_remove("ACTIONS_ID_TOKEN_REQUEST_URL")
         .env_remove("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        .env_remove("NOETA_GITHUB_CLIENT_ID")
         .args(["claim", "acme"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("GitHub Actions OIDC token"));
+        .stderr(predicate::str::contains("NOETA_GITHUB_CLIENT_ID"));
 }
 
 #[test]

@@ -423,12 +423,22 @@ impl HttpIndex {
         format!("{}/v1/packages/{name}", self.base)
     }
 
-    /// Claim `scope` for `token`, proving ownership with a GitHub OIDC `oidc` JWT
-    /// (namespace-protection #1): `POST /v1/scopes/claim`. Returns the registry's status message on
-    /// success (`scope claimed` / `scope re-claimed`), or the server's error. This binds `token` as
-    /// the scope's publish token — the same token `noeta publish` later presents.
-    pub fn claim_scope(&self, scope: &str, token: &str, oidc: &str) -> Result<String, String> {
-        let body = serde_json::json!({ "scope": scope, "token": token, "oidc": oidc });
+    /// Claim `scope` for `token`, proving ownership with `proof` — a GitHub Actions OIDC token (CI) or
+    /// a GitHub OAuth access token from the device flow (laptop) (namespace-protection #1): `POST
+    /// /v1/scopes/claim`. Returns the registry's status message on success (`scope claimed` /
+    /// `scope re-claimed`), or the server's error. This binds `token` as the scope's publish token —
+    /// the same token `noeta publish` later presents.
+    pub fn claim_scope(
+        &self,
+        scope: &str,
+        token: &str,
+        proof: &ClaimProof,
+    ) -> Result<String, String> {
+        let mut body = serde_json::json!({ "scope": scope, "token": token });
+        match proof {
+            ClaimProof::Oidc(jwt) => body["oidc"] = serde_json::json!(jwt),
+            ClaimProof::GithubToken(gh) => body["github_token"] = serde_json::json!(gh),
+        }
         let resp = self
             .client
             .post(format!("{}/v1/scopes/claim", self.base))
@@ -498,6 +508,30 @@ impl HttpIndex {
         Err(format!(
             "registry rejected the policy for `{scope}`: {detail}"
         ))
+    }
+}
+
+/// A proof of scope ownership presented to `POST /v1/scopes/claim` (namespace-protection #1): a GitHub
+/// Actions OIDC token (CI) or a GitHub OAuth access token from the device flow (laptop). Both resolve
+/// server-side to the owner's stable GitHub id, so they are interchangeable.
+#[cfg(feature = "registry-http")]
+pub enum ClaimProof {
+    /// A GitHub Actions OIDC JWT (the CI path).
+    Oidc(String),
+    /// A GitHub OAuth access token (the laptop device-flow path).
+    GithubToken(String),
+}
+
+// A proof carries a bearer secret, so its Debug redacts the token rather than deriving it — the value
+// must never leak into a log or panic message.
+#[cfg(feature = "registry-http")]
+impl std::fmt::Debug for ClaimProof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self {
+            ClaimProof::Oidc(_) => "Oidc",
+            ClaimProof::GithubToken(_) => "GithubToken",
+        };
+        write!(f, "ClaimProof::{kind}(<redacted>)")
     }
 }
 
@@ -1091,7 +1125,11 @@ mod http_tests {
         });
         let index = HttpIndex::new(base).unwrap();
         let msg = index
-            .claim_scope("widgetco", "publish-token-abc123", "eyJ.header.sig")
+            .claim_scope(
+                "widgetco",
+                "publish-token-abc123",
+                &ClaimProof::Oidc("eyJ.header.sig".into()),
+            )
             .unwrap();
         assert_eq!(msg, "scope claimed");
         let (method, path, body) = rx.recv().unwrap();
@@ -1112,7 +1150,11 @@ mod http_tests {
         });
         let index = HttpIndex::new(base).unwrap();
         let err = index
-            .claim_scope("stripe", "publish-token-abc123", "eyJ.header.sig")
+            .claim_scope(
+                "stripe",
+                "publish-token-abc123",
+                &ClaimProof::Oidc("eyJ.header.sig".into()),
+            )
             .unwrap_err();
         assert!(err.contains("cannot claim scope"), "{err}");
     }
