@@ -136,14 +136,55 @@ impl PackageName {
 }
 
 /// One `[dependencies]` entry's **source** (package-manager P2.0). The table *key* is the local import
+/// Which git reference a `git` dependency tracks. A **tag** is the release model (a published,
+/// immutable version); a **branch** or bare **HEAD** tracks a moving ref — for an in-development or
+/// bundled package that isn't cut into tagged releases yet (follow-on: `git` deps without a tag). In
+/// every case the lockfile pins the resolved commit SHA, so a build reproduces exactly; `noeta
+/// update` re-resolves a branch/HEAD ref to its latest commit (a tag re-resolves to the same commit
+/// unless it moved).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitRef {
+    /// A tagged release — `dep = { git = "…", tag = "v1.2.0" }`.
+    Tag(String),
+    /// A branch's current tip — `dep = { git = "…", branch = "main" }`.
+    Branch(String),
+    /// The remote's default-branch `HEAD` — `dep = { git = "…" }` with no tag/branch (the
+    /// tag-free in-dev/bundled case).
+    Head,
+}
+
+impl GitRef {
+    /// A short human description for messages and the lockfile ref comment (`v1.2.0`, `branch main`,
+    /// `HEAD`).
+    pub fn describe(&self) -> String {
+        match self {
+            GitRef::Tag(t) => t.clone(),
+            GitRef::Branch(b) => format!("branch {b}"),
+            GitRef::Head => "HEAD".to_string(),
+        }
+    }
+
+    /// The lockfile-pin key component (paired with the url) — a stable, kind-prefixed string so a tag
+    /// named `main` and the branch `main` never share a pin. Recomputed identically on lock read and
+    /// on the resolve-time pin lookup, so a locked SHA is found again.
+    pub fn lock_key(&self) -> String {
+        match self {
+            GitRef::Tag(t) => format!("tag:{t}"),
+            GitRef::Branch(b) => format!("branch:{b}"),
+            GitRef::Head => "head".to_string(),
+        }
+    }
+}
+
 /// root (an identifier), decoupled from the resolved package's global `company/package` identity.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Dependency {
     /// A local source tree — `dep = { path = "…" }`. Needs no network or resolver (P2.1).
     Path { path: PathBuf },
-    /// A git repository pinned to a **tag** (= a released version) — `dep = { git = "…", tag = "…" }`.
-    /// Sources are git + tagged releases only (user decision); the lockfile pins the resolved SHA.
-    Git { url: String, tag: String },
+    /// A git repository pinned to a [`GitRef`] — a `tag` (a released version), a `branch`, or the
+    /// default-branch `HEAD` (`dep = { git = "…" }`, the tag-free in-dev/bundled case). The lockfile
+    /// pins the resolved SHA either way, so a build reproduces exactly.
+    Git { url: String, git_ref: GitRef },
     /// A registry dependency by SemVer requirement — `dep = "^1.2"` or
     /// `dep = { version = "^1.2", package = "company/pkg" }`. The registry index resolves
     /// name→git-coords (P2.5). `package` is the registry identity (decoupled from the import-root
@@ -770,15 +811,35 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
             let url = table["git"]
                 .as_str()
                 .ok_or_else(|| format!("dependency `{key}`: `git` must be a string"))?;
-            let tag = table.get("tag").and_then(|v| v.as_str()).ok_or_else(|| {
-                format!(
-                    "dependency `{key}`: a `git` dependency requires a string `tag` \
-                         (sources are git + tagged releases only)"
-                )
-            })?;
+            // A `git` dependency tracks a `tag` (a release), a `branch`, or — with neither — the
+            // remote's default-branch HEAD (the tag-free in-dev/bundled case). `tag` and `branch`
+            // are mutually exclusive.
+            let git_ref = match (
+                table.get("tag").and_then(|v| v.as_str()),
+                table.get("branch").and_then(|v| v.as_str()),
+            ) {
+                (Some(_), Some(_)) => {
+                    return Err(format!(
+                        "dependency `{key}`: a `git` dependency takes `tag` OR `branch`, not both"
+                    ));
+                }
+                (Some(tag), None) => GitRef::Tag(tag.to_string()),
+                (None, Some(branch)) => GitRef::Branch(branch.to_string()),
+                (None, None) => {
+                    // Reject a non-string `tag`/`branch` explicitly rather than silently treating it
+                    // as HEAD (a common typo like `tag = 1` should not become a HEAD dependency).
+                    if table.contains_key("tag") {
+                        return Err(format!("dependency `{key}`: `tag` must be a string"));
+                    }
+                    if table.contains_key("branch") {
+                        return Err(format!("dependency `{key}`: `branch` must be a string"));
+                    }
+                    GitRef::Head
+                }
+            };
             Ok(Dependency::Git {
                 url: url.to_string(),
-                tag: tag.to_string(),
+                git_ref,
             })
         }
         (false, false, true) => {
@@ -1022,7 +1083,7 @@ mod tests {
             deps["http"],
             Dependency::Git {
                 url: "https://example.com/guzzle/http".to_string(),
-                tag: "v1.2.0".to_string(),
+                git_ref: GitRef::Tag("v1.2.0".to_string()),
             }
         );
         assert_eq!(
@@ -1042,8 +1103,39 @@ mod tests {
     }
 
     #[test]
-    fn a_git_dependency_requires_a_tag() {
-        assert!(Manifest::parse("[dependencies]\nhttp = { git = \"https://x/y\" }\n").is_err());
+    fn a_git_dependency_tracks_a_tag_a_branch_or_head() {
+        fn git_ref_of(toml: &str) -> GitRef {
+            let m = Manifest::parse(toml).expect("valid");
+            match &m.dependencies()["x"] {
+                Dependency::Git { url, git_ref } => {
+                    assert_eq!(url, "https://x/y");
+                    git_ref.clone()
+                }
+                other => panic!("expected a git dependency, got {other:?}"),
+            }
+        }
+
+        // A tag (the release form), a branch, or bare `git` — the default-branch HEAD (the tag-free
+        // in-dev/bundled case).
+        assert_eq!(
+            git_ref_of("[dependencies]\nx = { git = \"https://x/y\", tag = \"v1.0.0\" }\n"),
+            GitRef::Tag("v1.0.0".to_string())
+        );
+        assert_eq!(
+            git_ref_of("[dependencies]\nx = { git = \"https://x/y\", branch = \"main\" }\n"),
+            GitRef::Branch("main".to_string())
+        );
+        assert_eq!(
+            git_ref_of("[dependencies]\nx = { git = \"https://x/y\" }\n"),
+            GitRef::Head
+        );
+        // `tag` and `branch` together is a conflict.
+        assert!(
+            Manifest::parse(
+                "[dependencies]\nx = { git = \"https://x/y\", tag = \"v1\", branch = \"main\" }\n"
+            )
+            .is_err()
+        );
     }
 
     #[test]

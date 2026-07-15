@@ -1,19 +1,22 @@
-//! Git-tag dependency fetch (package-manager P2.3b) — the real-IO seam, CLI-only, **outside** the
+//! Git dependency fetch (package-manager P2.3b) — the real-IO seam, CLI-only, **outside** the
 //! differential oracle (a network operation, done before compilation; the build then runs over the
 //! materialized on-disk tree).
 //!
-//! Sources are **git + tagged releases only** (user decision): a dependency names a repository URL
-//! and a tag. Fetch shells out to the **system `git`** — dependency-light, Go-like, no libgit2/gix —
-//! so a consumer needs `git` on `PATH` only when it actually pulls a git dependency (a pure-path /
-//! pure-`std` program needs nothing). The tag is resolved to a **commit SHA** at the remote, the
-//! commit is checked out into the [`Store`], and the clone's `HEAD` is verified against the resolved
-//! SHA (integrity: a moved tag or a tampered remote is rejected). The SHA + content hash are what the
-//! lockfile pins (P2.4), so a later build reproduces exactly.
+//! A git dependency names a repository URL and a [`GitRef`] — a **tag** (the release model), a
+//! **branch**, or the default-branch **HEAD** (a tag-free in-dev/bundled package). Fetch shells out
+//! to the **system `git`** — dependency-light, Go-like, no libgit2/gix — so a consumer needs `git` on
+//! `PATH` only when it actually pulls a git dependency (a pure-path / pure-`std` program needs
+//! nothing). The ref is resolved to a **commit SHA** at the remote, the commit is checked out into
+//! the [`Store`], and the clone's `HEAD` is verified against the resolved SHA (integrity: a moved ref
+//! or a tampered remote is rejected). The SHA + content hash are what the lockfile pins (P2.4), so a
+//! later build reproduces exactly regardless of the ref kind; `noeta update` re-resolves a moving
+//! branch/HEAD ref to its new tip.
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::manifest::GitRef;
 use crate::store::{Store, hash_tree};
 
 /// A materialized git dependency.
@@ -29,34 +32,46 @@ pub struct Fetched {
     pub path: PathBuf,
 }
 
-/// Fetch `url`@`tag` into `store`, returning the materialized tree. The tag is resolved to a commit
-/// SHA at the remote (`ls-remote`), then materialized. If that SHA is already stored, no clone
+/// Fetch `url` at `git_ref` into `store`, returning the materialized tree. The ref is resolved to a
+/// commit SHA at the remote (`ls-remote`), then materialized. If that SHA is already stored, no clone
 /// happens — only the cheap `ls-remote`. Use [`fetch_pinned`] when the lockfile already records the
 /// SHA (it skips even the `ls-remote`).
-pub fn fetch(url: &str, tag: &str, store: &Store) -> Result<Fetched, String> {
-    let sha = ls_remote_tag(url, tag)?;
-    materialize_sha(url, tag, sha, store)
+pub fn fetch(url: &str, git_ref: &GitRef, store: &Store) -> Result<Fetched, String> {
+    let sha = ls_remote_ref(url, git_ref)?;
+    materialize_sha(url, git_ref, sha, store)
 }
 
-/// Fetch `url`@`tag` **pinned to a known commit `sha`** (package-manager P2.4) — the lockfile path.
-/// If the SHA is already stored, this touches the network **not at all** (offline, reproducible). If
-/// it isn't, the tag is cloned and its `HEAD` verified against `sha`; a mismatch means the tag moved
-/// since the lock was written — a reproducibility violation the user resolves with `noeta update`.
-pub fn fetch_pinned(url: &str, tag: &str, sha: &str, store: &Store) -> Result<Fetched, String> {
-    materialize_sha(url, tag, sha.to_string(), store)
+/// Fetch `url` at `git_ref` **pinned to a known commit `sha`** (package-manager P2.4) — the lockfile
+/// path. If the SHA is already stored, this touches the network **not at all** (offline,
+/// reproducible). If it isn't, the ref is cloned and its `HEAD` verified against `sha`; a mismatch
+/// means the ref moved since the lock was written — a reproducibility check the user resolves with
+/// `noeta update` (expected for a `branch`/`HEAD` ref, which tracks a moving tip).
+pub fn fetch_pinned(
+    url: &str,
+    git_ref: &GitRef,
+    sha: &str,
+    store: &Store,
+) -> Result<Fetched, String> {
+    materialize_sha(url, git_ref, sha.to_string(), store)
 }
 
-/// Materialize a known `url`@`tag`→`sha` into the store (shared by [`fetch`] and [`fetch_pinned`]):
-/// reuse the stored tree if present, else clone the tag and verify its `HEAD` equals `sha`.
-fn materialize_sha(url: &str, tag: &str, sha: String, store: &Store) -> Result<Fetched, String> {
+/// Materialize a known `url`@`git_ref`→`sha` into the store (shared by [`fetch`] and [`fetch_pinned`]):
+/// reuse the stored tree if present, else clone the ref and verify its `HEAD` equals `sha`.
+fn materialize_sha(
+    url: &str,
+    git_ref: &GitRef,
+    sha: String,
+    store: &Store,
+) -> Result<Fetched, String> {
     let path = if store.contains(&sha) {
         store.path_for(&sha)
     } else {
         store
-            .publish(&sha, |staging| clone_tag(url, tag, &sha, staging))
-            .map_err(|err| format!("storing `{url}`@`{tag}`: {err}"))?
+            .publish(&sha, |staging| clone_ref(url, git_ref, &sha, staging))
+            .map_err(|err| format!("storing `{url}`@`{}`: {err}", git_ref.describe()))?
     };
-    let content_hash = hash_tree(&path).map_err(|err| format!("hashing `{url}`@`{tag}`: {err}"))?;
+    let content_hash = hash_tree(&path)
+        .map_err(|err| format!("hashing `{url}`@`{}`: {err}", git_ref.describe()))?;
     Ok(Fetched {
         sha,
         content_hash,
@@ -65,46 +80,78 @@ fn materialize_sha(url: &str, tag: &str, sha: String, store: &Store) -> Result<F
 }
 
 /// Resolve `url`@`tag` to the commit SHA it currently points at, without cloning (package-manager
-/// Phase 4, S2) — used by `noeta publish` to pin the SHA into the registry index at publish time.
+/// Phase 4, S2) — used by `noeta publish` to pin the SHA into the registry index at publish time
+/// (a published release is always a tag).
 pub fn resolve_tag_sha(url: &str, tag: &str) -> Result<String, String> {
-    ls_remote_tag(url, tag)
+    ls_remote_ref(url, &GitRef::Tag(tag.to_string()))
 }
 
-/// Resolve `tag` to its commit SHA at the remote, without cloning (a lightweight network call). For
-/// an **annotated** tag `ls-remote` prints both the tag object and its peeled commit (`…^{}`); the
-/// peeled commit is the one a checkout lands on, so it is preferred. A missing tag is an error.
-fn ls_remote_tag(url: &str, tag: &str) -> Result<String, String> {
-    let refspec = format!("refs/tags/{tag}");
-    let out = run_git(["ls-remote", url, &refspec, &format!("{refspec}^{{}}")])?;
-    let mut plain = None;
-    for line in out.lines() {
-        let Some((sha, name)) = line.split_once('\t') else {
-            continue;
-        };
-        if name == format!("{refspec}^{{}}") {
-            return Ok(sha.to_string()); // peeled commit — definitive
+/// Resolve `git_ref` to its commit SHA at the remote, without cloning (a lightweight network call).
+/// A **tag** resolves via `refs/tags/<tag>` — for an *annotated* tag `ls-remote` prints both the tag
+/// object and its peeled commit (`…^{}`), and the peeled commit (the one a checkout lands on) is
+/// preferred. A **branch** resolves via `refs/heads/<branch>`, and **HEAD** via the symbolic `HEAD`
+/// (the remote's default branch). A ref that resolves to nothing is an error.
+fn ls_remote_ref(url: &str, git_ref: &GitRef) -> Result<String, String> {
+    match git_ref {
+        GitRef::Tag(tag) => {
+            let refspec = format!("refs/tags/{tag}");
+            let out = run_git(["ls-remote", url, &refspec, &format!("{refspec}^{{}}")])?;
+            let mut plain = None;
+            for line in out.lines() {
+                let Some((sha, name)) = line.split_once('\t') else {
+                    continue;
+                };
+                if name == format!("{refspec}^{{}}") {
+                    return Ok(sha.to_string()); // peeled commit — definitive
+                }
+                if name == refspec {
+                    plain = Some(sha.to_string());
+                }
+            }
+            plain.ok_or_else(|| format!("`{url}` has no tag `{tag}`"))
         }
-        if name == refspec {
-            plain = Some(sha.to_string());
+        GitRef::Branch(branch) => {
+            let refspec = format!("refs/heads/{branch}");
+            single_ref_sha(url, &refspec)?
+                .ok_or_else(|| format!("`{url}` has no branch `{branch}`"))
         }
+        GitRef::Head => single_ref_sha(url, "HEAD")?
+            .ok_or_else(|| format!("`{url}` has no HEAD (is it an empty repository?)")),
     }
-    plain.ok_or_else(|| format!("`{url}` has no tag `{tag}` (sources must be tagged releases)"))
 }
 
-/// Shallow-clone `url` at `tag` into `staging`, verify the checked-out `HEAD` equals `expected_sha`,
-/// then drop the `.git` metadata (the package *is* its working tree). Runs inside the store's atomic
-/// publish, so any error here leaves no partial tree.
-fn clone_tag(url: &str, tag: &str, expected_sha: &str, staging: &Path) -> io::Result<()> {
+/// The single commit SHA `refspec` resolves to at `url`, or `None` if the remote lists no such ref.
+fn single_ref_sha(url: &str, refspec: &str) -> Result<Option<String>, String> {
+    let out = run_git(["ls-remote", url, refspec])?;
+    Ok(out
+        .lines()
+        .find_map(|line| line.split_once('\t').map(|(sha, _)| sha.to_string())))
+}
+
+/// Shallow-clone `url` at `git_ref` into `staging`, verify the checked-out `HEAD` equals
+/// `expected_sha`, then drop the `.git` metadata (the package *is* its working tree). Runs inside the
+/// store's atomic publish, so any error here leaves no partial tree. A tag/branch clones with
+/// `--branch <name>` (git accepts either for that flag); a bare `HEAD` clones the default branch.
+fn clone_ref(url: &str, git_ref: &GitRef, expected_sha: &str, staging: &Path) -> io::Result<()> {
     let dir = staging
         .to_str()
         .ok_or_else(|| io::Error::other("store path is not valid UTF-8"))?;
-    run_git(["clone", "--depth", "1", "--branch", tag, url, dir]).map_err(io::Error::other)?;
+    match git_ref {
+        GitRef::Tag(name) | GitRef::Branch(name) => {
+            run_git(["clone", "--depth", "1", "--branch", name, url, dir])
+                .map_err(io::Error::other)?;
+        }
+        GitRef::Head => {
+            run_git(["clone", "--depth", "1", url, dir]).map_err(io::Error::other)?;
+        }
+    }
     let head = run_git(["-C", dir, "rev-parse", "HEAD"]).map_err(io::Error::other)?;
     let head = head.trim();
     if head != expected_sha {
         return Err(io::Error::other(format!(
-            "integrity check failed: `{url}`@`{tag}` resolved to {expected_sha} but the clone's \
-             HEAD is {head} (the tag may have moved)"
+            "integrity check failed: `{url}`@`{}` resolved to {expected_sha} but the clone's \
+             HEAD is {head} (the ref may have moved)",
+            git_ref.describe()
         )));
     }
     let _ = std::fs::remove_dir_all(staging.join(".git"));
@@ -191,7 +238,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&store_dir);
         let store = Store::open_at(store_dir).unwrap();
 
-        let fetched = fetch(repo.to_str().unwrap(), "v1.0.0", &store).unwrap();
+        let tag = GitRef::Tag("v1.0.0".to_string());
+        let fetched = fetch(repo.to_str().unwrap(), &tag, &store).unwrap();
         assert_eq!(fetched.sha.len(), 40, "a full commit SHA");
         assert!(store.contains(&fetched.sha));
         // The working tree is materialized; `.git` is stripped.
@@ -200,7 +248,7 @@ mod tests {
         assert!(!fetched.content_hash.is_empty());
 
         // A second fetch is served from the store (idempotent) and agrees on the SHA + hash.
-        let again = fetch(repo.to_str().unwrap(), "v1.0.0", &store).unwrap();
+        let again = fetch(repo.to_str().unwrap(), &tag, &store).unwrap();
         assert_eq!(again.sha, fetched.sha);
         assert_eq!(again.content_hash, fetched.content_hash);
     }
@@ -212,7 +260,63 @@ mod tests {
         }
         let repo = tagged_repo("missingtag", "v1.0.0");
         let store = Store::open_at(std::env::temp_dir().join("noeta_git_test_store2")).unwrap();
-        let err = fetch(repo.to_str().unwrap(), "v9.9.9", &store).unwrap_err();
+        let err = fetch(
+            repo.to_str().unwrap(),
+            &GitRef::Tag("v9.9.9".to_string()),
+            &store,
+        )
+        .unwrap_err();
         assert!(err.contains("no tag"), "got: {err}");
+    }
+
+    /// Fetch an **untagged** repo by its default-branch HEAD, and by a named branch — the tag-free
+    /// in-dev/bundled case. Both resolve to the same commit and materialize the working tree.
+    #[test]
+    fn fetches_head_and_a_branch_without_a_tag() {
+        if !git_available() {
+            return;
+        }
+        // A repo with a commit but no tag; force a known default branch name for the branch case.
+        let repo = std::env::temp_dir().join("noeta_git_test_head");
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&["init", "-q", "-b", "trunk"], &repo);
+        std::fs::write(
+            repo.join("noeta.toml"),
+            "[package]\nname = \"acme/lib\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join("lib.noe"), "namespace lib.core;\n").unwrap();
+        git(&["add", "."], &repo);
+        git(&["commit", "-q", "-m", "wip"], &repo);
+        let expected = super::run_git(["-C", repo.to_str().unwrap(), "rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+
+        let store = Store::open_at(std::env::temp_dir().join("noeta_git_test_store_head")).unwrap();
+        let head = fetch(repo.to_str().unwrap(), &GitRef::Head, &store).unwrap();
+        assert_eq!(head.sha, expected, "HEAD resolves to the tip commit");
+        assert!(head.path.join("lib.noe").is_file());
+
+        let branch = fetch(
+            repo.to_str().unwrap(),
+            &GitRef::Branch("trunk".to_string()),
+            &store,
+        )
+        .unwrap();
+        assert_eq!(
+            branch.sha, expected,
+            "the named branch resolves to the same tip"
+        );
+
+        // A branch that does not exist is a clean error.
+        let err = fetch(
+            repo.to_str().unwrap(),
+            &GitRef::Branch("nope".to_string()),
+            &store,
+        )
+        .unwrap_err();
+        assert!(err.contains("no branch"), "got: {err}");
     }
 }

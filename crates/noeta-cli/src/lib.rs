@@ -1084,8 +1084,12 @@ fn cmd_audit(path: &std::path::Path) -> ExitCode {
     for pkg in &deps {
         let source = match &pkg.source {
             noeta_pm::graph::ResolvedSource::Path { path } => format!("path {}", path.display()),
-            noeta_pm::graph::ResolvedSource::Git { url, tag, sha } => {
-                format!("git {url}#{tag} ({})", &sha[..sha.len().min(9)])
+            noeta_pm::graph::ResolvedSource::Git { url, git_ref, sha } => {
+                format!(
+                    "git {url}#{} ({})",
+                    git_ref.describe(),
+                    &sha[..sha.len().min(9)]
+                )
             }
         };
         let mut flags = Vec::new();

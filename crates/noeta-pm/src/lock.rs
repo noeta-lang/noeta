@@ -98,9 +98,17 @@ impl Lock {
                     continue;
                 };
                 lock.hashes.insert(name.to_string(), hash.to_string());
-                if let (Some(url), Some(tag), Some(sha)) = (get("url"), get("tag"), get("sha")) {
+                // A git package pins its SHA under the ref it was resolved from: a `tag`, a `branch`,
+                // or — with neither recorded — the default-branch `HEAD`. The key is rebuilt with the
+                // same `GitRef::lock_key` the resolve-time lookup uses, so the pin is found again.
+                if let (Some(url), Some(sha)) = (get("url"), get("sha")) {
+                    let git_ref = match (get("tag"), get("branch")) {
+                        (Some(tag), _) => crate::manifest::GitRef::Tag(tag.to_string()),
+                        (None, Some(branch)) => crate::manifest::GitRef::Branch(branch.to_string()),
+                        (None, None) => crate::manifest::GitRef::Head,
+                    };
                     lock.git_pins
-                        .insert((url.to_string(), tag.to_string()), sha.to_string());
+                        .insert((url.to_string(), git_ref.lock_key()), sha.to_string());
                 }
             }
         }
@@ -125,10 +133,10 @@ impl Lock {
         lock
     }
 
-    /// The pinned commit SHA for a git `url`@`tag`, if the lock records it.
-    pub fn git_pin(&self, url: &str, tag: &str) -> Option<&str> {
+    /// The pinned commit SHA for a git `url` at `git_ref`, if the lock records it.
+    pub fn git_pin(&self, url: &str, git_ref: &crate::manifest::GitRef) -> Option<&str> {
         self.git_pins
-            .get(&(url.to_string(), tag.to_string()))
+            .get(&(url.to_string(), git_ref.lock_key()))
             .map(String::as_str)
     }
 
@@ -160,10 +168,20 @@ fn render(locked: &[LockedPackage], scope_trust: &BTreeMap<String, ScopeTrust>) 
                 out.push_str("source = \"path\"\n");
                 out.push_str(&format!("path = {}\n", quote(&path.display().to_string())));
             }
-            ResolvedSource::Git { url, tag, sha } => {
+            ResolvedSource::Git { url, git_ref, sha } => {
                 out.push_str("source = \"git\"\n");
                 out.push_str(&format!("url = {}\n", quote(url)));
-                out.push_str(&format!("tag = {}\n", quote(tag)));
+                // The ref the SHA was resolved from: a `tag` or `branch` line, or neither for a
+                // default-branch HEAD dependency (which `noeta update` re-resolves to a new SHA).
+                match git_ref {
+                    crate::manifest::GitRef::Tag(tag) => {
+                        out.push_str(&format!("tag = {}\n", quote(tag)));
+                    }
+                    crate::manifest::GitRef::Branch(branch) => {
+                        out.push_str(&format!("branch = {}\n", quote(branch)));
+                    }
+                    crate::manifest::GitRef::Head => {}
+                }
                 out.push_str(&format!("sha = {}\n", quote(sha)));
             }
         }
@@ -229,7 +247,7 @@ mod tests {
             content_hash: "deadbeef".to_string(),
             source: ResolvedSource::Git {
                 url: "https://example.com/acme/greet".to_string(),
-                tag: "v1.0.0".to_string(),
+                git_ref: crate::manifest::GitRef::Tag("v1.0.0".to_string()),
                 sha: "a".repeat(40),
             },
             native: None,
@@ -261,13 +279,19 @@ mod tests {
 
         let lock = Lock::read(&dir);
         assert_eq!(
-            lock.git_pin("https://example.com/acme/greet", "v1.0.0"),
+            lock.git_pin(
+                "https://example.com/acme/greet",
+                &crate::manifest::GitRef::Tag("v1.0.0".to_string())
+            ),
             Some("a".repeat(40).as_str())
         );
         assert_eq!(lock.content_hash("acme/greet"), Some("deadbeef"));
         assert_eq!(lock.content_hash("acme/local"), Some("cafe"));
         // A path package records no git pin.
-        assert_eq!(lock.git_pin("../local", ""), None);
+        assert_eq!(
+            lock.git_pin("../local", &crate::manifest::GitRef::Head),
+            None
+        );
         // The pinned scope key round-trips (provenance TOFU, Phase 4 #2).
         assert_eq!(
             lock.scope_trust("acme"),
@@ -339,7 +363,11 @@ mod tests {
         let dir = std::env::temp_dir().join("noeta_lock_test_missing");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(Lock::read(&dir).git_pin("x", "y").is_none());
+        assert!(
+            Lock::read(&dir)
+                .git_pin("x", &crate::manifest::GitRef::Tag("y".to_string()))
+                .is_none()
+        );
         // A future version is ignored (re-resolve rather than misread).
         std::fs::write(dir.join(LOCK_NAME), "version = 999\n").unwrap();
         assert!(Lock::read(&dir).content_hash("acme/greet").is_none());

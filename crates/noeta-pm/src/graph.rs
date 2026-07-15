@@ -98,10 +98,10 @@ pub struct LockedPackage {
 pub enum ResolvedSource {
     /// A local source tree, recorded as written in the manifest.
     Path { path: PathBuf },
-    /// A git tag pinned to the commit SHA it resolved to.
+    /// A git ref (tag, branch, or default-branch HEAD) pinned to the commit SHA it resolved to.
     Git {
         url: String,
-        tag: String,
+        git_ref: crate::manifest::GitRef,
         sha: String,
     },
 }
@@ -333,7 +333,7 @@ impl Walker<'_> {
                 let dir = joined.canonicalize().unwrap_or(joined);
                 Ok((dir, ResolvedSource::Path { path: path.clone() }))
             }
-            Dependency::Git { url, tag } => self.fetch_git(key, url, tag, None),
+            Dependency::Git { url, git_ref } => self.fetch_git(key, url, git_ref, None),
             Dependency::Registry { package, .. } => {
                 // Materialize the **resolver-selected** version (Phase 4, S5b): the PubGrub solve
                 // already chose one compatible version per identity, so look up the coordinates of
@@ -369,8 +369,9 @@ impl Walker<'_> {
                 self.check_provenance(key, &name, &release, scope_key.as_deref())?;
                 let coords = release.coords;
                 // The registry pins the SHA (Phase 4, S2), so a first resolve fetches by it rather
-                // than trusting the tag's current target.
-                self.fetch_git(key, &coords.url, &coords.tag, Some(&coords.sha))
+                // than trusting the tag's current target. A published release is always a tag.
+                let git_ref = crate::manifest::GitRef::Tag(coords.tag.clone());
+                self.fetch_git(key, &coords.url, &git_ref, Some(&coords.sha))
             }
         }
     }
@@ -385,25 +386,25 @@ impl Walker<'_> {
         &mut self,
         key: &str,
         url: &str,
-        tag: &str,
+        git_ref: &crate::manifest::GitRef,
         registry_sha: Option<&str>,
     ) -> Result<(PathBuf, ResolvedSource), String> {
         let pin = self
             .lock
-            .git_pin(url, tag)
+            .git_pin(url, git_ref)
             .or(registry_sha)
             .map(str::to_string);
         let store = self.store()?;
         let fetched = match &pin {
-            Some(sha) => crate::git::fetch_pinned(url, tag, sha, store),
-            None => crate::git::fetch(url, tag, store),
+            Some(sha) => crate::git::fetch_pinned(url, git_ref, sha, store),
+            None => crate::git::fetch(url, git_ref, store),
         }
         .map_err(|err| format!("dependency `{key}`: {err}"))?;
         Ok((
             fetched.path,
             ResolvedSource::Git {
                 url: url.to_string(),
-                tag: tag.to_string(),
+                git_ref: git_ref.clone(),
                 sha: fetched.sha,
             },
         ))
