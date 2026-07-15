@@ -64,6 +64,13 @@ fn collect_noe(dir: &Path, out: &mut Vec<PathBuf>) {
 
 #[test]
 fn corpus_is_safe_and_idempotent() {
+    // The formatter parses each corpus file, and a deeply-nested case (a reactive `@html` LiveView
+    // template) recurses past the default ~2 MiB test-thread stack and aborts the process. Sweep on a
+    // 64 MiB worker, the same deep stack the eval corpus and the conformance oracle use
+    // (`noeta_conformance::on_deep_stack`, matched to `noeta_parser`'s deep-parse stack).
+    const DEEP_STACK: usize = 64 * 1024 * 1024;
+    std::thread::scope(|scope| {
+        std::thread::Builder::new().stack_size(DEEP_STACK).spawn_scoped(scope, || {
     // Every configuration must be safe, idempotent, and comment-complete: the default
     // (source-directed), width-driven wrapping, and import sorting.
     let configs = [
@@ -129,4 +136,9 @@ fn corpus_is_safe_and_idempotent() {
             "[{label}] expected most corpus files to format, got {ok}"
         );
     }
+    })
+    .expect("spawn deep-stack fmt-corpus worker")
+    .join()
+    .expect("fmt corpus worker panicked");
+    });
 }
