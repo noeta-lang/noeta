@@ -158,6 +158,133 @@ fn clone_ref(url: &str, git_ref: &GitRef, expected_sha: &str, staging: &Path) ->
     Ok(())
 }
 
+/// The committers a release introduces (namespace-protection, committer signal) — a **soft** anomaly
+/// signal (git author/committer fields are self-set and thus forgeable), meant to prompt a human to
+/// look, not to gate. A release spans a *range* of commits, so this reports every committer new to the
+/// repo across that whole range — not just the tip commit's author. Computed by [`authorship`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Authorship {
+    /// Distinct committers (as `Name <email>`) who appear in the release's commit range but nowhere
+    /// in the repo's history before it — the new maintainers to review. Empty when there are none, or
+    /// when no baseline release exists to compare against.
+    pub new_committers: Vec<String>,
+}
+
+impl Authorship {
+    /// Whether this is worth warning about — the release brought in at least one new committer.
+    pub fn is_noteworthy(&self) -> bool {
+        !self.new_committers.is_empty()
+    }
+}
+
+/// Analyze the committers a release (`sha`) introduces in `url`'s repo (namespace-protection, committer
+/// signal). The release's commit *range* is `baseline..sha`, where `baseline` is `since` when given
+/// (an upgrade: the previously-locked commit), else the **previous tag** reachable from `sha` (a fresh
+/// add: the prior release). Does a **blobless** clone (`--filter=blob:none`, no working tree) — the
+/// commit graph without file contents, a network op run only for `noeta update`/`add` on the deps that
+/// changed, never on the resolve hot path. Best-effort: an `Err` means "couldn't tell", so the caller
+/// stays quiet rather than failing the command.
+pub fn authorship(url: &str, sha: &str, since: Option<&str>) -> Result<Authorship, String> {
+    let short = &sha[..sha.len().min(12)];
+    let dir = std::env::temp_dir().join(format!("noeta-authorship-{}-{short}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let dir_str = dir
+        .to_str()
+        .ok_or_else(|| "temp path is not valid UTF-8".to_string())?
+        .to_string();
+    // A blobless bare clone: full commit graph, no blobs, no checkout. On a local `file` transport the
+    // filter is a no-op (still a full but cheap clone), so tests and real remotes both work.
+    let clone = run_git([
+        "clone",
+        "--filter=blob:none",
+        "--bare",
+        "--quiet",
+        url,
+        &dir_str,
+    ]);
+    let result = clone.and_then(|_| authorship_from(&dir_str, sha, since));
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+/// Compute the new committers from an already-cloned `git_dir` (split out so the git-plumbing is
+/// testable against a local clone without the network).
+fn authorship_from(git_dir: &str, sha: &str, since: Option<&str>) -> Result<Authorship, String> {
+    let gd = format!("--git-dir={git_dir}");
+    // The baseline that defines the release range: the caller's `since` (an upgrade's previous commit),
+    // else the previous tag reachable from `sha`'s parent (the prior release). No baseline — a repo's
+    // very first release — means there is nothing to compare against, so nobody is "new".
+    let baseline = match since {
+        Some(since) => Some(since.to_string()),
+        None => run_git([&gd, "describe", "--tags", "--abbrev=0", &format!("{sha}^")])
+            .ok()
+            .map(|tag| tag.trim().to_string())
+            .filter(|tag| !tag.is_empty()),
+    };
+    let Some(baseline) = baseline else {
+        return Ok(Authorship {
+            new_committers: Vec::new(),
+        });
+    };
+
+    // Author emails already present before the baseline, and the authors across the release range.
+    // Both best-effort: an unrelated baseline (force-push / wrong repo) yields an empty range, so we
+    // simply report nobody rather than failing.
+    let before: std::collections::BTreeSet<String> =
+        run_git([&gd, "log", "--format=%ae", &baseline])
+            .map(|out| out.lines().map(|l| l.trim().to_string()).collect())
+            .unwrap_or_default();
+    let range = run_git([
+        &gd,
+        "log",
+        "--format=%an <%ae>%x1f%ae",
+        &format!("{baseline}..{sha}"),
+    ])
+    .unwrap_or_default();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut new_committers = Vec::new();
+    for line in range.lines() {
+        if let Some((display, email)) = line.split_once('\u{1f}') {
+            let email = email.trim();
+            if !before.contains(email) && seen.insert(email.to_string()) {
+                new_committers.push(display.trim().to_string());
+            }
+        }
+    }
+    Ok(Authorship { new_committers })
+}
+
+/// Normalize a git remote `url` to a browsable **HTTPS repo URL** (best-effort): strip a trailing
+/// `.git` and rewrite the `git@host:owner/repo` and `ssh://git@host/owner/repo` SSH forms. Returns
+/// `None` for a local path / `file:` URL (no web home) or anything whose shape we don't recognize —
+/// callers then show the raw `url`.
+pub fn repo_web_url(url: &str) -> Option<String> {
+    let strip_git = |s: &str| s.strip_suffix(".git").unwrap_or(s).to_string();
+    if let Some(rest) = url.strip_prefix("https://") {
+        return Some(format!("https://{}", strip_git(rest)));
+    }
+    if let Some(rest) = url.strip_prefix("http://") {
+        return Some(format!("https://{}", strip_git(rest)));
+    }
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        // ssh://git@host/owner/repo(.git)
+        let rest = rest.strip_prefix("git@").unwrap_or(rest);
+        return Some(format!("https://{}", strip_git(rest)));
+    }
+    if let Some(rest) = url.strip_prefix("git@") {
+        // git@host:owner/repo(.git)
+        let (host, path) = rest.split_once(':')?;
+        return Some(format!("https://{host}/{}", strip_git(path)));
+    }
+    None
+}
+
+/// A browsable link to `sha` in `url`'s repo (`<repo>/commit/<sha>`, the GitHub/GitLab/Gitea shape),
+/// or `None` when the repo isn't web-browsable (a local/`file` source).
+pub fn commit_web_url(url: &str, sha: &str) -> Option<String> {
+    repo_web_url(url).map(|repo| format!("{repo}/commit/{sha}"))
+}
+
 /// Run `git` with `args`, returning trimmed stdout on success or a message built from stderr. A
 /// failure to even spawn `git` (not installed) is reported as such.
 fn run_git<'a>(args: impl IntoIterator<Item = &'a str>) -> Result<String, String> {
@@ -323,5 +450,104 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("no branch"), "got: {err}");
+    }
+    /// Commit `file` (created with unique content) authored by `name <email>`.
+    fn commit_as(repo: &Path, file: &str, name: &str, email: &str) {
+        std::fs::write(repo.join(file), format!("// {file}\n")).unwrap();
+        let run = |args: &[&str]| {
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(repo)
+                .env("GIT_AUTHOR_NAME", name)
+                .env("GIT_AUTHOR_EMAIL", email)
+                .env("GIT_COMMITTER_NAME", name)
+                .env("GIT_COMMITTER_EMAIL", email)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", file]);
+    }
+
+    #[test]
+    fn authorship_reports_new_committers_across_a_release_range() {
+        if !git_available() {
+            return;
+        }
+        let repo = std::env::temp_dir().join(format!("noeta_authorship_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let url = repo.to_str().unwrap();
+        let head = || {
+            super::run_git(["-C", url, "rev-parse", "HEAD"])
+                .unwrap()
+                .trim()
+                .to_string()
+        };
+        // History: Alice (v0.9.0), then two more commits — one by Alice, one by first-timer Bob —
+        // making up the v1.0.0 release; the release *range* spans both, not just the tip.
+        commit_as(&repo, "a.noe", "Alice", "alice@example.com");
+        let v0 = head();
+        git(&["tag", "v0.9.0"], &repo);
+        commit_as(&repo, "b.noe", "Alice", "alice@example.com");
+        commit_as(&repo, "c.noe", "Bob", "bob@example.com");
+        let v1 = head();
+        git(&["tag", "v1.0.0"], &repo);
+
+        // Explicit baseline (an upgrade from v0.9.0): Bob is new across v0..v1; Alice is established.
+        let up = authorship(url, &v1, Some(&v0)).unwrap();
+        assert_eq!(up.new_committers.len(), 1, "only Bob is new: {up:?}");
+        assert!(up.new_committers[0].contains("Bob"), "{up:?}");
+        assert!(up.is_noteworthy(), "{up:?}");
+
+        // No baseline given (a fresh add): the previous tag v0.9.0 is discovered and used — same range,
+        // same result. This is what proves we span the release, not just look at the tip commit.
+        let added = authorship(url, &v1, None).unwrap();
+        assert!(
+            added.new_committers.iter().any(|a| a.contains("Bob")),
+            "{added:?}"
+        );
+        assert!(added.is_noteworthy(), "{added:?}");
+
+        // A release entirely by the established maintainer introduces nobody new.
+        let est = authorship(url, &v0, Some(&v0)).unwrap();
+        assert!(est.new_committers.is_empty(), "{est:?}");
+        assert!(!est.is_noteworthy(), "{est:?}");
+    }
+
+    #[test]
+    fn repo_and_commit_links_normalize_the_common_url_forms() {
+        assert_eq!(
+            repo_web_url("https://github.com/acme/http.git").as_deref(),
+            Some("https://github.com/acme/http")
+        );
+        assert_eq!(
+            repo_web_url("git@github.com:acme/http.git").as_deref(),
+            Some("https://github.com/acme/http")
+        );
+        assert_eq!(
+            repo_web_url("ssh://git@gitlab.com/acme/http").as_deref(),
+            Some("https://gitlab.com/acme/http")
+        );
+        assert_eq!(
+            repo_web_url("http://x/acme/http").as_deref(),
+            Some("https://x/acme/http")
+        );
+        // A local path / file URL has no web home.
+        assert_eq!(repo_web_url("/tmp/acme/http"), None);
+        assert_eq!(repo_web_url("file:///tmp/acme/http"), None);
+        assert_eq!(
+            commit_web_url("https://github.com/acme/http", "abc123").as_deref(),
+            Some("https://github.com/acme/http/commit/abc123")
+        );
+        assert_eq!(commit_web_url("/tmp/x", "abc"), None);
     }
 }

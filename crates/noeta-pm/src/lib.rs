@@ -20,6 +20,12 @@ pub mod graph;
 pub mod lock;
 pub mod manifest;
 pub mod registry;
+pub mod reserved;
+
+/// GitHub OAuth device flow for the laptop scope-claim path (namespace-protection #1). Behind
+/// `registry-http` (it needs the HTTP client), like the rest of the hosted-registry client.
+#[cfg(feature = "registry-http")]
+pub mod github;
 
 /// A git forge (GitHub org) used as a registry — resolve packages from repos + tags instead of the
 /// hosted index (private-registries arc). Implements the `registry::Index` trait.
@@ -29,6 +35,18 @@ pub mod git_forge;
 /// Behind the `provenance` feature (CLI-only; the LSP and offline consumers don't pull the crypto).
 #[cfg(feature = "provenance")]
 pub mod provenance;
+
+/// Client-side transparency-log verification (namespace-protection #1): inclusion + consistency proofs
+/// and signed-checkpoint verification over the registry's RFC 6962 Merkle log. Behind `provenance`
+/// (it needs Ed25519 + SHA-256).
+#[cfg(feature = "provenance")]
+pub mod transparency;
+
+/// Client-side security-advisory verification (namespace-protection #1, advisory feed): fetch the
+/// registry's signed advisory database, verify each entry against a pinned key, and match it against
+/// resolved versions. Needs serde (the feed) + Ed25519/SHA-256 (the signatures).
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+pub mod advisory;
 
 /// Keyless provenance — Sigstore bundles verified offline against the public sigstore.dev trust
 /// root (Phase 5). Behind the `keyless` feature (CLI-only), for the same reason as `provenance`.
@@ -47,6 +65,10 @@ mod git;
 mod git_auth;
 mod resolve;
 mod store;
+
+/// The git **authorship** helpers backing the committer signal (`noeta update`/`add`) — re-exported so
+/// front-ends reach them without the rest of the git-fetch internals (which keep `Store` private).
+pub use git::{Authorship, authorship, commit_web_url, repo_web_url};
 
 /// Resolve a git `url`@`tag` to its current commit SHA (package-manager Phase 4, S2) — the one git
 /// operation `noeta publish` needs, to pin the SHA into the registry index at publish time.

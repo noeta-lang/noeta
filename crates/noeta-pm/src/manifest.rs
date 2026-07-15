@@ -182,6 +182,46 @@ pub struct Trust {
     /// Packages permitted to contribute `noeta <subcommand>` CLI commands. A command from an
     /// unlisted package is silently omitted (a capability the user never asked for).
     pub commands: std::collections::BTreeSet<String>,
+    /// Which registry **scopes** (the `company` segment) this project demands carry verified
+    /// provenance (namespace-protection #1, require-provenance). A dependency resolved from a required
+    /// scope whose release is unsigned is a hard resolve error — the consumer's own guarantee, held
+    /// independently of whether the scope itself set a require-provenance policy.
+    pub require_provenance: RequireProvenance,
+    /// Whether every registry dependency must be publicly recorded in the registry's **transparency
+    /// log** (namespace-protection #1, TLog): resolution verifies each registry release's inclusion
+    /// under a signed checkpoint and that the log is an append-only extension of the one pinned in
+    /// `noeta.lock` — so a compromised registry can't serve an unlogged or history-rewritten release.
+    /// Default `false` (gradual adoption).
+    pub require_transparency: bool,
+    /// A **publish cooldown** window in seconds (namespace-protection #1): a registry release published
+    /// more recently than this is not *newly selected* during resolution — so an advisory or a yank can
+    /// catch a compromised release before it auto-propagates to consumers. An existing lockfile pin is
+    /// unaffected (already your choice); only fresh selection is held back. `None` = off (default).
+    pub publish_cooldown: Option<u64>,
+}
+
+/// The consumer's `[trust].require_provenance` policy: demand verified provenance from no scope
+/// (default), every scope, or a named set of scopes. The `company` segment is the scope.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum RequireProvenance {
+    /// Unset — a scope's releases are accepted unsigned (gradual-adoption default).
+    #[default]
+    None,
+    /// `require_provenance = true` — every registry dependency must carry verified provenance.
+    All,
+    /// `require_provenance = ["acme", "para"]` — only these scopes must.
+    Scopes(std::collections::BTreeSet<String>),
+}
+
+impl RequireProvenance {
+    /// Whether releases from `scope` (a `company` segment) must carry verified provenance.
+    pub fn requires(&self, scope: &str) -> bool {
+        match self {
+            RequireProvenance::None => false,
+            RequireProvenance::All => true,
+            RequireProvenance::Scopes(scopes) => scopes.contains(scope),
+        }
+    }
 }
 
 /// The `[package]` table — a package's global identity and version (package-manager P2.0). Absent for
@@ -870,6 +910,16 @@ fn parse_dependency_map(deps: &toml::Table) -> Result<BTreeMap<String, Dependenc
                  `use {key}.…`)"
             ));
         }
+        // The key is the local import root: binding a dependency under a built-in root
+        // (`std`/`noeta`/`core`) would make `use std.…` resolve to that package instead of the
+        // compiler's built-in — an import-layer shadowing vector (namespace-protection #2/#3).
+        // Refuse it here so even a hand-edited manifest can't capture a core import root.
+        if crate::reserved::is_builtin(key) {
+            return Err(format!(
+                "dependency key `{key}` is a built-in import root (`use {key}.…` is the compiler's \
+                 own `{key}` namespace) and cannot be bound to a dependency — choose another key"
+            ));
+        }
         out.insert(key.clone(), parse_dependency(key, value)?);
     }
     Ok(out)
@@ -904,9 +954,60 @@ fn parse_trust(table: &toml::Table) -> Result<Trust, String> {
         }
         Ok(out)
     };
+    // `require_provenance` is `true` (every scope), `false`/absent (none), or an array of scope
+    // (`company`) strings. A scope entry is validated as an identifier so a typo fails loudly.
+    let require_provenance = match trust_table.get("require_provenance") {
+        None => RequireProvenance::None,
+        Some(v) => {
+            if let Some(b) = v.as_bool() {
+                if b {
+                    RequireProvenance::All
+                } else {
+                    RequireProvenance::None
+                }
+            } else if let Some(array) = v.as_array() {
+                let mut scopes = std::collections::BTreeSet::new();
+                for entry in array {
+                    let s = entry.as_str().ok_or(
+                        "`trust.require_provenance` entries must be scope strings (a `company`)",
+                    )?;
+                    if !is_identifier(s) {
+                        return Err(format!(
+                            "`trust.require_provenance`: `{s}` is not a scope (a `company` identifier)"
+                        ));
+                    }
+                    scopes.insert(s.to_string());
+                }
+                RequireProvenance::Scopes(scopes)
+            } else {
+                return Err(
+                    "`trust.require_provenance` must be a boolean or an array of scope strings"
+                        .to_string(),
+                );
+            }
+        }
+    };
+    let require_transparency = match trust_table.get("require_transparency") {
+        None => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or("`trust.require_transparency` must be a boolean")?,
+    };
+    let publish_cooldown = match trust_table.get("publish_cooldown") {
+        None => None,
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or("`trust.publish_cooldown` must be a duration string like \"24h\"")?;
+            Some(parse_duration(s)?)
+        }
+    };
     Ok(Trust {
         native: parse_list("native")?,
         commands: parse_list("commands")?,
+        require_provenance,
+        require_transparency,
+        publish_cooldown,
     })
 }
 
@@ -939,6 +1040,34 @@ fn parse_registries(table: &toml::Table) -> Result<Registries, String> {
         }
     }
     Ok(registries)
+}
+
+/// Parse a human duration into seconds for `[trust].publish_cooldown`: an integer with an optional unit
+/// suffix `s`/`m`/`h`/`d` (seconds/minutes/hours/days), e.g. `"24h"`, `"30m"`, `"7d"`, `"3600s"`. A
+/// bare number is seconds. Zero is allowed (a no-op window). Rejects a negative, empty, or malformed
+/// value so a typo can't silently disable the cooldown.
+fn parse_duration(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("`trust.publish_cooldown` is empty".to_string());
+    }
+    let (digits, unit_secs) = match s.chars().last().unwrap() {
+        's' => (&s[..s.len() - 1], 1u64),
+        'm' => (&s[..s.len() - 1], 60),
+        'h' => (&s[..s.len() - 1], 3600),
+        'd' => (&s[..s.len() - 1], 86_400),
+        c if c.is_ascii_digit() => (s, 1),
+        _ => {
+            return Err(format!(
+                "`trust.publish_cooldown` = \"{s}\" has an unknown unit (use s, m, h, or d)"
+            ));
+        }
+    };
+    let n: u64 = digits.trim().parse().map_err(|_| {
+        format!("`trust.publish_cooldown` = \"{s}\" is not a whole number of time units")
+    })?;
+    n.checked_mul(unit_secs)
+        .ok_or_else(|| format!("`trust.publish_cooldown` = \"{s}\" overflows"))
 }
 
 /// Parse one dependency value: a bare SemVer string (`dep = "^1.2"`, the registry shorthand) or a
@@ -1283,6 +1412,77 @@ mod tests {
     }
 
     #[test]
+    fn trust_parses_require_provenance() {
+        // Default: no scope is required.
+        let none = Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").unwrap();
+        assert!(!none.trust().require_provenance.requires("acme"));
+        // `true` → every scope required.
+        let all = Manifest::parse("[trust]\nrequire_provenance = true\n").unwrap();
+        assert!(all.trust().require_provenance.requires("acme"));
+        assert!(all.trust().require_provenance.requires("anything"));
+        // A scope list → only those scopes required.
+        let some = Manifest::parse("[trust]\nrequire_provenance = [\"para\", \"acme\"]\n").unwrap();
+        assert!(some.trust().require_provenance.requires("para"));
+        assert!(some.trust().require_provenance.requires("acme"));
+        assert!(!some.trust().require_provenance.requires("other"));
+        // `false` is explicitly none.
+        let off = Manifest::parse("[trust]\nrequire_provenance = false\n").unwrap();
+        assert!(!off.trust().require_provenance.requires("acme"));
+        // A malformed scope entry / wrong type fails loudly.
+        assert!(Manifest::parse("[trust]\nrequire_provenance = [\"a/b\"]\n").is_err());
+        assert!(Manifest::parse("[trust]\nrequire_provenance = 42\n").is_err());
+    }
+
+    #[test]
+    fn trust_parses_require_transparency() {
+        let off = Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").unwrap();
+        assert!(!off.trust().require_transparency);
+        let on = Manifest::parse("[trust]\nrequire_transparency = true\n").unwrap();
+        assert!(on.trust().require_transparency);
+        assert!(Manifest::parse("[trust]\nrequire_transparency = \"yes\"\n").is_err());
+    }
+
+    #[test]
+    fn trust_parses_publish_cooldown() {
+        let off = Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").unwrap();
+        assert_eq!(off.trust().publish_cooldown, None);
+        assert_eq!(
+            Manifest::parse("[trust]\npublish_cooldown = \"24h\"\n")
+                .unwrap()
+                .trust()
+                .publish_cooldown,
+            Some(86_400)
+        );
+        assert_eq!(
+            Manifest::parse("[trust]\npublish_cooldown = \"7d\"\n")
+                .unwrap()
+                .trust()
+                .publish_cooldown,
+            Some(604_800)
+        );
+        // A bare number is seconds; a non-string or bad unit is an error, not a silent no-op.
+        assert_eq!(
+            Manifest::parse("[trust]\npublish_cooldown = \"90\"\n")
+                .unwrap()
+                .trust()
+                .publish_cooldown,
+            Some(90)
+        );
+        assert!(Manifest::parse("[trust]\npublish_cooldown = \"2w\"\n").is_err());
+        assert!(Manifest::parse("[trust]\npublish_cooldown = 24\n").is_err());
+    }
+
+    #[test]
+    fn parse_duration_units() {
+        assert_eq!(parse_duration("30m").unwrap(), 1_800);
+        assert_eq!(parse_duration("3600s").unwrap(), 3_600);
+        assert_eq!(parse_duration("0").unwrap(), 0);
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("h").is_err());
+        assert!(parse_duration("-5h").is_err());
+    }
+
+    #[test]
     fn trust_rejects_a_malformed_identity() {
         // A typo'd grant must fail loudly, not silently authorize nothing.
         assert!(Manifest::parse("[trust]\nnative = [\"not-an-identity\"]\n").is_err());
@@ -1397,6 +1597,18 @@ mod tests {
     fn a_dependency_key_must_be_an_identifier() {
         // The key is the local import root (`use bad-key.…` is not a valid path).
         assert!(Manifest::parse("[dependencies]\n\"bad-key\" = \"^1\"\n").is_err());
+    }
+
+    #[test]
+    fn a_dependency_key_cannot_capture_a_builtin_import_root() {
+        // namespace-protection #2/#3: binding a dep under `std`/`noeta`/`core` would shadow the
+        // compiler's built-in namespace at the import layer — refused even by hand-editing.
+        for key in ["std", "noeta", "core"] {
+            let err = Manifest::parse(&format!("[dependencies]\n{key} = \"^1\"\n")).unwrap_err();
+            assert!(err.contains("built-in import root"), "{key}: {err}");
+        }
+        // A near-miss that is *not* reserved is accepted (the guard is exact, not a prefix match).
+        assert!(Manifest::parse("[dependencies]\nstdx = \"^1\"\n").is_ok());
     }
 
     #[test]

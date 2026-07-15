@@ -62,6 +62,12 @@ pub struct ResolvedGraph {
     /// compilation unit compiles under. [`Edition::DEFAULT`] for a bare script with no `[package]`.
     /// Per-dependency editions live on each [`LockedPackage`]; this is the one the front-end reads.
     pub root_edition: crate::edition::Edition,
+    /// The transparency-log head to pin in `noeta.lock` (namespace-protection #1, TLog) — the log key
+    /// + last checkpoint verified during this resolve. `None` when transparency isn't engaged.
+    pub log_trust: Option<crate::lock::LogTrust>,
+    /// The identities resolved via a **registry** dependency (as opposed to a direct git/path source)
+    /// — the set transparency enforcement applies to. Empty when no registry dependency was resolved.
+    pub registry_identities: std::collections::BTreeSet<String>,
 }
 
 /// A resolved package's native entry crate (Phase 3, N3.1): where the composed build finds its
@@ -144,6 +150,8 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
             trusted_command_roots: Vec::new(),
             scope_trust: BTreeMap::new(),
             root_edition: crate::edition::Edition::DEFAULT,
+            log_trust: None,
+            registry_identities: std::collections::BTreeSet::new(),
         });
     };
     let manifest = read_manifest(&manifest_path)?;
@@ -161,6 +169,10 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
     // never applies — authority flows top-down from the human.
     let native_trust = &manifest.trust().native;
     let registries = manifest.registries();
+    // Same top-down authority: the consumer's require-provenance policy is the root's, applied to every
+    // resolved dependency (namespace-protection #1). A dependency can't relax it for itself.
+    let require_provenance = &manifest.trust().require_provenance;
+    let publish_cooldown = manifest.trust().publish_cooldown;
     let mut walker = Walker {
         instances: BTreeMap::new(),
         store: None,
@@ -168,8 +180,11 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
         indexes: BTreeMap::new(),
         registries,
         native_trust,
+        require_provenance,
+        publish_cooldown,
         solution: BTreeMap::new(),
         scope_trust: BTreeMap::new(),
+        registry_ids: std::collections::BTreeSet::new(),
     };
     // Phase 4, S5b: first *select versions* — gather the candidate graph (materialize the path/git
     // spine, query the index for every registry candidate + its deps) and run PubGrub. This backtracks
@@ -184,20 +199,128 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
     // dependencies are pinned individually in the lock). A bare manifest with no `[package]` compiles
     // under the default edition.
     let root_edition = manifest.package().map(|p| p.edition()).unwrap_or_default();
-    let graph = assemble(
+    let registry_ids = walker.registry_ids;
+    #[allow(unused_mut)]
+    let mut graph = assemble(
         walker.instances,
         &root_edges,
         &manifest.trust().commands,
         scope_trust,
         root_edition,
+        registry_ids,
     );
+
+    // Transparency-log enforcement (namespace-protection #1, TLog): when the consumer requires it,
+    // every registry release must be publicly logged under a signed checkpoint that is an append-only
+    // extension of the one pinned in `noeta.lock`. Feature-gated (the crypto + HTTP client), like
+    // provenance verification; a lockfile-shape-only build (the LSP) skips the crypto.
+    #[cfg(all(feature = "registry-http", feature = "provenance"))]
+    if manifest.trust().require_transparency && !graph.registry_identities.is_empty() {
+        graph.log_trust = Some(enforce_transparency(&graph, lock.log_trust())?);
+    }
 
     // Refresh the lockfile (best-effort: a read-only project must not fail a build). Skipped for a
     // manifest with no resolved dependencies, so a bare-`[targets]` project grows no lock.
     if !graph.locked.is_empty() {
-        let _ = crate::lock::write(&manifest_dir, &graph.locked, &graph.scope_trust);
+        // Resolution doesn't touch the advisory feed (that's `noeta audit`), so preserve any advisory
+        // pin already in the lock rather than erasing it on every build.
+        let advisory_trust = crate::lock::Lock::read(&manifest_dir)
+            .advisory_trust()
+            .cloned();
+        let _ = crate::lock::write(
+            &manifest_dir,
+            &graph.locked,
+            &graph.scope_trust,
+            graph.log_trust.as_ref(),
+            advisory_trust.as_ref(),
+        );
     }
     Ok(graph)
+}
+
+/// Enforce `[trust].require_transparency` (namespace-protection #1, TLog): verify the registry's
+/// current signed checkpoint (against the pinned log key, TOFU on first use), prove it is an
+/// append-only extension of the checkpoint pinned in the lock, and verify every registry-resolved
+/// release is included at that checkpoint. Returns the new head to pin. Any failure — a changed log
+/// key, a rewritten history, or a missing/forged inclusion — aborts the resolve.
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+fn enforce_transparency(
+    graph: &ResolvedGraph,
+    pinned: Option<&crate::lock::LogTrust>,
+) -> Result<crate::lock::LogTrust, String> {
+    use crate::transparency;
+    let index = crate::registry::open_http()?.ok_or(
+        "`[trust].require_transparency` needs the hosted registry — set `NOETA_REGISTRY_URL`",
+    )?;
+    // The log key: the one pinned in the lock, or the served key on first use (TOFU).
+    let key = match pinned {
+        Some(p) => p.public_key.clone(),
+        None => index
+            .log_public_key()?
+            .ok_or("the registry serves no transparency-log public key")?,
+    };
+    let cp = index.log_checkpoint()?;
+    if !transparency::verify_checkpoint(&key, cp.tree_size, &cp.root_hash, &cp.signature)? {
+        return Err(
+            "the transparency-log checkpoint does not verify against the pinned log key — the \
+             registry changed keys or is equivocating (reconcile, then `noeta update` to re-pin)"
+                .to_string(),
+        );
+    }
+    // Append-only: the current checkpoint must be a consistent extension of the pinned one.
+    if let Some(p) = pinned {
+        if cp.tree_size < p.tree_size {
+            return Err(
+                "the transparency log shrank since it was pinned — the registry rewrote history"
+                    .to_string(),
+            );
+        }
+        let cons = index.log_consistency(p.tree_size, cp.tree_size)?;
+        let root_from =
+            transparency::hex_to_array::<32>(&p.root_hash).ok_or("malformed pinned root hash")?;
+        let root_to =
+            transparency::hex_to_array::<32>(&cp.root_hash).ok_or("malformed checkpoint root")?;
+        let proof = cons
+            .proof
+            .iter()
+            .map(|h| transparency::hex_to_array::<32>(h))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("malformed consistency proof")?;
+        if !transparency::verify_consistency(
+            p.tree_size as usize,
+            cp.tree_size as usize,
+            &proof,
+            &root_from,
+            &root_to,
+        ) {
+            return Err(
+                "the transparency log is not an append-only extension of the pinned checkpoint — \
+                 history was rewritten or the registry is equivocating"
+                    .to_string(),
+            );
+        }
+    }
+    // Every registry-resolved release must be included at this verified checkpoint.
+    for pkg in &graph.locked {
+        if !graph.registry_identities.contains(&pkg.identity) {
+            continue;
+        }
+        let ResolvedSource::Git { url, git_ref, sha } = &pkg.source else {
+            continue;
+        };
+        // A registry-resolved release is pinned to a tag; the transparency log is keyed by that tag.
+        // (`git_ref` generalized `tag` to tag/branch/HEAD in the private-registries arc — a non-tag
+        // git source is never a registry identity, so it is not logged.)
+        let crate::manifest::GitRef::Tag(tag) = git_ref else {
+            continue;
+        };
+        index.verify_inclusion_at(&pkg.identity, &pkg.version.to_string(), url, tag, sha, &cp)?;
+    }
+    Ok(crate::lock::LogTrust {
+        public_key: key,
+        tree_size: cp.tree_size,
+        root_hash: cp.root_hash,
+    })
 }
 
 /// Carries the walk's growing state: the deduped package instances, the lazily-opened package store
@@ -214,6 +337,14 @@ struct Walker<'a> {
     registries: &'a crate::manifest::Registries,
     /// The root manifest's `[trust].native` — package identities allowed to run native code (Phase 4).
     native_trust: &'a std::collections::BTreeSet<String>,
+    /// The root manifest's `[trust].require_provenance` — scopes whose releases the consumer demands
+    /// carry verified provenance (namespace-protection #1). An unsigned release from a required scope
+    /// is refused during the walk.
+    require_provenance: &'a crate::manifest::RequireProvenance,
+    /// The root manifest's `[trust].publish_cooldown` in seconds (namespace-protection #1): a registry
+    /// release published more recently than this is dropped from the candidate set before PubGrub, so a
+    /// too-fresh version is never newly selected. `None` = off.
+    publish_cooldown: Option<u64>,
     /// The resolved `identity → version` map (Phase 4, S5b), computed by [`Walker::solve`] before the
     /// walk. The walk materializes each registry dependency at *its* selected version rather than
     /// greedily picking the highest; empty until `solve` runs (a pure path/git graph leaves registry
@@ -222,6 +353,9 @@ struct Walker<'a> {
     /// scope → the trust root established while materializing registry deps (provenance, Phase 4
     /// #2 / Phase 5); pinned into `noeta.lock` afterwards.
     scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
+    /// The identities materialized via a **registry** dependency (not a direct git/path source) —
+    /// what transparency-log enforcement applies to (namespace-protection #1, TLog).
+    registry_ids: std::collections::BTreeSet<String>,
 }
 
 impl Walker<'_> {
@@ -353,6 +487,18 @@ impl Walker<'_> {
                     )
                 })?;
                 let name = format!("{}/{}", package.company, package.package);
+                // This identity came from a registry dependency — transparency enforcement applies to
+                // it (a direct git/path dep isn't logged, so it's out of scope).
+                self.registry_ids.insert(name.clone());
+                // Defense in depth: `solve` already refused built-in scopes before they entered the
+                // candidate graph, so a solved version can't name one — but the walk is a public entry
+                // too, so keep the invariant local rather than assume the solve ran.
+                if crate::reserved::is_builtin(&package.company) {
+                    return Err(format!(
+                        "dependency `{key}`: {}",
+                        crate::reserved::builtin_registry_refusal(&package.company, &name)
+                    ));
+                }
                 let version = self.solution.get(&name).cloned().ok_or_else(|| {
                     format!("dependency `{key}` (`{name}`) is not in the resolved version set")
                 })?;
@@ -457,6 +603,19 @@ impl Walker<'_> {
         served_key: Option<&str>,
     ) -> Result<(), String> {
         let scope = name.split('/').next().unwrap_or(name);
+        // Consumer require-provenance (namespace-protection #1): if this project demands `scope`
+        // carry provenance, an unsigned release is refused outright — the guarantee holds even if the
+        // scope set no policy of its own, and even on first use where TOFU would otherwise allow it.
+        if self.require_provenance.requires(scope)
+            && release.signature.is_none()
+            && release.bundle.is_none()
+        {
+            return Err(format!(
+                "dependency `{key}` (`{name}`): `[trust].require_provenance` demands verified \
+                 provenance from scope `{scope}`, but this release is unsigned — refusing to resolve \
+                 an unattested release"
+            ));
+        }
         let action = provenance_decision(
             self.lock.scope_trust(scope),
             release.signature.as_deref(),
@@ -578,6 +737,12 @@ impl Walker<'_> {
             &mut registry_queue,
         )?;
 
+        // Versions the **root consumer** exact-pins (`dep = "=1.5.0"`) — a deliberate choice that
+        // bypasses their own publish cooldown (namespace-protection #1). Only the root's *direct* deps
+        // count: a transitive dependency can't exact-pin its way past the consumer's cooldown, so the
+        // control stays sound against a malicious dep declaring `= <fresh version>`.
+        let exact_pins = root_exact_pins(&root_deps);
+
         // Transitively load every registry candidate (and the identities its releases depend on) from
         // the index — a path/git-overridden identity is skipped (its single version already wins).
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -585,11 +750,19 @@ impl Walker<'_> {
             if path_git.contains_key(&identity) || !seen.insert(identity.clone()) {
                 continue;
             }
-            let company = identity.split('/').next().unwrap_or(&identity).to_string();
+            // Same supply-chain invariant, at the transitive frontier: a release from the index may
+            // *declare* a dependency under a built-in scope. Refuse before querying the index for it,
+            // so a compromised registry can't drag a forged `std/*` in behind a legitimate package.
+            let scope = identity.split('/').next().unwrap_or(&identity);
+            if crate::reserved::is_builtin(scope) {
+                return Err(crate::reserved::builtin_registry_refusal(scope, &identity));
+            }
+            let company = scope.to_string();
             let releases = self
                 .index_for(&company)?
                 .releases(&identity)
                 .map_err(|err| format!("registry package `{identity}`: {err}"))?;
+            let releases = self.apply_cooldown(&identity, releases, &exact_pins)?;
             for release in &releases {
                 for dep in &release.deps {
                     if !path_git.contains_key(&dep.package) && !seen.contains(&dep.package) {
@@ -662,12 +835,59 @@ impl Walker<'_> {
                         )
                     })?;
                     let identity = format!("{}/{}", package.company, package.package);
+                    // Supply-chain invariant (namespace-protection #2): a built-in scope
+                    // (`std`/`noeta`/`core`) is served by the compiler, never a registry — refuse it
+                    // here, before it can enter the candidate graph, so no registry can shadow core.
+                    if crate::reserved::is_builtin(&package.company) {
+                        return Err(format!(
+                            "dependency `{key}`: {}",
+                            crate::reserved::builtin_registry_refusal(&package.company, &identity)
+                        ));
+                    }
                     reqs.push((identity.clone(), req.clone()));
                     registry_queue.push(identity);
                 }
             }
         }
         Ok(reqs)
+    }
+
+    /// Drop registry candidates published within `[trust].publish_cooldown` (namespace-protection #1),
+    /// so a too-fresh release is never *newly selected* — giving an advisory or a yank time to catch a
+    /// compromised release before it auto-propagates. A release with no known publish time is kept
+    /// (undateable — the local index and any pre-cooldown registry aren't subject to it). If **every**
+    /// candidate of a package is within the window, that's a hard error naming the package: the control
+    /// fails closed (silently allowing the just-published version would defeat its purpose), and the
+    /// message points at the levers (wait, lower, or disable the cooldown).
+    fn apply_cooldown(
+        &self,
+        identity: &str,
+        releases: Vec<crate::registry::Release>,
+        exact_pins: &std::collections::BTreeSet<(String, Version)>,
+    ) -> Result<Vec<crate::registry::Release>, String> {
+        let Some(cooldown_secs) = self.publish_cooldown else {
+            return Ok(releases);
+        };
+        if cooldown_secs == 0 || releases.is_empty() {
+            return Ok(releases);
+        }
+        // The versions of *this* package the root consumer exact-pinned — exempt from the window.
+        let exempt: std::collections::BTreeSet<Version> = exact_pins
+            .iter()
+            .filter(|(id, _)| id == identity)
+            .map(|(_, v)| v.clone())
+            .collect();
+        let had = releases.len();
+        let kept = cooldown_kept(releases, cooldown_secs, now_unix_ms(), &exempt);
+        if kept.is_empty() && had > 0 {
+            return Err(format!(
+                "every published version of `{identity}` is within the {} publish cooldown \
+                 (`[trust].publish_cooldown`) — wait for a version to age out, lower the cooldown, or \
+                 remove the setting",
+                human_secs(cooldown_secs)
+            ));
+        }
+        Ok(kept)
     }
 }
 
@@ -683,6 +903,77 @@ fn registry_cache_key(source: Option<&crate::manifest::RegistrySource>) -> Strin
         None => "default".to_string(),
         Some(crate::manifest::RegistrySource::Hosted(url)) => format!("hosted:{url}"),
         Some(crate::manifest::RegistrySource::GitForge(base)) => format!("forge:{base}"),
+    }
+}
+
+/// Now as Unix epoch **milliseconds** (publish-cooldown). A clock before the epoch → 0 (treats every
+/// release as old enough — cooldown fails safe toward availability if the clock is absurd).
+fn now_unix_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Keep only registry candidates old enough to clear the cooldown: `published_at ≤ now − cooldown`.
+/// A release is also kept if it is undateable (`published_at == None`) or its version is in `exempt`
+/// (the root consumer exact-pinned it). Pure (clock passed in) so it is directly testable;
+/// [`Walker::apply_cooldown`] wraps it with the fail-closed empty check.
+fn cooldown_kept(
+    releases: Vec<crate::registry::Release>,
+    cooldown_secs: u64,
+    now_ms: i64,
+    exempt: &std::collections::BTreeSet<Version>,
+) -> Vec<crate::registry::Release> {
+    let cutoff_ms = now_ms.saturating_sub((cooldown_secs as i64).saturating_mul(1000));
+    releases
+        .into_iter()
+        .filter(|r| match r.published_at {
+            Some(ts) => ts <= cutoff_ms || exempt.contains(&r.version),
+            None => true,
+        })
+        .collect()
+}
+
+/// The `(identity, version)` pairs a set of resolver requirements **exactly** pins — a fully specified
+/// `=x.y.z`. Only these bypass the publish cooldown; a range (`^1`, `>=1, <2`) or a partial exact
+/// (`=1.5`) is not a single deliberate version and does not.
+fn root_exact_pins(reqs: &[(String, VersionReq)]) -> std::collections::BTreeSet<(String, Version)> {
+    reqs.iter()
+        .filter_map(|(id, req)| exact_version(req).map(|v| (id.clone(), v)))
+        .collect()
+}
+
+/// If `req` is a fully specified exact pin (`=x.y.z`), the pinned [`Version`]; else `None`. A partial
+/// exact (`=1.5`, `=1`) matches a range of patches, so it isn't a single-version pin.
+fn exact_version(req: &VersionReq) -> Option<Version> {
+    if req.comparators.len() != 1 {
+        return None;
+    }
+    let c = &req.comparators[0];
+    if c.op != semver::Op::Exact {
+        return None;
+    }
+    Some(Version {
+        major: c.major,
+        minor: c.minor?,
+        patch: c.patch?,
+        pre: c.pre.clone(),
+        build: semver::BuildMetadata::EMPTY,
+    })
+}
+
+/// A compact rendering of a cooldown window (`86400` → `"1d"`), for the error message.
+fn human_secs(s: u64) -> String {
+    if s != 0 && s.is_multiple_of(86_400) {
+        format!("{}d", s / 86_400)
+    } else if s != 0 && s.is_multiple_of(3_600) {
+        format!("{}h", s / 3_600)
+    } else if s != 0 && s.is_multiple_of(60) {
+        format!("{}m", s / 60)
+    } else {
+        format!("{s}s")
     }
 }
 
@@ -869,6 +1160,7 @@ fn assemble(
     trusted_commands: &std::collections::BTreeSet<String>,
     scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
     root_edition: crate::edition::Edition,
+    registry_identities: std::collections::BTreeSet<String>,
 ) -> ResolvedGraph {
     // Global segment per identity. Direct dependencies keep the consumer's key (so the entry's
     // `use <key>.…` needs no rewrite); transitive-only packages get a unique synthesized segment.
@@ -946,6 +1238,8 @@ fn assemble(
         trusted_command_roots,
         scope_trust,
         root_edition,
+        log_trust: None,
+        registry_identities,
     }
 }
 
@@ -988,6 +1282,87 @@ fn read_manifest(path: &Path) -> Result<Manifest, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dated_release(major: u64, published_at: Option<i64>) -> crate::registry::Release {
+        crate::registry::Release {
+            version: Version::new(major, 0, 0),
+            coords: crate::registry::GitCoords {
+                url: "u".into(),
+                tag: format!("v{major}.0.0"),
+                sha: "s".into(),
+            },
+            deps: Vec::new(),
+            signature: None,
+            bundle: None,
+            published_at,
+        }
+    }
+
+    #[test]
+    fn cooldown_drops_only_versions_inside_the_window() {
+        let now = 1_000_000_000_000i64; // fixed "now" in ms
+        let day = 86_400_000i64;
+        let releases = vec![
+            dated_release(1, Some(now - 10 * day)), // old → kept
+            dated_release(2, Some(now - day / 2)),  // 12h old → within a 1d window → dropped
+            dated_release(3, None),                 // undateable → kept
+        ];
+        let none = std::collections::BTreeSet::new();
+        let kept = cooldown_kept(releases, 86_400, now, &none); // 1-day cooldown
+        let versions: Vec<u64> = kept.iter().map(|r| r.version.major).collect();
+        assert_eq!(versions, vec![1, 3]);
+    }
+
+    #[test]
+    fn cooldown_keeps_everything_at_the_boundary_and_when_zero() {
+        let now = 2_000_000_000_000i64;
+        let none = std::collections::BTreeSet::new();
+        // Published exactly at the cutoff is old enough (inclusive).
+        let at_cutoff = dated_release(1, Some(now - 3_600_000));
+        assert_eq!(cooldown_kept(vec![at_cutoff], 3_600, now, &none).len(), 1);
+    }
+
+    #[test]
+    fn an_exact_pin_bypasses_the_cooldown() {
+        let now = 3_000_000_000_000i64;
+        // A brand-new version, within the window — normally dropped.
+        let fresh = dated_release(2, Some(now - 60_000)); // 1 minute old
+        let none = std::collections::BTreeSet::new();
+        assert!(cooldown_kept(vec![fresh.clone()], 86_400, now, &none).is_empty());
+        // But if the consumer exact-pinned exactly that version, it's exempt.
+        let exempt = std::collections::BTreeSet::from([Version::new(2, 0, 0)]);
+        assert_eq!(cooldown_kept(vec![fresh], 86_400, now, &exempt).len(), 1);
+    }
+
+    #[test]
+    fn only_fully_specified_exact_reqs_pin_a_version() {
+        assert_eq!(
+            exact_version(&VersionReq::parse("=1.5.0").unwrap()),
+            Some(Version::new(1, 5, 0))
+        );
+        // A range or partial exact is not a single deliberate version.
+        assert_eq!(exact_version(&VersionReq::parse("=1.5").unwrap()), None);
+        assert_eq!(exact_version(&VersionReq::parse("^1.5.0").unwrap()), None);
+        assert_eq!(exact_version(&VersionReq::parse(">=1, <2").unwrap()), None);
+        // root_exact_pins keys by identity.
+        let reqs = vec![
+            ("acme/a".to_string(), VersionReq::parse("=2.0.0").unwrap()),
+            ("acme/b".to_string(), VersionReq::parse("^1").unwrap()),
+        ];
+        let pins = root_exact_pins(&reqs);
+        assert!(pins.contains(&("acme/a".to_string(), Version::new(2, 0, 0))));
+        assert_eq!(pins.len(), 1);
+    }
+
+    #[test]
+    fn human_secs_renders_the_largest_whole_unit() {
+        assert_eq!(human_secs(86_400), "1d");
+        assert_eq!(human_secs(7 * 86_400), "7d");
+        assert_eq!(human_secs(3_600), "1h");
+        assert_eq!(human_secs(1_800), "30m");
+        assert_eq!(human_secs(45), "45s");
+        assert_eq!(human_secs(0), "0s");
+    }
 
     /// Lay out an app + one path dep under a fresh temp base; the dep declares `native = "native"`
     /// when `with_crate` says to create the crate dir (Phase 3, N3.1). When `trusted`, the app's
@@ -1331,6 +1706,29 @@ mod tests {
         let err = resolve_graph(&app.join("main.noe")).expect_err("root must authorize native");
         assert!(err.contains("acme/imgfx"), "{err}");
         assert!(err.contains("[trust].native"), "{err}");
+    }
+
+    #[test]
+    fn a_builtin_scope_registry_dependency_is_refused() {
+        // namespace-protection #2: a registry dependency under a built-in scope (`std`/`noeta`/`core`)
+        // is refused at resolve time — the compiler provides these, so a registry serving `std/…` is a
+        // shadow-core supply-chain attack. Refusal happens in `solve`/`gather` before any index query,
+        // so this needs no network and no configured registry.
+        let base = std::env::temp_dir().join("noeta_graph_test_reserved_scope");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nextra = { version = \"^1\", package = \"std/extra\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+        let err = resolve_graph(&app.join("main.noe")).expect_err("built-in scope must be refused");
+        assert!(err.contains("std/extra"), "{err}");
+        assert!(err.contains("supply-chain"), "names the threat: {err}");
+        assert!(err.contains("built into"), "{err}");
     }
 
     #[test]

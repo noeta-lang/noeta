@@ -74,6 +74,18 @@ on one `@dev`-declared-tier primitive (content-kind = code|text), `test` impleme
 co-located-TDD experience PHP can't strip. Re-scopes Phase 5.2 (class-as-value → struct), breaking
 surface migration (`record`/`type X={}` → `struct X{}`).
 
+## Vulnerability / advisory intake — beyond operator-curated
+
+**Status:** parked (2026-07-15), from the namespace-protection arc. The **advisory feed** ships (registry `src/advisory.ts` + migration `0007`/`0008`; client `noeta-pm/src/advisory.rs`; `noeta audit` matching + exit code; transparency-log-bound issuance). But there is exactly **one intake path today: operator-curated.** `POST /v1/advisories` is **admin-only** (`ADMIN_TOKEN` bearer + `ADVISORY_PRIVATE_KEY` to sign), idempotent per `id` (re-POST updates/withdraws, appends a new log leaf). No one but the registry operator can register a vulnerability.
+
+**The gap — intake paths worth building (each independent):**
+1. **Self-service, scope-owned advisories.** Let a scope owner file an advisory against *their own* `company/*` packages, authenticated with the scope's publish token (the same owner check `set_scope_policy` already does). Turns "operator files everything" into "maintainers disclose their own." Signing stays registry-side (one advisory key) or moves to per-scope keys (bigger change; the scope already has a provenance key).
+2. **A reporting / triage queue.** A public `POST /v1/advisories/reports` (unauthenticated or lightly rate-limited) that lands a *candidate* in a pending state; an operator/maintainer promotes it to a signed advisory. Separates "anyone can report" from "only trusted parties publish."
+3. **Upstream import (OSV / GHSA / CVE / RUSTSEC).** A sync job mapping external advisory IDs → `company/package` + affected `ranges`, re-signed and logged locally. This is how the feed gets real coverage without hand-authoring; needs a name-mapping step (external ecosystem coords → Noeta scope/package).
+4. **A transparency-log monitor** (the anti-*suppression* complement, already flagged in the arc): a standing service that enumerates **all** advisory leaves in the log and cross-checks a served feed omits none. Per-advisory inclusion is verified client-side today; full suppression detection is this separate service.
+
+**When it graduates:** decide the trust model first — who may *publish* (operator only, scope owners, or a promote-from-report queue) vs. who may *report* — because that choice drives the auth surface and whether per-scope advisory signing is needed. Reserved-namespace + owner checks from the arc carry over. Strike this entry and point to the slice(s) when picked up.
+
 ## Packed-field-kind enum duplication (low priority — mostly inherent)
 
 **Status:** noted, not scheduled. Four parallel enums encode "what kind is each packed field":

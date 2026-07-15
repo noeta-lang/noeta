@@ -162,6 +162,9 @@ impl Index for GitForgeIndex {
                 deps,
                 signature: None,
                 bundle: None,
+                // A git-forge release carries no publish timestamp, so it is never subject to the
+                // consumer's publish cooldown (namespace-protection #1) — same as any git/path source.
+                published_at: None,
             });
         }
         Ok(releases)
@@ -361,6 +364,7 @@ mod tests {
             deps: Vec::new(),
             signature: None,
             bundle: None,
+            published_at: None,
         };
         assert!(
             idx.publish("acme/thing", &r)

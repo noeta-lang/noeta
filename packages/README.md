@@ -56,7 +56,7 @@ git init -q && git add -A && git commit -qm 'para/html v0.1.0' && git tag v0.1.0
 NOETA_REGISTRY_DIR=<INDEX> noeta publish --git "file://<REPO>" --tag v0.1.0
 
 # 3. A fresh consumer ANYWHERE resolves it purely from the index — a registry dep, not a path:
-#    [dependencies] para = { version = "^0.1", package = "noeta/para" }
+#    [dependencies] para = { version = "^0.1", package = "para/html" }
 NOETA_REGISTRY_DIR=<INDEX> noeta run main.noe   # → clones by pinned SHA, links use para.html.*
 ```
 

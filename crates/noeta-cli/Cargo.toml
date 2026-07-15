@@ -76,6 +76,8 @@ noeta-pm = { workspace = true, features = ["keyless-test-fixtures"] }
 # `docs/Local-First-and-P2P.md`'s `para.*` samples are validated against real signatures (a single
 # `noeta run` sees only std).
 noeta-para-p2p = { path = "../noeta-para-p2p" }
+# The advisory-feed e2e signs a mock feed the client verifies (namespace-protection #1).
+ed25519-dalek = { workspace = true }
 
 [lints]
 workspace = true

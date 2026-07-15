@@ -63,6 +63,11 @@ pub struct Release {
     /// JSON Sigstore bundle over the same attestation (keyless trust root, Phase 5): a DSSE
     /// envelope + Fulcio certificate + Rekor inclusion proof, verified offline. Or `None`.
     pub bundle: Option<String>,
+    /// Publish time as Unix epoch **milliseconds** (publish-cooldown, namespace-protection #1), when
+    /// the index knows it. Drives the consumer's `[trust].publish_cooldown` filter — a release younger
+    /// than the window is not newly selected. `None` for sources without a timestamp (the local index,
+    /// path/git), which are never subject to cooldown.
+    pub published_at: Option<i64>,
 }
 
 impl Release {
@@ -257,6 +262,8 @@ impl Index for LocalIndex {
                     deps,
                     signature: get("sig").map(str::to_string),
                     bundle: get("bundle").map(str::to_string),
+                    // The local (offline) index carries no publish time — never subject to cooldown.
+                    published_at: None,
                 });
             }
         }
@@ -425,6 +432,10 @@ struct WireVersion {
     signature: Option<String>,
     #[serde(default)]
     bundle: Option<String>,
+    /// Publish time as Unix epoch milliseconds (publish-cooldown). Absent for a registry that predates
+    /// the field or can't parse its own timestamp → treated as undateable (never in cooldown).
+    #[serde(default)]
+    published_at_unix: Option<i64>,
 }
 
 #[cfg(feature = "registry-http")]
@@ -463,6 +474,666 @@ impl HttpIndex {
         // `name` is `company/package`, which becomes the two path segments verbatim.
         format!("{}/v1/packages/{name}", self.base)
     }
+
+    /// Claim `scope` for `token`, proving ownership with `proof` — a GitHub Actions OIDC token (CI) or
+    /// a GitHub OAuth access token from the device flow (laptop) (namespace-protection #1): `POST
+    /// /v1/scopes/claim`. Returns the registry's status message on success (`scope claimed` /
+    /// `scope re-claimed`), or the server's error. This binds `token` as the scope's publish token —
+    /// the same token `noeta publish` later presents.
+    pub fn claim_scope(
+        &self,
+        scope: &str,
+        token: &str,
+        proof: &ClaimProof,
+    ) -> Result<String, String> {
+        let mut body = serde_json::json!({ "scope": scope, "token": token });
+        match proof {
+            ClaimProof::Oidc(jwt) => body["oidc"] = serde_json::json!(jwt),
+            ClaimProof::GithubToken(gh) => body["github_token"] = serde_json::json!(gh),
+            ClaimProof::Domain(domain) => body["domain"] = serde_json::json!(domain),
+        }
+        let resp = self
+            .client
+            .post(format!("{}/v1/scopes/claim", self.base))
+            .json(&body)
+            .send()
+            .map_err(|err| format!("claiming scope `{scope}` failed: {err}"))?;
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status.is_success() {
+            // Surface the human-readable status the Worker returns (`{ "status": … }`).
+            let msg = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(str::to_string))
+                .unwrap_or_else(|| format!("scope `{scope}` claimed"));
+            return Ok(msg);
+        }
+        // Prefer the server's `{ "error": … }` message when present.
+        let detail = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| status.to_string());
+        Err(format!("registry refused the claim of `{scope}`: {detail}"))
+    }
+
+    /// Set a scope's **publishing policy** (namespace-protection #1, require-provenance): `POST
+    /// /v1/scopes/{scope}/policy`, owner-authenticated with the scope's publish token
+    /// (`NOETA_REGISTRY_TOKEN`). `require_provenance` turns the requirement on/off; `root` narrows
+    /// which trust root is demanded (`key`/`keyless`), or `None` = either satisfies it. Returns the
+    /// registry's status message.
+    pub fn set_scope_policy(
+        &self,
+        scope: &str,
+        require_provenance: bool,
+        root: Option<&str>,
+    ) -> Result<String, String> {
+        let token = self.token.as_ref().ok_or_else(|| {
+            "setting a scope policy needs a token — set NOETA_REGISTRY_TOKEN to the scope's publish \
+             token"
+                .to_string()
+        })?;
+        let mut body = serde_json::json!({ "require_provenance": require_provenance });
+        if let Some(root) = root {
+            body["root"] = serde_json::json!(root);
+        }
+        let resp = self
+            .client
+            .post(format!("{}/v1/scopes/{scope}/policy", self.base))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .map_err(|err| format!("setting the policy for scope `{scope}` failed: {err}"))?;
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status.is_success() {
+            let msg = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(str::to_string))
+                .unwrap_or_else(|| format!("policy updated for `{scope}`"));
+            return Ok(msg);
+        }
+        let detail = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| status.to_string());
+        Err(format!(
+            "registry rejected the policy for `{scope}`: {detail}"
+        ))
+    }
+
+    /// The transparency log's current **signed checkpoint** (namespace-protection #1): `GET
+    /// /v1/log/checkpoint`.
+    pub fn log_checkpoint(&self) -> Result<LogCheckpoint, String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/log/checkpoint", self.base))
+            .send()
+            .map_err(|err| format!("fetching the transparency-log checkpoint failed: {err}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the transparency-log checkpoint",
+                resp.status()
+            ));
+        }
+        resp.json()
+            .map_err(|err| format!("malformed transparency-log checkpoint: {err}"))
+    }
+
+    /// The transparency log's **public key** (hex) to pin, or `None` if the registry serves none.
+    pub fn log_public_key(&self) -> Result<Option<String>, String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/log/key", self.base))
+            .send()
+            .map_err(|err| format!("fetching the transparency-log key failed: {err}"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the transparency-log key",
+                resp.status()
+            ));
+        }
+        #[derive(serde::Deserialize)]
+        struct KeyResponse {
+            public_key: String,
+        }
+        Ok(Some(
+            resp.json::<KeyResponse>()
+                .map_err(|err| format!("malformed transparency-log key: {err}"))?
+                .public_key,
+        ))
+    }
+
+    /// The **inclusion proof** for `name`@`version`, or `None` if the release is not logged: `GET
+    /// /v1/log/proof/{name}/{version}`.
+    pub fn log_inclusion(&self, name: &str, version: &str) -> Result<Option<LogInclusion>, String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/log/proof/{name}/{version}", self.base))
+            .send()
+            .map_err(|err| format!("fetching the transparency-log proof failed: {err}"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the transparency-log proof of `{name}`@{version}",
+                resp.status()
+            ));
+        }
+        Ok(Some(resp.json().map_err(|err| {
+            format!("malformed transparency-log proof: {err}")
+        })?))
+    }
+
+    /// A **consistency proof** that the log at size `from` is a prefix of size `to`: `GET
+    /// /v1/log/consistency?from&to` (namespace-protection #1, append-only across checkpoints).
+    pub fn log_consistency(&self, from: u64, to: u64) -> Result<LogConsistency, String> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/v1/log/consistency?from={from}&to={to}",
+                self.base
+            ))
+            .send()
+            .map_err(|err| {
+                format!("fetching the transparency-log consistency proof failed: {err}")
+            })?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the transparency-log consistency proof",
+                resp.status()
+            ));
+        }
+        resp.json()
+            .map_err(|err| format!("malformed transparency-log consistency proof: {err}"))
+    }
+}
+
+/// A transparency-log signed checkpoint (RFC 6962 signed tree head) as served by the registry.
+#[cfg(feature = "registry-http")]
+#[derive(Debug, serde::Deserialize)]
+pub struct LogCheckpoint {
+    pub tree_size: u64,
+    pub root_hash: String,
+    pub signature: String,
+}
+
+/// A transparency-log inclusion proof for one release.
+#[cfg(feature = "registry-http")]
+#[derive(Debug, serde::Deserialize)]
+pub struct LogInclusion {
+    pub index: u64,
+    pub tree_size: u64,
+    pub root_hash: String,
+    /// The canonical leaf record — the client recomputes the leaf from it.
+    pub record: String,
+    /// The audit path (hex hashes).
+    pub proof: Vec<String>,
+}
+
+/// A transparency-log consistency proof between two tree sizes (the audit path; the caller already
+/// knows the two roots it is proving append-only between).
+#[cfg(feature = "registry-http")]
+#[derive(Debug, serde::Deserialize)]
+pub struct LogConsistency {
+    pub proof: Vec<String>,
+}
+
+/// Open the **hosted** registry as a concrete [`HttpIndex`] when `NOETA_REGISTRY_URL` is set (needed
+/// for transparency-log verification, which uses HttpIndex-only endpoints), else `None`.
+#[cfg(feature = "registry-http")]
+pub fn open_http() -> Result<Option<HttpIndex>, String> {
+    match std::env::var_os("NOETA_REGISTRY_URL") {
+        Some(url) => {
+            let base = url
+                .into_string()
+                .map_err(|_| "NOETA_REGISTRY_URL is not valid UTF-8".to_string())?;
+            Ok(Some(HttpIndex::new(base)?))
+        }
+        None => Ok(None),
+    }
+}
+
+/// A transparency-log checkpoint the client verified and can pin (namespace-protection #1): the log
+/// key that signed it, plus the tree size + root it attests to (trust-on-first-use / anti-equivocation).
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+#[derive(Debug, Clone)]
+pub struct VerifiedLog {
+    pub tree_size: u64,
+    pub root_hex: String,
+    pub public_key: String,
+}
+
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+impl HttpIndex {
+    /// Verify a resolved release is **included** in the transparency log at a **signed** checkpoint
+    /// (namespace-protection #1). `pinned_key` is the log public key the caller already trusts; `None`
+    /// adopts the served key (trust-on-first-use). The release is identified by its coordinates
+    /// (`name`/`version`/`url`/`tag`/`sha`), which must match the logged record. Returns the verified
+    /// checkpoint to pin. This proves, without trusting the registry, that the release we're about to
+    /// use is publicly logged under a key the log operator controls — a compromised registry can't
+    /// quietly serve an unlogged forgery.
+    pub fn verify_release_logged(
+        &self,
+        name: &str,
+        version: &str,
+        url: &str,
+        tag: &str,
+        sha: &str,
+        pinned_key: Option<&str>,
+    ) -> Result<VerifiedLog, String> {
+        use crate::transparency;
+        let key = match pinned_key {
+            Some(k) => k.to_string(),
+            None => self
+                .log_public_key()?
+                .ok_or("the registry serves no transparency-log public key")?,
+        };
+        let cp = self.log_checkpoint()?;
+        if !transparency::verify_checkpoint(&key, cp.tree_size, &cp.root_hash, &cp.signature)? {
+            return Err(
+                "the transparency-log checkpoint signature does not verify against the log key \
+                 — the registry may be equivocating, or the log key changed"
+                    .to_string(),
+            );
+        }
+        self.verify_inclusion_at(name, version, url, tag, sha, &cp)?;
+        Ok(VerifiedLog {
+            tree_size: cp.tree_size,
+            root_hex: cp.root_hash,
+            public_key: key,
+        })
+    }
+
+    /// Verify a release is included at an **already-verified** checkpoint `cp` (namespace-protection
+    /// #1): fetch its inclusion proof, require it be against `cp`'s signed tree, confirm the logged
+    /// record's coordinates match the release, and verify the audit path. Shared by
+    /// [`Self::verify_release_logged`] and the resolve-time enforcement (which verifies one checkpoint
+    /// then checks every release against it).
+    pub fn verify_inclusion_at(
+        &self,
+        name: &str,
+        version: &str,
+        url: &str,
+        tag: &str,
+        sha: &str,
+        cp: &LogCheckpoint,
+    ) -> Result<(), String> {
+        use crate::transparency;
+        let incl = self
+            .log_inclusion(name, version)?
+            .ok_or_else(|| format!("`{name}`@{version} is not in the transparency log"))?;
+        // The inclusion proof must be against the *signed* checkpoint's tree, else a registry could
+        // prove inclusion in some other (unsigned) tree.
+        if incl.root_hash != cp.root_hash || incl.tree_size != cp.tree_size {
+            return Err(format!(
+                "the transparency inclusion proof for `{name}`@{version} is not against the signed \
+                 checkpoint (a concurrent publish can cause this — retry)"
+            ));
+        }
+        // The logged record must be for exactly the release we resolved: identity, version, and git
+        // coordinates. The record's provenance field rides along, authenticated by inclusion. We check
+        // the *served* record so the client needn't recompute the provenance digest.
+        let fields: Vec<&str> = incl.record.split('\n').collect();
+        let matches = fields.len() >= 6
+            && fields[0] == "noeta-transparency-log-v1"
+            && fields[1] == name
+            && fields[2] == version
+            && fields[3] == url
+            && fields[4] == tag
+            && fields[5] == sha;
+        if !matches {
+            return Err(format!(
+                "the transparency-log record for `{name}`@{version} does not match the resolved \
+                 release (coordinates differ)"
+            ));
+        }
+        let root = transparency::hex_to_array::<32>(&cp.root_hash)
+            .ok_or("malformed checkpoint root hash")?;
+        let proof = incl
+            .proof
+            .iter()
+            .map(|h| transparency::hex_to_array::<32>(h))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("malformed inclusion-proof hash")?;
+        let leaf = transparency::leaf_hash(incl.record.as_bytes());
+        if !transparency::verify_inclusion(
+            leaf,
+            incl.index as usize,
+            incl.tree_size as usize,
+            &proof,
+            &root,
+        ) {
+            return Err(format!(
+                "the transparency inclusion proof for `{name}`@{version} does not verify"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The registry's advisory-feed signed head (namespace-protection #1): the total advisory count and a
+/// digest over every advisory's canonical bytes, signed with the feed's Ed25519 key.
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+#[derive(Debug, serde::Deserialize)]
+pub struct AdvisoryCheckpoint {
+    pub count: usize,
+    pub digest: String,
+    pub signature: String,
+}
+
+/// The verified advisory feed a client fetched (namespace-protection #1): the pinned advisory key, the
+/// signed head it attests to (`count`/`digest`, for trust-on-first-use rollback detection), and the
+/// signature-verified advisories.
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+#[derive(Debug, Clone)]
+pub struct VerifiedAdvisories {
+    pub public_key: String,
+    pub count: usize,
+    pub digest: String,
+    pub advisories: Vec<crate::advisory::Advisory>,
+}
+
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+impl HttpIndex {
+    /// The advisory feed's **public key** (hex) to pin, or `None` if the registry serves none.
+    pub fn advisory_public_key(&self) -> Result<Option<String>, String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/advisories/key", self.base))
+            .send()
+            .map_err(|err| format!("fetching the advisory-feed key failed: {err}"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the advisory-feed key",
+                resp.status()
+            ));
+        }
+        #[derive(serde::Deserialize)]
+        struct KeyResponse {
+            public_key: String,
+        }
+        Ok(Some(
+            resp.json::<KeyResponse>()
+                .map_err(|err| format!("malformed advisory-feed key: {err}"))?
+                .public_key,
+        ))
+    }
+
+    /// The advisory feed's current **signed head**: `GET /v1/advisories/checkpoint`.
+    pub fn advisory_checkpoint(&self) -> Result<AdvisoryCheckpoint, String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/advisories/checkpoint", self.base))
+            .send()
+            .map_err(|err| format!("fetching the advisory-feed checkpoint failed: {err}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the advisory-feed checkpoint",
+                resp.status()
+            ));
+        }
+        resp.json()
+            .map_err(|err| format!("malformed advisory-feed checkpoint: {err}"))
+    }
+
+    /// The raw advisory feed: `GET /v1/advisories`.
+    pub fn list_advisories(&self) -> Result<Vec<crate::advisory::Advisory>, String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/advisories", self.base))
+            .send()
+            .map_err(|err| format!("fetching the advisory feed failed: {err}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the advisory feed",
+                resp.status()
+            ));
+        }
+        #[derive(serde::Deserialize)]
+        struct FeedResponse {
+            advisories: Vec<crate::advisory::Advisory>,
+        }
+        Ok(resp
+            .json::<FeedResponse>()
+            .map_err(|err| format!("malformed advisory feed: {err}"))?
+            .advisories)
+    }
+
+    /// Fetch and **verify** the whole advisory feed (namespace-protection #1). `pinned_key` is the
+    /// advisory key the caller already trusts; `None` adopts the served key (trust-on-first-use). Every
+    /// advisory's signature is checked against that key, the signed head's signature is checked, and the
+    /// head's digest is required to equal the digest recomputed from the served advisories — so a
+    /// registry can't withhold an advisory (the digest would diverge) or serve a tampered one. Returns
+    /// the verified feed and its head, for the caller to pin and to match against resolved versions.
+    pub fn fetch_advisories(&self, pinned_key: Option<&str>) -> Result<VerifiedAdvisories, String> {
+        use crate::advisory;
+        let key = match pinned_key {
+            Some(k) => k.to_string(),
+            None => self
+                .advisory_public_key()?
+                .ok_or("the registry serves no advisory-feed public key")?,
+        };
+        let advisories = self.list_advisories()?;
+        for a in &advisories {
+            if !a.verify(&key)? {
+                return Err(format!(
+                    "advisory `{}` does not verify against the advisory-feed key — the feed may be \
+                     tampered, or the key changed",
+                    a.id
+                ));
+            }
+        }
+        let cp = self.advisory_checkpoint()?;
+        if !advisory::verify_feed_head(&key, cp.count, &cp.digest, &cp.signature)? {
+            return Err(
+                "the advisory-feed head signature does not verify against the feed key".to_string(),
+            );
+        }
+        // The signed head must attest to exactly the advisories served (else one was withheld).
+        let recomputed = advisory::feed_digest(&advisories);
+        if cp.count != advisories.len() || cp.digest != recomputed {
+            return Err(
+                "the advisory-feed head does not match the served advisories — the registry may be \
+                 withholding an advisory"
+                    .to_string(),
+            );
+        }
+        Ok(VerifiedAdvisories {
+            public_key: key,
+            count: cp.count,
+            digest: cp.digest,
+            advisories,
+        })
+    }
+
+    /// The inclusion proof for an advisory's current transparency-log leaf (`GET
+    /// /v1/log/advisory/{id}`), or `None` if the advisory is not logged.
+    pub fn advisory_inclusion(&self, id: &str) -> Result<Option<LogInclusion>, String> {
+        let resp = self
+            .client
+            .get(format!("{}/v1/log/advisory/{id}", self.base))
+            .send()
+            .map_err(|err| format!("fetching the advisory inclusion proof failed: {err}"))?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the advisory inclusion proof of `{id}`",
+                resp.status()
+            ));
+        }
+        Ok(Some(resp.json().map_err(|err| {
+            format!("malformed advisory inclusion proof: {err}")
+        })?))
+    }
+
+    /// Verify that every advisory in `advisories` is **included** in the transparency log at the
+    /// registry's current **signed** checkpoint (advisory-log binding, namespace-protection #1) — so an
+    /// advisory the registry serves is provably in the public, append-only log, not fabricated for one
+    /// consumer. `pinned_log_key` is the log key the caller already trusts (TOFU); `None` adopts the
+    /// served one. Returns `(verified count, unlogged ids)`: an advisory the registry serves *without* a
+    /// log index, or whose logged leaf doesn't match, is surfaced. `Ok(None)` if the registry runs no
+    /// transparency log at all (nothing to verify against).
+    pub fn verify_advisories_logged(
+        &self,
+        advisories: &[crate::advisory::Advisory],
+        pinned_log_key: Option<&str>,
+    ) -> Result<Option<(usize, Vec<String>)>, String> {
+        use crate::transparency;
+        let log_key = match pinned_log_key {
+            Some(k) => k.to_string(),
+            None => match self.log_public_key()? {
+                Some(k) => k,
+                None => return Ok(None), // no transparency log configured
+            },
+        };
+        let cp = self.log_checkpoint()?;
+        if !transparency::verify_checkpoint(&log_key, cp.tree_size, &cp.root_hash, &cp.signature)? {
+            return Err(
+                "the transparency-log checkpoint signature does not verify against the log key"
+                    .to_string(),
+            );
+        }
+        let mut verified = 0usize;
+        let mut unlogged = Vec::new();
+        for a in advisories {
+            let Some(_idx) = a.log_index else {
+                unlogged.push(a.id.clone());
+                continue;
+            };
+            let incl = match self.advisory_inclusion(&a.id)? {
+                Some(incl) => incl,
+                None => {
+                    unlogged.push(a.id.clone());
+                    continue;
+                }
+            };
+            // The proof must be against the *signed* checkpoint, the logged record must be exactly this
+            // advisory's canonical bytes, and the audit path must verify.
+            let canonical = String::from_utf8(a.canonical_bytes())
+                .map_err(|_| "advisory canonical bytes are not UTF-8".to_string())?;
+            if incl.root_hash != cp.root_hash
+                || incl.tree_size != cp.tree_size
+                || incl.record != canonical
+            {
+                return Err(format!(
+                    "advisory `{}` in the feed does not match its transparency-log leaf",
+                    a.id
+                ));
+            }
+            let root = transparency::hex_to_array::<32>(&cp.root_hash)
+                .ok_or("malformed checkpoint root hash")?;
+            let proof = incl
+                .proof
+                .iter()
+                .map(|h| transparency::hex_to_array::<32>(h))
+                .collect::<Option<Vec<_>>>()
+                .ok_or("malformed advisory inclusion-proof hash")?;
+            let leaf = transparency::leaf_hash(canonical.as_bytes());
+            if !transparency::verify_inclusion(
+                leaf,
+                incl.index as usize,
+                incl.tree_size as usize,
+                &proof,
+                &root,
+            ) {
+                return Err(format!(
+                    "the transparency inclusion proof for advisory `{}` does not verify",
+                    a.id
+                ));
+            }
+            verified += 1;
+        }
+        Ok(Some((verified, unlogged)))
+    }
+}
+
+/// A proof of scope ownership presented to `POST /v1/scopes/claim` (namespace-protection #1): a GitHub
+/// Actions OIDC token (CI), a GitHub OAuth access token from the device flow (laptop), or a **domain**
+/// whose control the registry verifies via a well-known file (namespace-protection follow-on). The two
+/// GitHub proofs resolve server-side to one owner identity (interchangeable); a domain proof is its own
+/// `domain` owner kind.
+#[cfg(feature = "registry-http")]
+pub enum ClaimProof {
+    /// A GitHub Actions OIDC JWT (the CI path).
+    Oidc(String),
+    /// A GitHub OAuth access token (the laptop device-flow path).
+    GithubToken(String),
+    /// A domain the claimant controls — the registry fetches its `/.well-known/noeta-registry.txt`.
+    /// The domain is public (not a secret), so Debug shows it.
+    Domain(String),
+}
+
+// The GitHub proofs carry a bearer secret, so Debug redacts them — the value must never leak into a log
+// or panic message. A domain is public, so it's shown.
+#[cfg(feature = "registry-http")]
+impl std::fmt::Debug for ClaimProof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClaimProof::Oidc(_) => write!(f, "ClaimProof::Oidc(<redacted>)"),
+            ClaimProof::GithubToken(_) => write!(f, "ClaimProof::GithubToken(<redacted>)"),
+            ClaimProof::Domain(domain) => write!(f, "ClaimProof::Domain({domain:?})"),
+        }
+    }
+}
+
+/// Mint a fresh 256-bit publish token (hex) from OS entropy — what `noeta claim` binds to a scope
+/// when the user doesn't supply one (namespace-protection #1).
+#[cfg(feature = "registry-http")]
+pub fn generate_publish_token() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).map_err(|err| format!("cannot read OS entropy: {err}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Fetch a GitHub Actions **OIDC token** for `audience`, or `Ok(None)` when not running under GitHub
+/// Actions (namespace-protection #1). GitHub exposes the request URL + a bearer via the
+/// `ACTIONS_ID_TOKEN_REQUEST_URL` / `ACTIONS_ID_TOKEN_REQUEST_TOKEN` env vars (present only when the
+/// workflow grants `id-token: write`); the response is `{ "value": "<jwt>" }`. The `audience` must
+/// match the registry's configured `OIDC_AUDIENCE`.
+#[cfg(feature = "registry-http")]
+pub fn fetch_github_oidc(audience: &str) -> Result<Option<String>, String> {
+    let (Ok(req_url), Ok(req_token)) = (
+        std::env::var("ACTIONS_ID_TOKEN_REQUEST_URL"),
+        std::env::var("ACTIONS_ID_TOKEN_REQUEST_TOKEN"),
+    ) else {
+        return Ok(None);
+    };
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent(concat!("noeta/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|err| format!("cannot build the OIDC HTTP client: {err}"))?;
+    let sep = if req_url.contains('?') { '&' } else { '?' };
+    let resp = client
+        .get(format!("{req_url}{sep}audience={audience}"))
+        .bearer_auth(req_token)
+        .send()
+        .map_err(|err| format!("requesting a GitHub OIDC token failed: {err}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "GitHub OIDC token endpoint returned {} (does the workflow grant `id-token: write`?)",
+            resp.status()
+        ));
+    }
+    #[derive(serde::Deserialize)]
+    struct TokenResponse {
+        value: String,
+    }
+    let token: TokenResponse = resp
+        .json()
+        .map_err(|err| format!("GitHub OIDC token response was not the expected JSON: {err}"))?;
+    Ok(Some(token.value))
 }
 
 #[cfg(feature = "registry-http")]
@@ -509,6 +1180,7 @@ impl Index for HttpIndex {
                 deps,
                 signature: v.signature,
                 bundle: v.bundle,
+                published_at: v.published_at_unix,
             });
         }
         Ok(out)
@@ -646,6 +1318,7 @@ mod tests {
             deps: Vec::new(),
             signature: None,
             bundle: None,
+            published_at: None,
         }
     }
 
@@ -845,7 +1518,7 @@ mod http_tests {
             (
                 200,
                 r#"{"name":"acme/imgfx","versions":[
-                    {"version":"1.2.0","url":"https://x/acme/imgfx","tag":"v1.2.0","sha":"abc","yanked":false},
+                    {"version":"1.2.0","url":"https://x/acme/imgfx","tag":"v1.2.0","sha":"abc","yanked":false,"published_at_unix":1700000000000},
                     {"version":"2.0.0","url":"https://x/acme/imgfx","tag":"v2.0.0","sha":"def","yanked":true}
                 ]}"#
                     .to_string(),
@@ -857,6 +1530,8 @@ mod http_tests {
         assert_eq!(releases.len(), 1);
         assert_eq!(releases[0].version, Version::new(1, 2, 0));
         assert_eq!(releases[0].coords.sha, "abc");
+        // The publish timestamp flows through as epoch-millis for the cooldown filter.
+        assert_eq!(releases[0].published_at, Some(1_700_000_000_000));
 
         // resolve_coords picks it through the same trait the local index uses.
         let (v, c) =
@@ -894,6 +1569,7 @@ mod http_tests {
                     }],
                     signature: Some("deadbeef".to_string()),
                     bundle: None,
+                    published_at: None,
                 },
             )
             .unwrap();
@@ -951,6 +1627,7 @@ mod http_tests {
             deps: Vec::new(),
             signature: None,
             bundle: Some(r#"{"mediaType":"m"}"#.to_string()),
+            published_at: None,
         };
         index.publish("a/b", &rel).unwrap();
         let body = rx.recv().unwrap();
@@ -985,9 +1662,196 @@ mod http_tests {
                     deps: Vec::new(),
                     signature: None,
                     bundle: None,
+                    published_at: None,
                 },
             )
             .unwrap_err();
         assert!(err.contains("NOETA_REGISTRY_TOKEN"), "{err}");
+    }
+
+    #[test]
+    fn http_index_claims_a_scope_and_surfaces_the_status() {
+        // namespace-protection #1: `claim_scope` POSTs { scope, token, oidc } to /v1/scopes/claim and
+        // returns the Worker's status message; a non-2xx surfaces the server's error verbatim.
+        let (tx, rx) = mpsc::channel();
+        let base = mock_server(move |method, path, body| {
+            tx.send((method.to_string(), path.to_string(), body.to_string()))
+                .unwrap();
+            (
+                201,
+                r#"{"status":"scope claimed","scope":"widgetco","owner":"widgetco"}"#.to_string(),
+            )
+        });
+        let index = HttpIndex::new(base).unwrap();
+        let msg = index
+            .claim_scope(
+                "widgetco",
+                "publish-token-abc123",
+                &ClaimProof::Oidc("eyJ.header.sig".into()),
+            )
+            .unwrap();
+        assert_eq!(msg, "scope claimed");
+        let (method, path, body) = rx.recv().unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/v1/scopes/claim");
+        assert!(body.contains("\"scope\":\"widgetco\""), "body: {body}");
+        assert!(body.contains("\"oidc\":\"eyJ.header.sig\""), "body: {body}");
+    }
+
+    #[test]
+    fn http_index_claim_surfaces_a_rejection() {
+        let base = mock_server(|_, _, _| {
+            (
+                403,
+                r#"{"error":"your GitHub identity `attacker` cannot claim scope `stripe`"}"#
+                    .to_string(),
+            )
+        });
+        let index = HttpIndex::new(base).unwrap();
+        let err = index
+            .claim_scope(
+                "stripe",
+                "publish-token-abc123",
+                &ClaimProof::Oidc("eyJ.header.sig".into()),
+            )
+            .unwrap_err();
+        assert!(err.contains("cannot claim scope"), "{err}");
+    }
+
+    #[test]
+    fn http_index_sets_a_scope_policy_with_the_owner_token() {
+        // namespace-protection #1 Phase 1: `set_scope_policy` POSTs the require-provenance policy to
+        // /v1/scopes/{scope}/policy under the scope's publish token, and surfaces the status.
+        let (tx, rx) = mpsc::channel();
+        let base = mock_server(move |method, path, body| {
+            tx.send((method.to_string(), path.to_string(), body.to_string()))
+                .unwrap();
+            (200, r#"{"status":"policy updated","scope":"para","require_provenance":true,"root":"keyless"}"#.to_string())
+        });
+        let index = HttpIndex {
+            token: Some("owner-token".to_string()),
+            ..HttpIndex::new(base).unwrap()
+        };
+        let msg = index
+            .set_scope_policy("para", true, Some("keyless"))
+            .unwrap();
+        assert_eq!(msg, "policy updated");
+        let (method, path, body) = rx.recv().unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/v1/scopes/para/policy");
+        assert!(body.contains("\"require_provenance\":true"), "body: {body}");
+        assert!(body.contains("\"root\":\"keyless\""), "body: {body}");
+    }
+
+    #[test]
+    fn set_scope_policy_needs_a_token() {
+        let base = mock_server(|_, _, _| (200, "{}".to_string()));
+        let err = HttpIndex::new(base)
+            .unwrap()
+            .set_scope_policy("para", true, None)
+            .unwrap_err();
+        assert!(err.contains("NOETA_REGISTRY_TOKEN"), "{err}");
+    }
+
+    #[test]
+    fn github_oidc_is_none_outside_ci() {
+        // Absent the GitHub Actions token-request env, there is no ambient OIDC token — `Ok(None)`, so
+        // `noeta claim` can print actionable guidance rather than error opaquely. (These vars are only
+        // set inside a GitHub Actions job with `id-token: write`.) We don't mutate the environment —
+        // the crate forbids `unsafe`, and `remove_var` is unsafe — so assert only when it is already
+        // absent (the normal case, including ordinary CI test jobs).
+        if std::env::var_os("ACTIONS_ID_TOKEN_REQUEST_URL").is_none()
+            && std::env::var_os("ACTIONS_ID_TOKEN_REQUEST_TOKEN").is_none()
+        {
+            assert_eq!(fetch_github_oidc("noeta-registry").unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn generated_publish_tokens_are_long_and_unique() {
+        let a = generate_publish_token().unwrap();
+        let b = generate_publish_token().unwrap();
+        assert_eq!(a.len(), 64, "256 bits as hex");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b, "tokens must not repeat");
+    }
+
+    #[test]
+    fn log_consistency_parses_the_audit_path() {
+        let (tx, rx) = mpsc::channel();
+        let base = mock_server(move |method, path, _body| {
+            tx.send((method.to_string(), path.to_string())).unwrap();
+            (
+                200,
+                r#"{"from":2,"to":3,"root_from":"aa","root_to":"bb","proof":["11","22"]}"#
+                    .to_string(),
+            )
+        });
+        let index = HttpIndex::new(base).unwrap();
+        let cons = index.log_consistency(2, 3).unwrap();
+        assert_eq!(cons.proof, vec!["11".to_string(), "22".to_string()]);
+        let (method, path) = rx.recv().unwrap();
+        assert_eq!(method, "GET");
+        assert_eq!(path, "/v1/log/consistency?from=2&to=3");
+    }
+
+    #[cfg(feature = "provenance")]
+    #[test]
+    fn verify_release_logged_checks_the_signed_checkpoint_and_inclusion() {
+        // namespace-protection #1 TLog 3: end-to-end client verification against a mock log. A size-1
+        // tree keeps the fixture simple (empty audit path); the multi-size proof math is exhaustively
+        // covered in `transparency`. What this proves is the *wiring* — fetch key/checkpoint/proof,
+        // verify the signature, match the record, verify inclusion — plus that a wrong pinned key is
+        // rejected.
+        use crate::transparency;
+        use ed25519_dalek::{Signer, SigningKey};
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+
+        let sk = SigningKey::from_bytes(&[9u8; 32]);
+        let pub_hex = hex(&sk.verifying_key().to_bytes());
+        let record = transparency::log_record("acme/imgfx", "1.0.0", "u", "t", "abc", "unsigned");
+        let root_hex = hex(&transparency::leaf_hash(record.as_bytes())); // size-1 tree: root == leaf
+        let sig_hex = hex(&sk
+            .sign(format!("noeta-log-checkpoint-v1\n1\n{root_hex}\n").as_bytes())
+            .to_bytes());
+
+        let (pk, rk, sg, rec) = (pub_hex.clone(), root_hex.clone(), sig_hex, record.clone());
+        let base = mock_server(move |_method, path, _body| match path {
+            "/v1/log/key" => (200, format!("{{\"public_key\":\"{pk}\"}}")),
+            "/v1/log/checkpoint" => (
+                200,
+                format!("{{\"tree_size\":1,\"root_hash\":\"{rk}\",\"signature\":\"{sg}\"}}"),
+            ),
+            "/v1/log/proof/acme/imgfx/1.0.0" => (
+                200,
+                format!(
+                    "{{\"index\":0,\"tree_size\":1,\"root_hash\":\"{rk}\",\"record\":{},\"proof\":[]}}",
+                    serde_json::to_string(&rec).unwrap()
+                ),
+            ),
+            _ => (404, "{}".to_string()),
+        });
+        let index = HttpIndex::new(base).unwrap();
+
+        // First use (no pinned key) adopts the served key and verifies the whole chain.
+        let verified = index
+            .verify_release_logged("acme/imgfx", "1.0.0", "u", "t", "abc", None)
+            .unwrap();
+        assert_eq!(verified.tree_size, 1);
+        assert_eq!(verified.public_key, pub_hex);
+        assert_eq!(verified.root_hex, root_hex);
+
+        // A wrong pinned log key is rejected — the checkpoint signature won't verify against it.
+        let err = index
+            .verify_release_logged(
+                "acme/imgfx",
+                "1.0.0",
+                "u",
+                "t",
+                "abc",
+                Some(&"00".repeat(32)),
+            )
+            .unwrap_err();
+        assert!(err.contains("checkpoint signature"), "{err}");
     }
 }
