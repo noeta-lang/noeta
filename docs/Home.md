@@ -31,6 +31,7 @@ Learn the language from zero.
 ### 2 · Bundled tools
 Everything the `noeta` binary does beyond running code.
 - [The `noeta` CLI](The-CLI)
+- [Package Registries](Package-Registries)
 - [Package Provenance](Package-Provenance)
 - [Testing](Testing)
 - [Benchmarking](Benchmarking)
