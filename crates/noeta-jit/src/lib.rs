@@ -1059,6 +1059,11 @@ impl Jit<ObjectModule> {
         bytes[0..8].copy_from_slice(&(n as u64).to_le_bytes());
 
         let mut data = DataDescription::new();
+        // The table is read as `usize`/function-pointer words (`bind_aot_dispatch` does `*dispatch`),
+        // so it must be word-aligned — without this Cranelift defaults to align-1 and the linker may
+        // place `noeta_aot_dispatch` at a non-8-aligned address, which trips Rust's misaligned-pointer
+        // debug check the moment the AOT runtime dereferences it.
+        data.set_align(w as u64);
         data.define(bytes.into_boxed_slice());
         for p in 0..n {
             if let Some(id) = main_ids[p] {
