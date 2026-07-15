@@ -369,6 +369,32 @@ All three accept `--target <NAME>`, which acts as a **gate**: if the named `noet
 
 Dependencies are declared in `noeta.toml` (`[dependencies]`, with elevated grants in `[trust]`) and resolve automatically on `run`/`build`/`check` — there is no separate install step; the resolved pins live in `noeta.lock` (commit it). These three verbs are the *publisher/consumer trust* surface. The trust model behind them — attestations, the two signing roots, pinning, downgrade protection — is documented on [Package Provenance](Package-Provenance).
 
+### The manifest: `[package]` and dependency forms
+
+```toml
+[package]
+name = "acme/app"        # the global identity `company/package` the registry indexes
+version = "0.1.0"        # SemVer
+edition = "2026"         # optional — the language edition this package is written against
+
+[dependencies]
+# A local source tree — no network, no resolver:
+util  = { path = "../util" }
+# A git dependency, pinned to a released tag (the reproducible default):
+http  = { git = "https://github.com/acme/http", tag = "v1.2.0" }
+# A git dependency tracking a branch's tip (re-resolved by `noeta update`):
+gfx   = { git = "https://github.com/acme/gfx", branch = "main" }
+# A git dependency tracking the default branch's HEAD — no tag or branch needed,
+# handy for an in-development or bundled package not yet cut into tagged releases:
+draft = { git = "https://github.com/acme/draft" }
+# A registry dependency by SemVer requirement (`package` is the registry identity):
+json  = { version = "^1.2", package = "acme/json" }
+```
+
+The **dependency key** (`util`, `http`, …) is the import root you address the package by — `use util.…` — decoupled from its global `company/package` identity (like Rust's `foo = { package = "real-name" }`). A **git** source resolves its ref (`tag`/`branch`/HEAD) to a commit SHA at the remote and records that SHA in `noeta.lock`, so **every** form is reproducible regardless of ref kind — a plain build fetches by the pinned SHA (offline once cached), and only `noeta update` re-resolves a moving `branch`/HEAD ref to its new tip. `tag` and `branch` are mutually exclusive. A **published** package (`noeta publish`) may depend only via the registry — a `path`/`git` dependency is rejected at publish time, since a consumer couldn't resolve it.
+
+**Editions** pin the language/ABI semantics a package is written against, so a package can evolve on its own cadence and a newer toolchain still compiles it under *its* edition. `edition` is validated against the editions this toolchain understands (an unknown one is a manifest error); omitting it uses the current edition. Each package's edition is recorded in `noeta.lock`, and the toolchain keys its compiled-bytecode cache on it — so switching a package's edition never serves a stale artifact.
+
 ### `noeta publish`
 
 ```
