@@ -3999,6 +3999,7 @@ dependencies = [
  "insta",
  "noeta-ast",
  "noeta-diagnostics",
+ "noeta-edition",
  "noeta-lexer",
  "noeta-parser",
  "noeta-span",
@@ -4166,6 +4167,9 @@ dependencies = [
 [[package]]
 name = "noeta-edition"
 version = "0.1.0"
+dependencies = [
+ "noeta-span",
+]
 
 [[package]]
 name = "noeta-embed"

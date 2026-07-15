@@ -6,5 +6,10 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+# `SourceId` — the key of an `EditionMap`. `noeta-span` is itself a leaf (it depends on nothing in
+# the pipeline), so this stays acyclic and `noeta-edition` remains near the bottom of the DAG.
+noeta-span = { workspace = true }
+
 [lints]
 workspace = true

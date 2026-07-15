@@ -26,7 +26,10 @@
 //! package's own edition across the single merged program is the compiler arc's later work; this
 //! crate is the shared vocabulary that work is written in.
 
+use std::collections::HashMap;
 use std::fmt;
+
+use noeta_span::{SourceId, Span};
 
 /// A pinned language edition. A closed set: the toolchain knows every edition it ever shipped, so an
 /// unknown value in a manifest is a hard error (a typo or a package needing a newer toolchain), never
@@ -85,6 +88,60 @@ impl fmt::Display for Edition {
     }
 }
 
+/// Which language [`Edition`] each source of a merged program was written against, keyed by
+/// [`SourceId`].
+///
+/// The loader merges every package's modules into **one** `Program` compiled as a unit, so a
+/// per-package edition cannot be a single scalar on the program — the merged statement list mixes
+/// declarations from many sources. Each declaration's span already carries the `SourceId` of the
+/// file it came from, so this side-table recovers "which edition governs this declaration?" from any
+/// span, exactly as `noeta-loader`'s `SourceMap` recovers "which file does this span render
+/// against?". This is the carrier the checker (and later, lowering) consults per declaration.
+///
+/// **An absent source is [`Edition::DEFAULT`].** A source not recorded — a single-file check, a
+/// synthetic REPL fragment, the one-edition world — is governed by the default edition, so
+/// [`Self::at`] never fails. An empty map therefore means "everything is the default edition", which
+/// is exactly what a plain `check_all` / single-file `parse` wants.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EditionMap {
+    by_source: HashMap<SourceId, Edition>,
+}
+
+impl EditionMap {
+    /// An empty map — every source resolves to [`Edition::DEFAULT`] via [`Self::at`].
+    pub fn new() -> EditionMap {
+        EditionMap::default()
+    }
+
+    /// Record that the source `id` is written against `edition`.
+    pub fn set(&mut self, id: SourceId, edition: Edition) {
+        self.by_source.insert(id, edition);
+    }
+
+    /// The edition governing the source `id` — its recorded edition, or [`Edition::DEFAULT`] if the
+    /// source was never recorded (a single-file/synthetic source, or the one-edition world).
+    pub fn source_edition(&self, id: SourceId) -> Edition {
+        self.by_source.get(&id).copied().unwrap_or(Edition::DEFAULT)
+    }
+
+    /// The edition governing the declaration a `span` belongs to — [`Self::source_edition`] of the
+    /// span's owning source. The per-span lookup the checker uses to apply each declaration's own
+    /// edition across a merged program.
+    pub fn at(&self, span: Span) -> Edition {
+        self.source_edition(span.source)
+    }
+
+    /// Whether nothing has been recorded — i.e. every source is the default edition.
+    pub fn is_empty(&self) -> bool {
+        self.by_source.is_empty()
+    }
+
+    /// How many sources have a recorded edition.
+    pub fn len(&self) -> usize {
+        self.by_source.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +169,29 @@ mod tests {
         for &e in Edition::KNOWN {
             assert_eq!(Edition::parse(e.as_str()).unwrap(), e);
         }
+    }
+
+    #[test]
+    fn edition_map_defaults_an_unrecorded_source() {
+        let map = EditionMap::new();
+        assert!(map.is_empty());
+        // An empty map governs every source with the default edition — the one-edition world.
+        assert_eq!(map.source_edition(SourceId(0)), Edition::DEFAULT);
+        assert_eq!(map.source_edition(SourceId(7)), Edition::DEFAULT);
+        assert_eq!(map.at(Span::new_in(SourceId(3), 0, 1)), Edition::DEFAULT);
+    }
+
+    #[test]
+    fn edition_map_recovers_a_recorded_source_and_span() {
+        let mut map = EditionMap::new();
+        map.set(SourceId(0), Edition::E2026);
+        map.set(SourceId(2), Edition::E2026);
+        assert_eq!(map.len(), 2);
+        assert!(!map.is_empty());
+        // A recorded source resolves to its edition; a span resolves via its owning `SourceId`.
+        assert_eq!(map.source_edition(SourceId(0)), Edition::E2026);
+        assert_eq!(map.at(Span::new_in(SourceId(2), 4, 8)), Edition::E2026);
+        // An unrecorded source still falls back to the default.
+        assert_eq!(map.source_edition(SourceId(9)), Edition::DEFAULT);
     }
 }

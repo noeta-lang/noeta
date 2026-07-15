@@ -1983,7 +1983,7 @@ fn cmd_check(
                 continue;
             }
         };
-        match noeta_loader::load_with_deps(entry, &deps) {
+        match noeta_loader::load_with_deps(entry, manifest::root_edition(entry), &deps) {
             Err(err) => {
                 // One unreadable file does not abort the whole run — record it and keep checking the
                 // rest, so `check` reports as much as it can in a single pass.
@@ -2185,7 +2185,9 @@ fn try_tier_dispatch(err: &clap::Error) -> Option<ExitCode> {
     // through (the external probe, then clap's error). Dependencies resolve first: a declared
     // tier typically lives in a dependency package (`use fuzzkit.tiers.run_fuzz`).
     let deps = graph::resolve_graph(&file).ok()?.packages;
-    let linked = noeta_loader::load_with_deps(&file, &deps).ok()?.ok()?;
+    let linked = noeta_loader::load_with_deps(&file, manifest::root_edition(&file), &deps)
+        .ok()?
+        .ok()?;
     let activated = noeta_check::activate_tiers_with(&linked.program, &[&name], &providers);
     let tier = match activated.registry.resolve_provider(&name, &providers) {
         Ok(noeta_check::ResolvedProvider::Declared(d)) => d.clone(),
@@ -2527,20 +2529,21 @@ impl noeta_stdlib::CommandCtx for CliCommandCtx {
                 return 2;
             }
         };
-        let mut linked = match noeta_loader::load_with_deps(file, &deps) {
-            Err(err) => {
-                eprintln!("lang: cannot read {}: {err}", file.display());
-                return 2;
-            }
-            Ok(Err(load_diagnostics)) => {
-                let mut stderr = io::stderr();
-                for ld in &load_diagnostics {
-                    let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+        let mut linked =
+            match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
+                Err(err) => {
+                    eprintln!("lang: cannot read {}: {err}", file.display());
+                    return 2;
                 }
-                return 1;
-            }
-            Ok(Ok(linked)) => linked,
-        };
+                Ok(Err(load_diagnostics)) => {
+                    let mut stderr = io::stderr();
+                    for ld in &load_diagnostics {
+                        let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+                    }
+                    return 1;
+                }
+                Ok(Ok(linked)) => linked,
+            };
 
         // Synthesize `<module>.<func>(<args>)` as a trailing top-level statement. The program
         // supplies any identifiers the call names (`fetch`); a missing one surfaces as an
@@ -2656,7 +2659,7 @@ fn serve_parallel_impl(file: &std::path::Path, port: i64, host: &str, workers: u
             return 2;
         }
     };
-    let mut linked = match noeta_loader::load_with_deps(file, &deps) {
+    let mut linked = match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
         Err(err) => {
             eprintln!("lang: cannot read {}: {err}", file.display());
             return 2;
@@ -3875,7 +3878,7 @@ fn load_linked(file: &std::path::Path) -> Result<noeta_loader::Linked, ExitCode>
             return Err(ExitCode::from(2));
         }
     };
-    match noeta_loader::load_with_deps(file, &deps) {
+    match noeta_loader::load_with_deps(file, manifest::root_edition(file), &deps) {
         Err(err) => {
             eprintln!("lang: cannot read {}: {err}", file.display());
             Err(ExitCode::from(2))

@@ -10,11 +10,12 @@ use logos::Logos;
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::{Source, Span};
 
-/// Re-export of the language [`Edition`] type (from the leaf `noeta-edition` crate) so every
-/// front-end crate that already depends on the lexer (loader, db, fmt, conformance) can name the
-/// edition it threads into [`lex_in`] / `noeta_parser::parse_in` without a separate dependency on
-/// `noeta-edition`.
-pub use noeta_edition::Edition;
+/// Re-export of the language [`Edition`] type and its [`EditionMap`] side-table (from the leaf
+/// `noeta-edition` crate) so every front-end crate that already depends on the lexer (loader, db,
+/// fmt, conformance, check) can name the edition it threads into [`lex_in`] /
+/// `noeta_parser::parse_in`, and the per-source map it builds/consumes, without a separate
+/// dependency on `noeta-edition`.
+pub use noeta_edition::{Edition, EditionMap};
 
 /// The lexical category of a token. Declarative `logos` definitions keep the lexer
 /// fast and the token set legible. `logos` resolves overlaps by longest match (so `==`

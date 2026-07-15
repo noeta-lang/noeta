@@ -169,7 +169,7 @@ pub fn compile_whole_file(
     // Miss: load + link (sibling `.noe` modules the entry `use`s are resolved and merged; a lone file
     // links to itself; dependency packages re-rooted under their keys), activate any dev-tiers,
     // type-check, and compile to bytecode.
-    let linked = match noeta_loader::load_with_deps(file, &deps) {
+    let linked = match noeta_loader::load_with_deps(file, edition, &deps) {
         Err(err) => {
             return Err(CompileFailure::Unreadable(format!(
                 "cannot read {}: {err}",
@@ -180,6 +180,11 @@ pub fn compile_whole_file(
         Ok(Ok(linked)) => linked,
     };
     let sources = linked.sources;
+    // Which edition governs each source (entry/siblings = root package's; each dependency's own),
+    // keyed by `SourceId` — the checker recovers a declaration's edition from its span. Captured
+    // before `linked.program` is moved below; SourceIds survive tier activation, so the map stays
+    // valid against the activated program.
+    let editions = linked.editions;
     // Activation inlines each `@<tier> { … }` block; with no active tiers the program runs as-is and
     // every tier block is stripped at lowering (the default). Activation is only done when needed.
     let program = if active.is_empty() {
@@ -195,7 +200,7 @@ pub fn compile_whole_file(
         }
         activated.program
     };
-    let checked = noeta_check::check_all(&program);
+    let checked = noeta_check::check_all_with_editions(&program, editions);
     if !checked.diagnostics.is_empty() {
         return Err(CompileFailure::Diagnostics {
             sources,
