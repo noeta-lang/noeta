@@ -41,7 +41,8 @@ use std::cmp::Ordering;
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
     Cap, CtxError, CtxOut, CtxResult, ErrorKind, ExternBox, ExternValue, NativeCtx, NativeValue,
-    Retained, Slot, StdError, capability, ctx_arity, no_function_error, no_method_error, type_error,
+    Retained, Slot, StdError, capability, ctx_arity, no_function_error, no_method_error,
+    type_error,
 };
 use noeta_reactive::NodeId;
 // `synced` shares the SAME reactive graph as core `std.reactive`: a synced signal IS a node in that

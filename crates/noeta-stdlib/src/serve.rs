@@ -463,7 +463,8 @@ pub fn http_ctx_dispatch(
                                     // returns the `Response` immediately (its whole body runs
                                     // inside this call — under the context); an async one a
                                     // `Future` reaped below. A call-time abort → 500 now.
-                                    let prior = ctx.task_context().swap(std::mem::take(&mut context));
+                                    let prior =
+                                        ctx.task_context().swap(std::mem::take(&mut context));
                                     let called = ctx.call(handler, &[request]);
                                     context = ctx.task_context().swap(prior);
                                     ctx.free(request);

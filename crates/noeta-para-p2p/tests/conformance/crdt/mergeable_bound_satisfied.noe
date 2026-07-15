@@ -1,0 +1,16 @@
+// para.crdt (p2p P2 / P2.M) — the positive side of the `Mergeable` bound: every registered CRDT
+// type satisfies `T: Mergeable`, so a generic `fn store<T: Mergeable>` accepts a gcounter,
+// pncounter, and gset with a clean check (the bound is seeded from the CRDTs in the registry). The
+// negative case — a plain value has no convergence story and is rejected E0025 — lives in
+// `synced/mergeable_bound.noe`. (Was a `noeta-check` unit test over `std.crdt`; it moved here with
+// the crdt module when it left `std` for `para`.)
+// expect: stdout "ok"
+// expect: exit 0
+use para.{crdt}
+
+fn store<T: Mergeable>(v: T): T { return v; }
+
+g = store(crdt.gcounter())
+p = store(crdt.pncounter())
+s = store(crdt.gset())
+echo "ok"

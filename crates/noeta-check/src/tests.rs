@@ -372,17 +372,11 @@ fn generic_call_violating_a_bound_is_reported() {
 // --- The `Mergeable` bound (p2p P2): CRDT extern types satisfy it, nothing else does, and it is
 //     intrinsic (not user-implementable). The bound is seeded from the extension registry.
 
-#[test]
-fn crdt_types_satisfy_the_mergeable_bound() {
-    // Every registered CRDT satisfies `T: Mergeable` through a generic function call — the seed
-    // from the extension registry plus the ordinary bound check.
-    let src = "use std.{crdt}\n\
-               fn store<T: Mergeable>(v: T): T { return v; }\n\
-               echo store(crdt.gcounter());\n\
-               echo store(crdt.pncounter());\n\
-               echo store(crdt.gset());\n";
-    assert!(codes(src).is_empty(), "{:?}", codes(src));
-}
+// The positive case — every registered CRDT *satisfies* `T: Mergeable` — needs the actual CRDT
+// types, which left `std` for the `para.crdt` package (para-namespace S2). It can't be checked
+// against this std-only registry, so it lives in the para conformance corpus where `ParaP2pExtension`
+// is installed: `crates/noeta-para-p2p/tests/conformance/crdt/mergeable_bound_satisfied.noe`. The
+// bound *name* itself is still checker-intrinsic, so the negative/intrinsic cases below stay here.
 
 #[test]
 fn a_non_crdt_violates_the_mergeable_bound() {

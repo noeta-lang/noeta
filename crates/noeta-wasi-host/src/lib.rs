@@ -762,13 +762,6 @@ mod tests {
         host.tel_release_remote(seed);
         assert!(!host.tel_is_remote(seed));
     }
-
-    #[test]
-    fn p2p_loopback_broker_round_trips() {
-        let mut host = WasiHost::new();
-        host.p2p_publish("t", b"m1".to_vec()).expect("publish");
-        let sub = host.p2p_subscribe("t").expect("subscribe");
-        assert_eq!(host.p2p_poll_sub(sub).expect("poll"), Some(b"m1".to_vec()));
-        assert_eq!(host.p2p_poll_sub(sub).expect("caught up"), None);
-    }
+    // (The p2p loopback-broker round-trip test moved to `noeta-native`'s `p2p.rs` when P2p left the
+    // Host union — F2b: `WasiHost` no longer implements `P2p`; the broker owns those semantics.)
 }
