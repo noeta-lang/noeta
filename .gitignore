@@ -1,5 +1,8 @@
 # Rust build artifacts
 /target
+# The in-tree first-party packages (`packages/*/native/`) are their own cargo projects, built by
+# the composed toolchain into their own `target/` dirs — never track those.
+/packages/**/target/
 **/*.rs.bk
 
 # insta pending snapshots (review then accept; never commit *.snap.new)
