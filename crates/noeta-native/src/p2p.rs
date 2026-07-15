@@ -76,9 +76,9 @@ impl P2pBroker {
 /// maps to a broker operation, and the trait's defaults (durable → ephemeral, encrypted-group →
 /// plaintext pass-through, no identity, always-`Synced`) are exactly the loopback semantics. This is
 /// what lets the p2p capability be **owned by an extension** rather than baked into every host
-/// (para-namespace follow-on F2): the `para.p2p` extension parks one of these behind a [`SharedBroker`]
-/// and serves both the synchronous ops and the async `receive` from it, so a host that speaks no peer
-/// networking implements no `P2p` at all.
+/// (para-namespace follow-on F2/F2b): the `para.p2p` extension parks one of these behind a
+/// [`P2pBackend`] and serves both the synchronous ops and the async `receive` from it, so a host that
+/// speaks no peer networking implements no `P2p` at all.
 impl crate::host::P2p for P2pBroker {
     fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), crate::StdError> {
         self.publish(topic, message);
@@ -98,61 +98,45 @@ impl crate::host::P2p for P2pBroker {
     }
 }
 
-/// A **shareable, `Send`** handle to a loopback [`P2pBroker`] — the ABI that carries the p2p
-/// capability across the async boundary when an *extension* owns it (para-namespace follow-on F2).
-///
-/// The async `p2p.receive` leaf ([`BrokerReceiveIo`]) is an [`crate::ExternIo`], which is `Send`; the
-/// extension's per-run state ([`crate::NativeCtx::state`]) is `Rc`-based and **not** `Send`, so a
-/// receive descriptor cannot capture the extension state directly. The broker lives behind this
-/// `Arc<Mutex<…>>` instead: the extension stores the `Arc` in its (main-thread) `Rc` state slot and
-/// clones it — the `Arc` *is* `Send` — into each receive descriptor, so the same broker is reached
-/// from both the synchronous dispatch and the async leaf without the host holding any p2p state.
-pub type SharedBroker = Arc<Mutex<P2pBroker>>;
+/// A shareable, `Send` handle to a **P2p backend** — either this loopback [`P2pBroker`] or the real
+/// node in `noeta-para-p2p-net` (para-namespace F2b). Both implement [`crate::host::P2p`]; the
+/// `para.p2p` extension picks which at creation (by the host's `real_p2p()` config) and holds one in
+/// per-run ctx state. It lives behind `Arc<Mutex<…>>` because the async `p2p.receive` leaf
+/// ([`P2pReceiveIo`]) is `Send` while ctx state is `Rc`-based — the `Arc` is what crosses into the
+/// receive descriptor, so the same backend is reached from both the synchronous dispatch and the
+/// async leaf, and no host holds any p2p state at all.
+pub type P2pBackend = Arc<Mutex<dyn crate::host::P2p + Send>>;
 
-/// The async receive descriptor over an **extension-owned** [`SharedBroker`] (para-namespace F2) — the
-/// `Send` twin of [`ReceiveIo`], which resolves through the *host*. It captures a clone of the broker
-/// `Arc` at spawn (where the extension's ctx is available) and, at resolve, locks it and pops the
-/// topic's next message — so the receive path needs no host p2p capability at all.
-#[derive(Debug)]
-pub struct BrokerReceiveIo {
-    /// The extension-owned broker this receive resolves against (a clone of the ctx-state `Arc`).
-    pub broker: SharedBroker,
+/// The async receive descriptor over an extension-owned [`P2pBackend`] (para-namespace F2b) — the
+/// `Send` twin of the old host-driven receive. It captures a clone of the backend `Arc` at spawn
+/// (where the extension's ctx is available) and, at resolve, locks it and pops the topic's next
+/// message. Works uniformly for the loopback broker and the real node.
+pub struct P2pReceiveIo {
+    /// The extension-owned backend this receive resolves against (a clone of the ctx-state `Arc`).
+    pub backend: P2pBackend,
     /// The topic to take the next message from.
     pub topic: String,
 }
 
-impl crate::ExternIo for BrokerReceiveIo {
+impl std::fmt::Debug for P2pReceiveIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("P2pReceiveIo")
+            .field("topic", &self.topic)
+            .finish_non_exhaustive()
+    }
+}
+
+impl crate::ExternIo for P2pReceiveIo {
     fn run_sync(
         &mut self,
         _host: &mut dyn crate::Host,
     ) -> Result<crate::NativeOut, crate::StdError> {
         let next = self
-            .broker
+            .backend
             .lock()
-            .expect("p2p broker mutex poisoned")
-            .poll_default(&self.topic);
+            .expect("p2p backend mutex poisoned")
+            .p2p_poll(&self.topic)?;
         Ok(receive_outcome(next))
-    }
-}
-
-/// The default async receive descriptor (p2p P1): it resolves synchronously through the Host at
-/// spawn (the sandbox pops the topic's FIFO; any host degrades serially) and has no real body. A
-/// real gossip transport overrides [`crate::host::P2p::p2p_receive`] with a genuine subscription
-/// future — the same "serial degradation for free" the fs/net leaves rely on.
-#[derive(Debug)]
-pub struct ReceiveIo {
-    /// The topic to take the next message from.
-    pub topic: String,
-}
-
-impl crate::ExternIo for ReceiveIo {
-    fn run_sync(
-        &mut self,
-        host: &mut dyn crate::Host,
-    ) -> Result<crate::NativeOut, crate::StdError> {
-        Ok(receive_outcome(
-            crate::host::require_p2p(host)?.p2p_poll(&self.topic)?,
-        ))
     }
 }
 

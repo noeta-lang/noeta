@@ -364,18 +364,10 @@ pub trait P2p {
     fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError>;
 
     /// The next pending message on `topic`, or `None` if none is available — the non-blocking leaf
-    /// the async `p2p.receive` descriptor resolves through (deterministic FIFO in the sandbox). A
-    /// real async transport would override [`Self::p2p_receive`]; this stays the resolve-at-spawn
-    /// default, the same "serial degradation for free" the fs/net leaves rely on.
+    /// the async `p2p.receive` descriptor ([`crate::P2pReceiveIo`]) resolves through (a deterministic
+    /// FIFO on the loopback broker; the real node's try-recv off its gossip channel), the same
+    /// "serial degradation for free" the fs/net leaves rely on.
     fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, StdError>;
-
-    /// Build the async receive descriptor for `topic` — the p2p mirror of
-    /// [`Network::net_accept`]. Default: a [`crate::p2p::ReceiveIo`] resolving through
-    /// [`Self::p2p_poll`] at spawn (deterministic in the sandbox; serial on any host). A real
-    /// gossip transport would override it with a genuine subscription future.
-    fn p2p_receive(&self, topic: String) -> Box<dyn crate::ExternIo> {
-        Box::new(crate::p2p::ReceiveIo { topic })
-    }
 
     /// Subscribe to `topic`, returning a subscription id whose cursor starts at the beginning of
     /// the topic log (p2p P2). Unlike the topic-level [`Self::p2p_poll`] (one implicit reader),
@@ -478,30 +470,31 @@ pub trait P2p {
     }
 }
 
-/// The **optional** provision of the [`P2p`] capability (para-namespace arc). `P2p` used to be a
-/// mandatory arm of the [`Host`] union; the p2p/local-first stack has since left `std` for the
-/// non-default `para` package, so a host no longer has to implement it. Instead every host declares
-/// whether it provides `P2p` through this accessor: a host that speaks to peers returns `Some(self)`
-/// (its own [`P2p`] impl); a minimal host uses the default `None`. The `para.p2p`/`para.synced`
-/// dispatch reaches the capability through this seam and errors cleanly when it is absent.
-pub trait P2pProvider {
-    /// The `P2p` capability, if this host provides one. Default `None` — a host with no peer
-    /// networking need not implement `P2p` at all.
-    fn as_p2p(&mut self) -> Option<&mut dyn P2p> {
-        None
-    }
+/// Configuration for **real** peer networking on a host (para-namespace follow-on F2b). A host that
+/// permits a live transport (`RealHost` — real IO, nondeterminism) carries one; the deterministic
+/// sandbox and the WASI/browser hosts do not. It holds only the *policy* the extension needs, not any
+/// transport: the p2panda node itself lives in the `para.p2p` extension, never in a host.
+#[derive(Debug, Clone, Default)]
+pub struct RealP2pConfig {
+    /// The app-namespace that keys this node's persistent identity + on-disk store, set by the CLI
+    /// via `RealHost::with_p2p_app`. `None` uses the transport's own default location.
+    pub app_id: Option<String>,
 }
 
-/// Reach a host's [`P2p`] capability through the [`P2pProvider`] seam, or a clean error when the host
-/// does not provide it. The shared accessor the p2p receive descriptor ([`crate::p2p::ReceiveIo`])
-/// and the `para.p2p`/`para.synced` dispatch use, now that `P2p` is optional rather than a mandatory
-/// arm of [`Host`]. In practice the error never fires — a program reaching p2p code runs on a host
-/// that provides it — but it makes the dependency explicit and degrades gracefully otherwise.
-pub fn require_p2p(host: &mut dyn Host) -> Result<&mut dyn P2p, crate::StdError> {
-    host.as_p2p().ok_or_else(|| crate::StdError {
-        kind: crate::ErrorKind::Io,
-        message: "this host does not provide the p2p capability".to_string(),
-    })
+/// Whether a host permits **real** peer networking (para-namespace arc → F2b). `P2p` used to be a
+/// mandatory arm of the [`Host`] union; the p2p/local-first stack left `std` for the non-default
+/// `para` package, and F2b moved the transport *impl* out of every host into the `para.p2p`
+/// extension. So a host no longer provides `P2p` at all — it only declares, through this seam,
+/// whether real networking is allowed and with what config. A real host returns `Some`; the
+/// deterministic sandbox and the minimal hosts keep the default `None`, which the extension reads as
+/// "use the loopback broker" (oracle-safe). The `P2p` impls now live entirely on the extension side
+/// (the loopback [`crate::P2pBroker`] here, the real node in `noeta-para-p2p-net`).
+pub trait P2pProvider {
+    /// The real-networking config for this host, or `None` (the default) to use the deterministic
+    /// loopback broker. Only a real host overrides it.
+    fn real_p2p(&self) -> Option<RealP2pConfig> {
+        None
+    }
 }
 
 /// A `synced_signal`'s convergence state relative to its peers (p2p P3.3). Meaningless on the

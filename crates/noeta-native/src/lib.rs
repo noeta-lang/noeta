@@ -29,13 +29,13 @@ pub use ctx::{
 pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};
 pub use host::{
-    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, ReadSource, Rng,
-    SyncStatus,
+    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, P2pProvider,
+    ReadSource, RealP2pConfig, Rng, SyncStatus,
 };
 pub use map_key::{ExternKeyRef, MapKey, PackedKeyField};
 pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
 pub use os::{ExecIo, ExecResult, Process};
-pub use p2p::{BrokerReceiveIo, P2pBroker, ReceiveIo, SharedBroker};
+pub use p2p::{P2pBackend, P2pBroker, P2pReceiveIo};
 pub use registry::{
     ArenaGetter, BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, CtxTypeDispatch,
     ExtBundle, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut, NativeValue,

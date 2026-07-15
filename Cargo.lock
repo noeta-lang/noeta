@@ -4384,6 +4384,7 @@ dependencies = [
  "noeta-conformance",
  "noeta-crdt",
  "noeta-native",
+ "noeta-para-p2p-net",
  "noeta-reactive",
  "noeta-stdlib",
 ]
@@ -4517,7 +4518,6 @@ dependencies = [
  "criterion",
  "gethostname",
  "getrandom 0.3.4",
- "noeta-para-p2p-net",
  "noeta-stdlib",
  "reqwest 0.12.28",
  "serde_json",

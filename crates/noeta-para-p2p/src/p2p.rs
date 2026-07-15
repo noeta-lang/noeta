@@ -2,17 +2,17 @@
 //! program `publish`es a message to a topic and `receive`s the next message on a topic.
 //!
 //! `publish` is a plain host effect (bytes cross the seam by value). `receive` returns a
-//! `Future<?bytes>` — it hands the executor the host's async receive descriptor
-//! ([`noeta_native::ReceiveIo`]) via [`NativeOut::Spawn`], exactly like `fs.read_async` /
-//! `http.get_async`; under the deterministic sandbox broker it resolves at spawn, so a receive
-//! loop (`while let some(msg) = p2p.receive(topic).await`) drains the topic and terminates
-//! in-oracle. The message is `string|bytes` on the way in (a string rides as its UTF-8 bytes — the
-//! same ergonomic union `crypto` uses) and `bytes` on the way out (the wire is byte-oriented, as
-//! p2panda and CRDT serialization will be).
+//! `Future<?bytes>` — it hands the executor the extension's async receive descriptor
+//! ([`noeta_native::P2pReceiveIo`], built by [`crate::provider::receive_descriptor`]) via a spawned
+//! future, exactly like `fs.read_async` / `http.get_async`; under the deterministic loopback broker
+//! it resolves at spawn, so a receive loop (`while let some(msg) = p2p.receive(topic).await`) drains
+//! the topic and terminates in-oracle. The message is `string|bytes` on the way in (a string rides as
+//! its UTF-8 bytes — the same ergonomic union `crypto` uses) and `bytes` on the way out (the wire is
+//! byte-oriented, as p2panda and CRDT serialization are).
 //!
-//! P1 is single-node **loopback** — publish and receive share one host's broker. Genuine peer/
-//! cross-isolate delivery and real p2panda transport are later slices (P3); the seam and its
-//! determinism story are what P1 proves.
+//! The backend is chosen per run by the host's `real_p2p()` policy (para-namespace F2b): the
+//! deterministic loopback broker on the sandbox, or the real p2panda node on a host that permits real
+//! networking — both reached through [`crate::provider`], neither owned by the host.
 
 use noeta_native::registry::{ExtFn, NativeOut, RetTy, SigType};
 use noeta_native::{
@@ -70,7 +70,7 @@ pub fn p2p_ctx_dispatch<C: NativeCtx + ?Sized>(
             // WORK, not a value: ticket the receive descriptor on the executor and hand back a future
             // slot. The descriptor resolves through the active provider (host transport or the
             // extension broker) at spawn — deterministic under the loopback broker.
-            let io = receive_descriptor(ctx, topic);
+            let io = receive_descriptor(ctx, topic)?;
             Ok(CtxOut::Slot(ctx.spawn_io(io)))
         }
         "identity" => {

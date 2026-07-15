@@ -54,17 +54,16 @@ noeta-diagnostics = { workspace = true }
 # scan builds this crate with `--no-default-features --features entry,<used rings>` to shed the rest,
 # and the linker then drops each unreferenced ring's native dep tree. The `aot` runtime support (on
 # `noeta-vm`) is a hard dep feature above, so it survives `--no-default-features`.
-default = ["entry", "ring-http-client", "ring-p2p", "ring-datetime"]
+default = ["entry", "ring-http-client", "ring-datetime"]
 # Export the C-ABI `main` entry (dev-deps). Default-on so a plain `--native` links a working entry;
 # a *composed* AOT runtime for a native-dependency app depends on this crate with this feature OFF and
 # supplies its own `main` (which installs the app's extensions), avoiding a duplicate-`main` link error.
 entry = []
 # The `std.http` outbound-client ring — forwards to reqwest in noeta-runtime.
 ring-http-client = ["noeta-runtime/ring-http-client"]
-# The `std.p2p`/`std.synced` real-transport ring — forwards to the p2panda-net node in
-# noeta-runtime. The footprint scan drops this (and its multi-MB iroh/QUIC tree) from an AOT binary
-# whose program never imports `std.p2p`/`std.synced`.
-ring-p2p = ["noeta-runtime/ring-p2p"]
+# (para-namespace F2b) There is no `ring-p2p` here anymore: the p2panda transport left noeta-runtime
+# for the `para.p2p` extension crate, so the AOT footprint scan gates it on the *extension* crate's
+# own `ring-p2p` feature (through the composed AOT shim), not on this base.
 # The `std.datetime` ring — forwards to jiff + the tzdb in noeta-stdlib. Unlike the two rings above
 # (host-deps in noeta-runtime), jiff is a *pure* dep in noeta-stdlib, so shedding it needs every
 # noeta-stdlib puller in this crate's graph (vm/value/ir/compiler/check/runtime and this crate) to

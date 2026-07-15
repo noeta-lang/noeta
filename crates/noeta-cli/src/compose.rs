@@ -605,8 +605,17 @@ fn aot_shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, rings: &[
             }
         }
     };
+    // Rings the AOT **base** (`noeta-aot-runtime`) owns — it forwards them to noeta-stdlib /
+    // noeta-runtime. An **extension-owned** ring is not a base feature: since para-namespace F2b the
+    // p2panda transport is `ring-p2p` on the `para.p2p` *extension* crate, whose native tree is linked
+    // through the entry crate that declares it (default-on there), not the base. So such a ring is
+    // filtered out of the base feature set here — applying it to the base would be an unknown-feature
+    // error. (Shedding p2panda from a para-*depending* but non-*importing* `--native` binary is a
+    // future refinement — it would toggle the entry crate's own `ring-p2p` from the footprint scan.)
+    const AOT_BASE_RINGS: &[&str] = &["ring-http-client", "ring-datetime"];
     let ring_list = rings
         .iter()
+        .filter(|r| AOT_BASE_RINGS.contains(&r.as_str()))
         .map(|r| toml_quote(r))
         .collect::<Vec<_>>()
         .join(", ");

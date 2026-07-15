@@ -7,7 +7,7 @@
 
 pub use noeta_native::host::{
     Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, P2pProvider,
-    ReadSource, Rng,
+    ReadSource, RealP2pConfig, Rng,
 };
 pub use noeta_native::{Logging, Metrics, Tracing};
 

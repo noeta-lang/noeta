@@ -976,6 +976,67 @@ fn create_operation(
     (hash, operation)
 }
 
+/// The real node **is** a [`P2p`](noeta_native::host::P2p) backend (para-namespace F2b): the
+/// `para.p2p` extension owns one of these in ctx state and reaches it through the same seam as the
+/// loopback broker, so the transport lives entirely on the extension side — no host implements
+/// `P2p`. Every method delegates to the node's inherent operation (all `&self`: the node is
+/// internally synchronized; the trait's `&mut self` composes over that). The trait's own defaults —
+/// which the loopback broker relies on — are all overridden here with the real log-sync / spaces /
+/// identity behaviour, exactly as `RealHost` used to.
+impl noeta_native::host::P2p for P2pNode {
+    fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
+        self.publish(topic, message)
+    }
+
+    fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, StdError> {
+        self.poll_default(topic)
+    }
+
+    fn p2p_subscribe(&mut self, topic: &str) -> Result<u64, StdError> {
+        self.subscribe(topic)
+    }
+
+    fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
+        Ok(self.poll_sub(sub))
+    }
+
+    fn p2p_publish_durable(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
+        self.publish_durable(topic, message)
+    }
+
+    fn p2p_subscribe_durable(&mut self, topic: &str) -> Result<u64, StdError> {
+        self.subscribe_durable(topic)
+    }
+
+    fn p2p_group_open(&mut self, topic: &str, members: &[String]) -> Result<u64, StdError> {
+        self.group_open(topic, members)
+    }
+
+    fn p2p_group_publish(&mut self, topic: &str, plaintext: Vec<u8>) -> Result<(), StdError> {
+        self.group_publish(topic, plaintext)
+    }
+
+    fn p2p_group_poll(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
+        self.group_poll(sub)
+    }
+
+    fn p2p_group_add(&mut self, topic: &str, member: &str) -> Result<(), StdError> {
+        self.group_add(topic, member)
+    }
+
+    fn p2p_group_remove(&mut self, topic: &str, member: &str) -> Result<(), StdError> {
+        self.group_remove(topic, member)
+    }
+
+    fn p2p_identity(&mut self) -> Result<Option<String>, StdError> {
+        Ok(Some(self.identity()))
+    }
+
+    fn p2p_sync_status(&mut self, topic: &str) -> SyncStatus {
+        self.sync_status(topic)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1004,6 +1065,24 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// The node **is** a [`noeta_native::host::P2p`] backend (para-namespace F2b) — the extension owns
+    /// one and drives it through the trait. Single node, so no delivery; this pins that the trait
+    /// delegation + lazy start work end to end (identity present, status Offline with no peer).
+    /// Starting a node binds local sockets only, so it stays hermetic (unlike the two-node tests).
+    #[test]
+    fn a_node_serves_the_p2p_trait() {
+        use noeta_native::{P2p, SyncStatus};
+        let dir = TempDir::new("trait");
+        let mut node = P2pNode::start_with_config(P2pConfig::at(&dir.0)).expect("node starts");
+        node.p2p_publish("room", b"hello".to_vec())
+            .expect("publish via the trait");
+        let sub = node.p2p_subscribe("room").expect("subscribe via the trait");
+        assert_eq!(node.p2p_poll_sub(sub).expect("poll_sub"), None);
+        assert_eq!(node.p2p_poll("other").expect("poll"), None);
+        assert!(node.p2p_identity().expect("identity").is_some());
+        assert_eq!(node.p2p_sync_status("room"), SyncStatus::Offline);
     }
 
     #[test]

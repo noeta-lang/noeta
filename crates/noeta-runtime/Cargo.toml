@@ -33,15 +33,13 @@ reqwest = { workspace = true, optional = true }
 # over reqwest + serde_json — deliberately NOT `opentelemetry-otlp` (which drags tonic/prost), so a
 # telemetry build adds no protobuf/gRPC tree. Optional so a non-telemetry build links none of it.
 serde_json = { workspace = true, optional = true }
-# Real p2p transport (p2p P3): the `P2p` capability on `RealHost` backed by a p2panda-net node
-# (gossip + log-sync over iroh/QUIC). The transport itself lives in `noeta-para-p2p-net` (extracted
-# para-namespace F2b — the heavy iroh/QUIC/p2panda tree is no longer noeta-runtime's own); this crate
-# only pulls it in behind the `ring-p2p` ring. Optional and OFF ⇒ `RealHost` keeps the single-node
-# loopback broker (P1). Needs the `iroh-gossip` git `[patch]` in the workspace Cargo.toml.
-noeta-para-p2p-net = { workspace = true, optional = true }
+# (para-namespace F2b) noeta-runtime no longer carries any p2p transport: `RealHost` dropped its
+# `P2p` impl, so the p2panda node + its whole iroh/QUIC tree left this crate entirely — it now lives
+# in `noeta-para-p2p-net`, owned by the `para.p2p` extension. This crate keeps only the `p2p_app_id`
+# config it surfaces to that extension via `P2pProvider::real_p2p`.
 
 [features]
-default = ["ring-http-client", "telemetry", "ring-p2p"]
+default = ["ring-http-client", "telemetry"]
 # The `std.http` outbound-client ring: pulls reqwest into `RealHost`. Off ⇒ `net_fetch` is a stub
 # that errors (never reached — a program that doesn't import `std.http` never calls it), and reqwest
 # is absent from the link.
@@ -51,14 +49,6 @@ ring-http-client = ["dep:reqwest"]
 # `--no-default-features` drops it, and AOT footprint selection links it only when a program imports
 # `std.tracing`.
 telemetry = ["dep:serde_json", "ring-http-client", "reqwest/json"]
-# The real-p2p ring (p2p P3): pulls a p2panda-net node into `RealHost`. On by default, mirroring
-# `ring-http-client` — the plain toolchain/build is fully capable, and `noeta build --native`'s
-# footprint scan sheds the whole p2panda/iroh tree from a binary that never imports `std.p2p`/
-# `std.synced` (via `noeta-aot-runtime --no-default-features`). Off ⇒ `RealHost`'s `P2p` stays the
-# dep-free loopback broker (single-node), which is also the always-compiled sandbox side. (The
-# oracle suite never builds `noeta-runtime`, so it stays p2panda-free regardless.) Pinned exactly
-# (`p2panda-net = "0.7"`) so the pre-1.0 dep can't break the default build via an auto-update.
-ring-p2p = ["dep:noeta-para-p2p-net"]
 
 [dev-dependencies]
 criterion = { workspace = true }

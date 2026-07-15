@@ -15,6 +15,19 @@ noeta-native = { workspace = true }
 # `register_view_source_extractor`). One-way: noeta-stdlib does not depend on this crate.
 noeta-reactive = { workspace = true }
 noeta-stdlib = { workspace = true }
+# The real p2panda transport (para-namespace F2b). Optional and behind the `ring-p2p` ring: when a
+# host permits real networking (`RealHost`) this crate owns a live p2panda node; off ⇒ the extension
+# uses only the dep-free loopback broker, so a loopback/wasm build never links iroh/QUIC. Needs the
+# `iroh-gossip` git `[patch]` in the workspace Cargo.toml (present).
+noeta-para-p2p-net = { workspace = true, optional = true }
+
+[features]
+# On by default so the composed **dev toolchain** (`noeta run`) gets real peer networking, mirroring
+# how `ring-p2p` used to be a noeta-runtime default. `noeta build --native`'s footprint scan turns it
+# OFF for a binary whose program never imports `para.p2p`/`para.synced`, shedding the whole p2panda
+# tree (the same DCE axis the http/datetime rings use — now gated on THIS crate's feature).
+default = ["ring-p2p"]
+ring-p2p = ["dep:noeta-para-p2p-net"]
 
 [dev-dependencies]
 # The para-conformance harness runs this crate's moved fixtures with `ParaP2pExtension` registered
