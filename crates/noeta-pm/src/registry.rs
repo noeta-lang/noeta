@@ -576,6 +576,29 @@ impl HttpIndex {
             format!("malformed transparency-log proof: {err}")
         })?))
     }
+
+    /// A **consistency proof** that the log at size `from` is a prefix of size `to`: `GET
+    /// /v1/log/consistency?from&to` (namespace-protection #1, append-only across checkpoints).
+    pub fn log_consistency(&self, from: u64, to: u64) -> Result<LogConsistency, String> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/v1/log/consistency?from={from}&to={to}",
+                self.base
+            ))
+            .send()
+            .map_err(|err| {
+                format!("fetching the transparency-log consistency proof failed: {err}")
+            })?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "registry returned {} for the transparency-log consistency proof",
+                resp.status()
+            ));
+        }
+        resp.json()
+            .map_err(|err| format!("malformed transparency-log consistency proof: {err}"))
+    }
 }
 
 /// A transparency-log signed checkpoint (RFC 6962 signed tree head) as served by the registry.
@@ -598,6 +621,29 @@ pub struct LogInclusion {
     pub record: String,
     /// The audit path (hex hashes).
     pub proof: Vec<String>,
+}
+
+/// A transparency-log consistency proof between two tree sizes (the audit path; the caller already
+/// knows the two roots it is proving append-only between).
+#[cfg(feature = "registry-http")]
+#[derive(Debug, serde::Deserialize)]
+pub struct LogConsistency {
+    pub proof: Vec<String>,
+}
+
+/// Open the **hosted** registry as a concrete [`HttpIndex`] when `NOETA_REGISTRY_URL` is set (needed
+/// for transparency-log verification, which uses HttpIndex-only endpoints), else `None`.
+#[cfg(feature = "registry-http")]
+pub fn open_http() -> Result<Option<HttpIndex>, String> {
+    match std::env::var_os("NOETA_REGISTRY_URL") {
+        Some(url) => {
+            let base = url
+                .into_string()
+                .map_err(|_| "NOETA_REGISTRY_URL is not valid UTF-8".to_string())?;
+            Ok(Some(HttpIndex::new(base)?))
+        }
+        None => Ok(None),
+    }
 }
 
 /// A transparency-log checkpoint the client verified and can pin (namespace-protection #1): the log
@@ -643,22 +689,43 @@ impl HttpIndex {
                     .to_string(),
             );
         }
+        self.verify_inclusion_at(name, version, url, tag, sha, &cp)?;
+        Ok(VerifiedLog {
+            tree_size: cp.tree_size,
+            root_hex: cp.root_hash,
+            public_key: key,
+        })
+    }
+
+    /// Verify a release is included at an **already-verified** checkpoint `cp` (namespace-protection
+    /// #1): fetch its inclusion proof, require it be against `cp`'s signed tree, confirm the logged
+    /// record's coordinates match the release, and verify the audit path. Shared by
+    /// [`Self::verify_release_logged`] and the resolve-time enforcement (which verifies one checkpoint
+    /// then checks every release against it).
+    pub fn verify_inclusion_at(
+        &self,
+        name: &str,
+        version: &str,
+        url: &str,
+        tag: &str,
+        sha: &str,
+        cp: &LogCheckpoint,
+    ) -> Result<(), String> {
+        use crate::transparency;
         let incl = self
             .log_inclusion(name, version)?
             .ok_or_else(|| format!("`{name}`@{version} is not in the transparency log"))?;
         // The inclusion proof must be against the *signed* checkpoint's tree, else a registry could
         // prove inclusion in some other (unsigned) tree.
         if incl.root_hash != cp.root_hash || incl.tree_size != cp.tree_size {
-            return Err(
-                "the transparency inclusion proof is not against the signed checkpoint (a concurrent \
-                 publish can cause this — retry)"
-                    .to_string(),
-            );
+            return Err(format!(
+                "the transparency inclusion proof for `{name}`@{version} is not against the signed \
+                 checkpoint (a concurrent publish can cause this — retry)"
+            ));
         }
-        // The logged record (whose leaf we verify below) must be for exactly the release we resolved:
-        // its identity, version, and git coordinates. The record's provenance field rides along,
-        // authenticated by inclusion. We check the *served* record so the client needn't recompute the
-        // provenance digest.
+        // The logged record must be for exactly the release we resolved: identity, version, and git
+        // coordinates. The record's provenance field rides along, authenticated by inclusion. We check
+        // the *served* record so the client needn't recompute the provenance digest.
         let fields: Vec<&str> = incl.record.split('\n').collect();
         let matches = fields.len() >= 6
             && fields[0] == "noeta-transparency-log-v1"
@@ -668,10 +735,10 @@ impl HttpIndex {
             && fields[4] == tag
             && fields[5] == sha;
         if !matches {
-            return Err(
-                "the transparency-log record does not match the resolved release (coordinates differ)"
-                    .to_string(),
-            );
+            return Err(format!(
+                "the transparency-log record for `{name}`@{version} does not match the resolved \
+                 release (coordinates differ)"
+            ));
         }
         let root = transparency::hex_to_array::<32>(&cp.root_hash)
             .ok_or("malformed checkpoint root hash")?;
@@ -689,13 +756,11 @@ impl HttpIndex {
             &proof,
             &root,
         ) {
-            return Err("the transparency inclusion proof does not verify".to_string());
+            return Err(format!(
+                "the transparency inclusion proof for `{name}`@{version} does not verify"
+            ));
         }
-        Ok(VerifiedLog {
-            tree_size: cp.tree_size,
-            root_hex: cp.root_hash,
-            public_key: key,
-        })
+        Ok(())
     }
 }
 
@@ -1403,6 +1468,25 @@ mod http_tests {
         assert_eq!(a.len(), 64, "256 bits as hex");
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b, "tokens must not repeat");
+    }
+
+    #[test]
+    fn log_consistency_parses_the_audit_path() {
+        let (tx, rx) = mpsc::channel();
+        let base = mock_server(move |method, path, _body| {
+            tx.send((method.to_string(), path.to_string())).unwrap();
+            (
+                200,
+                r#"{"from":2,"to":3,"root_from":"aa","root_to":"bb","proof":["11","22"]}"#
+                    .to_string(),
+            )
+        });
+        let index = HttpIndex::new(base).unwrap();
+        let cons = index.log_consistency(2, 3).unwrap();
+        assert_eq!(cons.proof, vec!["11".to_string(), "22".to_string()]);
+        let (method, path) = rx.recv().unwrap();
+        assert_eq!(method, "GET");
+        assert_eq!(path, "/v1/log/consistency?from=2&to=3");
     }
 
     #[cfg(feature = "provenance")]

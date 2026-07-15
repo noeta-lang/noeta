@@ -68,6 +68,12 @@ pub struct Trust {
     /// scope whose release is unsigned is a hard resolve error — the consumer's own guarantee, held
     /// independently of whether the scope itself set a require-provenance policy.
     pub require_provenance: RequireProvenance,
+    /// Whether every registry dependency must be publicly recorded in the registry's **transparency
+    /// log** (namespace-protection #1, TLog): resolution verifies each registry release's inclusion
+    /// under a signed checkpoint and that the log is an append-only extension of the one pinned in
+    /// `noeta.lock` — so a compromised registry can't serve an unlogged or history-rewritten release.
+    /// Default `false` (gradual adoption).
+    pub require_transparency: bool,
 }
 
 /// The consumer's `[trust].require_provenance` policy: demand verified provenance from no scope
@@ -778,10 +784,17 @@ fn parse_trust(table: &toml::Table) -> Result<Trust, String> {
             }
         }
     };
+    let require_transparency = match trust_table.get("require_transparency") {
+        None => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or("`trust.require_transparency` must be a boolean")?,
+    };
     Ok(Trust {
         native: parse_list("native")?,
         commands: parse_list("commands")?,
         require_provenance,
+        require_transparency,
     })
 }
 
@@ -1014,6 +1027,15 @@ mod tests {
         // A malformed scope entry / wrong type fails loudly.
         assert!(Manifest::parse("[trust]\nrequire_provenance = [\"a/b\"]\n").is_err());
         assert!(Manifest::parse("[trust]\nrequire_provenance = 42\n").is_err());
+    }
+
+    #[test]
+    fn trust_parses_require_transparency() {
+        let off = Manifest::parse("[package]\nname = \"a/b\"\nversion = \"1.0.0\"\n").unwrap();
+        assert!(!off.trust().require_transparency);
+        let on = Manifest::parse("[trust]\nrequire_transparency = true\n").unwrap();
+        assert!(on.trust().require_transparency);
+        assert!(Manifest::parse("[trust]\nrequire_transparency = \"yes\"\n").is_err());
     }
 
     #[test]

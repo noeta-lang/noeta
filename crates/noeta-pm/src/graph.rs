@@ -58,6 +58,12 @@ pub struct ResolvedGraph {
     /// **pinned** in `noeta.lock` (trust-on-first-use). Empty when no registry dependency carried
     /// provenance.
     pub scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
+    /// The transparency-log head to pin in `noeta.lock` (namespace-protection #1, TLog) — the log key
+    /// + last checkpoint verified during this resolve. `None` when transparency isn't engaged.
+    pub log_trust: Option<crate::lock::LogTrust>,
+    /// The identities resolved via a **registry** dependency (as opposed to a direct git/path source)
+    /// — the set transparency enforcement applies to. Empty when no registry dependency was resolved.
+    pub registry_identities: std::collections::BTreeSet<String>,
 }
 
 /// A resolved package's native entry crate (Phase 3, N3.1): where the composed build finds its
@@ -135,6 +141,8 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
             native_crates: Vec::new(),
             trusted_command_roots: Vec::new(),
             scope_trust: BTreeMap::new(),
+            log_trust: None,
+            registry_identities: std::collections::BTreeSet::new(),
         });
     };
     let manifest = read_manifest(&manifest_path)?;
@@ -163,6 +171,7 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
         require_provenance,
         solution: BTreeMap::new(),
         scope_trust: BTreeMap::new(),
+        registry_ids: std::collections::BTreeSet::new(),
     };
     // Phase 4, S5b: first *select versions* — gather the candidate graph (materialize the path/git
     // spine, query the index for every registry candidate + its deps) and run PubGrub. This backtracks
@@ -173,19 +182,115 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
     walker.walk(&root_deps, &manifest_dir, &mut root_edges)?;
 
     let scope_trust = walker.scope_trust;
-    let graph = assemble(
+    let registry_ids = walker.registry_ids;
+    #[allow(unused_mut)]
+    let mut graph = assemble(
         walker.instances,
         &root_edges,
         &manifest.trust().commands,
         scope_trust,
+        registry_ids,
     );
+
+    // Transparency-log enforcement (namespace-protection #1, TLog): when the consumer requires it,
+    // every registry release must be publicly logged under a signed checkpoint that is an append-only
+    // extension of the one pinned in `noeta.lock`. Feature-gated (the crypto + HTTP client), like
+    // provenance verification; a lockfile-shape-only build (the LSP) skips the crypto.
+    #[cfg(all(feature = "registry-http", feature = "provenance"))]
+    if manifest.trust().require_transparency && !graph.registry_identities.is_empty() {
+        graph.log_trust = Some(enforce_transparency(&graph, lock.log_trust())?);
+    }
 
     // Refresh the lockfile (best-effort: a read-only project must not fail a build). Skipped for a
     // manifest with no resolved dependencies, so a bare-`[targets]` project grows no lock.
     if !graph.locked.is_empty() {
-        let _ = crate::lock::write(&manifest_dir, &graph.locked, &graph.scope_trust);
+        let _ = crate::lock::write(
+            &manifest_dir,
+            &graph.locked,
+            &graph.scope_trust,
+            graph.log_trust.as_ref(),
+        );
     }
     Ok(graph)
+}
+
+/// Enforce `[trust].require_transparency` (namespace-protection #1, TLog): verify the registry's
+/// current signed checkpoint (against the pinned log key, TOFU on first use), prove it is an
+/// append-only extension of the checkpoint pinned in the lock, and verify every registry-resolved
+/// release is included at that checkpoint. Returns the new head to pin. Any failure — a changed log
+/// key, a rewritten history, or a missing/forged inclusion — aborts the resolve.
+#[cfg(all(feature = "registry-http", feature = "provenance"))]
+fn enforce_transparency(
+    graph: &ResolvedGraph,
+    pinned: Option<&crate::lock::LogTrust>,
+) -> Result<crate::lock::LogTrust, String> {
+    use crate::transparency;
+    let index = crate::registry::open_http()?.ok_or(
+        "`[trust].require_transparency` needs the hosted registry — set `NOETA_REGISTRY_URL`",
+    )?;
+    // The log key: the one pinned in the lock, or the served key on first use (TOFU).
+    let key = match pinned {
+        Some(p) => p.public_key.clone(),
+        None => index
+            .log_public_key()?
+            .ok_or("the registry serves no transparency-log public key")?,
+    };
+    let cp = index.log_checkpoint()?;
+    if !transparency::verify_checkpoint(&key, cp.tree_size, &cp.root_hash, &cp.signature)? {
+        return Err(
+            "the transparency-log checkpoint does not verify against the pinned log key — the \
+             registry changed keys or is equivocating (reconcile, then `noeta update` to re-pin)"
+                .to_string(),
+        );
+    }
+    // Append-only: the current checkpoint must be a consistent extension of the pinned one.
+    if let Some(p) = pinned {
+        if cp.tree_size < p.tree_size {
+            return Err(
+                "the transparency log shrank since it was pinned — the registry rewrote history"
+                    .to_string(),
+            );
+        }
+        let cons = index.log_consistency(p.tree_size, cp.tree_size)?;
+        let root_from =
+            transparency::hex_to_array::<32>(&p.root_hash).ok_or("malformed pinned root hash")?;
+        let root_to =
+            transparency::hex_to_array::<32>(&cp.root_hash).ok_or("malformed checkpoint root")?;
+        let proof = cons
+            .proof
+            .iter()
+            .map(|h| transparency::hex_to_array::<32>(h))
+            .collect::<Option<Vec<_>>>()
+            .ok_or("malformed consistency proof")?;
+        if !transparency::verify_consistency(
+            p.tree_size as usize,
+            cp.tree_size as usize,
+            &proof,
+            &root_from,
+            &root_to,
+        ) {
+            return Err(
+                "the transparency log is not an append-only extension of the pinned checkpoint — \
+                 history was rewritten or the registry is equivocating"
+                    .to_string(),
+            );
+        }
+    }
+    // Every registry-resolved release must be included at this verified checkpoint.
+    for pkg in &graph.locked {
+        if !graph.registry_identities.contains(&pkg.identity) {
+            continue;
+        }
+        let ResolvedSource::Git { url, tag, sha } = &pkg.source else {
+            continue;
+        };
+        index.verify_inclusion_at(&pkg.identity, &pkg.version.to_string(), url, tag, sha, &cp)?;
+    }
+    Ok(crate::lock::LogTrust {
+        public_key: key,
+        tree_size: cp.tree_size,
+        root_hash: cp.root_hash,
+    })
 }
 
 /// Carries the walk's growing state: the deduped package instances, the lazily-opened package store
@@ -209,6 +314,9 @@ struct Walker<'a> {
     /// scope → the trust root established while materializing registry deps (provenance, Phase 4
     /// #2 / Phase 5); pinned into `noeta.lock` afterwards.
     scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
+    /// The identities materialized via a **registry** dependency (not a direct git/path source) —
+    /// what transparency-log enforcement applies to (namespace-protection #1, TLog).
+    registry_ids: std::collections::BTreeSet<String>,
 }
 
 impl Walker<'_> {
@@ -339,6 +447,9 @@ impl Walker<'_> {
                     )
                 })?;
                 let name = format!("{}/{}", package.company, package.package);
+                // This identity came from a registry dependency — transparency enforcement applies to
+                // it (a direct git/path dep isn't logged, so it's out of scope).
+                self.registry_ids.insert(name.clone());
                 // Defense in depth: `solve` already refused built-in scopes before they entered the
                 // candidate graph, so a solved version can't name one — but the walk is a public entry
                 // too, so keep the invariant local rather than assume the solve ran.
@@ -857,6 +968,7 @@ fn assemble(
     root_edges: &BTreeMap<String, String>,
     trusted_commands: &std::collections::BTreeSet<String>,
     scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
+    registry_identities: std::collections::BTreeSet<String>,
 ) -> ResolvedGraph {
     // Global segment per identity. Direct dependencies keep the consumer's key (so the entry's
     // `use <key>.…` needs no rewrite); transitive-only packages get a unique synthesized segment.
@@ -929,6 +1041,8 @@ fn assemble(
         native_crates,
         trusted_command_roots,
         scope_trust,
+        log_trust: None,
+        registry_identities,
     }
 }
 

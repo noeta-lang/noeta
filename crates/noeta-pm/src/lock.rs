@@ -51,6 +51,18 @@ pub enum ScopeTrust {
     Keyless { issuer: String, identity: String },
 }
 
+/// The **pinned transparency-log head** (namespace-protection #1, TLog), recorded trust-on-first-use.
+/// The log is global to the registry (not per-scope), so the lock keeps a single one: the log's public
+/// key plus the last checkpoint (tree size + root) verified. On a later resolve the served checkpoint
+/// must be signed by this same key and be an append-only extension of this size/root — so a registry
+/// can't rewrite history or equivocate after first use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogTrust {
+    pub public_key: String,
+    pub tree_size: u64,
+    pub root_hash: String,
+}
+
 /// A read lockfile: the pins a build consults to reproduce (package-manager P2.4c). Missing or
 /// unreadable → [`Lock::empty`] (the walk then resolves from scratch).
 #[derive(Debug, Default)]
@@ -68,6 +80,8 @@ pub struct Lock {
     /// keyless identity, or a *weaker root* (keyless → key/unsigned) is rejected — so a registry
     /// compromised *after* first use can't forge releases or downgrade a scope's trust.
     scope_trust: BTreeMap<String, ScopeTrust>,
+    /// The pinned transparency-log head (namespace-protection #1, TLog), if recorded.
+    log_trust: Option<LogTrust>,
 }
 
 impl Lock {
@@ -124,6 +138,20 @@ impl Lock {
                 lock.scope_trust.insert(scope.to_string(), trust);
             }
         }
+        if let Some(l) = table.get("log").and_then(|v| v.as_table()) {
+            let get = |k: &str| l.get(k).and_then(|v| v.as_str());
+            if let (Some(public_key), Some(size), Some(root_hash)) = (
+                get("public_key"),
+                l.get("tree_size").and_then(|v| v.as_integer()),
+                get("root_hash"),
+            ) {
+                lock.log_trust = Some(LogTrust {
+                    public_key: public_key.to_string(),
+                    tree_size: size.max(0) as u64,
+                    root_hash: root_hash.to_string(),
+                });
+            }
+        }
         lock
     }
 
@@ -150,10 +178,20 @@ impl Lock {
     pub fn scope_trust(&self, scope: &str) -> Option<&ScopeTrust> {
         self.scope_trust.get(scope)
     }
+
+    /// The pinned transparency-log head, if the lock records one (namespace-protection #1, TLog).
+    pub fn log_trust(&self) -> Option<&LogTrust> {
+        self.log_trust.as_ref()
+    }
 }
 
-/// Serialize the resolved packages + pinned scope trust to `noeta.lock` text (deterministic, sorted).
-fn render(locked: &[LockedPackage], scope_trust: &BTreeMap<String, ScopeTrust>) -> String {
+/// Serialize the resolved packages + pinned scope trust + transparency-log head to `noeta.lock` text
+/// (deterministic, sorted).
+fn render(
+    locked: &[LockedPackage],
+    scope_trust: &BTreeMap<String, ScopeTrust>,
+    log_trust: Option<&LogTrust>,
+) -> String {
     let mut sorted: Vec<&LockedPackage> = locked.iter().collect();
     sorted.sort_by(|a, b| a.identity.cmp(&b.identity));
     let mut out = String::new();
@@ -195,6 +233,14 @@ fn render(locked: &[LockedPackage], scope_trust: &BTreeMap<String, ScopeTrust>) 
             }
         }
     }
+    // The pinned transparency-log head (TLog TOFU): a later checkpoint must be signed by this key and
+    // be an append-only extension of this size/root.
+    if let Some(log) = log_trust {
+        out.push_str("\n[log]\n");
+        out.push_str(&format!("public_key = {}\n", quote(&log.public_key)));
+        out.push_str(&format!("tree_size = {}\n", log.tree_size));
+        out.push_str(&format!("root_hash = {}\n", quote(&log.root_hash)));
+    }
     out
 }
 
@@ -206,9 +252,10 @@ pub fn write(
     dir: &Path,
     locked: &[LockedPackage],
     scope_trust: &BTreeMap<String, ScopeTrust>,
+    log_trust: Option<&LogTrust>,
 ) -> io::Result<()> {
     let path = dir.join(LOCK_NAME);
-    let text = render(locked, scope_trust);
+    let text = render(locked, scope_trust, log_trust);
     if std::fs::read_to_string(&path).is_ok_and(|existing| existing == text) {
         return Ok(()); // unchanged
     }
@@ -262,7 +309,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut scope_trust = BTreeMap::new();
         scope_trust.insert("acme".to_string(), ScopeTrust::Key("b".repeat(64)));
-        write(&dir, &[git_pkg(), path_pkg()], &scope_trust).unwrap();
+        write(&dir, &[git_pkg(), path_pkg()], &scope_trust, None).unwrap();
 
         let lock = Lock::read(&dir);
         assert_eq!(
@@ -296,7 +343,7 @@ mod tests {
         scope_trust.insert("acme".to_string(), pin.clone());
         // A second scope stays on the key root — the two coexist in one lock.
         scope_trust.insert("legacy".to_string(), ScopeTrust::Key("c".repeat(64)));
-        write(&dir, &[git_pkg()], &scope_trust).unwrap();
+        write(&dir, &[git_pkg()], &scope_trust, None).unwrap();
 
         let lock = Lock::read(&dir);
         assert_eq!(lock.scope_trust("acme"), Some(&pin));
@@ -307,17 +354,37 @@ mod tests {
     }
 
     #[test]
+    fn a_transparency_log_head_round_trips() {
+        let dir = std::env::temp_dir().join("noeta_lock_test_logtrust");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = LogTrust {
+            public_key: "ab".repeat(32),
+            tree_size: 42,
+            root_hash: "cd".repeat(32),
+        };
+        write(&dir, &[git_pkg()], &BTreeMap::new(), Some(&log)).unwrap();
+        assert_eq!(Lock::read(&dir).log_trust(), Some(&log));
+        // A lock with no `[log]` block reports no pin.
+        let dir2 = std::env::temp_dir().join("noeta_lock_test_nolog");
+        let _ = std::fs::remove_dir_all(&dir2);
+        std::fs::create_dir_all(&dir2).unwrap();
+        write(&dir2, &[git_pkg()], &BTreeMap::new(), None).unwrap();
+        assert_eq!(Lock::read(&dir2).log_trust(), None);
+    }
+
+    #[test]
     fn rewrite_is_skipped_when_unchanged() {
         let dir = std::env::temp_dir().join("noeta_lock_test_nochurn");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        write(&dir, &[git_pkg()], &BTreeMap::new()).unwrap();
+        write(&dir, &[git_pkg()], &BTreeMap::new(), None).unwrap();
         let first = std::fs::metadata(dir.join(LOCK_NAME))
             .unwrap()
             .modified()
             .unwrap();
         // A no-op write must not touch the file (same content).
-        write(&dir, &[git_pkg()], &BTreeMap::new()).unwrap();
+        write(&dir, &[git_pkg()], &BTreeMap::new(), None).unwrap();
         let second = std::fs::metadata(dir.join(LOCK_NAME))
             .unwrap()
             .modified()
