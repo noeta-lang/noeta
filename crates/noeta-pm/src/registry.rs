@@ -368,12 +368,10 @@ fn open_hosted(_url: &str) -> Result<Box<dyn Index>, String> {
     )
 }
 
-/// Open a GitHub org as a registry (a `[registries]` `github:<org>` source). Implemented in
-/// private-registries S3 — a stub until then so routing (S2) can be built and tested first.
+/// Open a GitHub org as a registry (a `[registries]` `github:<org>` source): packages resolve from
+/// `github.com/<org>/<package>` by their semver tags (private-registries S3).
 fn open_github(org: &str) -> Result<Box<dyn Index>, String> {
-    Err(format!(
-        "GitHub-org registries (`github:{org}`) are not implemented yet (private-registries S3)"
-    ))
+    Ok(Box::new(crate::git_forge::GitForgeIndex::github(org)?))
 }
 
 /// The networked registry index (package-manager Phase 4, S4): an HTTP client of the hosted index

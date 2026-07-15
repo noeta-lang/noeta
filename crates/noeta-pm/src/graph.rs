@@ -1063,26 +1063,23 @@ mod tests {
     }
 
     #[test]
-    fn registries_route_a_scope_to_its_configured_source() {
-        // private-registries S2: a `[registries]` mapping sends `acme/*` to a github source. Resolving
-        // an `acme` registry dep must reach that source (here the S3 stub error), proving the router
-        // picked the per-scope registry rather than the default index.
-        let base = std::env::temp_dir().join("noeta_graph_test_registry_routing");
-        let _ = std::fs::remove_dir_all(&base);
-        let app = base.join("app");
-        std::fs::create_dir_all(&app).unwrap();
-        std::fs::write(
-            app.join("noeta.toml"),
-            "[package]\nname = \"me/app\"\nversion = \"0.1.0\"\n\
-             [registries]\nacme = \"github:acme\"\n\
-             [dependencies]\nthing = { version = \"^1.0\", package = \"acme/thing\" }\n",
-        )
-        .unwrap();
-        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
-        let err = resolve_graph(&app.join("main.noe")).expect_err("github source is a stub in S2");
-        assert!(
-            err.contains("github:acme") && err.contains("not implemented"),
-            "routing should have reached the github source: {err}"
+    fn registry_cache_key_is_distinct_per_source() {
+        // private-registries S2: the per-scope index cache keys off the source, so two scopes on the
+        // same registry share one index and different registries get distinct ones (the routing seam).
+        use crate::manifest::RegistrySource;
+        assert_eq!(registry_cache_key(None), "default");
+        assert_eq!(
+            registry_cache_key(Some(&RegistrySource::GitHub("acme".into()))),
+            "github:acme"
+        );
+        assert_ne!(
+            registry_cache_key(Some(&RegistrySource::Hosted("https://a".into()))),
+            registry_cache_key(Some(&RegistrySource::Hosted("https://b".into())))
+        );
+        // The GitHub and hosted namespaces don't collide.
+        assert_ne!(
+            registry_cache_key(Some(&RegistrySource::GitHub("x".into()))),
+            registry_cache_key(Some(&RegistrySource::Hosted("x".into())))
         );
     }
 

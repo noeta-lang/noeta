@@ -18,6 +18,10 @@ pub mod lock;
 pub mod manifest;
 pub mod registry;
 
+/// A git forge (GitHub org) used as a registry — resolve packages from repos + tags instead of the
+/// hosted index (private-registries arc). Implements the `registry::Index` trait.
+pub mod git_forge;
+
 /// Package provenance — Ed25519-signed attestations binding a release to its commit (Phase 4, #2).
 /// Behind the `provenance` feature (CLI-only; the LSP and offline consumers don't pull the crypto).
 #[cfg(feature = "provenance")]
