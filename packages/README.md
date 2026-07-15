@@ -65,16 +65,38 @@ package's language `edition` — so the build reproduces the exact source and ed
 The `@html` expression tier travels with the package (importing `render` brings its
 `@tier(html, …, expr: Html)` declaration into scope).
 
-**Native packages (`para-p2p`) reference the toolchain's Rust crates by git, not crates.io.**
-A native entry crate compiled by the composed toolchain depends on `noeta-native` /
-`noeta-stdlib` / `noeta-crdt` / `noeta-reactive` — these are *toolchain* crates, versioned
-with the language. A standalone `para-p2p` repo references them the same way the composer
-already pulls its base (`ToolchainSource::GitTag`): a **git dependency on the lang repo at a
-version tag**. They are never published to a foreign registry — Noeta packages resolve
-through the Noeta registry, and their native crates resolve toolchain crates from the Noeta
-repo. This is why `para-p2p`'s split is a larger step than `para-html`'s (it must rewrite its
-native crate's dependency edges from monorepo workspace paths to git-tag deps), tracked as its
-own slice.
+### Native packages: git-deps + a composer `[patch]` (proven, F3)
+
+A native entry crate compiled by the composed toolchain depends on `noeta-native` (and, for a
+first-party package, its toolchain-resident impl crate — `para-p2p` depends on
+`noeta-para-p2p`). These are **toolchain** crates, versioned with the language — never published
+to a foreign registry (crates.io is irrelevant; Noeta packages resolve through the Noeta
+registry, and their native crates resolve toolchain crates from the Noeta repo). A **standalone**
+package references them by a **git dependency on the noeta toolchain repo**:
+
+```toml
+# packages/<pkg>/native/Cargo.toml, standalone form
+[dependencies]
+noeta-para-p2p = { git = "https://github.com/…/noeta", tag = "vX" }
+```
+
+The catch: that git crate is a *second* copy of the toolchain, so a `dyn Extension` from it
+would not match the shim's `noeta_native::Extension` type. The composed toolchain closes this
+with a **`[patch]`** it injects into the generated shim
+(`compose.rs::toolchain_patch_section`): for a workspace (local-path) toolchain it rewrites
+**every** `crates/*` member of the noeta repo to the consumer's *exact* toolchain path, so the
+whole graph — including the package's git-deps and their transitive `workspace = true` deps —
+unifies on one `noeta-native`. The patch key is this build's `repository`, overridable via
+`NOETA_TOOLCHAIN_REPO` (a fork, a private mirror, or a local `file://` clone). A **git-tag**
+toolchain needs no patch: the package pins the same tag and Cargo unifies the identical git
+source (and Cargo forbids patching a git source with itself). Cargo does fetch the git source
+before applying the patch, so the toolchain repo must be **reachable** — fine for a public repo.
+
+**Proven** (para-namespace F3): with `para-p2p/native` git-depping a reachable clone and the
+matching patch key, the composed `para-p2p-demo` builds and runs on the real host with the
+`dyn Extension` types unified. As with `para-html`, the **in-tree** `native/Cargo.toml` keeps a
+**path** dep (so a fresh checkout builds the demo with no network); the git-dep form is what a
+standalone clone uses, and it lands for real once the toolchain repo is published (F4).
 
 The monorepo keeps the in-tree copies here as the committed source of truth (so a fresh
 checkout stays self-contained and portable — a `file://` URL is machine-specific); the true

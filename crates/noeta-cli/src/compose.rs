@@ -633,6 +633,7 @@ fn aot_shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, rings: &[
             toml_quote(&e.dir.display().to_string())
         ));
     }
+    out.push_str(&toolchain_patch_section(toolchain));
     out.push_str("\n[workspace]\n\n[profile.release]\ncodegen-units = 1\nlto = \"thin\"\n");
     out
 }
@@ -713,7 +714,58 @@ fn shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, kind: ShimKin
             toml_quote(&e.dir.display().to_string())
         ));
     }
+    out.push_str(&toolchain_patch_section(toolchain));
     out.push_str("\n[workspace]\n\n[profile.release]\ncodegen-units = 1\nlto = \"thin\"\n");
+    out
+}
+
+/// The `[patch]` section that redirects a native package's git dependencies **on the canonical
+/// toolchain repo** to *this* toolchain's own crates (para-namespace follow-on F3). It is what makes
+/// an **out-of-tree** native package buildable: the package's entry crate depends on `noeta-native`
+/// (and, for a first-party package, its own toolchain-resident impl crate) by git on the noeta repo —
+/// resolvable in a standalone clone — and here the composer overrides every one of those with the
+/// consumer's *exact* toolchain source. Without this the git crates would be a **second** copy of
+/// `noeta-native`, so a `dyn Extension` from the package would not match the shim's
+/// `noeta_native::Extension` type and the `NOETA_EXTENSIONS` aggregation would not type-check.
+///
+/// Only emitted for a **workspace** (local-path) toolchain: a git-tag toolchain unifies naturally
+/// when the package pins the same tag, and Cargo forbids patching a git source with itself. Every
+/// `crates/*` member is patched to its path; Cargo ignores the unused ones (a package depends on only
+/// a few), and the composed build captures cargo's output, so the unused-patch notes never reach the
+/// user. Crate directory names equal their package names across the workspace, so the directory name
+/// is the patch key.
+fn toolchain_patch_section(toolchain: &ToolchainSource) -> String {
+    let ToolchainSource::Workspace(root) = toolchain else {
+        return String::new();
+    };
+    // The git URL a native package references its toolchain crates by. Defaults to this build's
+    // `repository`, overridable via `NOETA_TOOLCHAIN_REPO` for a fork, a private mirror, or a local
+    // `file://` clone — the patch key must equal the URL the package's Cargo.toml declares.
+    let repo = std::env::var("NOETA_TOOLCHAIN_REPO")
+        .unwrap_or_else(|_| env!("CARGO_PKG_REPOSITORY").to_string());
+    if repo.is_empty() {
+        return String::new();
+    }
+    let crates_dir = root.join("crates");
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        return String::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.path().join("Cargo.toml").is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort(); // deterministic shim content (folds into the compose cache key)
+    if names.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\n[patch.{}]\n", toml_quote(&repo));
+    for name in names {
+        out.push_str(&format!(
+            "{name} = {{ path = {} }}\n",
+            toml_quote(&crates_dir.join(&name).display().to_string())
+        ));
+    }
     out
 }
 
@@ -857,6 +909,53 @@ mod tests {
             ),
             "{toml}"
         );
+    }
+
+    #[test]
+    fn shim_patches_noeta_repo_git_crates_to_the_workspace_for_out_of_tree_packages() {
+        // A workspace toolchain with two crates. `toolchain_patch_section` must emit a `[patch]` on
+        // the canonical repo URL redirecting each `crates/*` member to its path — so a native package
+        // that git-deps the noeta repo unifies its `noeta_native::Extension` with the shim's.
+        let root = std::env::temp_dir().join(format!("noeta_patch_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for c in ["noeta-native", "noeta-crdt"] {
+            let d = root.join("crates").join(c);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{c}\"\n")).unwrap();
+        }
+        let toml = shim_cargo_toml(
+            &entries(),
+            &ToolchainSource::Workspace(root.clone()),
+            ShimKind::Toolchain,
+        );
+
+        // A `[patch]` on the toolchain repo (this build's `repository`, or a `NOETA_TOOLCHAIN_REPO`
+        // override) redirecting each `crates/*` member to its path.
+        assert!(toml.contains("[patch."), "a [patch] section:\n{toml}");
+        assert!(
+            toml.contains(&format!(
+                "noeta-native = {{ path = \"{}\" }}",
+                root.join("crates").join("noeta-native").display()
+            )),
+            "each crate redirected to its path:\n{toml}"
+        );
+        assert!(toml.contains("noeta-crdt = { path ="), "{toml}");
+
+        // A git-tag (out-of-workspace) toolchain emits NO patch — it unifies by pinning the same tag,
+        // and Cargo forbids patching a git source with itself.
+        let git = shim_cargo_toml(
+            &entries(),
+            &ToolchainSource::GitTag {
+                repo: "https://example.com/acme/noeta".to_string(),
+                tag: "v0.1.0".to_string(),
+            },
+            ShimKind::Toolchain,
+        );
+        assert!(
+            !git.contains("[patch."),
+            "no patch for a git-tag toolchain:\n{git}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
