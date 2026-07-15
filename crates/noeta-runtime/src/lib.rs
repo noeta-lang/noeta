@@ -43,13 +43,12 @@ pub fn shutdown_notify() -> std::sync::Arc<Notify> {
 #[cfg(feature = "telemetry")]
 mod telemetry;
 mod ws;
-// Real p2p transport (p2p P3) — only compiled under the `ring-p2p` ring, which pulls the heavy
-// p2panda/iroh dependency tree. Off by default; `RealHost` keeps the loopback broker.
+// Real p2p transport (p2p P3) — the p2panda-net node + its group encryption. Extracted into the
+// leaf crate `noeta-para-p2p-net` (para-namespace F2b), pulled in only under the `ring-p2p` ring so
+// the heavy p2panda/iroh tree stays out of a loopback build. `RealHost` reaches it as
+// `noeta_para_p2p_net::{P2pNode, P2pConfig}` below.
 #[cfg(feature = "ring-p2p")]
-pub mod p2p_node;
-// Group encryption for `synced_signal` (p2p P3.4b) — p2panda-spaces assembly, same ring.
-#[cfg(feature = "ring-p2p")]
-pub mod p2p_crypto;
+use noeta_para_p2p_net::p2p_node;
 
 use compact_str::CompactString;
 use noeta_stdlib::net::accept_outcome;

@@ -51,6 +51,9 @@ noeta-stdlib = { path = "crates/noeta-stdlib" }
 # Native-extension ABI (P-NATIVE): the contract + dep-free primitives, split out of noeta-stdlib so
 # the batteries (crypto/uuid/json) don't ride the ABI. noeta-stdlib re-exports it (core/std-style).
 noeta-native = { path = "crates/noeta-native" }
+# The real p2panda transport for `para.p2p` (para-namespace F2b), extracted out of noeta-runtime so
+# the iroh/QUIC tree rides with the extension, not the CLI runtime. Depends only on noeta-native.
+noeta-para-p2p-net = { path = "crates/noeta-para-p2p-net" }
 noeta-html = { path = "crates/noeta-html" }
 noeta-css = { path = "crates/noeta-css" }
 # M2 runtime (host-coupled IO: real disk async + real env/args)

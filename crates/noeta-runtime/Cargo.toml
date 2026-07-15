@@ -34,23 +34,11 @@ reqwest = { workspace = true, optional = true }
 # telemetry build adds no protobuf/gRPC tree. Optional so a non-telemetry build links none of it.
 serde_json = { workspace = true, optional = true }
 # Real p2p transport (p2p P3): the `P2p` capability on `RealHost` backed by a p2panda-net node
-# (gossip + log-sync over iroh/QUIC). Optional and OFF by default — pre-1.0, a heavy dep tree
-# (iroh/QUIC/rustls), and needs the `iroh-gossip` git `[patch]` in the workspace Cargo.toml. Off ⇒
-# `RealHost` keeps the single-node loopback broker (P1); a program still runs locally, just without
-# real peers. Only `noeta run --features` / a build declaring the ring links p2panda.
-p2panda-net = { workspace = true, optional = true }
-p2panda-core = { workspace = true, optional = true }
-# The `spaces` feature pulls in the group-encryption store tables (SqliteSpacesStore) that
-# `p2panda-spaces` needs; it transitively enables the store's `groups`/`encryption` support.
-p2panda-store = { workspace = true, optional = true, features = ["spaces"] }
-p2panda-sync = { workspace = true, optional = true }
-p2panda-spaces = { workspace = true, optional = true }
-p2panda-auth = { workspace = true, optional = true }
-p2panda-encryption = { workspace = true, optional = true }
-futures-util = { workspace = true, optional = true }
-# Serialize the node's group-encryption `Credentials` to disk (p2p P3.4b) and (later) spaces
-# operations for the wire. Compact, no_std-friendly; only pulled in with the p2p ring.
-postcard = { workspace = true, optional = true }
+# (gossip + log-sync over iroh/QUIC). The transport itself lives in `noeta-para-p2p-net` (extracted
+# para-namespace F2b — the heavy iroh/QUIC/p2panda tree is no longer noeta-runtime's own); this crate
+# only pulls it in behind the `ring-p2p` ring. Optional and OFF ⇒ `RealHost` keeps the single-node
+# loopback broker (P1). Needs the `iroh-gossip` git `[patch]` in the workspace Cargo.toml.
+noeta-para-p2p-net = { workspace = true, optional = true }
 
 [features]
 default = ["ring-http-client", "telemetry", "ring-p2p"]
@@ -70,17 +58,7 @@ telemetry = ["dep:serde_json", "ring-http-client", "reqwest/json"]
 # dep-free loopback broker (single-node), which is also the always-compiled sandbox side. (The
 # oracle suite never builds `noeta-runtime`, so it stays p2panda-free regardless.) Pinned exactly
 # (`p2panda-net = "0.7"`) so the pre-1.0 dep can't break the default build via an auto-update.
-ring-p2p = [
-    "dep:p2panda-net",
-    "dep:p2panda-core",
-    "dep:p2panda-store",
-    "dep:p2panda-sync",
-    "dep:p2panda-spaces",
-    "dep:p2panda-auth",
-    "dep:p2panda-encryption",
-    "dep:futures-util",
-    "dep:postcard",
-]
+ring-p2p = ["dep:noeta-para-p2p-net"]
 
 [dev-dependencies]
 criterion = { workspace = true }

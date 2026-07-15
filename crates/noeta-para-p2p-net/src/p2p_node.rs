@@ -1,6 +1,6 @@
 //! Real p2p transport via a **p2panda-net node** (p2p P3, `ring-p2p` feature).
 //!
-//! This is the non-loopback backing for the [`P2p`](noeta_stdlib::P2p) host capability: where the
+//! This is the non-loopback backing for the [`P2p`](noeta_native::host::P2p) host capability: where the
 //! sandbox (and the default `RealHost`) use a deterministic in-process broker, a build with the
 //! `ring-p2p` ring gives `RealHost` a genuine p2panda-net node — gossip pub/sub over iroh/QUIC with
 //! mDNS discovery. Non-deterministic and CLI-only, exactly like `reqwest` for `Network`; never
@@ -50,7 +50,7 @@ use p2panda_spaces::{ActorId, Credentials};
 
 use crate::io_error;
 use crate::p2p_crypto::{CryptoGroups, EncryptedGroup};
-use noeta_stdlib::{StdError, SyncStatus};
+use noeta_native::{StdError, SyncStatus};
 
 /// Every node keeps a single append-only log for its own operations; the durable (log-sync)
 /// transport hard-codes its id, matching p2panda's `chat` example.
