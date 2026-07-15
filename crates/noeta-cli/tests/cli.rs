@@ -3582,6 +3582,61 @@ fn a_published_package_resolves_as_a_registry_dependency() {
 }
 
 #[test]
+fn a_github_org_registry_resolves_and_runs_a_package() {
+    // private-registries S4 (end-to-end): a consumer maps a scope to a GitHub org via `[registries]`
+    // and resolves a package from that org's repos + tags. Hermetic — a local directory stands in for
+    // github.com (NOETA_GITHUB_BASE), so no network and no auth (public path). Proves the full chain:
+    // per-scope routing → GitForgeIndex (tags → versions) → git materialization → run.
+    if !git_available() {
+        return;
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("pm_github_registry_e2e");
+    let _ = std::fs::remove_dir_all(&base);
+    let host = base.join("host"); // stands in for github.com
+    let repo = host.join("acme").join("greet"); // the org/repo = acme/greet
+    let app = base.join("app");
+    let cache = base.join("forge-cache");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&app).unwrap();
+
+    // The package repo, with a tagged release (versions are tags — no publish step).
+    git_in(&["init", "-q", "-b", "main"], &repo);
+    std::fs::write(
+        repo.join("hello.noe"),
+        "namespace greet.hello;\npub fn greeting(): string { return \"hello from the org registry\"; }\n",
+    )
+    .unwrap();
+    commit_version(
+        &repo,
+        "v1.2.0",
+        "[package]\nname = \"acme/greet\"\nversion = \"1.2.0\"\n",
+    );
+
+    // The consumer routes scope `acme` to the org; everything else stays on the default.
+    std::fs::write(
+        app.join("noeta.toml"),
+        "[package]\nname = \"me/app\"\nversion = \"0.1.0\"\n\
+         [registries]\nacme = \"github:acme\"\n\
+         [dependencies]\ngc = { version = \"^1.0\", package = \"acme/greet\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use gc.hello.greeting;\necho greeting();\n",
+    )
+    .unwrap();
+
+    lang()
+        .env("NOETA_GITHUB_BASE", &host)
+        .env("NOETA_GIT_FORGE_CACHE", &cache)
+        .arg("run")
+        .arg(app.join("main.noe"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hello from the org registry"));
+}
+
+#[test]
 fn a_registry_dependency_without_a_package_is_an_error() {
     // A bare registry requirement names no package identity, so it can't be resolved — the error
     // points the user to add `package = "company/pkg"` (P2.5).
