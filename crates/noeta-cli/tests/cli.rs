@@ -3504,11 +3504,21 @@ fn require_provenance_refuses_an_unsigned_registry_dependency() {
     lang()
         .current_dir(&repo)
         .env("NOETA_REGISTRY_DIR", &reg)
-        .args(["publish", "--git", repo.to_str().unwrap(), "--tag", "v1.2.0"])
+        .args([
+            "publish",
+            "--git",
+            repo.to_str().unwrap(),
+            "--tag",
+            "v1.2.0",
+        ])
         .assert()
         .success();
 
-    std::fs::write(app.join("main.noe"), "use gc.hello.greeting;\necho greeting();\n").unwrap();
+    std::fs::write(
+        app.join("main.noe"),
+        "use gc.hello.greeting;\necho greeting();\n",
+    )
+    .unwrap();
 
     // A consumer that requires provenance for `acme` refuses the unsigned release.
     std::fs::write(
@@ -3524,7 +3534,10 @@ fn require_provenance_refuses_an_unsigned_registry_dependency() {
         .arg(app.join("main.noe"))
         .assert()
         .failure()
-        .stderr(predicate::str::contains("require_provenance").and(predicate::str::contains("unattested")));
+        .stderr(
+            predicate::str::contains("require_provenance")
+                .and(predicate::str::contains("unattested")),
+        );
 
     // Without the policy, the same unsigned dependency still resolves (gradual-adoption default).
     std::fs::write(
@@ -4474,6 +4487,26 @@ fn noeta_claim_requires_the_hosted_registry() {
     lang()
         .env_remove("NOETA_REGISTRY_URL")
         .args(["claim", "acme"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs the hosted registry"));
+}
+
+#[test]
+fn noeta_scope_require_provenance_validates_and_needs_a_registry() {
+    // namespace-protection #1 Phase 1: the CLI validates `--root` and requires a registry URL before
+    // it would ever contact the network.
+    lang()
+        .env_remove("NOETA_REGISTRY_URL")
+        .args(["scope", "require-provenance", "para", "--root", "nonsense"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`--root` must be `key` or `keyless`",
+        ));
+    lang()
+        .env_remove("NOETA_REGISTRY_URL")
+        .args(["scope", "require-provenance", "para"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("needs the hosted registry"));

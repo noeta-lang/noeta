@@ -453,6 +453,52 @@ impl HttpIndex {
             .unwrap_or_else(|| status.to_string());
         Err(format!("registry refused the claim of `{scope}`: {detail}"))
     }
+
+    /// Set a scope's **publishing policy** (namespace-protection #1, require-provenance): `POST
+    /// /v1/scopes/{scope}/policy`, owner-authenticated with the scope's publish token
+    /// (`NOETA_REGISTRY_TOKEN`). `require_provenance` turns the requirement on/off; `root` narrows
+    /// which trust root is demanded (`key`/`keyless`), or `None` = either satisfies it. Returns the
+    /// registry's status message.
+    pub fn set_scope_policy(
+        &self,
+        scope: &str,
+        require_provenance: bool,
+        root: Option<&str>,
+    ) -> Result<String, String> {
+        let token = self.token.as_ref().ok_or_else(|| {
+            "setting a scope policy needs a token — set NOETA_REGISTRY_TOKEN to the scope's publish \
+             token"
+                .to_string()
+        })?;
+        let mut body = serde_json::json!({ "require_provenance": require_provenance });
+        if let Some(root) = root {
+            body["root"] = serde_json::json!(root);
+        }
+        let resp = self
+            .client
+            .post(format!("{}/v1/scopes/{scope}/policy", self.base))
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .map_err(|err| format!("setting the policy for scope `{scope}` failed: {err}"))?;
+        let status = resp.status();
+        let text = resp.text().unwrap_or_default();
+        if status.is_success() {
+            let msg = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(str::to_string))
+                .unwrap_or_else(|| format!("policy updated for `{scope}`"));
+            return Ok(msg);
+        }
+        let detail = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| status.to_string());
+        Err(format!(
+            "registry rejected the policy for `{scope}`: {detail}"
+        ))
+    }
 }
 
 /// Mint a fresh 256-bit publish token (hex) from OS entropy — what `noeta claim` binds to a scope
@@ -1069,6 +1115,41 @@ mod http_tests {
             .claim_scope("stripe", "publish-token-abc123", "eyJ.header.sig")
             .unwrap_err();
         assert!(err.contains("cannot claim scope"), "{err}");
+    }
+
+    #[test]
+    fn http_index_sets_a_scope_policy_with_the_owner_token() {
+        // namespace-protection #1 Phase 1: `set_scope_policy` POSTs the require-provenance policy to
+        // /v1/scopes/{scope}/policy under the scope's publish token, and surfaces the status.
+        let (tx, rx) = mpsc::channel();
+        let base = mock_server(move |method, path, body| {
+            tx.send((method.to_string(), path.to_string(), body.to_string()))
+                .unwrap();
+            (200, r#"{"status":"policy updated","scope":"para","require_provenance":true,"root":"keyless"}"#.to_string())
+        });
+        let index = HttpIndex {
+            token: Some("owner-token".to_string()),
+            ..HttpIndex::new(base).unwrap()
+        };
+        let msg = index
+            .set_scope_policy("para", true, Some("keyless"))
+            .unwrap();
+        assert_eq!(msg, "policy updated");
+        let (method, path, body) = rx.recv().unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/v1/scopes/para/policy");
+        assert!(body.contains("\"require_provenance\":true"), "body: {body}");
+        assert!(body.contains("\"root\":\"keyless\""), "body: {body}");
+    }
+
+    #[test]
+    fn set_scope_policy_needs_a_token() {
+        let base = mock_server(|_, _, _| (200, "{}".to_string()));
+        let err = HttpIndex::new(base)
+            .unwrap()
+            .set_scope_policy("para", true, None)
+            .unwrap_err();
+        assert!(err.contains("NOETA_REGISTRY_TOKEN"), "{err}");
     }
 
     #[test]

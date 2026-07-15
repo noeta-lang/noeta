@@ -464,6 +464,29 @@ enum Command {
         #[arg(long)]
         audience: Option<String>,
     },
+    /// Manage a registry scope you own — its publishing policy (namespace-protection #1). Authenticated
+    /// with the scope's publish token (`NOETA_REGISTRY_TOKEN`) against `NOETA_REGISTRY_URL`.
+    Scope {
+        #[command(subcommand)]
+        action: ScopeAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ScopeAction {
+    /// Require that every release under a scope carry verified provenance, so a leaked publish token
+    /// alone can't push a release. `--off` lifts the requirement.
+    RequireProvenance {
+        /// The scope (`company`) to set the policy on — you must own its publish token.
+        scope: String,
+        /// Narrow which trust root is required: `key` (Ed25519 signature) or `keyless` (Sigstore
+        /// bundle). Omitted, either satisfies it.
+        #[arg(long, value_name = "key|keyless")]
+        root: Option<String>,
+        /// Turn the requirement **off** for this scope instead of on.
+        #[arg(long)]
+        off: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -709,6 +732,62 @@ pub fn run_cli(
             token,
             audience,
         } => cmd_claim(&scope, token.as_deref(), audience.as_deref()),
+        Command::Scope { action } => cmd_scope(&action),
+    }
+}
+
+/// `noeta scope <action>` — manage a registry scope you own (namespace-protection #1).
+fn cmd_scope(action: &ScopeAction) -> ExitCode {
+    match action {
+        ScopeAction::RequireProvenance { scope, root, off } => {
+            cmd_scope_require_provenance(scope, root.as_deref(), *off)
+        }
+    }
+}
+
+/// `noeta scope require-provenance <scope> [--root key|keyless] [--off]` — set (or lift) the scope's
+/// require-provenance policy via the registry's policy endpoint, authenticated with its publish token.
+fn cmd_scope_require_provenance(scope: &str, root: Option<&str>, off: bool) -> ExitCode {
+    if let Some(root) = root
+        && root != "key"
+        && root != "keyless"
+    {
+        eprintln!("lang: `--root` must be `key` or `keyless`");
+        return ExitCode::from(2);
+    }
+    if off && root.is_some() {
+        eprintln!("lang: `--root` doesn't apply with `--off` (you're lifting the requirement)");
+        return ExitCode::from(2);
+    }
+    let Some(base) = std::env::var_os("NOETA_REGISTRY_URL") else {
+        eprintln!(
+            "lang: setting a scope policy needs the hosted registry — set `NOETA_REGISTRY_URL`"
+        );
+        return ExitCode::from(2);
+    };
+    let index = match registry::HttpIndex::new(base.to_string_lossy().into_owned()) {
+        Ok(index) => index,
+        Err(err) => {
+            eprintln!("lang: {err}");
+            return ExitCode::from(1);
+        }
+    };
+    // `--off` lifts the requirement; the root only narrows an *on* requirement.
+    let require = !off;
+    match index.set_scope_policy(scope, require, if off { None } else { root }) {
+        Ok(status) => {
+            if require {
+                let which = root.unwrap_or("any signed");
+                println!("{status}: `{scope}` now requires {which} provenance to publish");
+            } else {
+                println!("{status}: `{scope}` no longer requires provenance");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("lang: {err}");
+            ExitCode::from(1)
+        }
     }
 }
 
