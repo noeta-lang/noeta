@@ -58,6 +58,10 @@ pub struct ResolvedGraph {
     /// **pinned** in `noeta.lock` (trust-on-first-use). Empty when no registry dependency carried
     /// provenance.
     pub scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
+    /// The **root** package's effective language [`Edition`] (follow-on F1) — the edition the merged
+    /// compilation unit compiles under. [`Edition::DEFAULT`] for a bare script with no `[package]`.
+    /// Per-dependency editions live on each [`LockedPackage`]; this is the one the front-end reads.
+    pub root_edition: crate::edition::Edition,
 }
 
 /// A resolved package's native entry crate (Phase 3, N3.1): where the composed build finds its
@@ -83,6 +87,9 @@ pub struct LockedPackage {
     pub source: ResolvedSource,
     /// The manifest's relative native-crate dir, recorded in the lock as declared (Phase 3).
     pub native: Option<String>,
+    /// The package's effective language [`Edition`] (follow-on F1), pinned so a rebuild reproduces
+    /// the exact edition each dependency compiled under.
+    pub edition: crate::edition::Edition,
 }
 
 /// A resolved dependency's origin (package-manager P2.4).
@@ -91,10 +98,10 @@ pub struct LockedPackage {
 pub enum ResolvedSource {
     /// A local source tree, recorded as written in the manifest.
     Path { path: PathBuf },
-    /// A git tag pinned to the commit SHA it resolved to.
+    /// A git ref (tag, branch, or default-branch HEAD) pinned to the commit SHA it resolved to.
     Git {
         url: String,
-        tag: String,
+        git_ref: crate::manifest::GitRef,
         sha: String,
     },
 }
@@ -103,6 +110,7 @@ pub enum ResolvedSource {
 /// its on-disk tree, and its dependency edges (local key → child identity).
 struct Instance {
     version: Version,
+    edition: crate::edition::Edition,
     root_segment: String,
     dir: PathBuf,
     content_hash: String,
@@ -135,6 +143,7 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
             native_crates: Vec::new(),
             trusted_command_roots: Vec::new(),
             scope_trust: BTreeMap::new(),
+            root_edition: crate::edition::Edition::DEFAULT,
         });
     };
     let manifest = read_manifest(&manifest_path)?;
@@ -169,11 +178,16 @@ pub fn resolve_graph_for(entry: &Path, target: Option<&str>) -> Result<ResolvedG
     walker.walk(&root_deps, &manifest_dir, &mut root_edges)?;
 
     let scope_trust = walker.scope_trust;
+    // The root package's edition governs the merged compilation unit (per-package editions of the
+    // dependencies are pinned individually in the lock). A bare manifest with no `[package]` compiles
+    // under the default edition.
+    let root_edition = manifest.package().map(|p| p.edition()).unwrap_or_default();
     let graph = assemble(
         walker.instances,
         &root_edges,
         &manifest.trust().commands,
         scope_trust,
+        root_edition,
     );
 
     // Refresh the lockfile (best-effort: a read-only project must not fail a build). Skipped for a
@@ -281,6 +295,7 @@ impl Walker<'_> {
                 identity.clone(),
                 Instance {
                     version: pkg.version.clone(),
+                    edition: pkg.edition(),
                     root_segment: pkg.name.root().to_string(),
                     dir: dir.clone(),
                     content_hash,
@@ -318,7 +333,7 @@ impl Walker<'_> {
                 let dir = joined.canonicalize().unwrap_or(joined);
                 Ok((dir, ResolvedSource::Path { path: path.clone() }))
             }
-            Dependency::Git { url, tag } => self.fetch_git(key, url, tag, None),
+            Dependency::Git { url, git_ref } => self.fetch_git(key, url, git_ref, None),
             Dependency::Registry { package, .. } => {
                 // Materialize the **resolver-selected** version (Phase 4, S5b): the PubGrub solve
                 // already chose one compatible version per identity, so look up the coordinates of
@@ -354,8 +369,9 @@ impl Walker<'_> {
                 self.check_provenance(key, &name, &release, scope_key.as_deref())?;
                 let coords = release.coords;
                 // The registry pins the SHA (Phase 4, S2), so a first resolve fetches by it rather
-                // than trusting the tag's current target.
-                self.fetch_git(key, &coords.url, &coords.tag, Some(&coords.sha))
+                // than trusting the tag's current target. A published release is always a tag.
+                let git_ref = crate::manifest::GitRef::Tag(coords.tag.clone());
+                self.fetch_git(key, &coords.url, &git_ref, Some(&coords.sha))
             }
         }
     }
@@ -370,25 +386,25 @@ impl Walker<'_> {
         &mut self,
         key: &str,
         url: &str,
-        tag: &str,
+        git_ref: &crate::manifest::GitRef,
         registry_sha: Option<&str>,
     ) -> Result<(PathBuf, ResolvedSource), String> {
         let pin = self
             .lock
-            .git_pin(url, tag)
+            .git_pin(url, git_ref)
             .or(registry_sha)
             .map(str::to_string);
         let store = self.store()?;
         let fetched = match &pin {
-            Some(sha) => crate::git::fetch_pinned(url, tag, sha, store),
-            None => crate::git::fetch(url, tag, store),
+            Some(sha) => crate::git::fetch_pinned(url, git_ref, sha, store),
+            None => crate::git::fetch(url, git_ref, store),
         }
         .map_err(|err| format!("dependency `{key}`: {err}"))?;
         Ok((
             fetched.path,
             ResolvedSource::Git {
                 url: url.to_string(),
-                tag: tag.to_string(),
+                git_ref: git_ref.clone(),
                 sha: fetched.sha,
             },
         ))
@@ -811,6 +827,7 @@ fn assemble(
     root_edges: &BTreeMap<String, String>,
     trusted_commands: &std::collections::BTreeSet<String>,
     scope_trust: BTreeMap<String, crate::lock::ScopeTrust>,
+    root_edition: crate::edition::Edition,
 ) -> ResolvedGraph {
     // Global segment per identity. Direct dependencies keep the consumer's key (so the entry's
     // `use <key>.…` needs no rewrite); transitive-only packages get a unique synthesized segment.
@@ -860,6 +877,7 @@ fn assemble(
             content_hash: inst.content_hash.clone(),
             source: inst.source.clone(),
             native: inst.native.clone(),
+            edition: inst.edition,
         });
         if let Some(native) = &inst.native {
             native_crates.push(NativeCrate {
@@ -883,6 +901,7 @@ fn assemble(
         native_crates,
         trusted_command_roots,
         scope_trust,
+        root_edition,
     }
 }
 
@@ -1018,6 +1037,47 @@ mod tests {
             names(&dev).contains(&"acme/tool".to_string()),
             "dev dep missing under --target dev"
         );
+    }
+
+    #[test]
+    fn the_resolved_graph_carries_per_package_and_root_editions() {
+        // An app pinning edition 2026 explicitly, with a dependency that omits `edition` (so it
+        // defaults). The root edition is the app's; each package's own edition is on its LockedPackage.
+        let base = std::env::temp_dir().join("noeta_graph_test_editions");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        let dep = base.join("dep");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&dep).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\
+             [dependencies]\nd = { path = \"../dep\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+        std::fs::write(
+            dep.join("noeta.toml"),
+            "[package]\nname = \"acme/dep\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dep.join("d.noe"),
+            "namespace dep.m;\npub fn one(): int { return 1; }\n",
+        )
+        .unwrap();
+        let entry = app.join("main.noe");
+
+        let graph = resolve_graph(&entry).expect("resolves");
+        // Root edition = the app's explicit pin.
+        assert_eq!(graph.root_edition, crate::edition::Edition::E2026);
+        // The dependency omitted `edition`, so its LockedPackage records the default.
+        let dep_lock = graph
+            .locked
+            .iter()
+            .find(|l| l.identity == "acme/dep")
+            .expect("dep locked");
+        assert_eq!(dep_lock.edition, crate::edition::Edition::DEFAULT);
     }
 
     #[test]

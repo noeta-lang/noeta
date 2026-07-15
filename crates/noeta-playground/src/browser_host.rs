@@ -28,8 +28,8 @@ use noeta_stdlib::fs::Vfs;
 use noeta_stdlib::{
     AttrValue, Clock, Entropy, Env, ErrorKind, ExecResult, FileReader, FileSystem, Ids,
     InstrumentId, InstrumentKind, LogRecord, Logging, MetricData, MetricStore, MetricValue,
-    Metrics, NetRequest, NetResponse, Network, Os, P2p, ReadSource, Rng, SpanId, SpanKind,
-    SpanStatus, SpanTracker, StdError, TraceContext, Tracing,
+    Metrics, NetRequest, NetResponse, Network, Os, ReadSource, Rng, SpanId, SpanKind, SpanStatus,
+    SpanTracker, StdError, TraceContext, Tracing,
 };
 use serde_json::json;
 
@@ -141,7 +141,6 @@ pub struct BrowserHost {
     /// The program's `env.set` writes — a tab inherits no environment, so the overlay is all
     /// there is.
     env: HashMap<String, String>,
-    p2p: noeta_stdlib::P2pBroker,
     spans: SpanTracker,
     metrics: MetricStore,
 }
@@ -471,24 +470,9 @@ impl Network for BrowserHost {
     }
 }
 
-impl P2p for BrowserHost {
-    fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
-        self.p2p.publish(topic, message);
-        Ok(())
-    }
-
-    fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, StdError> {
-        Ok(self.p2p.poll_default(topic))
-    }
-
-    fn p2p_subscribe(&mut self, topic: &str) -> Result<u64, StdError> {
-        Ok(self.p2p.subscribe(topic))
-    }
-
-    fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
-        Ok(self.p2p.poll_sub(sub))
-    }
-}
+// The playground's browser host no longer bakes in the loopback broker (para-namespace follow-on
+// F2) — the `para.p2p` extension owns it — so it keeps the default `P2pProvider` (`as_p2p` → `None`).
+impl noeta_stdlib::host::P2pProvider for BrowserHost {}
 
 impl Tracing for BrowserHost {
     fn tel_enabled(&self) -> bool {

@@ -1,0 +1,28 @@
+// para.p2p (p2p P1) — topics are independent queues: a message published to one topic is never
+// delivered on another, and receiving on a topic with nothing pending yields `none` immediately
+// (non-blocking). Here "a" carries one 5-byte message, "b" one 3-byte message, and the never-used
+// topic "c" is empty (receive → none → the -1 sentinel).
+// expect: stdout "a=5"
+// expect: stdout "b=3"
+// expect: stdout "c-empty=true"
+// expect: exit 0
+use para.{p2p}
+
+async fn size(topic: string): int {
+    msg = p2p.receive(topic).await
+    return match msg {
+        some(b) => b.len(),
+        none => 0 - 1,
+    }
+}
+
+async fn run(): void {
+    p2p.publish("a", "hello")
+    p2p.publish("b", "hey")
+    echo "a=" ~ size("a").await
+    echo "b=" ~ size("b").await
+    empty = size("c").await == 0 - 1
+    echo "c-empty=" ~ empty
+}
+
+run().await

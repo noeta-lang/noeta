@@ -1,0 +1,34 @@
+// para.p2p (p2p P1) — publish/receive round-trip over the `P2p` host capability. In the sandbox the
+// "network" is a deterministic in-process per-topic FIFO broker, so a program that publishes then
+// receives drains in publish order and terminates in-oracle — both backends agree. `receive` is
+// async (`Future<?bytes>`); `.await` it in a loop until `none`. Messages are bytes; a string
+// publishes as its UTF-8 ("a"/"b"/"c" → hex 61/62/63).
+// expect: stdout "recv 61"
+// expect: stdout "recv 62"
+// expect: stdout "recv 63"
+// expect: stdout "drained after 3"
+// expect: exit 0
+use para.{p2p}
+
+async fn run(): int {
+    p2p.publish("t", "a")
+    p2p.publish("t", "b")
+    p2p.publish("t", "c")
+    mut n = 0
+    mut running = true
+    while running {
+        msg = p2p.receive("t").await
+        (hex, keep) = match msg {
+            some(b) => (b.to_hex(), true),
+            none => ("", false),
+        }
+        if keep {
+            echo "recv " ~ hex
+            n = n + 1
+        }
+        running = keep
+    }
+    return n
+}
+
+echo "drained after " ~ run().await

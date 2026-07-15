@@ -164,7 +164,7 @@ fn emit<C: NativeCtx + ?Sized>(
 /// The W3C context of the current active span — the record's correlation link, or `None` at top
 /// level. Mirrors `tracing`'s reader over the task-local active-span stack.
 fn current_parent<C: NativeCtx + ?Sized>(ctx: &mut C) -> Option<TraceContext> {
-    let top = ctx.context_top()?;
+    let top = ctx.task_context().top()?;
     Some(ctx.host().tel_span_context(top))
 }
 

@@ -1,0 +1,29 @@
+// A demo of the first-party non-default `para.p2p` package — CRDTs, a CRDT-backed synced signal,
+// and the reactivity integration — all addressed under the `para` namespace and delivered through
+// the package registry + composed toolchain (the app authorizes the native code in `[trust]`).
+//
+//   noeta run examples/para-p2p-demo/demo.noe
+//
+// The three `para` modules resolve because this app depends on the `para-p2p` package: `para.crdt`
+// and `para.synced` (native) alongside core `std.reactive` (still in std).
+use para.{crdt}
+use para.synced.{synced_signal}
+use std.reactive.{effect}
+
+// para.crdt — two replicas of a grow-only counter that converge on merge.
+a = crdt.gcounter().increment("A", 3).increment("A", 2)
+b = crdt.gcounter().increment("B", 4)
+echo "crdt: a=${a.value()} b=${b.value()} merged=${a.merge(b).value()}"
+
+// para.synced — a CRDT-backed signal in the shared reactive graph. A local `.merge()` converges the
+// value and, because a synced signal IS a node in the reactive graph, reruns the effect (the reactive
+// seam that lets this out-of-`std` type integrate with core `std.reactive`). Peer replication over
+// the topic happens asynchronously in the background; this local view is deterministic.
+x = synced_signal(crdt.gcounter().increment("A", 1), "demo")
+
+seen = effect(fn() {
+    echo "synced: x = ${x.get().value()}"
+})
+
+x.merge(crdt.gcounter().increment("B", 5))
+echo "synced: after local merge x = ${x.get().value()}"

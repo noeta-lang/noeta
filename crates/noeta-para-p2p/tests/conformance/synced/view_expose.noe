@@ -1,0 +1,23 @@
+// para.synced ∘ std.reactive.view — a `synced_signal` IS a node over the shared reactive graph, so
+// `view.expose` accepts it directly (the reactive seam: core `view.expose` recognizes this out-of-
+// `std` handle through a registered extractor). A local `.merge()` converges the value and the view
+// pushes a minimal patch, exactly as for a plain signal — LiveView over synced state.
+// expect: stdout "{"type":"snapshot","values":{"count":"<gcounter 1>"}}"
+// expect: stdout "{"type":"patch","changes":{"count":"<gcounter 5>"}}"
+// expect: stdout "none"
+// expect: exit 0
+use para.{crdt}
+use para.synced.{synced_signal}
+use std.reactive.{view}
+
+count = synced_signal(crdt.gcounter().increment("A", 1), "room")
+
+v = view()
+v.expose("count", count)
+echo v.snapshot()
+
+count.merge(crdt.gcounter().increment("B", 4))
+echo v.diff() ?? "none"
+
+// No change since the last diff.
+echo v.diff() ?? "none"

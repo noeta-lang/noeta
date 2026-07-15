@@ -23,23 +23,23 @@ pub mod telemetry;
 
 pub use command::{ArgKind, ArgSpec, CommandCtx, EntryArg, EntryCall, ExtCommand, ParsedArgs};
 pub use ctx::{
-    CtxDispatch, CtxError, CtxOut, CtxResult, ExtState, NativeCtx, PackedField, PackedView,
-    Retained, Slot, ctx_arity,
+    Cap, CtxDispatch, CtxError, CtxOut, CtxResult, ExtState, FutureTracing, HotReload, NativeCtx,
+    PackedField, PackedView, Retained, Slot, TaskContext, capability, ctx_arity,
 };
 pub use executor::{Executor, ExternIo, FsIo, RealBody, SandboxExecutor};
 pub use extern_value::{ExternBox, ExternValue};
 pub use host::{
-    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, ReadSource, Rng,
-    SyncStatus,
+    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, P2pProvider,
+    ReadSource, RealP2pConfig, Rng, SyncStatus,
 };
 pub use map_key::{ExternKeyRef, MapKey, PackedKeyField};
 pub use net::{AcceptIo, NetFetchIo, NetRequest, NetResponse, ReplyIo, Request};
 pub use os::{ExecIo, ExecResult, Process};
-pub use p2p::{P2pBroker, ReceiveIo};
+pub use p2p::{P2pBackend, P2pBroker, P2pReceiveIo};
 pub use registry::{
     ArenaGetter, BundleFn, BundleReceiver, ConstraintField, ConstraintLayout, CtxTypeDispatch,
-    ExtBundle, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut, NativeValue,
-    PackedConstraint, RetTy, Scalar, ScalarVec, SigType, TypeDispatch, TypeRecipe,
+    ExtBundle, ExtCapability, ExtFn, ExtModule, ExtType, Extension, ModuleDispatch, NativeOut,
+    NativeValue, PackedConstraint, RetTy, Scalar, ScalarVec, SigType, TypeDispatch, TypeRecipe,
 };
 pub use telemetry::{
     AttrValue, DEFAULT_HISTOGRAM_BOUNDS, HistogramPoint, InstrumentId, InstrumentKind, LogRecord,

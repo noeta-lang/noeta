@@ -12,6 +12,7 @@
 //! producing on-disk source trees + `noeta.lock`; the loader/compiler then run deterministically over
 //! those, outside the differential oracle.
 
+pub mod edition;
 pub mod graph;
 pub mod lock;
 pub mod manifest;

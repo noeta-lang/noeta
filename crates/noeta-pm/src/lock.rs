@@ -10,7 +10,7 @@
 //!
 //! The format is TOML, Cargo-like:
 //! ```toml
-//! version = 1
+//! version = 2
 //!
 //! [[package]]
 //! name = "acme/greet"
@@ -19,6 +19,7 @@
 //! url = "https://example.com/acme/greet"
 //! tag = "v1.0.0"
 //! sha = "…40 hex…"
+//! edition = "2026"
 //! hash = "…content hash…"
 //! ```
 
@@ -32,8 +33,10 @@ use crate::graph::{LockedPackage, ResolvedSource};
 pub const LOCK_NAME: &str = "noeta.lock";
 
 /// The lock format version. A lock written by a newer format is ignored (treated as absent) so an
-/// older toolchain re-resolves rather than misreading it.
-const LOCK_VERSION: i64 = 1;
+/// older toolchain re-resolves rather than misreading it. Bumped to `2` when the per-package
+/// language `edition` was recorded (follow-on F1) — an older toolchain re-resolves rather than
+/// reading a lock whose editions it wouldn't understand.
+const LOCK_VERSION: i64 = 2;
 
 /// The **pinned trust root** of a scope (`company`), recorded trust-on-first-use in `noeta.lock`.
 /// Two roots exist (Phase 4 #2 / Phase 5) and the pin remembers *which* — that memory is the
@@ -95,9 +98,17 @@ impl Lock {
                     continue;
                 };
                 lock.hashes.insert(name.to_string(), hash.to_string());
-                if let (Some(url), Some(tag), Some(sha)) = (get("url"), get("tag"), get("sha")) {
+                // A git package pins its SHA under the ref it was resolved from: a `tag`, a `branch`,
+                // or — with neither recorded — the default-branch `HEAD`. The key is rebuilt with the
+                // same `GitRef::lock_key` the resolve-time lookup uses, so the pin is found again.
+                if let (Some(url), Some(sha)) = (get("url"), get("sha")) {
+                    let git_ref = match (get("tag"), get("branch")) {
+                        (Some(tag), _) => crate::manifest::GitRef::Tag(tag.to_string()),
+                        (None, Some(branch)) => crate::manifest::GitRef::Branch(branch.to_string()),
+                        (None, None) => crate::manifest::GitRef::Head,
+                    };
                     lock.git_pins
-                        .insert((url.to_string(), tag.to_string()), sha.to_string());
+                        .insert((url.to_string(), git_ref.lock_key()), sha.to_string());
                 }
             }
         }
@@ -122,10 +133,10 @@ impl Lock {
         lock
     }
 
-    /// The pinned commit SHA for a git `url`@`tag`, if the lock records it.
-    pub fn git_pin(&self, url: &str, tag: &str) -> Option<&str> {
+    /// The pinned commit SHA for a git `url` at `git_ref`, if the lock records it.
+    pub fn git_pin(&self, url: &str, git_ref: &crate::manifest::GitRef) -> Option<&str> {
         self.git_pins
-            .get(&(url.to_string(), tag.to_string()))
+            .get(&(url.to_string(), git_ref.lock_key()))
             .map(String::as_str)
     }
 
@@ -157,16 +168,27 @@ fn render(locked: &[LockedPackage], scope_trust: &BTreeMap<String, ScopeTrust>) 
                 out.push_str("source = \"path\"\n");
                 out.push_str(&format!("path = {}\n", quote(&path.display().to_string())));
             }
-            ResolvedSource::Git { url, tag, sha } => {
+            ResolvedSource::Git { url, git_ref, sha } => {
                 out.push_str("source = \"git\"\n");
                 out.push_str(&format!("url = {}\n", quote(url)));
-                out.push_str(&format!("tag = {}\n", quote(tag)));
+                // The ref the SHA was resolved from: a `tag` or `branch` line, or neither for a
+                // default-branch HEAD dependency (which `noeta update` re-resolves to a new SHA).
+                match git_ref {
+                    crate::manifest::GitRef::Tag(tag) => {
+                        out.push_str(&format!("tag = {}\n", quote(tag)));
+                    }
+                    crate::manifest::GitRef::Branch(branch) => {
+                        out.push_str(&format!("branch = {}\n", quote(branch)));
+                    }
+                    crate::manifest::GitRef::Head => {}
+                }
                 out.push_str(&format!("sha = {}\n", quote(sha)));
             }
         }
         if let Some(native) = &pkg.native {
             out.push_str(&format!("native = {}\n", quote(native)));
         }
+        out.push_str(&format!("edition = {}\n", quote(pkg.edition.as_str())));
         out.push_str(&format!("hash = {}\n", quote(&pkg.content_hash)));
     }
     // Pinned scope trust roots (provenance TOFU): once written, a later differing key, differing
@@ -225,10 +247,11 @@ mod tests {
             content_hash: "deadbeef".to_string(),
             source: ResolvedSource::Git {
                 url: "https://example.com/acme/greet".to_string(),
-                tag: "v1.0.0".to_string(),
+                git_ref: crate::manifest::GitRef::Tag("v1.0.0".to_string()),
                 sha: "a".repeat(40),
             },
             native: None,
+            edition: crate::edition::Edition::E2026,
         }
     }
 
@@ -241,6 +264,7 @@ mod tests {
                 path: PathBuf::from("../local"),
             },
             native: Some("native".to_string()),
+            edition: crate::edition::Edition::E2026,
         }
     }
 
@@ -255,19 +279,39 @@ mod tests {
 
         let lock = Lock::read(&dir);
         assert_eq!(
-            lock.git_pin("https://example.com/acme/greet", "v1.0.0"),
+            lock.git_pin(
+                "https://example.com/acme/greet",
+                &crate::manifest::GitRef::Tag("v1.0.0".to_string())
+            ),
             Some("a".repeat(40).as_str())
         );
         assert_eq!(lock.content_hash("acme/greet"), Some("deadbeef"));
         assert_eq!(lock.content_hash("acme/local"), Some("cafe"));
         // A path package records no git pin.
-        assert_eq!(lock.git_pin("../local", ""), None);
+        assert_eq!(
+            lock.git_pin("../local", &crate::manifest::GitRef::Head),
+            None
+        );
         // The pinned scope key round-trips (provenance TOFU, Phase 4 #2).
         assert_eq!(
             lock.scope_trust("acme"),
             Some(&ScopeTrust::Key("b".repeat(64)))
         );
         assert_eq!(lock.scope_trust("nobody"), None);
+
+        // The per-package edition is recorded for reproducibility (follow-on F1), under the bumped
+        // format version. It is a record field (re-derived from manifests on resolve, like `native`),
+        // so it round-trips via the rendered file, not the read model.
+        let text = std::fs::read_to_string(dir.join(LOCK_NAME)).unwrap();
+        assert!(
+            text.contains("version = 2\n"),
+            "format version bumped: {text}"
+        );
+        assert_eq!(
+            text.matches("edition = \"2026\"").count(),
+            2,
+            "both packages record their edition: {text}"
+        );
     }
 
     #[test]
@@ -319,7 +363,11 @@ mod tests {
         let dir = std::env::temp_dir().join("noeta_lock_test_missing");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(Lock::read(&dir).git_pin("x", "y").is_none());
+        assert!(
+            Lock::read(&dir)
+                .git_pin("x", &crate::manifest::GitRef::Tag("y".to_string()))
+                .is_none()
+        );
         // A future version is ignored (re-resolve rather than misread).
         std::fs::write(dir.join(LOCK_NAME), "version = 999\n").unwrap();
         assert!(Lock::read(&dir).content_hash("acme/greet").is_none());

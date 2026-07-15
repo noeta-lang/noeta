@@ -23,8 +23,8 @@ use compact_str::CompactString;
 use noeta_stdlib::{
     AttrValue, Clock, Entropy, Env, ErrorKind, ExecResult, FileReader, FileSystem, Ids,
     InstrumentId, InstrumentKind, LogRecord, Logging, MetricData, MetricStore, MetricValue,
-    Metrics, NetRequest, NetResponse, Network, Os, P2p, ReadSource, Rng, SpanId, SpanKind,
-    SpanStatus, SpanTracker, StdError, TraceContext, Tracing,
+    Metrics, NetRequest, NetResponse, Network, Os, ReadSource, Rng, SpanId, SpanKind, SpanStatus,
+    SpanTracker, StdError, TraceContext, Tracing,
 };
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -50,9 +50,6 @@ pub struct WasiHost {
     /// The program's `env.set` writes: an overlay consulted before the real environment, which
     /// is never mutated (same rule as `RealHost`, and WASI environs are immutable anyway).
     env_overlay: HashMap<String, String>,
-    /// The p2p backing: the in-process loopback broker (single-node, the same type the sandbox
-    /// and ring-p2p-less `RealHost` use), so a p2p/synced program runs locally without peers.
-    p2p: noeta_stdlib::P2pBroker,
     /// The one-request inbound script (P-WASM W4): armed by [`WasiHost::with_inbound`] for a
     /// `wasi:http` handler invocation. `None` on the plain runner, where serving stays an honest
     /// error pointing at the serve build.
@@ -88,7 +85,6 @@ impl WasiHost {
             next_reader_id: 0,
             args: std::env::args().collect(),
             env_overlay: HashMap::new(),
-            p2p: noeta_stdlib::P2pBroker::default(),
             inbound: None,
             outbound: None,
             tel: WasiTelemetry::default(),
@@ -502,27 +498,9 @@ impl Network for WasiHost {
     }
 }
 
-impl P2p for WasiHost {
-    // The loopback broker (single-node, in-process) — the same backing `RealHost` uses without
-    // the `ring-p2p` ring, so a p2p/synced program runs locally, just without real peers. The
-    // durable/group/identity defaults on the trait are exactly right for a broker.
-    fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
-        self.p2p.publish(topic, message);
-        Ok(())
-    }
-
-    fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, StdError> {
-        Ok(self.p2p.poll_default(topic))
-    }
-
-    fn p2p_subscribe(&mut self, topic: &str) -> Result<u64, StdError> {
-        Ok(self.p2p.subscribe(topic))
-    }
-
-    fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
-        Ok(self.p2p.poll_sub(sub))
-    }
-}
+// WasiHost no longer bakes in the loopback broker (para-namespace follow-on F2) — the `para.p2p`
+// extension owns it in per-run ctx state — so it keeps the default `P2pProvider` (`as_p2p` → `None`).
+impl noeta_stdlib::host::P2pProvider for WasiHost {}
 
 impl Tracing for WasiHost {
     fn tel_enabled(&self) -> bool {

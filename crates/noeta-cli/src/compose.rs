@@ -39,7 +39,7 @@ const DEV_FEATURES: &[&str] = &["fmt"];
 /// `noeta-runner` + the app's native runtime extensions — no dev tooling — and is the base a
 /// `build --exe`/`--native` artifact staples onto, so a shipped native-dependency app carries its
 /// runtime handlers but none of the toolchain.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ShimKind {
     Toolchain,
     Runner,
@@ -277,6 +277,12 @@ struct Entry {
     /// [`ShimKind::Toolchain`] composition turns on; empty for a pure-runtime crate. A shipped base
     /// ignores this and pulls the crate at default features.
     dev_features: Vec<String>,
+    /// The **footprint rings** this entry crate declares (a `ring-*` feature — e.g. `ring-p2p` for the
+    /// para.p2p transport, para-namespace F2b). A Toolchain/Runner composition enables **all** of them
+    /// (full runtime capability); the AOT composition enables only the subset the program's footprint
+    /// scan selected, so a `--native` binary that never imports the ring's modules sheds its native
+    /// dep tree. Empty for a crate with no gated rings (built at default features, unchanged).
+    ring_features: Vec<String>,
 }
 
 fn resolve_entries(crates: &[NativeCrate]) -> Result<Vec<Entry>, String> {
@@ -294,12 +300,20 @@ fn resolve_entries(crates: &[NativeCrate]) -> Result<Vec<Entry>, String> {
             .filter(|f| declared.iter().any(|d| d == *f))
             .map(|f| (*f).to_string())
             .collect();
+        // Footprint rings the crate gates (a `ring-*` feature). Sorted for deterministic shim output.
+        let mut ring_features: Vec<String> = declared
+            .iter()
+            .filter(|f| f.starts_with("ring-"))
+            .cloned()
+            .collect();
+        ring_features.sort();
         entries.push(Entry {
             identity: nc.identity.clone(),
             dir: nc.crate_dir.clone(),
             cargo_name,
             ident,
             dev_features,
+            ring_features,
         });
     }
     // Deterministic shim content (the graph already sorts by identity; keep it locally true too).
@@ -605,8 +619,17 @@ fn aot_shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, rings: &[
             }
         }
     };
+    // Rings the AOT **base** (`noeta-aot-runtime`) owns — it forwards them to noeta-stdlib /
+    // noeta-runtime. An **extension-owned** ring is not a base feature: since para-namespace F2b the
+    // p2panda transport is `ring-p2p` on the `para.p2p` *extension* crate, whose native tree is linked
+    // through the entry crate that declares it (default-on there), not the base. So such a ring is
+    // filtered out of the base feature set here — applying it to the base would be an unknown-feature
+    // error. (Shedding p2panda from a para-*depending* but non-*importing* `--native` binary is a
+    // future refinement — it would toggle the entry crate's own `ring-p2p` from the footprint scan.)
+    const AOT_BASE_RINGS: &[&str] = &["ring-http-client", "ring-datetime"];
     let ring_list = rings
         .iter()
+        .filter(|r| AOT_BASE_RINGS.contains(&r.as_str()))
         .map(|r| toml_quote(r))
         .collect::<Vec<_>>()
         .join(", ");
@@ -627,12 +650,32 @@ fn aot_shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, rings: &[
         src_spec("noeta-native")
     ));
     for (n, e) in entries.iter().enumerate() {
+        // Footprint-gate the entry crate's rings: enable only those the program actually selected, so
+        // a `--native` binary that depends on a native package but never imports the ring's modules
+        // sheds that ring's native dep tree (e.g. a para-p2p-depending program that never touches
+        // `para.p2p`/`para.synced` links no p2panda). A crate with no `ring-*` features is unaffected.
+        let selected: Vec<&String> = e
+            .ring_features
+            .iter()
+            .filter(|r| rings.iter().any(|s| s == *r))
+            .collect();
+        let features = if selected.is_empty() {
+            String::new()
+        } else {
+            let list = selected
+                .iter()
+                .map(|f| toml_quote(f))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(", features = [{list}]")
+        };
         out.push_str(&format!(
-            "ext{n} = {{ package = {}, path = {} }}\n",
+            "ext{n} = {{ package = {}, path = {}{features} }}\n",
             toml_quote(&e.cargo_name),
             toml_quote(&e.dir.display().to_string())
         ));
     }
+    out.push_str(&toolchain_patch_section(toolchain));
     out.push_str("\n[workspace]\n\n[profile.release]\ncodegen-units = 1\nlto = \"thin\"\n");
     out
 }
@@ -696,16 +739,23 @@ fn shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, kind: ShimKin
     out.push_str(&toolchain_dep(kind.base_crate()));
     out.push_str(&toolchain_dep("noeta-native"));
     for (n, e) in entries.iter().enumerate() {
-        let features = if kind == ShimKind::Toolchain && !e.dev_features.is_empty() {
-            let list = e
-                .dev_features
+        // A dev toolchain turns on the crate's dev features (`fmt`); a Toolchain *and* a Runner
+        // (shipped `--exe`) both enable ALL of the crate's footprint rings — a runnable binary is
+        // fully capable. (Only the AOT composition footprint-gates rings; see `aot_shim_cargo_toml`.)
+        let mut feats: Vec<String> = Vec::new();
+        if kind == ShimKind::Toolchain {
+            feats.extend(e.dev_features.iter().cloned());
+        }
+        feats.extend(e.ring_features.iter().cloned());
+        let features = if feats.is_empty() {
+            String::new()
+        } else {
+            let list = feats
                 .iter()
                 .map(|f| toml_quote(f))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(", features = [{list}]")
-        } else {
-            String::new()
         };
         out.push_str(&format!(
             "ext{n} = {{ package = {}, path = {}{features} }}\n",
@@ -713,7 +763,58 @@ fn shim_cargo_toml(entries: &[Entry], toolchain: &ToolchainSource, kind: ShimKin
             toml_quote(&e.dir.display().to_string())
         ));
     }
+    out.push_str(&toolchain_patch_section(toolchain));
     out.push_str("\n[workspace]\n\n[profile.release]\ncodegen-units = 1\nlto = \"thin\"\n");
+    out
+}
+
+/// The `[patch]` section that redirects a native package's git dependencies **on the canonical
+/// toolchain repo** to *this* toolchain's own crates (para-namespace follow-on F3). It is what makes
+/// an **out-of-tree** native package buildable: the package's entry crate depends on `noeta-native`
+/// (and, for a first-party package, its own toolchain-resident impl crate) by git on the noeta repo —
+/// resolvable in a standalone clone — and here the composer overrides every one of those with the
+/// consumer's *exact* toolchain source. Without this the git crates would be a **second** copy of
+/// `noeta-native`, so a `dyn Extension` from the package would not match the shim's
+/// `noeta_native::Extension` type and the `NOETA_EXTENSIONS` aggregation would not type-check.
+///
+/// Only emitted for a **workspace** (local-path) toolchain: a git-tag toolchain unifies naturally
+/// when the package pins the same tag, and Cargo forbids patching a git source with itself. Every
+/// `crates/*` member is patched to its path; Cargo ignores the unused ones (a package depends on only
+/// a few), and the composed build captures cargo's output, so the unused-patch notes never reach the
+/// user. Crate directory names equal their package names across the workspace, so the directory name
+/// is the patch key.
+fn toolchain_patch_section(toolchain: &ToolchainSource) -> String {
+    let ToolchainSource::Workspace(root) = toolchain else {
+        return String::new();
+    };
+    // The git URL a native package references its toolchain crates by. Defaults to this build's
+    // `repository`, overridable via `NOETA_TOOLCHAIN_REPO` for a fork, a private mirror, or a local
+    // `file://` clone — the patch key must equal the URL the package's Cargo.toml declares.
+    let repo = std::env::var("NOETA_TOOLCHAIN_REPO")
+        .unwrap_or_else(|_| env!("CARGO_PKG_REPOSITORY").to_string());
+    if repo.is_empty() {
+        return String::new();
+    }
+    let crates_dir = root.join("crates");
+    let Ok(entries) = std::fs::read_dir(&crates_dir) else {
+        return String::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.path().join("Cargo.toml").is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort(); // deterministic shim content (folds into the compose cache key)
+    if names.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\n[patch.{}]\n", toml_quote(&repo));
+    for name in names {
+        out.push_str(&format!(
+            "{name} = {{ path = {} }}\n",
+            toml_quote(&crates_dir.join(&name).display().to_string())
+        ));
+    }
     out
 }
 
@@ -809,6 +910,7 @@ mod tests {
             cargo_name: "imgfx-native".to_string(),
             ident: "imgfx_native".to_string(),
             dev_features: vec![],
+            ring_features: vec![],
         }]
     }
 
@@ -820,6 +922,19 @@ mod tests {
             cargo_name: "imgfx-native".to_string(),
             ident: "imgfx_native".to_string(),
             dev_features: vec!["fmt".to_string()],
+            ring_features: vec![],
+        }]
+    }
+
+    /// A crate declaring a footprint ring (like `para-p2p-native`'s `ring-p2p`).
+    fn ring_entries() -> Vec<Entry> {
+        vec![Entry {
+            identity: "acme/imgfx".to_string(),
+            dir: PathBuf::from("/store/acme_imgfx/native"),
+            cargo_name: "imgfx-native".to_string(),
+            ident: "imgfx_native".to_string(),
+            dev_features: vec![],
+            ring_features: vec!["ring-p2p".to_string()],
         }]
     }
 
@@ -856,6 +971,83 @@ mod tests {
                 "noeta-cli = { git = \"https://github.com/nsrosenqvist/noeta\", tag = \"v0.1.0\" }"
             ),
             "{toml}"
+        );
+    }
+
+    #[test]
+    fn shim_patches_noeta_repo_git_crates_to_the_workspace_for_out_of_tree_packages() {
+        // A workspace toolchain with two crates. `toolchain_patch_section` must emit a `[patch]` on
+        // the canonical repo URL redirecting each `crates/*` member to its path — so a native package
+        // that git-deps the noeta repo unifies its `noeta_native::Extension` with the shim's.
+        let root = std::env::temp_dir().join(format!("noeta_patch_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for c in ["noeta-native", "noeta-crdt"] {
+            let d = root.join("crates").join(c);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("Cargo.toml"), format!("[package]\nname = \"{c}\"\n")).unwrap();
+        }
+        let toml = shim_cargo_toml(
+            &entries(),
+            &ToolchainSource::Workspace(root.clone()),
+            ShimKind::Toolchain,
+        );
+
+        // A `[patch]` on the toolchain repo (this build's `repository`, or a `NOETA_TOOLCHAIN_REPO`
+        // override) redirecting each `crates/*` member to its path.
+        assert!(toml.contains("[patch."), "a [patch] section:\n{toml}");
+        assert!(
+            toml.contains(&format!(
+                "noeta-native = {{ path = \"{}\" }}",
+                root.join("crates").join("noeta-native").display()
+            )),
+            "each crate redirected to its path:\n{toml}"
+        );
+        assert!(toml.contains("noeta-crdt = { path ="), "{toml}");
+
+        // A git-tag (out-of-workspace) toolchain emits NO patch — it unifies by pinning the same tag,
+        // and Cargo forbids patching a git source with itself.
+        let git = shim_cargo_toml(
+            &entries(),
+            &ToolchainSource::GitTag {
+                repo: "https://example.com/acme/noeta".to_string(),
+                tag: "v0.1.0".to_string(),
+            },
+            ShimKind::Toolchain,
+        );
+        assert!(
+            !git.contains("[patch."),
+            "no patch for a git-tag toolchain:\n{git}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn footprint_rings_are_full_in_a_runnable_shim_but_gated_in_the_aot_shim() {
+        let ws = ToolchainSource::Workspace(PathBuf::from("/src/noeta"));
+
+        // A Toolchain (and a Runner) shim enables ALL of an entry crate's rings — a runnable binary
+        // is fully capable, so `noeta run` / `--exe` get real p2p.
+        for kind in [ShimKind::Toolchain, ShimKind::Runner] {
+            let toml = shim_cargo_toml(&ring_entries(), &ws, kind);
+            assert!(
+                toml.contains("ext0 = { package = \"imgfx-native\", path = \"/store/acme_imgfx/native\", features = [\"ring-p2p\"] }"),
+                "{kind:?} shim enables the ring:\n{toml}"
+            );
+        }
+
+        // The AOT shim gates rings on the footprint: selected ⇒ enabled …
+        let selected = aot_shim_cargo_toml(&ring_entries(), &ws, &["ring-p2p".to_string()]);
+        assert!(
+            selected.contains("ext0 = { package = \"imgfx-native\", path = \"/store/acme_imgfx/native\", features = [\"ring-p2p\"] }"),
+            "selected ring enabled:\n{selected}"
+        );
+        // … not selected (the program never imports the ring's modules) ⇒ shed (no features).
+        let shed = aot_shim_cargo_toml(&ring_entries(), &ws, &[]);
+        assert!(
+            shed.contains(
+                "ext0 = { package = \"imgfx-native\", path = \"/store/acme_imgfx/native\" }"
+            ),
+            "unselected ring shed:\n{shed}"
         );
     }
 

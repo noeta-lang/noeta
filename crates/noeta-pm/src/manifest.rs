@@ -72,8 +72,10 @@ pub struct PackageMeta {
     /// The global identity `company/package` — what the registry indexes and git coords map to.
     pub name: PackageName,
     pub version: semver::Version,
-    /// The language edition, if pinned (reserved; not yet consumed).
-    pub edition: Option<String>,
+    /// The pinned language [`Edition`] (follow-on arc F1). `None` when the package omits `edition`,
+    /// which the toolchain treats as [`Edition::DEFAULT`]; the value is validated at parse time
+    /// (an unknown edition is a manifest error), so a present value is always a known edition.
+    pub edition: Option<crate::edition::Edition>,
     /// The relative directory of this package's native Rust **entry crate** (package-manager
     /// Phase 3, N3.1): `native = "native"` points at a `Cargo.toml` whose crate exports the
     /// package's extension units (one crate, any number of units — std's own shape). `None` for a
@@ -81,6 +83,15 @@ pub struct PackageMeta {
     /// Rust into a consumer's build, which should never be triggered by the mere presence of a
     /// directory.
     pub native: Option<String>,
+}
+
+impl PackageMeta {
+    /// The **effective** language edition this package compiles under — its pinned [`Edition`], or
+    /// [`Edition::DEFAULT`] when it declared none. The one place the rest of the toolchain reads an
+    /// edition, so the default is applied consistently.
+    pub fn edition(&self) -> crate::edition::Edition {
+        self.edition.unwrap_or_default()
+    }
 }
 
 /// A global package identity `company/package` (package-manager P2.0). The slash is deliberately
@@ -125,14 +136,55 @@ impl PackageName {
 }
 
 /// One `[dependencies]` entry's **source** (package-manager P2.0). The table *key* is the local import
+/// Which git reference a `git` dependency tracks. A **tag** is the release model (a published,
+/// immutable version); a **branch** or bare **HEAD** tracks a moving ref — for an in-development or
+/// bundled package that isn't cut into tagged releases yet (follow-on: `git` deps without a tag). In
+/// every case the lockfile pins the resolved commit SHA, so a build reproduces exactly; `noeta
+/// update` re-resolves a branch/HEAD ref to its latest commit (a tag re-resolves to the same commit
+/// unless it moved).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitRef {
+    /// A tagged release — `dep = { git = "…", tag = "v1.2.0" }`.
+    Tag(String),
+    /// A branch's current tip — `dep = { git = "…", branch = "main" }`.
+    Branch(String),
+    /// The remote's default-branch `HEAD` — `dep = { git = "…" }` with no tag/branch (the
+    /// tag-free in-dev/bundled case).
+    Head,
+}
+
+impl GitRef {
+    /// A short human description for messages and the lockfile ref comment (`v1.2.0`, `branch main`,
+    /// `HEAD`).
+    pub fn describe(&self) -> String {
+        match self {
+            GitRef::Tag(t) => t.clone(),
+            GitRef::Branch(b) => format!("branch {b}"),
+            GitRef::Head => "HEAD".to_string(),
+        }
+    }
+
+    /// The lockfile-pin key component (paired with the url) — a stable, kind-prefixed string so a tag
+    /// named `main` and the branch `main` never share a pin. Recomputed identically on lock read and
+    /// on the resolve-time pin lookup, so a locked SHA is found again.
+    pub fn lock_key(&self) -> String {
+        match self {
+            GitRef::Tag(t) => format!("tag:{t}"),
+            GitRef::Branch(b) => format!("branch:{b}"),
+            GitRef::Head => "head".to_string(),
+        }
+    }
+}
+
 /// root (an identifier), decoupled from the resolved package's global `company/package` identity.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Dependency {
     /// A local source tree — `dep = { path = "…" }`. Needs no network or resolver (P2.1).
     Path { path: PathBuf },
-    /// A git repository pinned to a **tag** (= a released version) — `dep = { git = "…", tag = "…" }`.
-    /// Sources are git + tagged releases only (user decision); the lockfile pins the resolved SHA.
-    Git { url: String, tag: String },
+    /// A git repository pinned to a [`GitRef`] — a `tag` (a released version), a `branch`, or the
+    /// default-branch `HEAD` (`dep = { git = "…" }`, the tag-free in-dev/bundled case). The lockfile
+    /// pins the resolved SHA either way, so a build reproduces exactly.
+    Git { url: String, git_ref: GitRef },
     /// A registry dependency by SemVer requirement — `dep = "^1.2"` or
     /// `dep = { version = "^1.2", package = "company/pkg" }`. The registry index resolves
     /// name→git-coords (P2.5). `package` is the registry identity (decoupled from the import-root
@@ -302,6 +354,26 @@ pub fn resolve_active_tier_providers(
 /// `use`s link without key collision.
 pub fn dependency_packages(entry: &Path) -> Result<Vec<noeta_loader::DepPackage>, String> {
     Ok(crate::graph::resolve_graph(entry)?.packages)
+}
+
+/// The **effective language edition** the entry compiles under (follow-on F1) — its own
+/// `[package].edition`, or [`Edition::DEFAULT`] when it declares none or has no manifest at all (a
+/// bare script). This is the entry's *own* package edition, independent of its dependency graph
+/// (each dependency's edition is pinned separately in `noeta.lock`), so it is a cheap manifest read,
+/// not a graph walk — the edition the compile boundary folds into the startup-cache key so a future
+/// edition that changes compilation already invalidates stale bytecode.
+pub fn root_edition(entry: &Path) -> crate::edition::Edition {
+    let dir = entry.parent().unwrap_or_else(|| Path::new("."));
+    let Some(path) = find(dir) else {
+        return crate::edition::Edition::DEFAULT;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return crate::edition::Edition::DEFAULT;
+    };
+    match Manifest::parse(&text) {
+        Ok(m) => m.package().map(|p| p.edition()).unwrap_or_default(),
+        Err(_) => crate::edition::Edition::DEFAULT,
+    }
 }
 
 /// The `[package] name` of a **cargo** manifest — what a composed-toolchain shim writes into its
@@ -602,11 +674,10 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
         .map_err(|err| format!("`package.version` `{version_str}` is not valid SemVer: {err}"))?;
     let edition = match pkg.get("edition") {
         None => None,
-        Some(v) => Some(
-            v.as_str()
-                .ok_or("`package.edition` must be a string")?
-                .to_string(),
-        ),
+        Some(v) => {
+            let s = v.as_str().ok_or("`package.edition` must be a string")?;
+            Some(crate::edition::Edition::parse(s)?)
+        }
     };
     let native = match pkg.get("native") {
         None => None,
@@ -740,15 +811,35 @@ fn parse_dependency(key: &str, value: &toml::Value) -> Result<Dependency, String
             let url = table["git"]
                 .as_str()
                 .ok_or_else(|| format!("dependency `{key}`: `git` must be a string"))?;
-            let tag = table.get("tag").and_then(|v| v.as_str()).ok_or_else(|| {
-                format!(
-                    "dependency `{key}`: a `git` dependency requires a string `tag` \
-                         (sources are git + tagged releases only)"
-                )
-            })?;
+            // A `git` dependency tracks a `tag` (a release), a `branch`, or — with neither — the
+            // remote's default-branch HEAD (the tag-free in-dev/bundled case). `tag` and `branch`
+            // are mutually exclusive.
+            let git_ref = match (
+                table.get("tag").and_then(|v| v.as_str()),
+                table.get("branch").and_then(|v| v.as_str()),
+            ) {
+                (Some(_), Some(_)) => {
+                    return Err(format!(
+                        "dependency `{key}`: a `git` dependency takes `tag` OR `branch`, not both"
+                    ));
+                }
+                (Some(tag), None) => GitRef::Tag(tag.to_string()),
+                (None, Some(branch)) => GitRef::Branch(branch.to_string()),
+                (None, None) => {
+                    // Reject a non-string `tag`/`branch` explicitly rather than silently treating it
+                    // as HEAD (a common typo like `tag = 1` should not become a HEAD dependency).
+                    if table.contains_key("tag") {
+                        return Err(format!("dependency `{key}`: `tag` must be a string"));
+                    }
+                    if table.contains_key("branch") {
+                        return Err(format!("dependency `{key}`: `branch` must be a string"));
+                    }
+                    GitRef::Head
+                }
+            };
             Ok(Dependency::Git {
                 url: url.to_string(),
-                tag: tag.to_string(),
+                git_ref,
             })
         }
         (false, false, true) => {
@@ -835,7 +926,30 @@ mod tests {
         assert_eq!(pkg.name.package, "widgets");
         assert_eq!(pkg.name.root(), "widgets");
         assert_eq!(pkg.version, semver::Version::parse("1.4.2").unwrap());
-        assert_eq!(pkg.edition.as_deref(), Some("2026"));
+        assert_eq!(pkg.edition, Some(crate::edition::Edition::E2026));
+        assert_eq!(pkg.edition(), crate::edition::Edition::E2026);
+    }
+
+    #[test]
+    fn defaults_edition_when_omitted_and_rejects_an_unknown_one() {
+        let m = Manifest::parse(
+            "[package]\n\
+             name = \"acme/widgets\"\n\
+             version = \"1.0.0\"\n",
+        )
+        .expect("valid");
+        let pkg = m.package().expect("package present");
+        assert_eq!(pkg.edition, None);
+        assert_eq!(pkg.edition(), crate::edition::Edition::DEFAULT);
+
+        let err = Manifest::parse(
+            "[package]\n\
+             name = \"acme/widgets\"\n\
+             version = \"1.0.0\"\n\
+             edition = \"2030\"\n",
+        )
+        .expect_err("unknown edition rejected");
+        assert!(err.contains("2030"), "names the offending value: {err}");
     }
 
     // --- cargo manifest introspection (composition: dev-deps D5b) ------------------------------
@@ -969,7 +1083,7 @@ mod tests {
             deps["http"],
             Dependency::Git {
                 url: "https://example.com/guzzle/http".to_string(),
-                tag: "v1.2.0".to_string(),
+                git_ref: GitRef::Tag("v1.2.0".to_string()),
             }
         );
         assert_eq!(
@@ -989,8 +1103,39 @@ mod tests {
     }
 
     #[test]
-    fn a_git_dependency_requires_a_tag() {
-        assert!(Manifest::parse("[dependencies]\nhttp = { git = \"https://x/y\" }\n").is_err());
+    fn a_git_dependency_tracks_a_tag_a_branch_or_head() {
+        fn git_ref_of(toml: &str) -> GitRef {
+            let m = Manifest::parse(toml).expect("valid");
+            match &m.dependencies()["x"] {
+                Dependency::Git { url, git_ref } => {
+                    assert_eq!(url, "https://x/y");
+                    git_ref.clone()
+                }
+                other => panic!("expected a git dependency, got {other:?}"),
+            }
+        }
+
+        // A tag (the release form), a branch, or bare `git` — the default-branch HEAD (the tag-free
+        // in-dev/bundled case).
+        assert_eq!(
+            git_ref_of("[dependencies]\nx = { git = \"https://x/y\", tag = \"v1.0.0\" }\n"),
+            GitRef::Tag("v1.0.0".to_string())
+        );
+        assert_eq!(
+            git_ref_of("[dependencies]\nx = { git = \"https://x/y\", branch = \"main\" }\n"),
+            GitRef::Branch("main".to_string())
+        );
+        assert_eq!(
+            git_ref_of("[dependencies]\nx = { git = \"https://x/y\" }\n"),
+            GitRef::Head
+        );
+        // `tag` and `branch` together is a conflict.
+        assert!(
+            Manifest::parse(
+                "[dependencies]\nx = { git = \"https://x/y\", tag = \"v1\", branch = \"main\" }\n"
+            )
+            .is_err()
+        );
     }
 
     #[test]

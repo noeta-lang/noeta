@@ -6,7 +6,8 @@
 //! it stays with the modules ([`crate::fs`], [`crate::random`], [`crate::net`]) whose state it holds.
 
 pub use noeta_native::host::{
-    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, ReadSource, Rng,
+    Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Network, Os, P2p, P2pProvider,
+    ReadSource, RealP2pConfig, Rng,
 };
 pub use noeta_native::{Logging, Metrics, Tracing};
 
@@ -58,10 +59,6 @@ pub struct SandboxHost {
     /// most one listener — a differential program calls `http.serve` once — so a single slot
     /// suffices; a second `net_listen` re-arms it.
     inbound: Option<InboundState>,
-    /// The p2p broker (p2p P1/P2): the deterministic in-process pub/sub log that is the sandbox's
-    /// whole "network", so a publish/receive-or-sync program is byte-identical across backends and
-    /// terminates in-oracle once its topics drain.
-    p2p: noeta_native::P2pBroker,
     /// The deterministic telemetry recorder (native OTEL): in-progress spans by id, ended spans in
     /// end order, and the counters deriving deterministic span/trace ids. Since spans are write-only
     /// (never program output), this exists only so conformance can assert on emitted spans; the
@@ -174,7 +171,6 @@ impl SandboxHost {
             procs: BTreeMap::new(),
             next_proc: 1,
             inbound: None,
-            p2p: noeta_native::P2pBroker::default(),
             tel: TelRecorder {
                 next_span: 1,
                 next_trace: 1,
@@ -462,24 +458,11 @@ impl Network for SandboxHost {
     }
 }
 
-impl P2p for SandboxHost {
-    fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError> {
-        self.p2p.publish(topic, message);
-        Ok(())
-    }
-
-    fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, StdError> {
-        Ok(self.p2p.poll_default(topic))
-    }
-
-    fn p2p_subscribe(&mut self, topic: &str) -> Result<u64, StdError> {
-        Ok(self.p2p.subscribe(topic))
-    }
-
-    fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, StdError> {
-        Ok(self.p2p.poll_sub(sub))
-    }
-}
+// The sandbox no longer bakes in the P2p capability (para-namespace follow-on F2): the loopback
+// broker moved into the `para.p2p` extension, which owns it in per-run ctx state. So the sandbox
+// keeps the **default** `P2pProvider` (`as_p2p` → `None`) — a host with no peer networking — and the
+// `para.p2p`/`para.synced` surface serves itself from the extension broker.
+impl P2pProvider for SandboxHost {}
 
 impl Env for SandboxHost {
     fn env_get(&self, key: &str) -> Option<String> {

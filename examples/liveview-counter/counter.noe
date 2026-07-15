@@ -1,4 +1,4 @@
-// A LiveView counter built on the `liveview` package — reactive HTML templating over a websocket.
+// A LiveView counter built on the `para.html` package — reactive HTML templating over a websocket.
 // The dynamic text is reactive automatically: `${count.get()}` is an `@html` hole the package turns
 // into a `computed`, and a click pushes a minimal diff of just the holes that changed.
 //
@@ -7,7 +7,7 @@
 //
 // Importing `render` (the `@html` handler) brings its `@tier(html, …)` declaration into scope, so
 // `@html { … }` resolves here.
-use liveview.{render, Html, handle}
+use para.html.{render, Html, handle}
 use std.reactive.signal
 use std.http.server
 use std.http.{Request, Response}

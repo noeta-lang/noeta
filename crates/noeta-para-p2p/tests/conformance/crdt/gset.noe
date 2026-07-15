@@ -1,0 +1,20 @@
+// para.crdt (p2p P0) — GSet, a grow-only set of strings. Insert is idempotent, merge is union, and
+// members come back sorted (the state is order-independent, which is what keeps merge/equality
+// deterministic across replicas).
+// expect: stdout "len=2 has_x=true has_z=false"
+// expect: stdout "union=<gset [x, y, z]> len=3"
+// expect: stdout "members=[\"x\", \"y\", \"z\"]"
+// expect: stdout "commutes=true"
+// expect: exit 0
+use para.{crdt}
+
+a = crdt.gset().insert("x").insert("y").insert("x")
+has_x = a.contains("x")
+has_z = a.contains("z")
+echo "len=${a.len()} has_x=${has_x} has_z=${has_z}"
+
+b = crdt.gset().insert("y").insert("z")
+u = a.merge(b)
+echo "union=${u} len=${u.len()}"
+echo "members=${u.members()}"
+echo "commutes=${a.merge(b) == b.merge(a)}"

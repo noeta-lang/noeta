@@ -1,0 +1,13 @@
+// para.p2p (p2p P3.3) — `p2p.identity()` is this node's stable identity (the hex Ed25519 public key
+// it signs with, persisted across restarts on a real host). The deterministic sandbox has no
+// network identity, so it returns `none` — a program that reads it stays oracle-safe (both backends
+// agree, no real key to leak into the output).
+// expect: stdout "identity none"
+// expect: exit 0
+use para.{p2p}
+
+id = match p2p.identity() {
+    some(k) => k,
+    none => "none",
+}
+echo "identity ${id}"

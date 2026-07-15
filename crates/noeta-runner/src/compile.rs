@@ -150,8 +150,12 @@ pub fn compile_whole_file(
     // (so a dep change never serves stale bytecode) and the loader (so `use <dep-key>.…` resolves).
     let deps = manifest::dependency_packages(file).map_err(CompileFailure::Message)?;
 
+    // The entry's effective language edition (follow-on F1) — part of the compilation identity, so it
+    // is folded into the cache key below.
+    let edition = manifest::root_edition(file);
+
     // Startup cache (M3): on a hit, return the cached module — load/check/compile all skipped.
-    let cache = open_startup_cache(file, &active, &providers, &deps, no_cache);
+    let cache = open_startup_cache(file, &active, &providers, &deps, edition, no_cache);
     if let Some(slot) = &cache
         && let Some(blob) = slot.cache.load(&slot.key)
         && let Ok(module) = noeta_bundle::read(&blob)
@@ -226,6 +230,7 @@ fn open_startup_cache(
     active: &[String],
     providers: &BTreeMap<String, String>,
     deps: &[noeta_loader::DepPackage],
+    edition: noeta_pm::edition::Edition,
     no_cache: bool,
 ) -> Option<CacheSlot> {
     if no_cache || std::env::var_os("NOETA_NO_CACHE").is_some() {
@@ -261,6 +266,10 @@ fn open_startup_cache(
             key.source(&module.name, module.text.as_bytes());
         }
     }
+    // The language edition is part of the compilation identity (follow-on F1): a future edition that
+    // changes what the front-end accepts or how it lowers must not reuse another edition's cached
+    // bytecode, so the entry's effective edition is key material. Distinct from tier names.
+    key.source("<edition>", edition.as_str().as_bytes());
     key.runtime_version(noeta_bundle::RUNTIME_VERSION)
         .binary_identity(binary);
     for tier in active {

@@ -1238,8 +1238,9 @@ impl Checker {
         for ext in self.reg().extensions() {
             for ty in ext.types() {
                 if !ty.traits.is_empty() {
-                    // Keyed by the **qualified identity** (`std.crdt.GCounter`) the checker stores in
-                    // `Type::Named`, so a `T: Mergeable` bound resolves against the same string.
+                    // Keyed by the **qualified identity** (`para.crdt.GCounter` once the para-p2p
+                    // package is installed) the checker stores in `Type::Named`, so a `T: Mergeable`
+                    // bound resolves against the same string.
                     self.record_trait_impls(&ty.qualified(), ty.traits.iter().copied());
                 }
             }

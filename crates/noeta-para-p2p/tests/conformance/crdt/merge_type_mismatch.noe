@@ -1,0 +1,11 @@
+// Each CRDT's `merge` takes its own type — you cannot merge a GCounter with a GSet. The extern-
+// type method signatures make this a *static* error (extern-types X1): the checker rejects the
+// mismatched argument at check time, a preview of the compile-time `Mergeable` safety the synced-
+// signal surface will build on.
+// expect: error E0007 at 10:5
+// expect: exit 1
+use para.{crdt}
+a = crdt.gcounter()
+b = crdt.gset()
+c = a.merge(b)
+echo c.value()

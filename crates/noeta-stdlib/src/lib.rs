@@ -34,7 +34,6 @@
 pub use noeta_native::*;
 
 pub mod cell;
-pub mod crdt;
 pub mod crypto;
 /// The `std.datetime` calendar/timezone surface (Ring 3), gated behind the default-on
 /// `ring-datetime` feature so a footprint-tailored build can shed jiff and the tzdb.
@@ -53,13 +52,11 @@ pub mod map_key;
 pub mod math;
 pub mod metrics;
 pub mod net;
-pub mod p2p;
 pub mod quat;
 pub mod random;
 pub mod reactive;
 pub mod registry;
 pub mod serve;
-pub mod synced;
 pub mod task;
 pub mod template;
 pub mod tiers;
@@ -70,6 +67,4 @@ pub mod vec3;
 pub use handle::{FileHandle, FileMode, Flush};
 pub use host::SandboxHost;
 pub use iter::IterMethod;
-pub use registry::{
-    CoreExtension, CryptoExtension, HttpExtension, IdExtension, P2pExtension, VecExtension,
-};
+pub use registry::{CoreExtension, CryptoExtension, HttpExtension, IdExtension, VecExtension};

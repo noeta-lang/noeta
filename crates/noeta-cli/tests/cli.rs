@@ -1843,6 +1843,118 @@ fn published_docs_round_trip_through_the_registry() {
 }
 
 #[test]
+fn para_html_publishes_and_resolves_from_the_registry() {
+    // The para-namespace arc's registry round-trip: the first-party `para-html` (pure Noeta source)
+    // package publishes to a `LocalIndex`, and a **fresh consumer resolves it FROM the index** — a
+    // registry dep (`{ version, package }`), not a path — locking the git source + sha + content
+    // hash, so `use para.html.*` resolves from the registry-fetched package. The native `para-p2p`
+    // twin's registry-from-index distribution awaits the physical split (its entry crate path-deps
+    // workspace crates absent from a standalone clone); its `[trust]` gate is covered elsewhere.
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/para-html");
+    if !src.join("noeta.toml").is_file() {
+        return; // the package isn't present in this checkout — nothing to exercise.
+    }
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("para_html_registry");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let repo = base.join("para-html-repo");
+    let reg = base.join("registry");
+    let cache = base.join("cache");
+    let cons = base.join("consumer");
+    std::fs::create_dir_all(&cons).unwrap();
+
+    // 1. A standalone git repo of the package (its `noeta.toml` is already at its root).
+    assert!(
+        std::process::Command::new("cp")
+            .args(["-r".as_ref(), src.as_os_str(), repo.as_os_str()])
+            .status()
+            .expect("cp runs")
+            .success(),
+        "copy the package into a standalone repo"
+    );
+    let git = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("git runs")
+                .status
+                .success(),
+            "git {args:?}"
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&[
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-qm",
+        "v0.1.0",
+    ]);
+    git(&["tag", "v0.1.0"]);
+
+    // 2. Publish to the LocalIndex.
+    let url = format!("file://{}", repo.display());
+    lang()
+        .current_dir(&repo)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .args(["publish", "--git", &url, "--tag", "v0.1.0"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("published `noeta/para` 0.1.0"));
+
+    // 3. A fresh consumer depends on it via the REGISTRY (version + package), not a path.
+    std::fs::write(
+        cons.join("noeta.toml"),
+        "[package]\nname = \"noeta/reg_consumer\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\npara = { version = \"^0.1\", package = \"noeta/para\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        cons.join("main.noe"),
+        "use para.html.{render, Html, handle}\n\
+         use std.reactive.signal\n\
+         use std.http.{Request, Response}\n\
+         c = signal(1)\n\
+         fn page(): Html { return @html { <h1>${c.get()}</h1> } }\n\
+         fn fetch(req: Request): Response { return handle(req, \"t\", page, fn(n: string) {}) }\n",
+    )
+    .unwrap();
+
+    // 4. Resolve from the index → the lockfile pins the git source + sha + content hash.
+    lang()
+        .current_dir(&cons)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_CACHE_DIR", &cache)
+        .arg("update")
+        .assert()
+        .success();
+    let lock = std::fs::read_to_string(cons.join("noeta.lock")).unwrap();
+    for needle in [
+        "name = \"noeta/para\"",
+        "source = \"git\"",
+        "tag = \"v0.1.0\"",
+        "sha = ",
+        "hash = ",
+    ] {
+        assert!(lock.contains(needle), "lock missing `{needle}`:\n{lock}");
+    }
+
+    // 5. `use para.html.*` resolves and type-checks against the registry-fetched package.
+    lang()
+        .current_dir(&cons)
+        .env("NOETA_REGISTRY_DIR", &reg)
+        .env("NOETA_CACHE_DIR", &cache)
+        .args(["check", "main.noe"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn doc_no_blocks_is_success_with_note() {
     let file = temp_program("doc_none", "echo \"hi\"\n");
     lang()
@@ -3711,7 +3823,7 @@ fn keyless_trust_pins_downgrades_and_switches_are_enforced_end_to_end() {
     //    like. The resolve must fail and name the defense.
     std::fs::write(
         app.join("noeta.lock"),
-        "version = 1\n\n[[scope]]\nname = \"acme\"\n\
+        "version = 2\n\n[[scope]]\nname = \"acme\"\n\
          issuer = \"https://token.actions.githubusercontent.com\"\n\
          identity = \"https://github.com/acme/greet/.github/workflows/r.yaml@refs/heads/main\"\n",
     )
@@ -3743,7 +3855,7 @@ fn keyless_trust_pins_downgrades_and_switches_are_enforced_end_to_end() {
     std::fs::write(
         app.join("noeta.lock"),
         format!(
-            "version = 1\n\n[[scope]]\nname = \"acme\"\npublic_key = \"{}\"\n",
+            "version = 2\n\n[[scope]]\nname = \"acme\"\npublic_key = \"{}\"\n",
             "b".repeat(64)
         ),
     )

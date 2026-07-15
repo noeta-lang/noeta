@@ -1,11 +1,23 @@
 # Local-First & Peer-to-Peer State
 
-The standard library ships the building blocks for **local-first, collaborative state** (architecture §9.15): conflict-free replicated data types (**CRDTs**), a **peer-to-peer transport**, and — where they meet — a **synced signal**: reactive state that several peers edit concurrently and that converges without coordination. A peer's change flows into the [reactivity graph](Reactivity) and reruns your `computed`/`effect`s exactly like a local edit — *signals that happen to be shared*.
+The **`para-p2p` package** provides the building blocks for **local-first, collaborative state** (architecture §9.15): conflict-free replicated data types (**CRDTs**), a **peer-to-peer transport**, and — where they meet — a **synced signal**: reactive state that several peers edit concurrently and that converges without coordination. A peer's change flows into the [reactivity graph](Reactivity) and reruns your `computed`/`effect`s exactly like a local edit — *signals that happen to be shared*.
 
-```noeta
-use std.{crdt}
+It is a **first-party but non-default** package under the `para` ("alongside") namespace — maintained by the project, but not part of the always-on `std` stdlib, so a program that never needs peer-to-peer state carries none of its weight. Add it to your `noeta.toml` and, because it ships native code, authorize it in `[trust]`:
+
+```toml
+[dependencies]
+para = { path = "…/packages/para-p2p" }   # or a registry/git version once published
+
+[trust]
+native = ["noeta/para_p2p"]
+```
+
+Its modules then resolve as `para.crdt`, `para.p2p`, and `para.synced`. (The [LiveView](LiveView) `para.html` package is its sibling under the same namespace.)
+
+```noeta check
+use para.{crdt}
 use std.reactive.{effect}
-use std.synced.{synced_signal}
+use para.synced.{synced_signal}
 
 // Two replicas of the same counter, on one topic.
 a = synced_signal(crdt.gcounter().increment("A", 1), "counter")
@@ -20,9 +32,9 @@ b.sync()   // b merges a's state → also 3
 echo "converged: ${a.get().value()} == ${b.get().value()}"   // 3 == 3
 ```
 
-> **Status.** All three layers ship today. Data convergence and the language surface run entirely locally on a deterministic in-process loopback that models peers; and a real networked transport — [p2panda](https://p2panda.org) peer discovery (mDNS), NAT-traversing QUIC, gossip + eventual-consistency log-sync, a persistent per-node identity, and end-to-end **group encryption** — backs `noeta run` under the default `ring-p2p` build. A program that never syncs pays nothing for it: the whole p2panda tree is dropped from a tailored `noeta build --native` binary that imports neither `std.p2p` nor `std.synced`. This is a supported, opt-in path, not something imposed on every program.
+> **Status.** All three layers ship today. Data convergence and the language surface run entirely locally on a deterministic in-process loopback that models peers; and a real networked transport — [p2panda](https://p2panda.org) peer discovery (mDNS), NAT-traversing QUIC, gossip + eventual-consistency log-sync, a persistent per-node identity, and end-to-end **group encryption** — backs `noeta run` under the default `ring-p2p` build. A program that never syncs pays nothing for it: the whole p2panda tree is dropped from a tailored `noeta build --native` binary that imports neither `para.p2p` nor `para.synced`. This is a supported, opt-in path, not something imposed on every program.
 
-## CRDTs — `std.crdt`
+## CRDTs — `para.crdt`
 
 A CRDT is a value whose concurrent edits **merge** into the same result regardless of the order they arrive in. `merge` is commutative, associative, and idempotent, so replicas converge without a coordinator — and duplicated or out-of-order messages are harmless. CRDTs are ordinary immutable values (an update returns a new value); they compare by content and print for debugging.
 
@@ -34,8 +46,8 @@ Each carries a **replica id** — a string identifying the node that made a chan
 | `crdt.pncounter()` | `PnCounter` | A counter that also decrements. |
 | `crdt.gset()` | `GSet` | A grow-only set of strings. |
 
-```noeta
-use std.{crdt}
+```noeta check
+use para.{crdt}
 
 // A grow-only counter: each replica accumulates its own count; merge takes the per-replica max,
 // so two replicas that incremented independently converge to the total.
@@ -56,18 +68,18 @@ echo "${s.members()} has_z=${has_z}"             // ["x", "y", "z"] has_z=true
 **Methods.** Every CRDT has `.merge(other)` (returning the converged value) and a reader: `GCounter`/`PnCounter` expose `.value(): int`; `GSet` exposes `.contains(e): bool`, `.len(): int`, and `.members(): [string]`. Counters take `.increment(replica, by=1)` (and `PnCounter` also `.decrement(replica, by=1)`); a grow-only counter rejects a negative amount — use a `PnCounter` when you need to go down. `.merge` only accepts the *same* CRDT type, checked statically:
 
 ```noeta error
-use std.{crdt}
+use para.{crdt}
 a = crdt.gcounter()
 b = crdt.gset()
 c = a.merge(b)   // compile error: argument of type `GSet` is not assignable to `GCounter`
 ```
 
-## Peer-to-peer messaging — `std.p2p`
+## Peer-to-peer messaging — `para.p2p`
 
-`std.p2p` is the transport underneath synced state: publish a message to a **topic**, receive messages other peers published to it. Messages are opaque bytes (a string rides as its UTF-8), so any payload — including serialized CRDT state — travels over it.
+`para.p2p` is the transport underneath synced state: publish a message to a **topic**, receive messages other peers published to it. Messages are opaque bytes (a string rides as its UTF-8), so any payload — including serialized CRDT state — travels over it.
 
-```noeta
-use std.{p2p}
+```noeta check
+use para.{p2p}
 
 async fn drain(): void {
     p2p.publish("room", "hello")
@@ -91,12 +103,12 @@ async fn drain(): void {
 
 Topics are independent broadcast channels: every subscriber sees every message, and receiving from an empty topic yields `none` immediately.
 
-## Synced signals — `std.synced`
+## Synced signals — `para.synced`
 
 A `synced_signal(initial, topic)` fuses the two: a reactive [signal](Reactivity) whose value is a CRDT and whose changes are shared over a p2p topic. Its value type must be `Mergeable` — i.e. a CRDT — which the compiler enforces, so you can never accidentally sync a value with no convergence story:
 
 ```noeta error
-use std.synced.{synced_signal}
+use para.synced.{synced_signal}
 synced_signal(42, "counter")   // compile error: `int` does not satisfy the bound `Mergeable`
 ```
 
@@ -108,9 +120,9 @@ The surface is a signal you converge rather than overwrite:
 
 `.sync()` is deliberately explicit — the network boundary stays visible, so it is legible in your code exactly where remote state enters, rather than hiding behind every read.
 
-```noeta
-use std.{crdt}
-use std.synced.{synced_signal}
+```noeta check
+use para.{crdt}
+use para.synced.{synced_signal}
 
 // A shared set of who's online, replicated on the "presence" topic.
 here = synced_signal(crdt.gset(), "presence")
@@ -129,8 +141,8 @@ Because a synced signal is an ordinary node in the reactivity graph, everything 
 Add a third argument — a **member set** — to make a synced signal end-to-end encrypted to exactly those peers. Every state it publishes crosses the wire encrypted; a node outside the set sees only ciphertext it cannot read.
 
 ```noeta check
-use std.{crdt}
-use std.synced.{synced_signal}
+use para.{crdt}
+use para.synced.{synced_signal}
 
 // A shared tally readable only by alice and bob (peer ids are their node identities).
 tally = synced_signal(crdt.gcounter(), "team/tally", [alice_id, bob_id])

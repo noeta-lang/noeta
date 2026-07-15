@@ -364,18 +364,10 @@ pub trait P2p {
     fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), StdError>;
 
     /// The next pending message on `topic`, or `None` if none is available — the non-blocking leaf
-    /// the async `p2p.receive` descriptor resolves through (deterministic FIFO in the sandbox). A
-    /// real async transport would override [`Self::p2p_receive`]; this stays the resolve-at-spawn
-    /// default, the same "serial degradation for free" the fs/net leaves rely on.
+    /// the async `p2p.receive` descriptor ([`crate::P2pReceiveIo`]) resolves through (a deterministic
+    /// FIFO on the loopback broker; the real node's try-recv off its gossip channel), the same
+    /// "serial degradation for free" the fs/net leaves rely on.
     fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, StdError>;
-
-    /// Build the async receive descriptor for `topic` — the p2p mirror of
-    /// [`Network::net_accept`]. Default: a [`crate::p2p::ReceiveIo`] resolving through
-    /// [`Self::p2p_poll`] at spawn (deterministic in the sandbox; serial on any host). A real
-    /// gossip transport would override it with a genuine subscription future.
-    fn p2p_receive(&self, topic: String) -> Box<dyn crate::ExternIo> {
-        Box::new(crate::p2p::ReceiveIo { topic })
-    }
 
     /// Subscribe to `topic`, returning a subscription id whose cursor starts at the beginning of
     /// the topic log (p2p P2). Unlike the topic-level [`Self::p2p_poll`] (one implicit reader),
@@ -478,6 +470,33 @@ pub trait P2p {
     }
 }
 
+/// Configuration for **real** peer networking on a host (para-namespace follow-on F2b). A host that
+/// permits a live transport (`RealHost` — real IO, nondeterminism) carries one; the deterministic
+/// sandbox and the WASI/browser hosts do not. It holds only the *policy* the extension needs, not any
+/// transport: the p2panda node itself lives in the `para.p2p` extension, never in a host.
+#[derive(Debug, Clone, Default)]
+pub struct RealP2pConfig {
+    /// The app-namespace that keys this node's persistent identity + on-disk store, set by the CLI
+    /// via `RealHost::with_p2p_app`. `None` uses the transport's own default location.
+    pub app_id: Option<String>,
+}
+
+/// Whether a host permits **real** peer networking (para-namespace arc → F2b). `P2p` used to be a
+/// mandatory arm of the [`Host`] union; the p2p/local-first stack left `std` for the non-default
+/// `para` package, and F2b moved the transport *impl* out of every host into the `para.p2p`
+/// extension. So a host no longer provides `P2p` at all — it only declares, through this seam,
+/// whether real networking is allowed and with what config. A real host returns `Some`; the
+/// deterministic sandbox and the minimal hosts keep the default `None`, which the extension reads as
+/// "use the loopback broker" (oracle-safe). The `P2p` impls now live entirely on the extension side
+/// (the loopback [`crate::P2pBroker`] here, the real node in `noeta-para-p2p-net`).
+pub trait P2pProvider {
+    /// The real-networking config for this host, or `None` (the default) to use the deterministic
+    /// loopback broker. Only a real host overrides it.
+    fn real_p2p(&self) -> Option<RealP2pConfig> {
+        None
+    }
+}
+
 /// A `synced_signal`'s convergence state relative to its peers (p2p P3.3). Meaningless on the
 /// deterministic loopback broker (always [`SyncStatus::Synced`]); real once a network can be
 /// partitioned — a live p2panda node reports it from its log-sync session lifecycle, letting a
@@ -507,18 +526,22 @@ impl SyncStatus {
 }
 
 /// Every host-coupled effect the interpreters perform, behind one swappable seam — the union of the
-/// twelve capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Os`], [`Entropy`],
-/// [`Ids`], [`Network`], [`P2p`], and the three telemetry signals [`Tracing`](crate::Tracing) /
-/// [`Metrics`](crate::Metrics) / [`Logging`](crate::Logging)). Backends hold a `Box<dyn Host>` and
-/// reach any capability through it; a consumer that needs only one (a read handle → [`FileReader`],
-/// the RNG dispatch → [`Rng`], …) depends on that trait instead, so a partial host (e.g. a read-only
-/// test double) implements exactly what it supports rather than stubbing the rest.
+/// core capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Os`], [`Entropy`],
+/// [`Ids`], [`Network`], the three telemetry signals [`Tracing`](crate::Tracing) /
+/// [`Metrics`](crate::Metrics) / [`Logging`](crate::Logging)) plus [`P2pProvider`], through which a
+/// host **optionally** offers the [`P2p`] capability (the p2p/local-first stack left `std` for the
+/// non-default `para` package, so peer networking is no longer a mandatory arm — see [`P2pProvider`]).
+/// Backends hold a `Box<dyn Host>` and reach any capability through it; a consumer that needs only
+/// one (a read handle → [`FileReader`], the RNG dispatch → [`Rng`], …) depends on that trait instead,
+/// so a partial host (e.g. a read-only test double) implements exactly what it supports rather than
+/// stubbing the rest.
 ///
 /// Object-safe on purpose (IO is never a hot path, so the dynamic dispatch is immaterial). The
-/// blanket impl means any type providing all twelve capabilities *is* a `Host` automatically — there
-/// is nothing extra to implement. Splitting telemetry into three sibling traits costs nothing at
-/// runtime: a `dyn Host` has one vtable and supertrait methods fold into it, so a call is one
-/// indirection regardless of which sub-trait declared it.
+/// blanket impl means any type providing all the core capabilities *is* a `Host` automatically — a
+/// host that omits `P2p` supplies a default `P2pProvider` (which returns `None`) and nothing else.
+/// Splitting telemetry into three sibling traits costs nothing at runtime: a `dyn Host` has one
+/// vtable and supertrait methods fold into it, so a call is one indirection regardless of which
+/// sub-trait declared it.
 pub trait Host:
     FileSystem
     + Rng
@@ -528,7 +551,7 @@ pub trait Host:
     + Entropy
     + Ids
     + Network
-    + P2p
+    + P2pProvider
     + crate::Tracing
     + crate::Metrics
     + crate::Logging
@@ -543,7 +566,7 @@ impl<
         + Entropy
         + Ids
         + Network
-        + P2p
+        + P2pProvider
         + crate::Tracing
         + crate::Metrics
         + crate::Logging,

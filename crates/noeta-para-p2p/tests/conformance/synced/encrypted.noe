@@ -1,0 +1,22 @@
+// para.synced (p2p P3.4b) — an *encrypted* synced_signal: a third argument, the member set, opts
+// the signal into an end-to-end-encrypted group to exactly those peers. Semantically it is the same
+// convergent signal — encryption is transparent (the decrypted value equals the plaintext value) —
+// so under the deterministic sandbox (a transparent pass-through, no real peers to hide from) it
+// converges byte-for-byte like the plaintext `converge.noe`. Two replicas on one topic, declared
+// members "alice"/"bob", still meet at 3.
+// expect: stdout "before: b=2"
+// expect: stdout "final a=3 b=3"
+// expect: exit 0
+use para.{crdt}
+use para.synced.{synced_signal}
+
+members = ["alice", "bob"]
+a = synced_signal(crdt.gcounter().increment("A", 1), "secure/counter", members)
+b = synced_signal(crdt.gcounter().increment("B", 2), "secure/counter", members)
+
+echo "before: b=${b.get().value()}"
+
+a.sync()
+b.sync()
+
+echo "final a=${a.get().value()} b=${b.get().value()}"

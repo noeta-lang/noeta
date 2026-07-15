@@ -8,6 +8,7 @@
 //! sandbox broker.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 /// The deterministic in-process message broker both hosts use as their p2p "network" (p2p P1/P2).
 /// A topic is an **append-only log**; readers hold independent cursors, so it is genuine broadcast
@@ -71,22 +72,71 @@ impl P2pBroker {
     }
 }
 
-/// The default async receive descriptor (p2p P1): it resolves synchronously through the Host at
-/// spawn (the sandbox pops the topic's FIFO; any host degrades serially) and has no real body. A
-/// real gossip transport overrides [`crate::host::P2p::p2p_receive`] with a genuine subscription
-/// future — the same "serial degradation for free" the fs/net leaves rely on.
-#[derive(Debug)]
-pub struct ReceiveIo {
+/// The loopback broker **is** a self-contained [`crate::host::P2p`] provider — every required method
+/// maps to a broker operation, and the trait's defaults (durable → ephemeral, encrypted-group →
+/// plaintext pass-through, no identity, always-`Synced`) are exactly the loopback semantics. This is
+/// what lets the p2p capability be **owned by an extension** rather than baked into every host
+/// (para-namespace follow-on F2/F2b): the `para.p2p` extension parks one of these behind a
+/// [`P2pBackend`] and serves both the synchronous ops and the async `receive` from it, so a host that
+/// speaks no peer networking implements no `P2p` at all.
+impl crate::host::P2p for P2pBroker {
+    fn p2p_publish(&mut self, topic: &str, message: Vec<u8>) -> Result<(), crate::StdError> {
+        self.publish(topic, message);
+        Ok(())
+    }
+
+    fn p2p_poll(&mut self, topic: &str) -> Result<Option<Vec<u8>>, crate::StdError> {
+        Ok(self.poll_default(topic))
+    }
+
+    fn p2p_subscribe(&mut self, topic: &str) -> Result<u64, crate::StdError> {
+        Ok(self.subscribe(topic))
+    }
+
+    fn p2p_poll_sub(&mut self, sub: u64) -> Result<Option<Vec<u8>>, crate::StdError> {
+        Ok(self.poll_sub(sub))
+    }
+}
+
+/// A shareable, `Send` handle to a **P2p backend** — either this loopback [`P2pBroker`] or the real
+/// node in `noeta-para-p2p-net` (para-namespace F2b). Both implement [`crate::host::P2p`]; the
+/// `para.p2p` extension picks which at creation (by the host's `real_p2p()` config) and holds one in
+/// per-run ctx state. It lives behind `Arc<Mutex<…>>` because the async `p2p.receive` leaf
+/// ([`P2pReceiveIo`]) is `Send` while ctx state is `Rc`-based — the `Arc` is what crosses into the
+/// receive descriptor, so the same backend is reached from both the synchronous dispatch and the
+/// async leaf, and no host holds any p2p state at all.
+pub type P2pBackend = Arc<Mutex<dyn crate::host::P2p + Send>>;
+
+/// The async receive descriptor over an extension-owned [`P2pBackend`] (para-namespace F2b) — the
+/// `Send` twin of the old host-driven receive. It captures a clone of the backend `Arc` at spawn
+/// (where the extension's ctx is available) and, at resolve, locks it and pops the topic's next
+/// message. Works uniformly for the loopback broker and the real node.
+pub struct P2pReceiveIo {
+    /// The extension-owned backend this receive resolves against (a clone of the ctx-state `Arc`).
+    pub backend: P2pBackend,
     /// The topic to take the next message from.
     pub topic: String,
 }
 
-impl crate::ExternIo for ReceiveIo {
+impl std::fmt::Debug for P2pReceiveIo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("P2pReceiveIo")
+            .field("topic", &self.topic)
+            .finish_non_exhaustive()
+    }
+}
+
+impl crate::ExternIo for P2pReceiveIo {
     fn run_sync(
         &mut self,
-        host: &mut dyn crate::Host,
+        _host: &mut dyn crate::Host,
     ) -> Result<crate::NativeOut, crate::StdError> {
-        Ok(receive_outcome(host.p2p_poll(&self.topic)?))
+        let next = self
+            .backend
+            .lock()
+            .expect("p2p backend mutex poisoned")
+            .p2p_poll(&self.topic)?;
+        Ok(receive_outcome(next))
     }
 }
 

@@ -1,0 +1,30 @@
+# The native entry crate for the `noeta/para_p2p` package. Standalone (its own empty `[workspace]`)
+# so the composed toolchain can build it as a path dependency without the main workspace adopting it,
+# exactly like the generated shim. It re-exports the `noeta-para-p2p` crate's extension slice under
+# the fixed `NOETA_EXTENSIONS` convention.
+[package]
+name = "para-p2p-native"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+doctest = false
+
+[dependencies]
+# In-tree, the impl crate is a monorepo path (so a fresh checkout of THIS repo builds the demo with no
+# network). A **standalone** clone of this package instead references the impl by **git on the noeta
+# toolchain repo** — `noeta-para-p2p = { git = "https://github.com/…/noeta", tag = "vX" }` — and the
+# composed toolchain rewrites every noeta-repo git crate to the consumer's exact toolchain source via a
+# `[patch]` (see `compose.rs::toolchain_patch_section`), so the `dyn Extension` types unify. That
+# git-dep + `[patch]` path is proven (para-namespace follow-on F3); the in-tree copy stays a path dep,
+# like `packages/para-html`, until the toolchain repo is published (F4). See `packages/README.md`.
+noeta-para-p2p = { path = "../../../crates/noeta-para-p2p", default-features = false }
+
+# The real-transport ring, forwarded to the impl crate. Not default: the composed toolchain/runner
+# enables it (real networking for `noeta run`/`--exe`), and `noeta build --native`'s footprint scan
+# enables it only when the program imports `para.p2p`/`para.synced` — so a `--native` binary that
+# depends on this package but never touches its p2p modules links no p2panda (para-namespace F2b).
+[features]
+ring-p2p = ["noeta-para-p2p/ring-p2p"]
+
+[workspace]

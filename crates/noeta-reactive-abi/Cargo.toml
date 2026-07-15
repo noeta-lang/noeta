@@ -1,0 +1,17 @@
+[package]
+name = "noeta-reactive-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The capability trait speaks in NativeCtx re-entries and arena `Retained` cells…
+noeta-native = { workspace = true }
+# …over `NodeId` handles into the shared reactive graph. Both are the only vocabulary that crosses
+# the seam — the engine's representation and the consumer's node types stay on their own sides.
+noeta-reactive = { workspace = true }
+
+[lints]
+workspace = true

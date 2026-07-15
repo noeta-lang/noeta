@@ -1,0 +1,19 @@
+// para.crdt (p2p P0) — GCounter, a grow-only counter. Each replica accumulates its own count;
+// `value()` is their sum; `merge` takes the per-replica max, so two replicas that incremented
+// independently converge to the total. `increment(replica)` defaults the amount to 1.
+// expect: stdout "a=5 b=4"
+// expect: stdout "merge=9 commutes=true"
+// expect: stdout "default=1"
+// expect: exit 0
+use para.{crdt}
+
+a = crdt.gcounter().increment("A", 3).increment("A", 2)
+b = crdt.gcounter().increment("B", 4)
+echo "a=${a.value()} b=${b.value()}"
+
+m1 = a.merge(b)
+m2 = b.merge(a)
+echo "merge=${m1.value()} commutes=${m1 == m2}"
+
+d = crdt.gcounter().increment("A")
+echo "default=${d.value()}"

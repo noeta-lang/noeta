@@ -17,8 +17,8 @@
 //! all three (example-based and property-based) over every type.
 //!
 //! Like [`noeta-reactive`](../noeta_reactive/index.html), this crate is **dependency-free**,
-//! `unsafe`-free, holds **no language values**, and does **no I/O**. The `std.crdt` module in
-//! `noeta-stdlib` wraps these types as extern values and both backends run this identical code, so
+//! `unsafe`-free, holds **no language values**, and does **no I/O**. The `para.crdt` module in
+//! `noeta-para-p2p` wraps these types as extern values and both backends run this identical code, so
 //! the differential oracle holds by construction — the same guarantee reactivity's shared graph has.
 //!
 //! # Two determinism disciplines (the differential's proof obligations)
@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 /// associative, and idempotent. Implementing this type is a *promise* to uphold those three laws —
 /// it is what makes a value safe to replicate. In a later slice this Rust trait is the backing for
 /// the language-level `Mergeable` bound that `synced_signal` requires of its state (§9.15.1); in P0
-/// it is the internal contract the `std.crdt` surface dispatches `merge` through.
+/// it is the internal contract the `para.crdt` surface dispatches `merge` through.
 ///
 /// A replicated value must also be **wire-sendable** — its whole state has to cross the [`crate`]-
 /// external P2p byte seam to reach a peer — so serialization is part of the contract (p2p P2.0),

@@ -1,0 +1,11 @@
+// para.synced (p2p P3.3) — `synced_signal.status()` surfaces this replica's convergence state as a
+// plain word: `"synced"` / `"syncing"` / `"offline"`. Under the deterministic sandbox broker a
+// single node never lags, so it is always `"synced"` — which keeps a program that reads it
+// oracle-safe (both backends agree). Over a real network it reports genuine offline/sync state.
+// expect: stdout "status synced"
+// expect: exit 0
+use para.{crdt}
+use para.synced.{synced_signal}
+
+a = synced_signal(crdt.gcounter().increment("A", 1), "room")
+echo "status ${a.status()}"

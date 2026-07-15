@@ -255,6 +255,15 @@ pub trait NativeCtx {
     /// re-entry. Plain data only — language values belong in the retained arena.
     fn state(&mut self, key: &'static str, init: fn() -> Box<dyn Any>) -> ExtState;
 
+    /// The type-erased **capability broker** (the capability-broker seam): given a capability
+    /// trait's `TypeId`, find the registered provider (an [`ExtCapability`](crate::registry::ExtCapability)
+    /// on some installed extension), ensure its backing [`ExtState`] exists, and return the provider's
+    /// erased trait-object handle — a `Box<dyn Trait>` boxed once more and type-erased as
+    /// `Box<dyn Any>`. `None` if no installed extension provides the capability. Consumers use the
+    /// typed front door [`capability`] rather than this directly. Cold path (orchestration ops), so
+    /// the linear provider scan and the boxing are not on any hot loop.
+    fn capability(&mut self, id: std::any::TypeId) -> Option<Box<dyn Any>>;
+
     /// Move a slot's value into the per-run **retained arena** — the extension now owns one
     /// reference to it across dispatches (the slot itself stays valid and table-owned). The
     /// arena is a root set the backend enumerates: the cycle collector traces it, teardown
@@ -348,63 +357,128 @@ pub trait NativeCtx {
         fields: &[Scalar],
     ) -> CtxResult<Slot>;
 
-    // ----- task-local context (native-otel T5a) -----
+    // ----- scheduler-service sub-capabilities -----
     //
-    // A per-task stack of opaque `u64`s the backend carries with its cooperative scheduling: the
-    // **current** context belongs to whichever strand is executing (the main strand's root cell,
-    // or a task's own — the scheduler swaps a task's context in around each poll of its step, and
-    // a `spawn`ed task inherits a snapshot of its spawner's). Extensions that need scope to follow
-    // *execution* rather than the run — `std.tracing`'s active-span stack is the first client —
-    // read/write the current context through these ops instead of keeping one global stack in
-    // `ExtState`, which would interleave wrongly across `await`s. The values are opaque to the
-    // core (telemetry stores `SpanId`s); an empty context is the natural zero.
+    // Three cross-cutting **backend services** an extension may consume, grouped behind their own
+    // traits rather than flattened onto this one (they are the concerns that used to grow `NativeCtx`
+    // one method at a time). The backend returns `self` from each accessor — no lookup, no allocation,
+    // one virtual indirection on already-cold paths — and the sub-traits can move to their own crates
+    // the day their consumers (`std.tracing`/`http.serve`) leave `std`, exactly as the reactive
+    // contract did. Unlike the [`capability`] broker (one *extension's* private state vended to
+    // another), these are the scheduler's own state exposed to extensions, so they live here on the
+    // backend ABI.
 
+    /// The per-execution **task-local context** stack ([`TaskContext`], native-otel T5a).
+    fn task_context(&mut self) -> &mut dyn TaskContext;
+
+    /// The **future-completion tracing** hook ([`FutureTracing`], native-otel T5c).
+    fn future_tracing(&mut self) -> &mut dyn FutureTracing;
+
+    /// The **hot-reload** observation channel ([`HotReload`], server-hmr L3).
+    fn hot_reload(&mut self) -> &mut dyn HotReload;
+}
+
+/// The per-execution **task-local context**: a per-task stack of opaque `u64`s the backend carries
+/// with its cooperative scheduling (native-otel T5a). The **current** context belongs to whichever
+/// strand is executing (the main strand's root cell, or a task's own — the scheduler swaps a task's
+/// context in around each poll of its step, and a `spawn`ed task inherits a snapshot of its
+/// spawner's). Extensions that need scope to follow *execution* rather than the run — `std.tracing`'s
+/// active-span stack is the first client — read/write it here instead of keeping one global stack in
+/// `ExtState`, which would interleave wrongly across `await`s. The values are opaque to the core
+/// (telemetry stores `SpanId`s); an empty context is the natural zero.
+pub trait TaskContext {
     /// The top of the current strand's context stack, if any.
-    fn context_top(&mut self) -> Option<u64>;
+    fn top(&mut self) -> Option<u64>;
 
     /// Push onto the current strand's context stack (`with_span` entering its body).
-    fn context_push(&mut self, v: u64);
+    fn push(&mut self, v: u64);
 
     /// Pop the current strand's context stack **if** its top is `v` (defensive against a push/pop
     /// imbalance from a re-entrant dispatch); otherwise a no-op.
-    fn context_pop(&mut self, v: u64);
+    fn pop(&mut self, v: u64);
 
     /// Replace the current strand's context wholesale, returning the previous one — how an
     /// orchestrating dispatch that polls futures *manually* (outside the task scheduler; `http.serve`'s
     /// per-connection handler futures) brackets each poll with that future's own context. Callers
     /// must restore the returned context after the bracketed operation, mirroring the scheduler's
     /// own swap discipline.
-    fn context_swap(&mut self, ctx: Vec<u64>) -> Vec<u64>;
+    fn swap(&mut self, ctx: Vec<u64>) -> Vec<u64>;
+}
 
-    /// Trace a future to completion (native-otel T5c) — the **future-completion hook**, a
-    /// telemetry-specific scheduler service: the backend registers the future in its traced set
-    /// (holding a reference; teardown releases strays), runs every subsequent poll of it under a
-    /// context of `current context + span` (so spans the body creates nest under `span`, across
-    /// suspensions), and on completion ends `span` — with an error status first if the body
-    /// aborted. This is what gives `with_span` over an **async** body its correct duration: the
-    /// span closes when the future resolves, not when it is constructed.
+/// The **future-completion tracing** hook (native-otel T5c): a telemetry-specific scheduler service.
+pub trait FutureTracing {
+    /// Trace a future to completion — the backend registers the future in its traced set (holding a
+    /// reference; teardown releases strays), runs every subsequent poll of it under a context of
+    /// `current context + span` (so spans the body creates nest under `span`, across suspensions), and
+    /// on completion ends `span` — with an error status first if the body aborted. This is what gives
+    /// `with_span` over an **async** body its correct duration: the span closes when the future
+    /// resolves, not when it is constructed.
     ///
     /// Returns `false` if the future's flavor is not traceable (only step futures — lowered
-    /// `async fn` bodies — are, on both backends identically): the caller then falls back to
-    /// ending the span itself.
-    fn trace_future(&mut self, future: Slot, span: u64) -> CtxResult<bool>;
+    /// `async fn` bodies — are, on both backends identically): the caller then falls back to ending
+    /// the span itself.
+    fn trace(&mut self, future: Slot, span: u64) -> CtxResult<bool>;
+}
 
-    // --- hot reload (server-hmr L3): how a long-running orchestrating dispatch observes the
-    // hot-swap channel. Defaults are the "not in hot mode" answers, so only the backend that
-    // actually carries a swap mailbox (the VM under `noeta serve --watch`) overrides — the
-    // tree-walker and every ordinary run see a constant 0/None and the loops stay inert.
-
-    /// The swap **generation**: how many hot swaps have been applied to this run. A dispatch
-    /// loop that snapshots this each iteration detects "a swap landed since" and can notify its
-    /// clients (the serve loop pushes `reload` frames to live websockets).
-    fn hot_swap_count(&mut self) -> u64 {
+/// The **hot-reload** observation channel (server-hmr L3): how a long-running orchestrating dispatch
+/// observes the hot-swap channel. The defaults are the "not in hot mode" answers, so only the backend
+/// that actually carries a swap mailbox (the VM under `noeta serve --watch`) overrides — the
+/// tree-walker and every ordinary run see a constant 0/None and the loops stay inert.
+pub trait HotReload {
+    /// The swap **generation**: how many hot swaps have been applied to this run. A dispatch loop
+    /// that snapshots this each iteration detects "a swap landed since" and can notify its clients
+    /// (the serve loop pushes `reload` frames to live websockets).
+    fn swap_count(&mut self) -> u64 {
         0
     }
 
-    /// Take the last **rejected** edit's rendered diagnostics (a red check under `--watch`),
-    /// if one is pending. Consuming — each error is delivered once (the serve loop forwards it
-    /// to live clients as an `error` frame for the browser overlay).
-    fn take_hot_error(&mut self) -> Option<String> {
+    /// Take the last **rejected** edit's rendered diagnostics (a red check under `--watch`), if one
+    /// is pending. Consuming — each error is delivered once (the serve loop forwards it to live
+    /// clients as an `error` frame for the browser overlay).
+    fn take_error(&mut self) -> Option<String> {
         None
     }
+}
+
+/// A typed per-run **capability handle** — the front door of the capability-broker seam. Owns the
+/// provider's trait-object handle (which in turn holds its own reference to the backing engine
+/// state), so it coexists with `&mut dyn NativeCtx`: derefs to `T`, and each `T` method takes `ctx`.
+pub struct Cap<T: ?Sized> {
+    inner: Box<T>,
+}
+
+impl<T: ?Sized> std::ops::Deref for Cap<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T: ?Sized> std::fmt::Debug for Cap<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The handle is an opaque trait object (no `Debug` bound); name the type only.
+        f.debug_struct("Cap").finish_non_exhaustive()
+    }
+}
+
+/// Obtain a per-run **capability** by trait type — the typed front door over [`NativeCtx::capability`].
+///
+/// `capability::<dyn ReactiveSource>(ctx)` returns `Some(cap)` when some installed extension provides
+/// it (declared on its [`Extension::capabilities`](crate::registry::Extension::capabilities)), or
+/// `None` when none does (e.g. `std.reactive` is not installed in this run). The handle derefs to the
+/// capability trait, so the call reads `cap.wake(ctx, node)`.
+///
+/// Sound because the provider's `build` returns a concrete, sized `Box<dyn T>` erased as
+/// `Box<dyn Any>`; recovery is a safe `downcast` back to that exact `Box<dyn T>`. `TypeId` is
+/// consistent within one linked program (the composed toolchain builds everything under one
+/// lockfile), so the trait's id matches on both sides.
+pub fn capability<T, C>(ctx: &mut C) -> Option<Cap<T>>
+where
+    T: ?Sized + 'static,
+    C: NativeCtx + ?Sized,
+{
+    let erased = ctx.capability(std::any::TypeId::of::<T>())?;
+    // The provider boxed a `Box<dyn T>` (a sized fat pointer) inside the `Box<dyn Any>`; recover it.
+    let handle: Box<Box<T>> = erased.downcast().ok()?;
+    Some(Cap { inner: *handle })
 }
