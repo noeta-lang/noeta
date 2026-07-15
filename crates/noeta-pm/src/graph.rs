@@ -911,6 +911,9 @@ fn assemble(
             // A native package's modules live in its Rust extension (composed in downstream), not the
             // link pool — so the loader retains, rather than flags, a `use` under its key.
             native: inst.native.is_some(),
+            // The package's own edition, carried to the loader (editions arc) so a future compiler pass
+            // can apply it per-package; the merged program still compiles under the root's today.
+            edition: inst.edition.as_str().to_string(),
         });
         locked.push(LockedPackage {
             identity: identity.clone(),
@@ -1142,6 +1145,43 @@ mod tests {
             .find(|l| l.identity == "acme/dep")
             .expect("dep locked");
         assert_eq!(dep_lock.edition, crate::edition::Edition::DEFAULT);
+
+        // The edition is also carried on the DepPackage that reaches the loader/compiler (editions
+        // arc) — the root and the dependency each get *their own*, in canonical string form.
+        let dep_pkg = graph
+            .packages
+            .iter()
+            .find(|p| p.root == "dep")
+            .expect("dep package");
+        assert_eq!(dep_pkg.edition, "2026");
+    }
+
+    #[test]
+    fn an_unknown_dependency_edition_fails_resolution_actionably() {
+        // A dependency pinned to an edition this toolchain doesn't understand must fail the resolve
+        // (not be silently miscompiled under the root's edition) — naming the dependency and the fix.
+        let base = std::env::temp_dir().join("noeta_graph_test_future_edition");
+        let _ = std::fs::remove_dir_all(&base);
+        let app = base.join("app");
+        let dep = base.join("dep");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&dep).unwrap();
+        std::fs::write(
+            app.join("noeta.toml"),
+            "[package]\nname = \"acme/app\"\nversion = \"0.1.0\"\n\
+             [dependencies]\nfuturedep = { path = \"../dep\" }\n",
+        )
+        .unwrap();
+        std::fs::write(app.join("main.noe"), "echo 1;\n").unwrap();
+        std::fs::write(
+            dep.join("noeta.toml"),
+            "[package]\nname = \"acme/dep\"\nversion = \"1.0.0\"\nedition = \"2099\"\n",
+        )
+        .unwrap();
+        let err = resolve_graph(&app.join("main.noe")).expect_err("future edition must fail");
+        assert!(err.contains("futuredep"), "names the dependency: {err}");
+        assert!(err.contains("2099"), "names the offending edition: {err}");
+        assert!(err.contains("2026"), "enumerates the known editions: {err}");
     }
 
     #[test]

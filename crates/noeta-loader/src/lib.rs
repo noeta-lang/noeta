@@ -150,6 +150,12 @@ pub struct DepPackage {
     /// its key; the composed checker validates the members. A pure-Noeta package has all its modules
     /// in the link pool, so a `use` under its key that resolves to nothing is a genuine typo.
     pub native: bool,
+    /// The package's language **edition** in canonical string form (`"2026"`) — the semantics its
+    /// source is written against (editions arc). Carried per package from resolution so a later
+    /// compiler pass can apply *each* package's edition to *its own* declarations; today the merged
+    /// program still compiles under the root's edition, so this is recorded, not yet acted on. A
+    /// string (not the `Edition` enum) because the loader sits below the manifest layer that owns it.
+    pub edition: String,
 }
 
 /// Re-root a namespace/use path in place: replace its leading segment per the rules
@@ -1096,6 +1102,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use webclient.client.Client;\nc = Client { base: \"x\" };\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
@@ -1125,6 +1132,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use webclient.clientt.Client;\nc = Client { base: \"x\" };\n";
         let errors =
@@ -1149,6 +1157,7 @@ mod tests {
             modules: Vec::new(),
             dep_renames: Default::default(),
             native: true,
+            edition: "2026".to_string(),
         };
         let entry = "use imgfx.fx;\necho fx.double(21);\n";
         let linked =
@@ -1175,6 +1184,7 @@ mod tests {
             modules: Vec::new(),
             dep_renames: Default::default(),
             native: true,
+            edition: "2026".to_string(),
         };
         let entry = "use imgtx.fx;\necho fx.double(21);\n";
         let errors =
@@ -1210,6 +1220,7 @@ mod tests {
             ],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use webclient.client.Client;\nc = Client { body: Body { text: \"hi\" } };\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
@@ -1233,6 +1244,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let b = DepPackage {
             key: "beta".to_string(),
@@ -1243,6 +1255,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry =
             "use alpha.core.Ping;\nuse beta.core.Pong;\np = Ping { n: 1 };\nq = Pong { n: 2 };\n";
@@ -1268,6 +1281,7 @@ mod tests {
             )],
             dep_renames: app_renames,
             native: false,
+            edition: "2026".to_string(),
         };
         let json = DepPackage {
             key: "pkg_json".to_string(),
@@ -1278,6 +1292,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use app.core.Widget;\nw = Widget { v: Value { n: 1 } };\n";
         let linked = link_with_deps("main.noe", entry, &[], &[app, json]).unwrap();
@@ -1301,6 +1316,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use geo.circle.area;\necho area(2.0);\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
@@ -1595,6 +1611,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use mathx.lib.twice;\necho twice(21);\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
@@ -1620,6 +1637,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use widgets.lib.origin;\np = origin();\necho p.x;\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
@@ -1646,6 +1664,7 @@ mod tests {
             )],
             dep_renames: Default::default(),
             native: false,
+            edition: "2026".to_string(),
         };
         let entry = "use chain.lib.go;\ni = go(3);\necho i.v;\n";
         let linked = link_with_deps("main.noe", entry, &[], std::slice::from_ref(&dep)).unwrap();
