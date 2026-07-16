@@ -16,11 +16,16 @@
 /// keeps resolving (the resolution-side arc introduced the type here; the compiler arc relocated it
 /// to a crate the front-end can also depend on).
 pub use noeta_edition as edition;
+pub mod error;
 pub mod graph;
 pub mod lock;
 pub mod manifest;
 pub mod registry;
 pub mod reserved;
+
+/// The crate's typed error, re-exported at the root — `noeta_pm::PmError` is the name consumers
+/// match on (audit-5 #7 / cross-cutting #3).
+pub use error::PmError;
 
 /// GitHub OAuth device flow for the laptop scope-claim path (namespace-protection #1). Behind
 /// `registry-http` (it needs the HTTP client), like the rest of the hosted-registry client.

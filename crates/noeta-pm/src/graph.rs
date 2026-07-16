@@ -366,7 +366,15 @@ fn enforce_transparency(
         };
         // `None` license: the lock doesn't carry one, so only the coordinates are checked — the
         // record's license field is still authenticated by inclusion, just not cross-checked here.
-        index.verify_inclusion_at(&pkg.identity, &pkg.version.to_string(), url, tag, sha, None, &cp)?;
+        index.verify_inclusion_at(
+            &pkg.identity,
+            &pkg.version.to_string(),
+            url,
+            tag,
+            sha,
+            None,
+            &cp,
+        )?;
     }
     Ok(crate::lock::LogTrust {
         public_key: key,
@@ -902,9 +910,9 @@ impl Walker<'_> {
             }
             let lock = self.lock;
             if !frontier.is_empty()
-                && frontier.iter().all(|(id, req)| {
-                    lock.locked_version(id).is_some_and(|v| req.matches(v))
-                })
+                && frontier
+                    .iter()
+                    .all(|(id, req)| lock.locked_version(id).is_some_and(|v| req.matches(v)))
             {
                 self.solution = lock
                     .locked_versions()
@@ -1468,7 +1476,8 @@ mod tests {
 
     /// A tiny two-package fixture on disk: `app` with one path dependency `lib`.
     fn path_dep_fixture(name: &str) -> PathBuf {
-        let base = std::env::temp_dir().join(format!("noeta_graph_test_{name}_{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("noeta_graph_test_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let lib = base.join("lib");
         std::fs::create_dir_all(&lib).unwrap();

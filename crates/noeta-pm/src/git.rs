@@ -14,7 +14,6 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::manifest::GitRef;
 use crate::store::{Store, hash_tree};
@@ -294,6 +293,8 @@ fn run_git<'a>(args: impl IntoIterator<Item = &'a str>) -> Result<String, String
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
 
     /// Whether `git` is available — the fetch tests are meaningless without it and skip gracefully

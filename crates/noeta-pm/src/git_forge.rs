@@ -16,7 +16,6 @@
 //! credential; auth is applied per git-invocation.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use semver::Version;
 
@@ -229,6 +228,8 @@ fn git(args: &[&str]) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
 
     fn git_available() -> bool {

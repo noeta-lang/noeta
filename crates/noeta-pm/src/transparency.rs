@@ -47,7 +47,9 @@ pub fn log_record(
     provenance: &str,
     license: &str,
 ) -> String {
-    format!("noeta-transparency-log-v1\n{name}\n{version}\n{url}\n{tag}\n{sha}\n{provenance}\n{license}\n")
+    format!(
+        "noeta-transparency-log-v1\n{name}\n{version}\n{url}\n{tag}\n{sha}\n{provenance}\n{license}\n"
+    )
 }
 
 /// Verify that `leaf` at index `m` in a tree of `size` with `root` is proven by `proof`.

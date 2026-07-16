@@ -1453,7 +1453,11 @@ mod tests {
             .expect_err("must refuse the lossy rewrite");
         assert!(err.contains("refusing to rewrite"), "{err}");
         // The half-understood entry is still on disk, untouched.
-        assert!(std::fs::read_to_string(&file).unwrap().contains("future_shape"));
+        assert!(
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("future_shape")
+        );
     }
 
     fn coords(tag: &str) -> GitCoords {
@@ -1551,7 +1555,9 @@ mod tests {
         let got = index.releases("acme/pkg").unwrap();
         assert_eq!(got[0].license.as_deref(), Some("MIT OR Apache-2.0"));
         // A license-less release stays None (absent from the TOML entirely).
-        index.publish("acme/pkg", &release(2, 0, 0, "v2.0.0")).expect("publish");
+        index
+            .publish("acme/pkg", &release(2, 0, 0, "v2.0.0"))
+            .expect("publish");
         let got = index.releases("acme/pkg").unwrap();
         assert_eq!(got[1].license, None);
     }
@@ -1569,7 +1575,9 @@ mod tests {
             Some("# pkg\n\nHello.")
         );
         // Last-wins, like docs — a corrected README overwrites.
-        index.put_readme("acme/pkg", &v, "# pkg v2").expect("re-put");
+        index
+            .put_readme("acme/pkg", &v, "# pkg v2")
+            .expect("re-put");
         assert_eq!(
             index.readme("acme/pkg", &v).unwrap().as_deref(),
             Some("# pkg v2")
@@ -2009,7 +2017,8 @@ mod http_tests {
 
         let sk = SigningKey::from_bytes(&[9u8; 32]);
         let pub_hex = hex(&sk.verifying_key().to_bytes());
-        let record = transparency::log_record("acme/imgfx", "1.0.0", "u", "t", "abc", "unsigned", "MIT");
+        let record =
+            transparency::log_record("acme/imgfx", "1.0.0", "u", "t", "abc", "unsigned", "MIT");
         let root_hex = hex(&transparency::leaf_hash(record.as_bytes())); // size-1 tree: root == leaf
         let sig_hex = hex(&sk
             .sign(format!("noeta-log-checkpoint-v1\n1\n{root_hex}\n").as_bytes())
@@ -2048,7 +2057,15 @@ mod http_tests {
         // The record binds the license: an index serving a *different* license than it logged is
         // caught as equivocation.
         let err = index
-            .verify_release_logged("acme/imgfx", "1.0.0", "u", "t", "abc", Some("GPL-3.0-only"), None)
+            .verify_release_logged(
+                "acme/imgfx",
+                "1.0.0",
+                "u",
+                "t",
+                "abc",
+                Some("GPL-3.0-only"),
+                None,
+            )
             .unwrap_err();
         assert!(err.contains("license"), "{err}");
 

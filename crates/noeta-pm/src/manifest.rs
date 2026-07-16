@@ -881,7 +881,9 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
     let license = match pkg.get("license") {
         None => None,
         Some(v) => {
-            let expr = v.as_str().ok_or("`package.license` must be a string (an SPDX expression)")?;
+            let expr = v
+                .as_str()
+                .ok_or("`package.license` must be a string (an SPDX expression)")?;
             Some(validate_license(expr)?)
         }
     };
@@ -900,7 +902,12 @@ fn parse_package(table: &toml::Table) -> Result<Option<PackageMeta>, String> {
 /// not adjudicating license law.
 fn validate_license(expr: &str) -> Result<String, String> {
     let trimmed = expr.trim();
-    if trimmed.is_empty() || expr.len() > 120 || !expr.chars().all(|c| c.is_ascii_alphanumeric() || " .+()-".contains(c)) {
+    if trimmed.is_empty()
+        || expr.len() > 120
+        || !expr
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || " .+()-".contains(c))
+    {
         return Err(format!(
             "`package.license` `{expr}` is not an SPDX license expression (letters, digits, ` .+()-`, ≤ 120 chars)"
         ));
@@ -1387,7 +1394,8 @@ mod tests {
             Some("MIT OR Apache-2.0")
         );
         // Omitted → None (a license is optional, nudged at publish).
-        let m = Manifest::parse("[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n").unwrap();
+        let m =
+            Manifest::parse("[package]\nname = \"acme/widgets\"\nversion = \"1.0.0\"\n").unwrap();
         assert_eq!(m.package().unwrap().license, None);
         // Not an SPDX-shaped expression → a manifest error naming the value.
         let err = Manifest::parse(
