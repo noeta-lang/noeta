@@ -1392,6 +1392,28 @@ fn validate(units: &[&'static (dyn Extension + Sync)]) {
             pair[0]
         );
     }
+    // Extern-type identities. The runtime resolves a value's type by its SHORT `type_name()`
+    // (`find_type` scans units in registration order), so two types sharing a short name — even
+    // under distinct namespaces — would silently dispatch through whichever unit registered
+    // first: the wrong `ExtType`'s downcast then fails per value at call time, and `is`/`.as<T>()`
+    // answer against the wrong qualified name. Until extern values carry their qualified identity,
+    // a short-name collision is a mis-assembly — refuse to start rather than mis-dispatch.
+    let mut types: Vec<(&str, &str)> = units
+        .iter()
+        .flat_map(|e| e.types().iter().map(move |t| (t.name, e.name())))
+        .collect();
+    types.sort_unstable();
+    for pair in types.windows(2) {
+        assert!(
+            pair[0].0 != pair[1].0,
+            "duplicate extern type `{}` in the assembled registry (units `{}` and `{}`): \
+             runtime dispatch resolves extern types by their short name, so two extensions \
+             cannot register the same type name",
+            pair[0].0,
+            pair[0].1,
+            pair[1].1
+        );
+    }
     for module in units.iter().flat_map(|e| e.modules()) {
         for (i, bundle) in module.bundles.iter().enumerate() {
             for other in &module.bundles[i + 1..] {
@@ -1910,6 +1932,49 @@ mod runtime_registry_tests {
         // Same root (`a`) + same module name (`math`) across two differently-named units.
         let result = std::panic::catch_unwind(|| validate(&[&A, &B_DUP_MODULE]));
         assert!(result.is_err(), "duplicate qualified module must panic");
+    }
+
+    #[test]
+    fn duplicate_extern_type_short_name_is_rejected() {
+        // Two units registering the same SHORT type name — even under distinct namespaces — must
+        // refuse to assemble: runtime dispatch resolves an extern value's type by its short
+        // `type_name()` (`find_type` scans units in order), so the collision would silently route
+        // one unit's values through the other's dispatch.
+        const T_STD_COUNTER: ExtType = ExtType {
+            name: "Counter",
+            namespace: "std.metrics",
+            ..ExtType::DEFAULTS
+        };
+        const T_ACME_COUNTER: ExtType = ExtType {
+            name: "Counter",
+            namespace: "acme.metrics",
+            ..ExtType::DEFAULTS
+        };
+        static SM: NsUnit = NsUnit("std", &[], &[T_STD_COUNTER]);
+        static AM: TypedUnit = TypedUnit("acme.metrics", "acme", &[T_ACME_COUNTER]);
+        let result = std::panic::catch_unwind(|| validate(&[&SM, &AM]));
+        assert!(
+            result.is_err(),
+            "duplicate extern-type short name must refuse to assemble"
+        );
+    }
+
+    /// A unit with only types, under its own name and root (the `NsUnit` helper hardcodes
+    /// `std.core` as its unit name, so a second distinctly-named unit needs its own shape).
+    struct TypedUnit(&'static str, &'static str, &'static [ExtType]);
+    impl Extension for TypedUnit {
+        fn name(&self) -> &'static str {
+            self.0
+        }
+        fn root(&self) -> &'static str {
+            self.1
+        }
+        fn modules(&self) -> &'static [ExtModule] {
+            &[]
+        }
+        fn types(&self) -> &'static [ExtType] {
+            self.2
+        }
     }
 
     #[test]
