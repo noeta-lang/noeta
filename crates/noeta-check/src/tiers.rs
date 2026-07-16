@@ -28,6 +28,8 @@ use noeta_ast::{AttrArg, Attribute, Program, Stmt};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
 
+use super::*;
+
 /// A tier brought into existence by a `@tier(name[, config: T]) fn runner(…)` declaration
 /// (tier-providers T2) — the program-declared counterpart of an extension's [`ExtTier`] entry
 /// (`noeta_native::registry::ExtTier`).
@@ -890,6 +892,380 @@ fn resolve_children(
         _ => {}
     }
     stmt
+}
+
+// ----- the checker's tier/semantic-role validation passes (impl Checker, moved from lib.rs) -----
+
+impl Checker {
+    /// Validate every `@semantic` directive and `@role(Enum.Variant)` tag in the program (`E0031`).
+    /// Runs **after** `collect`, so the full set of `@semantic` enums is known regardless of source
+    /// order. A `@semantic` on a struct/class is a misplacement (it marks enums only); a `@role`
+    /// must tag a struct that is itself an attribute and must name a fieldless variant of a
+    /// `@semantic` enum. Well-formed tags are surfaced purely by `reflect::build`, so nothing is
+    /// stored here.
+    /// Validate every `@tier` declaration (tier-providers T2, E0051) and build the program's
+    /// [`tiers::TierRegistry`]. Runs after `collect`, so a `config:` type declared later in the
+    /// file (or in an imported module) is visible. Four rules: the name must not collide with a
+    /// built-in tier; two declarations must not claim one name; `config:` must name an
+    /// `@attribute` struct; and the runner must be `fn(roots: List<TierRoot>): void` — the
+    /// signature dispatch calls with the activated roots.
+    pub(crate) fn check_tier_decls(&mut self, program: &Program) {
+        // Resolve the extension-tier half of the name-space against THIS checker's registry
+        // (instance-registry IR4), so an embed session whose own extension declares a `@tier`
+        // validates its `@<tier>` blocks correctly. Defaults to the process-global registry.
+        self.tier_registry = tiers::TierRegistry::collect_with_registry(program, self.reg());
+        let mut seen: HashMap<(String, String), Span> = HashMap::new();
+        for stmt in &program.stmts {
+            let Stmt::Fn(f) = stmt else { continue };
+            let Some(decl) = &f.tier else { continue };
+            // Redeclaring an extension tier's name is legal (provider override): the declaration
+            // is dormant until a target's `tiers` map selects its package as the provider
+            // (`bench = "criterion"`); the extension declaration stays the default. Only a
+            // duplicate within one provider — two `@tier(x)` declarations whose runners share a
+            // package root — is a real collision (E0051): provider selection could not tell them
+            // apart.
+            let root = decl_runner_root(&f.name);
+            if let Some(first) = seen.get(&(decl.name.clone(), root.clone())) {
+                let first = *first;
+                self.error(
+                    DiagnosticCode::InvalidTierDeclaration,
+                    decl.name_span,
+                    format!(
+                        "tier `{}` is declared more than once by one provider",
+                        decl.name
+                    ),
+                )
+                .help(format!(
+                    "the first declaration is at {first:?}; a tier has exactly one runner per \
+                     package"
+                ));
+            } else {
+                seen.insert((decl.name.clone(), root), decl.name_span);
+            }
+            if let Some((config, config_span)) = &decl.config
+                && !self.attributes.contains(config)
+            {
+                self.error(
+                    DiagnosticCode::InvalidTierDeclaration,
+                    *config_span,
+                    format!("`config: {config}` does not name an `@attribute` struct"),
+                )
+                .help("a tier's knobs are an attribute's fields; declare the struct with `@attribute`");
+            }
+            // `text:` and `config:` are mutually exclusive: a text tier's body is verbatim prose,
+            // so there are no contained fns to stamp knob attributes onto.
+            if let (Some(_), Some((_, text_span))) = (&decl.config, &decl.text) {
+                self.error(
+                    DiagnosticCode::InvalidTierDeclaration,
+                    *text_span,
+                    format!(
+                        "tier `{}` declares both `config:` and `text:` — a text tier has no knobs",
+                        decl.name
+                    ),
+                )
+                .help(
+                    "a `text: \"<lang>\"` tier's `@<name> { … }` bodies are captured verbatim \
+                     (no fns inside to configure); drop one of the two",
+                );
+            }
+            if let Some((lang, text_span)) = &decl.text
+                && lang.is_empty()
+            {
+                self.error(
+                    DiagnosticCode::InvalidTierDeclaration,
+                    *text_span,
+                    "`text:` needs a language ID for the body, e.g. `text: \"markdown\"`",
+                )
+                .help(
+                    "the ID tags the verbatim bodies for tooling (editor highlighting, \
+                     extraction); use a lowercase language name like \"markdown\", \"xml\", \"sql\"",
+                );
+            }
+            // An **expression tier** (expr-tiers arc): `expr: T` makes the decorated fn the
+            // tier's *handler* — `fn(statics: List<string>, holes: List<() -> U>): T` — not a
+            // runner. Its own rules, then skip the runner-signature branch entirely.
+            if let Some((expr_ty, expr_span)) = &decl.expr {
+                if decl.config.is_some() {
+                    self.error(
+                        DiagnosticCode::InvalidTierDeclaration,
+                        *expr_span,
+                        format!(
+                            "tier `{}` declares both `config:` and `expr:` — an expression tier \
+                             has no knobs",
+                            decl.name
+                        ),
+                    )
+                    .help(
+                        "an `expr: Type` tier's `@<name> { … }` blocks are expressions (no fns \
+                         inside to configure); drop one of the two",
+                    );
+                }
+                let statics_ok = matches!(
+                    f.params.first().and_then(|p| p.ty.as_ref()),
+                    Some(TypeRef::Named { name, args, .. })
+                        if name == "List"
+                            && matches!(
+                                args.as_slice(),
+                                [TypeRef::Named { name: el, args: el_args, .. }]
+                                    if el == "string" && el_args.is_empty()
+                            )
+                );
+                // The hole type `U` is the handler's choice — only the thunk shape is fixed.
+                let holes_ok = matches!(
+                    f.params.get(1).and_then(|p| p.ty.as_ref()),
+                    Some(TypeRef::Named { name, args, .. })
+                        if name == "List"
+                            && matches!(
+                                args.as_slice(),
+                                [TypeRef::Fn { params, .. }] if params.is_empty()
+                            )
+                );
+                let ret_ok = matches!(
+                    f.ret.as_ref(),
+                    Some(TypeRef::Named { name, args, .. }) if name == expr_ty && args.is_empty()
+                );
+                if f.params.len() != 2 || !statics_ok || !holes_ok || !ret_ok {
+                    self.error(
+                        DiagnosticCode::InvalidTierDeclaration,
+                        f.name_span,
+                        format!(
+                            "tier `{}`'s handler must be `fn(statics: List<string>, holes: \
+                             List<() -> U>): {expr_ty}`",
+                            decl.name
+                        ),
+                    )
+                    .help(
+                        "an expression tier's `@<name> { … }` block desugars to \
+                         `handler(statics, holes)`: the body's literal segments (always holes + \
+                         1) and one zero-param closure per `${…}` hole, typed against the `U` \
+                         you choose; the return type must match the declared `expr:`",
+                    );
+                }
+                continue;
+            }
+            // The runner signature: exactly one `List<TierRoot>` parameter (`List<TierText>` for
+            // a text tier — its roots are verbatim bodies, not fns), returning `void`.
+            let root_ty = if decl.text.is_some() {
+                noeta_ast::reflect::TIER_TEXT
+            } else {
+                noeta_ast::reflect::TIER_ROOT
+            };
+            let param_ok = f.params.len() == 1
+                && matches!(
+                    f.params[0].ty.as_ref(),
+                    Some(TypeRef::Named { name, args, .. })
+                        if name == "List"
+                            && matches!(
+                                args.as_slice(),
+                                [TypeRef::Named { name: el, args: el_args, .. }]
+                                    if el == root_ty && el_args.is_empty()
+                            )
+                );
+            let ret_ok = matches!(
+                f.ret.as_ref(),
+                Some(TypeRef::Named { name, args, .. }) if name == "void" && args.is_empty()
+            );
+            if !param_ok || !ret_ok {
+                self.error(
+                    DiagnosticCode::InvalidTierDeclaration,
+                    f.name_span,
+                    format!(
+                        "tier `{}`'s runner must be `fn(roots: List<{root_ty}>): void`",
+                        decl.name
+                    ),
+                )
+                .help(if decl.text.is_some() {
+                    "a text tier's runner receives one root per verbatim body — `root.target` \
+                     names the adjacent declaration (`\"\"` for module/section prose), `root.text` \
+                     is the body"
+                } else {
+                    "the runner receives one activated root per fn — `root.name` for the report, \
+                     `root.run()` to invoke it; knob values come from `attributes_of::<Config>()`"
+                });
+            }
+        }
+    }
+
+    pub(crate) fn check_semantic_roles(&mut self, program: &Program) {
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::Struct(r) => {
+                    self.check_misplaced_semantic(r.semantic, &r.name, "record");
+                    self.check_role_tags(r.name_span, r.role.as_deref(), r.attribute.is_some());
+                    self.check_packed_struct(r);
+                }
+                Stmt::Class(c) => {
+                    self.check_misplaced_semantic(c.semantic, &c.name, "class");
+                    self.check_misplaced_packed(c.packed, &c.name, "class");
+                    // A role tags an attribute, and attributes are structs only, so `@role` on a
+                    // class is an error (E0031).
+                    if c.role.is_some() {
+                        self.error(
+                            DiagnosticCode::InvalidRole,
+                            c.name_span,
+                            format!(
+                                "a class cannot carry a role: `{}` must be a record attribute",
+                                c.name
+                            ),
+                        )
+                        .help("declare it as an `@attribute type` and tag that with `@role`");
+                    }
+                }
+                Stmt::Enum(e) => {
+                    self.check_misplaced_packed(e.packed, &e.name, "enum");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Whether `ty` can be a field of a `@packed` struct (P-PACK): a primitive (`int`/`float`/`bool`)
+    /// or another packed struct (a non-generic `Named` in `packed_structs`). Everything else — a
+    /// string/list/map/class/enum/`dyn`/generic — is heap-shaped and cannot lay out flat.
+    pub(crate) fn is_packable_type(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Int | Type::Float | Type::F32 | Type::Bool => true,
+            Type::Named(name, args) if args.is_empty() => self.packed_structs.contains(name),
+            _ => false,
+        }
+    }
+
+    /// The flat [`PackedLayout`] of `ty` if it is a `@packed` struct, else `None` (P-PACK Phase 2).
+    /// Recurses through nested packed fields, flattening them inline. `check_packed_struct` has
+    /// already guaranteed every field of a packed struct is packable, so the field walk never bails on
+    /// a well-typed program; the `?`s defend against a malformed registry (and an unpacked element).
+    /// Resolve a checker [`Type`] into a [`noeta_stdlib::TypeRecipe`] for call-site-typed
+    /// deserialization (`json.parse::<T>`), or `None` if `T` has no JSON decoding: an enum or class
+    /// (a reference/identity type, or a sum with no canonical JSON form), a tuple/set/result/`dyn`,
+    /// a non-string-keyed map, a generic instantiation, or a struct with any such field. A struct
+    /// records its fields in **declared order** (so the decoder emits them in the order the backend's
+    /// registered type expects).
+    pub(crate) fn type_to_recipe(&self, ty: &Type) -> Option<noeta_stdlib::TypeRecipe> {
+        use noeta_stdlib::TypeRecipe;
+        Some(match ty {
+            Type::Int => TypeRecipe::Int,
+            Type::Float => TypeRecipe::Float,
+            Type::F32 => TypeRecipe::F32,
+            Type::Bool => TypeRecipe::Bool,
+            Type::String => TypeRecipe::Str,
+            Type::Unit => TypeRecipe::Unit,
+            Type::Option(e) => TypeRecipe::Option(Box::new(self.type_to_recipe(e)?)),
+            Type::List(e) => TypeRecipe::List(Box::new(self.type_to_recipe(e)?)),
+            // JSON object keys are strings, so only string-keyed maps decode.
+            Type::Map(k, v) if matches!(**k, Type::String) => {
+                TypeRecipe::Map(Box::new(self.type_to_recipe(v)?))
+            }
+            // Only a non-generic value struct decodes (a class is reference/identity; an enum has no
+            // canonical JSON shape). The field set is the declared record fields, in order.
+            Type::Named(name, args)
+                if args.is_empty()
+                    && self.type_kinds.get(name) == Some(&noeta_types::TypeKind::Struct) =>
+            {
+                let fields = self
+                    .records
+                    .get(name)?
+                    .iter()
+                    .map(|(fname, fty)| Some((fname.clone(), self.type_to_recipe(fty)?)))
+                    .collect::<Option<Vec<_>>>()?;
+                TypeRecipe::Struct {
+                    name: name.clone(),
+                    fields,
+                }
+            }
+            _ => return None,
+        })
+    }
+
+    /// Flag a `@semantic` directive on a non-enum declaration (`E0031`): it marks enums role-eligible
+    /// and has no meaning on a struct or class.
+    pub(crate) fn check_misplaced_semantic(
+        &mut self,
+        semantic: Option<Span>,
+        name: &str,
+        kind: &str,
+    ) {
+        if let Some(span) = semantic {
+            self.error(
+                DiagnosticCode::InvalidRole,
+                span,
+                format!("`@semantic` may only mark an enum, not the {kind} `{name}`"),
+            )
+            .help("`@semantic` makes an enum's variants usable as `@role(Enum.Variant)`");
+        }
+    }
+
+    /// Validate a struct's `@role(Enum.Variant)` tags. Each must name a **fieldless** variant of a
+    /// `@semantic` enum, and may only tag a struct that is itself an attribute (`@attribute`) — the
+    /// role rides on what the attribute attaches to. Multiple roles are allowed. Each violation is
+    /// `E0031` at its span; `name_span` locates the declaration for the "not an attribute" case.
+    pub(crate) fn check_role_tags(
+        &mut self,
+        name_span: Span,
+        roles: Option<&[noeta_ast::RoleTag]>,
+        is_attribute: bool,
+    ) {
+        let Some(roles) = roles else { return };
+        if !is_attribute {
+            self.error(
+                DiagnosticCode::InvalidRole,
+                name_span,
+                "`@role(...)` may only tag an attribute".to_string(),
+            )
+            .help("also mark the record `@attribute`");
+        }
+        for tag in roles {
+            // A bare `@role(Variant)` carries no enum; a role must name `Enum.Variant`.
+            if tag.enum_name.is_empty() {
+                self.error(
+                    DiagnosticCode::InvalidRole,
+                    tag.span,
+                    format!(
+                        "`@role` requires a qualified `Enum.Variant`, not `{}`",
+                        tag.variant
+                    ),
+                )
+                .help("name a variant of a `@semantic` enum, e.g. `@role(Semantic.EntryPoint)`");
+                continue;
+            }
+            // The enum must be `@semantic` (the built-in `Semantic` always is).
+            if !self.semantic_enums.contains(&tag.enum_name) {
+                self.error(
+                    DiagnosticCode::InvalidRole,
+                    tag.span,
+                    format!("`{}` is not a `@semantic` enum", tag.enum_name),
+                )
+                .help("mark the enum `@semantic` to use its variants as roles");
+                continue;
+            }
+            // The variant must exist on that enum and be fieldless (a payload would have to be
+            // built per use site — genuine comptime, the one thing roles defer).
+            match self
+                .enums
+                .get(&tag.enum_name)
+                .and_then(|vs| vs.iter().find(|v| v.name == tag.variant))
+            {
+                None => {
+                    self.error(
+                        DiagnosticCode::InvalidRole,
+                        tag.span,
+                        format!("`{}` has no variant `{}`", tag.enum_name, tag.variant),
+                    );
+                }
+                Some(variant) if !variant.fields.is_empty() => {
+                    self.error(
+                        DiagnosticCode::InvalidRole,
+                        tag.span,
+                        format!(
+                            "`{}.{}` carries fields, so it cannot be a role",
+                            tag.enum_name, tag.variant
+                        ),
+                    )
+                    .help("a role must be a fieldless (payload-free) variant");
+                }
+                Some(_) => {}
+            }
+        }
+    }
 }
 
 #[cfg(test)]
