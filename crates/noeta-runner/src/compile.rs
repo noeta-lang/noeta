@@ -82,7 +82,7 @@ pub fn resolve_providers(
 ) -> Result<BTreeMap<String, String>, String> {
     match target {
         None => Ok(BTreeMap::new()),
-        Some(name) => manifest::resolve_active_tier_providers(entry, name),
+        Some(name) => Ok(manifest::resolve_active_tier_providers(entry, name)?),
     }
 }
 
@@ -147,9 +147,8 @@ pub fn resolve_front_with(
     // The active tier set is the union of any `--target`'s live tiers (from `noeta.toml`) and any
     // explicit `--tier` flags.
     let mut active: Vec<String> = match target {
-        Some(name) => {
-            manifest::resolve_active_tiers(file, name).map_err(CompileFailure::Message)?
-        }
+        Some(name) => manifest::resolve_active_tiers(file, name)
+            .map_err(|err| CompileFailure::Message(err.to_string()))?,
         None => Vec::new(),
     };
     for tier in tiers {

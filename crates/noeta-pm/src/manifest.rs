@@ -27,6 +27,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::error::PmError;
+
 // The `[fmt]` grammar lives in `noeta-fmt` (dev tooling), so reading a manifest's formatter config
 // pulls in the formatter crate — gated behind `fmt-config` (dev-deps D3c) so a lean runtime that only
 // needs tier/dependency resolution never links it.
@@ -106,7 +108,13 @@ impl RegistrySource {
     /// - `git:<url>` → the git forge at that base URL verbatim (self-hosted Gitea/GitLab/Forgejo, SSH,
     ///   or a `file://`/local path for tests)
     /// - a bare `http(s)://…` → a hosted noeta-registry service
-    pub fn parse(s: &str) -> Result<RegistrySource, String> {
+    pub fn parse(s: &str) -> Result<RegistrySource, PmError> {
+        Self::parse_inner(s).map_err(PmError::Manifest)
+    }
+
+    /// The string-formatting body of [`Self::parse`] — a manifest-value validator, so every
+    /// failure is one kind ([`PmError::Manifest`]), applied once at the public boundary.
+    fn parse_inner(s: &str) -> Result<RegistrySource, String> {
         let s = s.trim();
         if let Some(owner) = s.strip_prefix("github:") {
             Ok(RegistrySource::GitForge(format!(
@@ -271,20 +279,22 @@ impl PackageName {
     /// Parse `company/package`: exactly one `/`, each side a non-empty identifier
     /// (`[A-Za-z_][A-Za-z0-9_]*`). The `package` half is the package's **root namespace segment** —
     /// what a consumer's dep-key re-roots at the package boundary (see phase-2 plan).
-    pub fn parse(s: &str) -> Result<PackageName, String> {
-        let (company, package) = s
-            .split_once('/')
-            .ok_or_else(|| format!("package name `{s}` must be `company/package` (missing `/`)"))?;
+    pub fn parse(s: &str) -> Result<PackageName, PmError> {
+        let (company, package) = s.split_once('/').ok_or_else(|| {
+            PmError::Manifest(format!(
+                "package name `{s}` must be `company/package` (missing `/`)"
+            ))
+        })?;
         if package.contains('/') {
-            return Err(format!(
+            return Err(PmError::Manifest(format!(
                 "package name `{s}` must have exactly one `/` (found more)"
-            ));
+            )));
         }
         if !is_identifier(company) || !is_identifier(package) {
-            return Err(format!(
+            return Err(PmError::Manifest(format!(
                 "package name `{s}`: `company` and `package` must each be identifiers \
                  (letters, digits, `_`; not starting with a digit)"
-            ));
+            )));
         }
         Ok(PackageName {
             company: company.to_string(),
@@ -386,25 +396,26 @@ pub fn find(start_dir: &Path) -> Option<PathBuf> {
 
 /// Read + parse the manifest at `manifest_path` (package-manager Phase 4, backing `noeta audit`).
 /// Errors (tagged with the path) on an unreadable or invalid manifest.
-pub fn load(manifest_path: &Path) -> Result<Manifest, String> {
+pub fn load(manifest_path: &Path) -> Result<Manifest, PmError> {
     let text = std::fs::read_to_string(manifest_path)
-        .map_err(|err| format!("cannot read `{}`: {err}", manifest_path.display()))?;
-    Manifest::parse(&text).map_err(|err| format!("invalid `{}`: {err}", manifest_path.display()))
+        .map_err(|err| PmError::Io(format!("cannot read `{}`: {err}", manifest_path.display())))?;
+    Manifest::parse(&text)
+        .map_err(|err| err.map_msg(|m| format!("invalid `{}`: {m}", manifest_path.display())))
 }
 
 /// The `[package]` identity (`company/package`) and version of the manifest at `manifest_path`
 /// (package-manager P2.5, backing `noeta publish`). Errors when the manifest can't be read/parsed or
 /// declares no `[package]` (a bare script can't be published).
-pub fn current_package(manifest_path: &Path) -> Result<(String, semver::Version), String> {
+pub fn current_package(manifest_path: &Path) -> Result<(String, semver::Version), PmError> {
     let text = std::fs::read_to_string(manifest_path)
-        .map_err(|err| format!("cannot read `{}`: {err}", manifest_path.display()))?;
+        .map_err(|err| PmError::Io(format!("cannot read `{}`: {err}", manifest_path.display())))?;
     let manifest = Manifest::parse(&text)
-        .map_err(|err| format!("invalid `{}`: {err}", manifest_path.display()))?;
+        .map_err(|err| err.map_msg(|m| format!("invalid `{}`: {m}", manifest_path.display())))?;
     let pkg = manifest.package().ok_or_else(|| {
-        format!(
+        PmError::Manifest(format!(
             "`{}` has no `[package]` table — only a package (with a name + version) can be published",
             manifest_path.display()
-        )
+        ))
     })?;
     Ok((
         format!("{}/{}", pkg.name.company, pkg.name.package),
@@ -419,31 +430,34 @@ pub fn current_package(manifest_path: &Path) -> Result<(String, semver::Version)
 /// leaving the rest of the file — comments, ordering, whitespace — untouched. The result is re-parsed
 /// before writing, so a malformed value or an unknown source never corrupts the manifest, and the
 /// write is atomic. Errors if `key` is not an identifier or is already a dependency.
-pub fn add_dependency(manifest_path: &Path, key: &str, value_toml: &str) -> Result<(), String> {
+pub fn add_dependency(manifest_path: &Path, key: &str, value_toml: &str) -> Result<(), PmError> {
     if !is_identifier(key) {
-        return Err(format!(
+        return Err(PmError::Manifest(format!(
             "dependency key `{key}` must be an identifier (it becomes the import root — `use {key}.…`)"
-        ));
+        )));
     }
     let text = std::fs::read_to_string(manifest_path)
-        .map_err(|err| format!("cannot read `{}`: {err}", manifest_path.display()))?;
+        .map_err(|err| PmError::Io(format!("cannot read `{}`: {err}", manifest_path.display())))?;
     let manifest = Manifest::parse(&text)
-        .map_err(|err| format!("invalid `{}`: {err}", manifest_path.display()))?;
+        .map_err(|err| err.map_msg(|m| format!("invalid `{}`: {m}", manifest_path.display())))?;
     if manifest.dependencies().contains_key(key) {
-        return Err(format!("dependency `{key}` is already in the manifest"));
+        return Err(PmError::Manifest(format!(
+            "dependency `{key}` is already in the manifest"
+        )));
     }
 
     let entry = format!("{key} = {value_toml}");
     let updated = insert_dependency_entry(&text, &entry);
     // Re-parse the edited manifest so a bad value/source fails here rather than corrupting the file.
-    Manifest::parse(&updated)
-        .map_err(|err| format!("`noeta add {key}` would make `{MANIFEST_NAME}` invalid: {err}"))?;
+    Manifest::parse(&updated).map_err(|err| {
+        err.map_msg(|m| format!("`noeta add {key}` would make `{MANIFEST_NAME}` invalid: {m}"))
+    })?;
 
     let dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = dir.join(format!(".{MANIFEST_NAME}.{}.tmp", std::process::id()));
     std::fs::write(&tmp, &updated)
         .and_then(|()| std::fs::rename(&tmp, manifest_path))
-        .map_err(|err| format!("cannot write `{}`: {err}", manifest_path.display()))
+        .map_err(|err| PmError::Io(format!("cannot write `{}`: {err}", manifest_path.display())))
 }
 
 /// Insert `entry` (a `key = value` line) into `text`'s `[dependencies]` table: right after an
@@ -472,18 +486,18 @@ fn insert_dependency_entry(text: &str, entry: &str) -> String {
 /// directory: load the manifest, follow `extends`, and return the live tier names (sorted). Every
 /// failure — no manifest, parse error, unknown target/tier, unavailable provider, inheritance
 /// cycle — is a human-readable `Err` the caller prints.
-pub fn resolve_active_tiers(entry: &Path, target: &str) -> Result<Vec<String>, String> {
+pub fn resolve_active_tiers(entry: &Path, target: &str) -> Result<Vec<String>, PmError> {
     let dir = entry.parent().unwrap_or_else(|| Path::new("."));
     let path = find(dir).ok_or_else(|| {
-        format!(
+        PmError::NoManifest(format!(
             "no `{MANIFEST_NAME}` found at or above `{}` (needed for `--target {target}`)",
             dir.display()
-        )
+        ))
     })?;
     let text = std::fs::read_to_string(&path)
-        .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
-    let manifest =
-        Manifest::parse(&text).map_err(|err| format!("invalid `{}`: {err}", path.display()))?;
+        .map_err(|err| PmError::Io(format!("cannot read `{}`: {err}", path.display())))?;
+    let manifest = Manifest::parse(&text)
+        .map_err(|err| err.map_msg(|m| format!("invalid `{}`: {m}", path.display())))?;
     manifest.active_tiers(target)
 }
 
@@ -495,18 +509,18 @@ pub fn resolve_active_tiers(entry: &Path, target: &str) -> Result<Vec<String>, S
 pub fn resolve_active_tier_providers(
     entry: &Path,
     target: &str,
-) -> Result<BTreeMap<String, String>, String> {
+) -> Result<BTreeMap<String, String>, PmError> {
     let dir = entry.parent().unwrap_or_else(|| Path::new("."));
     let path = find(dir).ok_or_else(|| {
-        format!(
+        PmError::NoManifest(format!(
             "no `{MANIFEST_NAME}` found at or above `{}` (needed for `--target {target}`)",
             dir.display()
-        )
+        ))
     })?;
     let text = std::fs::read_to_string(&path)
-        .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
-    let manifest =
-        Manifest::parse(&text).map_err(|err| format!("invalid `{}`: {err}", path.display()))?;
+        .map_err(|err| PmError::Io(format!("cannot read `{}`: {err}", path.display())))?;
+    let manifest = Manifest::parse(&text)
+        .map_err(|err| err.map_msg(|m| format!("invalid `{}`: {m}", path.display())))?;
     manifest.active_tier_providers(target)
 }
 
@@ -561,20 +575,20 @@ pub fn root_edition(entry: &Path) -> crate::edition::Edition {
 /// The `[package] name` of a **cargo** manifest — what a composed-toolchain shim writes into its
 /// dependency line for a native entry crate (package-manager Phase 3, N3.2). Kept here because
 /// `noeta-pm` owns the toml dependency; this reads cargo's manifest, not ours.
-pub fn cargo_package_name(crate_dir: &Path) -> Result<String, String> {
+pub fn cargo_package_name(crate_dir: &Path) -> Result<String, PmError> {
     let path = crate_dir.join("Cargo.toml");
     let text = std::fs::read_to_string(&path)
-        .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
-    let table: toml::Table = text
-        .parse()
-        .map_err(|err| format!("`{}` is not valid TOML: {err}", path.display()))?;
+        .map_err(|err| PmError::Io(format!("cannot read `{}`: {err}", path.display())))?;
+    let table: toml::Table = text.parse().map_err(|err| {
+        PmError::Manifest(format!("`{}` is not valid TOML: {err}", path.display()))
+    })?;
     table
         .get("package")
         .and_then(|p| p.as_table())
         .and_then(|p| p.get("name"))
         .and_then(|n| n.as_str())
         .map(str::to_string)
-        .ok_or_else(|| format!("`{}` has no `[package] name`", path.display()))
+        .ok_or_else(|| PmError::Manifest(format!("`{}` has no `[package] name`", path.display())))
 }
 
 /// The feature names a **cargo** manifest declares under `[features]` (dev-deps D5b). A composed
@@ -583,13 +597,13 @@ pub fn cargo_package_name(crate_dir: &Path) -> Result<String, String> {
 /// enabling an absent feature never makes cargo error. A missing/empty `[features]` table yields the
 /// empty set. (A shipped runner/AOT base never calls this: it pulls each crate at default features,
 /// so the formatter and its parser stay uncompiled — the whole point of the split.)
-pub fn cargo_features(crate_dir: &Path) -> Result<Vec<String>, String> {
+pub fn cargo_features(crate_dir: &Path) -> Result<Vec<String>, PmError> {
     let path = crate_dir.join("Cargo.toml");
     let text = std::fs::read_to_string(&path)
-        .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
-    let table: toml::Table = text
-        .parse()
-        .map_err(|err| format!("`{}` is not valid TOML: {err}", path.display()))?;
+        .map_err(|err| PmError::Io(format!("cannot read `{}`: {err}", path.display())))?;
+    let table: toml::Table = text.parse().map_err(|err| {
+        PmError::Manifest(format!("`{}` is not valid TOML: {err}", path.display()))
+    })?;
     Ok(table
         .get("features")
         .and_then(|f| f.as_table())
@@ -603,7 +617,7 @@ pub fn cargo_features(crate_dir: &Path) -> Result<Vec<String>, String> {
 /// Returns `Err` only when a present `[fmt]` table is malformed (wrong types / unknown arrow style),
 /// so a typo surfaces rather than being silently ignored.
 #[cfg(feature = "fmt-config")]
-pub fn resolve_fmt_config(file: &Path) -> Result<FmtConfig, String> {
+pub fn resolve_fmt_config(file: &Path) -> Result<FmtConfig, PmError> {
     // Precedence: built-in defaults, then `.editorconfig` (walked up from the file), then the
     // manifest's `[fmt]` table — so an explicit `noeta.toml` setting wins over `.editorconfig`, which
     // wins over the defaults. (CLI flags, applied by the caller, win over all.)
@@ -612,12 +626,12 @@ pub fn resolve_fmt_config(file: &Path) -> Result<FmtConfig, String> {
     let dir = file.parent().unwrap_or_else(|| Path::new("."));
     if let Some(path) = find(dir) {
         let text = std::fs::read_to_string(&path)
-            .map_err(|err| format!("cannot read `{}`: {err}", path.display()))?;
+            .map_err(|err| PmError::Io(format!("cannot read `{}`: {err}", path.display())))?;
         // The `[fmt]` grammar lives in `noeta-fmt` (shared with the LSP formatter); the CLI adds the
         // manifest path to any error.
         config
             .overlay_toml(&text)
-            .map_err(|err| format!("invalid `{}`: {err}", path.display()))?;
+            .map_err(|err| PmError::Manifest(format!("invalid `{}`: {err}", path.display())))?;
     }
     Ok(config)
 }
@@ -626,7 +640,14 @@ impl Manifest {
     /// Parse a `noeta.toml`'s text into a [`Manifest`], validating every tier name (a built-in tier)
     /// and provider (only `"std"` for now). Unknown keys outside `[targets]` and unknown
     /// target-level keys are ignored, leaving room for later codegen knobs.
-    pub fn parse(text: &str) -> Result<Manifest, String> {
+    pub fn parse(text: &str) -> Result<Manifest, PmError> {
+        Self::parse_inner(text).map_err(PmError::Manifest)
+    }
+
+    /// The string-formatting body of [`Self::parse`]: every failure here is a manifest
+    /// parse/validation problem, so the one classification ([`PmError::Manifest`]) is applied
+    /// once at the public boundary and the internal helpers keep their plain strings.
+    fn parse_inner(text: &str) -> Result<Manifest, String> {
         let table: toml::Table = text.parse().map_err(|err| format!("{err}"))?;
         let package = parse_package(&table)?;
         let dependencies = parse_dependencies(&table)?;
@@ -748,9 +769,11 @@ impl Manifest {
 
     /// The active tier names for `target`, merging inherited tiers (`extends`) under this target's
     /// own (which win), returned sorted. Errors on an unknown target or an `extends` cycle.
-    pub fn active_tiers(&self, target: &str) -> Result<Vec<String>, String> {
+    pub fn active_tiers(&self, target: &str) -> Result<Vec<String>, PmError> {
         let mut chain = Vec::new();
-        let merged = self.resolve(target, &mut chain)?;
+        let merged = self
+            .resolve(target, &mut chain)
+            .map_err(PmError::Manifest)?;
         Ok(merged.into_keys().collect())
     }
 
@@ -758,9 +781,9 @@ impl Manifest {
     /// to the package providing it — the built-in `"std"` or a declared dependency's import-root key.
     /// The tier-execution layer dispatches on this: `"std"` runs the built-in native runner, a
     /// dependency key runs that package's `@tier` runner (`resolve_active_tier_providers`).
-    pub fn active_tier_providers(&self, target: &str) -> Result<BTreeMap<String, String>, String> {
+    pub fn active_tier_providers(&self, target: &str) -> Result<BTreeMap<String, String>, PmError> {
         let mut chain = Vec::new();
-        self.resolve(target, &mut chain)
+        self.resolve(target, &mut chain).map_err(PmError::Manifest)
     }
 
     /// Resolve a target's effective tier map by walking its `extends` chain base-first, overlaying
@@ -774,13 +797,16 @@ impl Manifest {
     pub fn active_dependencies(
         &self,
         target: Option<&str>,
-    ) -> Result<BTreeMap<String, Dependency>, String> {
+    ) -> Result<BTreeMap<String, Dependency>, PmError> {
         let mut merged = self.dependencies.clone();
         if let Some(name) = target
             && self.targets.contains_key(name)
         {
             let mut chain = Vec::new();
-            for (key, dep) in self.resolve_deps(name, &mut chain)? {
+            for (key, dep) in self
+                .resolve_deps(name, &mut chain)
+                .map_err(PmError::Manifest)?
+            {
                 merged.insert(key, dep);
             }
         }
@@ -1377,7 +1403,10 @@ mod tests {
              edition = \"2030\"\n",
         )
         .expect_err("unknown edition rejected");
-        assert!(err.contains("2030"), "names the offending value: {err}");
+        assert!(
+            err.message().contains("2030"),
+            "names the offending value: {err}"
+        );
     }
 
     #[test]
@@ -1405,7 +1434,7 @@ mod tests {
              license = \"<script>\"\n",
         )
         .expect_err("malformed license rejected");
-        assert!(err.contains("SPDX"), "{err}");
+        assert!(err.message().contains("SPDX"), "{err}");
     }
 
     // --- cargo manifest introspection (composition: dev-deps D5b) ------------------------------
@@ -1685,7 +1714,10 @@ mod tests {
         // compiler's built-in namespace at the import layer — refused even by hand-editing.
         for key in ["std", "noeta", "core"] {
             let err = Manifest::parse(&format!("[dependencies]\n{key} = \"^1\"\n")).unwrap_err();
-            assert!(err.contains("built-in import root"), "{key}: {err}");
+            assert!(
+                err.message().contains("built-in import root"),
+                "{key}: {err}"
+            );
         }
         // A near-miss that is *not* reserved is accepted (the guard is exact, not a prefix match).
         assert!(Manifest::parse("[dependencies]\nstdx = \"^1\"\n").is_ok());
@@ -1756,14 +1788,14 @@ mod tests {
         assert_eq!(m.active_tiers("dev").unwrap(), ["fuzz"]);
         // Only the *shape* is validated here: a non-identifier key is rejected.
         let err = Manifest::parse("[targets.dev.tiers]\n\"fu zz\" = \"std\"\n").unwrap_err();
-        assert!(err.contains("not a valid tier name"), "{err}");
+        assert!(err.message().contains("not a valid tier name"), "{err}");
     }
 
     #[test]
     fn an_undeclared_provider_is_rejected() {
         // A provider that is neither `std` nor a declared dependency is an error.
         let err = Manifest::parse("[targets.dev.tiers]\nbench = \"criterion\"\n").unwrap_err();
-        assert!(err.contains("declared dependency"), "{err}");
+        assert!(err.message().contains("declared dependency"), "{err}");
     }
 
     #[test]
@@ -1788,6 +1820,7 @@ mod tests {
         assert!(
             m.active_tiers("nope")
                 .unwrap_err()
+                .message()
                 .contains("unknown target")
         );
     }
@@ -1862,7 +1895,7 @@ mod tests {
     fn inheritance_cycle_is_detected() {
         let m = Manifest::parse("[targets.a]\nextends = \"b\"\n[targets.b]\nextends = \"a\"\n")
             .unwrap();
-        assert!(m.active_tiers("a").unwrap_err().contains("cycle"));
+        assert!(m.active_tiers("a").unwrap_err().message().contains("cycle"));
     }
 
     #[test]
