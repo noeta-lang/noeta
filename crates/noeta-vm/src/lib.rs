@@ -4129,14 +4129,15 @@ impl<'m> Vm<'m> {
                         func: func_id,
                         args,
                         recipe,
+                        ok_shape,
+                        err_shape,
                         span,
                     } => {
                         // Resolve the interned module/func names (`module` is the outer loop-local
                         // `&Module`, so bind the op's ids under different names to avoid shadowing it).
                         let mod_name = module.name(*mod_id);
                         let func = module.name(*func_id);
-                        // A call-site-typed native module call (`json.parse::<T>(s)`). The recipe is
-                        // required; its absence was already reported by the checker.
+                        // The recipe is required; its absence was already reported by the checker.
                         let Some(recipe) = recipe else {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
@@ -4146,8 +4147,10 @@ impl<'m> Vm<'m> {
                                 ),
                             ));
                         };
-                        // The only call-site-typed native function today is `json.parse::<T>(text)`.
-                        if mod_name == "json" && func == "parse" {
+                        // The call-site-typed native functions: `json.parse::<T>` (aborting) and the
+                        // recoverable `json.decode::<T>` → `Result<T, string>` (L2 DI).
+                        let recoverable = func == "decode";
+                        if mod_name == "json" && (func == "parse" || recoverable) {
                             let text = args
                                 .first()
                                 .map(|r| regs[fbase + *r as usize])
@@ -4156,13 +4159,25 @@ impl<'m> Vm<'m> {
                                 return Err(self.error(
                                     DiagnosticCode::TypeMismatch,
                                     *span,
-                                    "`json.parse` expects a `string` argument".to_string(),
+                                    format!("`json.{func}` expects a `string` argument"),
                                 ));
                             };
                             match noeta_stdlib::json::parse_typed(&text, recipe) {
                                 Ok(out) => {
                                     let value = materialize_recipe(out);
+                                    let value = if recoverable {
+                                        Value::enum_value(self.shapes[*ok_shape as usize], vec![value])
+                                    } else {
+                                        value
+                                    };
                                     set_reg(regs, fbase, *dst, value);
+                                }
+                                Err(error) if recoverable => {
+                                    // A decode failure is a recoverable `Result.Err(message)`.
+                                    let msg = Value::string(&error.message);
+                                    let err =
+                                        Value::enum_value(self.shapes[*err_shape as usize], vec![msg]);
+                                    set_reg(regs, fbase, *dst, err);
                                 }
                                 Err(error) => {
                                     return Err(self.error(

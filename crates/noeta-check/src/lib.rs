@@ -5301,13 +5301,16 @@ impl Checker {
                 // The only call-site-typed native function today is `json.parse::<T>(text)`. (When
                 // more land, this resolves through the registry's `RetTy::TypeArg` functions; the
                 // dynamic `json.parse(s)` keeps its own path, so the shared name does not collide.)
-                if module == "json" && func == "parse" {
+                // `json.parse::<T>` (aborting) and `json.decode::<T>` (recoverable → `Result<T, string>`,
+                // L2 DI) are the call-site-typed native functions.
+                let recoverable_decode = module == "json" && func == "decode";
+                if module == "json" && (func == "parse" || recoverable_decode) {
                     if arg_types.len() != 1 {
                         self.error(
                             DiagnosticCode::TypeMismatch,
                             *span,
                             format!(
-                                "`json.parse::<T>` takes 1 argument, found {}",
+                                "`json.{func}::<T>` takes 1 argument, found {}",
                                 arg_types.len()
                             ),
                         );
@@ -5317,7 +5320,7 @@ impl Checker {
                         self.error(
                             DiagnosticCode::TypeMismatch,
                             args[0].span(),
-                            format!("`json.parse` expects a `string`, found `{}`", arg_types[0]),
+                            format!("`json.{func}` expects a `string`, found `{}`", arg_types[0]),
                         );
                     }
                 } else {
@@ -5341,11 +5344,17 @@ impl Checker {
                         self.error(
                             DiagnosticCode::TypeMismatch,
                             *span,
-                            format!("`{t}` cannot be deserialized from JSON with `json.parse`"),
+                            format!("`{t}` cannot be deserialized from JSON with `json.{func}`"),
                         );
                     }
                 }
-                t
+                // `json.decode::<T>` is recoverable — it yields `Result<T, string>` so a malformed
+                // body is a catchable error, not a program abort (unlike `json.parse::<T>`).
+                if recoverable_decode {
+                    Type::Result(Box::new(t), Box::new(Type::String))
+                } else {
+                    t
+                }
             }
             Expr::Invoke {
                 recv, name, args, ..

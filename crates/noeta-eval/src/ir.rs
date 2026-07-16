@@ -1569,17 +1569,34 @@ impl Interpreter {
                         format!("`{module}.{func}::<T>(...)` has no resolved result type"),
                     ));
                 };
-                // The only call-site-typed native function today is `json.parse::<T>(text)`.
-                if module == "json" && func == "parse" {
+                // The call-site-typed native functions: `json.parse::<T>` (aborting) and the
+                // recoverable `json.decode::<T>` → `Result<T, string>` (L2 DI).
+                let recoverable = func == "decode";
+                if module == "json" && (func == "parse" || recoverable) {
                     let Some(Value::Str(text)) = arg_vals.first() else {
                         return Err(self.runtime_error(
                             DiagnosticCode::TypeMismatch,
                             *span,
-                            "`json.parse` expects a `string` argument".to_string(),
+                            format!("`json.{func}` expects a `string` argument"),
                         ));
                     };
                     match noeta_stdlib::json::parse_typed(text, recipe) {
-                        Ok(out) => self.materialize_recipe(out, *span),
+                        Ok(out) => {
+                            let value = self.materialize_recipe(out, *span)?;
+                            if recoverable {
+                                Ok(crate::builtin_enum("Result", "Ok", vec![value]))
+                            } else {
+                                Ok(value)
+                            }
+                        }
+                        Err(error) if recoverable => {
+                            // A decode failure is a recoverable `Result.Err(message)`.
+                            Ok(crate::builtin_enum(
+                                "Result",
+                                "Err",
+                                vec![Value::Str(error.message)],
+                            ))
+                        }
                         Err(error) => Err(self.runtime_error(
                             crate::std_error_code(error.kind),
                             *span,

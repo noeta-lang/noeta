@@ -788,6 +788,11 @@ pub enum Op {
         /// Boxed (P-VMT-OPSZ): a `TypeRecipe` is 48 bytes and only a call-site-typed native call
         /// (`json.parse::<T>`) carries one, so it lives behind a pointer.
         recipe: Option<Box<noeta_native::TypeRecipe>>,
+        /// `Result.Ok` / `Result.Err` shape indices — used by the **recoverable** decode variant
+        /// (`json.decode::<T>` → `Result<T, string>`, L2 DI): a decode failure lands as `Result.Err`
+        /// instead of aborting. `json.parse::<T>` ignores them (it aborts on failure).
+        ok_shape: u32,
+        err_shape: u32,
         span: Span,
     },
     /// A **method-bundle** method call (kernel-methods K2/K3): `recv.method(args)` statically
