@@ -1,0 +1,115 @@
+// noeta-aether + para.db, wired together in ONE app (aether DB3).
+//
+// This app depends on BOTH first-party `para` packages through a single scope dependency
+// (`para = [ para-aether, para-db ]` in noeta.toml) — the multi-package-per-scope resolution that
+// was the F7 blocker. It demonstrates the two database-facing framework features:
+//
+//   * ROUTE-MODEL BINDING — `GET /users/{id}` declares `fn show(user: User)`; aether loads the
+//     `User` from the database by the route id and injects it (Laravel implicit binding).
+//   * UNIT-OF-WORK — `POST /users` stages an insert during the request; aether commits it with one
+//     `flush` AFTER the response is produced (a request's writes land as one batch).
+//
+// Crucially, aether NEVER imports `para.db`: it depends only on its own `Store` interface. This app
+// backs that interface with a `para.db` repository. Swap the driver, keep the framework.
+
+use para.aether.{App, Get, Post, Store}
+use para.db
+use para.db.repo.Repository
+use std.json
+
+// The persisted model: derives both directions of JSON (row -> model on read, model -> columns on
+// write). Route-model binding materializes one of these from a `{id}`.
+@derive(Serialize<Json>, Deserialize<Json>)
+struct User {
+    id: int
+    name: string
+    age: int
+}
+
+// The create-request body — decoded from the POST body (not route-bound), so it is a NEW user.
+@derive(Serialize<Json>, Deserialize<Json>)
+struct CreateUser {
+    id: int
+    name: string
+    age: int
+}
+
+// The app's data store: a `para.db` repository over the `users` table, adapting the native SQLite
+// driver to aether's database-agnostic `Store` interface. This is the ONE place the framework and the
+// database meet — everything above it is driver-agnostic.
+class SqlStore {
+    conn: dyn // a para.db.Connection (typed `dyn` — F5 native cross-package identity)
+    repo: Repository
+
+    fn new(conn: dyn): SqlStore {
+        return SqlStore { conn: conn, repo: Repository.new("User", "users", "id") }
+    }
+
+    impl Store {
+        // Route-model binding: load a `User` by its route id. The path id is a string; `to_int`
+        // returns `?int` (a parse can fail), so unwrap it to the integer primary key before querying.
+        fn load(model: string, id: string): dyn {
+            key = id.to_int() ?? -1
+            return match self.repo.find(self.conn, key) {
+                some(u) => u,
+                none => panic("404 no ${model} ${id}"),
+            }
+        }
+
+        // Stage a write into the request's unit-of-work: decode the JSON into a `User`, enqueue it.
+        fn stage(model: string, data: string): void {
+            match json.decode_typed("User", data) {
+                Ok(u) => self.repo.add(u),
+                Err(e) => panic("400 ${e}"),
+            }
+        }
+
+        // Commit the request's staged writes as one batch (BEGIN … COMMIT).
+        fn flush(): void {
+            self.repo.flush(self.conn)
+        }
+    }
+}
+
+class UsersController {
+    fn new(): UsersController {
+        return UsersController {}
+    }
+
+    // Route-model binding: aether loads the `User` from the store by the `{id}` and injects it.
+    #[Get("/users/{id}")]
+    fn show(user: User): string {
+        return "user ${user.id}: ${user.name} (${user.age})"
+    }
+
+    // Service injection (`store: dyn Store`) + unit-of-work: the handler stages an insert and returns
+    // immediately; aether flushes the write after the response.
+    #[Post("/users")]
+    fn create(body: CreateUser, store: dyn Store): string {
+        store.stage("User", body.to_json())
+        return "queued ${body.name}"
+    }
+}
+
+// --- Wire the app. -----------------------------------------------------------------------------
+
+conn = db.connect("sqlite::memory:")
+conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)", [])
+conn.execute("INSERT INTO users (id, name, age) VALUES (?, ?, ?)", [1, "Ada", 36])
+
+app = App.new()
+app.register("UsersController", UsersController.new())
+app.set_store(SqlStore.new(conn))
+app.bind_model("User")
+app.discover()
+
+// 1. Route-model binding — GET /users/1 injects the User loaded from the database.
+echo app.dispatch_request("GET", "/users/1", "")
+
+// 2. Unit-of-work — POST /users stages an insert; aether flushes it after the response.
+echo app.dispatch_request("POST", "/users", "{\"id\":2,\"name\":\"Bob\",\"age\":41}")
+
+// 3. Confirm the staged insert was committed by the end-of-request flush.
+echo app.dispatch_request("GET", "/users/2", "")
+
+conn.close()
