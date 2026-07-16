@@ -13,10 +13,17 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 noeta-db = { workspace = true }
-# The debug run's direct compile (W2.4): the salsa `bytecode` query compiles without debug info,
-# so `debug_source` calls `compile_with_sites(…, debug = true)` itself for the reg→name locals
-# the Variables panel reads. Already in the tree via noeta-db — no new dependency weight.
+# The empty per-source EditionMap the single-file debug session checks under (same as check_all).
+noeta-edition = { workspace = true }
+# The debug run's direct SESSION compile (W2.4/W2.5): the salsa `bytecode` query compiles
+# without debug info, so `debug_source` calls `compile_with_sites_session(…, debug = true)`
+# itself — the reg→name locals the Variables panel reads, plus the live SessionCompiler the
+# debug console's fragments extend. noeta-check supplies the SessionChecker fragments type-check
+# against, noeta-parser the one fragment parse entry point. All already in the tree via
+# noeta-db — no new dependency weight.
+noeta-check = { workspace = true }
 noeta-compiler = { workspace = true }
+noeta-parser = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-fmt = { workspace = true }
 # The IDE engine (W2.3): hover/completion/definition/signature — the same DocumentStore the LSP

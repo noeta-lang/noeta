@@ -213,6 +213,23 @@ const stopped = call(noeta_debug_run, JSON.stringify({ source: debugSource, brea
 assert.equal(stopped.terminated, true);
 assert.equal(stopped.stdout, '');
 
+// The debug console (W2.5): an eval against the paused frame answers in the NEXT pause payload
+// (the trampoline re-entry), full language — a call included — and the program stays paused.
+debugPauses.length = 0;
+debugCommands.push(
+  { action: 'eval', expr: 'a + b', frame: 0 },
+  { action: 'eval', expr: 'add(10, 20)', frame: 0 },
+  { action: 'continue' },
+);
+const evalRun = call(noeta_debug_run, JSON.stringify({ source: debugSource, breakpoints: [2] }));
+assert.equal(evalRun.exit_code, 0, JSON.stringify(evalRun));
+assert.equal(evalRun.stdout, '3\n');
+assert.equal(debugPauses.length, 3, JSON.stringify(debugPauses));
+assert.equal(debugPauses[0].eval, null);
+assert.deepEqual(debugPauses[1].eval, { ok: true, value: '3', ty: 'int' });
+assert.deepEqual(debugPauses[2].eval, { ok: true, value: '30', ty: 'int' });
+assert.equal(debugPauses[2].frames[0].name, 'add', 'still paused at the breakpoint');
+
 // The JSPI pump (W3.1): two async fetches must genuinely OVERLAP — both start before either
 // settles — and the run entry suspends/resumes through WebAssembly.promising.
 if (JSPI) {

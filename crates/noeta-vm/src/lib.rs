@@ -118,10 +118,30 @@ const DEBUG_EVAL_CLOCK_INTERVAL: u64 = 4_096;
 /// never breaks inside `f`.
 struct EvalBudget {
     steps: u64,
-    deadline: std::time::Instant,
+    /// `None` where the platform has no monotonic clock (wasm32-unknown-unknown —
+    /// `Instant::now()` panics there); the step cap alone bounds the run then.
+    deadline: Option<std::time::Instant>,
     /// Set on a trip so the caller can distinguish "the budget stopped it" from an ordinary
     /// fragment abort (the terminate surfaces as `Err(Abort)` either way).
     tripped: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl EvalBudget {
+    /// The wall-clock deadline, where the platform can sample one. A browser tab (the playground
+    /// debug console) gets `None` — its embedder already enforces its own wall-clock guard, and
+    /// the deterministic step cap stays as the in-VM backstop.
+    fn deadline() -> Option<std::time::Instant> {
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            None
+        }
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            Some(
+                std::time::Instant::now() + std::time::Duration::from_millis(DEBUG_EVAL_TIMEOUT_MS),
+            )
+        }
+    }
 }
 
 impl Debugger for EvalBudget {
@@ -129,7 +149,9 @@ impl Debugger for EvalBudget {
         self.steps += 1;
         if self.steps > DEBUG_EVAL_MAX_STEPS
             || (self.steps.is_multiple_of(DEBUG_EVAL_CLOCK_INTERVAL)
-                && std::time::Instant::now() >= self.deadline)
+                && self
+                    .deadline
+                    .is_some_and(|deadline| std::time::Instant::now() >= deadline))
         {
             self.tripped
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -6637,8 +6659,7 @@ impl<'m> Vm<'m> {
         let saved = self.debugger.take();
         self.debugger = Some(Box::new(EvalBudget {
             steps: 0,
-            deadline: std::time::Instant::now()
-                + std::time::Duration::from_millis(DEBUG_EVAL_TIMEOUT_MS),
+            deadline: EvalBudget::deadline(),
             tripped: Arc::clone(&tripped),
         }));
         let outcome = self.run_thunk(entry, &[]);
@@ -7013,8 +7034,7 @@ impl<'m> Vm<'m> {
         let saved = self.debugger.take();
         self.debugger = Some(Box::new(EvalBudget {
             steps: 0,
-            deadline: std::time::Instant::now()
-                + std::time::Duration::from_millis(DEBUG_EVAL_TIMEOUT_MS),
+            deadline: EvalBudget::deadline(),
             tripped: Arc::clone(&tripped),
         }));
         let result = self.run_installed_fragment_inner(entry, args, span);

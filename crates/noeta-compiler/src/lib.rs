@@ -2189,8 +2189,8 @@ impl<'m> FnCompiler<'m> {
         self.loops.push(LoopCtx::default());
         let result = (|| {
             match pattern {
-                ForPattern::Single { name, .. } => {
-                    self.bind_loop_var(name, element);
+                ForPattern::Single { name, name_span } => {
+                    self.bind_loop_var(name, element, *name_span);
                 }
                 // A tuple for-pattern is desugared to a `Single` hidden var + `.N` projections in
                 // lowering (object-model slice 4b), so it never reaches the compiler.
@@ -2268,8 +2268,8 @@ impl<'m> FnCompiler<'m> {
         }
         let result = (|| {
             match pattern {
-                ForPattern::Single { name, .. } => {
-                    self.bind_loop_var(name, elem);
+                ForPattern::Single { name, name_span } => {
+                    self.bind_loop_var(name, elem, *name_span);
                 }
                 // A tuple for-pattern is desugared to a `Single` hidden var + `.N` projections in
                 // lowering (object-model slice 4b), so it never reaches the compiler.
@@ -2343,12 +2343,24 @@ impl<'m> FnCompiler<'m> {
     /// Register an already-populated register as an immutable loop-body binding. Unlike
     /// [`FnCompiler::declare_local`] this emits no `Move`: the element/destructure op has
     /// already written the value into `reg`.
-    fn bind_loop_var(&mut self, name: &str, reg: Reg) {
+    fn bind_loop_var(&mut self, name: &str, reg: Reg, def_span: Span) {
         let celled = self.celled.contains(name);
         // A captured loop variable is boxed in place; the `MakeCell` sits inside the loop body, so
         // each iteration captures a distinct cell (matching the tree-walker's per-iteration scope).
         if celled {
             self.code.push(Op::MakeCell { dst: reg, src: reg });
+        }
+        // In a debug compile a loop/match binding is a named local the debugger's Variables view
+        // should see, like any `declare_local` binding. Deliberately NOT added to `frame_locals`:
+        // that list is also the panic-teardown list, and a debug compile must not change which
+        // destructors fire. Its register is pinned through coalescing via `debug_locals` itself
+        // (see regalloc's debug-locals pin), so the 1:1 `reg → name` contract still holds.
+        if self.module.debug {
+            self.debug_locals.push(LocalDebug {
+                name: name.to_string(),
+                reg,
+                def_span,
+            });
         }
         self.scopes.last_mut().unwrap().insert(
             name.to_string(),
@@ -4238,7 +4250,7 @@ impl<'m> FnCompiler<'m> {
     fn emit_pattern(&mut self, pattern: &Pattern, reg: Reg, fail_jumps: &mut Vec<usize>) {
         match pattern {
             Pattern::Wildcard { .. } => {}
-            Pattern::Binding { name, .. } => self.bind_loop_var(name, reg),
+            Pattern::Binding { name, span } => self.bind_loop_var(name, reg, *span),
             Pattern::Int { value, .. } => {
                 fail_jumps.push(self.code.len());
                 self.code.push(Op::MatchInt {
@@ -4617,6 +4629,45 @@ mod tests {
                 .any(|c| c.name.as_deref() == Some("Point.mag")),
             "expected a proto named Point.mag; names: {:?}",
             m.protos.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn loop_and_match_bindings_are_named_locals_in_a_debug_compile() {
+        // A `for` variable and a match-arm binding bind through `bind_loop_var`, not
+        // `declare_local` — both must still reach the Variables view, each 1:1 on its own
+        // register (pinned via `debug_locals` itself, NOT the panic-teardown list).
+        let m = compile_dbg(
+            "fn f(values: List<int>): int {\n  mut total = 0;\n  for v in values {\n    total = total + v;\n  }\n  return match total { n => n }\n}\nf([1, 2]);\n",
+        );
+        let f = m
+            .protos
+            .iter()
+            .find(|c| c.name.as_deref() == Some("f"))
+            .expect("a proto named f");
+        let names: Vec<&str> = f.debug_locals.iter().map(|l| l.name.as_str()).collect();
+        assert!(names.contains(&"v"), "missing loop var v: {names:?}");
+        assert!(names.contains(&"n"), "missing match binding n: {names:?}");
+        // The loop var holds a fresh element register — it must keep a slot of its own. (The
+        // match binding `n` is different: it *aliases* the scrutinee's register by design, so
+        // sharing `total`'s slot is truthful, not a coalescing collapse.)
+        let reg_of = |name: &str| f.debug_locals.iter().find(|l| l.name == name).unwrap().reg;
+        let v_reg = reg_of("v");
+        for other in ["values", "total", "n"] {
+            assert_ne!(v_reg, reg_of(other), "v shares a register with {other}");
+        }
+        assert_eq!(reg_of("n"), reg_of("total"), "n aliases its scrutinee");
+        // The loop var is a named local, not a teardown register: the teardown list is behavior
+        // (which destructors fire on a panic) and a debug compile must not change it.
+        let v_reg = f
+            .debug_locals
+            .iter()
+            .find(|l| l.name == "v")
+            .expect("v recorded")
+            .reg;
+        assert!(
+            !f.frame_locals.contains(&v_reg),
+            "loop var leaked into the panic-teardown list"
         );
     }
 
