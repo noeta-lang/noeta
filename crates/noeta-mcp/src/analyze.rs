@@ -67,52 +67,45 @@ pub struct SpanLoc {
     pub end: Loc,
 }
 
-/// A byte-offset ↔ line/column index over one source text. Built once per tool call over the entry
-/// file; small and linear, matching the corpus-scale simplicity of the rest of the server.
+/// A byte-offset ↔ 1-based line/column index over one source text: the MCP wire's convention (a
+/// 1-based UTF-8 **byte** column) as a thin adapter over the shared [`noeta_ide::LineIndex`] — the
+/// same conversion engine the LSP serves, so the two surfaces cannot drift on position math
+/// (audit-4 finding 8). Under `Encoding::Utf8` the ide character *is* the byte column, so the
+/// adapter is exactly a ±1 shift on both axes.
 pub struct LineIndex<'a> {
-    text: &'a str,
-    /// Byte offset of the first character of each line (`line_starts[0] == 0`).
-    line_starts: Vec<u32>,
+    inner: noeta_ide::LineIndex<'a>,
+    /// The text length, for the clamp [`LineIndex::loc`] reports back in [`Loc::offset`] (the
+    /// shared index clamps internally but does not echo the clamped offset).
+    len: u32,
 }
 
 impl<'a> LineIndex<'a> {
     pub fn new(text: &'a str) -> Self {
-        let mut line_starts = vec![0u32];
-        for (i, b) in text.bytes().enumerate() {
-            if b == b'\n' {
-                line_starts.push(i as u32 + 1);
-            }
+        LineIndex {
+            inner: noeta_ide::LineIndex::new(text),
+            len: text.len() as u32,
         }
-        LineIndex { text, line_starts }
     }
 
-    /// Resolve a byte offset to its 1-based line/column.
+    /// Resolve a byte offset to its 1-based line/column (offsets past the end clamp to it).
     pub fn loc(&self, offset: u32) -> Loc {
-        let offset = offset.min(self.text.len() as u32);
-        // The line is the last line-start not past the offset.
-        let line = self
-            .line_starts
-            .partition_point(|&start| start <= offset)
-            .max(1);
-        let line_start = self.line_starts[line - 1];
+        let offset = offset.min(self.len);
+        let pos = self.inner.position(offset, noeta_ide::Encoding::Utf8);
         Loc {
-            line: line as u32,
-            column: offset - line_start + 1,
+            line: pos.line + 1,
+            column: pos.character + 1,
             offset,
         }
     }
 
-    /// Resolve a 1-based line/column to a byte offset (clamped into the text). The inverse of
-    /// [`LineIndex::loc`] for a `check`-style caller that only has a position.
+    /// Resolve a 1-based line/column to a byte offset (clamped into the text — a column past its
+    /// line's end lands on the line's last content byte, a line past the text on its end). The
+    /// inverse of [`LineIndex::loc`] for a `check`-style caller that only has a position.
     pub fn offset(&self, line: u32, column: u32) -> u32 {
-        let line = (line.max(1) as usize).min(self.line_starts.len());
-        let line_start = self.line_starts[line - 1];
-        let next = self
-            .line_starts
-            .get(line)
-            .copied()
-            .unwrap_or(self.text.len() as u32);
-        (line_start + column.saturating_sub(1)).min(next)
+        self.inner.offset(
+            noeta_ide::Position::new(line.saturating_sub(1), column.saturating_sub(1)),
+            noeta_ide::Encoding::Utf8,
+        )
     }
 
     pub fn span_loc(&self, span: noeta_span::Span) -> SpanLoc {
