@@ -811,6 +811,11 @@ impl Pretty for Expr {
                 Some(ty) => out.push_str(&format!("(roles_of {} {})", type_ref_str(ty), span(*s))),
                 None => out.push_str(&format!("(roles_of {})", span(*s))),
             },
+            Expr::ParamsOf { target, span: s } => {
+                out.push_str(&format!("(params_of {}\n", span(*s)));
+                target.pretty(out, level + 1);
+                out.push(')');
+            }
             Expr::TypedModuleCall {
                 recv,
                 func,

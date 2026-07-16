@@ -721,6 +721,14 @@ pub enum Op {
         dst: Reg,
         role_enum: Option<NameId>,
     },
+    /// `params_of(target)`: `dst = List<ParamInfo>` — the declared parameter list of the fn/method
+    /// named by the runtime `string` in `src`, each materialized into a `ParamInfo { name, type }`
+    /// from the module's reflection info. The `type` is the `Type` ADT value built from the
+    /// parameter's declared type. An unknown target yields an empty list. Reads `Module::reflection`.
+    ParamsOf {
+        dst: Reg,
+        src: Reg,
+    },
     /// `type_of(value)`: `dst = Type` — the runtime [`noeta_ast::reflect`] head-constructor descriptor
     /// of the value in `src` (`List(Dyn)`, `Named("Route")`, `Int`, …). Generics are erased at
     /// runtime, so element/argument types collapse to `Dyn` at this fidelity.
@@ -1656,6 +1664,7 @@ fn op_repr(
             Some(e) => format!("RolesOf     r{dst} <- roles_of::<{}>()", n(e)),
             None => format!("RolesOf     r{dst} <- roles_of()"),
         },
+        Op::ParamsOf { dst, src } => format!("ParamsOf    r{dst} <- params_of(r{src})"),
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
         Op::FromBytes {
             dst, src, schema, ..

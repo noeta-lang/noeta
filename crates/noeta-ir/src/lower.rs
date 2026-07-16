@@ -1632,6 +1632,17 @@ impl Lowerer<'_> {
                 },
                 *span,
             )),
+            Expr::ParamsOf { target, span } => {
+                let target = self.lower_expr(target, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::ParamsOf {
+                        target,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             Expr::Invoke {
                 recv,
                 name,

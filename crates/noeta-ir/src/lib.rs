@@ -486,6 +486,9 @@ pub enum Rvalue {
     /// `roles_of()` / `roles_of::<RoleEnum>()` — the `(declaration, Role)` index, optionally scoped
     /// to a single role enum.
     RolesOf { ty: Option<TypeRef>, span: Span },
+    /// `params_of(target)` — the declared parameter list of the fn/method named by the runtime
+    /// `target` string, materialized as `List<ParamInfo>`.
+    ParamsOf { target: Atom, span: Span },
     /// `invoke(recv, name, args)` — fallible by-name dispatch.
     Invoke {
         recv: Atom,

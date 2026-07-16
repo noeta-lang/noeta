@@ -471,6 +471,10 @@ fn op_facts(op: &Op) -> OpFacts {
         Op::ScopeBegin | Op::ScopeEnd { .. } => {}
         Op::AttributesOf { dst, .. } => f.def = Some(*dst),
         Op::RolesOf { dst, .. } => f.def = Some(*dst),
+        Op::ParamsOf { dst, src } => {
+            f.def = Some(*dst);
+            f.uses.push(*src);
+        }
         Op::TypeOf { dst, src } => {
             f.def = Some(*dst);
             f.uses.push(*src);
@@ -950,6 +954,10 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::ScopeBegin | Op::ScopeEnd { .. } => {}
         Op::AttributesOf { dst, .. } => m(dst),
         Op::RolesOf { dst, .. } => m(dst),
+        Op::ParamsOf { dst, src } => {
+            m(dst);
+            m(src);
+        }
         Op::TypeOf { dst, src } => {
             m(dst);
             m(src);

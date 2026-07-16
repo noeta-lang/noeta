@@ -528,6 +528,7 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         | Rvalue::As { operand, .. }
         | Rvalue::TypeTest { operand, .. }
         | Rvalue::TypeOf { operand, .. } => f(operand),
+        Rvalue::ParamsOf { target, .. } => f(target),
         Rvalue::MakeGen { step, .. } => f(step),
         Rvalue::MakeFuture { thunk, .. } => f(thunk),
         Rvalue::RunFuture { future, .. } => f(future),

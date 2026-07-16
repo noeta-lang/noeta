@@ -1539,6 +1539,14 @@ impl Interpreter {
                 });
                 Ok(self.materialize_roles(role_enum))
             }
+            noeta_ir::Rvalue::ParamsOf { target, .. } => {
+                // The runtime target string names a fn or method; materialize its declared params.
+                let target = match self.eval_ir_atom(target, frame)? {
+                    Value::Str(s) => s,
+                    _ => String::new(),
+                };
+                Ok(self.materialize_params(&target))
+            }
             noeta_ir::Rvalue::Invoke {
                 recv,
                 name,

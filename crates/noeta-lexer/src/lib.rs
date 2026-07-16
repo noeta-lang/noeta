@@ -138,6 +138,11 @@ pub enum TokenKind {
     /// as `List<RoleBinding>`. A keyword for symmetry with `attributes_of`/`type_of`.
     #[token("roles_of")]
     RolesOfKw,
+    /// The reflection keyword `params_of(target)` — a callable's declared parameter list, returned as
+    /// `List<ParamInfo>`. Takes a runtime `string` target (a bare fn name or `Type.method`). A keyword
+    /// for symmetry with `type_of`/`roles_of`/`attributes_of`.
+    #[token("params_of")]
+    ParamsOfKw,
     /// The reflection keyword `invoke(recv, name, args)` — the fallible by-name invocation
     /// primitive: dispatch a method (on a value) or an associated function (on a type) by a
     /// runtime string name, returning `Result`. A keyword for symmetry with the other reflection
@@ -389,6 +394,7 @@ impl TokenKind {
             TokenKind::TypeOfKw => "TypeOfKw",
             TokenKind::FromBytesKw => "FromBytesKw",
             TokenKind::RolesOfKw => "RolesOfKw",
+            TokenKind::ParamsOfKw => "ParamsOfKw",
             TokenKind::InvokeKw => "InvokeKw",
             TokenKind::ChannelKw => "ChannelKw",
             TokenKind::ColonColon => "ColonColon",
@@ -496,6 +502,7 @@ impl TokenKind {
             TokenKind::TypeOfKw => "`type_of`",
             TokenKind::FromBytesKw => "`from_bytes`",
             TokenKind::RolesOfKw => "`roles_of`",
+            TokenKind::ParamsOfKw => "`params_of`",
             TokenKind::InvokeKw => "`invoke`",
             TokenKind::ChannelKw => "`channel`",
             TokenKind::ColonColon => "`::`",

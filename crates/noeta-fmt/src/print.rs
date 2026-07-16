@@ -1659,6 +1659,9 @@ impl Printer<'_> {
             Expr::TypeOf { value, .. } => {
                 Doc::concat([Doc::text("type_of("), self.expr(value)?, Doc::text(")")])
             }
+            Expr::ParamsOf { target, .. } => {
+                Doc::concat([Doc::text("params_of("), self.expr(target)?, Doc::text(")")])
+            }
             Expr::FromBytes { ty, blob, .. } => Doc::concat([
                 Doc::text("from_bytes::<"),
                 self.type_ref(ty)?,

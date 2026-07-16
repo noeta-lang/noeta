@@ -1295,10 +1295,13 @@ where
         // are the exception — they have dedicated `.as<T>()` / `.await` postfixes registered ahead
         // of the member postfix, so they must NOT be admitted here.) Add a keyword to the choice
         // when a stdlib/user method needs its spelling.
-        let member_name = choice((just(T::Ident), just(T::SpawnKw))).map_with(move |_, e| {
-            let span = ctx.to_span(e.span());
-            (ctx.source.slice(span).to_string(), span)
-        });
+        // `type` is admitted so the reflection prelude's `ParamInfo { name, type }` field is
+        // reachable as `p.type` (the `params_of()` result); after a `.` the keyword is unambiguous.
+        let member_name =
+            choice((just(T::Ident), just(T::SpawnKw), just(T::TypeKw))).map_with(move |_, e| {
+                let span = ctx.to_span(e.span());
+                (ctx.source.slice(span).to_string(), span)
+            });
 
         // Literals.
         let int = just(T::IntLit).map_with(move |_, e| {
@@ -1732,6 +1735,16 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `params_of(target)` — the parameter-list reflection query. A keyword + parenthesized
+        // operand (like `type_of`); the operand is a runtime `string` naming a fn or method. Yields
+        // `List<ParamInfo>`.
+        let params_of = just(T::ParamsOfKw)
+            .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
+            .map_with(move |target, e| Expr::ParamsOf {
+                target: Box::new(target),
+                span: ctx.to_span(e.span()),
+            });
+
         // `invoke(recv, name, args)` — the fallible by-name invocation primitive. A keyword + three
         // parenthesized, comma-separated operands (receiver, method-name string, argument list),
         // yielding `Result<dyn, dyn>`.
@@ -1770,6 +1783,7 @@ where
             from_bytes,
             channel,
             roles_of,
+            params_of,
             invoke,
             typed_module_call,
             list,

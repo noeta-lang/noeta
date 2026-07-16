@@ -3255,6 +3255,27 @@ impl<'m> Vm<'m> {
         Value::list(items)
     }
 
+    /// Materialize a callable's declared parameter list from the module's reflection info into a
+    /// `List<ParamInfo>` — each `{ name: string, type: Type }`. `type` is the prelude `Type` ADT
+    /// value built from the parameter's declared type (the same `build_type_value` `type_of` uses).
+    /// The `ParamInfo` shape is built fresh; because shape equality is structural, it matches the
+    /// tree-walker's by construction. An unknown target yields an empty list.
+    fn materialize_params(&self, target: &str) -> Value {
+        let info_shape = noeta_object::intern_shape(Shape::object(
+            ShapeKind::Struct,
+            noeta_ast::reflect::PARAM_INFO,
+            vec!["name".to_string(), "type".to_string()],
+        ));
+        let items: Vec<Value> = self
+            .module
+            .reflection
+            .params_for(target)
+            .iter()
+            .map(|p| Value::object(info_shape, vec![Value::string(&p.name), build_type_value(&p.ty)]))
+            .collect();
+        Value::list(items)
+    }
+
     /// Record a runtime diagnostic and produce the unwind token.
     fn error(&mut self, code: DiagnosticCode, span: Span, message: String) -> Abort {
         self.diagnostics
@@ -5884,6 +5905,13 @@ impl<'m> Vm<'m> {
                     Op::RolesOf { dst, role_enum } => {
                         let filter = role_enum.map(|e| module.name(e));
                         let result = self.materialize_roles(filter);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::ParamsOf { dst, src } => {
+                        // The runtime target string names a fn or method; materialize its params.
+                        let target = regs[fbase + *src as usize].as_string().unwrap_or_default();
+                        let result = self.materialize_params(&target);
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }

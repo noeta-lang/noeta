@@ -1439,6 +1439,26 @@ impl Checker {
                 ("role".to_string(), Type::Kind(noeta_types::TypeKind::Enum)),
             ],
         );
+        // `ParamInfo { name: string, type: Type }` — the element type of `params_of()`'s result.
+        // `type` is the prelude `Type` enum (the same ADT `type_of` returns), built from the
+        // parameter's declared type annotation. Registered like any prelude struct, so a user
+        // declaration of the same name shadows it.
+        self.type_kinds.insert(
+            noeta_ast::reflect::PARAM_INFO.to_string(),
+            noeta_types::TypeKind::Struct,
+        );
+        self.types
+            .insert(noeta_ast::reflect::PARAM_INFO.to_string());
+        self.records.insert(
+            noeta_ast::reflect::PARAM_INFO.to_string(),
+            vec![
+                ("name".to_string(), Type::String),
+                (
+                    "type".to_string(),
+                    Type::Named(noeta_ast::reflect::TYPE_ENUM.to_string(), Vec::new()),
+                ),
+            ],
+        );
     }
 
     /// Register the prelude `TierRoot` struct (tier-providers T2) — the element type of the roots
@@ -5230,6 +5250,23 @@ impl Checker {
                     Vec::new(),
                 )))
             }
+            Expr::ParamsOf { target, span } => {
+                // The compiler-built parameter index, surfaced as `List<ParamInfo>`. The `target`
+                // operand is a runtime `string` naming a fn or method (a bare name or `Type.method`).
+                let target_ty = self.synth(target, env);
+                if !matches!(target_ty, Type::String) && !target_ty.defers_to_runtime() {
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!("`params_of` expects a `string` target, found `{target_ty}`"),
+                    )
+                    .help("pass a fn name or `Type.method` string");
+                }
+                Type::List(Box::new(Type::Named(
+                    noeta_ast::reflect::PARAM_INFO.to_string(),
+                    Vec::new(),
+                )))
+            }
             Expr::FromBytes { ty, blob, span } => {
                 // The operand must be a `bytes` buffer (gradual holes tolerated).
                 let blob_ty = self.synth(blob, env);
@@ -7561,6 +7598,8 @@ const PRELUDE_TYPES: &[&str] = &[
     "Type",
     "Semantic",
     "RoleBinding",
+    // The parameter-list element `params_of()` returns (`{ name: string, type: Type }`).
+    "ParamInfo",
     // The roots-list element a declared tier's runner receives (tier-providers T2).
     "TierRoot",
     // The lazy-iterator type (Track I): a writable annotation now that `iter()`/adapters and
@@ -8346,6 +8385,7 @@ fn conditional_await_span(e: &Expr) -> Option<Span> {
         | Expr::As { expr, .. }
         | Expr::TypeTest { expr, .. }
         | Expr::TypeOf { value: expr, .. }
+        | Expr::ParamsOf { target: expr, .. }
         | Expr::FromBytes { blob: expr, .. } => conditional_await_span(expr),
         Expr::Channel { capacity, .. } => conditional_await_span(capacity),
         Expr::Binary { lhs, rhs, .. }

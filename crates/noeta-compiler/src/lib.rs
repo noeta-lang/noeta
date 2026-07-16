@@ -3357,6 +3357,13 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::RolesOf { dst, role_enum });
                 Ok(())
             }
+            Rvalue::ParamsOf { target, .. } => {
+                // The target is a runtime string; the VM reads the matching parameter records from
+                // `Module::reflection` and materializes them. Load the operand into a register.
+                let src = self.atom_reg(target)?;
+                self.code.push(Op::ParamsOf { dst, src });
+                Ok(())
+            }
             Rvalue::Invoke {
                 recv,
                 name,

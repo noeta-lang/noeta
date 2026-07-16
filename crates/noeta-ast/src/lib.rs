@@ -990,6 +990,12 @@ pub enum Expr {
     /// `attributes_of::<T>()`): `roles_of::<Semantic>()` returns only bindings whose role is a
     /// `Semantic` variant; bare `roles_of()` (`ty = None`) returns the whole index.
     RolesOf { ty: Option<TypeRef>, span: Span },
+    /// The reflection query `params_of(target)` — a callable's declared parameter list, returned as a
+    /// `List<ParamInfo>` (each `{ name: string, type: Type }`). `target` is a runtime `string`
+    /// naming a function or method (a bare fn name, or a qualified `Type.method`), the same target
+    /// keying the attribute manifest. Built from the same compiler-built parameter index both
+    /// backends read; surfaces a controller method's declared parameter types for dependency injection.
+    ParamsOf { target: Box<Expr>, span: Span },
     /// The reflection invocation `invoke(recv, name, args)` — fallible by-name dispatch. `recv` is a
     /// value (→ instance method) or a bare type name (→ associated function); `name` is a runtime
     /// `string`; `args` is a runtime `List`. Evaluates to `Result<dyn, dyn>` — `Ok(retval)` on a
@@ -1246,6 +1252,7 @@ impl Expr {
             | Expr::Channel { span, .. }
             | Expr::TypedModuleCall { span, .. }
             | Expr::RolesOf { span, .. }
+            | Expr::ParamsOf { span, .. }
             | Expr::Invoke { span, .. }
             | Expr::TypeTest { span, .. }
             | Expr::FieldSet { span, .. }
@@ -1334,6 +1341,7 @@ impl Expr {
             | Expr::As { expr, .. }
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
+            | Expr::ParamsOf { target: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.mentions(name),
             Expr::Channel { capacity, .. } => capacity.mentions(name),
             Expr::Invoke {
@@ -1424,6 +1432,7 @@ impl Expr {
             | Expr::As { expr, .. }
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
+            | Expr::ParamsOf { target: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.has_await(),
             Expr::Channel { capacity, .. } => capacity.has_await(),
             Expr::Invoke {
