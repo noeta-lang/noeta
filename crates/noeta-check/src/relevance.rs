@@ -53,6 +53,17 @@ impl Checker {
     /// records the parameters whose type is reachable (locals are recorded inline during checking).
     pub(crate) fn compute_relevance(&mut self, program: &Program) {
         let mut reachable = self.symbols.destructor_classes.clone();
+        // Only a *generic* type's fields need the parameter→`dyn` substitution below (which
+        // materializes a fresh substituted tree); the common non-generic field is queried in
+        // place, clone-free — this fixpoint re-walks every declared field per iteration per
+        // check, so the per-field clone was a standing allocation tax (audit-3 Finding 12).
+        let relevant = |ty: &Type, params: &[String], reachable: &HashSet<String>| {
+            if params.is_empty() {
+                type_relevant(ty, reachable)
+            } else {
+                type_relevant(&params_to_dyn(ty, params), reachable)
+            }
+        };
         loop {
             let mut changed = false;
             // A field/payload mentioning a **generic parameter** is conservatively relevant: the
@@ -71,7 +82,7 @@ impl Checker {
                 if !reachable.contains(name)
                     && fields
                         .iter()
-                        .any(|(_, ty)| type_relevant(&params_to_dyn(ty, params), &reachable))
+                        .any(|(_, ty)| relevant(ty, params, &reachable))
                 {
                     reachable.insert(name.clone());
                     changed = true;
@@ -85,11 +96,9 @@ impl Checker {
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
                 if !reachable.contains(name)
-                    && variants.iter().any(|v| {
-                        v.fields
-                            .iter()
-                            .any(|ty| type_relevant(&params_to_dyn(ty, params), &reachable))
-                    })
+                    && variants
+                        .iter()
+                        .any(|v| v.fields.iter().any(|ty| relevant(ty, params, &reachable)))
                 {
                     reachable.insert(name.clone());
                     changed = true;
