@@ -543,6 +543,17 @@ fn attach_decorators(
             e.packed = packed;
             Stmt::Enum(e)
         }
+        Stmt::Trait(mut t) => {
+            // A trait accepts `#[...]` data attributes and `@role`; `@derive`/`@attribute`/
+            // `@semantic`/`@packed` do not apply to a trait and are carried for the checker (UT6).
+            t.attrs = attrs;
+            t.role = role;
+            t.derives = derives;
+            t.attribute = attribute;
+            t.semantic = semantic;
+            t.packed = packed;
+            Stmt::Trait(t)
+        }
         other => other,
     }
 }
@@ -566,6 +577,10 @@ fn set_public(stmt: Stmt, is_public: bool) -> Stmt {
         Stmt::Fn(mut d) => {
             d.is_public = is_public;
             Stmt::Fn(d)
+        }
+        Stmt::Trait(mut d) => {
+            d.is_public = is_public;
+            Stmt::Trait(d)
         }
         other => other,
     }
@@ -2666,13 +2681,12 @@ where
                     }
                 },
             );
-        // `pub? trait Name<T> { method-sigs }` — a user-defined trait declaration (L1). Names a
-        // contract of method signatures a type `impl`s; usable as a `<T: Name>` bound and a `dyn Name`
-        // trait object. `pub` is consumed here (traits take no `@derive`/`@attribute` decorators).
-        let trait_decl = just(T::PubKw)
-            .or_not()
-            .then_ignore(just(T::TraitKw))
-            .then(id.clone())
+        // `trait Name<T> { method-sigs }` — a user-defined trait declaration (L1). Names a contract
+        // of method signatures a type `impl`s; usable as a `<T: Name>` bound and a `dyn Name` trait
+        // object. The bare body only — leading `pub` and `#[...]`/`@role`/… decorators are applied by
+        // `attributed_type_decl` (UT6), the same uniform path structs/classes/enums take.
+        let trait_decl = just(T::TraitKw)
+            .ignore_then(id.clone())
             .then(type_params.clone())
             .then(
                 trait_method
@@ -2682,13 +2696,19 @@ where
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
-            .map_with(move |(((pub_kw, name_pair), type_params), methods), e| {
+            .map_with(move |((name_pair, type_params), methods), e| {
                 Stmt::Trait(TraitDecl {
                     name: name_pair.0,
                     name_span: name_pair.1,
-                    is_public: pub_kw.is_some(),
+                    is_public: false,
                     type_params,
                     methods,
+                    attrs: Vec::new(),
+                    role: None,
+                    derives: Vec::new(),
+                    attribute: None,
+                    semantic: None,
+                    packed: None,
                     span: ctx.to_span(e.span()),
                 })
             });
@@ -3198,7 +3218,7 @@ where
             .repeated()
             .collect::<Vec<_>>()
             .then(just(T::PubKw).or_not())
-            .then(choice((enum_decl, struct_decl, class_decl)))
+            .then(choice((enum_decl, struct_decl, class_decl, trait_decl)))
             .map(move |((decorators, pub_kw), stmt)| {
                 let mut derives: Vec<DeriveSpec> = Vec::new();
                 let mut attrs: Vec<Attribute> = Vec::new();
@@ -3425,7 +3445,6 @@ where
             continue_,
             fn_decl,
             standalone_impl,
-            trait_decl,
             tier_decl_fn,
             tier_block,
             tier_annotation,

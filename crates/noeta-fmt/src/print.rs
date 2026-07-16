@@ -1000,7 +1000,17 @@ impl Printer<'_> {
     }
 
     fn trait_decl(&self, d: &TraitDecl) -> Result<Doc, FmtError> {
-        let mut parts = Vec::new();
+        // Render leading decorators (UT6) so a `#[...]`-attributed trait round-trips; a valid trait
+        // carries only data attributes, but fmt must preserve whatever parsed (even a to-be-rejected
+        // `@…`) so re-parsing is identical.
+        let mut parts = self.decl_directives(
+            &d.derives,
+            &d.attrs,
+            d.attribute.as_deref(),
+            d.role.as_deref(),
+            d.semantic.is_some(),
+            d.packed.is_some(),
+        )?;
         if d.is_public {
             parts.push(Doc::text("pub "));
         }

@@ -213,6 +213,15 @@ pub fn build(program: &Program) -> ReflectionInfo {
             // A top-level function carries attributes too (keyed by its bare name); it is not a
             // declared *type*, so it contributes to the manifest only, not the type registry.
             Stmt::Fn(decl) => push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs),
+            // A trait carries `#[...]` data attributes keyed by its name (UT6), like a type —
+            // surfaced via `attributes_of` (and inheriting a role transitively when annotated with a
+            // role-bearing attribute). It is not a data type, so it adds no `TypeInfo`; its abstract
+            // method signatures are not scanned (route/metadata attributes live on the concrete
+            // `impl` methods, scanned via the class/struct arms). A direct `@role`/`@derive`/… on a
+            // trait is a checker error, so a runnable program never carries one here.
+            Stmt::Trait(decl) => {
+                push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
+            }
             Stmt::Enum(decl) => {
                 push_attrs(&mut manifest, &decl.name, decl.name_span, &decl.attrs);
                 // A variant's attributes are keyed by its qualified `Enum.Variant` name, mirroring

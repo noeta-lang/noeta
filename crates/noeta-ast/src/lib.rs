@@ -448,6 +448,20 @@ pub struct TraitDecl {
     pub type_params: Vec<TypeParam>,
     /// The trait's method contract, in source order.
     pub methods: Vec<TraitMethod>,
+    /// Leading `#[...]` data attributes on the trait (L1 UT6) — reflected via `attributes_of`
+    /// keyed by the trait name, like a type's.
+    pub attrs: Vec<Attribute>,
+    /// `@role(Enum.Variant, …)` tags on the trait (UT6) — surfaced via `roles_of`.
+    pub role: Option<Vec<RoleTag>>,
+    /// A `@derive(...)` on a trait — always a checker error (a trait is not a data type); carried
+    /// so the error can be reported at the site.
+    pub derives: Vec<DeriveSpec>,
+    /// A misplaced `@attribute` directive on a trait (attributes are structs only); checker error.
+    pub attribute: Option<Vec<(String, Span)>>,
+    /// A misplaced `@semantic` directive on a trait (marks enums); checker error.
+    pub semantic: Option<Span>,
+    /// A misplaced `@packed` directive on a trait (marks structs); checker error.
+    pub packed: Option<PackedDirective>,
     pub span: Span,
 }
 
