@@ -840,25 +840,42 @@ impl AotManifest {
     }
 }
 
+/// The runtime tier-1 compile error: **compilation declined — interpret instead** (audit-1
+/// finding 14). Deliberately zero-size: every runtime call site discards the reason and falls
+/// back to tier-0 (always sound under the bail-before-mutate contract), so a formatted
+/// `String` was cost without a consumer. The AOT/object surface (`new_object`,
+/// `compile_object`, `compile_module`, `finish`) keeps `Result<_, String>` — `noeta build
+/// --native` shows those messages to the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JitDecline;
+
+impl std::fmt::Display for JitDecline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("tier-1 compilation declined; interpreting")
+    }
+}
+
+impl std::error::Error for JitDecline {}
+
 impl Jit<JITModule> {
     /// Build a runtime JIT engine, registering the runtime-helper symbols the generated code may
     /// call. Each `(name, ptr)` is a `*const u8` cast of an `extern "C"` Rust function the VM owns;
     /// Cranelift resolves calls to `name` against `ptr`. The VM passes at least [`OBSERVE_HELPER`].
     ///
-    /// Returns `Err` with a human-readable message if the host ISA is unavailable or Cranelift
-    /// rejects the flags — the VM treats that as "JIT unavailable, stay tier 0".
+    /// Returns [`JitDecline`] if the host ISA is unavailable or Cranelift rejects the flags —
+    /// the VM treats that as "JIT unavailable, stay tier 0".
     pub fn new(
         helpers: &[(&str, *const u8)],
         layout: FrameLayout,
         frame_template: *const u8,
-    ) -> Result<Jit<JITModule>, String> {
-        let isa = Self::make_isa(false)?;
+    ) -> Result<Jit<JITModule>, JitDecline> {
+        let isa = Self::make_isa(false).map_err(|_| JitDecline)?;
         let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
         for (name, ptr) in helpers {
             builder.symbol(*name, *ptr);
         }
         let module = JITModule::new(builder);
-        Self::from_module(module, layout, frame_template)
+        Self::from_module(module, layout, frame_template).map_err(|_| JitDecline)
     }
 
     /// Compile prototype `proto` of `module` and cache its entry point, returning it. A J1-eligible
@@ -871,7 +888,13 @@ impl Jit<JITModule> {
     /// per-body finalize order the pre-L3.0 `compile` used, so behaviour and the compile breakdown
     /// are unchanged. The AOT path (L3.1) reuses the *same* `emit_*` routines but defers finalize,
     /// emitting an object file instead.
-    pub fn compile(&mut self, module: &Module, proto: usize) -> Result<CompiledFn, String> {
+    pub fn compile(&mut self, module: &Module, proto: usize) -> Result<CompiledFn, JitDecline> {
+        self.compile_inner(module, proto).map_err(|_| JitDecline)
+    }
+
+    /// [`compile`](Self::compile)'s body, over the internals' `String` errors (shared with the
+    /// AOT/object path, where the message reaches the user).
+    fn compile_inner(&mut self, module: &Module, proto: usize) -> Result<CompiledFn, String> {
         if proto >= self.compiled.len() {
             let n = module.protos.len().max(proto + 1);
             self.compiled.resize(n, None);
