@@ -2322,3 +2322,24 @@ fn closure_default_reads_a_captured_cell() {
     assert_eq!(r.stdout, "X:a\nY:a\n");
     assert_eq!(r.exit_code, 0);
 }
+
+/// The **line-count ratchet** on `lib.rs` (audit-1 finding 1). The 2025 split
+/// (`plans/code-quality/split-vm-lib.md`) took lib.rs 7,733 -> 5,729 lines, but nothing held the
+/// line: five later arcs (tier-1 glue, JIT engine mgmt, hot-swap, isolate workers, the
+/// `run_module_*` family) each defaulted their code into lib.rs and it regrew to 10,685. The
+/// 2026 re-split moved those into `hooks`/`backend`/`tier1`/`lifecycle`/`dispatch`/`hotswap`/
+/// `calls`/`tests`, leaving lib.rs at ~540 lines (crate docs, module decls + re-exports, the
+/// `Vm` struct, `Frame`/`RetTransform`/`Abort`, constants). The budget is that figure plus ~10%
+/// headroom for doc growth: a NEW SUBSYSTEM BELONGS IN ITS OWN MODULE, not here — if this fires,
+/// move the addition out rather than raising the budget.
+#[test]
+fn lib_rs_stays_decomposed() {
+    const BUDGET: usize = 600;
+    let lines = include_str!("lib.rs").lines().count();
+    assert!(
+        lines <= BUDGET,
+        "src/lib.rs is {lines} lines (budget {BUDGET}). The god-file is regrowing — land new \
+         subsystems in their own module (see the module map at the top of lib.rs and \
+         plans/audit/audit-1-vm-runtime.md finding 1) instead of raising the budget."
+    );
+}
