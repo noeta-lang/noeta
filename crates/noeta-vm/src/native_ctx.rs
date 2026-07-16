@@ -166,7 +166,7 @@ impl Drop for VmCtx<'_, '_> {
 
 impl NativeCtx for VmCtx<'_, '_> {
     fn host(&mut self) -> &mut dyn noeta_stdlib::Host {
-        &mut *self.vm.host
+        &mut *self.vm.persist.host
     }
 
     fn view(&mut self, slot: Slot) -> CtxResult<NativeValue> {
@@ -253,12 +253,16 @@ impl NativeCtx for VmCtx<'_, '_> {
     }
 
     fn spawn_io(&mut self, io: Box<dyn ExternIo>) -> Slot {
-        let id = self.vm.executor.spawn_ext(&mut *self.vm.host, io);
+        let id = self
+            .vm
+            .persist
+            .executor
+            .spawn_ext(&mut *self.vm.persist.host, io);
         self.insert(Value::make_async_io(id))
     }
 
     fn timer(&mut self, ms: u64) -> Slot {
-        self.insert(Value::make_timer(self.vm.executor.now() + ms))
+        self.insert(Value::make_timer(self.vm.persist.executor.now() + ms))
     }
 
     fn poll(&mut self, future: Slot) -> CtxResult<Option<Slot>> {
@@ -320,7 +324,7 @@ impl NativeCtx for VmCtx<'_, '_> {
     }
 
     fn advance_clock(&mut self) -> Option<u64> {
-        self.vm.executor.advance()
+        self.vm.persist.executor.advance()
     }
 
     fn wake_generation(&mut self) -> u64 {
@@ -381,11 +385,11 @@ impl NativeCtx for VmCtx<'_, '_> {
         key: &'static str,
         init: fn() -> Box<dyn std::any::Any>,
     ) -> noeta_stdlib::ExtState {
-        if let Some((_, state)) = self.vm.ext_state.iter().find(|(k, _)| *k == key) {
+        if let Some((_, state)) = self.vm.persist.ext_state.iter().find(|(k, _)| *k == key) {
             return state.clone();
         }
         let state: noeta_stdlib::ExtState = std::rc::Rc::new(std::cell::RefCell::new(init()));
-        self.vm.ext_state.push((key, state.clone()));
+        self.vm.persist.ext_state.push((key, state.clone()));
         state
     }
 
@@ -401,18 +405,19 @@ impl NativeCtx for VmCtx<'_, '_> {
         let value = self.get(slot)?;
         // The arena takes its own reference; the slot stays table-owned.
         retain(value);
-        Ok(if let Some(index) = self.vm.ext_arena_free.pop() {
-            self.vm.ext_arena[index as usize] = Some(value);
+        Ok(if let Some(index) = self.vm.persist.ext_arena_free.pop() {
+            self.vm.persist.ext_arena[index as usize] = Some(value);
             index
         } else {
-            self.vm.ext_arena.push(Some(value));
-            (self.vm.ext_arena.len() - 1) as noeta_stdlib::Retained
+            self.vm.persist.ext_arena.push(Some(value));
+            (self.vm.persist.ext_arena.len() - 1) as noeta_stdlib::Retained
         })
     }
 
     fn retained_get(&mut self, retained: noeta_stdlib::Retained) -> CtxResult<Slot> {
         let value = self
             .vm
+            .persist
             .ext_arena
             .get(retained as usize)
             .copied()
@@ -426,6 +431,7 @@ impl NativeCtx for VmCtx<'_, '_> {
         let new = self.get(slot)?;
         let Some(entry) = self
             .vm
+            .persist
             .ext_arena
             .get_mut(retained as usize)
             .filter(|e| e.is_some())
@@ -442,17 +448,18 @@ impl NativeCtx for VmCtx<'_, '_> {
     fn release_retained(&mut self, retained: noeta_stdlib::Retained) {
         if let Some(value) = self
             .vm
+            .persist
             .ext_arena
             .get_mut(retained as usize)
             .and_then(Option::take)
         {
             self.vm.release_value(value);
-            self.vm.ext_arena_free.push(retained);
+            self.vm.persist.ext_arena_free.push(retained);
         }
     }
 
     fn set_read_gate(&mut self, type_name: &'static str, open: bool) {
-        let closed = &mut self.vm.ext_closed_gates;
+        let closed = &mut self.vm.persist.ext_closed_gates;
         if open {
             closed.retain(|t| *t != type_name);
         } else if !closed.contains(&type_name) {
@@ -463,6 +470,7 @@ impl NativeCtx for VmCtx<'_, '_> {
     fn run_thunk(&mut self, body: Retained) -> CtxResult<()> {
         let callee = self
             .vm
+            .persist
             .ext_arena
             .get(body as usize)
             .copied()
@@ -482,6 +490,7 @@ impl NativeCtx for VmCtx<'_, '_> {
     fn call_thunk_into(&mut self, body: Retained, dest: Retained) -> CtxResult<()> {
         let callee = self
             .vm
+            .persist
             .ext_arena
             .get(body as usize)
             .copied()
@@ -495,6 +504,7 @@ impl NativeCtx for VmCtx<'_, '_> {
         // destructor-aware.
         let Some(entry) = self
             .vm
+            .persist
             .ext_arena
             .get_mut(dest as usize)
             .filter(|e| e.is_some())
@@ -633,21 +643,21 @@ impl NativeCtx for VmCtx<'_, '_> {
 // task-local context (native-otel T5a): thin views over `Vm::ctx_current`.
 impl noeta_stdlib::TaskContext for VmCtx<'_, '_> {
     fn top(&mut self) -> Option<u64> {
-        self.vm.ctx_current.last().copied()
+        self.vm.sched.ctx_current.last().copied()
     }
 
     fn push(&mut self, v: u64) {
-        self.vm.ctx_current.push(v);
+        self.vm.sched.ctx_current.push(v);
     }
 
     fn pop(&mut self, v: u64) {
-        if self.vm.ctx_current.last() == Some(&v) {
-            self.vm.ctx_current.pop();
+        if self.vm.sched.ctx_current.last() == Some(&v) {
+            self.vm.sched.ctx_current.pop();
         }
     }
 
     fn swap(&mut self, ctx: Vec<u64>) -> Vec<u64> {
-        std::mem::replace(&mut self.vm.ctx_current, ctx)
+        std::mem::replace(&mut self.vm.sched.ctx_current, ctx)
     }
 }
 
@@ -661,9 +671,9 @@ impl noeta_stdlib::FutureTracing for VmCtx<'_, '_> {
         }
         // The table owns one reference; identity = the NaN-box bits, stable while it is held.
         retain(value);
-        let mut context = self.vm.ctx_current.clone();
+        let mut context = self.vm.sched.ctx_current.clone();
         context.push(span);
-        self.vm.traced_futures.push(crate::TracedFuture {
+        self.vm.sched.traced_futures.push(crate::TracedFuture {
             future: value,
             context,
             span,
@@ -802,7 +812,13 @@ impl<'m> Vm<'m> {
             // retain — the arena keeps its reference.
             Ok(CtxOut::Retained(retained)) => {
                 drop(ctx);
-                match self.ext_arena.get(retained as usize).copied().flatten() {
+                match self
+                    .persist
+                    .ext_arena
+                    .get(retained as usize)
+                    .copied()
+                    .flatten()
+                {
                     Some(value) => {
                         retain(value);
                         Ok(value)
@@ -844,7 +860,7 @@ impl<'m> Vm<'m> {
     pub(crate) fn hotswap_prepare(&mut self, rebound_slots: &[u32]) {
         let handles: Vec<Value> = rebound_slots
             .iter()
-            .filter_map(|&s| self.globals.get(s as usize).copied())
+            .filter_map(|&s| self.persist.globals.get(s as usize).copied())
             .filter(|v| !v.is_unbound())
             .collect();
         let span = Span::empty_at_in(noeta_span::SourceId::FIRST, 0);
@@ -891,7 +907,13 @@ impl<'m> Vm<'m> {
             // retain — the arena keeps its reference.
             Ok(CtxOut::Retained(retained)) => {
                 drop(ctx);
-                match self.ext_arena.get(retained as usize).copied().flatten() {
+                match self
+                    .persist
+                    .ext_arena
+                    .get(retained as usize)
+                    .copied()
+                    .flatten()
+                {
                     Some(value) => {
                         retain(value);
                         Ok(value)

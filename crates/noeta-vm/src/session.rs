@@ -20,52 +20,17 @@ use noeta_backend::TraceFrame;
 use noeta_bytecode::{Module, PackedFieldDef};
 use noeta_compiler::SessionCompiler;
 use noeta_diagnostics::Diagnostic;
-use noeta_object::{PackedKind, PackedSchema, Shape};
+use noeta_object::{PackedKind, PackedSchema};
 use noeta_span::{SourceId, Span};
 use noeta_stdlib::{Executor, Host};
 use noeta_value::Value;
 
-use crate::{Channel, Vm, release, retain};
+use crate::{SessionState, Vm, release, retain};
 
 /// A factory for a fresh host + executor pair — the session builds one at construction and again on
 /// `:reset`, so a reset REPL starts against the same *kind* of environment (a real host, or the
 /// deterministic sandbox) without the session having to know which. Mirrors the isolate factory.
 pub type HostFactory = Box<dyn Fn() -> (Box<dyn Host>, Box<dyn Executor>)>;
-
-/// The persistent runtime state carried between REPL entries: everything the ephemeral per-entry
-/// [`Vm`] inherits so a first entry's effects survive into the next. Moved into the `Vm` at the start
-/// of an entry ([`Vm::load_seeded`]) and back out at the end ([`Vm::into_state`]); [`Vm::teardown`]
-/// consumes it at session end.
-pub(crate) struct SessionState {
-    globals: Vec<Value>,
-    global_order: Vec<u32>,
-    channels: Vec<Channel>,
-    channel_progress: u64,
-    /// The extensions' persistent runtime (higher-order-abi H4/H5): the retained-value arena
-    /// (signals' contents, cells) plus per-extension Rust state (the reactive graph) and gates —
-    /// what the pre-H5 `Rc<ReactiveGraph>` field carried, generalized.
-    ext_arena: Vec<Option<Value>>,
-    ext_arena_free: Vec<u32>,
-    /// Host-held embed handles (server-hmr F3), persisted across [`VmSession::call_by_name`].
-    embed_handles: Vec<Option<Value>>,
-    embed_handles_free: Vec<u32>,
-    ext_state: Vec<(&'static str, noeta_stdlib::ExtState)>,
-    ext_closed_gates: Vec<&'static str>,
-    /// The `Rc`-wrapped derived tables grow by **append** (never rebuild), so an entry-1 aggregate and
-    /// an entry-2 aggregate of the same type share `&'static Shape` identity — the invariant the reuse
-    /// gate, packed-value ops, and inline caches assume within a single run. [`SessionState::sync_to`]
-    /// extends them to a grown module; the existing prefix keeps its identity.
-    shapes: Vec<&'static Shape>,
-    packed_schemas: Vec<&'static PackedSchema>,
-    type_reprs: Vec<Rc<noeta_ast::reflect::TypeRepr>>,
-    host: Box<dyn Host>,
-    executor: Box<dyn Executor>,
-    /// The extension registry every entry's `Vm` resolves native names against (instance-registry
-    /// IR5), round-tripped through the session so every entry — the launch run, each REPL/eval
-    /// fragment, each hot-swap — shares it. `None` (the default) falls back to the process-global
-    /// default in `Vm::reg`; an embed session that assembled its own extension set installs it here.
-    registry: Option<&'static noeta_stdlib::registry::Registry>,
-}
 
 impl SessionState {
     /// A fresh runtime: empty tables, id counter at 1, and the given host + executor.
@@ -133,59 +98,20 @@ impl SessionState {
 
 impl<'m> Vm<'m> {
     /// Build a `Vm` for one REPL entry, seeded with the session's persistent `state` instead of a
-    /// fresh heap. The caller has already `sync_to`'d `state`'s derived tables to `module`. Reuses
-    /// [`Vm::load`] for the module-derived *name* tables (methods / destructors / …) and all per-entry
-    /// scratch, then swaps in the persistent globals, id counter, channels, reactive graph, and the
-    /// identity-preserving `Rc` tables (discarding the fresh ones `load` built — cheap at an
-    /// interactive prompt, and it keeps `load_seeded` in lockstep with `load`'s field init).
+    /// fresh runtime — **one move** into [`Vm::load_with`] (audit-1 finding 4). The caller has
+    /// already `sync_to`'d `state`'s derived tables to `module`; `load_with` builds only the
+    /// module-derived *name* tables and per-entry scratch, and rebuilds `map_packed` against the
+    /// seeded (identity-preserving) schemas.
     fn load_seeded(module: &'m Module, state: SessionState) -> Vm<'m> {
-        let mut vm = Vm::load(module, state.host, state.executor);
-        vm.registry = state.registry;
-        vm.globals = state.globals;
-        vm.global_order = state.global_order;
-        vm.channels = state.channels;
-        vm.channel_progress = state.channel_progress;
-        vm.ext_arena = state.ext_arena;
-        vm.ext_arena_free = state.ext_arena_free;
-        vm.embed_handles = state.embed_handles;
-        vm.embed_handles_free = state.embed_handles_free;
-        vm.ext_state = state.ext_state;
-        vm.ext_closed_gates = state.ext_closed_gates;
-        vm.shapes = state.shapes;
-        vm.packed_schemas = state.packed_schemas;
-        vm.type_reprs = state.type_reprs;
-        // `map_packed` references packed schemas by index; rebuild it against the seeded (persistent)
-        // schemas so an old span still resolves to the same shared schema.
-        vm.map_packed = module
-            .map_packed_sites
-            .iter()
-            .map(|(span, idx)| (*span, vm.packed_schemas[*idx as usize]))
-            .collect();
-        vm
+        Vm::load_with(module, state)
     }
 
     /// Move the persistent runtime state back out of the `Vm` after an entry ran (the ephemeral `Vm`
     /// is then dropped; its per-entry scratch — empty scopes, drained stdout/diagnostics, no isolates
-    /// — drops cleanly, `Vm` having no `Drop`). The next entry re-seeds from this.
+    /// — drops cleanly, `Vm` having no `Drop`). The next entry re-seeds from this. One move: a
+    /// persistent field added to [`SessionState`] rides along by construction (audit-1 finding 4).
     fn into_state(self) -> SessionState {
-        SessionState {
-            globals: self.globals,
-            global_order: self.global_order,
-            channels: self.channels,
-            channel_progress: self.channel_progress,
-            ext_arena: self.ext_arena,
-            ext_arena_free: self.ext_arena_free,
-            embed_handles: self.embed_handles,
-            embed_handles_free: self.embed_handles_free,
-            ext_state: self.ext_state,
-            ext_closed_gates: self.ext_closed_gates,
-            shapes: self.shapes,
-            packed_schemas: self.packed_schemas,
-            type_reprs: self.type_reprs,
-            host: self.host,
-            executor: self.executor,
-            registry: self.registry,
-        }
+        self.persist
     }
 }
 
@@ -315,9 +241,9 @@ impl VmSession {
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
         let mut vm = Vm::load_seeded(module, state);
         vm.run_top();
-        let stdout = std::mem::take(&mut vm.stdout);
-        let diagnostics = std::mem::take(&mut vm.diagnostics);
-        let trace = std::mem::take(&mut vm.abort_trace);
+        let stdout = std::mem::take(&mut vm.out.stdout);
+        let diagnostics = std::mem::take(&mut vm.out.diagnostics);
+        let trace = std::mem::take(&mut vm.out.abort_trace);
         let session = VmSession {
             compiler,
             factory,
@@ -474,7 +400,7 @@ impl VmSession {
 
         let value = if captures_value {
             self.sentinel_slot().and_then(|slot| {
-                let v = std::mem::replace(&mut vm.globals[slot as usize], Value::unbound());
+                let v = std::mem::replace(&mut vm.persist.globals[slot as usize], Value::unbound());
                 // Unbound means the entry errored (or returned) before the sentinel binding ran.
                 if v.is_unbound() {
                     return None;
@@ -491,9 +417,9 @@ impl VmSession {
             None
         };
 
-        let stdout = std::mem::take(&mut vm.stdout);
-        let diagnostics = std::mem::take(&mut vm.diagnostics);
-        let trace = std::mem::take(&mut vm.abort_trace);
+        let stdout = std::mem::take(&mut vm.out.stdout);
+        let diagnostics = std::mem::take(&mut vm.out.diagnostics);
+        let trace = std::mem::take(&mut vm.out.abort_trace);
         self.state = Some(vm.into_state());
         SessionOutput {
             stdout,
@@ -573,7 +499,7 @@ impl VmSession {
         state.sync_to(&module);
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
         let mut vm = Vm::load_seeded(&module, state);
-        let callee = vm.globals[slot as usize];
+        let callee = vm.persist.globals[slot as usize];
         if callee.is_unbound() {
             self.state = Some(vm.into_state());
             return Err(CallError::NoSuchFunction(name.to_string()));
@@ -586,7 +512,7 @@ impl VmSession {
             .map(|a| match a {
                 EmbedArg::Value(out) => crate::values::materialize_native(out),
                 EmbedArg::Handle(h) => {
-                    let v = vm.embed_handles[h.0 as usize].expect("a live embed handle");
+                    let v = vm.persist.embed_handles[h.0 as usize].expect("a live embed handle");
                     retain(v);
                     v
                 }
@@ -603,10 +529,10 @@ impl VmSession {
             Err(_) => None,
         };
         let output = SessionOutput {
-            stdout: std::mem::take(&mut vm.stdout),
-            diagnostics: std::mem::take(&mut vm.diagnostics),
+            stdout: std::mem::take(&mut vm.out.stdout),
+            diagnostics: std::mem::take(&mut vm.out.diagnostics),
             value: None,
-            trace: std::mem::take(&mut vm.abort_trace),
+            trace: std::mem::take(&mut vm.out.abort_trace),
         };
         self.state = Some(vm.into_state());
         match result {
@@ -657,7 +583,7 @@ impl VmSession {
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
         let mut vm = Vm::load_seeded(&module, state);
         let found = {
-            let v = std::mem::replace(&mut vm.globals[slot as usize], Value::unbound());
+            let v = std::mem::replace(&mut vm.persist.globals[slot as usize], Value::unbound());
             if v.is_unbound() {
                 false
             } else {
@@ -665,8 +591,8 @@ impl VmSession {
                 true
             }
         };
-        let stdout = std::mem::take(&mut vm.stdout);
-        let diagnostics = std::mem::take(&mut vm.diagnostics);
+        let stdout = std::mem::take(&mut vm.out.stdout);
+        let diagnostics = std::mem::take(&mut vm.out.diagnostics);
         self.state = Some(vm.into_state());
         (
             found,
