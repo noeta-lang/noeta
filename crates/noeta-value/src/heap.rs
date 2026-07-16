@@ -776,6 +776,8 @@ fn can_be_cyclic(value: Value) -> bool {
     if !value.is_pointer() {
         return false;
     }
+    // SAFETY: pointer-tag checked above; a live pointer this module allocated (callers hold a
+    // reference, so it is unfreed); single-threaded read.
     let obj = unsafe { &*obj_ptr(value) };
     matches!(
         obj.payload,
@@ -813,27 +815,36 @@ pub fn take_candidates() -> Vec<Value> {
 // The collector follows the heap's internal reference graph, trial-decrementing refcounts to
 // discover objects kept alive only by a cycle. These expose the per-object color/buffered
 // flags, raw refcount edits (no auto-free), child enumeration, and a child-preserving free.
+//
+// SAFETY (shared by every deref in this cluster): the collector only hands these functions
+// pointer values it reached from live candidate roots this module allocated and has not freed
+// (frees happen exclusively in the collector's own reclaim step, after these reads); the whole
+// walk is single-threaded. Each `unsafe` below relies on exactly this invariant.
 
 /// Read an object's cycle-collector color.
 pub(crate) fn color(value: Value) -> Color {
+    // SAFETY: see the cluster invariant above.
     let obj = unsafe { &*obj_ptr(value) };
     obj.header.color
 }
 
 /// Set an object's cycle-collector color.
 pub(crate) fn set_color(value: Value, color: Color) {
+    // SAFETY: see the cluster invariant above.
     let obj = unsafe { &mut *obj_ptr(value) };
     obj.header.color = color;
 }
 
 /// Whether the object is in the collector's candidate-root buffer.
 pub(crate) fn buffered(value: Value) -> bool {
+    // SAFETY: see the cluster invariant above.
     let obj = unsafe { &*obj_ptr(value) };
     obj.header.buffered
 }
 
 /// Mark/unmark the object as buffered in the candidate-root set.
 pub(crate) fn set_buffered(value: Value, buffered: bool) {
+    // SAFETY: see the cluster invariant above.
     let obj = unsafe { &mut *obj_ptr(value) };
     obj.header.buffered = buffered;
 }
@@ -841,6 +852,7 @@ pub(crate) fn set_buffered(value: Value, buffered: bool) {
 /// Raw refcount increment (no color logic). Used to restore counts during the collector's
 /// scan phase.
 pub(crate) fn rc_inc(value: Value) {
+    // SAFETY: see the cluster invariant above.
     let obj = unsafe { &mut *obj_ptr(value) };
     obj.header.refcount += 1;
 }
@@ -848,6 +860,7 @@ pub(crate) fn rc_inc(value: Value) {
 /// Raw refcount decrement that never frees (unlike [`dec_ref`]). Used for the collector's
 /// trial deletion, which restores or reclaims separately.
 pub(crate) fn rc_dec(value: Value) {
+    // SAFETY: see the cluster invariant above.
     let obj = unsafe { &mut *obj_ptr(value) };
     obj.header.refcount -= 1;
 }
@@ -855,6 +868,7 @@ pub(crate) fn rc_dec(value: Value) {
 /// The pointer-valued children an object references (list/map/object/enum slots). Immediates
 /// are excluded — they have no heap identity and cannot participate in a cycle.
 pub(crate) fn children(value: Value) -> Vec<Value> {
+    // SAFETY: see the cluster invariant above.
     let obj = unsafe { &*obj_ptr(value) };
     let mut out = Vec::new();
     let mut push = |v: Value| {
@@ -940,6 +954,8 @@ pub(crate) fn with_extern<R>(
     value: Value,
     f: impl FnOnce(&dyn noeta_stdlib::ExternValue) -> R,
 ) -> R {
+    // SAFETY: live object this module allocated (doc contract: caller checked Extern);
+    // single-threaded read.
     let obj = unsafe { &*obj_ptr(value) };
     let Payload::Extern(e) = &obj.payload else {
         panic!("with_extern on a non-extern value");
@@ -954,6 +970,8 @@ pub(crate) fn with_extern_mut<R>(
     value: Value,
     f: impl FnOnce(&mut dyn noeta_stdlib::ExternValue) -> R,
 ) -> R {
+    // SAFETY: live object this module allocated (doc contract: caller checked Extern);
+    // single-threaded interior mutation with no other borrow live across `f`.
     let obj = unsafe { &mut *obj_ptr(value) };
     let Payload::Extern(e) = &mut obj.payload else {
         panic!("with_extern_mut on a non-extern value");
@@ -964,6 +982,8 @@ pub(crate) fn with_extern_mut<R>(
 /// Read the value held in a cell, returning a borrowed (not retained) copy. The caller must
 /// have checked the value is a `Cell`.
 pub(crate) fn cell_get(cell: Value) -> Value {
+    // SAFETY: live object this module allocated (doc contract: caller checked Cell);
+    // single-threaded read.
     let obj = unsafe { &*obj_ptr(cell) };
     let Payload::Cell(inner) = &obj.payload else {
         panic!("cell_get on a non-cell value");
@@ -974,6 +994,8 @@ pub(crate) fn cell_get(cell: Value) -> Value {
 /// Overwrite a cell's contents, retaining the new occupant and releasing the old (the cell
 /// owns one reference to whatever it holds). The caller must have checked the value is a `Cell`.
 pub(crate) fn cell_set(cell: Value, value: Value) {
+    // SAFETY: live object this module allocated (doc contract: caller checked Cell);
+    // single-threaded write, no other borrow of the cell live across the swap.
     let obj = unsafe { &mut *obj_ptr(cell) };
     let Payload::Cell(inner) = &mut obj.payload else {
         panic!("cell_set on a non-cell value");
@@ -988,6 +1010,8 @@ pub(crate) fn cell_set(cell: Value, value: Value) {
 /// The captured upvalue cell at `index` of a closure, returning a borrowed (not retained)
 /// copy. The caller must have checked the value is a `Closure`.
 pub(crate) fn closure_upvalue(closure: Value, index: usize) -> Value {
+    // SAFETY: live object this module allocated (doc contract: caller checked Closure);
+    // single-threaded read.
     let obj = unsafe { &*obj_ptr(closure) };
     let Payload::Closure { upvalues, .. } = &obj.payload else {
         panic!("closure_upvalue on a non-closure value");
@@ -997,6 +1021,8 @@ pub(crate) fn closure_upvalue(closure: Value, index: usize) -> Value {
 
 /// How many upvalue cells a closure captured. The caller must have checked it is a `Closure`.
 pub(crate) fn closure_upvalue_count(closure: Value) -> usize {
+    // SAFETY: live object this module allocated (doc contract: caller checked Closure);
+    // single-threaded read.
     let obj = unsafe { &*obj_ptr(closure) };
     let Payload::Closure { upvalues, .. } = &obj.payload else {
         panic!("closure_upvalue_count on a non-closure value");
@@ -1008,6 +1034,8 @@ pub(crate) fn closure_upvalue_count(closure: Value) -> usize {
 /// old. This is the heap mutation primitive that lets references form cycles (and the
 /// foundation for field assignment in a later slice).
 pub(crate) fn set_slot(object: Value, index: usize, value: Value) {
+    // SAFETY: live object this module allocated; single-threaded write, no other borrow of the
+    // object live across the slot swap.
     let obj = unsafe { &mut *obj_ptr(object) };
     let Payload::Object { slots, .. } = &mut obj.payload else {
         panic!("set_slot on a non-object value");
@@ -1025,6 +1053,8 @@ pub(crate) fn set_slot(object: Value, index: usize, value: Value) {
 /// of [`set_slot`], used by in-place struct reuse so a replaced field's `destruct` fires at the
 /// right time (spec §4/§5).
 pub(crate) fn replace_slot(object: Value, index: usize, value: Value) -> Value {
+    // SAFETY: live object this module allocated; single-threaded write, no other borrow of the
+    // object live across the slot swap.
     let obj = unsafe { &mut *obj_ptr(object) };
     let Payload::Object { slots, .. } = &mut obj.payload else {
         panic!("replace_slot on a non-object value");

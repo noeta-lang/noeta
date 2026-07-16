@@ -85,28 +85,6 @@ pub struct HotChannel {
 }
 
 impl<'m> Vm<'m> {
-    /// Install a debug-console **fragment** into this running Vm (tooling-unification T4). The
-    /// fragment compiles through the adopted session compiler — checkerless, stable-prefix id
-    /// accumulation, exactly a REPL entry — and the Vm then:
-    ///
-    /// 1. **Relocates the fragment's entry chunk** to a fresh proto index at the end of the table.
-    ///    `SessionCompiler::extend` rewrites proto 0 per entry, but proto 0 of the *running* module
-    ///    is the program's `main`, which live frame 0 is still executing — so the snapshot's proto 0
-    ///    is restored to `main` and the fragment's statements get their own index. (Entry chunks
-    ///    never self-reference index 0; every callee/closure index inside is absolute and new.)
-    /// 2. **Grows the derived tables** the fragment introduced — the same appends `Vm::load` /
-    ///    `SessionState::sync_to` perform: interned shapes and packed schemas (global interning
-    ///    makes identity hold by construction), shared `TypeRepr`s, method / destructor /
-    ///    field-default entries, derive sets, destruct-reachability, and the globals vector (new
-    ///    slots start unbound).
-    /// 3. **Swaps `self.module` to the extended snapshot**, kept alive in the session's arena for
-    ///    the rest of the run. Every snapshot is a stable-prefix superset of every earlier one, so
-    ///    old frames keep executing identical code and an escaped fragment value (a closure's raw
-    ///    proto index) stays resolvable after the program resumes — the dispatch loop re-reads the
-    ///    module at each frame transfer.
-    ///
-    /// Returns the relocated entry's proto index; the caller runs it via [`Vm::run_thunk`]. Debug
-    /// runs keep the JIT unarmed (asserted): tier-1 mirror tables never see a swapped module.
     /// Apply a pending hot-swap plan, if one is waiting in the mailbox (server-hmr W1). Called at
     /// the scheduler tick (`advance_tasks` — every ctx-driven loop's per-iteration safepoint), so
     /// a `noeta serve --watch` process absorbs edits between polls. Mirrors
@@ -204,6 +182,28 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Install a debug-console **fragment** into this running Vm (tooling-unification T4). The
+    /// fragment compiles through the adopted session compiler — checkerless, stable-prefix id
+    /// accumulation, exactly a REPL entry — and the Vm then:
+    ///
+    /// 1. **Relocates the fragment's entry chunk** to a fresh proto index at the end of the table.
+    ///    `SessionCompiler::extend` rewrites proto 0 per entry, but proto 0 of the *running* module
+    ///    is the program's `main`, which live frame 0 is still executing — so the snapshot's proto 0
+    ///    is restored to `main` and the fragment's statements get their own index. (Entry chunks
+    ///    never self-reference index 0; every callee/closure index inside is absolute and new.)
+    /// 2. **Grows the derived tables** the fragment introduced — the same appends `Vm::load` /
+    ///    `SessionState::sync_to` perform: interned shapes and packed schemas (global interning
+    ///    makes identity hold by construction), shared `TypeRepr`s, method / destructor /
+    ///    field-default entries, derive sets, destruct-reachability, and the globals vector (new
+    ///    slots start unbound).
+    /// 3. **Swaps `self.module` to the extended snapshot**, kept alive in the session's arena for
+    ///    the rest of the run. Every snapshot is a stable-prefix superset of every earlier one, so
+    ///    old frames keep executing identical code and an escaped fragment value (a closure's raw
+    ///    proto index) stays resolvable after the program resumes — the dispatch loop re-reads the
+    ///    module at each frame transfer.
+    ///
+    /// Returns the relocated entry's proto index; the caller runs it via [`Vm::run_thunk`]. Debug
+    /// runs keep the JIT unarmed (asserted): tier-1 mirror tables never see a swapped module.
     pub(crate) fn install_fragment(&mut self, fragment: &Program) -> Result<u32, String> {
         // Tier-1 across a swap (server-hmr H3): retire the armed engine (pages parked in the
         // graveyard so in-flight native frames stay executable), install the fragment against a
